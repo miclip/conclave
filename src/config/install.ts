@@ -97,6 +97,7 @@ export function writeAtomic(path: string, contents: string): void {
 
 export interface InstallResult {
   repoRoot: string
+  dryRun: boolean
   written: { label: string; path: string; changed: boolean }[]
   codex?: {
     ready: boolean
@@ -109,6 +110,15 @@ export interface InstallOptions {
   repoRoot?: string
   /** Skip the Codex diagnosis (it spawns `codex app-server`, costing a second or two). */
   diagnose?: boolean
+  /**
+   * Report what would change without writing anything.
+   *
+   * Rendering is already a no-op on an unchanged checkout -- identical bytes are not
+   * rewritten, so mtime does not move and no trust transition occurs. This exists so that
+   * property can be *verified* before something that depends on it, rather than
+   * remembered. Before collecting fixtures, check; only install if something drifted.
+   */
+  dryRun?: boolean
 }
 
 export async function installConfig(opts: InstallOptions = {}): Promise<InstallResult> {
@@ -124,11 +134,13 @@ export async function installConfig(opts: InstallOptions = {}): Promise<InstallR
     const contents = render(readFileSync(templatePath, 'utf8'), repoRoot)
     const previous = existsSync(outputPath) ? readFileSync(outputPath, 'utf8') : undefined
     const changed = previous !== contents
-    if (changed) writeAtomic(outputPath, contents)
+    // Never rewrite identical bytes. Harmless for Claude; for Codex a rewritten handler
+    // would re-hash and invalidate an existing trust decision for no reason.
+    if (changed && !opts.dryRun) writeAtomic(outputPath, contents)
     written.push({ label: target.label, path: outputPath, changed })
   }
 
-  const result: InstallResult = { repoRoot, written }
+  const result: InstallResult = { repoRoot, dryRun: opts.dryRun === true, written }
 
   if (opts.diagnose !== false) {
     try {
@@ -154,10 +166,21 @@ export async function installConfig(opts: InstallOptions = {}): Promise<InstallR
   return result
 }
 
+/** True when the checkout's registrations differ from what the templates would render. */
+export function hasDrift(r: InstallResult): boolean {
+  return r.written.some((w) => w.changed)
+}
+
 export function formatInstallResult(r: InstallResult): string {
   const lines = [`repository root: ${r.repoRoot}`]
   for (const w of r.written) {
-    lines.push(`  ${w.changed ? 'wrote  ' : 'current'} ${w.label}: ${w.path}`)
+    const state = w.changed ? (r.dryRun ? 'DRIFT  ' : 'wrote  ') : 'current'
+    lines.push(`  ${state} ${w.label}: ${w.path}`)
+  }
+  if (r.dryRun && hasDrift(r)) {
+    lines.push('')
+    lines.push('Registrations differ from the templates. Running `config install` would')
+    lines.push('rewrite them, which re-hashes the Codex handlers and requires re-trusting.')
   }
   if (!r.codex) return lines.join('\n')
 

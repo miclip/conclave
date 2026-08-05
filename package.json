@@ -17,7 +17,8 @@
     "spike:codex-hooks": "python3 spikes/hooks/verify_codex_hooks.py",
     "test:codex": "ORCH_CODEX=1 node --test src/deployment/codexHookTrust.test.ts",
     "config:install": "node bin/conclave.ts config install",
-    "test:codex:real": "ORCH_CODEX_REAL=1 node --test src/deployment/codexHookTrust.test.ts"
+    "test:codex:real": "ORCH_CODEX_REAL=1 node --test src/deployment/codexHookTrust.test.ts",
+    "config:check": "node bin/conclave.ts config check"
   },
   "dependencies": {
     "node-pty": "^1.0.0"

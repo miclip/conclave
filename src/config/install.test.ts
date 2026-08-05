@@ -9,11 +9,20 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import {
+  hasDrift,
   installConfig,
   render,
   resolveRepoRoot,
@@ -167,5 +176,45 @@ test('no tracked source file hardcodes an absolute home path', () => {
     offenders,
     [],
     `these tracked files hardcode a home directory; render them from a template instead:\n${offenders.join('\n')}`,
+  )
+})
+
+test('dry run reports drift without writing', async () => {
+  const repo = fixtureRepo()
+  await installConfig({ repoRoot: repo, diagnose: false })
+
+  // Perturb one registration, then check without installing.
+  const codexOut = join(repo, '.codex/hooks.json')
+  const perturbed = readFileSync(codexOut, 'utf8').replace('"timeout": 10', '"timeout": 11')
+  writeFileSync(codexOut, perturbed)
+
+  const check = await installConfig({ repoRoot: repo, diagnose: false, dryRun: true })
+  assert.equal(hasDrift(check), true)
+  assert.equal(
+    readFileSync(codexOut, 'utf8'),
+    perturbed,
+    'a check must not rewrite the handler; that would re-hash it and drop Codex trust',
+  )
+
+  const install = await installConfig({ repoRoot: repo, diagnose: false })
+  assert.equal(hasDrift(install), true)
+  assert.notEqual(readFileSync(codexOut, 'utf8'), perturbed, 'install does write')
+})
+
+test('an unchanged checkout is a true no-op, not a rewrite', async () => {
+  // The property the pre-fixture guidance depends on: running install before an
+  // experiment must not cause a deployment-state transition.
+  const repo = fixtureRepo()
+  await installConfig({ repoRoot: repo, diagnose: false })
+  const before = TARGETS.map((t) => statSync(join(repo, t.output)).mtimeMs)
+
+  await new Promise((r) => setTimeout(r, 20))
+  const again = await installConfig({ repoRoot: repo, diagnose: false })
+
+  assert.equal(hasDrift(again), false)
+  assert.deepEqual(
+    TARGETS.map((t) => statSync(join(repo, t.output)).mtimeMs),
+    before,
+    'identical bytes must not be rewritten; mtime must not move',
   )
 })
