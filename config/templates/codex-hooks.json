@@ -1,5 +1,5 @@
 {
-  "description": "Orchestrator spike step 2: observe SessionStart and Stop only.",
+  "description": "Conclave hooks. Rendered from config/templates/codex-hooks.json.",
   "hooks": {
     "SessionStart": [
       {
@@ -9,7 +9,33 @@
             "command": "{{REPO_ROOT}}/spikes/hooks/hook_post.py codex",
             "async": false,
             "timeout": 10,
-            "statusMessage": "spike: recording SessionStart"
+            "statusMessage": "conclave: recording SessionStart"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{{REPO_ROOT}}/spikes/hooks/hook_post.py codex",
+            "async": false,
+            "timeout": 10,
+            "statusMessage": "conclave: recording UserPromptSubmit"
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{{REPO_ROOT}}/spikes/hooks/hook_post.py codex",
+            "async": false,
+            "timeout": 10,
+            "statusMessage": "conclave: recording PermissionRequest"
           }
         ]
       }
@@ -22,7 +48,20 @@
             "command": "{{REPO_ROOT}}/spikes/hooks/hook_post.py codex",
             "async": false,
             "timeout": 10,
-            "statusMessage": "spike: recording Stop"
+            "statusMessage": "conclave: recording Stop"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{{REPO_ROOT}}/spikes/hooks/hook_post.py codex",
+            "async": false,
+            "timeout": 10,
+            "statusMessage": "conclave: recording SessionEnd"
           }
         ]
       }

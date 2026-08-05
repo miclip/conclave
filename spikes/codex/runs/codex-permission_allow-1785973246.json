@@ -1,0 +1,59 @@
+{
+  "scenario": "permission_allow",
+  "runId": "codex-permission_allow-1785973246",
+  "hooks": [
+    {
+      "event": "SessionStart",
+      "payload": {
+        "session_id": "019fd44d-093f-7f93-b28f-09170e8621c0",
+        "transcript_path": "/Users/miclip/.codex/sessions/2026/08/05/rollout-2026-08-05T17-40-46-019fd44d-093f-7f93-b28f-09170e8621c0.jsonl",
+        "cwd": "/Users/miclip/workspace/coding-repl",
+        "hook_event_name": "SessionStart",
+        "model": "gpt-5.6-sol",
+        "permission_mode": "default",
+        "source": "startup"
+      }
+    },
+    {
+      "event": "Stop",
+      "turnId": "019fd44d-142a-7751-820d-70b76b73d665",
+      "payload": {
+        "session_id": "019fd44d-093f-7f93-b28f-09170e8621c0",
+        "turn_id": "019fd44d-142a-7751-820d-70b76b73d665",
+        "transcript_path": "/Users/miclip/.codex/sessions/2026/08/05/rollout-2026-08-05T17-40-46-019fd44d-093f-7f93-b28f-09170e8621c0.jsonl",
+        "cwd": "/Users/miclip/workspace/coding-repl",
+        "hook_event_name": "Stop",
+        "model": "gpt-5.6-sol",
+        "permission_mode": "default",
+        "stop_hook_active": false,
+        "last_assistant_message": "Created `/tmp/codex-perm-allow.txt` containing `probe`."
+      }
+    }
+  ],
+  "transcript": {
+    "path": "/Users/miclip/.codex/sessions/2026/08/05/rollout-2026-08-05T17-40-46-019fd44d-093f-7f93-b28f-09170e8621c0.jsonl",
+    "eventTypes": {
+      "task_started": 1,
+      "user_message": 1,
+      "agent_message": 2,
+      "patch_apply_end": 1,
+      "token_count": 3,
+      "task_complete": 1
+    },
+    "turns": [
+      {
+        "key": "019fd44d-142a-7751-820d-70b76b73d665",
+        "state": "completed",
+        "confidence": "proven"
+      }
+    ],
+    "abortReasons": []
+  },
+  "notes": {
+    "decision": "allow",
+    "interactive": true,
+    "sawDialog": false,
+    "fileCreated": true,
+    "ended": "sigterm"
+  }
+}

@@ -1,0 +1,70 @@
+{
+  "scenario": "completed",
+  "runId": "codex-completed-1785973540",
+  "hooks": [
+    {
+      "event": "SessionStart",
+      "payload": {
+        "session_id": "019fd451-8678-7d02-b08b-39c35b028eae",
+        "transcript_path": "/Users/miclip/.codex/sessions/2026/08/05/rollout-2026-08-05T17-45-40-019fd451-8678-7d02-b08b-39c35b028eae.jsonl",
+        "cwd": "/Users/miclip/workspace/coding-repl",
+        "hook_event_name": "SessionStart",
+        "model": "gpt-5.6-sol",
+        "permission_mode": "default",
+        "source": "startup"
+      }
+    },
+    {
+      "event": "UserPromptSubmit",
+      "turnId": "019fd451-9166-7062-a260-8af96b82828c",
+      "payload": {
+        "session_id": "019fd451-8678-7d02-b08b-39c35b028eae",
+        "turn_id": "019fd451-9166-7062-a260-8af96b82828c",
+        "transcript_path": "/Users/miclip/.codex/sessions/2026/08/05/rollout-2026-08-05T17-45-40-019fd451-8678-7d02-b08b-39c35b028eae.jsonl",
+        "cwd": "/Users/miclip/workspace/coding-repl",
+        "hook_event_name": "UserPromptSubmit",
+        "model": "gpt-5.6-sol",
+        "permission_mode": "default",
+        "prompt": "Reply with exactly CDX-N and nothing else, where N is 41 plus 1. No tools."
+      }
+    },
+    {
+      "event": "Stop",
+      "turnId": "019fd451-9166-7062-a260-8af96b82828c",
+      "payload": {
+        "session_id": "019fd451-8678-7d02-b08b-39c35b028eae",
+        "turn_id": "019fd451-9166-7062-a260-8af96b82828c",
+        "transcript_path": "/Users/miclip/.codex/sessions/2026/08/05/rollout-2026-08-05T17-45-40-019fd451-8678-7d02-b08b-39c35b028eae.jsonl",
+        "cwd": "/Users/miclip/workspace/coding-repl",
+        "hook_event_name": "Stop",
+        "model": "gpt-5.6-sol",
+        "permission_mode": "default",
+        "stop_hook_active": false,
+        "last_assistant_message": "CDX-42"
+      }
+    }
+  ],
+  "transcript": {
+    "path": "/Users/miclip/.codex/sessions/2026/08/05/rollout-2026-08-05T17-45-40-019fd451-8678-7d02-b08b-39c35b028eae.jsonl",
+    "eventTypes": {
+      "task_started": 1,
+      "user_message": 1,
+      "agent_message": 1,
+      "token_count": 1,
+      "task_complete": 1
+    },
+    "turns": [
+      {
+        "key": "019fd451-9166-7062-a260-8af96b82828c",
+        "state": "completed",
+        "confidence": "proven"
+      }
+    ],
+    "abortReasons": []
+  },
+  "notes": {
+    "interactive": true,
+    "answered": true,
+    "ended": "sigterm"
+  }
+}

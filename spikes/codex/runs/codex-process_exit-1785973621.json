@@ -1,0 +1,50 @@
+{
+  "scenario": "process_exit",
+  "runId": "codex-process_exit-1785973621",
+  "hooks": [
+    {
+      "event": "SessionStart",
+      "payload": {
+        "session_id": "019fd452-c288-7c40-9cf5-cedb638c79aa",
+        "transcript_path": "/Users/miclip/.codex/sessions/2026/08/05/rollout-2026-08-05T17-47-01-019fd452-c288-7c40-9cf5-cedb638c79aa.jsonl",
+        "cwd": "/Users/miclip/workspace/coding-repl",
+        "hook_event_name": "SessionStart",
+        "model": "gpt-5.6-sol",
+        "permission_mode": "default",
+        "source": "startup"
+      }
+    },
+    {
+      "event": "UserPromptSubmit",
+      "turnId": "019fd452-cd7b-74d3-8659-9ffcc4c5de08",
+      "payload": {
+        "session_id": "019fd452-c288-7c40-9cf5-cedb638c79aa",
+        "turn_id": "019fd452-cd7b-74d3-8659-9ffcc4c5de08",
+        "transcript_path": "/Users/miclip/.codex/sessions/2026/08/05/rollout-2026-08-05T17-47-01-019fd452-c288-7c40-9cf5-cedb638c79aa.jsonl",
+        "cwd": "/Users/miclip/workspace/coding-repl",
+        "hook_event_name": "UserPromptSubmit",
+        "model": "gpt-5.6-sol",
+        "permission_mode": "default",
+        "prompt": "Count slowly from 1 to 500, one number per line. Do not stop early."
+      }
+    }
+  ],
+  "transcript": {
+    "path": "/Users/miclip/.codex/sessions/2026/08/05/rollout-2026-08-05T17-47-01-019fd452-c288-7c40-9cf5-cedb638c79aa.jsonl",
+    "eventTypes": {
+      "task_started": 1,
+      "user_message": 1
+    },
+    "turns": [
+      {
+        "key": "019fd452-cd7b-74d3-8659-9ffcc4c5de08",
+        "state": "in_progress"
+      }
+    ],
+    "abortReasons": []
+  },
+  "notes": {
+    "interactive": true,
+    "ended": "sigterm"
+  }
+}

@@ -1,0 +1,47 @@
+{
+  "scenario": "permission_deny",
+  "runId": "codex-permission_deny-1785973449",
+  "hooks": [
+    {
+      "event": "SessionStart",
+      "payload": {
+        "session_id": "019fd450-23ff-7fb1-aca2-c4cfb6530a31",
+        "transcript_path": "/Users/miclip/.codex/sessions/2026/08/05/rollout-2026-08-05T17-44-09-019fd450-23ff-7fb1-aca2-c4cfb6530a31.jsonl",
+        "cwd": "/Users/miclip/workspace/coding-repl",
+        "hook_event_name": "SessionStart",
+        "model": "gpt-5.6-sol",
+        "permission_mode": "default",
+        "source": "startup"
+      }
+    }
+  ],
+  "transcript": {
+    "path": "/Users/miclip/.codex/sessions/2026/08/05/rollout-2026-08-05T17-44-09-019fd450-23ff-7fb1-aca2-c4cfb6530a31.jsonl",
+    "eventTypes": {
+      "task_started": 1,
+      "user_message": 1,
+      "agent_message": 1,
+      "token_count": 1,
+      "turn_aborted": 1,
+      "patch_apply_end": 1
+    },
+    "turns": [
+      {
+        "key": "019fd450-2ee9-7780-9dd9-0efe8752188c",
+        "state": "cancelled",
+        "confidence": "proven"
+      }
+    ],
+    "abortReasons": [
+      "interrupted"
+    ]
+  },
+  "notes": {
+    "decision": "deny",
+    "interactive": true,
+    "sawDialog": true,
+    "sent": "ESC",
+    "fileCreated": false,
+    "ended": "sigterm"
+  }
+}

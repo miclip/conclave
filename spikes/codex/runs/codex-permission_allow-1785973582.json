@@ -1,0 +1,91 @@
+{
+  "scenario": "permission_allow",
+  "runId": "codex-permission_allow-1785973582",
+  "hooks": [
+    {
+      "event": "SessionStart",
+      "payload": {
+        "session_id": "019fd452-2a9e-7883-8927-592af576a366",
+        "transcript_path": "/Users/miclip/.codex/sessions/2026/08/05/rollout-2026-08-05T17-46-22-019fd452-2a9e-7883-8927-592af576a366.jsonl",
+        "cwd": "/Users/miclip/workspace/coding-repl",
+        "hook_event_name": "SessionStart",
+        "model": "gpt-5.6-sol",
+        "permission_mode": "default",
+        "source": "startup"
+      }
+    },
+    {
+      "event": "UserPromptSubmit",
+      "turnId": "019fd452-3589-7a62-9538-38ae6f697ebd",
+      "payload": {
+        "session_id": "019fd452-2a9e-7883-8927-592af576a366",
+        "turn_id": "019fd452-3589-7a62-9538-38ae6f697ebd",
+        "transcript_path": "/Users/miclip/.codex/sessions/2026/08/05/rollout-2026-08-05T17-46-22-019fd452-2a9e-7883-8927-592af576a366.jsonl",
+        "cwd": "/Users/miclip/workspace/coding-repl",
+        "hook_event_name": "UserPromptSubmit",
+        "model": "gpt-5.6-sol",
+        "permission_mode": "default",
+        "prompt": "Use your file-writing tool to create /tmp/codex-perm-allow.txt containing the word probe. Do this immediately."
+      }
+    },
+    {
+      "event": "PermissionRequest",
+      "turnId": "019fd452-3589-7a62-9538-38ae6f697ebd",
+      "payload": {
+        "session_id": "019fd452-2a9e-7883-8927-592af576a366",
+        "turn_id": "019fd452-3589-7a62-9538-38ae6f697ebd",
+        "transcript_path": "/Users/miclip/.codex/sessions/2026/08/05/rollout-2026-08-05T17-46-22-019fd452-2a9e-7883-8927-592af576a366.jsonl",
+        "cwd": "/Users/miclip/workspace/coding-repl",
+        "hook_event_name": "PermissionRequest",
+        "model": "gpt-5.6-sol",
+        "permission_mode": "default",
+        "tool_name": "apply_patch",
+        "tool_input": {
+          "command": "*** Begin Patch\n*** Add File: /tmp/codex-perm-allow.txt\n+probe\n*** End Patch"
+        }
+      }
+    },
+    {
+      "event": "Stop",
+      "turnId": "019fd452-3589-7a62-9538-38ae6f697ebd",
+      "payload": {
+        "session_id": "019fd452-2a9e-7883-8927-592af576a366",
+        "turn_id": "019fd452-3589-7a62-9538-38ae6f697ebd",
+        "transcript_path": "/Users/miclip/.codex/sessions/2026/08/05/rollout-2026-08-05T17-46-22-019fd452-2a9e-7883-8927-592af576a366.jsonl",
+        "cwd": "/Users/miclip/workspace/coding-repl",
+        "hook_event_name": "Stop",
+        "model": "gpt-5.6-sol",
+        "permission_mode": "default",
+        "stop_hook_active": false,
+        "last_assistant_message": "Created `/tmp/codex-perm-allow.txt` containing `probe`."
+      }
+    }
+  ],
+  "transcript": {
+    "path": "/Users/miclip/.codex/sessions/2026/08/05/rollout-2026-08-05T17-46-22-019fd452-2a9e-7883-8927-592af576a366.jsonl",
+    "eventTypes": {
+      "task_started": 1,
+      "user_message": 1,
+      "agent_message": 2,
+      "patch_apply_end": 1,
+      "token_count": 3,
+      "task_complete": 1
+    },
+    "turns": [
+      {
+        "key": "019fd452-3589-7a62-9538-38ae6f697ebd",
+        "state": "completed",
+        "confidence": "proven"
+      }
+    ],
+    "abortReasons": []
+  },
+  "notes": {
+    "decision": "allow",
+    "interactive": true,
+    "sawDialog": true,
+    "sent": "y",
+    "fileCreated": true,
+    "ended": "sigterm"
+  }
+}

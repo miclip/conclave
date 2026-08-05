@@ -37,3 +37,8 @@ spikes/hooks/receiver.out
 #
 # Journals written by the TypeScript adapter at runtime never land here: HookReceiver
 # writes into a per-session mkdtemp directory outside the repo.
+
+# Codex fixture-collection PTY streams. Large, mostly escape sequences, and quoted where
+# they mattered in spikes/codex/FINDINGS.md. The runs/*.json observations and journal/
+# are evidence and ARE tracked.
+spikes/codex/runs/*.pty.log

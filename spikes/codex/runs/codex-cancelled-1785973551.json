@@ -1,0 +1,56 @@
+{
+  "scenario": "cancelled",
+  "runId": "codex-cancelled-1785973551",
+  "hooks": [
+    {
+      "event": "SessionStart",
+      "payload": {
+        "session_id": "019fd451-b1bd-7321-a092-ca3716c7e5e1",
+        "transcript_path": "/Users/miclip/.codex/sessions/2026/08/05/rollout-2026-08-05T17-45-51-019fd451-b1bd-7321-a092-ca3716c7e5e1.jsonl",
+        "cwd": "/Users/miclip/workspace/coding-repl",
+        "hook_event_name": "SessionStart",
+        "model": "gpt-5.6-sol",
+        "permission_mode": "default",
+        "source": "startup"
+      }
+    },
+    {
+      "event": "UserPromptSubmit",
+      "turnId": "019fd451-bca9-7a43-a895-e368da1f869a",
+      "payload": {
+        "session_id": "019fd451-b1bd-7321-a092-ca3716c7e5e1",
+        "turn_id": "019fd451-bca9-7a43-a895-e368da1f869a",
+        "transcript_path": "/Users/miclip/.codex/sessions/2026/08/05/rollout-2026-08-05T17-45-51-019fd451-b1bd-7321-a092-ca3716c7e5e1.jsonl",
+        "cwd": "/Users/miclip/workspace/coding-repl",
+        "hook_event_name": "UserPromptSubmit",
+        "model": "gpt-5.6-sol",
+        "permission_mode": "default",
+        "prompt": "Write a detailed 3000-word technical essay on the history of terminal emulators. Be exhaustive and do not stop early."
+      }
+    }
+  ],
+  "transcript": {
+    "path": "/Users/miclip/.codex/sessions/2026/08/05/rollout-2026-08-05T17-45-51-019fd451-b1bd-7321-a092-ca3716c7e5e1.jsonl",
+    "eventTypes": {
+      "task_started": 1,
+      "user_message": 1,
+      "token_count": 1,
+      "turn_aborted": 1
+    },
+    "turns": [
+      {
+        "key": "019fd451-bca9-7a43-a895-e368da1f869a",
+        "state": "cancelled",
+        "confidence": "proven"
+      }
+    ],
+    "abortReasons": [
+      "interrupted"
+    ]
+  },
+  "notes": {
+    "interactive": true,
+    "sawWorking": true,
+    "ended": "sigterm"
+  }
+}

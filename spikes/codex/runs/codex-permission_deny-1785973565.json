@@ -1,0 +1,78 @@
+{
+  "scenario": "permission_deny",
+  "runId": "codex-permission_deny-1785973565",
+  "hooks": [
+    {
+      "event": "SessionStart",
+      "payload": {
+        "session_id": "019fd451-e86a-7860-aa39-2e83c816d6be",
+        "transcript_path": "/Users/miclip/.codex/sessions/2026/08/05/rollout-2026-08-05T17-46-05-019fd451-e86a-7860-aa39-2e83c816d6be.jsonl",
+        "cwd": "/Users/miclip/workspace/coding-repl",
+        "hook_event_name": "SessionStart",
+        "model": "gpt-5.6-sol",
+        "permission_mode": "default",
+        "source": "startup"
+      }
+    },
+    {
+      "event": "UserPromptSubmit",
+      "turnId": "019fd451-f352-7cb2-8d9d-ea38e4267011",
+      "payload": {
+        "session_id": "019fd451-e86a-7860-aa39-2e83c816d6be",
+        "turn_id": "019fd451-f352-7cb2-8d9d-ea38e4267011",
+        "transcript_path": "/Users/miclip/.codex/sessions/2026/08/05/rollout-2026-08-05T17-46-05-019fd451-e86a-7860-aa39-2e83c816d6be.jsonl",
+        "cwd": "/Users/miclip/workspace/coding-repl",
+        "hook_event_name": "UserPromptSubmit",
+        "model": "gpt-5.6-sol",
+        "permission_mode": "default",
+        "prompt": "Use your file-writing tool to create /tmp/codex-perm-deny.txt containing the word probe. Do this immediately."
+      }
+    },
+    {
+      "event": "PermissionRequest",
+      "turnId": "019fd451-f352-7cb2-8d9d-ea38e4267011",
+      "payload": {
+        "session_id": "019fd451-e86a-7860-aa39-2e83c816d6be",
+        "turn_id": "019fd451-f352-7cb2-8d9d-ea38e4267011",
+        "transcript_path": "/Users/miclip/.codex/sessions/2026/08/05/rollout-2026-08-05T17-46-05-019fd451-e86a-7860-aa39-2e83c816d6be.jsonl",
+        "cwd": "/Users/miclip/workspace/coding-repl",
+        "hook_event_name": "PermissionRequest",
+        "model": "gpt-5.6-sol",
+        "permission_mode": "default",
+        "tool_name": "apply_patch",
+        "tool_input": {
+          "command": "*** Begin Patch\n*** Add File: /tmp/codex-perm-deny.txt\n+probe\n*** End Patch"
+        }
+      }
+    }
+  ],
+  "transcript": {
+    "path": "/Users/miclip/.codex/sessions/2026/08/05/rollout-2026-08-05T17-46-05-019fd451-e86a-7860-aa39-2e83c816d6be.jsonl",
+    "eventTypes": {
+      "task_started": 1,
+      "user_message": 1,
+      "agent_message": 1,
+      "token_count": 1,
+      "turn_aborted": 1,
+      "patch_apply_end": 1
+    },
+    "turns": [
+      {
+        "key": "019fd451-f352-7cb2-8d9d-ea38e4267011",
+        "state": "cancelled",
+        "confidence": "proven"
+      }
+    ],
+    "abortReasons": [
+      "interrupted"
+    ]
+  },
+  "notes": {
+    "decision": "deny",
+    "interactive": true,
+    "sawDialog": true,
+    "sent": "ESC",
+    "fileCreated": false,
+    "ended": "sigterm"
+  }
+}

@@ -113,7 +113,9 @@ export function parseCodex(records: Record<string, any>[]): ParsedTranscript {
     if (!id) return current
     const rec: TurnRecord = {
       key: turnKey(id),
-      prompt: current?.prompt ?? '',
+      // Left empty on purpose: `task_started` precedes `user_message`, so the prompt is
+      // filled in when it arrives rather than copied from a previous turn.
+      prompt: '',
       state: 'in_progress',
       toolCalls: [],
     }
@@ -139,15 +141,24 @@ export function parseCodex(records: Record<string, any>[]): ParsedTranscript {
         case 'context_compacted':
           declaredCompaction = true
           break
-        case 'user_message':
-          current = {
-            key: turnKey(`codex-pending-${turns.length}`),
-            prompt: String(p.message ?? ''),
-            state: 'in_progress',
-            toolCalls: [],
+        case 'user_message': {
+          // Observed on 0.146.0: `task_started` is written BEFORE `user_message`, so by
+          // the time the prompt appears the turn usually already exists. Creating one
+          // here unconditionally produced a phantom second turn per exchange.
+          const text = String(p.message ?? '')
+          if (current && current.prompt === '') {
+            current.prompt = text
+          } else {
+            current = {
+              key: turnKey(`codex-pending-${turns.length}`),
+              prompt: text,
+              state: 'in_progress',
+              toolCalls: [],
+            }
+            turns.push(current)
           }
-          turns.push(current)
           break
+        }
         case 'task_started': {
           // Now the turn has a real id; adopt it rather than creating a duplicate.
           if (current && p.turn_id) {

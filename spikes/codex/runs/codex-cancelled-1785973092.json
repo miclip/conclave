@@ -1,0 +1,42 @@
+{
+  "scenario": "cancelled",
+  "runId": "codex-cancelled-1785973092",
+  "hooks": [
+    {
+      "event": "SessionStart",
+      "payload": {
+        "session_id": "019fd44a-b17a-7760-8229-f88597c79ad9",
+        "transcript_path": "/Users/miclip/.codex/sessions/2026/08/05/rollout-2026-08-05T17-38-12-019fd44a-b17a-7760-8229-f88597c79ad9.jsonl",
+        "cwd": "/Users/miclip/workspace/coding-repl",
+        "hook_event_name": "SessionStart",
+        "model": "gpt-5.6-sol",
+        "permission_mode": "default",
+        "source": "startup"
+      }
+    }
+  ],
+  "transcript": {
+    "path": "/Users/miclip/.codex/sessions/2026/08/05/rollout-2026-08-05T17-38-12-019fd44a-b17a-7760-8229-f88597c79ad9.jsonl",
+    "eventTypes": {
+      "task_started": 1,
+      "user_message": 1,
+      "token_count": 1,
+      "turn_aborted": 1
+    },
+    "turns": [
+      {
+        "key": "019fd44a-c119-7a30-831c-5d3a0610ab8f",
+        "state": "cancelled",
+        "confidence": "proven"
+      }
+    ],
+    "abortReasons": [
+      "interrupted"
+    ]
+  },
+  "notes": {
+    "interactive": true,
+    "sawWorking": true,
+    "ended": "sigterm"
+  }
+}

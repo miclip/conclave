@@ -1,0 +1,13 @@
+{
+  "scenario": "readiness",
+  "runId": "codex-readiness-1785972969",
+  "hooks": [],
+  "notes": {
+    "interactive": true,
+    "msToInteractive": 2469,
+    "hooksBeforeAnyTurn": [],
+    "echoed": true,
+    "msToFirstAcceptedInput": 2479,
+    "ended": "sigterm"
+  }
+}
