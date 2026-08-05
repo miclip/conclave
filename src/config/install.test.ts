@@ -8,6 +8,7 @@
  */
 
 import { strict as assert } from 'node:assert'
+import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -131,5 +132,40 @@ test('the rendered output matches what this checkout currently has installed', a
   assert.ok(
     result.written.every((w) => !w.changed),
     'templates have drifted from the installed registrations; run `npm run config:install`',
+  )
+})
+
+test('no tracked source file hardcodes an absolute home path', () => {
+  // Guards the portability this task establishes. Deliberately exempt:
+  //
+  //   - the evidence corpus (fixtures, journal, results): those are RECORDINGS of real
+  //     runs, and the paths in them are part of what was observed. Rewriting them would
+  //     falsify the evidence behind the conformance claims.
+  //   - prose (*.md): TODO.md and the FINDINGS documents discuss these paths by name,
+  //     which is the point of documenting them.
+  //   - rendered registrations: git-ignored, so they cannot be tracked anyway.
+  const tracked = execFileSync('git', ['ls-files'], { cwd: REPO, encoding: 'utf8' })
+    .split('\n')
+    .filter(Boolean)
+    .filter((f) => !f.startsWith('spikes/hooks/fixtures/'))
+    .filter((f) => !f.startsWith('spikes/hooks/journal/'))
+    .filter((f) => f !== 'spikes/hooks/results.ndjson')
+    .filter((f) => !f.endsWith('.md'))
+
+  // Match a plausible real home directory, not a synthetic one. `/home/x` appears as a
+  // literal in the childenv sanitizer tests and is not a portability problem, so require
+  // a username of at least three characters followed by a path separator.
+  const REAL_HOME = /\/(?:Users|home)\/[A-Za-z][A-Za-z0-9._-]{2,}\//
+
+  const offenders = tracked.filter((f) => {
+    const p = join(REPO, f)
+    if (!existsSync(p)) return false
+    return REAL_HOME.test(readFileSync(p, 'utf8'))
+  })
+
+  assert.deepEqual(
+    offenders,
+    [],
+    `these tracked files hardcode a home directory; render them from a template instead:\n${offenders.join('\n')}`,
   )
 })

@@ -20,6 +20,13 @@ spikes/**/logs/
 spikes/**/captures/
 spikes/hooks/receiver.out
 
+# Rendered hook registrations. Both CLIs require an absolute command path, so an active
+# registration is necessarily machine-local; committing one bakes a home directory into
+# portable source. Canonical templates live in config/templates/ and are versioned.
+# Regenerate with `npm run config:install`.
+.claude/settings.json
+.codex/hooks.json
+
 # NOTE: `spikes/**/journal/` is deliberately NOT ignored.
 #
 # spikes/hooks/journal/hook-journal.ndjson looks like a local runtime journal and is in
