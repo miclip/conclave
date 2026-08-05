@@ -15,9 +15,14 @@
     "spike:outcomes": "python3 spikes/transcripts/outcomes.py --validate",
     "spike:env": "python3 tests/test_childenv.py",
     "spike:codex-hooks": "python3 spikes/hooks/verify_codex_hooks.py",
-    "test:codex": "ORCH_CODEX=1 node --test src/deployment/codexHookTrust.test.ts"
+    "test:codex": "ORCH_CODEX=1 node --test src/deployment/codexHookTrust.test.ts",
+    "config:install": "node bin/conclave.ts config install",
+    "test:codex:real": "ORCH_CODEX_REAL=1 node --test src/deployment/codexHookTrust.test.ts"
   },
   "dependencies": {
     "node-pty": "^1.0.0"
+  },
+  "bin": {
+    "conclave": "bin/conclave.ts"
   }
 }

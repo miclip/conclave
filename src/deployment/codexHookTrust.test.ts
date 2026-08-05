@@ -1,34 +1,73 @@
 /**
  * Codex hook-trust invalidation — a configuration/deployment invariant.
  *
- * This costs no model tokens (everything goes through `hooks/list` and the boot-time
- * trust prompt), so it can run while the account is rate-limited. It does mutate real
- * state: the project's `.codex/hooks.json` and the USER-level `~/.codex/config.toml`,
- * where Codex persists trust decisions. Both are snapshotted byte-for-byte and restored,
- * with the restoration asserted.
+ * Costs no model tokens (everything goes through `hooks/list` and the boot-time trust
+ * prompt), so it runs while the account is rate-limited.
+ *
+ * By default these operate on a TEMPORARY project directory containing a rendered copy of
+ * the sidecar, so this checkout's own `.codex/hooks.json` is never mutated. The trust
+ * decision itself still lands in the user-level `~/.codex/config.toml` -- that is where
+ * Codex stores it and there is no project-scoped alternative -- so that file is
+ * snapshotted and restored byte-for-byte, with the restoration asserted.
+ *
+ * The one test that deliberately mutates the REAL installed sidecar is gated separately
+ * behind ORCH_CODEX_REAL, because its purpose is to verify the registration this checkout
+ * actually uses rather than a copy of it.
  *
  * Nothing here is lifecycle evidence. It must not change any turn-outcome grade -- a
- * trusted hook is not evidence that a turn completed. There is a test at the bottom
- * asserting that separation holds.
+ * trusted hook is not evidence that a turn completed. There is a test asserting that
+ * separation holds, and it needs no Codex at all.
  *
- *   ORCH_CODEX=1 node --test src/deployment/codexHookTrust.test.ts
+ *   ORCH_CODEX=1      node --test src/deployment/codexHookTrust.test.ts
+ *   ORCH_CODEX_REAL=1 node --test src/deployment/codexHookTrust.test.ts   # + real sidecar
  */
 
 import { strict as assert } from 'node:assert'
-import { readFileSync, writeFileSync } from 'node:fs'
-import { homedir } from 'node:os'
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { diagnoseHookTrust, readCodexHooks, trustCodexHooks } from './codexHookTrust.ts'
 import type { CodexHookReport } from './codexHookTrust.ts'
 import { CODEX_CAPABILITIES } from '../conformance/capabilities.ts'
+import { render, TARGETS } from '../config/install.ts'
 
 const ROOT = join(import.meta.dirname, '..', '..')
-const HOOKS_JSON = join(ROOT, '.codex', 'hooks.json')
 const CODEX_CONFIG = join(homedir(), '.codex', 'config.toml')
 const MATCH = 'hook_post.py'
 
-const skip = process.env.ORCH_CODEX === '1' ? false : 'set ORCH_CODEX=1 (mutates ~/.codex/config.toml, then restores it)'
+const skip =
+  process.env.ORCH_CODEX === '1' || process.env.ORCH_CODEX_REAL === '1'
+    ? false
+    : 'set ORCH_CODEX=1 (uses a temp project; mutates ~/.codex/config.toml, then restores it)'
+
+const skipReal =
+  process.env.ORCH_CODEX_REAL === '1'
+    ? false
+    : 'set ORCH_CODEX_REAL=1 (mutates this checkout\'s real .codex/hooks.json)'
+
+/**
+ * A throwaway project directory with a rendered sidecar, so trust behaviour can be
+ * exercised without touching the registration this checkout depends on.
+ */
+function tempProject(): { dir: string; hooksJson: string } {
+  // realpath matters on macOS: mkdtemp returns /var/... while Codex resolves and reports
+  // /private/var/..., so an unresolved path makes every trust key and sourcePath
+  // comparison silently miss.
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'conclave-trust-')))
+  const target = TARGETS.find((t) => t.output.includes('.codex'))!
+  const template = readFileSync(join(ROOT, target.template), 'utf8')
+  const hooksJson = join(dir, target.output)
+  mkdirSync(join(hooksJson, '..'), { recursive: true })
+  // Rendered against the temp dir, so its handler hash is distinct from this checkout's.
+  writeFileSync(hooksJson, render(template, dir))
+
+  // Pre-seed DIRECTORY trust. It is a separate precondition from hook trust, and when
+  // both prompts appear in sequence the second one does not reliably take. Seeding the
+  // first leaves exactly the single-prompt path that the real checkout exercises.
+  appendFileSync(CODEX_CONFIG, `\n[projects."${dir}"]\ntrust_level = "trusted"\n`)
+  return { dir, hooksJson }
+}
 
 const status = (r: CodexHookReport, event = 'sessionStart') =>
   r.hooks.find((h) => h.eventName === event && h.command?.includes(MATCH))
@@ -46,19 +85,21 @@ function trustedHashes(): Record<string, string> {
 }
 
 test('hook trust is content-based, invalidates on edit, and survives a byte-exact revert', { skip }, async (t) => {
-  // Snapshot BEFORE anything. Restoration is asserted, not assumed.
-  const originalHooks = readFileSync(HOOKS_JSON)
+  // Snapshot the real trust store BEFORE tempProject() seeds directory trust into it.
   const originalConfig = readFileSync(CODEX_CONFIG)
+  const { dir: PROJECT, hooksJson: HOOKS_JSON } = tempProject()
+  const originalHooks = readFileSync(HOOKS_JSON)
 
   t.after(() => {
-    writeFileSync(HOOKS_JSON, originalHooks)
     writeFileSync(CODEX_CONFIG, originalConfig)
-    assert.ok(readFileSync(HOOKS_JSON).equals(originalHooks), '.codex/hooks.json not restored')
     assert.ok(readFileSync(CODEX_CONFIG).equals(originalConfig), '~/.codex/config.toml not restored')
   })
 
+  // A fresh temp project has never been trusted, so establish a baseline first.
+  await trustCodexHooks(PROJECT)
+
   // 1. Baseline: the trusted file reports trusted.
-  const baseline = await readCodexHooks(ROOT)
+  const baseline = await readCodexHooks(PROJECT)
   const before = status(baseline)
   assert.ok(before, 'expected our sessionStart hook to be loaded')
   assert.equal(before.trustStatus, 'trusted', 'baseline must start from a trusted state')
@@ -69,8 +110,8 @@ test('hook trust is content-based, invalidates on edit, and survives a byte-exac
   assert.equal(diagnoseHookTrust(baseline, MATCH).ready, true)
 
   const baselineHashes = trustedHashes()
-  const hashKeys = Object.keys(baselineHashes).filter((k) => k.includes('coding-repl'))
-  assert.ok(hashKeys.length >= 2, 'expected trusted_hash entries for this project')
+  const hashKeys = Object.keys(baselineHashes).filter((k) => k.startsWith(PROJECT))
+  assert.ok(hashKeys.length >= 2, 'expected trusted_hash entries for the temp project')
 
   // 2. A content edit invalidates trust. This is the security-relevant case: the command
   //    that will be executed changed, so the prior decision cannot carry over.
@@ -79,7 +120,7 @@ test('hook trust is content-based, invalidates on edit, and survives a byte-exac
   edited.hooks.SessionStart[0].hooks[0].command += ' --edited'
   writeFileSync(HOOKS_JSON, JSON.stringify(edited, null, 2) + '\n')
 
-  const afterEdit = await readCodexHooks(ROOT)
+  const afterEdit = await readCodexHooks(PROJECT)
   const edit = status(afterEdit)
   assert.ok(edit, 'the hook should still be loaded, just not trusted')
   assert.notEqual(edit.trustStatus, 'trusted', 'a changed command must invalidate trust')
@@ -104,7 +145,7 @@ test('hook trust is content-based, invalidates on edit, and survives a byte-exac
 
   // 3. Reverting byte-for-byte restores the original hash behaviour, with no re-trust.
   writeFileSync(HOOKS_JSON, originalHooks)
-  const afterRevert = await readCodexHooks(ROOT)
+  const afterRevert = await readCodexHooks(PROJECT)
   const revert = status(afterRevert)
   assert.equal(revert?.trustStatus, 'trusted', 'a byte-exact revert must restore trust')
   assert.equal(revert?.currentHash, before.currentHash, 'the content hash must be identical')
@@ -122,7 +163,7 @@ test('hook trust is content-based, invalidates on edit, and survives a byte-exac
   //    not the file: changing `description` or adding an unrelated event does not
   //    re-validate handlers that did not themselves change.
   writeFileSync(HOOKS_JSON, JSON.stringify(parsed, null, 8) + '\n')
-  const afterWhitespace = await readCodexHooks(ROOT)
+  const afterWhitespace = await readCodexHooks(PROJECT)
   const ws = status(afterWhitespace)
   assert.ok(ws, 'the reformatted file must still parse and load')
   assert.equal(ws.trustStatus, 'trusted', 'whitespace-only changes must not invalidate trust')
@@ -133,16 +174,16 @@ test('hook trust is content-based, invalidates on edit, and survives a byte-exac
 })
 
 test('re-trusting a changed hook writes a new trusted_hash', { skip }, async (t) => {
-  const originalHooks = readFileSync(HOOKS_JSON)
   const originalConfig = readFileSync(CODEX_CONFIG)
+  const { dir: PROJECT, hooksJson: HOOKS_JSON } = tempProject()
+  const originalHooks = readFileSync(HOOKS_JSON)
 
   t.after(() => {
-    writeFileSync(HOOKS_JSON, originalHooks)
     writeFileSync(CODEX_CONFIG, originalConfig)
-    assert.ok(readFileSync(HOOKS_JSON).equals(originalHooks), '.codex/hooks.json not restored')
     assert.ok(readFileSync(CODEX_CONFIG).equals(originalConfig), '~/.codex/config.toml not restored')
   })
 
+  await trustCodexHooks(PROJECT)
   const hashesBefore = trustedHashes()
 
   // Change the timeout: a real content change, and harmless if anything leaks.
@@ -150,20 +191,20 @@ test('re-trusting a changed hook writes a new trusted_hash', { skip }, async (t)
   parsed.hooks.SessionStart[0].hooks[0].timeout = 11
   writeFileSync(HOOKS_JSON, JSON.stringify(parsed, null, 2) + '\n')
 
-  const invalidated = await readCodexHooks(ROOT)
+  const invalidated = await readCodexHooks(PROJECT)
   assert.notEqual(status(invalidated)?.trustStatus, 'trusted', 'the change must invalidate first')
 
-  const { prompted } = await trustCodexHooks(ROOT)
+  const { prompted } = await trustCodexHooks(PROJECT)
   assert.equal(prompted, true, 'changing hook content must re-prompt for review')
 
-  const retrusted = await readCodexHooks(ROOT)
+  const retrusted = await readCodexHooks(PROJECT)
   const now = status(retrusted)
   assert.equal(now?.trustStatus, 'trusted', 're-trusting must restore execution')
   assert.equal(now?.executable, true)
   assert.equal(now?.timeoutSec, 11, 'the new content is what got trusted')
 
   const hashesAfter = trustedHashes()
-  const key = Object.keys(hashesAfter).find((k) => k.includes('coding-repl') && k.includes('session_start'))
+  const key = Object.keys(hashesAfter).find((k) => k.startsWith(PROJECT) && k.includes('session_start'))
   assert.ok(key, 'expected a session_start trust entry')
   assert.ok(hashesAfter[key]!.startsWith('sha256:'), 'trust is recorded as a content hash')
   assert.notEqual(
@@ -279,4 +320,21 @@ test('codex declares a preflight even though its adapter does not exist yet', as
   const { CODEX_AGENT } = await import('../registry/builtin.ts')
   assert.equal(typeof CODEX_AGENT.preflight, 'function')
   assert.equal(CODEX_AGENT.create, undefined)
+})
+
+test('GATED: the real installed sidecar is trusted and executable', { skip: skipReal }, async () => {
+  // The one test whose subject is the registration this checkout actually uses, rather
+  // than a copy of it. Read-only: it asserts the installed state is usable and mutates
+  // nothing, so the checkout's trust is never disturbed.
+  const report = await readCodexHooks(ROOT)
+  const diagnosis = diagnoseHookTrust(report, MATCH)
+  assert.equal(
+    diagnosis.ready,
+    true,
+    `this checkout's hooks are not executable; run \`npm run config:install\`:\n${diagnosis.messages.join('\n')}`,
+  )
+  for (const h of report.hooks.filter((x) => x.command?.includes(MATCH))) {
+    assert.equal(h.executable, true)
+    assert.ok(h.sourcePath?.startsWith(ROOT), 'the subject must be this checkout, not a copy')
+  }
 })

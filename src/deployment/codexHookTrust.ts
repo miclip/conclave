@@ -207,7 +207,7 @@ export async function assertCodexHooksExecutable(cwd: string, matchCommand: stri
 export async function trustCodexHooks(
   cwd: string,
   opts: { timeoutMs?: number } = {},
-): Promise<{ prompted: boolean }> {
+): Promise<{ prompted: boolean; askedAboutDirectory: boolean }> {
   const timeoutMs = opts.timeoutMs ?? 45_000
   const pty = await PtyProcess.spawn({
     file: 'codex',
@@ -217,6 +217,22 @@ export async function trustCodexHooks(
   })
 
   try {
+    // A directory Codex has not seen before is asked about FIRST, and the hook review
+    // prompt only follows once it is answered. Skipping this leaves the helper waiting
+    // for a prompt that will never appear -- which is how a project the caller just
+    // created silently fails to get trusted at all.
+    const askedAboutDirectory = await pty.waitForOutput(
+      (all) => squash(all).includes('Doyoutrustthecontentsofthisdirectory'),
+      8_000,
+    )
+    if (askedAboutDirectory) {
+      await new Promise((r) => setTimeout(r, 600))
+      pty.write('1') // "Yes, continue"
+      await new Promise((r) => setTimeout(r, 400))
+      pty.write('\r')
+      await new Promise((r) => setTimeout(r, 1200))
+    }
+
     const prompted = await pty.waitForOutput(
       (all) => squash(all).includes('Hooksneedreview'),
       timeoutMs,
@@ -229,7 +245,7 @@ export async function trustCodexHooks(
       await pty.waitQuiet(1500, 20_000)
       await new Promise((r) => setTimeout(r, 1500))
     }
-    return { prompted }
+    return { prompted, askedAboutDirectory }
   } finally {
     await pty.terminate()
   }

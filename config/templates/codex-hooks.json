@@ -1,0 +1,31 @@
+{
+  "description": "Orchestrator spike step 2: observe SessionStart and Stop only.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{{REPO_ROOT}}/spikes/hooks/hook_post.py codex",
+            "async": false,
+            "timeout": 10,
+            "statusMessage": "spike: recording SessionStart"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{{REPO_ROOT}}/spikes/hooks/hook_post.py codex",
+            "async": false,
+            "timeout": 10,
+            "statusMessage": "spike: recording Stop"
+          }
+        ]
+      }
+    ]
+  }
+}
