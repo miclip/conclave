@@ -172,6 +172,13 @@ test('parity with the validated Python classifier over the recorded corpus', () 
   }
 
   // The Python run reports 17 classified / 0 mismatches / 4 excluded.
+  //
+  // These counts are exact ON PURPOSE. The corpus is labelled evidence supporting the
+  // conformance claims, not an append-only runtime log, so a spike rerun that appends
+  // records SHOULD break this test. See TODO.md, "Evidence corpus counts are
+  // intentionally exact" — updating the baseline requires reviewing the new evidence,
+  // its expected classifications, supersession relationships, parity and any affected
+  // grades. Do not loosen this to a lower bound to make casual reruns pass.
   assert.deepEqual(mismatches, [], `classifier disagrees with ground truth:\n${mismatches.join('\n')}`)
   assert.equal(checked, 17, `expected 17 classifiable runs, found ${checked}`)
   assert.equal(skipped.length, 4, `expected 4 superseded runs, found ${skipped.length}`)
