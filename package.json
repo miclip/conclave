@@ -1,0 +1,23 @@
+{
+  "name": "coding-repl",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Multi-agent orchestrator REPL. One runtime dependency (node-pty); Node 24 strips types natively and node:test is built in.",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "test": "node --test 'src/**/*.test.ts'",
+    "test:live": "ORCH_LIVE=1 node --test src/adapters/claude.live.test.ts",
+    "conformance": "node src/conformance/report.ts",
+    "postinstall": "node scripts/fix-node-pty.cjs",
+    "spike:outcomes": "python3 spikes/transcripts/outcomes.py --validate",
+    "spike:env": "python3 tests/test_childenv.py",
+    "spike:codex-hooks": "python3 spikes/hooks/verify_codex_hooks.py",
+    "test:codex": "ORCH_CODEX=1 node --test src/deployment/codexHookTrust.test.ts"
+  },
+  "dependencies": {
+    "node-pty": "^1.0.0"
+  }
+}

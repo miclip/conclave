@@ -1,0 +1,32 @@
+node_modules/
+*.log
+.DS_Store
+tmp/
+coverage/
+
+# Secrets and machine-specific configuration
+.env
+.env.*
+!.env.example
+
+# Python bytecode from the spike modules
+__pycache__/
+*.pyc
+
+# Raw PTY captures. Regenerable by re-running the spikes, read by no test, and mostly
+# terminal escape sequences. Kept out deliberately -- they are debugging aids, not
+# evidence. The FINDINGS documents quote the parts that mattered.
+spikes/**/logs/
+spikes/**/captures/
+spikes/hooks/receiver.out
+
+# NOTE: `spikes/**/journal/` is deliberately NOT ignored.
+#
+# spikes/hooks/journal/hook-journal.ndjson looks like a local runtime journal and is in
+# fact the labelled corpus behind the conformance claims. src/outcomes/classify.test.ts
+# and src/conformance/suite.ts both read it; removing it drops the parity test from 11
+# passing to 10 passing and 1 failing. Same for spikes/hooks/results.ndjson and
+# spikes/hooks/fixtures/ -- the 27 raw hook payloads are evidence, not clutter.
+#
+# Journals written by the TypeScript adapter at runtime never land here: HookReceiver
+# writes into a per-session mkdtemp directory outside the repo.
