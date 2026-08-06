@@ -604,49 +604,53 @@ very unlikely. The human's own constraints (§6) then need a genuinely higher pr
 than the lead's instructions, or an intervention is indistinguishable from routine
 steering.
 
-### Workspace: a worktree per agent [Decided 2026-08-05]
+### Workspace [Revised 2026-08-05 — an earlier draft over-decided this]
 
-Each agent gets its own git worktree rather than sharing one directory. This dissolves
-both hazards of a shared tree — concurrent writes, and verification racing a half-written
-edit — instead of gating around them. The advisor can run the suite whenever it likes,
-because nothing is being edited underneath it.
+**Default: one shared directory.** A previous revision made a worktree per agent the
+standing answer to the hazards of a shared tree. That was too strong, and it traded away
+the thing that matters most for review.
 
-Verified against git 2.x on this machine, because three of these bite immediately:
+An advisor whose job is to check what the implementer is doing *right now* wants to see
+uncommitted work. In a shared directory it does — files, `git diff`, a test run against
+the actual current state. In its own worktree it sees **zero** uncommitted changes
+(measured, not assumed), so "the advisor reviews the artifact" quietly narrows to "the
+advisor reviews the last commit", and getting live work in front of it needs a sync
+mechanism that would not otherwise exist.
 
-**Git refuses the same branch in two worktrees.** `git worktree add <path> main` fails
-outright while main is checked out elsewhere. The advisor's worktree is therefore detached
-at a commit, or on its own branch.
+**Worktrees are required only when agents edit concurrently, or when one needs a
+different branch or commit than the other.** Otherwise they are cost without benefit.
 
-**The advisor sees committed work only — this is the significant one.** An uncommitted
-edit in the implementer's worktree is invisible in the advisor's: measured, zero files.
-So "the advisor sees the artifact" narrows to "the advisor sees the last commit". Getting
-work in front of it needs a deliberate mechanism, and the choice is open:
+The two hazards a shared directory does carry are both manageable:
 
-  - the implementer commits per turn (natural, pollutes history with WIP)
-  - the orchestrator syncs the implementer's tree into the advisor's at turn boundaries
-  - the advisor reviews only at commit boundaries, which may be the honest cadence anyway
+**The advisor must not write.** `roles.ts` already declares `mutatesWorkspace: false`;
+sharing a tree makes that something to enforce at launch rather than describe — Codex
+takes `sandbox_mode="read-only"`, Claude Code a permission mode. This is the same
+per-participant args path the Codex acceptance work already uses.
 
-**`node_modules` is not shared.** A fresh worktree has none, so a test run there fails for
-environmental reasons that look exactly like real failures to an advisor reading the
-output. Either install per worktree or share a store deliberately. This generalises: any
-gitignored build state the tests need is absent by construction.
+**Verification is gated to turn boundaries.** An advisor running the suite mid-edit tests
+a half-written tree and reports failures that are pure timing artifacts. The orchestrator
+knows when a turn completed, *with evidence* — that is what the whole lifecycle apparatus
+produces — so a `completed` verdict is the signal that the tree is worth looking at. This
+is the payoff for the turn-boundary work being trustworthy rather than heuristic.
 
-**Hook configuration is per worktree.** `.claude/settings.json` and `.codex/hooks.json`
-are git-ignored and rendered per checkout, so each worktree needs its own
-`conclave config install`. And because Codex's trust hash covers the command string —
-which contains the absolute path — **each worktree is a separate Codex trust decision**.
-The registry preflight already refuses to construct a session whose hooks are registered
-but untrusted, so this surfaces as a clear error rather than a silent no-hooks session.
+#### When worktrees are used
 
-The advisor is still read-only within its own worktree (`roles.ts` declares
-`mutatesWorkspace: false`), enforced at launch via Codex's `sandbox_mode="read-only"` or
-Claude's permission mode. A worktree removes the collision hazard; it does not make it
-sensible for the advisor to edit.
+Verified against git on this machine, because three of these bite immediately:
 
-This also reframes the arbiter (§7). It is not a separate seat compensating for an
-advisor that cannot check things; it is the tool the advisor uses to check them. The
-value is unchanged — a test result is ground truth neither model authored — but it is
-reached by the advisor running it, not by a third participant existing.
+- **The same branch cannot be checked out twice.** `git worktree add <path> main` fails
+  outright while main is checked out elsewhere; the second worktree runs detached or on
+  its own branch.
+- **Uncommitted work is invisible across worktrees** — the point above, and the reason
+  this is not the default.
+- **`node_modules` is not shared.** A fresh worktree has none, so a test run there fails
+  for environmental reasons that look exactly like real failures to an advisor reading the
+  output. This generalises to any gitignored build state the tests need.
+- **Hook configuration is per worktree.** `.claude/settings.json` and `.codex/hooks.json`
+  are gitignored and rendered per checkout, so each worktree needs its own
+  `conclave config install` — and because Codex's trust hash covers the command string,
+  which contains the absolute path, **each worktree is a separate Codex trust decision**.
+  The registry preflight already refuses to construct a session whose hooks are registered
+  but untrusted, so this surfaces as a clear error rather than a silent no-hooks session.
 
 ### Open decisions
 
