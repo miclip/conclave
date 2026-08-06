@@ -16,6 +16,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PassThrough, Writable } from 'node:stream'
 import test from 'node:test'
+import type { Verdict } from '../contract/outcome.ts'
 import type { AgentSession } from '../contract/session.ts'
 import { AgentRegistry } from '../registry/registry.ts'
 import { FakeRotationSession } from '../rotation/fakeSession.ts'
@@ -438,4 +439,78 @@ test('a delivered message becomes a turn in the transcript, not a note about one
   // ...and the message itself lands as a speaker block once a participant takes it.
   assert.match(out.text(), /● you → /)
   assert.match(out.text(), /also check the error path/)
+})
+
+// ---------------------------------------------------------------------------------------
+// A pause whose verdict the system withdraws while the operator is reading it. The relay
+// amends the pause object and records a note; the console has already written the pause
+// block to a terminal and cannot take it back, so the question here is whether what it
+// writes NEXT tells the operator the decision in front of them has gone stale.
+// ---------------------------------------------------------------------------------------
+
+const TIMED_OUT: Verdict = {
+  outcome: 'timed_out',
+  confidence: 'uncertain',
+  provenance: [{ source: 'orchestrator', detail: 'past the watchdog at 600s with no Stop' }],
+}
+const COMPLETED: Verdict = {
+  outcome: 'completed',
+  confidence: 'proven',
+  provenance: [{ source: 'hook', detail: 'Stop' }],
+}
+
+async function untilText(what: string, text: () => string, re: RegExp, ms = 5000): Promise<void> {
+  const deadline = Date.now() + ms
+  for (;;) {
+    if (re.test(text())) return
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}:\n${text()}`)
+    await new Promise((r) => setTimeout(r, 20))
+  }
+}
+
+test('a verdict withdrawn while the operator reads the pause is surfaced in the console', async () => {
+  const dir = repo()
+  const impl = slow('impl', 'claude', ['ack', 'Did it, slowly.', 'And again.'])
+  impl.endTurn = { index: 1, verdict: TIMED_OUT }
+  const out = collect()
+  const input = new PassThrough()
+  const running = runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'claude',
+    rounds: 4,
+    checks: [],
+    registry: registryOf({
+      codex: [slow('advisor', 'codex', ['Do it.', 'More.', 'DONE'])],
+      claude: [impl],
+    }),
+    input,
+    output: out.stream,
+  })
+
+  await untilText('the pause to be printed', out.text, /paused/)
+  // The late Stop the watchdog beat to it, arriving while the operator is at the prompt.
+  impl.lateSignal(COMPLETED)
+  await untilText('the replacement verdict to reach the console', out.text, /withdrawn and replaced/)
+
+  const text = out.text()
+  const pausedAt = text.indexOf('paused')
+  const withdrawnAt = text.search(/withdrawn/)
+  assert.ok(withdrawnAt > pausedAt, 'the withdrawal must follow the pause it invalidates')
+
+  // Marked, not merely printed. Grey, it sat between `implementer turn: timed_out` and
+  // `paused (turn_incomplete)` looking like more of the same background — and it is the
+  // line that contradicts both. The `~` is what `renderPause` uses for a pause that was
+  // already superseded when it printed; the operator should not have to know which of the
+  // two arrival orders they got.
+  const marked = text.split('\n').filter((l) => /^\s*~ /.test(l))
+  const replacement = marked.find((l) => /withdrawn and replaced/.test(l))
+  assert.ok(replacement, `the supersession must carry the ~ marker:\n${text.slice(-1200)}`)
+  assert.match(replacement, /timed_out/, 'the verdict the pause rests on, by name')
+  assert.match(replacement, /completed/, 'and the verdict that replaced it')
+  assert.match(replacement, /still paused/, 'surfaced, not decided')
+
+  input.write('/continue\n')
+  assert.equal(await running, 0)
 })

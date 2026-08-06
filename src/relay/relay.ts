@@ -315,7 +315,11 @@ export class Relay {
     // Recorded only if the pause was still there to amend. Logging a supersession for a
     // pause the operator has already resolved would put a decision in the log that nobody made.
     if (pending.handle.supersede(info)) {
-      this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text: note })
+      // Marked, because this one arrives AFTER the pause block has been written to a
+      // terminal and cannot be taken back. `RunPause.superseded` carries the same note for a
+      // pause printed after the fact; the mark is what lets a reader see the two arrival
+      // orders the same way instead of one shouting and the other reading as more background.
+      this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text: note, supersession: true })
     }
   }
 

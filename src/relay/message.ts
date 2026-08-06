@@ -61,6 +61,13 @@ export interface RelayMessage {
   visibility: Visibility
   /** Participants deliberately excluded. Only meaningful when restricted. */
   excluded: string[]
+  /**
+   * Set on a note that WITHDRAWS an assertion the orchestrator has already made to the
+   * human — today, the verdict a live pause was raised on. Notes are otherwise
+   * undifferentiated background, and this one contradicts something the operator is looking
+   * at right now, so a reader has to be able to pick it out without matching on its prose.
+   */
+  supersession?: boolean | undefined
 }
 
 /**

@@ -139,6 +139,11 @@ function renderActivity(participant: string, e: AgentEvent): string | undefined 
  * stable colour, and the body is rendered rather than dumped.
  */
 function renderMessage(m: RelayMessage, width: number): string {
+  // A note that withdraws the pause currently in front of the operator, in the same yellow
+  // `~` as `renderPause` gives a pause that was already superseded when it was printed.
+  // Rendered as grey it was indistinguishable from `implementer turn: timed_out` two lines
+  // above it, which is the line it exists to contradict.
+  if (m.supersession) return `\n  ${yellow('~')} ${m.text}`
   if (m.visibility === 'internal') return grey(`  ${m.text}`)
   const colour = speakerColor(m.from, m.fromRank)
   // The name alone when it already carries the rank; both only when they differ.
