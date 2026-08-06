@@ -462,14 +462,23 @@ export async function runSession(opts: SessionOptions): Promise<number> {
         live.set(t, set)
       }
     }
-    // Anything that has left every queue was delivered: write it into the transcript in
-    // normal type. This is the whole point of pinning it — a line that already scrolled
-    // past cannot stop being provisional, so the provisional copy has to live in the box
-    // until it can be replaced by a real one.
+    // Anything that has left every queue was delivered: write it into the transcript as a
+    // TURN, in the same speaker block every participant gets. This is the whole point of
+    // pinning it — a line that already scrolled past cannot stop being provisional, so the
+    // provisional copy lives in the box until it can be replaced by a real one.
+    //
+    // Rendered as a speaker rather than as a note about a speaker, because it is one. A
+    // grey `› hello — read by advisor` sat among the run's own logging and read as more
+    // logging; the transition from dim-in-the-box to a full magenta `you → advisor` is what
+    // makes "this was read" legible without a phrase claiming it.
     for (const [text, recipients] of [...queuedFor]) {
       if (live.has(text)) continue
       queuedFor.delete(text)
-      write(`  ${dim('›')} ${text.split('\n')[0]} ${dim(`— read by ${[...recipients].join(', ')}`)}`)
+      const colour = speakerColor('you', 'human')
+      write(
+        `\n${colour('●')} ${bold('you')}${dim(` → ${[...recipients].join(', ')}`)}\n` +
+          markdown(text, { width }),
+      )
     }
     for (const [text, ids] of live) queuedFor.set(text, ids)
     return [...live].map(([text, ids]) => `→ ${[...ids].join(', ')}  ${text.split('\n')[0]}`)

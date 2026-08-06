@@ -411,3 +411,31 @@ test('/abort ends the run but keeps the console, and says so when there is no ru
   assert.equal(code, 0)
   assert.match(out.text(), /nothing is running — \/exit to leave/)
 })
+
+
+test('a delivered message becomes a turn in the transcript, not a note about one', async () => {
+  // It was rendered as a grey `› hello — read by advisor`, which sat among the run's own
+  // logging and read as more logging. The point of pinning a message while it waits is that
+  // being read CHANGES it, and the change has to be visible.
+  const dir = repo()
+  const out = collect()
+  await runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'claude',
+    rounds: 3,
+    checks: [],
+    registry: registryOf({
+      codex: [slow('advisor', 'codex', ['Do it.', 'DONE'])],
+      claude: [slow('impl', 'claude', ['ack', 'Did it.'])],
+    }),
+    input: script(['also check the error path']),
+    output: out.stream,
+  })
+  // Piped input has no box, so the queue confirmation still appears...
+  assert.match(out.text(), /queued for everyone/)
+  // ...and the message itself lands as a speaker block once a participant takes it.
+  assert.match(out.text(), /● you → /)
+  assert.match(out.text(), /also check the error path/)
+})
