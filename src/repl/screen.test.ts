@@ -46,11 +46,11 @@ function harness(suggestion?: Suggestion, pending?: () => string[]) {
     type: (text: string) => {
       for (const ch of text) input.emit('keypress', ch, { name: ch, sequence: ch })
     },
-    /** The menu row: the fourth of the four reserved rows in the most recent draw. */
+    /** Everything drawn below the input rule in the most recent frame. */
     menuRow: () => {
       const frame = written.at(-1) ?? ''
-      const row = String(24 - 4 + 4)
-      const at = frame.lastIndexOf(`${ESC}${row};1H`)
+      // The last rule drawn is the one under the input; the menu follows it.
+      const at = frame.lastIndexOf('───')
       return at < 0 ? '' : strip(frame.slice(at))
     },
     /** Everything written since the harness was made, escape codes intact. */
@@ -181,4 +181,22 @@ test('a long queue stops at a fixed height and says how much it is hiding', () =
   const h = harness(undefined, () => ['a', 'b', 'c', 'd', 'e'])
   h.screen.draw()
   assert.match(h.raw(), /3 more queued — \/queue/)
+})
+
+
+test('every command is reachable, wrapping rather than silently truncating', () => {
+  // A fixed cap of eight hid `/exit` — the tenth command, and the one an operator most
+  // needs to find. The bug was not that two were missing; it was that nothing said so.
+  const commands = ['/pause', '/continue', '/rotate', '/abort', '/state', '/log', '/queue', '/audit', '/help', '/exit']
+  const h = harness({ items: commands, start: 0, end: 1, suffix: ' ' })
+  h.type('/')
+  const shown = h.menuRow()
+  for (const c of commands) assert.match(shown, new RegExp(c.replace('/', '\\/')), `${c} should be listed`)
+})
+
+test('a list too long even to wrap says how many it is hiding', () => {
+  const many = Array.from({ length: 80 }, (_, i) => `@file-${i}.ts`)
+  const h = harness({ items: many, start: 0, end: 1, suffix: ' ' })
+  h.type('@')
+  assert.match(h.menuRow(), /\+\d+ more/)
 })

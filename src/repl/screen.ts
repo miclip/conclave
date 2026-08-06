@@ -80,6 +80,9 @@ export interface ScreenOptions {
 /** Pinned rows spent on the queue before it starts crowding the transcript. */
 const MAX_PENDING_ROWS = 3
 
+/** Rows the candidate list may wrap onto before it admits it is showing a prefix. */
+const MAX_MENU_ROWS = 3
+
 const ESC = '\x1b['
 const dimmed = (s: string) => `\x1b[2m${s}\x1b[0m`
 
@@ -205,6 +208,49 @@ export class Screen {
   }
 
   /**
+   * The candidate rows, wrapped to the width, or the hint row when no menu is open.
+   *
+   * Wrapping rather than truncating, because a fixed cap of eight items hid `/exit` — the
+   * tenth command, and the one an operator most needs to be able to find — and hid it
+   * silently. A menu that looks complete is read as complete, so the failure was not that
+   * two items were missing but that nothing said so.
+   *
+   * Bounded at three rows all the same: `@` over a large directory has no natural limit,
+   * and a picker that can swallow half the screen is worse than one that admits it is
+   * showing a prefix.
+   */
+  #menuRows(): string[] {
+    const menu = this.#menu
+    if (!menu) return [this.#o.hint()]
+    const w = this.columns
+    // Width is tracked alongside the text rather than measured from it: the rendered string
+    // carries escapes that occupy no columns, so its `.length` is not what fits on a row.
+    const rows: { text: string; width: number }[] = [{ text: ' ', width: 1 }]
+    let hiddenFrom = menu.items.length
+    for (const [i, item] of menu.items.entries()) {
+      const cost = item.length + 2
+      let row = rows[rows.length - 1]!
+      if (row.width + cost > w && row.width > 1) {
+        if (rows.length === MAX_MENU_ROWS) {
+          hiddenFrom = i
+          break
+        }
+        row = { text: ' ', width: 1 }
+        rows.push(row)
+      }
+      row.text += i === menu.index ? `\x1b[7m ${item} \x1b[0m` : ` ${dimmed(item)} `
+      row.width += cost
+    }
+    const last = rows[rows.length - 1]!
+    const hidden = menu.items.length - hiddenFrom
+    if (hidden > 0) last.text += dimmed(` +${hidden} more`)
+    else if (menu.note && last.width + menu.note.length + 4 <= w) {
+      last.text += `  ${dimmed(menu.note)}`
+    }
+    return rows.map((r) => r.text)
+  }
+
+  /**
    * Grow or shrink the reserved region as the queue changes.
    *
    * Growing has to push the transcript up FIRST. The region is shrinking from the bottom,
@@ -233,7 +279,8 @@ export class Screen {
   draw(): void {
     if (!this.#open) return
     const queued = this.#pendingRows()
-    this.#resize(this.#base + queued.length)
+    const menuRows = this.#menuRows()
+    this.#resize(this.#base + queued.length + menuRows.length - 1)
     const w = this.columns
     const top = this.rows - this.#height + 1
     const rule = '─'.repeat(Math.max(4, w))
@@ -245,20 +292,6 @@ export class Screen {
     const head = status
       ? `${'─'.repeat(2)} ${status} ${'─'.repeat(Math.max(0, w - visible(status) - 4))}`
       : rule
-    const menu = this.#menu
-    let below = this.#o.hint()
-    if (menu) {
-      const items = menu.items
-        .slice(0, 8)
-        .map((item, i) => (i === menu.index ? `\x1b[7m ${item} \x1b[0m` : ` ${dimmed(item)} `))
-        .join('')
-      below = `  ${items}`
-      // The note only earns its place if it fits; a wrapped menu row would push the input
-      // box off its reserved lines.
-      if (menu.note && visible(below) + menu.note.length + 4 <= w) {
-        below += `  ${dimmed(menu.note)}`
-      }
-    }
     // Dim AND italic: two signals, because a terminal that drops one usually keeps the
     // other, and this is the difference between "said" and "not yet said".
     const waiting = queued.map((t) => {
@@ -266,7 +299,7 @@ export class Screen {
       const clipped = text.length > w ? `${text.slice(0, Math.max(1, w - 1))}…` : text
       return `\x1b[2;3m${clipped}\x1b[0m`
     })
-    const rows = [...waiting, head, `${prompt}${this.#line}`, rule, below]
+    const rows = [...waiting, head, `${prompt}${this.#line}`, rule, ...menuRows]
     let out = `${ESC}s`
     rows.forEach((text, i) => {
       out += `${ESC}${top + i};1H${ESC}2K${text}`
