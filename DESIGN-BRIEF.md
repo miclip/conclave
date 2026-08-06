@@ -16,10 +16,18 @@ strengthened the original conclusion by a different route than the one first arg
 A REPL that sits above two or more coding agent CLIs and mediates a working session
 between them, with a human in the loop.
 
-The user brings a problem. The orchestrator interviews each participant for an opinion
-on approach, assigns roles (for example Claude Code as the implementation stream, Codex
-as architect and reviewer), relays their exchange, summarizes it for the human, and lets
-the human inject constraints mid-flight that both participants must respect.
+**[Revised 2026-08-05 — the participants are not peers.]** One agent is declared the
+**lead** (architect). It starts the coding session, reads what the implementer reports
+back, and generates the instructions that continue it. The implementer does the work and
+can push back or disagree. The human follows along through summaries of both sides and
+can intervene at any point.
+
+The orchestrator is therefore plumbing, not a participant: routing, visibility, evidence
+and budget. What the original draft called the "orchestrator model" (build step 7) is
+collapsed into the lead, which is one of the two agents rather than a third one.
+
+The earlier peer framing is preserved below where it still applies, but the exchange is
+asymmetric now: the lead directs and the implementer executes.
 
 The observed behavior this is built around: two frontier models with different training
 and different harness prompts have genuinely different blind spots, and routing an
@@ -35,6 +43,14 @@ that bogs down the implementer.
 - Not consensus-by-committee. Two models that cannot run the code will converge on
   whoever sounds most confident. Confidence is not correlated with correctness. The
   design has to actively resist agreement-seeking rather than encourage it.
+
+  **[Revised]** The lead/implementer split mostly dissolves this: there is no consensus
+  to reach, because the lead decides. It inverts the risk rather than removing it. The
+  implementer will be inclined to *defer* to an instruction for exactly the training
+  reasons peers converged, so "the implementer can push back" is the property that erodes
+  silently — and it erodes while producing confident status updates, which is harder to
+  notice than two agents talking each other into nonsense. If the implementer stops
+  disagreeing, this is one model with extra latency.
 - Not a transcript viewer. If reading the panel costs as much attention as doing the
   work, it failed.
 
@@ -450,6 +466,65 @@ flag list rots into cargo cult. Codex's records that an unsuppressed update dial
 consumed a prompt and ran `npm install -g @openai/codex`, and its deployment-state notes
 record the directory-trust and hook-trust preconditions the adapter cannot fix itself.
 
+## 5c. Visibility [Added 2026-08-05]
+
+**Both agents exchange prose only.** Neither sees the other's tool use, file contents,
+diffs, or reasoning traces — only what the other chose to say.
+
+The rationale is that this channel already exists and is already written for the right
+audience. An agent's prose is what it produces for a human who cannot see its tools; it
+is not a synthetic summary generated for a peer, so nothing is lost in translation and no
+summarisation step can distort it. Context isolation then comes for free rather than
+being enforced: the lead physically cannot accumulate the working set, because the
+working set never reaches it.
+
+`thinking` blocks are excluded on the same principle. Reasoning traces are the
+implementer's working, not its report.
+
+**Human messages are visible to both by default.** The human may also send a **private
+aside** to one participant that the other does not see — useful as an instrument, since
+one side can be biased and the effect on the exchange observed.
+
+Consequences, each of which needs handling rather than noting:
+
+- **Privacy holds for one hop only.** The channel is confidential; the recipient is not.
+  An aside can be repeated verbatim in the recipient's next status update, which is
+  ordinary prose and goes straight to the other side. Undecided: mark asides confidential
+  in the instruction (a request, not a guarantee), accept the leak, or filter outbound
+  prose — which means reading it, and that is its own problem.
+- **An aside can manufacture apparent disagreement.** Positions diverge for reasons that
+  look technical but are actually informational. The orchestrator must be able to tell
+  that apart from a real design dispute, or it will escalate its own routing to the human
+  as if it were a technical deadlock.
+- **No child's transcript is the full record.** Each is a partial view. The orchestrator's
+  routing log becomes the only complete account of who saw what, which makes it something
+  to preserve deliberately rather than a debugging artifact.
+- **A prose-only lead cannot verify anything.** It can only react to what the implementer
+  claims happened. "Fixed, tests pass" is unfalsifiable from inside the conversation.
+  This makes the non-model arbiter (§7) more important, not less: a test run is the one
+  claim neither model can talk itself into.
+- **Permission dialogs escalate to the human by construction.** A lead that cannot see
+  tool use has no basis on which to authorise one.
+
+Attribution stops being an experiment here. §5 treats it as a per-message flag to test;
+under a lead it is a requirement. The implementer must know an instruction came from a
+peer model rather than from the human — Claude Code treats user turns as authoritative,
+so an unattributed instruction arrives carrying the human's authority and pushback becomes
+very unlikely. The human's own constraints (§6) then need a genuinely higher privilege
+than the lead's instructions, or an intervention is indistinguishable from routine
+steering.
+
+### Open decisions
+
+1. **Narration or final message?** The two channels already disagree. The transcript
+   yields every prose block in a turn — the running narration, including status a lead
+   should react to mid-flight. The `Stop` hook yields only `last_assistant_message`, the
+   closing summary. The adapter currently takes the transcript version and then overwrites
+   it with the hook's, so which survives is an accident rather than a decision.
+2. **What ends the loop?** lead → instruct → implement → report → lead is unbounded and
+   both sides spend tokens. The arbiter is the natural stopping condition.
+3. **Is the recipient told an aside was private?** Bears directly on the leak above.
+
 ### Roles
 
 Roles are orchestrator-assigned and explicit. Suggested starting set:
@@ -464,6 +539,9 @@ feature, and if the advisor ends up with the same context as the implementer you
 paid for two models and bought one perspective.
 
 ### Attribution is a variable, not a default
+
+**[Superseded for the lead model — see §5c.]** Under a lead it stops being a variable and
+becomes a requirement. The reasoning below still explains why.
 
 When the orchestrator relays a peer's position, whether it attributes the source changes
 behavior measurably. "The architect thinks X" and "consider X" produce different
@@ -599,8 +677,11 @@ local web view; do not fight the child TUIs for the terminal.
    and no run achieved a clean exit, so it stays *not observed* rather than unsupported. Until those
    exist, Codex staying visibly lower-confidence than Claude is correct behaviour rather
    than unfinished polish.
-5. **Two-party relay, no orchestrator model.** Hardcode roles, relay turns, print a raw
-   log. Confirm the loop is stable before adding intelligence.
+5. **Two-party relay.** **[Revised — see §1 and §5c.]** Not a peer relay: declare a lead,
+   let it start the implementer's session, feed it the implementer's prose, and route its
+   instructions back. Prose only in both directions. Broadcast the human's messages to
+   both, support a private aside to one. Print a raw routing log — it is the only complete
+   record of who saw what. Confirm the loop is stable before adding intelligence.
 6. **Round budget and escalation.** Add the anti-spiral machinery before the orchestrator
    model, because you will need it immediately.
 7. **Orchestrator model.** Role assignment, summarization, constraint routing.
