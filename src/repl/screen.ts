@@ -21,6 +21,7 @@
  * operator runs.
  */
 
+import type { Suggestion } from './complete.ts'
 import { emitKeypressEvents } from 'node:readline'
 
 export interface Key {
@@ -55,19 +56,13 @@ export interface ScreenOptions {
   hint: () => string
   prompt: () => string
   /**
-   * Tab completion. Returns the replacement line and cursor, or undefined to do nothing.
-   *
-   * The screen owns the buffer, so completion has to come back through it rather than
-   * being applied by the caller — otherwise two things would be editing the same string.
-   */
-  /**
    * Candidates for what is being typed, recomputed on every edit.
    *
    * The screen owns selection and application: a menu that the caller applied would mean
    * two things editing one buffer, which is the mistake that made the status line take
    * three attempts.
    */
-  suggest?: (line: string, cursor: number) => { items: string[]; start: number; end: number; suffix: string } | undefined
+  suggest?: (line: string, cursor: number) => Suggestion | undefined
 }
 
 const ESC = '\x1b['
@@ -81,7 +76,14 @@ export class Screen {
   #cursor = 0
   #history: string[] = []
   #historyAt = 0
-  #menu: { items: string[]; index: number; start: number; end: number; suffix: string } | undefined
+  /**
+   * `index` is -1 when nothing is selected, which is how the menu OPENS. Pre-selecting the
+   * first item would mean the menu had already made a choice on the operator's behalf, and
+   * for participants that choice is wrong: no prefix at all reaches both, so a menu that
+   * arrives with `>advisor` highlighted teaches that narrowing is mandatory. Nothing is
+   * selected until an arrow says so, and enter with nothing selected submits the line.
+   */
+  #menu: (Suggestion & { index: number }) | undefined
   #open = false
   #onResize = () => this.#reserve()
 
@@ -192,14 +194,19 @@ export class Screen {
       ? `${'─'.repeat(2)} ${status} ${'─'.repeat(Math.max(0, w - visible(status) - 4))}`
       : rule
     const menu = this.#menu
-    const below = menu
-      ? `  ${menu.items
-          .slice(0, 8)
-          .map((item, i) =>
-            i === menu.index ? `\x1b[7m ${item} \x1b[0m` : ` ${dimmed(item)} `,
-          )
-          .join('')}`
-      : this.#o.hint()
+    let below = this.#o.hint()
+    if (menu) {
+      const items = menu.items
+        .slice(0, 8)
+        .map((item, i) => (i === menu.index ? `\x1b[7m ${item} \x1b[0m` : ` ${dimmed(item)} `))
+        .join('')
+      below = `  ${items}`
+      // The note only earns its place if it fits; a wrapped menu row would push the input
+      // box off its reserved lines.
+      if (menu.note && visible(below) + menu.note.length + 4 <= w) {
+        below += `  ${dimmed(menu.note)}`
+      }
+    }
     const rows = [head, `${prompt}${this.#line}`, rule, below]
     let out = `${ESC}s`
     rows.forEach((text, i) => {
@@ -229,15 +236,30 @@ export class Screen {
         this.draw()
         return
       }
-      if (key.name === 'up' || key.name === 'down') {
+      // Left and right first, because the candidates are laid out left to right and the
+      // arrow that matches the layout is the one an operator reaches for. Up and down work
+      // too rather than being an error: a menu is not the place to be strict about which
+      // arrow you meant.
+      //
+      // This does cost cursor movement while a menu is open. Escape gets it back, and the
+      // menu is open precisely when the cursor sits at the end of the token being typed,
+      // where there is nothing to the right to move to.
+      const forward = key.name === 'right' || key.name === 'down'
+      const back = key.name === 'left' || key.name === 'up'
+      if (forward || back) {
         const n = this.#menu.items.length
-        this.#menu.index = (this.#menu.index + (key.name === 'down' ? 1 : n - 1)) % n
+        // From "nothing selected", forward lands on the first and back on the last.
+        this.#menu.index =
+          this.#menu.index < 0 ? (forward ? 0 : n - 1) : (this.#menu.index + (forward ? 1 : n - 1)) % n
         this.draw()
         return
       }
-      if (key.name === 'tab' || key.name === 'return' || key.name === 'enter') {
-        this.#accept()
-        return
+      // Tab completes the obvious one even with nothing selected — that is what tab has
+      // always meant. Enter does not: with nothing selected it submits the line as typed,
+      // so the default stays reachable without dismissing the menu first.
+      if (key.name === 'tab') return void this.#accept(Math.max(0, this.#menu.index))
+      if ((key.name === 'return' || key.name === 'enter') && this.#menu.index >= 0) {
+        return void this.#accept(this.#menu.index)
       }
     } else if (key.name === 'tab') {
       // No menu and nothing to suggest: tab does nothing rather than inserting a tab into
@@ -303,10 +325,10 @@ export class Screen {
   }
 
   /** Replace the suggested span with the highlighted item. */
-  #accept(): void {
+  #accept(index: number): void {
     const m = this.#menu
     if (!m) return
-    const item = m.items[m.index] ?? ''
+    const item = m.items[index] ?? ''
     // A directory gets no suffix, so the next keystroke descends into it rather than
     // starting a new word.
     const insert = item.endsWith('/') ? item : `${item}${m.suffix}`
@@ -325,8 +347,10 @@ export class Screen {
     }
     // Keep the selection on the same item while it is still offered, so narrowing a search
     // does not silently move the choice under the cursor.
-    const previous = this.#menu ? this.#menu.items[this.#menu.index] : undefined
-    const index = previous ? Math.max(0, next.items.indexOf(previous)) : 0
-    this.#menu = { ...next, index }
+    // Keep the selection on the item it was on, and drop back to "nothing selected" if that
+    // item stopped being offered — moving it to a neighbour would change the choice under
+    // the operator without a keystroke saying so.
+    const previous = this.#menu && this.#menu.index >= 0 ? this.#menu.items[this.#menu.index] : undefined
+    this.#menu = { ...next, index: previous ? next.items.indexOf(previous) : -1 }
   }
 }

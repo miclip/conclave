@@ -35,6 +35,12 @@ export interface Suggestion {
   end: number
   /** Appended after the item unless it already ends with a separator. */
   suffix: string
+  /**
+   * Shown dim beside the candidates when there is a way to get one of them WITHOUT picking.
+   * A menu that only lists what you can select teaches that selecting is required; saying
+   * "plain text reaches both" beside `>both` is what makes the default legible.
+   */
+  note?: string
 }
 
 export function suggest(
@@ -58,6 +64,9 @@ export function suggest(
   if (to) {
     const partial = to[1] ?? ''
     const items = PARTICIPANTS.filter((p) => p.startsWith(partial)).map((p) => `>${p}`)
+    if (items.length > 0) {
+      return { items, start: 0, end: cursor, suffix: ' ', note: 'plain text reaches both' }
+    }
     return items.length > 0 ? { items, start: 0, end: cursor, suffix: ' ' } : undefined
   }
 
