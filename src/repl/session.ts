@@ -35,7 +35,7 @@ import type { AgentRegistry } from '../registry/registry.ts'
 import { Relay } from '../relay/relay.ts'
 import type { RelayMessage } from '../relay/message.ts'
 import type { RunHandle, RunPause } from '../relay/run.ts'
-import { ensureCodexTrust, trustCodexHooks } from '../deployment/codexHookTrust.ts'
+import { trustCodexHooks } from '../deployment/codexHookTrust.ts'
 import { installConfig } from '../config/install.ts'
 import { guard } from '../workspace/sessionLock.ts'
 
@@ -260,29 +260,21 @@ export async function runSession(opts: SessionOptions): Promise<number> {
       //
       // This writes to the operator's GLOBAL config, which is heavier than anything else
       // here, so it is append-only, idempotent, and announced with the exact lines added.
-      const trust = ensureCodexTrust(opts.cwd)
-      if (!trust.alreadyTrusted) {
-        write(dim(`  trusted this directory for Codex, by appending to ${trust.path}:`))
-        for (const l of (trust.added ?? '').split('\n')) write(dim(`      ${l}`))
-        write(dim('  remove that stanza to undo it'))
-      }
-      // Directory trust is not hook trust: each hook additionally needs a
-      // `[hooks.state."<sidecar>:<event>:0:0"] trusted_hash` entry, over a hash Codex
-      // computes from a normalized rendering of the hook identity. Reproducing that here
-      // would be a copy of a private detail that breaks silently — the failure mode being
-      // hooks that look trusted and never run.
-      //
-      // So Codex is asked to do it, through the interstitial it already shows: this drives
-      // a real Codex TUI and answers "Trust all and continue" once. It costs no model
-      // tokens and it is the supported path; openai/codex#21615 asks for a CLI equivalent
-      // and does not have one yet.
-      write(dim('  trusting the hooks with Codex — this drives its own review prompt once'))
-      const hookTrust = await trustCodexHooks(opts.cwd)
+      // Both halves of Codex's trust — the directory and the hooks — are answered by the
+      // prompts Codex itself shows. An earlier version hand-appended a
+      // `[projects."<cwd>"] trust_level` stanza to the operator's global config; that
+      // duplicated what this already does, and did it by editing their file directly
+      // instead of going through the flow Codex supports.
+      write(dim('  trusting this directory and its hooks with Codex — answers its own prompts once'))
+      const t = await trustCodexHooks(opts.cwd)
+      const did = [t.askedAboutDirectory ? 'directory' : '', t.prompted ? 'hooks' : '']
+        .filter(Boolean)
+        .join(' and ')
       write(
         dim(
-          hookTrust.prompted
-            ? '  hooks trusted'
-            : '  Codex showed no review prompt; if turns end on the watchdog, run `codex` here once',
+          did
+            ? `  trusted: ${did}`
+            : '  Codex showed no prompt; if turns end on the watchdog, run `codex` here once',
         ),
       )
     }
