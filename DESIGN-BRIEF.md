@@ -672,6 +672,24 @@ action, which may be something the human wanted. A correct objection can stop th
 thing. Silence would have been better than a well-founded intervention applied to the
 wrong step.
 
+**Some human input is not a message at all.** "Hurry up", "stop", "not like that" are
+control signals, and queueing them as context is close to useless: they arrive after the
+thing they were about, and the model can only acknowledge a delay the human has already
+sat through. Human input therefore splits in two:
+
+| | delivery | example |
+|---|---|---|
+| **context** | queue, deliver at the next turn boundary | a constraint, a preference, an answer to a question |
+| **control** | act now — cancel the turn, then re-instruct | stop, not like that, hurry up |
+
+Control signals have a correct implementation and it is not the message queue: cancel the
+turn so the intervention lands *before* more happens, then send the correction as context
+to a session that is actually listening. That is a real use for cancellation, which is
+`proven` on both adapters, rather than a feature in search of one.
+
+Note the asymmetry this creates with §5c: control is the one case where a human message
+does not simply outrank later instructions, it *pre-empts* the turn in flight.
+
 Three mitigations, none free:
 
 - **Anchor the intervention.** A human message carries the point it was written against —

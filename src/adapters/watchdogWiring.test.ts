@@ -100,10 +100,15 @@ async function collect(
   const deadline = Date.now() + timeoutMs
   const it = session.events()[Symbol.asyncIterator]()
   while (Date.now() < deadline) {
+    // The losing timer is cleared each round; left pending it holds the test process open
+    // for the full budget after the assertions have already passed.
+    let timer: NodeJS.Timeout | undefined
     const next = await Promise.race([
       it.next(),
-      new Promise<'timeout'>((r) => setTimeout(() => r('timeout'), deadline - Date.now())),
-    ])
+      new Promise<'timeout'>((r) => {
+        timer = setTimeout(() => r('timeout'), Math.max(0, deadline - Date.now()))
+      }),
+    ]).finally(() => clearTimeout(timer))
     if (next === 'timeout' || next.done) break
     seen.push(next.value)
     if (done(seen)) break

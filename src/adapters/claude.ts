@@ -461,10 +461,17 @@ export class ClaudePtyHookAdapter implements AgentSession {
     })
     // Serialized against cancel() and decidePermission() by the shared queue.
     await this.#input.submit(message)
-    const timeout = new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error('no UserPromptSubmit hook after send')), 30_000),
-    )
-    return Promise.race([keyed, timeout])
+    // Cleared on the way out: the loser of the race is a live 30s timer, and leaving it
+    // pending keeps the event loop alive long after the send resolved.
+    let timer: NodeJS.Timeout | undefined
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error('no UserPromptSubmit hook after send')), 30_000)
+    })
+    try {
+      return await Promise.race([keyed, timeout])
+    } finally {
+      clearTimeout(timer)
+    }
   }
 
   async cancel(): Promise<TurnKey | undefined> {

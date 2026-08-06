@@ -236,7 +236,6 @@ export class CodexPtyHookAdapter implements AgentSession {
         }
         this.#turns.set(String(key), turn)
         this.#order.push(String(key))
-        this.#watchdog.arm(String(key), turn)
         this.#emit({
           type: 'turn_start',
           prompt: turn.prompt,
@@ -426,10 +425,17 @@ export class CodexPtyHookAdapter implements AgentSession {
       this.#pendingPrompt = { resolve, reject, prompt: message }
     })
     await this.#input.submit(message)
-    const timeout = new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error('no UserPromptSubmit hook after send')), 60_000),
-    )
-    return Promise.race([keyed, timeout])
+    // Cleared on the way out: the loser of the race is a live 60s timer, and leaving it
+    // pending keeps the event loop alive long after the send resolved.
+    let timer: NodeJS.Timeout | undefined
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error('no UserPromptSubmit hook after send')), 60_000)
+    })
+    try {
+      return await Promise.race([keyed, timeout])
+    } finally {
+      clearTimeout(timer)
+    }
   }
 
   /**
