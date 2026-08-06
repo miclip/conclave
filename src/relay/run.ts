@@ -39,6 +39,18 @@ export type PauseReason =
   | 'advisor_escalated'
   /** A turn ended as something other than `completed`. */
   | 'turn_incomplete'
+  /**
+   * The operator asked to stop at the next round boundary.
+   *
+   * Not in the original set, and added for a reason worth recording: without it the only
+   * way to reach a pause is to wait for the orchestrator to raise one, so "does a real
+   * session survive a human-scale pause" could not be tested without first provoking a
+   * real compaction — which is the precondition of the *other* live question. Two proofs
+   * that can only be run together are one proof.
+   *
+   * It is also the plainer operator need: intervening in a session already in progress.
+   */
+  | 'operator_requested'
 
 /** What the operator can do from here. Descriptive: the methods exist regardless. */
 export type PauseOption = 'continue' | 'rotate' | 'constrain' | 'abort'
@@ -76,6 +88,8 @@ export interface RunControl {
   constrain(text: string, audience: Audience): RelayMessage
   /** Ask the loop to stop at its next round boundary. */
   requestStop(): void
+  /** Ask the loop to pause at its next round boundary. */
+  requestPause(reason: string): void
 }
 
 export class RunHandle {
@@ -143,6 +157,20 @@ export class RunHandle {
       throw new Error(`can only rotate from a paused run; this one is '${this.#state}'`)
     }
     return this.#control.rotate(reason ?? this.#pause?.detail ?? 'operator requested rotation')
+  }
+
+  /**
+   * Ask the run to pause at its next round boundary.
+   *
+   * Not immediate, and cannot be: neither child CLI ingests input mid-turn (§5c), so the
+   * earliest safe point is after the turn in flight ends. Returns the pause once it is
+   * reached, or `undefined` if the run finished first.
+   */
+  async requestPause(reason = 'the operator asked to pause'): Promise<RunPause | undefined> {
+    if (this.#state === 'ended') return undefined
+    if (this.#state === 'paused') return this.#pause
+    this.#control.requestPause(reason)
+    return this.untilPause()
   }
 
   /**

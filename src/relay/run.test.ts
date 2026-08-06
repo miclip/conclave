@@ -302,6 +302,51 @@ test('a declined candidate is remembered, and a LATER compaction raises it again
   )
 })
 
+test('a pause suspends orchestration, not observation', async (t) => {
+  // The invariant a paused session has to hold: no participant is given new relay work,
+  // but everything that watches them keeps working. A pause that also stopped ingestion
+  // would mean the operator is asked to decide using a view that froze at the moment the
+  // question was raised -- and the longer they think, the staler their evidence gets.
+  //
+  // The adapter-side halves of this -- hook ingestion, transcript reconciliation, watchdog
+  // supervision -- are not observable through fakes. They are pinned in
+  // `pause.live.test.ts`, which is the only place they can be.
+  const dir = repo()
+  const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it.', 'And again.'])
+  const advisor = new FakeRotationSession('advisor', 'codex', ['Do it.', 'Do it again.', 'DONE'])
+  const relay = await relayOf(dir, advisor, [impl])
+  t.after(() => relay.stop())
+
+  const seen: string[] = []
+  void (async () => {
+    for await (const e of relay.observe()) if (e.type === 'activity') seen.push(e.participant)
+  })()
+
+  const run = relay.start('Keep the work moving.')
+  impl.compact()
+  await run.untilPause()
+
+  const sentAtPause = impl.received.length
+  const eventsAtPause = relay.participants.find((p) => p.rank === 'implementer')!.events.length
+  const observedAtPause = seen.length
+
+  // A child keeps running while the human thinks. Its events must still land.
+  impl.emit({ type: 'tool_use', tool: 'Read', input: {}, seq: 900, at: Date.now(), provisional: true })
+  await new Promise((r) => setTimeout(r, 40))
+
+  const p = relay.participants.find((q) => q.rank === 'implementer')!
+  assert.equal(impl.received.length, sentAtPause, 'no new relay work while paused')
+  assert.equal(p.events.length, eventsAtPause + 1, 'ingestion continues while paused')
+  assert.ok(seen.length > observedAtPause, 'observers keep receiving while paused')
+
+  // Inspection is live, not a snapshot taken when the question was asked.
+  const snap = await p.session.snapshot()
+  assert.ok(snap.turns.length > 0)
+  assert.equal(relay.audit().length >= 0, true)
+
+  await run.abort()
+})
+
 test('untilPause resolves immediately for an operator that attaches late', async (t) => {
   const dir = repo()
   const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it.'])

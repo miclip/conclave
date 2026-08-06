@@ -1251,6 +1251,55 @@ compaction moves the baseline to it, so the same evidence stops re-raising every
 design — without it the operator either abandons the feature or stops reading the pauses,
 and the second is worse than never having built it.
 
+#### A pause suspends orchestration, not observation [Invariant, 2026-08-06]
+
+| suspended | continuing |
+|---|---|
+| relay work — no participant is sent anything | hook ingestion |
+| | transcript reconciliation |
+| | process supervision |
+| | operator inspection (`snapshot()`, `observe()`, `audit()`) |
+
+A pause that also froze ingestion would ask the operator to decide from a view fixed at the
+moment the question was raised: the longer they think, the staler their evidence. And a
+paused *run* is not a quiesced *session* — the child keeps running, and its events must
+still land.
+
+The half the fakes can reach is pinned in `relay/run.test.ts`. The adapter-side half only
+exists live, and is the subject of the first of the two proofs below.
+
+`RunHandle.requestPause()` was added for that test and is not decoration. Without it the
+only way to reach a pause is to wait for the orchestrator to raise one, so proof 1 would
+have needed a real compaction first — which is proof 2's precondition. **Two proofs that
+can only be run together are one proof.** It is also the plainer operator need: intervening
+in a session already in progress. It pauses at the next round boundary, not immediately,
+because neither child ingests input mid-turn (§5c).
+
+#### The live proof is two proofs [2026-08-06]
+
+| | question | file |
+|---|---|---|
+| **1** | Can a real session sit quiescent through a realistic human pause and resume without transport failure or semantic drift? | `relay/pause.live.test.ts` |
+| **2** | Can the transaction rotate a real implementer, verify the replacement, preserve identity, and commit or roll back correctly? | `rotation/rotate.live.test.ts` |
+
+Run together they mask each other: a fast successful rotation hides unreliable long pauses,
+and a transport failure during a long pause gets blamed on rotation.
+
+Proof 2 triggers rotation **from the operator, not from compaction** — compaction is the
+policy question and this is the mechanism question, and waiting for a real compaction would
+make the mechanism test depend on the proxy it is not testing.
+
+Proof 1 checks drift rather than assuming it: the resumed implementer is asked to recall
+something only the session holds, with the filesystem explicitly excluded as a route. A
+session that resumes at the transport level having lost the thread fails that test.
+
+In proof 2 a **rollback is a result, not a failure** — the assertions say which of the three
+live unknowns broke, and check that the original came back and could carry on. The only
+outright failure is a rotation reporting success while the wrong session is left running.
+
+Both files are written and **neither has been run**. The assertions are what the design
+predicts, not what was observed.
+
 #### Evidence ledger for §7a
 
 | level | what |

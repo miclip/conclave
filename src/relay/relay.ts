@@ -141,6 +141,8 @@ export class Relay {
   #seq = 0
   #opts: RelayOptions
   #stopped = false
+  /** Set by `RunHandle.requestPause()`; consumed at the next round boundary. */
+  #pauseRequested: string | undefined
   #stream = new RelayEventStream()
   #ended = false
 
@@ -396,6 +398,9 @@ export class Relay {
       requestStop: () => {
         this.#stopped = true
       },
+      requestPause: (reason) => {
+        this.#pauseRequested = reason
+      },
     })
     void this.#loop(goal, handle).then(
       (outcome) => handle.settle(outcome),
@@ -522,6 +527,17 @@ export class Relay {
     const maxRounds = this.#opts.maxRounds ?? 6
     for (let round = 1; round <= maxRounds; round++) {
       if (this.#stopped) return this.#end('stopped')
+
+      if (this.#pauseRequested) {
+        const reason = this.#pauseRequested
+        this.#pauseRequested = undefined
+        const halted = await this.#halt(handle, {
+          reason: 'operator_requested',
+          detail: reason,
+          evidence: [`round ${round} of ${maxRounds}; no turn is in flight`],
+        })
+        if (halted) return halted
+      }
 
       const instruction = next.prose.trim()
       if (/^DONE\b/i.test(instruction)) {

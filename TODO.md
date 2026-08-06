@@ -154,30 +154,47 @@ the workspace discipline it enforces on its participants.
 Two claims, deliberately separated (DESIGN-BRIEF §7a). A successful rotation settles the
 first and says nothing about the second.
 
-### Claim 1 — can Conclave execute a real transactional rotation?
+### Claim 1 — the mechanism. Two runs, not one.
 
-**One live run under supervision.** `rotation.onDegradation` defaults to `'candidate'`, so
-the run pauses at compaction and the operator calls `rotateImplementer()` and watches:
+Split because run together they mask each other: a fast successful rotation would hide
+unreliable long pauses, and a transport failure during a long pause would be blamed on
+rotation.
+
+**1a. `ORCH_LIVE_PAUSE=1 node --test src/relay/pause.live.test.ts`** — does a real session
+survive a human-scale pause? Set `ORCH_PAUSE_SECONDS` to something a human would actually
+take. Checks the invariant that a pause suspends orchestration and not observation, and
+checks recall across the pause rather than assuming continuity.
+
+**1b. `ORCH_LIVE_ROTATE=1 node --test src/rotation/rotate.live.test.ts`** — does the
+transaction work? Triggered by the operator rather than by compaction, because that is the
+mechanism question and compaction is the policy question.
+
+Neither has been run. Both are written; the assertions are predictions.
+
+### What 1b answers, in the order it is likely to bite
 
 ```
-implementer works → compaction observed → old session quiesced → advisor produces handoff
+implementer works → operator pauses → old session quiesced → advisor produces handoff
 → replacement starts → independent checks reproduce the record → replacement continues
 → old session terminates
 ```
-
-Three sub-questions fall out of that one run, in order of how likely they are to bite:
 
 1. **Does a real advisor produce the seven headings?** Failure is recoverable by
    construction — the parse fails before anything is terminated — but a handoff that never
    parses makes rotation useless in practice.
 2. **Does a real replacement report `CHECK n: exit <code>`?** Same run.
-3. **Does a real session survive a long freeze?** Quiesce, wait, `unquiesce()`, send. This
-   is the only one the single run does not answer on its own.
+3. **Does promotion hold?** The replacement takes real turns under the implementer's
+   identity, and the retired session is terminated only after the proof.
 
-Resumability is now built: `relay.start(goal)` returns a `RunHandle` whose pauses suspend
-the loop rather than ending it (`continue` / `rotate` / `constrain` / `abort`). What the
-live run still has to show is that a **real** session tolerates being paused for as long as
-a human takes to decide — the fakes cannot fail that way.
+A rollback in 1b is a **result**, not a failure: it says which of those three broke, and
+the assertions check that the original came back and could carry on. The only outright
+failure is a rotation reporting success while the wrong session is left running.
+
+Quiescence over a long freeze belongs to 1a, not here. Resumability itself is built —
+`relay.start(goal)` returns a `RunHandle` whose pauses suspend the loop rather than ending
+it (`continue` / `rotate` / `constrain` / `abort` / `requestPause`) — and what neither the
+fakes nor 1b can show is whether a **real** session tolerates being held for as long as a
+human takes to decide.
 
 Still unbuilt, and deliberately: **inspecting a handoff before choosing to rotate.**
 Producing one costs an advisor turn and changes the session, so it is not done
