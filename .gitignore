@@ -31,6 +31,9 @@ spikes/hooks/receiver.out
 # SPIKE_HOOK_JOURNAL. Keeps incidental traffic out of the committed corpus.
 spikes/hooks/journal/adhoc.ndjson
 
+# Live-session marker. Machine-local, and meaningless in another checkout.
+.conclave/
+
 # NOTE: `spikes/**/journal/` is deliberately NOT ignored.
 #
 # spikes/hooks/journal/hook-journal.ndjson looks like a local runtime journal and is in

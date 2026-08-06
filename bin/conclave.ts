@@ -12,6 +12,7 @@ import {
 } from '../src/config/install.ts'
 import { defaultRegistry } from '../src/registry/builtin.ts'
 import { Relay } from '../src/relay/relay.ts'
+import { guard } from '../src/workspace/sessionLock.ts'
 
 const USAGE = `conclave <command>
 
@@ -24,6 +25,9 @@ Commands:
                                    before anything that depends on stable Codex trust.
                                    --json prints the report as JSON on stdout instead of
                                    prose; the exit code is unchanged.
+  guard                            Report whether participant sessions are live and which
+                                   paths changed since they started. Exits non-zero while
+                                   live, so it can gate a commit helper.
   relay "<goal>" [--lead codex] [--implementer claude] [--rounds N]
                                    Run a two-agent session: the lead steers, the
                                    implementer works, prose only in both directions.
@@ -51,6 +55,18 @@ async function main(argv: string[]): Promise<number> {
     // A checkout needing its first trust decision is not a failure, so this does not
     // exit non-zero on `retrustRequired` alone.
     return 0
+  }
+
+  if (command === 'guard') {
+    const report = guard(process.cwd())
+    if (!report.live && !report.stale) {
+      console.log('no participant sessions are live')
+      return 0
+    }
+    for (const m of report.messages) console.log(m)
+    // Stale exits 0: a crashed run must not block the repository forever, but it is
+    // reported so the files can be accounted for rather than silently absorbed.
+    return report.live ? 1 : 0
   }
 
   if (command === 'relay') {

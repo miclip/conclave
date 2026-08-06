@@ -18,6 +18,7 @@ import type { AgentEvent, AgentSession, TurnEndEvent } from '../contract/session
 import { formatVerdict } from '../contract/outcome.ts'
 import { AgentRegistry } from '../registry/registry.ts'
 import type { ParticipantSpec } from '../registry/types.ts'
+import { acquire, release } from '../workspace/sessionLock.ts'
 import {
   envelope,
   type Audience,
@@ -86,6 +87,12 @@ export class Relay {
     // once produces interleaved failures that are miserable to attribute.
     await relay.#join(opts.lead, 'advisor')
     await relay.#join(opts.implementer, 'implementer')
+    // Records what the tree looked like before the participants touched it, so the
+    // operator's own tooling can refuse to sweep their work into an unrelated commit.
+    acquire(opts.cwd, [
+      { id: opts.lead.id, agent: opts.lead.agent },
+      { id: opts.implementer.id, agent: opts.implementer.agent },
+    ])
     return relay
   }
 
@@ -282,5 +289,6 @@ export class Relay {
   async stop(): Promise<void> {
     this.#stopped = true
     for (const p of this.participants) await p.session.close('graceful')
+    release(this.#opts.cwd)
   }
 }
