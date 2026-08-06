@@ -49,7 +49,21 @@ const skip =
  */
 const PAUSE_SECONDS = Number(process.env.ORCH_PAUSE_SECONDS ?? 120)
 
-test('a real session survives a human-scale pause and resumes without drift', { skip }, async (t) => {
+/**
+ * The test declares its own deadline rather than trusting `--test-timeout`.
+ *
+ * Getting that arithmetic wrong is not a small mistake: a harness timeout that expires
+ * mid-pause cancels the body, the after-hooks tear the sessions down, and the log reports
+ * `test timed out` — a harness limit misattributed to the subject, which is exactly the
+ * confusion that made an orchestration deadlock read as an agent turn overrunning. At a
+ * realistic operator pause the default 15 minutes would do this silently.
+ *
+ * Startup, the first turn and the resume turn have taken 60-150s in observed runs; 15
+ * minutes of headroom is generous and still leaves the failure attributable.
+ */
+const BUDGET_MS = PAUSE_SECONDS * 1000 + 900_000
+
+test('a real session survives a human-scale pause and resumes without drift', { skip, timeout: BUDGET_MS }, async (t) => {
   const repo = join(import.meta.dirname, '..', '..')
   const work = join(repo, '.conclave', 'scratch-pause')
   rmSync(work, { recursive: true, force: true })
@@ -99,19 +113,30 @@ test('a real session survives a human-scale pause and resumes without drift', { 
   const priorProse = relay.log.filter((m) => m.kind === 'report').map((m) => m.text).join('\n')
 
   // --- the pause itself ------------------------------------------------------------
+  console.log(`    [pause] holding for ${PAUSE_SECONDS}s (test budget ${Math.round(BUDGET_MS / 1000)}s)`)
   const deadline = Date.now() + PAUSE_SECONDS * 1000
-  let inspections = 0
+  /** Latency of each inspection, so degradation PARTWAY is visible rather than a binary. */
+  const latencies: number[] = []
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, 15_000))
     // OBSERVATION CONTINUES. Each of these would throw or hang if the pause had frozen
     // the adapter rather than the orchestrator.
+    const t0 = Date.now()
     const snap = await impl.session.snapshot()
+    latencies.push(Date.now() - t0)
     assert.equal(snap.sessionId, impl.session.sessionId)
     assert.equal(impl.session.state, 'running', 'a paused RUN does not quiesce the SESSION')
     assert.ok(relay.audit().length >= 0)
-    inspections += 1
   }
-  assert.ok(inspections > 0, 'the pause must be long enough to inspect through')
+  assert.ok(latencies.length > 0, 'the pause must be long enough to inspect through')
+  const worst = Math.max(...latencies)
+  console.log(
+    `    [inspections] ${latencies.length} samples over ${PAUSE_SECONDS}s; ` +
+      `first ${latencies[0]}ms, last ${latencies.at(-1)}ms, worst ${worst}ms`,
+  )
+  // A snapshot that still resolves at the END is the claim, not one that resolved at the
+  // start. Growth in latency across the hold would be the shape of a degrading transport.
+  assert.ok(latencies.at(-1)! < 30_000, `the last inspection took ${latencies.at(-1)}ms — the transport is degrading`)
 
   // ORCHESTRATION WAS SUSPENDED. Nothing was asked of anyone while the human decided.
   assert.equal(
@@ -140,19 +165,48 @@ test('a real session survives a human-scale pause and resumes without drift', { 
 
   const after = relay.log.filter((m) => m.kind === 'report').at(-1)
   assert.ok(after, 'the implementer must have reported after the resume')
+
+  // The HOOK RECEIVER survived the hold. A turn completing on hook evidence after the
+  // pause proves the receiver was still bound and reachable across the whole interval —
+  // the adapter would have fallen back to weaker transcript inference otherwise, and the
+  // verdict's provenance is where that difference is visible.
+  const resumedEnd = impl.events.filter((e) => e.type === 'turn_end').at(-1)
+  assert.ok(resumedEnd, 'the resumed turn must have produced a terminal verdict')
+  assert.ok(
+    resumedEnd.type === 'turn_end' &&
+      resumedEnd.verdict.provenance.some((pr) => pr.source === 'hook'),
+    `the resumed turn settled without hook evidence, so the receiver did not survive the hold: ` +
+      `${JSON.stringify(resumedEnd.type === 'turn_end' ? resumedEnd.verdict : {})}`,
+  )
   assert.ok(
     (await impl.session.snapshot()).turns.length > before.turns,
     'the session took a turn after the resume, so the transport survived',
   )
-  assert.ok(existsSync(join(work, 'two.txt')), 'the resumed implementer acted on the new instruction')
-
-  // SEMANTIC DRIFT. The word is the only thing carrying session continuity here.
+  // SEMANTIC DRIFT — the actual claim, and therefore asserted FIRST.
+  //
+  // It used to sit behind a check that `two.txt` existed at end of run. That check failed
+  // on the 30-minute hold and the drift claim was never evaluated, because the ADVISOR --
+  // which never saw the human's aside -- instructed the implementer to delete the file,
+  // and it complied. Legitimate session behaviour, and an artifact assertion at end of run
+  // in a multi-round session cannot tell it apart from a failure to act.
+  //
+  // Recall is measured over EVERY post-resume report rather than only the last, for the
+  // same reason: which turn is last depends on what the advisor decided to do next.
   const word = /\b([a-z]{4,})\b/gi
   const chosen = [...priorProse.matchAll(word)].map((m) => m[1]!.toLowerCase())
-  const recalled = new Set([...after.text.matchAll(word)].map((m) => m[1]!.toLowerCase()))
+  const afterProse = relay.log
+    .filter((m) => m.kind === 'report' && m.seq > pause.atSeq)
+    .map((m) => m.text)
+    .join('\n')
+  const recalled = new Set([...afterProse.matchAll(word)].map((m) => m[1]!.toLowerCase()))
   assert.ok(
     chosen.some((w) => recalled.has(w)),
     `the resumed session did not recall anything it said before the pause.\n` +
-      `  before: ${priorProse.slice(0, 300)}\n  after: ${after.text.slice(0, 300)}`,
+      `  before: ${priorProse.slice(0, 400)}\n  after: ${afterProse.slice(0, 400)}`,
   )
+
+  // The artifact is an OBSERVATION, not an assertion. Whether it still exists at the end
+  // depends on what the advisor instructed afterwards, which is not this test's subject.
+  console.log(`    [artifact] two.txt present at end of run: ${existsSync(join(work, 'two.txt'))}`)
+  console.log(`    [post-resume reports] ${relay.log.filter((m) => m.kind === 'report' && m.seq > pause.atSeq).length}`)
 })

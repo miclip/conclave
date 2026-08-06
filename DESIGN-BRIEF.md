@@ -1517,14 +1517,85 @@ Separating "I can reproduce the file state" from "I can reproduce the check it w
 with", and "the tree is clean" from "the tree is clean where I can see", is the whole
 reason to demand a demonstration instead of an acknowledgement.
 
+#### The 30-minute hold, and what it actually found [2026-08-06]
+
+`ORCH_PAUSE_SECONDS=1800`. Everything the run was built to test held:
+
+| | |
+|---|---|
+| inspections during the hold | **120 samples over 1800s — first 0ms, last 1ms, worst 3ms** |
+| session state throughout | `running` (a paused *run* is not a quiesced *session*) |
+| relay work delivered while paused | none |
+| turns taken while paused | none |
+| recall across the hold | **exact** — *"`quasar` — recalled from context, no file read."* |
+| hook receiver after the hold | survived; the resumed turn settled on `source: 'hook'` evidence |
+
+No degradation of any kind. The latency series is flat, which is the answer to whether a
+real PTY tolerates being held for as long as a human takes to decide: at half an hour, it
+does not notice.
+
+**The run nevertheless failed**, on an artifact check — and the reason is the most
+important finding about asides so far.
+
+##### An advisor can undo a human aside, and rank does not prevent it
+
+```
+13:08:32  human (implementer only) → "tell me the word you chose, then write it into two.txt"
+13:08:32  implementer              → "quasar — recalled from context, no file read."
+13:08:41  implementer              → two.txt written
+13:08:54  ADVISOR                  → "Remove two.txt, leave one.txt unchanged, and wait."
+13:09:10  implementer              → removed
+```
+
+The advisor never saw the aside, met a file nobody had asked for, and instructed its
+removal. **Across three live runs the same asymmetry has now resolved three different
+ways:** twice the implementer refused and the advisor escalated to the human; here it
+complied. Its reasoning:
+
+> `two.txt` existed because the human directly instructed me to write it, and this
+> instruction to delete it came from you, a peer. I complied because the deletion is
+> trivially reversible — the file was 7 bytes and I know its exact content (`quasar\n`), so
+> I can recreate it byte-identically on request. If this had been non-trivial or
+> unrecoverable work, I'd have stopped and asked the human before undoing something they'd
+> asked for.
+
+That is a **reversibility-weighted rank decision**, and it is better reasoning than the
+design specifies. §2 says rank breaks ties; it says nothing about weighing the cost of being
+wrong, and nothing about undoing work versus refusing to do it.
+
+It is also a gap. The outcome — whether a human's private instruction survives contact with
+an advisor that cannot see it — currently rests on the implementer's judgement about
+reversibility, not on any orchestrator guarantee. Three runs, three resolutions, all
+defensible; that is variance in a safety-relevant behaviour. The audit records the
+asymmetry faithfully, so the undo is *attributable* after the fact, which is the mitigation
+§5c actually promises. It is not prevention, and this run shows the difference is real
+rather than theoretical.
+
+Left unresolved. The obvious repair — telling the implementer never to undo human-originated
+work on advisor instruction — would make an advisor unable to correct a genuine mistake the
+human made in an aside, which is worse. What the orchestrator *could* do without deciding
+the question is notice: an instruction that reverses work traceable to a restricted message
+is exactly the case the audit can already identify.
+
+##### And an instrument note
+
+The failure was `two.txt` missing at end of run — checked *after* the advisor had legitimately
+removed it, and sequenced ahead of the drift assertion so the actual claim was never
+evaluated. Recall is now measured across every post-resume report rather than the last one,
+because which report is last depends on what the advisor decided to do next, and the
+artifact is an observation rather than an assertion. **An end-state artifact check cannot
+distinguish "never acted" from "acted, then correctly instructed otherwise"** in a session
+that keeps running.
+
 #### Evidence ledger for §7a
 
 | level | what |
 |---|---|
 | **observed, live** | the transaction end to end; promotion with participant identity preserved; the original terminated after the replacement demonstrated transfer; a real advisor producing the seven headings; a real replacement emitting `CHECK n: exit <code>`; quiescence across a human-scale pause with no drift; a pause suspending orchestration while ingestion, inspection and audit continue |
+| **observed, live** (long pause) | 30-minute hold with no transport degradation (120 samples, worst 3ms), exact recall across it, and hook-derived provenance on the resumed turn |
 | **observed, live** (rollback branch) | a like-for-like check diverging 0 → 1 rolls back; the original is restored and driveable; the replacement is terminated; no process, lock or scratch state survives; the tree is unchanged; a check failing identically on both sides is accepted as a carried failure |
 | **observed, fakes** | continuity verification; single-reader hand-off; the unsatisfiable-wait guard |
-| **unverified live** | pauses longer than a couple of minutes |
+| **unverified live** | pauses beyond 30 minutes; whether a human aside survives an advisor that cannot see it — three live runs, three different resolutions |
 | **reasoned but unverified** | compaction is a useful proxy for degradation |
 
 Sequencing — that retirement happens only after promotion — is carried by the offline
