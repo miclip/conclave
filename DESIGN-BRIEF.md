@@ -1571,11 +1571,13 @@ asymmetry faithfully, so the undo is *attributable* after the fact, which is the
 §5c actually promises. It is not prevention, and this run shows the difference is real
 rather than theoretical.
 
-**Four live observations now, four different resolutions**: refuse-and-escalate (twice),
+**Four live observations, four different resolutions**: refuse-and-escalate (twice),
 comply-because-reversible (once), and refuse-pending-acknowledgement with explicit
-conditions for complying (once). All four are defensible; that is the point. The variance is
-not a defect in any model, it is the absence of a mechanism — which is what
-`authority_conflict` supplies.
+conditions for complying (once). All four defensible, and the set is not controlled — the
+first two were rotation runs where the advisor escalated rather than instructing removal,
+and the asides and artifacts differed. "Same situation, different answers" is roughly right
+rather than exactly so. The variance is not a defect in any model; it is the absence of a
+mechanism.
 
 ##### Resolved as a control-plane state, not a rule [2026-08-06]
 
@@ -1642,7 +1644,37 @@ adjudication is not work, so nothing can later be detected as reversing it, and 
 cannot breed another. Re-run live: the implementer complied.
 
 Only a real implementer could have found this. A fake complies with whatever it is sent, so
-the branch was green while the mechanism was inert.
+the branch was green while the mechanism was inert. **The offline tests proved
+`pause → adjudicate → release`; the live run proved the implementer had no evidence
+adjudication had occurred.** Formally correct, semantically incomplete.
+
+###### Evidence, graded
+
+| | |
+|---|---|
+| **observed (pre-fix)** | the implementer explicitly identified the *absence of human acknowledgement* as its reason for not complying, and named the message that would resolve it |
+| **observed (post-fix)** | three live runs; all complied, and all three cited the adjudication as the operative cause |
+| **reasoned** | the acknowledgement is the load-bearing part of the protocol |
+| **unverified** | that all implementers, or this one under different circumstances, behave the same |
+
+The post-fix runs were checked for *reasoning*, not just outcome, because stable outcomes
+can be a coincidence and stable reasoning cannot:
+
+> the removal proceeded on the human's explicit statement that they had both instructions
+> in view and were allowing yours. **That's what unblocked it, not your instruction alone.**
+
+> The human's authorization was explicit and stated with both instructions in view, so the
+> conflict I flagged is resolved — I'm treating it as settled.
+
+So the earlier variance was not primarily a property of the models. It was a property of the
+information available to them: four pre-fix observations, four different resolutions, all
+defensible; three post-fix observations, one resolution, each attributing it to the signal
+that was previously missing. **Authority without transmission is insufficient** — the human
+had decided, the control plane knew it, and the implementer did not.
+
+That said, three runs of one model on one scenario is consistency, not determinism, and the
+pre-fix implementer said it would comply *while restating its objection*. Compliance with a
+stated objection is the design's intent, not a failure of it.
 
 ##### What this preserves and what it does not
 
@@ -1660,6 +1692,31 @@ because which report is last depends on what the advisor decided to do next, and
 artifact is an observation rather than an assertion. **An end-state artifact check cannot
 distinguish "never acted" from "acted, then correctly instructed otherwise"** in a session
 that keeps running.
+
+#### Asking for missing information is evidence about the protocol [2026-08-06]
+
+> When a participant consistently asks for missing information instead of guessing, treat
+> that as evidence about the protocol before treating it as model behaviour.
+
+Every protocol defect found by a live run in this project arrived that way, and each one
+reads as friction if you are looking for compliance:
+
+| what the participant said | what it actually was |
+|---|---|
+| *"there is no CHECK 2 to report. I'm flagging that rather than inventing a line"* | the template rendered a check that did not exist |
+| *"`tsc --noEmit` passing tells you the pre-existing TypeScript is clean — it is not evidence about `adder.js`"* | the check reproduced faithfully and covered nothing |
+| *"I can't tell whether the sentinel is a deliberate tripwire or a leftover the handoff failed to record"* | the handoff had no field for it |
+| *"what I won't do is delete it while the conflict is unacknowledged"* | the protocol had no adjudication message |
+| *"`.conclave/` doesn't appear at all [...] I did not chase that further"* | `git status` cannot see an ignored directory |
+| *"inspect and report a concrete minimal design"* (experiment 2) | the task lacked information the advisor's role required |
+
+The failure mode this guards against is specific and asymmetric: **a participant that asks
+for missing information looks worse than one that guesses plausibly**, because the guesser
+produces output and the asker produces a delay. Tuning that friction away would have removed
+the only signal that found four defects in a single day's live runs.
+
+It is also why §7's health metrics count *unbacked* complaints rather than complaints. A
+request for information the protocol genuinely omits is not a stall.
 
 #### Evidence ledger for §7a
 

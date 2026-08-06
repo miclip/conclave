@@ -24,6 +24,13 @@
  * The detection is a heuristic and is deliberately biased. A false positive costs a pause
  * the human resolves in one word; a false negative leaves exactly the status quo, where the
  * implementer decides alone. Under-detecting is the failure it is tuned away from.
+ *
+ * LIMITATION, worth stating plainly: artifact attribution diffs `git status --porcelain`
+ * before and after, so it attributes to the aside *anything* that became dirty in the
+ * interval — including edits by whoever else is working in the tree. The false-positive
+ * rate therefore depends on who else is present, and observing a session now constrains how
+ * the session may be observed. That is a real cost of the mechanism, not only a sign it is
+ * integrated. Token matching does not have this property; only the attribution half does.
  */
 
 import { execFileSync } from 'node:child_process'
