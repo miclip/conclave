@@ -267,9 +267,10 @@ export class ClaudePtyHookAdapter implements AgentSession {
         // too late to matter.
         const turn = this.#turnFor(key) ?? this.#latestSettleableTurn()
         if (!turn) return
-        // The cheap common case: the answer without reading the transcript. The
-        // transcript is still required for recovery, audit and richer reconstruction.
-        if (d.payload.last_assistant_message) {
+        // Fallback only. The peer is entitled to the full narration, which lives in the
+        // transcript; this is the closing paragraph and is used until reconciliation
+        // replaces it, or permanently if the transcript is unreadable.
+        if (d.payload.last_assistant_message && !turn.assistantText) {
           turn.assistantText = String(d.payload.last_assistant_message)
         }
         this.#apply(turn, turn.tracker.observeHook('Stop', d.payload), false)
@@ -372,18 +373,27 @@ export class ClaudePtyHookAdapter implements AgentSession {
   async #reconcileFromTranscript(): Promise<void> {
     if (!this.#view) return
 
-    let completedInTranscript = 0
+    let snap: SessionSnapshot
     try {
-      const snap = await this.#view.snapshot()
-      completedInTranscript = snap.turns.filter((t) => t.state === 'completed').length
+      snap = await this.#view.snapshot()
     } catch {
       return // transcript unreadable; leave existing evidence alone rather than guess
     }
+    const completedInTranscript = snap.turns.filter((t) => t.state === 'completed').length
 
     // Only as many turns as the transcript actually evidences may claim completion.
     let credits = Math.max(0, completedInTranscript - this.#provenCompletedCount())
 
-    for (const turn of this.#allTurns()) {
+    this.#allTurns().forEach((turn, i) => {
+      // The peer receives ALL prose, not just the closing message, so the transcript is
+      // the source of truth here: parseClaude concatenates every text block in the turn,
+      // which is the running narration a reader following along actually sees. The Stop
+      // hook's last_assistant_message is only the final paragraph, and is kept as a
+      // fallback for when the transcript cannot be read. Claude Code writes no per-turn
+      // id, so correspondence is positional.
+      const narration = snap.turns[i]?.assistantText
+      if (narration) turn.assistantText = narration
+
       const recovered = !turn.tracker.evidence.hooks.includes('Stop') && credits > 0
       if (recovered) credits--
       const update = turn.tracker.resetTranscript({
@@ -393,7 +403,7 @@ export class ClaudePtyHookAdapter implements AgentSession {
         finalStopReason: recovered ? 'end_turn' : undefined,
       })
       this.#apply(turn, update, true)
-    }
+    })
   }
 
   /** Turns whose completion is proven by a Stop, so they need no transcript credit. */

@@ -259,7 +259,9 @@ export class CodexPtyHookAdapter implements AgentSession {
       case 'Stop': {
         const turn = this.#turnFor(d) ?? this.#latestSettleableTurn()
         if (!turn) return
-        if (d.payload['last_assistant_message']) {
+        // Fallback only; the transcript carries the full narration and reconciliation
+        // replaces this. See the visibility model: the peer receives all prose.
+        if (d.payload['last_assistant_message'] && !turn.assistantText) {
           turn.assistantText = String(d.payload['last_assistant_message'])
         }
         this.#apply(turn, turn.tracker.observeHook('Stop', d.payload), false)

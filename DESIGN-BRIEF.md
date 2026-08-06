@@ -44,13 +44,27 @@ that bogs down the implementer.
   whoever sounds most confident. Confidence is not correlated with correctness. The
   design has to actively resist agreement-seeking rather than encourage it.
 
-  **[Revised]** The lead/implementer split mostly dissolves this: there is no consensus
-  to reach, because the lead decides. It inverts the risk rather than removing it. The
-  implementer will be inclined to *defer* to an instruction for exactly the training
-  reasons peers converged, so "the implementer can push back" is the property that erodes
-  silently — and it erodes while producing confident status updates, which is harder to
-  notice than two agents talking each other into nonsense. If the implementer stops
-  disagreeing, this is one model with extra latency.
+  **[Revised — it is a committee, just not a flat one.]** The objection above is to
+  *consensus-seeking*, not to committees. A ranked committee does not have the problem:
+
+  ```
+  human  >  advisor  >  implementer
+  ```
+
+  All three participate and any of them may disagree. What changes is that disagreement
+  resolves by **rank**, not by who sounds more confident — which is precisely the failure
+  mode the original objection names. Nobody has to be talked round, so nothing is gained
+  by sounding certain.
+
+  The risk inverts rather than disappearing. The implementer will be inclined to *defer*
+  for exactly the training reasons flat peers converged, so "the implementer can push
+  back" is the property that erodes silently — and it erodes while producing confident
+  status updates, which is harder to notice than two agents talking each other into
+  nonsense. If the implementer stops disagreeing, this is one model with extra latency.
+
+  Rank makes pushback safe rather than optional: a subordinate that may state its case and
+  then comply is more useful than one that either caves immediately or digs in. That only
+  works if rank is *legible* to the participants — see §5c on attribution.
 - Not a transcript viewer. If reading the panel costs as much attention as doing the
   work, it failed.
 
@@ -468,8 +482,9 @@ record the directory-trust and hook-trust preconditions the adapter cannot fix i
 
 ## 5c. Visibility [Added 2026-08-05]
 
-**Both agents exchange prose only.** Neither sees the other's tool use, file contents,
-diffs, or reasoning traces — only what the other chose to say.
+**Both agents exchange prose only, symmetrically.** Neither sees the other's tool use,
+file contents, diffs, or reasoning traces — only what the other chose to say, and each
+receives all of it: the full narration of a turn, not just its closing message.
 
 The rationale is that this channel already exists and is already written for the right
 audience. An agent's prose is what it produces for a human who cannot see its tools; it
@@ -481,9 +496,16 @@ working set never reaches it.
 `thinking` blocks are excluded on the same principle. Reasoning traces are the
 implementer's working, not its report.
 
-**Human messages are visible to both by default.** The human may also send a **private
-aside** to one participant that the other does not see — useful as an instrument, since
-one side can be biased and the effect on the exchange observed.
+**Every human message carries an audience: one participant, or all.** Not a broadcast
+with an exception bolted on — addressing is explicit at send time, and generalises to
+however many participants exist rather than assuming two. Sending to all is the ordinary
+case; sending to one is a private aside the others never see, which is useful as an
+instrument, since one side can be biased and the effect on the exchange observed.
+
+The audience belongs on the message, not on a mode the orchestrator is in. A mode is
+state that can be wrong; an addressed message cannot be mis-delivered by forgetting to
+change it back. `SendProvenance` already carries `kind` and attribution, so audience is a
+third field on the same envelope.
 
 Consequences, each of which needs handling rather than noting:
 
@@ -492,7 +514,7 @@ Consequences, each of which needs handling rather than noting:
   ordinary prose and goes straight to the other side. Undecided: mark asides confidential
   in the instruction (a request, not a guarantee), accept the leak, or filter outbound
   prose — which means reading it, and that is its own problem.
-- **An aside can manufacture apparent disagreement.** Positions diverge for reasons that
+- **A single-recipient message can manufacture apparent disagreement.** Positions diverge for reasons that
   look technical but are actually informational. The orchestrator must be able to tell
   that apart from a real design dispute, or it will escalate its own routing to the human
   as if it were a technical deadlock.
@@ -517,6 +539,45 @@ Consequences, each of which needs handling rather than noting:
 - **Permission dialogs escalate to the human by construction.** A lead that cannot see
   tool use has no basis on which to authorise one.
 
+### Rank
+
+```
+human  >  advisor  >  implementer
+```
+
+Rank is what resolves disagreement, so it has to be enforced by the orchestrator rather
+than merely requested in prose. Two obligations follow.
+
+**Rank must be legible.** Every message reaching a participant carries who it came from
+and where they sit. An instruction the implementer cannot distinguish from a human
+directive gets human-level compliance; one it reads as a suggestion from an equal gets
+argued with. Neither is what a ranked committee wants: the implementer should be able to
+disagree, say so, and then comply.
+
+**Rank breaks ties. It does not buy silence.** Any participant may disagree with any
+other, including with the human. Dissent is the point, not a tolerated side effect: two
+models are worth having only because they have different blind spots, and an implementer
+that never contradicts the advisor has stopped contributing one of them. The expected
+shape is *state the objection, then comply* — the objection is recorded and surfaced to
+the human either way, so a correct dissent is not lost just because the work proceeded.
+
+That gives the orchestrator two obligations of its own. A pushback is not a failure and
+not a deadlock; it is content, and it belongs in the human's summary rather than being
+absorbed as noise. And **an implementer that stops disagreeing is a signal, not a
+success** — if dissent goes to zero, deference has set in and the second model has
+quietly become expensive latency. That is worth measuring rather than assuming.
+
+**A superior's constraint outlives a subordinate's instruction.** If the human sets a
+constraint and the advisor later instructs against it, the constraint wins — the
+orchestrator cannot let a lower-ranked instruction silently supersede a higher-ranked one
+just by arriving later. This is what §6's privilege channel is for.
+
+It also gives the manufactured-disagreement problem a defined resolution. If a private
+human message to the implementer conflicts with an advisor instruction, the implementer
+follows the human, and the advisor cannot see why. The orchestrator *can* see why — it
+routed both — so it should recognise that divergence as its own doing rather than escalate
+it as a technical deadlock.
+
 Attribution stops being an experiment here. §5 treats it as a per-message flag to test;
 under a lead it is a requirement. The implementer must know an instruction came from a
 peer model rather than from the human — Claude Code treats user turns as authoritative,
@@ -525,22 +586,44 @@ very unlikely. The human's own constraints (§6) then need a genuinely higher pr
 than the lead's instructions, or an intervention is indistinguishable from routine
 steering.
 
-### Shared workspace
+### Workspace: a worktree per agent [Decided 2026-08-05]
 
-Both agents run in the same directory on the same branch. Two hazards follow.
+Each agent gets its own git worktree rather than sharing one directory. This dissolves
+both hazards of a shared tree — concurrent writes, and verification racing a half-written
+edit — instead of gating around them. The advisor can run the suite whenever it likes,
+because nothing is being edited underneath it.
 
-**The advisor must not write.** `roles.ts` already declares `mutatesWorkspace: false` for
-the advisor; with a shared tree that stops being descriptive and becomes something to
-enforce at launch — Codex takes `sandbox_mode="read-only"`, Claude Code takes a
-permission mode. Two agents editing the same branch concurrently is a merge conflict with
-extra steps.
+Verified against git 2.x on this machine, because three of these bite immediately:
 
-**Verification must be gated to quiescent points.** An advisor that runs the suite while
-the implementer is mid-edit is testing a half-written tree and will report failures that
-are artifacts of timing. The orchestrator already knows turn boundaries — that is what
-the whole lifecycle apparatus produces — so verification belongs between the
-implementer's turns, not during them. A `completed` verdict is the signal that the tree
-is worth looking at.
+**Git refuses the same branch in two worktrees.** `git worktree add <path> main` fails
+outright while main is checked out elsewhere. The advisor's worktree is therefore detached
+at a commit, or on its own branch.
+
+**The advisor sees committed work only — this is the significant one.** An uncommitted
+edit in the implementer's worktree is invisible in the advisor's: measured, zero files.
+So "the advisor sees the artifact" narrows to "the advisor sees the last commit". Getting
+work in front of it needs a deliberate mechanism, and the choice is open:
+
+  - the implementer commits per turn (natural, pollutes history with WIP)
+  - the orchestrator syncs the implementer's tree into the advisor's at turn boundaries
+  - the advisor reviews only at commit boundaries, which may be the honest cadence anyway
+
+**`node_modules` is not shared.** A fresh worktree has none, so a test run there fails for
+environmental reasons that look exactly like real failures to an advisor reading the
+output. Either install per worktree or share a store deliberately. This generalises: any
+gitignored build state the tests need is absent by construction.
+
+**Hook configuration is per worktree.** `.claude/settings.json` and `.codex/hooks.json`
+are git-ignored and rendered per checkout, so each worktree needs its own
+`conclave config install`. And because Codex's trust hash covers the command string —
+which contains the absolute path — **each worktree is a separate Codex trust decision**.
+The registry preflight already refuses to construct a session whose hooks are registered
+but untrusted, so this surfaces as a clear error rather than a silent no-hooks session.
+
+The advisor is still read-only within its own worktree (`roles.ts` declares
+`mutatesWorkspace: false`), enforced at launch via Codex's `sandbox_mode="read-only"` or
+Claude's permission mode. A worktree removes the collision hazard; it does not make it
+sensible for the advisor to edit.
 
 This also reframes the arbiter (§7). It is not a separate seat compensating for an
 advisor that cannot check things; it is the tool the advisor uses to check them. The
@@ -549,11 +632,17 @@ reached by the advisor running it, not by a third participant existing.
 
 ### Open decisions
 
-1. **Narration or final message?** The two channels already disagree. The transcript
-   yields every prose block in a turn — the running narration, including status a lead
-   should react to mid-flight. The `Stop` hook yields only `last_assistant_message`, the
-   closing summary. The adapter currently takes the transcript version and then overwrites
-   it with the hook's, so which survives is an accident rather than a decision.
+1. ~~**Narration or final message?**~~ **Decided: all prose, in both directions.** Every
+   text block in a turn — the running narration — not just `last_assistant_message`.
+   Symmetric: the lead receives the implementer's narration and the implementer receives
+   the lead's. This matches what a human following along over remote control actually
+   sees.
+
+   The transcript is therefore the source of truth for prose, and the `Stop` hook's
+   `last_assistant_message` is a fallback for when the transcript is unreadable, not the
+   primary. Delivery is at turn boundaries, since that is where the orchestrator has a
+   complete record with a verdict attached; streaming mid-turn is possible later but the
+   evidence machinery works on turns.
 2. **What ends the loop?** lead → instruct → implement → report → lead is unbounded and
    both sides spend tokens. The arbiter is the natural stopping condition.
 3. **Is the recipient told an aside was private?** Bears directly on the leak above.
