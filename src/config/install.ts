@@ -1,13 +1,27 @@
 /**
- * `conclave config install` — render project-local hook registrations for this checkout.
+ * `conclave config install` — register Conclave's hooks in a project.
  *
  * Both CLIs require an absolute command path in their hook configuration, so an active
  * registration is necessarily machine-local. Committing one bakes somebody's home
  * directory into portable source. The split here is: canonical templates are versioned,
  * rendered registrations are generated and git-ignored.
  *
+ * THREE ROOTS, deliberately not collapsed. They coincide only when Conclave is installing
+ * into its own checkout, which is the case that hid the distinction for as long as that
+ * was the only supported one:
+ *
+ *   conclaveRoot      where Conclave's own code lives. Templates are read from here, and
+ *                     the rendered command paths point back here -- the hook that runs is
+ *                     always Conclave's, never something expected of the target project.
+ *   projectRoot       the repository a session will run in, and where `.claude/settings
+ *                     .json` is written. Resolved from the working directory.
+ *   codexProjectRoot  where Codex resolves project configuration for `projectRoot`, which
+ *                     is that repository's MAIN worktree. Differs in a linked worktree,
+ *                     and not cosmetically: a sidecar written to the linked worktree is
+ *                     never read, so the hooks silently do not exist.
+ *
  * A consequence worth surfacing rather than hiding: Codex's trust hash covers the
- * normalised handler, which includes that command string. Every checkout therefore
+ * normalised handler, which includes that command string. Every project therefore
  * produces a different hash and must trust its own hooks once. That is inherent to
  * diagnosing trust via `hooks/list` instead of reimplementing Codex's hashing, and the
  * installer says so instead of leaving the next person to rediscover it.
@@ -18,28 +32,56 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  realpathSync,
   renameSync,
   statSync,
   writeFileSync,
   unlinkSync,
 } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
-import { CONCLAVE_HOOK_MATCH, diagnoseHookTrust, readCodexHooks } from '../deployment/codexHookTrust.ts'
+import {
+  CONCLAVE_HOOK_MATCH,
+  diagnoseHookTrust,
+  readCodexHooks,
+  resolveCodexProjectRoot,
+} from '../deployment/codexHookTrust.ts'
 
-export const TEMPLATE_TOKEN = '{{REPO_ROOT}}'
+// Re-exported where it used to live: it is Codex deployment knowledge, and moving it next
+// to the diagnosis let that diagnosis name an untrusted directory instead of blaming the
+// file format. Callers and tests should not have to care that it changed module.
+export { resolveCodexProjectRoot }
+
+/**
+ * Substituted with `conclaveRoot`, never with the project being registered. Named for
+ * what it is: an earlier `{{REPO_ROOT}}` read as "the repository in hand", which is
+ * exactly the confusion that made installing into another project render commands
+ * pointing at files that project does not have.
+ */
+export const TEMPLATE_TOKEN = '{{CONCLAVE_ROOT}}'
 
 /**
  * Which directory a target's output path is relative to.
  *
- * `checkout` is this working tree. `codexProject` is the tree Codex resolves project
- * configuration from, which is the repository's MAIN worktree -- not necessarily this
- * one. The two differ in a linked worktree, and the difference is not cosmetic: a
- * sidecar written to the linked worktree is never read, so hooks silently do not exist.
+ * `project` is the repository being registered. `codexProject` is the tree Codex resolves
+ * that project's configuration from -- its main worktree.
  */
-export type OutputRoot = 'checkout' | 'codexProject'
+export type OutputRoot = 'project' | 'codexProject'
+
+/**
+ * Which CLI a registration is for.
+ *
+ * Both roles can be filled by the same CLI — two Claudes, or two Codexes — so "install
+ * everything" writes files for a tool the operator may never launch. That is not merely
+ * untidy: an unused Codex sidecar still has to be TRUSTED before anything reports ready,
+ * so it manufactures a setup step for a capability the session does not use.
+ */
+export type AgentKind = 'claude' | 'codex'
+
+export const AGENT_KINDS: AgentKind[] = ['claude', 'codex']
 
 export interface RenderTarget {
-  /** Template path, relative to this checkout. */
+  agent: AgentKind
+  /** Template path, relative to `conclaveRoot`. */
   template: string
   /** Rendered output path, relative to whichever root `outputRoot` names. */
   output: string
@@ -49,14 +91,16 @@ export interface RenderTarget {
 
 export const TARGETS: RenderTarget[] = [
   {
+    agent: 'claude',
     template: 'config/templates/claude-settings.json',
     output: '.claude/settings.json',
     // Claude reads project settings from the working directory, so a linked worktree
     // gets its own registration and there is nothing to redirect.
-    outputRoot: 'checkout',
+    outputRoot: 'project',
     label: 'Claude project hooks',
   },
   {
+    agent: 'codex',
     template: 'config/templates/codex-hooks.json',
     output: '.codex/hooks.json',
     outputRoot: 'codexProject',
@@ -64,7 +108,42 @@ export const TARGETS: RenderTarget[] = [
   },
 ]
 
-/** Prefer git, because a checkout can be nested anywhere; fall back to walking up. */
+/**
+ * Conclave's own checkout, from the MODULE's location rather than the working directory.
+ *
+ * `resolveRepoRoot()` answers a different question -- "what repository am I standing in"
+ * -- and using it here reported every working directory as the Conclave checkout, then
+ * sent the installer looking for templates that were never there.
+ *
+ * Realpath'd, because the CLI is expected to be reached through a symlink on PATH and the
+ * link's own directory contains no templates.
+ */
+export function resolveConclaveRoot(): string {
+  return realpathSync(join(import.meta.dirname, '..', '..'))
+}
+
+/** Compare through symlinks, and tolerate a path that does not exist yet. */
+function samePath(a: string, b: string): boolean {
+  const real = (p: string) => {
+    try {
+      return realpathSync(p)
+    } catch {
+      return resolve(p)
+    }
+  }
+  return real(a) === real(b)
+}
+
+/**
+ * The project a path belongs to: git root, else the nearest package.json ancestor, else
+ * the directory itself.
+ *
+ * That last step used to throw. It was correct while this only ever resolved Conclave's
+ * own checkout — a Conclave with no repository root really is broken. As the root of a
+ * TARGET project it is wrong: a plain directory with neither git nor a package.json is a
+ * perfectly ordinary thing to run a session in, and refusing to register hooks there
+ * denies the operator the one thing that would give the session a completion signal.
+ */
 export function resolveRepoRoot(from: string = process.cwd()): string {
   try {
     const out = execFileSync('git', ['rev-parse', '--show-toplevel'], {
@@ -76,60 +155,21 @@ export function resolveRepoRoot(from: string = process.cwd()): string {
   } catch {
     /* not a git checkout, or git absent */
   }
-  let dir = resolve(from)
+  const start = resolve(from)
+  let dir = start
   while (true) {
     if (existsSync(join(dir, 'package.json'))) return dir
     const parent = dirname(dir)
-    if (parent === dir) throw new Error(`could not resolve a repository root from ${from}`)
+    if (parent === dir) return start
     dir = parent
   }
 }
 
-/**
- * Where Codex looks for `.codex/hooks.json`, which is not always this checkout.
- *
- * Codex resolves project configuration from the repository's main worktree. Render the
- * sidecar into a LINKED worktree and Codex never reads it: `hooks/list` reports whatever
- * the main worktree has -- possibly nothing, possibly another checkout's stale command
- * path -- and the registration that was just written has no effect at all. That failure
- * is invisible from the linked worktree, because the file is right there and looks
- * installed.
- *
- * The command string still points at THIS checkout (see `render`); only the file's
- * location follows the main worktree. So a linked worktree runs its own hook code from a
- * sidecar its sibling owns, which is the honest description of what Codex supports.
- */
-export function resolveCodexProjectRoot(checkoutRoot: string): string {
-  const dotGit = join(checkoutRoot, '.git')
-  // A linked worktree is exactly the case where `.git` is a FILE pointing into the main
-  // worktree's admin directory. A normal checkout has a directory, and a non-repository
-  // has neither -- both are already their own project root, so do not spawn git to ask.
-  if (!existsSync(dotGit) || statSync(dotGit).isDirectory()) return checkoutRoot
-
-  let commonDir: string
-  try {
-    commonDir = execFileSync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], {
-      cwd: checkoutRoot,
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim()
-  } catch {
-    return checkoutRoot
-  }
-  if (!commonDir) return checkoutRoot
-
-  const mainRoot = dirname(commonDir)
-  // A submodule also has a `.git` file, and its common directory lives under the
-  // superproject's `.git/modules/<name>` -- whose parent is not a worktree at all.
-  // Requiring the result to look like a checkout keeps that case on the safe path.
-  return existsSync(join(mainRoot, '.git')) ? mainRoot : checkoutRoot
-}
-
-export function render(templateText: string, repoRoot: string): string {
+export function render(templateText: string, conclaveRoot: string): string {
   if (!templateText.includes(TEMPLATE_TOKEN)) {
     throw new Error(`template contains no ${TEMPLATE_TOKEN}; it would render identically everywhere`)
   }
-  const rendered = templateText.split(TEMPLATE_TOKEN).join(repoRoot)
+  const rendered = templateText.split(TEMPLATE_TOKEN).join(conclaveRoot)
   // Fail here rather than handing a broken registration to a CLI that will ignore it
   // silently -- an unparseable sidecar is exactly the failure mode that looks like
   // "hooks just don't fire".
@@ -159,13 +199,20 @@ export function writeAtomic(path: string, contents: string): void {
 }
 
 export interface InstallResult {
-  repoRoot: string
+  /** Where Conclave itself lives — what the rendered hook commands point at. */
+  conclaveRoot: string
+  /** The repository being registered. */
+  projectRoot: string
   /**
-   * Where the Codex sidecar was written. Equal to `repoRoot` except in a linked
+   * Where the Codex sidecar was written. Equal to `projectRoot` except in a linked
    * worktree. Reported rather than derived, because "the file is not where you are" is
    * the thing a reader needs told.
    */
   codexProjectRoot: string
+  /** The CLIs this run registered, after deduplication. */
+  agents: AgentKind[]
+  /** True when the project being registered IS Conclave's own checkout. */
+  selfHosted: boolean
   dryRun: boolean
   written: { label: string; path: string; changed: boolean }[]
   codex?: {
@@ -176,7 +223,17 @@ export interface InstallResult {
 }
 
 export interface InstallOptions {
-  repoRoot?: string
+  /**
+   * Which CLIs to register. Defaults to all of them.
+   *
+   * A session passes the agents it will actually launch, so a Claude-only run neither
+   * writes a Codex sidecar nor demands a trust decision for one.
+   */
+  agents?: AgentKind[]
+  /** The repository to register. Defaults to whatever the working directory is in. */
+  projectRoot?: string
+  /** Where Conclave's templates and hook client live. Defaults to this module's checkout. */
+  conclaveRoot?: string
   /** Overrides worktree detection; tests use it to render a linked layout on purpose. */
   codexProjectRoot?: string
   /** Skip the Codex diagnosis (it spawns `codex app-server`, costing a second or two). */
@@ -193,20 +250,26 @@ export interface InstallOptions {
 }
 
 export async function installConfig(opts: InstallOptions = {}): Promise<InstallResult> {
-  const repoRoot = opts.repoRoot ?? resolveRepoRoot()
-  const codexProjectRoot = opts.codexProjectRoot ?? resolveCodexProjectRoot(repoRoot)
-  const roots: Record<OutputRoot, string> = { checkout: repoRoot, codexProject: codexProjectRoot }
+  const conclaveRoot = opts.conclaveRoot ?? resolveConclaveRoot()
+  const projectRoot = opts.projectRoot ?? resolveRepoRoot()
+  const codexProjectRoot = opts.codexProjectRoot ?? resolveCodexProjectRoot(projectRoot)
+  const roots: Record<OutputRoot, string> = { project: projectRoot, codexProject: codexProjectRoot }
+  // Deduplicated, because a session with the same CLI in both roles names it twice.
+  const agents = [...new Set(opts.agents ?? AGENT_KINDS)]
   const written: InstallResult['written'] = []
 
-  for (const target of TARGETS) {
-    const templatePath = join(repoRoot, target.template)
+  for (const target of TARGETS.filter((t) => agents.includes(t.agent))) {
+    const templatePath = join(conclaveRoot, target.template)
     if (!existsSync(templatePath)) {
-      throw new Error(`missing template ${target.template}; the checkout is incomplete`)
+      // Not "the checkout is incomplete": the templates are read from Conclave's own
+      // installation, so their absence says that installation is broken -- and says
+      // nothing at all about the project being registered.
+      throw new Error(`missing template ${target.template} under ${conclaveRoot}`)
     }
     const outputPath = join(roots[target.outputRoot], target.output)
-    // Rendered against `repoRoot`, never the output's root: the handler must run THIS
-    // checkout's code even when the file lives in the main worktree.
-    const contents = render(readFileSync(templatePath, 'utf8'), repoRoot)
+    // Rendered against `conclaveRoot`, never the output's root: the hook that runs is
+    // Conclave's, wherever the registration happens to live.
+    const contents = render(readFileSync(templatePath, 'utf8'), conclaveRoot)
     const previous = existsSync(outputPath) ? readFileSync(outputPath, 'utf8') : undefined
     const changed = previous !== contents
     // Never rewrite identical bytes. Harmless for Claude; for Codex a rewritten handler
@@ -216,15 +279,22 @@ export async function installConfig(opts: InstallOptions = {}): Promise<InstallR
   }
 
   const result: InstallResult = {
-    repoRoot,
+    conclaveRoot,
+    projectRoot,
     codexProjectRoot,
+    agents,
+    selfHosted: samePath(conclaveRoot, projectRoot),
     dryRun: opts.dryRun === true,
     written,
   }
 
-  if (opts.diagnose !== false) {
+  // Nothing to diagnose when Codex is not among them, and diagnosing anyway would spawn
+  // `codex app-server` to report a sidecar we deliberately did not write as missing.
+  if (opts.diagnose !== false && agents.includes('codex')) {
     try {
-      const report = await readCodexHooks(repoRoot)
+      // Diagnose the PROJECT, not Conclave: the question is whether hooks will run where
+      // the session will, and those are no longer the same directory.
+      const report = await readCodexHooks(projectRoot)
       const diagnosis = diagnoseHookTrust(report, CONCLAVE_HOOK_MATCH)
       result.codex = {
         ready: diagnosis.ready,
@@ -264,12 +334,15 @@ export function formatInstallResultJson(r: InstallResult): string {
 }
 
 export function formatInstallResult(r: InstallResult): string {
-  const lines = [`repository root: ${r.repoRoot}`]
-  if (r.codexProjectRoot !== r.repoRoot) {
+  const lines = [`project: ${r.projectRoot}`]
+  // Only worth a line when they differ. Naming Conclave's own path on every run inside
+  // its own checkout is noise, and noise is what a reader learns to skip.
+  if (!r.selfHosted) lines.push(`hooks run from: ${r.conclaveRoot}`)
+  if (r.codexProjectRoot !== r.projectRoot) {
     // Say it before listing the paths, so the unexpected one reads as intended rather
     // than as a bug in this command.
     lines.push(
-      `  this is a linked worktree; Codex resolves project config from the main`,
+      `  the project is a linked worktree; Codex resolves project config from the main`,
       `  worktree, so its sidecar goes to ${r.codexProjectRoot}`,
     )
   }

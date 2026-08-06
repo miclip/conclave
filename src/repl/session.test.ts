@@ -11,7 +11,7 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PassThrough, Writable } from 'node:stream'
@@ -117,6 +117,38 @@ test('a session runs to completion and reports the outcome', async () => {
   assert.match(out.text(), /run ended: done/)
   // Without checks, rotation is refused rather than done unverified — and it says so.
   assert.match(out.text(), /pass --checks/)
+})
+
+test('a session registers its hooks in the project, for the CLIs it will actually launch', async () => {
+  // Two Claudes is a real configuration. Writing a Codex sidecar for it would then demand
+  // a Codex trust decision before anything reported ready — a setup step for a CLI this
+  // session never launches.
+  const dir = repo()
+  const out = collect()
+  const code = await runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'claude',
+    implementer: 'claude',
+    rounds: 3,
+    checks: [],
+    registry: registryOf({
+      claude: [
+        new FakeRotationSession('advisor', 'claude', ['Do it.', 'DONE']),
+        new FakeRotationSession('impl', 'claude', ['ack', 'Did it.']),
+      ],
+    }),
+    input: script([]),
+    output: out.stream,
+  })
+  assert.equal(code, 0)
+  assert.equal(existsSync(join(dir, '.claude', 'settings.json')), true, 'the project gets Claude hooks')
+  assert.equal(existsSync(join(dir, '.codex', 'hooks.json')), false, 'and no sidecar for an unused CLI')
+
+  // The registration points back at Conclave, so the project needs nothing installed.
+  const settings = readFileSync(join(dir, '.claude', 'settings.json'), 'utf8')
+  assert.ok(settings.includes('hook_post.py'))
+  assert.ok(!settings.includes(dir), 'a command must not point into the project being registered')
 })
 
 test('a pause is rendered with its evidence and the operator resumes it', async () => {

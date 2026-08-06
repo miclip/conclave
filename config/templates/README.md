@@ -1,7 +1,10 @@
 # Hook registration templates
 
-Canonical, versioned source for this project's hook registrations. `{{REPO_ROOT}}` is
-replaced with the current checkout path by `npm run config:install`.
+Canonical, versioned source for Conclave's hook registrations. `{{CONCLAVE_ROOT}}` is
+replaced by `conclave config install` with the path of the Conclave checkout the command
+ran from — NOT the project being registered. The rendered outputs land in the target
+project; the commands inside them point back at Conclave, because the hook that runs is
+always Conclave's own.
 
 The templates are pure JSON with no extra keys, because rendering is a plain string
 substitution and the outputs must be byte-exact. Codex in particular rejects unrecognised

@@ -1,6 +1,6 @@
 import { dirname, join } from 'node:path'
 import { homedir } from 'node:os'
-import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync } from 'node:fs'
 /**
  * Codex hook trust — a configuration/deployment invariant, not lifecycle evidence.
  *
@@ -18,7 +18,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync } fro
  * an evidence grade. A trusted hook is not evidence that a turn completed.
  */
 
-import { spawn } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import { createInterface } from 'node:readline'
 import { sanitizedCopy } from '../process/childenv.ts'
 import { PtyProcess, squash } from '../process/pty.ts'
@@ -157,6 +157,52 @@ export async function readCodexHooks(cwd: string, timeoutMs = 30_000): Promise<C
   }
 }
 
+/**
+ * Where Codex looks for a project's `.codex/hooks.json`, which is not always the project
+ * directory itself.
+ *
+ * Codex resolves project configuration from the repository's main worktree. Render the
+ * sidecar into a LINKED worktree and Codex never reads it: `hooks/list` reports whatever
+ * the main worktree has -- possibly nothing, possibly another checkout's stale command
+ * path -- and the registration that was just written has no effect at all. That failure
+ * is invisible from the linked worktree, because the file is right there and looks
+ * installed.
+ *
+ * The command string still points at `conclaveRoot` (see `render`); only the file's
+ * location follows the main worktree. So a linked worktree runs Conclave's hook code from
+ * a sidecar its sibling owns, which is the honest description of what Codex supports.
+ */
+export function resolveCodexProjectRoot(checkoutRoot: string): string {
+  const dotGit = join(checkoutRoot, '.git')
+  // A linked worktree is exactly the case where `.git` is a FILE pointing into the main
+  // worktree's admin directory. A normal checkout has a directory, and a non-repository
+  // has neither -- both are already their own project root, so do not spawn git to ask.
+  if (!existsSync(dotGit) || statSync(dotGit).isDirectory()) return checkoutRoot
+
+  let commonDir: string
+  try {
+    commonDir = execFileSync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], {
+      cwd: checkoutRoot,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim()
+  } catch {
+    return checkoutRoot
+  }
+  if (!commonDir) return checkoutRoot
+
+  const mainRoot = dirname(commonDir)
+  // A submodule also has a `.git` file, and its common directory lives under the
+  // superproject's `.git/modules/<name>` -- whose parent is not a worktree at all.
+  // Requiring the result to look like a checkout keeps that case on the safe path.
+  return existsSync(join(mainRoot, '.git')) ? mainRoot : checkoutRoot
+}
+
+/** The sidecar file Codex will actually read for a project. */
+export function codexSidecarPath(projectRoot: string): string {
+  return join(resolveCodexProjectRoot(projectRoot), '.codex', 'hooks.json')
+}
+
 export interface TrustDiagnosis {
   ready: boolean
   /** Loaded and enabled, but not permitted to execute. */
@@ -194,7 +240,20 @@ export function diagnoseHookTrust(report: CodexHookReport, matchCommand?: string
     )
   }
   if (ours.length === 0) {
-    messages.push('no matching hooks are loaded at all; check the sidecar file format')
+    // Codex reports an untrusted DIRECTORY as an empty hook list: no error, no warning,
+    // no hint that a decision is outstanding. Saying "check the sidecar file format" sent
+    // the reader to inspect a file that is almost never the problem — and cannot be, when
+    // the file is one this tool rendered moments earlier. Distinguish the two causes by
+    // the only evidence available, which is whether the sidecar is there at all.
+    const sidecar = codexSidecarPath(report.cwd)
+    messages.push(
+      existsSync(sidecar)
+        ? `Codex loaded no hooks from ${sidecar}, which it reports the same way whether ` +
+            `the sidecar is missing or the DIRECTORY is untrusted. The file is present, so ` +
+            `this is the directory: run \`codex\` once in ${report.cwd} and accept the ` +
+            `prompts — it asks about the directory first, then about the hooks.`
+        : `no Codex sidecar at ${sidecar}; run \`conclave config install\` in ${report.cwd}`,
+    )
   }
 
   return { ready: blocked.length === 0 && ours.length > 0, blocked, messages }

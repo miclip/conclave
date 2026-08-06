@@ -38,7 +38,17 @@ import { Relay } from '../relay/relay.ts'
 import type { RelayMessage } from '../relay/message.ts'
 import type { RunHandle, RunPause } from '../relay/run.ts'
 import { trustCodexHooks } from '../deployment/codexHookTrust.ts'
-import { installConfig } from '../config/install.ts'
+import { AGENT_KINDS, installConfig, type AgentKind } from '../config/install.ts'
+
+/**
+ * A role can be filled by an agent this installer knows nothing about — the registry is
+ * open. Such an agent simply gets no registration, which is honest: Conclave has no
+ * template for a CLI it has never heard of, and inventing one would be worse than
+ * leaving the operator to wire it up.
+ */
+function isAgentKind(id: string): id is AgentKind {
+  return (AGENT_KINDS as string[]).includes(id)
+}
 import { guard } from '../workspace/sessionLock.ts'
 
 export interface SessionOptions {
@@ -249,47 +259,53 @@ export async function runSession(opts: SessionOptions): Promise<number> {
   write(rule(width))
 
   /**
-   * Register the hooks for this checkout, if they are not already.
+   * Register Conclave's hooks in the project being worked in, if they are not already.
    *
    * Codex loads hooks from a sidecar in the working directory and Claude from project-local
-   * settings, so a fresh checkout has neither and a session there would have no
-   * turn-completion signal at all. Refusing with "run config install" was friction for a
-   * fix the tool already knows how to perform.
+   * settings, so a project that has never hosted a session has neither, and a session there
+   * would have no turn-completion signal at all. Refusing with "run config install" was
+   * friction for a fix the tool already knows how to perform.
    *
-   * Both files are checkout-specific — they contain absolute paths — which is why they are
-   * gitignored and never shipped, and why every new clone needs this once. Rendering is
+   * Both files are machine-local — they contain absolute paths — which is why they are
+   * gitignored and never shipped, and why every project needs this once. Rendering is
    * idempotent, so this is a no-op on every run after the first and stays silent then.
+   *
+   * The commands written into the target point back at Conclave's own checkout, so the
+   * target needs nothing installed and no dependency on Conclave. That is what makes this
+   * safe to do in a repository that is not ours.
    *
    * TRUST IS NOT TOUCHED. Codex will not run hooks in a directory it does not trust, and
    * that lives in the user's global `~/.codex/config.toml`. Writing project-local files
-   * into a checkout the operator just asked to run a session in is theirs to expect;
+   * into a repository the operator just asked to run a session in is theirs to expect;
    * silently editing their global configuration is not. It is reported instead.
    */
-  // Only when the working directory IS the Conclave checkout.
-  //
-  // `installConfig` reads its templates relative to the root it is given, so pointing it at
-  // an arbitrary working directory fails outright — the templates live with Conclave and
-  // only the rendered output belongs in the target. Registering hooks into someone else's
-  // repository from an installed release is a real gap, and a larger change than this:
-  // `conclave config install` has the same shape and the same limit.
-  // From the MODULE's location, not `resolveRepoRoot()` — that resolves from cwd, so it
-  // reported every working directory as the Conclave checkout and sent installConfig
-  // looking for templates that were never there.
-  const ownCheckout = join(import.meta.dirname, '..', '..')
-  const selfHosted =
-    existsSync(opts.cwd) && realpathSync(opts.cwd) === realpathSync(ownCheckout)
-  const installed = selfHosted
-    ? await installConfig({ diagnose: false })
-    : { written: [] as { label: string; path: string; changed: boolean }[] }
+  // Only the CLIs this session will actually launch. Both roles can be the same one, and
+  // registering the other anyway would write a sidecar nobody reads and then require a
+  // trust decision for it before anything reported ready.
+  const agents = [...new Set([opts.lead, opts.implementer])].filter(isAgentKind)
+  const installed = await installConfig({ projectRoot: opts.cwd, agents, diagnose: false })
   const changed = installed.written.filter((w) => w.changed)
   if (changed.length > 0) {
-    write(dim(`  registered hooks for this checkout: ${changed.map((w) => w.label).join(', ')}`))
-    // Diagnose only on the run that actually wrote something: it spawns `codex app-server`
-    // and costs a second or two, and it is only informative the first time. Registration
-    // alone is not enough — Codex will not load hooks from a directory it does not trust,
-    // and the preflight's own message ("check the sidecar file format") is misleading once
-    // the sidecar is demonstrably correct.
-    const diagnosed = await installConfig({ dryRun: true, diagnose: true })
+    const where = installed.selfHosted ? 'this checkout' : 'this project'
+    write(dim(`  registered hooks for ${where}: ${changed.map((w) => w.label).join(', ')}`))
+  }
+  // Diagnosing spawns `codex app-server`, and answering Codex's prompts spawns a real
+  // `codex` under a pty. An injected registry means the participants are fakes (see
+  // `registry` in the options), so there is no real CLI whose deployment state could
+  // affect this run — and reaching for one would make a test of the console depend on
+  // Codex being installed, responsive, and in a particular trust state.
+  if (changed.length > 0 && opts.registry === undefined) {
+    // Diagnose only on the run that actually wrote something: it costs a second or two,
+    // and it is only informative the first time. Registration alone is not enough — Codex
+    // will not load hooks from a directory it does not trust, and reports that the same
+    // way as a missing sidecar. `diagnoseHookTrust` tells the two apart now that the
+    // sidecar it just wrote is demonstrably present.
+    const diagnosed = await installConfig({
+      projectRoot: opts.cwd,
+      agents,
+      dryRun: true,
+      diagnose: true,
+    })
     for (const m of diagnosed.codex?.messages ?? []) write(dim(`  ${m}`))
     if (diagnosed.codex && !diagnosed.codex.ready) {
       // Registration is not enough: Codex never executes hooks in a directory it does not

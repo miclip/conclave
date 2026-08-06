@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node {{REPO_ROOT}}/src/hooks/client.ts codex",
+            "command": "node {{CONCLAVE_ROOT}}/src/hooks/client.ts codex",
             "async": false,
             "timeout": 10,
             "statusMessage": "conclave: recording SessionStart"
@@ -19,7 +19,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node {{REPO_ROOT}}/src/hooks/client.ts codex",
+            "command": "node {{CONCLAVE_ROOT}}/src/hooks/client.ts codex",
             "async": false,
             "timeout": 10,
             "statusMessage": "conclave: recording UserPromptSubmit"
@@ -32,7 +32,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node {{REPO_ROOT}}/src/hooks/client.ts codex",
+            "command": "node {{CONCLAVE_ROOT}}/src/hooks/client.ts codex",
             "async": false,
             "timeout": 10,
             "statusMessage": "conclave: recording PermissionRequest"
@@ -45,7 +45,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node {{REPO_ROOT}}/src/hooks/client.ts codex",
+            "command": "node {{CONCLAVE_ROOT}}/src/hooks/client.ts codex",
             "async": false,
             "timeout": 10,
             "statusMessage": "conclave: recording Stop"
@@ -58,7 +58,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node {{REPO_ROOT}}/src/hooks/client.ts codex",
+            "command": "node {{CONCLAVE_ROOT}}/src/hooks/client.ts codex",
             "async": false,
             "timeout": 10,
             "statusMessage": "conclave: recording SessionEnd"

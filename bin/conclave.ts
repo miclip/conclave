@@ -5,10 +5,12 @@
  */
 
 import {
+  AGENT_KINDS,
   formatInstallResult,
   formatInstallResultJson,
   hasDrift,
   installConfig,
+  type AgentKind,
 } from '../src/config/install.ts'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -20,9 +22,14 @@ import { formatGuardReportJson, guard } from '../src/workspace/sessionLock.ts'
 const USAGE = `conclave <command>
 
 Commands:
-  config install [--no-diagnose]   Render project-local hook registrations for this
-                                   checkout, then report whether Codex will run them.
-  config check   [--no-diagnose] [--json]
+  config install [--claude] [--codex] [--no-diagnose]
+                                   Register Conclave's hooks in the project you are in,
+                                   then report whether Codex will run them. The commands
+                                   written point back at this Conclave, so the project
+                                   needs nothing installed. Both CLIs are registered
+                                   unless you name one: pass --claude alone if both roles
+                                   are Claude, and no Codex sidecar is written or trusted.
+  config check   [--claude] [--codex] [--no-diagnose] [--json]
                                    Report drift without writing. Exits non-zero if the
                                    registrations differ from the templates. Prefer this
                                    before anything that depends on stable Codex trust.
@@ -72,11 +79,24 @@ function version(): string {
   }
 }
 
+/**
+ * `--claude` / `--codex` select what to register; naming neither registers both.
+ *
+ * Returned as a partial option object rather than a default-filled array so that "not
+ * specified" stays distinct from "explicitly both" all the way down to `installConfig`,
+ * which owns the default.
+ */
+function agentsFromFlags(flags: string[]): { agents?: AgentKind[] } {
+  const named = AGENT_KINDS.filter((a) => flags.includes(`--${a}`))
+  return named.length > 0 ? { agents: named } : {}
+}
+
 async function main(argv: string[]): Promise<number> {
   const [command, sub, ...rest] = argv
 
   if (command === 'config' && sub === 'check') {
     const result = await installConfig({
+      ...agentsFromFlags(rest),
       dryRun: true,
       diagnose: !rest.includes('--no-diagnose'),
     })
@@ -88,7 +108,10 @@ async function main(argv: string[]): Promise<number> {
   }
 
   if (command === 'config' && sub === 'install') {
-    const result = await installConfig({ diagnose: !rest.includes('--no-diagnose') })
+    const result = await installConfig({
+      ...agentsFromFlags(rest),
+      diagnose: !rest.includes('--no-diagnose'),
+    })
     console.log(formatInstallResult(result))
     // A checkout needing its first trust decision is not a failure, so this does not
     // exit non-zero on `retrustRequired` alone.

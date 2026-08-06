@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "{{REPO_ROOT}}/spikes/hooks/hook_post.py claude",
+            "command": "{{CONCLAVE_ROOT}}/spikes/hooks/hook_post.py claude",
             "timeout": 10
           }
         ]
@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "{{REPO_ROOT}}/spikes/hooks/hook_post.py claude",
+            "command": "{{CONCLAVE_ROOT}}/spikes/hooks/hook_post.py claude",
             "timeout": 10
           }
         ]
@@ -27,7 +27,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "{{REPO_ROOT}}/spikes/hooks/hook_post.py claude",
+            "command": "{{CONCLAVE_ROOT}}/spikes/hooks/hook_post.py claude",
             "timeout": 10
           }
         ]
@@ -38,7 +38,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "{{REPO_ROOT}}/spikes/hooks/hook_post.py claude",
+            "command": "{{CONCLAVE_ROOT}}/spikes/hooks/hook_post.py claude",
             "timeout": 10
           }
         ]
@@ -49,7 +49,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "{{REPO_ROOT}}/spikes/hooks/hook_post.py claude",
+            "command": "{{CONCLAVE_ROOT}}/spikes/hooks/hook_post.py claude",
             "timeout": 10
           }
         ]
@@ -60,7 +60,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "{{REPO_ROOT}}/spikes/hooks/hook_post.py claude",
+            "command": "{{CONCLAVE_ROOT}}/spikes/hooks/hook_post.py claude",
             "timeout": 10
           }
         ]

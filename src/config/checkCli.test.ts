@@ -67,7 +67,12 @@ test('--json prints the report as JSON and nothing else', () => {
 
   assert.equal(report.drift, true, 'an unrendered checkout has drifted')
   assert.equal(report.dryRun, true, 'check must never present itself as having written')
-  assert.equal(report.repoRoot, repo)
+  // The project being registered, which since the CLI went on PATH is no longer
+  // necessarily Conclave's own checkout. Both roots are reported, because a consumer that
+  // conflated them is the bug this split exists to prevent.
+  assert.equal(report.projectRoot, repo)
+  assert.equal(report.conclaveRoot, REPO)
+  assert.equal(report.selfHosted, false, 'a fixture project is not Conclave')
   assert.equal(report.written.length, TARGETS.length)
   assert.ok(report.written.every((w: { changed: boolean }) => w.changed))
   assert.deepEqual(
@@ -105,7 +110,8 @@ test('prose remains the default output', () => {
   const { status, stdout } = check(repo)
 
   assert.throws(() => JSON.parse(stdout), 'the default output must not have become JSON')
-  assert.ok(stdout.includes(`repository root: ${repo}`))
+  assert.ok(stdout.includes(`project: ${repo}`))
+  assert.ok(stdout.includes(`hooks run from: ${REPO}`), 'a reader must be told which Conclave runs')
   assert.ok(stdout.includes('DRIFT'), 'drift must still be visible to a reader')
   assert.equal(status, 1)
 })
