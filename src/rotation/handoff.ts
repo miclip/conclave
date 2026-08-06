@@ -209,7 +209,20 @@ export interface ClaimedCheck {
  */
 export function parseClaimedChecks(prose: string): ClaimedCheck[] {
   const out: ClaimedCheck[] = []
-  const re = /^\s*CHECK\s+(\d+)\s*:\s*exit\s+(-?\d+)/gim
+  // NOT anchored to a line start, and that is the whole point of this comment.
+  //
+  // It was. The first live rotation rolled back with "no reported exit code", and the
+  // replacement's prose read:
+  //
+  //     I'll verify the state before doing any work.CHECK 1: exit 0
+  //
+  // It had done exactly what it was asked. A newline it does not control -- and which the
+  // transcript may not preserve anyway -- decided that a correct answer was no answer.
+  //
+  // Strictness about the FORMAT is what keeps a vague "looks fine" from passing, and that
+  // is unchanged: the exact demanded token sequence is still required. Strictness about
+  // surrounding whitespace bought nothing and cost a spurious rollback.
+  const re = /CHECK\s+(\d+)\s*:\s*exit\s+(-?\d+)/gi
   let m: RegExpExecArray | null
   while ((m = re.exec(prose))) {
     out.push({ index: Number(m[1]), exitCode: Number(m[2]) })

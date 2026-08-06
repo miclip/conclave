@@ -603,6 +603,16 @@ export class CodexPtyHookAdapter implements AgentSession {
       for (const turn of this.#liveTurns()) {
         this.#apply(turn, turn.tracker.observeObservationGap(), true)
       }
+      // Record the gap first, THEN terminate. The distinction between the two modes is
+      // epistemic, not custodial: abandonment refuses to claim anything about the turns,
+      // and it was never meant to leak the process. It did -- the first live rotation
+      // rolled back, closed its replacement as abandoned, and left a Claude CLI running.
+      // The node process then could not exit for 26 minutes, which is how this was found.
+      //
+      // Terminating after the gap is recorded means cleanup cannot manufacture a verdict:
+      // the tracker already holds `unknown_abnormal_end`, and process death is weaker
+      // evidence than what it holds, so the classifier's rule order discards it.
+      if (this.#pty.alive) await this.#pty.terminate()
     }
 
     await this.#receiver.stop()

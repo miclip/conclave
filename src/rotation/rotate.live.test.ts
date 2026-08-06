@@ -35,6 +35,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 import { defaultRegistry } from '../registry/builtin.ts'
 import { Relay } from '../relay/relay.ts'
+import type { RunOutcome } from '../relay/run.ts'
 import { parseHandoff } from './handoff.ts'
 
 const skip =
@@ -67,6 +68,21 @@ test('a real implementer is replaced and the replacement proves it can continue'
   const run = relay.start(
     `Work only inside ${work}. Create adder.js exporting a function that adds two numbers, ` +
       `then wait for the next instruction. Touch nothing outside that directory.`,
+  )
+
+  // Wait for real work before rotating. `requestPause()` is honoured at the next round
+  // boundary, and the first of those precedes any instruction — so pausing immediately
+  // rotates an implementer that has done nothing but acknowledge its briefing, and the
+  // handoff describes an empty directory. The first live run did exactly that: the advisor
+  // wrote "neither the target directory nor file produced any result", which is a true
+  // handoff of no work at all.
+  const armed = Date.now() + 420_000
+  while (Date.now() < armed && !relay.log.some((m) => m.kind === 'report')) {
+    await new Promise((r) => setTimeout(r, 250))
+  }
+  assert.ok(
+    relay.log.some((m) => m.kind === 'report'),
+    'the implementer should have reported before the rotation, or there is no state to transfer',
   )
 
   const pause = await run.requestPause('rotating to test the transaction')
@@ -113,6 +129,10 @@ test('a real implementer is replaced and the replacement proves it can continue'
       result.acceptance.prose.slice(0, 800),
   )
   assert.deepEqual(result.acceptance.claimMismatches, [])
+  // A replacement that reports a discrepancy has performed a SUCCESSFUL transfer -- the
+  // first live run's replacement caught the advisor claiming a directory did not exist
+  // when it did. Surfaced rather than buried, because it is the behaviour worth having.
+  console.log(`\n    [replacement report]\n${result.acceptance.prose.split('\n').slice(0, 20).map((l) => `      ${l}`).join('\n')}`)
 
   // --- 3. did promotion hold? -------------------------------------------------------
   assert.notEqual(impl.session, retiring, 'the participant should now hold the replacement')
@@ -124,9 +144,32 @@ test('a real implementer is replaced and the replacement proves it can continue'
   const turnsBefore = (await impl.session.snapshot()).turns.length
   run.injectConstraint('Add a subtract function to the same file.', { only: 'implementer' })
   await run.continue()
-  const outcome = await run.result()
 
-  assert.notEqual(outcome.reason, 'escalated', `the rotated session could not continue: ${outcome.detail}`)
+  // Drive pauses rather than awaiting only `result()`. The first live run of this test
+  // deadlocked exactly there: promotion succeeded, the loop paused again, and nothing was
+  // listening -- so a 25-minute harness timeout reported an orchestration deadlock as an
+  // agent turn overrunning, with both agents idle and nothing scheduled.
+  const pauses: string[] = []
+  let outcome: RunOutcome
+  for (;;) {
+    const s = await run.settled()
+    if (s.kind === 'ended') {
+      outcome = s.outcome
+      break
+    }
+    pauses.push(`${s.pause.reason}: ${s.pause.detail}`)
+    console.log(`\n    [paused after promotion] ${s.pause.reason}: ${s.pause.detail}`)
+    for (const e of s.pause.evidence) console.log(`      evidence: ${e}`)
+    // A post-promotion pause is a legitimate result, not a hang. Resume once and let the
+    // run reach a terminal state so the assertions below mean something.
+    if (pauses.length > 3) {
+      await run.abort('too many pauses to be a working session')
+      break
+    }
+    await run.continue()
+  }
+
+  assert.notEqual(outcome!.reason, 'escalated', `the rotated session could not continue: ${outcome!.detail}`)
   assert.ok(
     (await impl.session.snapshot()).turns.length > turnsBefore,
     'the replacement took real turns after promotion',

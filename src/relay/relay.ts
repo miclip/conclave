@@ -541,6 +541,42 @@ export class Relay {
 
       const instruction = next.prose.trim()
       if (/^DONE\b/i.test(instruction)) {
+        // §7a, first paragraph: "The advisor can end the session; the human outranks that
+        // and can send them back to work." Returning here regardless let the advisor
+        // terminate an outstanding human instruction out of existence -- the human message
+        // is queued for the next exchange, and if the advisor ends the session there is no
+        // next exchange. That inverts the rank order the whole design rests on.
+        //
+        // Found by the first live pause run: the drift probe was injected at the pause and
+        // never delivered, because the advisor considered the task finished.
+        const outstanding = this.participants.filter((p) => (this.#pending.get(p.id) ?? []).length > 0)
+        if (outstanding.length > 0) {
+          this.#record({
+            from: 'orchestrator',
+            fromRank: 'human',
+            to: [],
+            kind: 'note',
+            text:
+              `advisor reported the work complete, but the human has an outstanding instruction for ` +
+              `${outstanding.map((p) => p.id).join(', ')} — the human outranks the advisor, so the ` +
+              `session continues rather than ending`,
+          })
+          if ((this.#pending.get(impl.id) ?? []).length > 0) {
+            const extra = await this.#exchange(impl, this.#drain(impl.id))
+            this.#record({ from: impl.id, fromRank: 'implementer', to: [lead.id], kind: 'report', text: extra.prose })
+            next = await this.#exchange(
+              lead,
+              [this.#drain(lead.id), envelope({ from: impl.id, fromRank: 'implementer', kind: 'report', text: extra.prose })]
+                .filter(Boolean)
+                .join('\n\n'),
+            )
+          } else {
+            next = await this.#exchange(lead, this.#drain(lead.id))
+          }
+          // Bounded by the round budget like everything else, so a human who keeps talking
+          // extends the session rather than making it unstoppable.
+          continue
+        }
         this.#record({ from: lead.id, fromRank: 'advisor', to: [], kind: 'note', text: `advisor reports the work complete: ${instruction}` })
         return this.#end('done', instruction)
       }

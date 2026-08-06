@@ -147,6 +147,15 @@ test('claimed exit codes are read out of the replacement prose', () => {
   ])
 })
 
+test('a claim glued to the end of a sentence is still a claim', () => {
+  // Verbatim from the first live rotation, which rolled back over exactly this. The
+  // replacement had run the check and reported it; a missing newline made it invisible.
+  const claimed = parseClaimedChecks(
+    "I'll verify the state before doing any work.CHECK 1: exit 0\n\nWhat I found. ...",
+  )
+  assert.deepEqual(claimed, [{ index: 1, exitCode: 0 }])
+})
+
 test('a report that cannot be read is no report, not a generous pass', () => {
   // Generosity here means accepting a transfer nobody demonstrated.
   assert.deepEqual(parseClaimedChecks('Everything passes, looks good to me.'), [])

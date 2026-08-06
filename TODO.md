@@ -154,52 +154,42 @@ the workspace discipline it enforces on its participants.
 Two claims, deliberately separated (DESIGN-BRIEF §7a). A successful rotation settles the
 first and says nothing about the second.
 
-### Claim 1 — the mechanism. Two runs, not one.
-
-Split because run together they mask each other: a fast successful rotation would hide
-unreliable long pauses, and a transport failure during a long pause would be blamed on
-rotation.
-
-**1a. `ORCH_LIVE_PAUSE=1 node --test src/relay/pause.live.test.ts`** — does a real session
-survive a human-scale pause? Set `ORCH_PAUSE_SECONDS` to something a human would actually
-take. Checks the invariant that a pause suspends orchestration and not observation, and
-checks recall across the pause rather than assuming continuity.
-
-**1b. `ORCH_LIVE_ROTATE=1 node --test src/rotation/rotate.live.test.ts`** — does the
-transaction work? Triggered by the operator rather than by compaction, because that is the
-mechanism question and compaction is the policy question.
-
-Neither has been run. Both are written; the assertions are predictions.
-
-### What 1b answers, in the order it is likely to bite
+### Claim 1 — the mechanism. BOTH RUNS PASS [2026-08-06]
 
 ```
-implementer works → operator pauses → old session quiesced → advisor produces handoff
-→ replacement starts → independent checks reproduce the record → replacement continues
-→ old session terminates
+ORCH_LIVE_PAUSE=1  node --test src/relay/pause.live.test.ts      192s, passed
+ORCH_LIVE_ROTATE=1 node --test src/rotation/rotate.live.test.ts  152s, passed
 ```
 
-1. **Does a real advisor produce the seven headings?** Failure is recoverable by
-   construction — the parse fails before anything is terminated — but a handoff that never
-   parses makes rotation useless in practice.
-2. **Does a real replacement report `CHECK n: exit <code>`?** Same run.
-3. **Does promotion hold?** The replacement takes real turns under the implementer's
-   identity, and the retired session is terminated only after the proof.
+Live rotation against real CLIs is established: a real advisor produced the seven headings,
+a real replacement emitted `CHECK n: exit <code>` and reproduced the record, promotion kept
+the participant identity, and the original was terminated. A real session also survived a
+two-minute hold and resumed without drift, with ingestion and audit live throughout.
 
-A rollback in 1b is a **result**, not a failure: it says which of those three broke, and
-the assertions check that the original came back and could carry on. The only outright
-failure is a rotation reporting success while the wrong session is left running.
+Five defects came out of getting there; see DESIGN-BRIEF §7a, "First live runs". Four were
+product bugs invisible to the offline suite.
 
-Quiescence over a long freeze belongs to 1a, not here. Resumability itself is built —
-`relay.start(goal)` returns a `RunHandle` whose pauses suspend the loop rather than ending
-it (`continue` / `rotate` / `constrain` / `abort` / `requestPause`) — and what neither the
-fakes nor 1b can show is whether a **real** session tolerates being held for as long as a
-human takes to decide.
+**Still not covered live:**
 
-Still unbuilt, and deliberately: **inspecting a handoff before choosing to rotate.**
-Producing one costs an advisor turn and changes the session, so it is not done
-speculatively; the pause carries the evidence that raised it instead. Build it once an
-operator has actually wanted it.
+1. **Rollback against real sessions.** Both runs took the promotion path, so leak-free
+   abandonment rests on the run-1 diagnosis plus offline tests. Needs a deliberately
+   failing acceptance — point `rotation.checks` at a command whose exit code differs
+   between capture and acceptance.
+2. **Pauses longer than a couple of minutes.** `ORCH_PAUSE_SECONDS` exists for this; the
+   longest run so far is 120s.
+3. **What a verification check does not cover.** The replacement observed, correctly and
+   unprompted, that `npx tsc --noEmit` says nothing about a plain `.js` file in an ignored
+   directory. Nothing in `Acceptance` can express "the check passed and was irrelevant".
+   `carriedFailures` and `claimMismatches` do not reach it.
+
+**Harness rules earned the hard way:**
+
+- A live test must wait for a report before pausing, or it measures an empty session.
+- Write live output to a file, never through `tail` — a buffered pipe cannot flush while
+  the process it reads from cannot exit, which is exactly the state a liveness bug creates.
+- Correlate process, filesystem and phase before diagnosing. Three separate wrong readings
+  came from a grep pattern that could not match, an inspector probe that loaded a second
+  module graph, and invisible buffered output.
 
 ### Claim 2 — does compaction predict degradation?
 

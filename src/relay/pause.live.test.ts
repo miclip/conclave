@@ -71,6 +71,21 @@ test('a real session survives a human-scale pause and resumes without drift', { 
       `the next instruction.`,
   )
 
+  // Wait until the implementer has reported once. `requestPause()` is honoured at the next
+  // round boundary, and the first of those comes BEFORE any instruction has been issued --
+  // so pausing immediately gives the drift check nothing to compare against. The first run
+  // of this test failed exactly there, on its own instrument rather than on the product.
+  // `relay.live.test.ts` already waits for a report before injecting its aside; the same
+  // reason applies here and it was not carried across.
+  const armed = Date.now() + 300_000
+  while (Date.now() < armed && !relay.log.some((m) => m.kind === 'report')) {
+    await new Promise((r) => setTimeout(r, 250))
+  }
+  assert.ok(
+    relay.log.some((m) => m.kind === 'report'),
+    'the implementer should have reported before the pause, or there is no continuity to test',
+  )
+
   const pause = await run.requestPause('holding the session to test quiescence')
   assert.ok(pause, 'the run should reach a pause rather than finishing first')
   assert.equal(pause.reason, 'operator_requested')

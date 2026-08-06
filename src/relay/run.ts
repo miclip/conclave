@@ -102,7 +102,7 @@ export class RunHandle {
   #decide: ((d: Decision) => void) | undefined
   /** Waiting `untilPause()` callers. Resolved with the pause, or `undefined` if it ended. */
   #watchers: ((p: RunPause | undefined) => void)[] = []
-  #settled: ((o: RunOutcome) => void)[] = []
+  #settled: { resolve: (o: RunOutcome) => void; reject: (e: Error) => void }[] = []
 
   constructor(control: RunControl) {
     this.#control = control
@@ -134,10 +134,39 @@ export class RunHandle {
     return new Promise((resolve) => this.#watchers.push(resolve))
   }
 
-  /** The final outcome. Resolves once, whenever the run ends. */
+  /**
+   * The final outcome, for a run expected to finish without intervention.
+   *
+   * REJECTS if the run pauses while nothing is waiting for pauses. That is not a timeout
+   * and not a heuristic: at the moment of a pause with no watcher, this promise provably
+   * cannot settle without an operator action that the caller has demonstrably not
+   * arranged, so the wait is unsatisfiable and saying so immediately beats hanging.
+   *
+   * The first live rotation deadlocked exactly here. Promotion succeeded, the loop paused
+   * again, and the test sat on this promise until a 25-minute harness timeout reported it
+   * as `timed_out` -- misfiling an orchestration deadlock as an agent turn overrunning,
+   * with both agents idle and nothing scheduled.
+   *
+   * Drive pauses with `settled()` instead. Do not hold this promise while separately
+   * looping on pauses: between iterations nothing is watching, and this would reject.
+   */
   result(): Promise<RunOutcome> {
     if (this.#outcome) return Promise.resolve(this.#outcome)
-    return new Promise((resolve) => this.#settled.push(resolve))
+    return new Promise((resolve, reject) => this.#settled.push({ resolve, reject }))
+  }
+
+  /**
+   * The next thing that happens: a pause, or the end.
+   *
+   * One await covering both is what a supervising caller actually wants, and its absence
+   * is what made the deadlock above possible -- `untilPause()` and `result()` are separate
+   * promises, and a caller can only await one of them first.
+   */
+  async settled(): Promise<{ kind: 'paused'; pause: RunPause } | { kind: 'ended'; outcome: RunOutcome }> {
+    if (this.#outcome) return { kind: 'ended', outcome: this.#outcome }
+    if (this.#state === 'paused' && this.#pause) return { kind: 'paused', pause: this.#pause }
+    const pause = await this.untilPause()
+    return pause ? { kind: 'paused', pause } : { kind: 'ended', outcome: this.#outcome! }
   }
 
   /** Resume from a pause. Throws if the run is not paused — silence would be worse. */
@@ -215,6 +244,22 @@ export class RunHandle {
     const watchers = this.#watchers
     this.#watchers = []
     for (const w of watchers) w(this.#pause)
+
+    // Nobody is waiting for pauses, but somebody is waiting for the end. That wait cannot
+    // now be satisfied: the run will not advance until an operator decides, and a caller
+    // holding only `result()` has shown it is not going to. Fail it here, where the reason
+    // is known, rather than leaving it to whatever timeout notices much later and
+    // attributes the stall to an agent.
+    if (watchers.length === 0 && this.#settled.length > 0) {
+      const waiting = this.#settled
+      this.#settled = []
+      const err = new Error(
+        `the run paused (${pause.reason}: ${pause.detail}) and nothing is waiting for pauses. ` +
+          `await settled() to handle pauses and the end together, or untilPause() before result().`,
+      )
+      for (const s of waiting) s.reject(err)
+    }
+
     return new Promise<Decision>((resolve) => {
       this.#decide = resolve
     })
@@ -231,6 +276,6 @@ export class RunHandle {
     for (const w of watchers) w(undefined)
     const settled = this.#settled
     this.#settled = []
-    for (const s of settled) s(outcome)
+    for (const s of settled) s.resolve(outcome)
   }
 }

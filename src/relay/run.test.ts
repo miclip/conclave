@@ -302,6 +302,121 @@ test('a declined candidate is remembered, and a LATER compaction raises it again
   )
 })
 
+test('the advisor cannot end a session out from under an outstanding human instruction', async (t) => {
+  // §7a, first paragraph: "The advisor can end the session; the human outranks that and
+  // can send them back to work." The loop returned on DONE without checking, so a human
+  // message queued for the next exchange was silently dropped when the advisor decided the
+  // work was finished — letting the advisor terminate a human instruction out of
+  // existence, which inverts the rank order the design rests on.
+  //
+  // Found by the first live pause run, where the drift probe was never delivered.
+  //
+  // Injected from `onLog` rather than from a pause: the constraint has to be outstanding
+  // at the exact moment the advisor says DONE, and polling for that against fake sessions
+  // is a race the poller always loses. The pause is how a human reaches this state; it is
+  // not what is being tested.
+  const dir = repo()
+  const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it.', 'Did the extra thing too.'])
+  const advisor = new FakeRotationSession('advisor', 'codex', ['Do it.', 'DONE', 'DONE'])
+  let relay: Relay
+  let injected = false
+  relay = await relayOf(dir, advisor, [impl], {
+    onLog: (m) => {
+      if (m.kind !== 'report' || injected) return
+      injected = true
+      relay.say('One more thing before you stop: do the extra thing.', { only: 'implementer' })
+    },
+  })
+  t.after(() => relay.stop())
+
+  const outcome = await relay.start('Keep the work moving.').result()
+
+  assert.ok(injected, 'the test must actually have injected something')
+  assert.ok(
+    impl.received.some((m) => m.includes('do the extra thing')),
+    'a human instruction outstanding at DONE must still be delivered',
+  )
+  assert.ok(relay.log.some((m) => m.text.includes('the human outranks the advisor')))
+  // And the advisor still gets to end it, once the human has nothing outstanding.
+  assert.equal(outcome.reason, 'done')
+})
+
+test('an advisor DONE with nothing outstanding ends the session as before', async (t) => {
+  const dir = repo()
+  const relay = await relayOf(
+    dir,
+    new FakeRotationSession('advisor', 'codex', ['Do it.', 'DONE']),
+    [new FakeRotationSession('impl', 'claude', ['ack', 'Did it.'])],
+  )
+  t.after(() => relay.stop())
+
+  const run = relay.start('Keep the work moving.')
+  const outcome = await run.result()
+  assert.equal(outcome.reason, 'done')
+  assert.ok(!relay.log.some((m) => m.text.includes('the human outranks the advisor')))
+})
+
+test('a run that pauses with nobody watching fails result() instead of hanging', async (t) => {
+  // The first live rotation deadlocked here. Promotion succeeded, the loop paused again,
+  // and the test sat on result() until a 25-minute harness timeout filed an orchestration
+  // deadlock as an agent turn overrunning -- with both agents idle and nothing scheduled.
+  //
+  // Not a timeout: at the moment of a pause with no watcher, result() provably cannot
+  // settle without an operator action the caller has demonstrably not arranged.
+  const dir = repo()
+  const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it.', 'And more.'])
+  const advisor = new FakeRotationSession('advisor', 'codex', ['Do it.', 'Do more.', 'DONE'])
+  const relay = await relayOf(dir, advisor, [impl])
+  t.after(() => relay.stop())
+
+  const run = relay.start('Keep the work moving.')
+  await run.requestPause()
+  await run.continue()
+  // Second pause, with the caller holding only result().
+  const pending = run.result()
+  impl.compact()
+
+  await assert.rejects(pending, /nothing is waiting for pauses/)
+  assert.equal(run.state, 'paused', 'the run itself is unharmed; only the impossible wait failed')
+  await run.abort()
+})
+
+test('settled() gives one await covering both a pause and the end', async (t) => {
+  const dir = repo()
+  const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it.', 'And more.'])
+  const advisor = new FakeRotationSession('advisor', 'codex', ['Do it.', 'Do more.', 'DONE'])
+  const relay = await relayOf(dir, advisor, [impl])
+  t.after(() => relay.stop())
+
+  const run = relay.start('Keep the work moving.')
+  impl.compact()
+
+  // What a supervising caller actually wants, and what the live test should have used.
+  const seen: string[] = []
+  for (;;) {
+    const s = await run.settled()
+    seen.push(s.kind)
+    if (s.kind === 'ended') break
+    await run.continue()
+  }
+  assert.deepEqual(seen, ['paused', 'ended'])
+  assert.equal(run.outcome!.reason, 'done')
+})
+
+test('settled() resolves immediately when the run is already paused or ended', async (t) => {
+  const dir = repo()
+  const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it.'])
+  const relay = await relayOf(dir, new FakeRotationSession('advisor', 'codex', ['Do it.', 'DONE']), [impl])
+  t.after(() => relay.stop())
+
+  const run = relay.start('Keep the work moving.')
+  await run.requestPause()
+  assert.equal((await run.settled()).kind, 'paused', 'already paused')
+  await run.continue()
+  await run.result()
+  assert.equal((await run.settled()).kind, 'ended', 'already ended')
+})
+
 test('a pause suspends orchestration, not observation', async (t) => {
   // The invariant a paused session has to hold: no participant is given new relay work,
   // but everything that watches them keeps working. A pause that also stopped ingestion

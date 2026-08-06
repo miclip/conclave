@@ -1300,17 +1300,99 @@ outright failure is a rotation reporting success while the wrong session is left
 Both files are written and **neither has been run**. The assertions are what the design
 predicts, not what was observed.
 
+#### First live runs [2026-08-06]
+
+Both proofs pass. Neither passed first time, and what the failures were is the useful part:
+**five defects, four of them in the product and one class of them invisible offline.**
+
+| # | found by | defect |
+|---|---|---|
+| 1 | pause run 2 | the advisor's `DONE` erased an outstanding human instruction |
+| 2 | rotation run 1 | `close('abandoned')` never terminated the child process |
+| 3 | rotation run 1 | `parseClaimedChecks` required a line start, rejecting a correct answer |
+| 4 | rotation run 2 | `result()` deadlocks when a run pauses unattended |
+| 5 | both | live tests that pause before any work exists measure nothing |
+
+**1 — rank inversion.** A human message is queued for the next exchange; if the advisor
+ends the session there is no next exchange. §7a's own first paragraph says the human
+outranks that, and the loop did the opposite. `DONE` is now honoured only when the human
+has nothing outstanding.
+
+**2 — the abandoned child.** "Walking away from the transport" was epistemic caution about
+the *turns* and was read by the code as walking away from cleanup too. A rolled-back
+replacement outlived its test by 26 minutes and held the orchestrator's process open.
+Abandonment now records the observation gap and *then* terminates — the tracker already
+holds `unknown_abnormal_end`, which outranks process death, so cleanup still cannot
+manufacture a verdict.
+
+**3 — strictness in the wrong place.** The replacement reported
+`I'll verify the state before doing any work.CHECK 1: exit 0` and was told it had reported
+nothing. A newline it does not control, and which the transcript need not preserve, decided
+that a correct answer was no answer. The format is still exact; the anchor is gone.
+
+**4 — the unsatisfiable wait.** `untilPause()` and `result()` are separate promises, and a
+caller can only await one first. Rotation succeeded, the loop paused again, nothing was
+watching, and a 25-minute harness timeout filed an orchestration deadlock as an agent turn
+overrunning — with both agents idle and nothing scheduled. `pauseAt()` now rejects pending
+`result()` waiters when a pause arrives with no watcher: not a timeout, but the observation
+that the promise provably cannot settle without an action the caller has not arranged.
+`settled()` gives the one await that covers both.
+
+##### What the escalation showed
+
+The pause that caused #4 was not noise. The live test injected a constraint addressed to the
+implementer alone, and the advisor — which never saw it — met a `subtract` function nobody
+had asked for:
+
+> ESCALATE: The implementer refuses to remove `subtract`, citing a direct human instruction
+> that is not present in the advisor-visible history; human confirmation is needed to
+> resolve the conflicting scope.
+
+Every piece of §5c working at once, unrehearsed: the implementer held a human-rank
+instruction against advisor rank, the advisor detected that its context was incomplete
+rather than overruling, and it escalated to the only party who could resolve it. The
+asymmetry an aside creates is exactly this, and this is the behaviour that makes it safe.
+
+##### The replacement audited the protocol
+
+Also unprompted, in both runs: it declined to invent a `CHECK 2` line to fill the template,
+re-derived the advisor's secondhand claims from `package.json` itself, ran its own import
+smoke test — and then observed that `npx tsc --noEmit` exiting 0 is *weak evidence here*,
+because the handed-off file is plain `.js` in an ignored directory that tsc never reads.
+
+It is right, and the check was chosen by this design rather than by it. A replacement that
+reports what its verification does **not** cover is doing the job the acceptance step exists
+for; `carriedFailures` and `claimMismatches` between them cannot express that, and nothing
+in the record captures it. Left unresolved rather than papered over.
+
+##### Instrument failures, which were the majority
+
+Both live tests initially paused before any work existed, so they measured an empty session
+— the same mistake, made twice, with the fix already present in `relay.live.test.ts`.
+Diagnosing #4 also produced three wrong readings in a row: a process table grepped with a
+pattern that could not match (`orch-codex` never appears in codex's command line), a
+`queryObjects` probe that reported zero live objects because a dynamic `import()` from the
+inspector loaded a second copy of the module graph, and reporter output invisible because
+`tail` cannot flush while the process it is reading from cannot exit.
+
+**Every one of those made the system look broken in a way it was not.** The rule that
+survived: correlate process, filesystem and phase before diagnosing, and validate a probe
+against something that must be true before trusting what it says is absent.
+
 #### Evidence ledger for §7a
 
 | level | what |
 |---|---|
-| **observed** (fakes) | the transaction; rollback; continuity verification; carried failures; participant identity preserved across replacement; single-reader hand-off |
-| **unverified live** | PTY quiescence over a long freeze; handoff delivery and the seven headings from a real advisor; `CHECK n: exit <code>` from a real replacement; promotion and rollback against real sessions; whether a real session tolerates being paused for as long as a human takes to decide |
+| **observed, live** | the transaction end to end; promotion with participant identity preserved; the original terminated after the replacement demonstrated transfer; a real advisor producing the seven headings; a real replacement emitting `CHECK n: exit <code>`; quiescence across a human-scale pause with no drift; a pause suspending orchestration while ingestion, inspection and audit continue |
+| **observed, fakes** | rollback; continuity verification; carried failures; single-reader hand-off; the unsatisfiable-wait guard |
+| **unverified live** | rollback against real sessions — both live runs took the promotion path, so leak-free abandonment is still only reasoned; pauses longer than a few minutes |
 | **reasoned but unverified** | compaction is a useful proxy for degradation |
 
-The first row is mechanism and the fakes are the right instrument for it. The second row is
-a single live run away. The third is the one that cannot be settled by any number of
-successful rotations.
+Sequencing — that retirement happens only after promotion — is carried by the offline
+transition test asserting `['quiesced', 'rotating', 'terminated']`, mutation-verified. The
+live runs inspect final states after the fact and cannot distinguish that order from any
+other reaching the same states. A green live run is not evidence for branches it never
+traversed.
 
 ## 9. The panel
 
