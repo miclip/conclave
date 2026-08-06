@@ -7,11 +7,10 @@ The children are the **real** Claude Code and Codex CLIs, unmodified, driven und
 pseudo-terminal exactly as a human would. Nothing about their harness, auth, or usage
 accounting differs from someone typing.
 
-> **Status: foundations only. There is no relay yet, so there is nothing to *use*.**
-> Two adapters can drive real sessions and report honestly what happened to each turn.
-> The orchestration that would make this a product — relaying between two children,
-> summarising for the human, routing constraints — is not built. See
-> [Where this actually is](#where-this-actually-is).
+> **Status: foundations only.** Both adapters work and can drive a real session
+> programmatically today — see [Try it](#try-it). What does not exist is the thing the
+> project is *for*: relaying between two children, summarising for the human, routing
+> constraints. That is build step 5. See [Where this actually is](#where-this-actually-is).
 
 ---
 
@@ -77,8 +76,31 @@ npm run test:codex         # Codex hook-trust deployment invariants (no model to
 npm run conformance        # what each adapter claims, graded by evidence
 ```
 
-There is no command that runs a two-child session. Building one today means using the
-registry directly — see `src/registry/` — which is a library, not a product.
+## Try it
+
+```bash
+node examples/one-session.ts            # claude
+node examples/one-session.ts codex      # codex
+```
+
+Drives one real session through the registry and prints the terminal verdict with its
+evidence. Both agents, same contract, same ~40 lines:
+
+```
+agents available: claude, codex
+
+codex: session started, input ownership mediated
+> Reply with exactly DEMO-N and nothing else, where N is 41 plus 1. No tools.
+
+turn_end   completed (proven) [hook:Stop]
+           synthesized=false
+
+snapshot (authoritative, rebuilt from the transcript):
+  completed            proven   "DEMO-42"
+```
+
+That is the honest extent of it: **one participant at a time, as a library.** There is no
+command that runs a two-child session, no relay between them, and no REPL.
 
 ## The ideas that shaped it
 
