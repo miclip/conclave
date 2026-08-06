@@ -20,12 +20,22 @@ accounting differs from someone typing.
 Requires **Node 24 or newer** — Conclave runs its TypeScript directly, with no build step.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/miclip/conclave/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/miclip/conclave/v0.1.1/scripts/install.sh | sh
 ```
 
-That clones into `~/.local/share/conclave`, compiles its one native dependency
-(`node-pty`), and symlinks `conclave` into `~/.local/bin`. Re-running it updates in place.
-Override `CONCLAVE_PREFIX`, `CONCLAVE_BINDIR` or `CONCLAVE_REF` if you want it elsewhere.
+That installs the newest **tagged release** — not the tip of `main`, which is where work
+lands and is sometimes halfway through something. It clones into
+`~/.local/share/conclave`, compiles its one native dependency (`node-pty`), and symlinks
+`conclave` into `~/.local/bin`. Re-running it upgrades in place.
+
+To pin an exact version, or to track the branch deliberately:
+
+```sh
+CONCLAVE_REF=v0.1.0 sh install.sh     # exactly that release
+CONCLAVE_REF=main   sh install.sh     # the branch, knowingly
+```
+
+`CONCLAVE_PREFIX` and `CONCLAVE_BINDIR` move where it lands.
 
 There is no zip of prebuilt artefacts, deliberately. `node-pty` is native and has to be
 compiled against the Node that will run it, so an archive built on one machine would fail

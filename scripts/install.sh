@@ -1,7 +1,7 @@
 #!/bin/sh
 # Install conclave: fetch a checkout, build its one native dependency, put `conclave` on PATH.
 #
-#   curl -fsSL https://raw.githubusercontent.com/miclip/conclave/main/scripts/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/miclip/conclave/v0.1.1/scripts/install.sh | sh
 #
 # NOT a zip of built artefacts. Node 24 strips types natively, so there is nothing to
 # build except `node-pty` — which is a native module and has to be compiled against the
@@ -14,9 +14,28 @@
 set -eu
 
 REPO="${CONCLAVE_REPO:-https://github.com/miclip/conclave.git}"
-REF="${CONCLAVE_REF:-main}"
 PREFIX="${CONCLAVE_PREFIX:-$HOME/.local/share/conclave}"
 BINDIR="${CONCLAVE_BINDIR:-$HOME/.local/bin}"
+
+# The newest RELEASE, not the tip of main.
+#
+# `main` is where work lands, including work that is halfway through something. An install
+# script that tracks it hands whoever runs it whatever happened to be committed at that
+# moment, which is not a thing anyone asked for. Resolved at run time rather than baked in,
+# so this script does not have to be re-released to point at the release after it — the
+# mismatch that produces is a script from v0.3.0 installing v0.2.0, and it is silent.
+#
+# `CONCLAVE_REF` pins exactly: `CONCLAVE_REF=v0.1.0 sh install.sh`, or `main` to track the
+# branch deliberately.
+latest_release() {
+  # Sorted by numeric field rather than `sort -V`, which BSD and busybox sort do not
+  # reliably have. Without it v0.10.0 sorts below v0.2.0 and the newest release is skipped
+  # the moment a minor version reaches double digits.
+  git ls-remote --tags --refs "$REPO" 'v*' 2>/dev/null |
+    sed 's#.*refs/tags/v##' |
+    sort -t. -k1,1n -k2,2n -k3,3n |
+    tail -1
+}
 
 die() { echo "conclave: $*" >&2; exit 1; }
 
@@ -29,6 +48,15 @@ command -v npm >/dev/null 2>&1 || die "npm is required"
 # reads, which reads as a corrupt download.
 major=$(node -p 'process.versions.node.split(".")[0]')
 [ "$major" -ge 24 ] || die "node 24 or newer is required (found $(node -v))"
+
+if [ -n "${CONCLAVE_REF:-}" ]; then
+  REF="$CONCLAVE_REF"
+else
+  version=$(latest_release)
+  [ -n "$version" ] || die "no released version found at $REPO (set CONCLAVE_REF to install anyway)"
+  REF="v$version"
+fi
+echo "conclave: installing $REF"
 
 if [ -d "$PREFIX/.git" ]; then
   echo "conclave: updating $PREFIX"
