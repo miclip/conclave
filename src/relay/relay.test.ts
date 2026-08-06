@@ -388,6 +388,44 @@ test('asking is refused while a run is in flight, rather than racing its turns',
   await relay.ask('implementer', 'now that it is over')
 })
 
+test('a direct question says where the answer goes, so it is not read as an instruction', async () => {
+  // Observed live. Asked "get the implementer to fix those" out of run, the advisor
+  // announced it was "handing the accessibility fix to an implementer agent" and spawned a
+  // subagent. Every reply it makes DURING a run is routed onward as an instruction, and
+  // nothing in a direct question said this one would not be — so it reached for the only
+  // other way it had to make work happen.
+  const { relay, lead } = await twoParty(['DONE', 'here is what I found'], ['ack'])
+  await relay.run('a goal')
+  await relay.ask('advisor', 'get the implementer to fix those')
+
+  // Whitespace collapsed: the notice is wrapped prose, and an assertion that broke when
+  // someone rewrapped a line would be testing the line breaks rather than the meaning.
+  const asked = lead.received.at(-1)!.replace(/\s+/g, ' ')
+  assert.match(asked, /get the implementer to fix those/, 'the question itself is sent')
+  assert.match(asked, /No run is in flight/)
+  assert.match(asked, /nothing you say here is routed to the other participant/)
+  assert.match(asked, /do not spawn a subagent to stand in for the other participant/)
+
+  // The LOG keeps what the human said. Recording the framing too would bury the question
+  // under orchestrator boilerplate every time anyone read the transcript.
+  const recorded = relay.log.find((m) => m.text.includes('get the implementer to fix those'))!
+  assert.equal(recorded.text, 'get the implementer to fix those')
+})
+
+test('subagents are distinguished from the other participant', async () => {
+  // The collision this session created: we told both participants they could spawn
+  // subagents, in a vocabulary where "the implementer" already names a peer. Nothing said
+  // those were different kinds of thing.
+  const { relay, lead, impl } = await twoParty(['DONE'], [])
+  await relay.run('a goal')
+  for (const session of [lead, impl]) {
+    const opening = session.received[0]!
+    assert.match(opening, /A subagent is YOURS/)
+    assert.match(opening, /you cannot spawn one/, 'a peer is not something you can create')
+    assert.match(opening, /do not hand the job to a subagent and call it delegation/)
+  }
+})
+
 test('two participants can be asked at once; the same one, not twice', async () => {
   // The sessions are independent. Asking the implementer to start a server has no bearing
   // on asking the advisor to look at something while it does — and a guard that serialised

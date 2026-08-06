@@ -199,6 +199,23 @@ compliance is worse than disagreement.`
  * Said out loud rather than left as an absence. An implementer that noticed no goal would
  * reasonably go looking for one, or ask, and spend a turn doing it.
  */
+/**
+ * How a direct question announces itself.
+ *
+ * Asked out of run, a participant has no way to know it. The advisor was told "get the
+ * implementer to fix those" and reasonably assumed its reply would be routed onward as an
+ * instruction, the way every reply during a run is. It cannot be — there is no loop to
+ * carry it — so it did the next most sensible thing and spawned a subagent to do the work,
+ * announcing that it was "handing the fix to an implementer agent".
+ *
+ * That is the orchestrator's omission, not the model's mistake. A message that arrives
+ * with no context about what can be done with the answer invites exactly that inference.
+ */
+const DIRECT_QUESTION_NOTICE = `[Direct question from the human. No run is in flight: your
+reply goes to them and to nobody else, and nothing you say here is routed to the other
+participant. Answer them, or say what you would instruct — do not spawn a subagent to
+stand in for the other participant.]`
+
 const WITHHELD_GOAL_NOTICE = `The advisor holds this session's goal. You have not been given
 it, and that is deliberate rather than an oversight — do not go looking for it or ask what
 it is. Work from the instruction in front of you, and say plainly when something about it
@@ -224,6 +241,12 @@ const SUBAGENT_BRIEFING = `You can spawn subagents, and should when work genuine
 independent research, reviewing several files at once, exploring parts of the codebase that
 do not depend on each other. You decide when it is worth it; nobody is asking you to use
 them for their own sake.
+
+A subagent is YOURS. It is not the other participant in this session. "The implementer" and
+"the advisor" name two peers with their own sessions and their own context, reachable only
+through what this orchestrator routes between them — you cannot spawn one, and a subagent
+you spawn is not one however you label it. If you want the other participant to do
+something, say so in your reply; do not hand the job to a subagent and call it delegation.
 
 One rule, and it is not negotiable: a subagent that MODIFIES anything must work in its own
 git worktree, never in the shared working directory. Another model is working in that
@@ -601,8 +624,10 @@ export class Relay {
     }
     this.#asking.add(participantId)
     try {
+      // The log records what the HUMAN said; the participant is sent the framing too. A
+      // transcript full of orchestrator boilerplate would bury the thing actually asked.
       this.#record({ from: 'human', fromRank: 'human', to: [participantId], kind: 'constraint', text })
-      const turn = await this.#exchange(p, text)
+      const turn = await this.#exchange(p, `${DIRECT_QUESTION_NOTICE}\n\n${text}`)
       // `to: []` because it is going to the human, who is not a routed participant. The
       // console renders an unaddressed participant message as `→ you`.
       this.#record({ from: p.id, fromRank: p.rank, to: [], kind: 'report', text: turn.prose })
