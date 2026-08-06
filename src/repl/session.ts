@@ -108,6 +108,10 @@ function renderPause(p: RunPause, width: number): string {
     lines.push('')
     for (const e of p.evidence) lines.push(grey(`  ${e}`))
   }
+  // A verdict already withdrawn before the pause was printed. The commoner case — withdrawn
+  // while the operator is reading — arrives later as an orchestrator note, because this
+  // block has already been written to a terminal and cannot be taken back.
+  if (p.superseded) lines.push('', `  ${yellow('~')} ${p.superseded.note}`)
   // `constrain` is not a command — you constrain by typing. Offering it as one sent people
   // looking for a slash command that does not exist.
   const commands = p.options.filter((o) => o !== 'constrain').map((o) => `/${o}`)
@@ -344,6 +348,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
 
     if (word === '/state') {
       write(`  run: ${run.state}${run.pause ? ` (${run.pause.reason})` : ''}`)
+      if (run.pause?.superseded) write(`  ${yellow('~')} ${run.pause.superseded.note}`)
       for (const p of relay.participants) {
         write(`  ${p.id} (${p.rank}): session ${p.session.state}, ${p.events.length} events`)
       }

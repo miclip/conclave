@@ -29,6 +29,7 @@
 import type { AuthorityConflict } from './authority.ts'
 import type { Audience, RelayMessage } from './message.ts'
 import type { RunReason } from './observe.ts'
+import type { Verdict } from '../contract/outcome.ts'
 import type { RotationResult } from '../rotation/rotate.ts'
 
 export type RunState = 'running' | 'paused' | 'ended'
@@ -64,6 +65,27 @@ export type PauseReason =
 /** What the operator can do from here. Descriptive: the methods exist regardless. */
 export type PauseOption = 'continue' | 'rotate' | 'constrain' | 'abort'
 
+/**
+ * The claim a pause was raised on, withdrawn by the system after the fact.
+ *
+ * A pause is an ASSERTION the orchestrator makes to a human, and the evidence model is
+ * explicitly allowed to keep working on a turn after reporting a verdict — that is what a
+ * `revision` is for. So the two can diverge: a run pauses on `timed_out`, a late `Stop`
+ * proves the turn completed, and the human is left adjudicating a verdict nothing stands
+ * behind any more.
+ *
+ * The run STAYS PAUSED when this arrives. Withdrawing the reason for a decision is not the
+ * same as making it, and resuming on the system's own behalf would take the choice away at
+ * exactly the moment it became easy to make. The orchestrator surfaces; the human decides.
+ */
+export interface PauseSupersession {
+  at: number
+  /** Assembled from the revision rather than narrated, per §9: what the human should read. */
+  note: string
+  /** The replacement verdict, once the adapter has issued one. */
+  verdict?: Verdict | undefined
+}
+
 export interface RunPause {
   reason: PauseReason
   detail: string
@@ -75,6 +97,14 @@ export interface RunPause {
   options: PauseOption[]
   /** Present only on `authority_conflict`: both sides, so the human can adjudicate. */
   conflict?: AuthorityConflict | undefined
+  /**
+   * Present on `turn_incomplete`: the `turn_end` this pause rests on. Adapters withdraw a
+   * verdict BY SEQUENCE NUMBER, so this is what lets a later revision be matched to this
+   * pause exactly, rather than guessed at from timing.
+   */
+  verdictOf?: { participant: string; endSeq: number } | undefined
+  /** Set once the verdict named above has been withdrawn. See `PauseSupersession`. */
+  superseded?: PauseSupersession | undefined
   /** Position in the routing log when the run paused, for lining up against `audit()`. */
   atSeq: number
   at: number
@@ -274,6 +304,23 @@ export class RunHandle {
     return new Promise<Decision>((resolve) => {
       this.#decide = resolve
     })
+  }
+
+  /**
+   * Record that the verdict this pause was raised on has been withdrawn.
+   *
+   * MUTATES the pause in place rather than replacing it. Everyone who is ever going to hear
+   * about this pause already holds the object — `untilPause()` resolved with it before the
+   * revision existed, and there is no second resolution to give them — so a fresh object
+   * would be an amendment nobody receives.
+   *
+   * Returns false when there is nothing to amend, which is the ordinary race and not an
+   * error: the operator decided while the revision was in flight.
+   */
+  supersede(info: PauseSupersession): boolean {
+    if (this.#state !== 'paused' || !this.#pause) return false
+    this.#pause.superseded = info
+    return true
   }
 
   /** Record the terminal outcome and wake everyone waiting on anything. */

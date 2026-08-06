@@ -16,6 +16,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
+import type { Verdict } from '../contract/outcome.ts'
 import type { AgentSession } from '../contract/session.ts'
 import { AgentRegistry } from '../registry/registry.ts'
 import { FakeRotationSession } from '../rotation/fakeSession.ts'
@@ -591,4 +592,162 @@ test('result() resolves for a caller that asks after the run already ended', asy
   const run = relay.start('Keep the work moving.')
   const first = await run.result()
   assert.deepEqual(await run.result(), first)
+})
+
+// ---------------------------------------------------------------------------------------
+// A pause the system has since withdrawn.
+//
+// The evidence model is allowed to keep working on a turn after reporting a verdict, and a
+// pause is a snapshot of it at one instant. A live run paused on `timed_out`, a late signal
+// completed the same turn, and the pause text never changed -- so the operator was
+// adjudicating a verdict nothing stood behind. These are about surfacing that, and about
+// NOT deciding it: the run stays paused either way.
+// ---------------------------------------------------------------------------------------
+
+const TIMED_OUT: Verdict = {
+  outcome: 'timed_out',
+  confidence: 'uncertain',
+  provenance: [{ source: 'orchestrator', detail: 'past the watchdog at 600s with no Stop' }],
+}
+const COMPLETED: Verdict = {
+  outcome: 'completed',
+  confidence: 'proven',
+  provenance: [{ source: 'hook', detail: 'Stop' }],
+}
+
+/** Poll for something the relay does asynchronously. Bounded, so a failure is a failure. */
+async function until<T>(what: string, f: () => T | undefined, ms = 3000): Promise<T> {
+  const deadline = Date.now() + ms
+  for (;;) {
+    const v = f()
+    if (v !== undefined) return v
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`)
+    await new Promise((r) => setTimeout(r, 10))
+  }
+}
+
+test('a verdict withdrawn while the human is deciding is surfaced on the pause itself', async (t) => {
+  const dir = repo()
+  const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it, slowly.'])
+  impl.endTurn = { index: 1, verdict: TIMED_OUT }
+  const relay = await relayOf(dir, new FakeRotationSession('advisor', 'codex', ['Do it.', 'DONE']), [impl])
+  t.after(() => relay.stop())
+
+  const run = relay.start('Keep the work moving.')
+  const pause = await run.untilPause()
+  assert.ok(pause)
+  assert.equal(pause.reason, 'turn_incomplete')
+  // Via a local: `assert.strict.equal` narrows its first argument, and narrowing the pause
+  // field to `undefined` here would make every later assertion about it unreachable.
+  const before = pause.superseded
+  assert.equal(before, undefined, 'nothing has contradicted it yet')
+
+  // The late Stop the watchdog beat to it.
+  impl.lateSignal(COMPLETED)
+
+  const superseded = await until('the pause to be marked superseded', () => run.pause?.superseded?.verdict)
+  assert.equal(superseded.outcome, 'completed')
+  // The object the operator was handed, not a replacement they will never see.
+  assert.equal(pause.superseded?.verdict?.outcome, 'completed')
+  assert.match(pause.superseded!.note, /timed_out/)
+  assert.match(pause.superseded!.note, /withdrawn/)
+  assert.match(pause.superseded!.note, /completed/)
+
+  // Surfaced, not decided.
+  assert.equal(run.state, 'paused', 'withdrawing the reason for a decision is not making it')
+  await run.abort()
+})
+
+test('the withdrawal is recorded, so the log says why the pause stopped meaning anything', async (t) => {
+  const dir = repo()
+  const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it, slowly.'])
+  impl.endTurn = { index: 1, verdict: TIMED_OUT }
+  const relay = await relayOf(dir, new FakeRotationSession('advisor', 'codex', ['Do it.', 'DONE']), [impl])
+  t.after(() => relay.stop())
+
+  const run = relay.start('Keep the work moving.')
+  const pause = await run.untilPause()
+  assert.ok(pause)
+  impl.lateSignal(COMPLETED)
+  await until('the pause to be marked superseded', () => run.pause?.superseded?.verdict)
+
+  const notes = relay.log.filter((m) => m.kind === 'note').map((m) => m.text)
+  const raised = notes.findIndex((t) => t.startsWith('paused (turn_incomplete)'))
+  const withdrawn = notes.findIndex((t) => /withdrawn/.test(t))
+  assert.ok(raised >= 0 && withdrawn > raised, `expected a withdrawal note after the pause:\n${notes.join('\n')}`)
+  await run.abort()
+})
+
+test('a verdict withdrawn BEFORE the check never raises a pause at all', async (t) => {
+  const dir = repo()
+  const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it, slowly.'])
+  // The window the relay used to lose: `#exchange` settles on the first turn_end, and the
+  // late signal lands while it is still waiting for the transcript to catch up.
+  impl.delayMs = 10
+  impl.endTurn = { index: 1, verdict: TIMED_OUT, withdraw: COMPLETED }
+  const relay = await relayOf(dir, new FakeRotationSession('advisor', 'codex', ['Do it.', 'DONE']), [impl])
+  t.after(() => relay.stop())
+
+  const run = relay.start('Keep the work moving.')
+  assert.equal(await run.untilPause(), undefined, 'the verdict was retracted before anyone was asked about it')
+  assert.equal((await run.result()).reason, 'done')
+
+  // Retracted is not the same as never said: the log still shows both.
+  const notes = relay.log.filter((m) => m.kind === 'note').map((m) => m.text)
+  assert.ok(notes.some((t) => /timed_out/.test(t) && /withdrawn/.test(t) && /completed/.test(t)), notes.join('\n'))
+})
+
+test('a withdrawal with no replacement pauses, and says so from the moment it is raised', async (t) => {
+  const dir = repo()
+  const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it, slowly.'])
+  impl.delayMs = 10
+  impl.endTurn = { index: 1, verdict: TIMED_OUT, withdraw: 'no_replacement' }
+  const relay = await relayOf(dir, new FakeRotationSession('advisor', 'codex', ['Do it.', 'DONE']), [impl])
+  t.after(() => relay.stop())
+
+  const run = relay.start('Keep the work moving.')
+  const pause = await run.untilPause()
+  assert.ok(pause)
+  assert.equal(pause.reason, 'turn_incomplete')
+  assert.ok(pause.superseded, 'the verdict it rests on was already retracted')
+  assert.equal(pause.superseded?.verdict, undefined)
+  assert.match(pause.superseded!.note, /no replacement/)
+  await run.abort()
+})
+
+test('a compaction revision does not mark a verdict pause superseded', async (t) => {
+  const dir = repo()
+  const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it, slowly.'])
+  impl.endTurn = { index: 1, verdict: TIMED_OUT }
+  const relay = await relayOf(dir, new FakeRotationSession('advisor', 'codex', ['Do it.', 'DONE']), [impl])
+  t.after(() => relay.stop())
+
+  const run = relay.start('Keep the work moving.')
+  const pause = await run.untilPause()
+  assert.ok(pause)
+  assert.equal(pause.reason, 'turn_incomplete')
+
+  // Compaction rewrites history without contradicting a verdict: `replaces` is empty.
+  impl.compact()
+  await new Promise((r) => setTimeout(r, 100))
+  assert.ok(!run.pause?.superseded, 'a rewritten transcript is not a withdrawn verdict')
+  await run.abort()
+})
+
+test('a late signal does not amend a pause that was never about a verdict', async (t) => {
+  const dir = repo()
+  const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it.'])
+  const relay = await relayOf(dir, new FakeRotationSession('advisor', 'codex', ['Do it.', 'DONE']), [impl])
+  t.after(() => relay.stop())
+
+  const run = relay.start('Keep the work moving.')
+  impl.compact()
+  const pause = await run.untilPause()
+  assert.ok(pause)
+  assert.equal(pause.reason, 'rotation_candidate')
+
+  impl.lateSignal(COMPLETED)
+  await new Promise((r) => setTimeout(r, 100))
+  assert.ok(!run.pause?.superseded, 'nothing about a rotation candidate rests on a turn verdict')
+  await run.abort()
 })

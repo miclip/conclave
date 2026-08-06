@@ -8,6 +8,7 @@
  * alive" is the property that matters.
  */
 
+import type { Verdict } from '../contract/outcome.ts'
 import type {
   AgentEvent,
   AgentSession,
@@ -17,6 +18,12 @@ import type {
   TurnKey,
 } from '../contract/session.ts'
 import { guaranteesFor, turnKey } from '../contract/session.ts'
+
+const COMPLETED: Verdict = {
+  outcome: 'completed',
+  confidence: 'proven',
+  provenance: [{ source: 'hook', detail: 'Stop' }],
+}
 
 export class FakeRotationSession implements AgentSession {
   readonly guarantees = guaranteesFor('mediated')
@@ -104,20 +111,76 @@ export class FakeRotationSession implements AgentSession {
       this.#turns[index]!.prose = report
     }
     if (this.delayMs > 0) {
-      setTimeout(() => this.#endTurn(key), this.delayMs).unref()
+      setTimeout(() => this.#endTurn(key, index), this.delayMs).unref()
       return key
     }
-    this.#endTurn(key)
+    this.#endTurn(key, index)
     return key
   }
 
-  #endTurn(key: TurnKey): void {
+  /**
+   * How one turn ends, when `completed` is not what the test needs. Indexed by turn like
+   * `compactOnTurn` and for the same reason — the implementer's turn 0 is the briefing, so
+   * the first turn that does work is 1, and a test that means that should say so.
+   *
+   * `withdraw` fires a late signal the instant the verdict is reported. Deliberately not a
+   * timer: it reproduces the window the relay actually loses the race in — between
+   * `turn_end` and the relay's own reading of it, across the transcript settle wait — and
+   * does it deterministically, which a `setTimeout` racing a 250ms poll would not.
+   */
+  endTurn: { index: number; verdict: Verdict; withdraw?: 'no_replacement' | Verdict } | undefined
+
+  /** Seq of the last `turn_end`, so a revision can withdraw it by number as the adapters do. */
+  #lastEndSeq: number | undefined
+  #lastKey: TurnKey | undefined
+
+  #endTurn(key: TurnKey, index: number): void {
+    const scripted = this.endTurn?.index === index ? this.endTurn : undefined
+    this.#lastKey = key
+    this.#lastEndSeq = ++this.#seq
     this.emit({
       type: 'turn_end',
-      verdict: { outcome: 'completed', confidence: 'proven', provenance: [{ source: 'hook', detail: 'Stop' }] },
+      verdict: scripted?.verdict ?? COMPLETED,
       synthesized: false,
       turnKey: key,
+      seq: this.#lastEndSeq,
+      at: Date.now(),
+      provisional: false,
+    })
+    if (scripted?.withdraw) {
+      this.lateSignal(scripted.withdraw === 'no_replacement' ? 'none' : scripted.withdraw)
+    }
+  }
+
+  /**
+   * A late signal that withdraws the last `turn_end` and optionally replaces it — the shape
+   * the adapters emit from `#apply`, including withdrawal BY SEQUENCE NUMBER, which is what
+   * lets a consumer match the revision to the verdict it retracts.
+   *
+   * `'none'` is the `resetTranscript` case: the verdict is gone and the turn is open again.
+   * A sentinel rather than `undefined`, which a default parameter cannot distinguish from
+   * an omitted argument.
+   */
+  lateSignal(replacement: Verdict | 'none' = COMPLETED): void {
+    if (this.#lastEndSeq === undefined) throw new Error('no turn_end to withdraw')
+    this.emit({
+      type: 'revision',
+      reason: 'late_signal',
+      replaces: [this.#lastEndSeq],
+      provenance: [{ source: 'hook', detail: 'stronger evidence superseded the reported verdict' }],
       seq: ++this.#seq,
+      at: Date.now(),
+      provisional: false,
+    })
+    this.#lastEndSeq = undefined
+    if (replacement === 'none') return
+    this.#lastEndSeq = ++this.#seq
+    this.emit({
+      type: 'turn_end',
+      verdict: replacement,
+      synthesized: false,
+      ...(this.#lastKey === undefined ? {} : { turnKey: this.#lastKey }),
+      seq: this.#lastEndSeq,
       at: Date.now(),
       provisional: false,
     })

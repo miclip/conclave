@@ -14,8 +14,14 @@
  *     implemented here.
  */
 
-import type { AgentEvent, AgentSession, SessionSnapshot, TurnEndEvent } from '../contract/session.ts'
-import { formatVerdict } from '../contract/outcome.ts'
+import type {
+  AgentEvent,
+  AgentSession,
+  RevisionEvent,
+  SessionSnapshot,
+  TurnEndEvent,
+} from '../contract/session.ts'
+import { formatVerdict, type Verdict } from '../contract/outcome.ts'
 import { AgentRegistry } from '../registry/registry.ts'
 import type { ParticipantSpec } from '../registry/types.ts'
 import { acquire, release } from '../workspace/sessionLock.ts'
@@ -28,7 +34,13 @@ import {
   type Visibility,
 } from './message.ts'
 import { RelayEventStream, type ObserveOptions, type RelayEvent, type RunReason } from './observe.ts'
-import { RunHandle, type PauseReason, type RunOutcome, type RunPause } from './run.ts'
+import {
+  RunHandle,
+  type PauseReason,
+  type PauseSupersession,
+  type RunOutcome,
+  type RunPause,
+} from './run.ts'
 import {
   attributable,
   describeConflict,
@@ -151,6 +163,40 @@ It outranks you on process, but you are not required to agree with it. If an ins
 is wrong, say so plainly and say why, then proceed unless a human overrules. Silent
 compliance is worse than disagreement.`
 
+/**
+ * The revision that withdrew a `turn_end`, and whatever replaced it.
+ *
+ * Adapters retract a verdict BY NUMBER — `revision.replaces` names the seq of the
+ * `turn_end` being withdrawn (see `#apply` in `adapters/claude.ts`) — so this is an exact
+ * link rather than an inference from timing or turn keys. A compaction revision carries an
+ * empty `replaces` and therefore never matches, which is correct: compaction rewrites
+ * history without contradicting a verdict.
+ *
+ * The replacement is the next `turn_end` after it. The tracker emits the revision and its
+ * successor back to back, and nothing can be sending this participant a new turn at the
+ * points where this is consulted — between exchanges, or with the loop suspended at a pause.
+ */
+function supersessionOf(
+  events: AgentEvent[],
+  end: TurnEndEvent,
+): { revision: RevisionEvent; replacement: TurnEndEvent | undefined } | undefined {
+  const i = events.findIndex((e) => e.type === 'revision' && e.replaces.includes(end.seq))
+  if (i < 0) return undefined
+  const replacement = events.slice(i + 1).find((e) => e.type === 'turn_end') as TurnEndEvent | undefined
+  return { revision: events[i] as RevisionEvent, replacement }
+}
+
+/** A pause in front of a human that rests on a turn verdict, and can therefore go stale. */
+interface VerdictPause {
+  handle: RunHandle
+  participant: string
+  /** The `turn_end` the pause was raised on; a revision naming it withdraws the pause's claim. */
+  endSeq: number
+  outcome: string
+  /** True once the revision has been seen and only the replacement is still outstanding. */
+  withdrawn: boolean
+}
+
 export class Relay {
   readonly log: RelayMessage[] = []
   #participants = new Map<string, RelayParticipant>()
@@ -159,6 +205,8 @@ export class Relay {
   #stopped = false
   /** Set by `RunHandle.requestPause()`; consumed at the next round boundary. */
   #pauseRequested: string | undefined
+  /** The pause currently in front of a human, when it rests on a verdict. See `#trackSupersession`. */
+  #verdictPause: VerdictPause | undefined
   #stream = new RelayEventStream()
   #ended = false
 
@@ -214,9 +262,61 @@ export class Relay {
       for await (const e of session.events()) {
         if (p.session !== session) return
         p.events.push(e)
+        this.#trackSupersession(p, e)
         this.#stream.emit({ type: 'activity', participant: p.id, rank: p.rank, event: e })
       }
     })()
+  }
+
+  /**
+   * A pause the system has since talked itself out of.
+   *
+   * The relay's pause is a snapshot of the evidence model at one instant; the evidence model
+   * keeps going. A run that paused on `timed_out` and then received the late `Stop` proving
+   * the turn completed leaves a human adjudicating a verdict that has been withdrawn — and
+   * the only party holding both the pause and the revision is this one. The revision does
+   * reach the operator's console today, as one line reading `transcript revised
+   * (late_signal)`, which names neither the verdict nor the pause it demolishes.
+   *
+   * It surfaces and does not decide: the run stays paused. See `RunHandle.supersede`.
+   */
+  #trackSupersession(p: RelayParticipant, e: AgentEvent): void {
+    const pending = this.#verdictPause
+    if (!pending || pending.participant !== p.id) return
+
+    if (!pending.withdrawn) {
+      if (e.type !== 'revision' || !e.replaces.includes(pending.endSeq)) return
+      pending.withdrawn = true
+      this.#supersede(
+        pending,
+        `the ${pending.outcome} verdict this pause was raised on has been withdrawn ` +
+          `(${e.reason}); the run is still paused, and the decision is still yours`,
+      )
+      return
+    }
+
+    // The replacement follows its revision immediately, and no new turn can be in flight for
+    // this participant while the loop is suspended at the pause, so the next `turn_end` is
+    // it. A withdrawal with no replacement is also possible — the turn is simply open again
+    // — which is why the note above stands on its own rather than waiting for this.
+    if (e.type === 'turn_end') {
+      this.#supersede(
+        pending,
+        `the ${pending.outcome} verdict this pause was raised on was withdrawn and replaced ` +
+          `with ${formatVerdict(e.verdict)}; the run is still paused, and the decision is still yours`,
+        e.verdict,
+      )
+      this.#verdictPause = undefined
+    }
+  }
+
+  #supersede(pending: VerdictPause, note: string, verdict?: Verdict): void {
+    const info: PauseSupersession = { at: Date.now(), note, ...(verdict === undefined ? {} : { verdict }) }
+    // Recorded only if the pause was still there to amend. Logging a supersession for a
+    // pause the operator has already resolved would put a decision in the log that nobody made.
+    if (pending.handle.supersede(info)) {
+      this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text: note })
+    }
   }
 
   #record(m: Omit<RelayMessage, 'seq' | 'at' | 'visibility' | 'excluded'>): RelayMessage {
@@ -525,7 +625,14 @@ export class Relay {
    */
   async #halt(
     handle: RunHandle | undefined,
-    p: { reason: PauseReason; detail: string; evidence: string[]; conflict?: AuthorityConflict },
+    p: {
+      reason: PauseReason
+      detail: string
+      evidence: string[]
+      conflict?: AuthorityConflict
+      verdictOf?: { participant: string; endSeq: number }
+      superseded?: PauseSupersession
+    },
   ): Promise<RunOutcome | undefined> {
     this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text: `paused (${p.reason}): ${p.detail}` })
     if (!handle) {
@@ -541,6 +648,8 @@ export class Relay {
       evidence: p.evidence,
       options: ['continue', 'rotate', 'constrain', 'abort'],
       ...(p.conflict === undefined ? {} : { conflict: p.conflict }),
+      ...(p.verdictOf === undefined ? {} : { verdictOf: p.verdictOf }),
+      ...(p.superseded === undefined ? {} : { superseded: p.superseded }),
       atSeq: this.#seq,
     })
     if (decision.kind === 'abort') return this.#end('stopped', decision.detail)
@@ -800,15 +909,61 @@ export class Relay {
       this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text: `${impl.id} turn: ${formatVerdict(report.end.verdict)}` })
       this.#attributeArtifacts()
 
+      // The verdict may already be stale by the time we read it. `#exchange` settles on the
+      // FIRST `turn_end`, and the late signal that withdraws it can land during the
+      // transcript settle window that follows — the same window that is there because a
+      // late `Stop` is expected. Pausing on a verdict the system has already retracted asks
+      // the human to adjudicate nothing at all, so the current one is used instead.
+      const already = supersessionOf(impl.events, report.end)
+      const current = already?.replacement ?? report.end
+      if (already) {
+        this.#record({
+          from: 'orchestrator',
+          fromRank: 'human',
+          to: [],
+          kind: 'note',
+          text:
+            `${impl.id}'s ${report.end.verdict.outcome} verdict was withdrawn (${already.revision.reason})` +
+            (already.replacement
+              ? ` and replaced with ${formatVerdict(already.replacement.verdict)}`
+              : ` with no replacement`),
+        })
+      }
+      // A withdrawal with no replacement leaves the pause resting on a verdict that is
+      // already retracted, so it says so from the moment it is raised.
+      const pre: PauseSupersession | undefined =
+        already && !already.replacement
+          ? {
+              at: Date.now(),
+              note:
+                `the ${report.end.verdict.outcome} verdict this pause was raised on had already been ` +
+                `withdrawn (${already.revision.reason}) with no replacement`,
+            }
+          : undefined
+
       // A turn that did not complete is the human's call, not the advisor's. Escalating
       // here rather than relaying the partial prose keeps the advisor from steering on a
       // report that never finished being written.
-      if (report.end.verdict.outcome !== 'completed') {
+      if (current.verdict.outcome !== 'completed') {
+        // Registered before the halt, so a revision arriving while the human reads the
+        // pause can be matched to it; cleared after, so it cannot amend the next one.
+        if (handle) {
+          this.#verdictPause = {
+            handle,
+            participant: impl.id,
+            endSeq: current.seq,
+            outcome: current.verdict.outcome,
+            withdrawn: pre !== undefined,
+          }
+        }
         const halted = await this.#halt(handle, {
           reason: 'turn_incomplete',
-          detail: `${impl.id} turn ended ${formatVerdict(report.end.verdict)}`,
-          evidence: report.end.verdict.provenance.map((p) => `${p.source}: ${p.detail}`),
+          detail: `${impl.id} turn ended ${formatVerdict(current.verdict)}`,
+          evidence: current.verdict.provenance.map((p) => `${p.source}: ${p.detail}`),
+          verdictOf: { participant: impl.id, endSeq: current.seq },
+          ...(pre === undefined ? {} : { superseded: pre }),
         })
+        this.#verdictPause = undefined
         if (halted) return halted
       }
 
