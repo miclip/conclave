@@ -170,6 +170,31 @@ export async function runSession(opts: SessionOptions): Promise<number> {
   // spinner carrying the current tool says "working" without burying the prose above it.
   const status = new Status(out, interactive, () => (rl?.line?.length ?? 0) > 0)
   statusRef = status
+
+  /**
+   * Narration streams to the human; the report goes to the other participant.
+   *
+   * The transcript view emits each new span of assistant text as a `message` delta, which
+   * is the running commentary — "now let me check X" — written to tell a watching human
+   * what is happening. It used to surface only after the turn ended, concatenated into the
+   * report, which is both too late to be useful and addressed to the wrong party.
+   *
+   * The last delta before `turn_end` is the closing message, and that is the report. It is
+   * held back rather than streamed, because the routed copy prints it a moment later under
+   * `→ advisor` and printing it twice would make the routing harder to read, not easier.
+   * One delta of lookahead is all that requires.
+   */
+  const pendingNarration = new Map<string, string>()
+  const narrating = new Set<string>()
+  const narrate = (participant: string, rank: string, text: string) => {
+    if (!text.trim()) return
+    if (!narrating.has(participant)) {
+      narrating.add(participant)
+      write(`\n${speakerColor(participant, rank)('●')} ${bold(participant)}${dim(' → you')}`)
+    }
+    write(dim(markdown(text, { width })))
+  }
+
   void (async () => {
     for await (const e of relay.observe({ replay: false })) {
       if (e.type !== 'activity') continue
@@ -177,9 +202,16 @@ export async function runSession(opts: SessionOptions): Promise<number> {
       if (ev.type === 'turn_start') {
         status.start(`${speakerColor(e.participant, e.rank)(e.participant)} working`)
       } else if (ev.type === 'turn_end') {
+        // Drop the held delta: it is the closing message, and the routed copy follows.
+        pendingNarration.delete(e.participant)
+        narrating.delete(e.participant)
         status.clear()
       } else if (ev.type === 'tool_use') {
         status.detail(ev.tool)
+      } else if (ev.type === 'message' && ev.role === 'assistant') {
+        const held = pendingNarration.get(e.participant)
+        if (held !== undefined) narrate(e.participant, e.rank, held)
+        pendingNarration.set(e.participant, ev.text)
       } else {
         const line = renderActivity(e.participant, ev)
         if (line) {

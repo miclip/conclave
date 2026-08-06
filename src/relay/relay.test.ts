@@ -149,6 +149,12 @@ class FakeSession implements AgentSession {
     this.#lag = { text: finalText, until: Date.now() + afterMs }
   }
 
+  /** Narration and closing message as the parsers now distinguish them. */
+  #split: { narration: string; report: string } | undefined
+  splitProse(narration: string, report: string): void {
+    this.#split = { narration, report }
+  }
+
   async snapshot(): Promise<SessionSnapshot> {
     const lagging = this.#lag !== undefined && Date.now() < this.#lag.until
     return {
@@ -162,7 +168,13 @@ class FakeSession implements AgentSession {
           key: t.key,
           prompt: '',
           state: (held && lagging ? 'in_progress' : 'completed') as 'in_progress' | 'completed',
-          assistantText: held && !lagging ? this.#lag!.text : t.prose,
+          assistantText:
+            held && !lagging
+              ? this.#lag!.text
+              : this.#split && last
+                ? `${this.#split.narration}\n\n${this.#split.report}`
+                : t.prose,
+          report: this.#split && last ? this.#split.report : undefined,
           toolCalls: t.args.map((args) => ({ tool: 'Bash', failed: false, args })),
         }
       }),
@@ -729,4 +741,26 @@ test('a transcript that never settles is used anyway, and the shortfall is recor
 
   assert.ok(relay.log.some((m) => m.text.includes('may be incomplete')))
   assert.match(relay.log.filter((m) => m.kind === 'report').at(-1)!.text, /PREAMBLE/)
+})
+
+test('the other participant receives the report, not the narration', async () => {
+  // An advisor that reads "I'll start by finding the relevant code" answers the stated
+  // intention rather than the result, and then re-asks for work already done. The human
+  // sees narration live instead; see repl/session.ts.
+  const impl = new FakeSession('claude', 'impl', ['ack', 'IGNORED'])
+  impl.splitProse("I'll start by finding the relevant code.", 'Done. guard --json is in.')
+
+  const relay = await Relay.start({
+    registry: registryWith({ codex: new FakeSession('codex', 'advisor', ['Do it.', 'DONE']), claude: impl }),
+    cwd: process.cwd(),
+    lead: { id: 'advisor', agent: 'codex', role: 'advisor' },
+    implementer: { id: 'implementer', agent: 'claude', role: 'implementer' },
+    maxRounds: 2,
+  })
+  await relay.run('Keep the work moving.')
+  await relay.stop()
+
+  const report = relay.log.filter((m) => m.kind === 'report').at(-1)!
+  assert.equal(report.text, 'Done. guard --json is in.')
+  assert.ok(!report.text.includes("I'll start by"), 'the narration must not be routed')
 })

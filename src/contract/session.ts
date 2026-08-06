@@ -158,7 +158,31 @@ export interface TurnRecord {
   state: TurnLiveness
   confidence?: Confidence | undefined
   provenance?: Provenance[] | undefined
+  /**
+   * Everything the model wrote this turn, in order, blocks separated by a blank line.
+   *
+   * This is the NARRATION — running commentary between tool calls, "now let me check X",
+   * as well as the closing message. It is what a human following along would see, and it
+   * was previously concatenated with no separator at all, producing "…exists.Now let me…".
+   */
   assistantText?: string | undefined
+  /**
+   * The closing message alone: the turn's actual report.
+   *
+   * Separate from `assistantText` because the two have different audiences. The brief
+   * originally routed full narration to the other participant; a live session showed why
+   * that is wrong. An advisor receiving "I'll start by finding the relevant code" will
+   * respond to a stated intention rather than to a result, and steering on intentions is
+   * how an advisor ends up re-asking for work already done.
+   *
+   * So: the human sees narration, live. The other participant sees the report.
+   *
+   * The two adapters silently disagreed about this. Codex set `assistantText` from
+   * `last_agent_message` — the closing message only — while Claude concatenated every
+   * block. Same field, two meanings, and no test could tell because each adapter was only
+   * ever compared against itself.
+   */
+  report?: string | undefined
   /**
    * `args` is the tool's input, serialized. Retained because it is the only per-participant
    * evidence of which files a session touched: no adapter emits `tool_use`, and

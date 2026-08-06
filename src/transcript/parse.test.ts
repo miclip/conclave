@@ -130,3 +130,31 @@ test('tool names and failure still parse exactly as before', () => {
   assert.equal(turns[0]!.toolCalls[0]!.tool, 'Bash')
   assert.equal(turns[0]!.toolCalls[0]!.failed, true)
 })
+
+test('narration and report are separated, and the narration is readable', () => {
+  // Two failures in one: blocks were concatenated with no separator ("…exists.Now let me…"),
+  // and the whole concatenation was routed to the other participant — which answers a
+  // stated intention rather than a result.
+  const parsed = parseClaude([
+    { type: 'user', message: { content: 'do the thing' } },
+    {
+      type: 'assistant',
+      message: {
+        content: [
+          { type: 'text', text: "I'll start by finding the relevant code." },
+          { type: 'tool_use', name: 'Read', input: { file_path: 'a.ts' } },
+          { type: 'text', text: 'Now the guard report shape.' },
+          { type: 'text', text: 'Done. guard --json is in.' },
+        ],
+        stop_reason: 'end_turn',
+      },
+    },
+  ])
+  const turn = parsed.turns.at(-1)!
+  assert.equal(turn.report, 'Done. guard --json is in.', 'the closing message alone')
+  assert.match(turn.assistantText!, /finding the relevant code\.\n\nNow the guard report shape/)
+  assert.ok(
+    turn.assistantText!.includes('Done. guard --json is in.'),
+    'the narration still contains everything, including the close',
+  )
+})

@@ -363,7 +363,12 @@ export class Relay {
       })
     }
     this.#collectEvidence(p, snap)
-    const prose = snap.turns.at(-1)?.assistantText ?? ''
+    // The report, not the narration. A participant that receives "I'll start by finding the
+    // relevant code" answers the intention rather than the result, which is how an advisor
+    // ends up re-asking for work already done. The narration reaches the human live, as
+    // `message` events; see repl/session.ts.
+    const turn = snap.turns.at(-1)
+    const prose = turn?.report ?? turn?.assistantText ?? ''
     return { prose, end }
   }
 

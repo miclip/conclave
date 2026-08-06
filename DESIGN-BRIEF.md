@@ -1730,6 +1730,47 @@ the only signal that found four defects in a single day's live runs.
 It is also why §7's health metrics count *unbacked* complaints rather than complaints. A
 request for information the protocol genuinely omits is not a stall.
 
+#### Narration is for the human; the report is for the participant [Revised 2026-08-06]
+
+The brief said participants exchange **all** of it — full narration, not just the closing
+message. A live session showed why that is wrong, and the correction has two halves.
+
+**What the other participant receives is the closing message alone.** An advisor that reads
+*"I'll start by finding the relevant code"* answers a stated intention rather than a result.
+Combined with the transcript-flush race it produced a session where the advisor asked three
+times for a trace the implementer had already delivered — it was steering on preambles. Even
+without the race, routing narration invites the advisor to react to work in progress, which
+is the opposite of what a thin-context advisor is for.
+
+**What the human receives is the narration, live.** That commentary is written to tell a
+watching human what is happening; surfacing it only after the turn ends, concatenated into
+the report, is both too late to be useful and addressed to the wrong party. The transcript
+view already emitted it as `message` deltas — the console simply had no case for them.
+
+So the console shows:
+
+```
+● implementer → you          ← narration, as it happens
+  I'll start by finding the relevant code.
+  Now the guard report shape.
+
+● implementer → advisor      ← the report, once the turn ends
+  Done. guard --json is in.
+```
+
+which also makes the routing legible: what was written for you, and what the other
+participant actually got. The closing message is held back rather than streamed, since the
+routed copy prints it a moment later; one delta of lookahead is all that takes.
+
+**Two adapters had silently disagreed about this.** Codex set `assistantText` from
+`last_agent_message` — the closing message only — while Claude concatenated every block. Same
+field, two meanings, and no test could see it because each adapter was only ever compared
+against itself. `TurnRecord` now carries both `assistantText` (narration, blocks separated by
+a blank line) and `report` (the closing message), and both parsers populate both.
+
+The blank line matters more than it looks: concatenation with no separator produced
+*"…what exists.Now let me see…"* in every Claude report, in the prose the advisor steers on.
+
 #### Evidence ledger for §7a
 
 | level | what |

@@ -102,7 +102,13 @@ export function parseClaude(records: Record<string, any>[]): ParsedTranscript {
         const msg = d.message ?? {}
         for (const block of msg.content ?? []) {
           if (block?.type === 'text' && block.text) {
-            current.assistantText = (current.assistantText ?? '') + block.text
+            // Blank line between blocks. Without it "…what exists.Now let me see…" is what
+            // both the human and the other participant read.
+            current.assistantText = current.assistantText
+              ? `${current.assistantText}\n\n${block.text}`
+              : block.text
+            // The last text block of the turn is its report; earlier ones are narration.
+            current.report = block.text
           } else if (block?.type === 'tool_use') {
             // `input` carries `file_path` on Write/Edit and `command` on Bash. Verified
             // present on 1883/1883 Edit and 475/475 Write calls across 173 sessions; Bash
@@ -213,7 +219,15 @@ export function parseCodex(records: Record<string, any>[]): ParsedTranscript {
             rec.state = 'completed'
             rec.confidence = 'proven'
             rec.provenance = [{ source: 'transcript', detail: 'task_complete' }]
-            if (p.last_agent_message) rec.assistantText = String(p.last_agent_message)
+            if (p.last_agent_message) {
+              const final = String(p.last_agent_message)
+              rec.report = final
+              // `assistantText` is the narration and must contain the closing message too;
+              // only append when the running text does not already end with it, since
+              // `agent_message` may have carried the same block already.
+              if (!rec.assistantText) rec.assistantText = final
+              else if (!rec.assistantText.endsWith(final)) rec.assistantText += `\n\n${final}`
+            }
           }
           break
         }
@@ -230,7 +244,13 @@ export function parseCodex(records: Record<string, any>[]): ParsedTranscript {
           break
         }
         case 'agent_message':
-          if (current && p.message) current.assistantText = String(p.message)
+          if (current && p.message) {
+            const text = String(p.message)
+            current.assistantText = current.assistantText
+              ? `${current.assistantText}\n\n${text}`
+              : text
+            current.report = text
+          }
           break
       }
       continue

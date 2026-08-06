@@ -44,6 +44,14 @@ export class FakeRotationSession implements AgentSession {
   delayMs = 0
   /** Compact when this turn index starts (0-based). Deterministic, unlike a timer. */
   compactOnTurn: number | undefined
+  /**
+   * Narration blocks emitted as `message` deltas during the turn, then a closing report.
+   * The two have different audiences and the console must show that; see repl/session.ts.
+   */
+  #narration: { blocks: string[]; report: string } | undefined
+  narrate(blocks: string[], report: string): void {
+    this.#narration = { blocks, report }
+  }
 
   constructor(sessionId: string, agent: string, replies: string[] = []) {
     this.sessionId = sessionId
@@ -69,6 +77,22 @@ export class FakeRotationSession implements AgentSession {
     const key = turnKey(`${this.sessionId}-turn-${index}`)
     this.#turns.push({ key, prose: this.#replies.shift() ?? '' })
     if (this.compactOnTurn === index) this.compact()
+    if (this.#narration && index > 0) {
+      const { blocks, report } = this.#narration
+      const step = Math.max(1, Math.floor(this.delayMs / (blocks.length + 2)))
+      blocks.forEach((text, n) => {
+        setTimeout(
+          () => this.emit({ type: 'message', role: 'assistant', text, seq: ++this.#seq, at: Date.now(), provisional: true }),
+          step * (n + 1),
+        ).unref()
+      })
+      // The closing message arrives as a delta too — the console must hold it back.
+      setTimeout(
+        () => this.emit({ type: 'message', role: 'assistant', text: report, seq: ++this.#seq, at: Date.now(), provisional: true }),
+        step * (blocks.length + 1),
+      ).unref()
+      this.#turns[index]!.prose = report
+    }
     if (this.delayMs > 0) {
       setTimeout(() => this.#endTurn(key), this.delayMs).unref()
       return key
