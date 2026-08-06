@@ -24,7 +24,7 @@
  * prompt says so rather than implying otherwise.
  */
 
-import { createInterface } from 'node:readline'
+import { clearLine, createInterface, cursorTo, type Interface } from 'node:readline'
 import type { AgentEvent } from '../contract/session.ts'
 import { defaultRegistry } from '../registry/builtin.ts'
 import type { AgentRegistry } from '../registry/registry.ts'
@@ -101,7 +101,28 @@ function renderPause(p: RunPause): string {
 
 export async function runSession(opts: SessionOptions): Promise<number> {
   const out = opts.output ?? process.stdout
-  const write = (s: string) => out.write(`${s}\n`)
+  const interactive =
+    (opts.input ?? process.stdin) === process.stdin && process.stdin.isTTY === true
+  let rl: Interface | undefined
+
+  /**
+   * Write a line without eating what the operator is halfway through typing.
+   *
+   * Activity arrives asynchronously while readline is holding a partial line, so a bare
+   * `out.write` interleaves with it and the typed text is visually destroyed. Clearing the
+   * current line, writing, and re-prompting with `preserveCursor` redraws the prompt AND
+   * the buffer, which is what makes this usable rather than merely functional.
+   */
+  const write = (s: string) => {
+    if (!rl || !interactive) {
+      out.write(`${s}\n`)
+      return
+    }
+    cursorTo(out as NodeJS.WritableStream & { columns?: number }, 0)
+    clearLine(out as NodeJS.WritableStream & { columns?: number }, 0)
+    out.write(`${s}\n`)
+    rl.prompt(true)
+  }
 
   // A live lock means someone else's participants are working in this tree. Starting anyway
   // would overwrite their record of what was dirty before they began, which is the thing
@@ -162,19 +183,41 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     }
   })()
 
-  const rl = createInterface({
+  rl = createInterface({
     input: opts.input ?? process.stdin,
     output: out,
     prompt: '> ',
     // Keyed off whether it IS a terminal, not whether a stream was injected. The first
     // live run piped stdin and got `[1G[0J>` escape sequences in the log, because readline
     // was drawing a prompt for a pipe.
-    terminal: (opts.input ?? process.stdin) === process.stdin && process.stdin.isTTY === true,
+    terminal: interactive,
   })
   const prompt = () => {
-    if (!done) rl.prompt()
+    if (!done) rl!.prompt()
   }
   prompt()
+
+  /**
+   * Ctrl-C must not orphan the children.
+   *
+   * Killing the process leaves two CLIs holding PTYs with nothing to reap them — the exact
+   * leak that held a test process open for 26 minutes before `close('abandoned')` was
+   * fixed to terminate. First interrupt aborts the run and tears down; a second gives up
+   * and exits, because a teardown that itself hangs must not trap the operator.
+   */
+  let interrupting = false
+  const onInterrupt = () => {
+    if (interrupting) {
+      write('\n  second interrupt — exiting without waiting for teardown')
+      process.exit(130)
+    }
+    interrupting = true
+    write('\n  interrupt — aborting the run and stopping participants (again to force)')
+    void run.abort('interrupted at the console').then(wake, wake)
+  }
+  rl.on('SIGINT', onInterrupt)
+  process.on('SIGINT', onInterrupt)
+  process.on('SIGTERM', onInterrupt)
 
   rl.on('line', (raw) => {
     const line = raw.trim()
@@ -270,8 +313,16 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     write('  queued for everyone at the next exchange')
   }
 
-  await supervising
-  rl.close()
-  await relay.stop()
+  try {
+    await supervising
+  } finally {
+    // Every exit path tears down. A console that leaks participants on an unexpected throw
+    // is worse than no console, because the leak is invisible until the next run refuses
+    // to start on a lock it does not recognise.
+    process.off('SIGINT', onInterrupt)
+    process.off('SIGTERM', onInterrupt)
+    rl.close()
+    await relay.stop()
+  }
   return 0
 }
