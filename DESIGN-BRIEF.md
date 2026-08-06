@@ -499,10 +499,21 @@ Consequences, each of which needs handling rather than noting:
 - **No child's transcript is the full record.** Each is a partial view. The orchestrator's
   routing log becomes the only complete account of who saw what, which makes it something
   to preserve deliberately rather than a debugging artifact.
-- **A prose-only lead cannot verify anything.** It can only react to what the implementer
-  claims happened. "Fixed, tests pass" is unfalsifiable from inside the conversation.
-  This makes the non-model arbiter (§7) more important, not less: a test run is the one
-  claim neither model can talk itself into.
+- **The advisor sees the artifact, not the activity.** *(Corrected: an earlier draft of
+  this section claimed a prose-only lead cannot verify anything. That was wrong, and an
+  argument was built on it.)* Both agents share a working directory and a branch, so the
+  advisor has independent access to ground truth — it can read the files, run `git diff`,
+  and run the test suite itself. "Fixed, tests pass" is entirely falsifiable; it just has
+  to be checked rather than believed.
+
+  What the advisor lacks is *process* context: which approaches were tried and abandoned,
+  what the implementer read, the intermediate states. It has full *state* access. That is
+  a better position than trusting a report, and better than two models agreeing — an
+  independently run test is corroboration of a kind that peer agreement never is.
+
+  It also means the thin context diet is self-directed rather than imposed. The advisor
+  chooses what to look at and pays for it deliberately, instead of passively accumulating
+  whatever the implementer happened to touch.
 - **Permission dialogs escalate to the human by construction.** A lead that cannot see
   tool use has no basis on which to authorise one.
 
@@ -513,6 +524,28 @@ so an unattributed instruction arrives carrying the human's authority and pushba
 very unlikely. The human's own constraints (§6) then need a genuinely higher privilege
 than the lead's instructions, or an intervention is indistinguishable from routine
 steering.
+
+### Shared workspace
+
+Both agents run in the same directory on the same branch. Two hazards follow.
+
+**The advisor must not write.** `roles.ts` already declares `mutatesWorkspace: false` for
+the advisor; with a shared tree that stops being descriptive and becomes something to
+enforce at launch — Codex takes `sandbox_mode="read-only"`, Claude Code takes a
+permission mode. Two agents editing the same branch concurrently is a merge conflict with
+extra steps.
+
+**Verification must be gated to quiescent points.** An advisor that runs the suite while
+the implementer is mid-edit is testing a half-written tree and will report failures that
+are artifacts of timing. The orchestrator already knows turn boundaries — that is what
+the whole lifecycle apparatus produces — so verification belongs between the
+implementer's turns, not during them. A `completed` verdict is the signal that the tree
+is worth looking at.
+
+This also reframes the arbiter (§7). It is not a separate seat compensating for an
+advisor that cannot check things; it is the tool the advisor uses to check them. The
+value is unchanged — a test result is ground truth neither model authored — but it is
+reached by the advisor running it, not by a third participant existing.
 
 ### Open decisions
 
