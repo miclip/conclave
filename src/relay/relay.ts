@@ -28,6 +28,8 @@ import {
   type Visibility,
 } from './message.ts'
 import { RelayEventStream, type ObserveOptions, type RelayEvent, type RunReason } from './observe.ts'
+import { assess, ComplaintLedger, topicOf } from '../rotation/degradation.ts'
+import { rotate, type RotationResult } from '../rotation/rotate.ts'
 
 export type {
   ObserveOptions,
@@ -43,6 +45,32 @@ export interface RelayParticipant {
   rank: Rank
   session: AgentSession
   events: AgentEvent[]
+  /** Compaction generation when this session joined. Degradation is measured against it. */
+  baselineGeneration: number
+  /**
+   * Index into `events` at which the current session began.
+   *
+   * Rotation keeps the routing history and the event list, so without a cursor the
+   * retired session's compaction events would be re-read every round and the replacement
+   * would be judged degraded from the moment it started.
+   */
+  degradationCursor: number
+}
+
+/**
+ * What a replacement must reproduce.
+ *
+ * Rotation without verification commands would be a transfer nobody demonstrated, which
+ * is the thing §7a exists to prevent -- so leaving this unset does not disable the
+ * *detection* of degradation, only the automatic response to it. A degraded implementer
+ * with nothing to verify against escalates to the human instead.
+ */
+export interface RotationConfig {
+  /** Commands the replacement must run and reproduce. Without these, no rotation. */
+  checks: string[]
+  /** Files whose exact content the transfer depends on, beyond those the advisor names. */
+  files?: string[]
+  checkTimeoutMs?: number
 }
 
 export interface RelayOptions {
@@ -61,6 +89,8 @@ export interface RelayOptions {
    * participant activity this does not.
    */
   onLog?: (m: RelayMessage) => void
+  /** Enables automatic rotation on mechanical degradation. See `RotationConfig`. */
+  rotation?: RotationConfig
 }
 
 const LEAD_BRIEFING = `You are the ADVISOR on a two-agent coding session, and you are in charge of it.
@@ -122,19 +152,33 @@ export class Relay {
       cwd: this.#opts.cwd,
       watchdogMs: this.#opts.turnWatchdogMs,
     })
-    const p: RelayParticipant = { id: spec.id, rank, session, events: [] }
+    const p: RelayParticipant = { id: spec.id, rank, session, events: [], baselineGeneration: 0, degradationCursor: 0 }
     this.#participants.set(spec.id, p)
-    // One consumer per session: the event queue delivers each event to exactly one reader.
-    // This loop is that reader, and forwarding from here is what lets an observer see a
-    // turn in progress -- the routing log says nothing between an instruction and the
-    // report that answers it, which is the entire duration of the work.
+    this.#attach(p)
+    this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text: `${spec.id} joined as ${rank} (${spec.agent})` })
+  }
+
+  /**
+   * Start forwarding one session's events.
+   *
+   * One consumer per session: the event queue delivers each event to exactly one reader.
+   * This loop is that reader, and forwarding from here is what lets an observer see a turn
+   * in progress -- the routing log says nothing between an instruction and the report that
+   * answers it, which is the entire duration of the work.
+   *
+   * Separate from `#join` because rotation replaces a participant's session in place, and
+   * the replacement needs its own reader. The loop closes over the session rather than
+   * reading `p.session`, so the retired one's iteration ends with it rather than quietly
+   * pushing the new session's events under the old reader.
+   */
+  #attach(p: RelayParticipant, session: AgentSession = p.session): void {
     void (async () => {
       for await (const e of session.events()) {
+        if (p.session !== session) return
         p.events.push(e)
         this.#stream.emit({ type: 'activity', participant: p.id, rank: p.rank, event: e })
       }
     })()
-    this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text: `${spec.id} joined as ${rank} (${spec.agent})` })
   }
 
   #record(m: Omit<RelayMessage, 'seq' | 'at' | 'visibility' | 'excluded'>): RelayMessage {
@@ -286,6 +330,59 @@ export class Relay {
    * advisor's calls, and both hand back to the human rather than being acted on. §7a's
    * rotation and termination authority is not implemented here.
    */
+  /**
+   * Should this implementer be replaced?
+   *
+   * Called every round, because a session may compact without saying so and a session
+   * that says so may not have. Returns a run-ending verdict when the answer needs a human,
+   * and `undefined` when the run should carry on -- either because nothing is wrong or
+   * because the rotation succeeded and there is now a fresh implementer to carry on with.
+   */
+  async #considerRotation(
+    impl: RelayParticipant,
+    prose: string,
+  ): Promise<{ reason: RunReason; detail?: string } | undefined> {
+    const snap = await impl.session.snapshot()
+    const verdict = assess({
+      participant: impl.id,
+      prose,
+      baselineGeneration: impl.baselineGeneration,
+      currentGeneration: snap.compactionGeneration,
+      events: impl.events.slice(impl.degradationCursor),
+      ledger: this.complaints,
+      at: Date.now(),
+    })
+
+    if (verdict.decision === 'continue') {
+      if (verdict.reason === 'unbacked') {
+        // Overriding a complaint is a decision, so it is recorded as one. The count is
+        // scoped and decays; a single early complaint must not read as a pattern.
+        this.#record({
+          from: 'orchestrator',
+          fromRank: 'human',
+          to: [],
+          kind: 'note',
+          text:
+            `${impl.id} asked for a fresh session with no compaction behind it; continuing. ` +
+            `unbacked complaints on this topic: ${this.complaints.count(impl.id, topicOf(prose))}`,
+        })
+      }
+      return undefined
+    }
+
+    const detail = `${impl.id} is degraded: ${verdict.evidence.join('; ')}${verdict.complained ? ' (and said so)' : ' (and did not say so)'}`
+    if (!this.#opts.rotation) {
+      // Detection does not depend on configuration; the automatic response does. Rotating
+      // with nothing to verify against would be a transfer nobody demonstrated, so this
+      // goes to the human instead of proceeding on an unverifiable handoff.
+      return this.#end('escalated', `${detail}. No rotation checks are configured, so this needs a human.`)
+    }
+
+    const result = await this.rotateImplementer(detail)
+    if (result.status === 'rotated') return undefined
+    return this.#end('escalated', `rotation failed (${result.reason}): ${result.detail}`)
+  }
+
   async run(goal: string): Promise<{ reason: RunReason; detail?: string }> {
     const lead = this.participants.find((p) => p.rank === 'advisor')!
     const impl = this.participants.find((p) => p.rank === 'implementer')!
@@ -327,6 +424,11 @@ export class Relay {
         return this.#end('escalated', `${impl.id} turn ended ${formatVerdict(report.end.verdict)}`)
       }
 
+      // §7a. Assessed before the advisor sees the report, so a degraded implementer is
+      // replaced rather than issued another instruction it cannot act on well.
+      const rotated = await this.#considerRotation(impl, report.prose)
+      if (rotated) return rotated
+
       const leadAside = this.#drain(lead.id)
       next = await this.#exchange(
         lead,
@@ -336,6 +438,101 @@ export class Relay {
       )
     }
     return this.#end('budget')
+  }
+
+  /** Unbacked complaints, per participant per topic. Feeds stall detection (§7). */
+  readonly complaints = new ComplaintLedger()
+
+  /**
+   * Replace the implementer, carrying the work forward.
+   *
+   * The transaction lives in `rotation/rotate.ts`; this supplies the four things it cannot
+   * get for itself: how to talk to a session, how to start a fresh implementer, which
+   * human constraints to replay, and where to write the notes.
+   *
+   * Callable by the human as well as by the run loop. Nothing about it assumes the loop is
+   * running -- an operator watching a session degrade should not have to wait for the
+   * orchestrator to notice.
+   */
+  async rotateImplementer(reason: string): Promise<RotationResult> {
+    const cfg = this.#opts.rotation
+    if (!cfg) {
+      throw new Error(
+        'rotation needs verification commands: set `rotation.checks` so a replacement has ' +
+          'something to reproduce. Rotating without them would be a transfer nobody demonstrated.',
+      )
+    }
+    const advisor = this.participants.find((p) => p.rank === 'advisor')!
+    const impl = this.participants.find((p) => p.rank === 'implementer')!
+    const spec = this.#opts.implementer
+    /** The replacement while it is proving itself, before it is anyone's session. */
+    let audition: RelayParticipant | undefined
+
+    this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text: `rotating ${impl.id}: ${reason}` })
+
+    const result = await rotate({
+      old: impl.session,
+      advisor: advisor.session,
+      reason,
+      deps: {
+        root: this.#opts.cwd,
+        exchange: async (session, text) => {
+          // The replacement is not in the participant map yet -- it is being auditioned --
+          // but it gets the same exchange as everyone else. A second path here would be a
+          // second set of failure modes on the least-tested code in the system.
+          const p = [...this.participants, audition].find((q) => q?.session === session)
+          if (!p) throw new Error('exchange requested for a session the relay does not hold')
+          return (await this.#exchange(p, text)).prose
+        },
+        startReplacement: async () => {
+          const session = await this.#opts.registry.createParticipant(spec, {
+            cwd: this.#opts.cwd,
+            watchdogMs: this.#opts.turnWatchdogMs,
+          })
+          audition = { id: `${spec.id}~replacement`, rank: 'implementer', session, events: [], baselineGeneration: 0, degradationCursor: 0 }
+          this.#attach(audition)
+          return session
+        },
+        checks: cfg.checks,
+        ...(cfg.files === undefined ? {} : { files: cfg.files }),
+        ...(cfg.checkTimeoutMs === undefined ? {} : { checkTimeoutMs: cfg.checkTimeoutMs }),
+        // Human messages only. Advisor instructions are the old session's history and
+        // belong in the handoff narrative; constraints outrank it and are replayed intact.
+        constraints: this.log.filter((m) => m.fromRank === 'human' && m.kind === 'constraint' && m.to.includes(impl.id)),
+        note: (text) => {
+          this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text })
+        },
+      },
+    })
+
+    if (result.status === 'rotated' && audition) {
+      // Swap the session in place, so the participant id, rank and routing history survive
+      // the replacement. A rotation that changed the implementer's id would break every
+      // reference to it in the log that already exists.
+      //
+      // The audition's reader is kept rather than restarted: it is already the single
+      // consumer of that session's queue, and attaching a second one would split the
+      // stream. Retargeting it means giving it the promoted identity and the one events
+      // array both objects now share -- the old session's reader retires itself on its
+      // next event, because `#attach` checks that it still owns `p.session`.
+      audition.events.unshift(...impl.events)
+      audition.id = impl.id
+      impl.session = result.replacement
+      impl.events = audition.events
+      impl.baselineGeneration = 0
+      impl.degradationCursor = impl.events.length
+      this.complaints.progressed(impl.id)
+      this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text: `${impl.id} rotated into ${result.replacement.sessionId}` })
+    } else if (result.status === 'rolled_back') {
+      this.#record({
+        from: 'orchestrator',
+        fromRank: 'human',
+        to: [],
+        kind: 'note',
+        text: `rotation rolled back (${result.reason}): ${result.detail}. ${impl.id} is back in service.`,
+      })
+    }
+    return result
   }
 
   async stop(): Promise<void> {

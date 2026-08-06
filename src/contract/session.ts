@@ -202,12 +202,51 @@ export interface SendProvenance {
 
 export type CloseMode = 'graceful' | 'abandoned'
 
+/**
+ * Lifecycle, not teardown style. `close()` cannot express this because rotation needs a
+ * state that is neither running nor gone.
+ *
+ *   running     accepting work
+ *   quiesced    alive, holds its context, cannot receive work, still inspectable
+ *   rotating    a replacement is proving it can continue
+ *   terminated  gone
+ *
+ * `quiesced` is the one that makes rotation a transaction rather than a hopeful sequence.
+ * A quiesced session still knows everything it knew, so if the replacement cannot
+ * reproduce the recorded state the original can be un-quiesced and the work is not
+ * stranded between two sessions. Without it, a failed transfer fails silently: the
+ * replacement carries on from a state it never actually reproduced.
+ */
+export type SessionState = 'running' | 'quiesced' | 'rotating' | 'terminated'
+
 export interface AgentSession {
   readonly agent: string
   readonly sessionId: string
   readonly guarantees: Guarantees
 
+  readonly state: SessionState
+
   send(message: string, provenance: SendProvenance): Promise<TurnKey>
+
+  /**
+   * Stop accepting work without ending the session. Cheap: an idle session costs nothing
+   * and keeps its context. Reversible by `unquiesce()`.
+   */
+  quiesce(): Promise<void>
+
+  /** Return a quiesced session to service. The rollback path for a failed rotation. */
+  unquiesce(): Promise<void>
+
+  /**
+   * Enter `rotating`: a replacement is now proving it can reproduce this session's state.
+   *
+   * Distinct from `quiesced` because the two differ in what a reader should conclude. A
+   * quiesced session is merely paused; a rotating one is mid-transaction and has exactly
+   * two ways out -- `close()` once the replacement has demonstrated transfer, or
+   * `unquiesce()` when it could not. Requires `quiesced`, so a rotation cannot begin
+   * against a session that is still accepting work.
+   */
+  beginRotation(): Promise<void>
 
   /** Best-effort cancellation. Resolves to the key it attempted to cancel. */
   cancel(): Promise<TurnKey | undefined>
@@ -235,10 +274,10 @@ export interface AgentSession {
    * SIGTERM leaves a truncated but real one, and discarding the transcript discards the
    * only durable record of the session.
    *
-   * `quiesced` and `rotating` (§7a) are not here yet. They are lifecycle states rather
-   * than teardown modes -- a quiesced session is alive, holds its context, and can be
-   * unquiesced if a replacement fails to prove itself -- so they need a state machine
-   * rather than another argument to this.
+   * `quiesced` and `rotating` are deliberately NOT modes here. They are lifecycle states
+   * rather than teardown -- a quiesced session is alive, holds its context, and can be
+   * unquiesced if a replacement fails to prove itself -- so they live in `state` and its
+   * transitions instead of becoming another argument to this.
    */
   close(mode?: CloseMode): Promise<void>
 }

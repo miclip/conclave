@@ -149,6 +149,21 @@ so the history is explained rather than merely wrong.
 explicitly, or hold commits until participants are quiesced. The orchestrator has to obey
 the workspace discipline it enforces on its participants.
 
+## Rotation: what is left to verify
+
+The transaction is built and covered offline. What it has never done is run against a real
+CLI, and four assumptions ride on that (DESIGN-BRIEF §7a, "What this is NOT evidence for").
+In rough order of cheapness:
+
+1. **Does compaction coincide with degradation?** Run one session to compaction and compare
+   output quality either side. This is the load-bearing assumption of §7a and the only one
+   whose failure would invalidate the design rather than the plumbing.
+2. **Does a real advisor produce the seven headings?** One live handoff request answers it.
+   Failure here is recoverable by construction — the parse fails before anything is
+   terminated — but a handoff that never parses makes rotation useless in practice.
+3. **Does a real replacement report `CHECK n: exit <code>`?** Same run.
+4. **Does a real session survive a long freeze?** Quiesce, wait, `unquiesce()`, send.
+
 ## Deferred, with reasons
 
 - `AgentSession.fork()` throws. Honest until session forking is actually needed.

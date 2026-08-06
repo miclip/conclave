@@ -37,6 +37,7 @@ import type {
   Role,
   SendProvenance,
   SessionSnapshot,
+  SessionState,
   TurnKey,
   TurnRecord,
 } from '../contract/session.ts'
@@ -420,7 +421,43 @@ export class CodexPtyHookAdapter implements AgentSession {
 
   // --- AgentSession ---------------------------------------------------------------
 
+
+  #state: SessionState = 'running'
+
+  get state(): SessionState {
+    return this.#state
+  }
+
+  /**
+   * Stop accepting work; stay alive and keep the context.
+   *
+   * Deliberately does not touch the PTY. A quiesced session is one a replacement may have
+   * to be rolled back to, so nothing about it may be discarded -- not the process, not the
+   * transcript, not the trackers. The only change is that `send()` refuses.
+   */
+  async quiesce(): Promise<void> {
+    if (this.#state === 'terminated') throw new Error('cannot quiesce a terminated session')
+    await this.#input.drain()
+    this.#state = 'quiesced'
+  }
+
+  /** The rollback path: return a quiesced session to service. */
+  async unquiesce(): Promise<void> {
+    if (this.#state === 'terminated') throw new Error('cannot unquiesce a terminated session')
+    this.#state = 'running'
+  }
+
+  async beginRotation(): Promise<void> {
+    if (this.#state !== 'quiesced') {
+      throw new Error(`cannot begin rotation from '${this.#state}': quiesce the session first`)
+    }
+    this.#state = 'rotating'
+  }
+
   async send(message: string, _provenance: SendProvenance): Promise<TurnKey> {
+    if (this.#state !== 'running') {
+      throw new Error(`session is ${this.#state}; it is not accepting work`)
+    }
     if (!this.acceptsInput) throw new Error('session is not accepting input')
     const keyed = new Promise<TurnKey>((resolve, reject) => {
       this.#pendingPrompt = { resolve, reject, prompt: message }
@@ -569,6 +606,7 @@ export class CodexPtyHookAdapter implements AgentSession {
     }
 
     await this.#receiver.stop()
+    this.#state = 'terminated'
     this.#events.close()
   }
 

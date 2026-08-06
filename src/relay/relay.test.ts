@@ -20,6 +20,7 @@ import type {
   AgentSession,
   CloseMode,
   SessionSnapshot,
+  SessionState,
   TurnKey,
 } from '../contract/session.ts'
 import { guaranteesFor, turnKey } from '../contract/session.ts'
@@ -135,6 +136,21 @@ class FakeSession implements AgentSession {
     }
   }
 
+
+  state: SessionState = 'running'
+
+  async quiesce(): Promise<void> {
+    this.state = 'quiesced'
+  }
+
+  async unquiesce(): Promise<void> {
+    this.state = 'running'
+  }
+
+  async beginRotation(): Promise<void> {
+    this.state = 'rotating'
+  }
+
   async cancel(): Promise<TurnKey | undefined> {
     return undefined
   }
@@ -144,6 +160,7 @@ class FakeSession implements AgentSession {
   }
   async close(mode: CloseMode = 'graceful'): Promise<void> {
     this.closedAs = mode
+    this.state = 'terminated'
   }
 }
 

@@ -889,6 +889,26 @@ provenance and what superseded what.
 Together they answer the question the project's premise depends on: is this still two
 participants, or one participant and an expensive echo?
 
+### Who corrected the experiment? [Noted 2026-08-05 — not formalised]
+
+Every metric above asks *how are the participants behaving toward each other*. Experiment 2
+produced two of its most useful outputs in a category none of them can see: a participant
+correcting the **experimenter**.
+
+The implementer found that `onLog` already fired live, so the task premise was partly
+wrong, and that `FakeSession` emits `turn_end` synchronously inside `send()`, so the
+harness could never have demonstrated the feature it was written to test. Neither is
+disagreement with another participant. Both are improvements to the *method* — the framing,
+the assumptions, the instrumentation.
+
+Distinct from novel contribution, which measures information added to the work. This
+measures flaws found in what the human supplied. It is the sort of contribution that
+otherwise disappears into a prose transcript, and it is arguably the highest-value thing
+either agent did that day.
+
+Not formalised yet: it needs a definition that does not collapse into "disagreed with the
+prompt". Recorded so it is not lost.
+
 ### Epistemic calibration [Added 2026-08-05, from experiment 2]
 
 A fifth dimension, and the one the first natural experiment actually surfaced. The four
@@ -1120,6 +1140,60 @@ consistently target shared and unattended use.
 **[Amended]** Codex's app-server is used in this repo only for reading configuration
 (`hooks/list`), never to run turns. That stays true; it is a build-time inspection tool,
 not a transport.
+
+#### Built [2026-08-05]
+
+`src/rotation/` implements the transaction, and `Relay.rotateImplementer()` drives it.
+
+| piece | where | what it is |
+|---|---|---|
+| lifecycle states | `contract/session.ts` | `running → quiesced → rotating → terminated`, with `unquiesce()` as the way back |
+| the record | `rotation/record.ts` | HEAD, digests of named files, verification exit codes — captured by the orchestrator, not by a participant |
+| the narrative | `rotation/handoff.ts` | authored by the advisor under fixed headings, parsed strictly, kept verbatim |
+| the transaction | `rotation/rotate.ts` | quiesce → handoff → start → verify → terminate-or-rollback |
+| degradation | `rotation/degradation.ts` | compaction signal, complaint detection, and the decaying unbacked-complaint ledger |
+
+Four decisions came out of building it rather than out of the design:
+
+**Divergence is graded, not boolean.** An exit code that changed between handoff and
+acceptance blocks the transfer. Output that differs while the exit code holds is
+advisory — it is usually a timing line, and treating it as failure would make rotation
+refuse to work for no reason. Likewise an unrelated dirty path is advisory: blocking on it
+would make rotation depend on the operator sitting still in a tree they share.
+
+**Rotation verifies continuity, not health.** A check that exits 3 both before and after is
+a *reproduced* state, and refusing to rotate over it would strand exactly the session that
+most needs replacing. Such checks are surfaced as `carriedFailures` instead — which is also
+the one place the advisor's `EVIDENCE` section, written from prose it cannot verify, can be
+seen to disagree with the arbiter.
+
+**A replacement reporting a mismatch is a successful transfer.** The failure being caught is
+the opposite one: a replacement that reports agreement it never observed. Its claimed exit
+codes are parsed strictly and compared against the orchestrator's own run, and prose that
+cannot be parsed counts as no report rather than as a generous pass.
+
+**No checks configured means no rotation.** Detection still runs — degradation is reported
+whatever the configuration — but the automatic response is withheld and the session
+escalates to the human. Rotating with nothing to verify against would be precisely the
+transfer nobody demonstrated.
+
+#### What this is NOT evidence for
+
+Every rotation test uses fake sessions. The transaction, the rollback, the identity swap
+and the reader hand-off are `observed`; **rotation has never run against a real Claude or
+Codex session**, so the following remain `reasoned_but_unverified`:
+
+- that a real advisor will produce the seven headings on request
+- that a real replacement will emit `CHECK n: exit <code>` in a comparable form
+- that a quiesced real session survives a long freeze and is still usable after
+  `unquiesce()` — the adapter refuses sends while quiesced, but nothing has held a real
+  PTY idle for an hour and then resumed it
+- that `snapshot().compactionGeneration` rises in a real long session at the point the
+  model's quality actually degrades. Compaction is the *observable* proxy for degradation,
+  and the two have not been shown to coincide.
+
+The last one is the load-bearing assumption of the whole section and the cheapest to
+falsify: a session can be run to compaction and its output quality compared either side.
 
 ## 9. The panel
 

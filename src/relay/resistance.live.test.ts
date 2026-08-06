@@ -30,6 +30,7 @@ import type {
   AgentSession,
   CloseMode,
   SessionSnapshot,
+  SessionState,
   TurnKey,
 } from '../contract/session.ts'
 import { guaranteesFor, turnKey } from '../contract/session.ts'
@@ -144,6 +145,21 @@ class ScriptedAdvisor implements AgentSession {
     }
   }
 
+
+  state: SessionState = 'running'
+
+  async quiesce(): Promise<void> {
+    this.state = 'quiesced'
+  }
+
+  async unquiesce(): Promise<void> {
+    this.state = 'running'
+  }
+
+  async beginRotation(): Promise<void> {
+    this.state = 'rotating'
+  }
+
   async cancel(): Promise<TurnKey | undefined> {
     return undefined
   }
@@ -151,7 +167,9 @@ class ScriptedAdvisor implements AgentSession {
   async fork(): Promise<AgentSession> {
     throw new Error('not implemented')
   }
-  async close(_mode?: CloseMode): Promise<void> {}
+  async close(_mode?: CloseMode): Promise<void> {
+    this.state = 'terminated'
+  }
 }
 
 test('the implementer challenges a plausible instruction the repository contradicts', { skip }, async (t) => {

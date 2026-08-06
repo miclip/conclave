@@ -1,0 +1,218 @@
+/**
+ * The handoff document.
+ *
+ * Two halves with different authors, and the split is the point.
+ *
+ *   narrative   the advisor's. Goal, state, decisions, disagreement, next action.
+ *   record      the orchestrator's. HEAD, file digests, verification exit codes.
+ *
+ * §7a argues the advisor is the natural author *because* it is on a thin context diet: it
+ * has followed the whole narrative and holds none of the working set, which is the shape a
+ * handoff should be. But it also cannot see the implementer's tools, so everything it says
+ * about files and tests is second-hand. Asking it to author the checkable parts too would
+ * hand the arbiter's job to a participant.
+ *
+ * Human constraints are NOT in here. They are replayed separately so they reach the
+ * replacement at human rank rather than as advisor prose — see §7a and the rank rules in
+ * §6. Folding them in would quietly demote every constraint the session was given.
+ */
+
+import type { RelayMessage } from '../relay/message.ts'
+import type { RepoRecord } from './record.ts'
+
+export interface HandoffNarrative {
+  goal: string
+  currentState: string
+  decisions: string[]
+  /** What the advisor believes about tests and evidence. A claim; `record` is the check. */
+  evidence: string
+  /** Files the advisor believes matter. Unioned with the tree, never trusted alone. */
+  files: string[]
+  /** Unresolved disagreement. Carried forward so a rotation cannot launder it away. */
+  openDisagreement: string[]
+  nextAction: string
+  /** Verbatim, because parsing is lossy and the prose is what actually gets handed over. */
+  raw: string
+}
+
+export interface Handoff {
+  narrative: HandoffNarrative
+  record: RepoRecord
+  /** Human-rank messages, replayed at human rank rather than quoted as advisor prose. */
+  constraints: RelayMessage[]
+  authoredBy: string
+  from: { sessionId: string; agent: string }
+  /** Compaction generation of the session being replaced: the mechanical degradation signal. */
+  compactionGeneration: number
+  at: number
+}
+
+const SECTIONS = ['GOAL', 'STATE', 'DECISIONS', 'EVIDENCE', 'FILES', 'DISAGREEMENT', 'NEXT'] as const
+type Section = (typeof SECTIONS)[number]
+
+/**
+ * What the advisor is asked for.
+ *
+ * Fixed headings rather than free prose, because an unparseable handoff has to be
+ * detectable *before* the old session is terminated. Sections are also the only way to
+ * ask for open disagreement explicitly — left implicit, a summary drops it, and the
+ * replacement then re-derives a settled question as if it were open.
+ */
+export function handoffPrompt(reason: string): string {
+  return `The implementer session is being replaced. ${reason}
+
+Write the handoff that lets a fresh implementer continue this work. It has none of your
+history: it has not seen the goal, the instructions, or anything either of us said.
+
+Use exactly these headings, in this order, and put nothing outside them:
+
+## GOAL
+What the human asked for, in their terms rather than yours.
+
+## STATE
+Where the work actually is right now. Be specific about what is finished and what is not.
+
+## DECISIONS
+One per line, prefixed with "- ". Choices already made that should not be reopened, each
+with the reason. Write "- none" if there are none.
+
+## EVIDENCE
+What has been verified and how, including test status. Say which of this you checked
+yourself and which you are repeating from the implementer's prose.
+
+## FILES
+One repo-relative path per line, prefixed with "- ". The files this work touches.
+
+## DISAGREEMENT
+One per line, prefixed with "- ". Anything still unresolved between us, stated fairly
+including the position you do not hold. Write "- none" if there is none. Do not resolve an
+open question here just to make the handoff tidy.
+
+## NEXT
+The single concrete action the replacement should take first.`
+}
+
+/**
+ * Split on headings by hand rather than by regex.
+ *
+ * A lazy `[\s\S]*?` bounded by `$` under the `m` flag stops at the first newline, which
+ * silently truncates every section to one line. Line-walking is duller and correct.
+ */
+function sections(text: string): Record<string, string> {
+  const out: Record<string, string> = {}
+  let current: string | undefined
+  let buf: string[] = []
+  const flush = () => {
+    if (current) out[current] = (out[current] ? `${out[current]}\n` : '') + buf.join('\n').trim()
+    buf = []
+  }
+  for (const line of text.split('\n')) {
+    const heading = /^\s*#{1,4}\s*([A-Z]+)\b/.exec(line)
+    if (heading) {
+      flush()
+      current = heading[1]
+    } else if (current) {
+      buf.push(line)
+    }
+  }
+  flush()
+  return out
+}
+
+function bullets(block: string): string[] {
+  const items = block
+    .split('\n')
+    .map((l) => l.replace(/^\s*[-*]\s*/, '').trim())
+    .filter(Boolean)
+  return items.length === 1 && /^none\.?$/i.test(items[0]!) ? [] : items
+}
+
+export interface ParseResult {
+  narrative?: HandoffNarrative
+  /** Missing or empty sections. Non-empty means the handoff cannot be relied on. */
+  missing: Section[]
+}
+
+/** Sections without which a replacement cannot start. The rest may legitimately be empty. */
+const REQUIRED: Section[] = ['GOAL', 'STATE', 'NEXT']
+
+export function parseHandoff(text: string): ParseResult {
+  const found = sections(text)
+  const got = Object.fromEntries(SECTIONS.map((s) => [s, (found[s] ?? '').trim()])) as Record<Section, string>
+  const missing = REQUIRED.filter((s) => got[s].length === 0)
+  if (missing.length > 0) return { missing }
+  return {
+    missing: [],
+    narrative: {
+      goal: got.GOAL,
+      currentState: got.STATE,
+      decisions: bullets(got.DECISIONS),
+      evidence: got.EVIDENCE,
+      files: bullets(got.FILES).map((f) => f.replace(/^`|`$/g, '')),
+      openDisagreement: bullets(got.DISAGREEMENT),
+      nextAction: got.NEXT,
+      raw: text,
+    },
+  }
+}
+
+/**
+ * What the replacement is given, and what it is asked to do with it.
+ *
+ * Not "acknowledge this". §7a: transfer acceptance is demonstrated. So the replacement is
+ * asked to inspect the named state, run the recorded commands, and report exit codes in a
+ * form that can be compared — a reply that cannot be compared is itself a failed transfer.
+ */
+export function acceptancePrompt(h: Handoff): string {
+  const checks = h.record.checks.map((c, i) => `${i + 1}. \`${c.command}\``).join('\n')
+  const files = h.narrative.files.length > 0 ? h.narrative.files.map((f) => `- ${f}`).join('\n') : '- (none named)'
+  return `You are replacing an implementer session that is being retired. It is still alive and
+frozen; if you cannot reproduce the state below, say so and it will be resumed instead of
+you. Do not paper over a mismatch.
+
+The advisor wrote the following handoff. It cannot see tool calls or code, so treat its
+account of files and tests as a claim to check, not as fact.
+
+${h.narrative.raw}
+
+Before doing any of the work, demonstrate that you can continue it:
+
+1. Read the files named above.
+${files}
+2. Run each of these commands and report its exit code:
+${checks}
+3. Report using exactly this format, one line per command, before anything else:
+
+CHECK 1: exit <code>
+CHECK 2: exit <code>
+
+Then, in prose: what you found, and anything in the handoff that the repository
+contradicts. If something does not match, say that plainly — a mismatch reported is a
+working transfer; a mismatch smoothed over is not.
+
+Do not start on the next action yet.`
+}
+
+export interface ClaimedCheck {
+  index: number
+  exitCode: number
+}
+
+/**
+ * Read the replacement's claimed exit codes out of its prose.
+ *
+ * These are compared against the orchestrator's own re-run, so a replacement that claims
+ * a passing check the arbiter observes failing is caught. The parse is deliberately
+ * strict: a report that cannot be read is treated as no report at all rather than
+ * generously interpreted, because generosity here means accepting a transfer nobody
+ * demonstrated.
+ */
+export function parseClaimedChecks(prose: string): ClaimedCheck[] {
+  const out: ClaimedCheck[] = []
+  const re = /^\s*CHECK\s+(\d+)\s*:\s*exit\s+(-?\d+)/gim
+  let m: RegExpExecArray | null
+  while ((m = re.exec(prose))) {
+    out.push({ index: Number(m[1]), exitCode: Number(m[2]) })
+  }
+  return out
+}
