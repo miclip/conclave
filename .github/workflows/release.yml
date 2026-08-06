@@ -1,0 +1,123 @@
+# Cut a release with ready-to-run archives, one per platform.
+#
+# There is no build step — Node 24 strips types directly — so "building" here means
+# resolving `node-pty`, the one runtime dependency and a native module. Each archive
+# carries the `node_modules` produced on its own platform, so a target machine needs only
+# Node 24 and no toolchain.
+#
+# That also means an archive is platform-specific and not portable: a macOS arm64 build
+# will not run on Linux. The names say which is which.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build (e.g. v0.1.0)'
+        required: true
+
+jobs:
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: macos-arm64
+          - os: macos-13
+            target: macos-x64
+          - os: ubuntu-latest
+            target: linux-x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - run: npm ci
+      - run: node bin/conclave.ts config install --no-diagnose
+
+      # The archive is only worth shipping if the suite passes on the platform it was
+      # produced on. node-pty is native and the TTY tests allocate a real pty, so this is
+      # the step that would catch a prebuild that does not work on this target.
+      - run: npm test
+
+      - name: Stamp the version so the banner names the build
+        shell: bash
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          node -e '
+            const fs = require("fs")
+            const p = JSON.parse(fs.readFileSync("package.json", "utf8"))
+            p.version = process.argv[1].replace(/^v/, "")
+            fs.writeFileSync("package.json", JSON.stringify(p, null, 2) + "\n")
+          ' "$TAG"
+
+      - name: Add a launcher
+        shell: bash
+        run: |
+          cat > conclave <<'SH'
+          #!/bin/sh
+          # Conclave needs no build; Node 24 executes its TypeScript directly.
+          exec node "$(dirname "$0")/bin/conclave.ts" "$@"
+          SH
+          chmod +x conclave
+
+      - name: Archive
+        shell: bash
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          NAME="conclave-${TAG}-${{ matrix.target }}"
+          mkdir -p "/tmp/${NAME}"
+          # Everything except VCS metadata, CI config, and any local session state. The
+          # spikes are included on purpose: they are the evidence corpora the conformance
+          # claims rest on, and a release without them ships claims without their basis.
+          tar --exclude='./.git' --exclude='./.github' --exclude='./.conclave' \
+              -cf - . | (cd "/tmp/${NAME}" && tar -xf -)
+          tar -czf "${NAME}.tar.gz" -C /tmp "${NAME}"
+          shasum -a 256 "${NAME}.tar.gz" > "${NAME}.tar.gz.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            conclave-*.tar.gz
+            conclave-*.tar.gz.sha256
+
+  release:
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          files: dist/**/*
+          generate_release_notes: true
+          body: |
+            Ready-to-run archives. No build step: Node 24 executes the TypeScript directly,
+            and each archive carries the `node_modules` produced on its own platform, so
+            `node-pty` is already resolved.
+
+            ```sh
+            tar xzf conclave-<tag>-<platform>.tar.gz
+            cd conclave-<tag>-<platform>
+            ./conclave demo                 # the console, no agents, no quota
+            ./conclave config install       # register hooks for this checkout
+            ./conclave session "<goal>" --checks "npm test"
+            ```
+
+            **Archives are platform-specific.** Requires Node 24+, and the `claude` and
+            `codex` CLIs installed and authenticated for anything other than `demo`.
+
+            The live suites do not run in CI — they spawn real sessions against real
+            accounts. A green build proves the contract, the classifier and the console;
+            it proves nothing about the CLIs themselves.

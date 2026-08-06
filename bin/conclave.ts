@@ -10,6 +10,8 @@ import {
   hasDrift,
   installConfig,
 } from '../src/config/install.ts'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { defaultRegistry } from '../src/registry/builtin.ts'
 import { runSession } from '../src/repl/session.ts'
 import { Relay } from '../src/relay/relay.ts'
@@ -36,6 +38,7 @@ Commands:
                                    routing log. Every pause point ENDS the run, because a
                                    call that returns an outcome has nowhere to suspend to.
                                    Spawns real sessions and uses real quota.
+  version                          Print the version of this build.
   demo [--record <file>]           Run the console against scripted participants: real
                                    terminal, real readline, no agents and no quota. For
                                    looking at rendering changes in seconds rather than
@@ -51,6 +54,21 @@ Commands:
                                    --checks enables rotation; without it a degraded
                                    implementer escalates rather than rotating unverified.
 `
+
+/**
+ * The version in the banner, read from package.json.
+ *
+ * A release ships one archive per platform and they are otherwise indistinguishable, so a
+ * session has to be able to say which build produced it. Read rather than compiled in,
+ * because there is no build step to compile it in at.
+ */
+function version(): string {
+  try {
+    return JSON.parse(readFileSync(join(import.meta.dirname, '..', 'package.json'), 'utf8')).version
+  } catch {
+    return 'unknown'
+  }
+}
 
 async function main(argv: string[]): Promise<number> {
   const [command, sub, ...rest] = argv
@@ -177,6 +195,7 @@ async function main(argv: string[]): Promise<number> {
       implementer,
       rounds: Number(rounds),
       checks,
+      version: version(),
       ...(turnTimeout ? { turnWatchdogMs: Number(turnTimeout) * 1000 } : {}),
     })
   }
@@ -186,6 +205,11 @@ async function main(argv: string[]): Promise<number> {
     const record = i >= 0 ? [sub, ...rest][i + 1] : undefined
     const { runDemo } = await import('../src/repl/demo.ts')
     return runDemo({ record })
+  }
+
+  if (command === '--version' || command === 'version') {
+    console.log(version())
+    return 0
   }
 
   if (command === 'help' || command === '--help' || command === undefined) {

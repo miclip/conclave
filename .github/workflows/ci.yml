@@ -1,0 +1,33 @@
+# Tests on every push and pull request.
+#
+# Only the offline suite runs. The live suites spawn real Claude Code and Codex sessions
+# against real accounts, so they are env-gated and skip here — CI can prove the contract
+# and the classifier, and cannot prove anything about the CLIs themselves. Treating a green
+# run as evidence about live behaviour would be exactly the evidence-into-judgement
+# collapse this project spends its effort avoiding.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: npm ci
+      # A fresh checkout has no rendered hook registrations, and one test compares the
+      # templates against what is installed. Rendering them first makes that test mean what
+      # it says rather than depending on which test ran before it.
+      - run: node bin/conclave.ts config install --no-diagnose
+      - run: npm test
