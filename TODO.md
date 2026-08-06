@@ -2,9 +2,17 @@
 
 Tracked because "it works without it" is how a deliberate deferral becomes an accident.
 
-## Before enabling any adapter with contradictory late evidence
+## ~~Before enabling any adapter with contradictory late evidence~~ — done
 
-**Migrate adapters to the shared evidence tracker.**
+**Migrated.** `ClaudePtyHookAdapter` now routes all terminal handling through
+`TurnVerdictTracker`; the one-shot finalisation is gone. Proofs in
+`src/outcomes/migration.test.ts` and the live suite. The gate on
+`CodexPtyHookAdapter` is lifted as far as terminal handling goes — what remains for
+Codex is transport integration over semantics already established.
+
+Kept below for the reasoning, which still explains why the tracker exists.
+
+**Original entry: migrate adapters to the shared evidence tracker.**
 
 `src/outcomes/tracker.ts` implements the self-correcting path: a provisional terminal
 verdict is *withdrawn* when stronger evidence lands, and weaker repeated evidence cannot

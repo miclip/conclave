@@ -153,8 +153,46 @@ export function classify(ev: Evidence): { state: TurnLiveness } & Partial<Verdic
     return { state: 'completed', ...verdict('completed', 'inferred', p) }
   }
 
-  // 3. A dead process explains a missing Stop on its own, so it outranks the
-  //    permission and cancellation rules below.
+  // 3. Terminal actions WE took, attributed to us at the time we took them.
+  //
+  //    These outrank process death on purpose. If the orchestrator ended a turn and the
+  //    session was then shut down, the turn was cancelled or refused -- the later death
+  //    says nothing about it. Ranking death first would let `close()` overwrite a
+  //    stronger, earlier verdict with a weaker causal guess, which is cleanup
+  //    manufacturing an outcome.
+  //
+  //    Only EXPLICIT actions get this precedence. The weaker inference from "a
+  //    permission was pending and no allow was recorded" stays below the process rule,
+  //    because a killed process explains that silence just as well.
+  if (ev.orchestrator.sentPermissionDecision === 'deny' && ev.hooks.includes('PermissionRequest')) {
+    const tool = ev.hookPayloads['PermissionRequest']?.['tool_name']
+    p.push({ source: 'hook', detail: `PermissionRequest tool=${String(tool)}` })
+    p.push({ source: 'orchestrator', detail: 'denied' })
+    if (!ev.orchestrator.inputIsMediated) {
+      p.push({
+        source: 'orchestrator',
+        detail: 'input not mediated: another writer may have answered the dialog',
+        caveat: true,
+      })
+      return { state: 'permission_refused', ...verdict('permission_refused', 'uncertain', p) }
+    }
+    return { state: 'permission_refused', ...verdict('permission_refused', 'inferred', p) }
+  }
+
+  if (ev.orchestrator.sentCancel) {
+    p.push({ source: 'orchestrator', detail: 'sent ESC' })
+    if (ev.orchestrator.inputIsMediated) {
+      return { state: 'cancelled', ...verdict('cancelled', 'assumed', p) }
+    }
+    p.push({
+      source: 'orchestrator',
+      detail: 'input not mediated: another writer may have ended the turn',
+      caveat: true,
+    })
+    return { state: 'cancelled', ...verdict('cancelled', 'uncertain', p) }
+  }
+
+  // 4. The child is gone, and nothing above explained the turn's end.
   if (!ev.process.alive) {
     let confidence: Confidence
     if (ev.hooks.includes('SessionEnd')) {
@@ -185,42 +223,23 @@ export function classify(ev: Evidence): { state: TurnLiveness } & Partial<Verdic
     return { state: 'process_exited', ...verdict('process_exited', confidence, p) }
   }
 
-  // 4. A permission decision was pending and the turn never completed. The hook fires
-  //    on REQUEST, not on decision, so it proves nothing alone -- but an allow would
-  //    have produced a Stop, which rule 1 already caught.
+  // 5. A permission decision was pending and the turn never completed, with no explicit
+  //    decision recorded. Weaker than rule 3: this is an inference from silence, and it
+  //    sits below the process rule because a dead process explains the same silence.
   if (ev.hooks.includes('PermissionRequest')) {
     const tool = ev.hookPayloads['PermissionRequest']?.['tool_name']
     p.push({ source: 'hook', detail: `PermissionRequest tool=${String(tool)}` })
     p.push({ source: 'hook', detail: 'no Stop after the request' })
-    if (ev.orchestrator.sentPermissionDecision === 'deny') {
-      p.push({ source: 'orchestrator', detail: 'denied' })
-      return { state: 'permission_refused', ...verdict('permission_refused', 'inferred', p) }
-    }
     if (ev.orchestrator.inputIsMediated) {
       p.push({ source: 'orchestrator', detail: 'mediated input, no allow recorded' })
       return { state: 'permission_refused', ...verdict('permission_refused', 'inferred', p) }
     }
     p.push({
       source: 'orchestrator',
-      detail: 'input not mediated: refusal indistinguishable from cancellation at the dialog',
+      detail: 'input not mediated: cannot tell refusal from cancellation at the dialog',
       caveat: true,
     })
     return { state: 'permission_refused', ...verdict('permission_refused', 'uncertain', p) }
-  }
-
-  // 5. We cancelled it ourselves. Unverifiable from Claude Code -- pure bookkeeping,
-  //    trustworthy only while we own all input.
-  if (ev.orchestrator.sentCancel) {
-    p.push({ source: 'orchestrator', detail: 'sent ESC' })
-    if (ev.orchestrator.inputIsMediated) {
-      return { state: 'cancelled', ...verdict('cancelled', 'assumed', p) }
-    }
-    p.push({
-      source: 'orchestrator',
-      detail: 'input not mediated: another writer may have ended the turn',
-      caveat: true,
-    })
-    return { state: 'cancelled', ...verdict('cancelled', 'uncertain', p) }
   }
 
   // 6. We lost the ability to observe. Not a statement about the turn.

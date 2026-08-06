@@ -155,8 +155,16 @@ test('hook loss: a lost Stop is recovered from the transcript, not called a deat
   assert.equal(end.verdict.outcome, 'completed')
   assert.notEqual(end.verdict.outcome, 'process_exited')
   assert.equal(end.synthesized, true, 'nothing announced this; we reconstructed it')
+  // Since the migration the caveat comes from the classifier rather than being appended
+  // by the adapter, so this pins the PROPERTY rather than one adapter's wording: a
+  // recovered completion must be weaker than a proven one and must say why.
+  assert.equal(
+    end.verdict.confidence,
+    'inferred',
+    'a recovered completion must not claim the confidence of a real Stop',
+  )
   assert.ok(
-    end.verdict.provenance.some((p) => p.caveat && p.detail.includes('Stop hook never arrived')),
+    end.verdict.provenance.some((p) => p.caveat && /no Stop/i.test(p.detail)),
     'recovery must be visible in the provenance, not silently equivalent to a real Stop',
   )
 })
@@ -213,4 +221,68 @@ test('a participant constructed through the registry behaves identically', { ski
 
   const snap = await session.snapshot()
   assert.equal(snap.role, 'implementer', 'the role assignment must reach the snapshot')
+})
+
+test('events() converges with snapshot() after revisions', { skip }, async (t) => {
+  // Requirement 4 of the tracker migration. The live stream is provisional and may
+  // withdraw what it already said; a consumer following only events() must still end up
+  // agreeing with the authoritative snapshot.
+  const session = await ClaudePtyHookAdapter.start({ cwd: CWD, role: 'implementer' })
+  t.after(() => session.close('graceful'))
+
+  const collecting = collect(session, (e) => e.some((x) => x.type === 'turn_end'), 180_000)
+  const key = await session.send(
+    'Reply with exactly CONV-N and nothing else, where N is 41 plus 1. No tools.',
+    { kind: 'orchestrator' },
+  )
+  const events = await collecting
+
+  // Fold the event stream the way a consumer would: apply terminal verdicts, and drop
+  // any that a revision has withdrawn.
+  const withdrawn = new Set(
+    events.filter((e) => e.type === 'revision').flatMap((e) => e.replaces),
+  )
+  const folded = new Map<string, string>()
+  for (const e of events) {
+    if (e.type === 'turn_end' && !withdrawn.has(e.seq) && e.turnKey) {
+      folded.set(String(e.turnKey), e.verdict.outcome)
+    }
+  }
+
+  const snap = await session.snapshot()
+  const authoritative = new Map(snap.turns.filter((tn) => tn.state !== 'in_progress').map((tn) => [String(tn.key), tn.state]))
+
+  assert.deepEqual(
+    [...folded.entries()].sort(),
+    [...authoritative.entries()].sort(),
+    'a consumer folding events() must agree with snapshot()',
+  )
+  assert.equal(folded.get(String(key)), 'completed')
+})
+
+test('closing does not downgrade an already-completed turn', { skip }, async (t) => {
+  // Requirement 6, end to end: the turn completes, then the session is closed and the
+  // process killed. The established verdict must survive cleanup.
+  const session = await ClaudePtyHookAdapter.start({ cwd: CWD, role: 'implementer' })
+
+  const collecting = collect(session, (e) => e.some((x) => x.type === 'turn_end'), 180_000)
+  await session.send('Reply with exactly SHUT-N and nothing else, where N is 41 plus 1. No tools.', {
+    kind: 'orchestrator',
+  })
+  const before = endOf(await collecting)
+  assert.equal(before?.verdict.outcome, 'completed')
+  assert.equal(before?.verdict.confidence, 'proven')
+
+  const after = collect(session, () => false, 8000)
+  await session.close('graceful')
+  const late = await after
+
+  const downgrades = late.filter(
+    (e) => e.type === 'turn_end' && e.verdict.outcome === 'process_exited',
+  )
+  assert.deepEqual(downgrades, [], 'cleanup must not manufacture a process_exited verdict')
+
+  const snap = await session.snapshot()
+  assert.equal(snap.turns[0]?.state, 'completed')
+  assert.equal(snap.turns[0]?.confidence, 'proven')
 })

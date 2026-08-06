@@ -33,8 +33,8 @@ import type {
   TurnKey,
 } from '../contract/session.ts'
 import { guaranteesFor, turnKey } from '../contract/session.ts'
-import type { Provenance, Verdict } from '../contract/outcome.ts'
-import { classify, evidence, emptyTranscriptState } from '../outcomes/classify.ts'
+import { emptyTranscriptState } from '../outcomes/classify.ts'
+import { TurnVerdictTracker, type VerdictUpdate } from '../outcomes/tracker.ts'
 import { sanitizedCopy } from '../process/childenv.ts'
 import { PtyProcess } from '../process/pty.ts'
 import { InputQueue } from '../process/input.ts'
@@ -49,9 +49,17 @@ interface TurnState {
   key: TurnKey
   prompt: string
   startedAt: number
-  hooks: string[]
-  payloads: Record<string, Record<string, any>>
-  verdict?: Verdict
+  /**
+   * Owns this turn's evidence and verdict. Replaces the previous one-shot finalisation,
+   * which could
+   * not represent Codex-style classification at all: the outcome depends on evidence
+   * arriving through four different channels -- transcript records, the hook stream, the
+   * mediated input log, and the input-ownership policy -- and some of it arrives after a
+   * verdict has already been reported.
+   */
+  tracker: TurnVerdictTracker
+  /** Seq of the last `turn_end` emitted, so a revision can withdraw it by number. */
+  endSeq?: number
   assistantText?: string
 }
 
@@ -234,12 +242,20 @@ export class ClaudePtyHookAdapter implements AgentSession {
       }
       case 'UserPromptSubmit': {
         const key = turnKey(String(d.turnKey ?? `unkeyed-${this.#order.length}`))
+        const tracker = new TurnVerdictTracker({
+          agent: this.agent,
+          orchestrator: {
+            sentCancel: false,
+            inputIsMediated: this.guarantees.inputOwnership === 'mediated',
+          },
+          watchdogSeconds: (this.#opts.watchdogMs ?? 600_000) / 1000,
+        })
+        tracker.observeHook('UserPromptSubmit', d.payload)
         const turn: TurnState = {
           key,
           prompt: String(d.payload.prompt ?? ''),
           startedAt: Date.now(),
-          hooks: ['UserPromptSubmit'],
-          payloads: { UserPromptSubmit: d.payload },
+          tracker,
         }
         this.#turns.set(String(key), turn)
         this.#order.push(String(key))
@@ -257,10 +273,7 @@ export class ClaudePtyHookAdapter implements AgentSession {
       }
       case 'PermissionRequest': {
         const turn = this.#latestLiveTurn()
-        if (turn) {
-          turn.hooks.push('PermissionRequest')
-          turn.payloads['PermissionRequest'] = d.payload
-        }
+        if (turn) this.#apply(turn, turn.tracker.observeHook('PermissionRequest', d.payload), true)
         this.#emit({
           type: 'permission_requested',
           tool: String(d.payload.tool_name ?? 'unknown'),
@@ -274,50 +287,89 @@ export class ClaudePtyHookAdapter implements AgentSession {
       }
       case 'Stop': {
         const key = String(d.turnKey ?? '')
-        const turn = this.#turnFor(key) ?? this.#latestLiveTurn()
+        // A Stop may arrive for a turn already settled by other evidence; the tracker
+        // decides whether it changes anything, rather than a guard here deciding it is
+        // too late to matter.
+        const turn = this.#turnFor(key) ?? this.#latestSettleableTurn()
         if (!turn) return
-        turn.hooks.push('Stop')
-        turn.payloads['Stop'] = d.payload
         // The cheap common case: the answer without reading the transcript. The
         // transcript is still required for recovery, audit and richer reconstruction.
         if (d.payload.last_assistant_message) {
           turn.assistantText = String(d.payload.last_assistant_message)
         }
-        this.#finalise(turn, false)
+        this.#apply(turn, turn.tracker.observeHook('Stop', d.payload), false)
         return
       }
       case 'SessionEnd': {
-        // Session-level, not turn-level. Recorded on live turns as evidence only.
-        for (const t of this.#liveTurns()) t.payloads['SessionEnd'] = d.payload
+        // Session-level, not turn-level. Recorded as evidence on turns still open.
+        for (const t of this.#liveTurns()) {
+          this.#apply(t, t.tracker.observeHook('SessionEnd', d.payload), true)
+        }
         return
       }
     }
   }
 
+  #allTurns(): TurnState[] {
+    return this.#order.map((k) => this.#turns.get(k)!).filter(Boolean)
+  }
+
   #liveTurns(): TurnState[] {
-    return this.#order.map((k) => this.#turns.get(k)!).filter((t) => t && !t.verdict)
+    return this.#allTurns().filter((t) => !t.tracker.settled)
   }
 
   #latestLiveTurn(): TurnState | undefined {
     return this.#liveTurns().at(-1)
   }
 
-  #evidenceFor(turn: TurnState, processAlive: boolean, transcriptSaysCompleted: boolean) {
-    return evidence({
-      agent: 'claude',
-      hooks: turn.hooks,
-      hookPayloads: turn.payloads,
-      transcript: transcriptSaysCompleted
-        ? { ...emptyTranscriptState(), exists: true, hasAssistantAfterPrompt: true, finalStopReason: 'end_turn' }
-        : emptyTranscriptState(),
-      process: { alive: processAlive, howEnded: this.#pty?.exitInfo?.reason },
-      orchestrator: {
-        sentCancel: this.#input.hasSent('cancel', turn.startedAt),
-        sentPermissionDecision: this.#lastPermissionDecision(turn.startedAt),
-        inputIsMediated: this.guarantees.inputOwnership === 'mediated',
-      },
-      elapsedSeconds: (Date.now() - turn.startedAt) / 1000,
-      watchdogSeconds: (this.#opts.watchdogMs ?? 600_000) / 1000,
+  /** Most recent turn, settled or not -- late evidence may still revise a settled one. */
+  #latestSettleableTurn(): TurnState | undefined {
+    return this.#liveTurns().at(-1) ?? this.#allTurns().at(-1)
+  }
+
+  /**
+   * Emit whatever a tracker update implies: a `revision` withdrawing the previous
+   * `turn_end` when one is superseded, then the new terminal event.
+   *
+   * This is the whole point of the migration. A verdict already reported to consumers is
+   * withdrawn by number rather than left standing beside its own contradiction.
+   */
+  #apply(turn: TurnState, update: VerdictUpdate | undefined, synthesized: boolean): void {
+    if (!update) return
+
+    if (update.supersedes && turn.endSeq !== undefined) {
+      this.#emit({
+        type: 'revision',
+        reason: 'late_signal',
+        replaces: [turn.endSeq],
+        provenance: [
+          {
+            source: 'hook',
+            detail:
+              `stronger evidence superseded ${update.supersedes.outcome}` +
+              (update.verdict ? ` with ${update.verdict.outcome}` : ' with no verdict'),
+          },
+          ...(update.verdict?.provenance ?? []),
+        ],
+        seq: this.#next(),
+        at: Date.now(),
+        provisional: false,
+      })
+      turn.endSeq = undefined
+    }
+
+    if (!update.verdict) return // withdrawn without replacement; the turn is open again
+
+    const seq = this.#next()
+    turn.endSeq = seq
+    this.#emit({
+      type: 'turn_end',
+      verdict: update.verdict,
+      synthesized,
+      turnKey: turn.key,
+      seq,
+      at: Date.now(),
+      provisional: false,
     })
   }
 
@@ -327,87 +379,51 @@ export class ClaudePtyHookAdapter implements AgentSession {
     return a.detail?.startsWith('deny') ? 'deny' : 'allow'
   }
 
-  #finalise(turn: TurnState, synthesized: boolean, extra: Provenance[] = []): void {
-    if (turn.verdict) return
-    const got = classify(this.#evidenceFor(turn, this.#pty.alive, false))
-    if (got.state === 'in_progress') return
-    turn.verdict = {
-      outcome: got.outcome!,
-      confidence: got.confidence!,
-      provenance: [...got.provenance!, ...extra],
-    }
-    this.#emit({
-      type: 'turn_end',
-      verdict: turn.verdict,
-      synthesized,
-      turnKey: turn.key,
-      seq: this.#next(),
-      at: Date.now(),
-      provisional: false,
-    })
-  }
-
   /**
-   * Reconcile unfinished turns against the transcript before declaring anything.
+   * Rebuild transcript evidence for every turn from the transcript as it CURRENTLY
+   * stands, and let each tracker re-decide.
    *
-   * This is what stops a lost `Stop` from becoming `process_exited` on shutdown. An
+   * `resetTranscript` rather than `observeTranscript` on purpose. Everywhere else
+   * evidence accumulates, which is what stops weaker repeated signals resurrecting a
+   * verdict. Compaction breaks that: a rewritten transcript may no longer contain a
+   * record a tracker already saw, and holding it would assert something the source of
+   * truth now denies. Hook and orchestrator evidence survive untouched -- those channels
+   * were not rewritten.
+   *
+   * This is also what stops a lost `Stop` from becoming `process_exited` at shutdown: an
    * assistant entry with stop_reason=end_turn is correlation evidence that the turn
-   * completed; without it, a live turn in a dead process really did die.
+   * completed even though its hook never arrived.
    */
-  async #reconcileLiveTurns(): Promise<void> {
-    const live = this.#liveTurns()
-    if (live.length === 0) return
+  async #reconcileFromTranscript(): Promise<void> {
+    if (!this.#view) return
 
     let completedInTranscript = 0
-    if (this.#view) {
-      try {
-        const snap = await this.#view.snapshot()
-        completedInTranscript = snap.turns.filter((t) => t.state === 'completed').length
-      } catch {
-        /* transcript unreadable; fall through with zero evidence */
-      }
+    try {
+      const snap = await this.#view.snapshot()
+      completedInTranscript = snap.turns.filter((t) => t.state === 'completed').length
+    } catch {
+      return // transcript unreadable; leave existing evidence alone rather than guess
     }
 
-    // Turns are finalised in order, and only as many as the transcript actually
-    // evidences may claim completion.
-    let credits = Math.max(0, completedInTranscript - this.#completedCount())
-    for (const turn of live) {
-      const recovered = credits > 0
+    // Only as many turns as the transcript actually evidences may claim completion.
+    let credits = Math.max(0, completedInTranscript - this.#provenCompletedCount())
+
+    for (const turn of this.#allTurns()) {
+      const recovered = !turn.tracker.evidence.hooks.includes('Stop') && credits > 0
       if (recovered) credits--
-      const got = classify(this.#evidenceFor(turn, this.#pty.alive, recovered))
-      if (got.state === 'in_progress') continue
-      turn.verdict = {
-        outcome: got.outcome!,
-        confidence: got.confidence!,
-        provenance: [
-          ...got.provenance!,
-          recovered
-            ? {
-                source: 'transcript' as const,
-                detail: 'completion recovered from transcript; the Stop hook never arrived',
-                caveat: true,
-              }
-            : {
-                source: 'transcript' as const,
-                detail: 'no transcript evidence of completion for this turn',
-                caveat: true,
-              },
-        ],
-      }
-      this.#emit({
-        type: 'turn_end',
-        verdict: turn.verdict,
-        synthesized: true,
-        turnKey: turn.key,
-        seq: this.#next(),
-        at: Date.now(),
-        provisional: false,
+      const update = turn.tracker.resetTranscript({
+        ...emptyTranscriptState(),
+        exists: true,
+        hasAssistantAfterPrompt: recovered,
+        finalStopReason: recovered ? 'end_turn' : undefined,
       })
+      this.#apply(turn, update, true)
     }
   }
 
-  #completedCount(): number {
-    return [...this.#turns.values()].filter((t) => t.verdict?.outcome === 'completed').length
+  /** Turns whose completion is proven by a Stop, so they need no transcript credit. */
+  #provenCompletedCount(): number {
+    return this.#allTurns().filter((t) => t.tracker.evidence.hooks.includes('Stop')).length
   }
 
   async #onExit(reason: string): Promise<void> {
@@ -416,7 +432,14 @@ export class ClaudePtyHookAdapter implements AgentSession {
     this.#pendingPrompt?.reject(new Error(`claude exited (${reason}) before accepting the prompt`))
     this.#pendingPrompt = undefined
 
-    await this.#reconcileLiveTurns()
+    await this.#reconcileFromTranscript()
+    for (const turn of this.#liveTurns()) {
+      this.#apply(
+        turn,
+        turn.tracker.observeProcess({ alive: false, howEnded: this.#pty.exitInfo?.reason }),
+        true,
+      )
+    }
 
     if (!this.#closed) {
       this.#emit({
@@ -451,9 +474,10 @@ export class ClaudePtyHookAdapter implements AgentSession {
     await this.#input.cancel(turn ? String(turn.key) : 'no live turn')
     if (!turn) return undefined
     // Cancellation produces no signal from the child at all. Give the UI a moment to
-    // settle, then conclude from our own record of having sent ESC.
+    // settle, then conclude from our own record of having sent ESC -- which is why the
+    // input queue's semantic action log is classification evidence, not a debug aid.
     await new Promise((r) => setTimeout(r, 1500))
-    this.#finalise(turn, true)
+    this.#apply(turn, turn.tracker.observeOrchestrator({ sentCancel: true }), true)
     return turn.key
   }
 
@@ -461,7 +485,18 @@ export class ClaudePtyHookAdapter implements AgentSession {
     if (this.guarantees.inputOwnership !== 'mediated') {
       throw new Error('permission decisions require mediated input ownership')
     }
-    await this.#input.decidePermission(decision)
+    const action = await this.#input.decidePermission(decision)
+    // The decision is evidence: on both agents a refused permission is otherwise
+    // indistinguishable from a user cancellation.
+    const turn = this.#latestLiveTurn()
+    if (turn) {
+      this.#apply(
+        turn,
+        turn.tracker.observeOrchestrator({ sentPermissionDecision: decision }),
+        true,
+      )
+    }
+    void action
   }
 
   events(): AsyncIterable<AgentEvent> {
@@ -486,13 +521,14 @@ export class ClaudePtyHookAdapter implements AgentSession {
     // transcript only suggests it.
     for (let i = 0; i < snap.turns.length; i++) {
       const known = this.#turns.get(this.#order[i] ?? '')
-      if (known?.verdict) {
+      const verdict = known?.tracker.verdict
+      if (known && verdict) {
         snap.turns[i] = {
           ...snap.turns[i]!,
           key: known.key,
-          state: known.verdict.outcome,
-          confidence: known.verdict.confidence,
-          provenance: known.verdict.provenance,
+          state: verdict.outcome,
+          confidence: verdict.confidence,
+          provenance: verdict.provenance,
         }
       }
     }
@@ -515,28 +551,31 @@ export class ClaudePtyHookAdapter implements AgentSession {
 
     if (mode === 'graceful' && this.#pty.alive) {
       await this.#input.drain()
-      await this.#reconcileLiveTurns()
+      // Reconcile BEFORE terminating. A verdict already established by stronger evidence
+      // must not be replaced by a weaker causal guess just because cleanup killed the
+      // process; the classifier's rule order enforces the same thing from the other side.
+      await this.#reconcileFromTranscript()
       await this.#pty.terminate()
     } else if (mode === 'abandoned') {
       // We are walking away from the transport, not asserting anything about the turns.
+      // Only turns with no verdict yet. Abandonment asserts nothing about a turn whose
+      // outcome is already established -- walking away does not un-complete it.
       for (const turn of this.#liveTurns()) {
-        turn.verdict = {
-          outcome: 'transport_lost',
-          confidence: 'uncertain',
-          provenance: [
-            { source: 'transport', detail: 'adapter abandoned the session' },
-            { source: 'transport', detail: 'the child may still be running', caveat: true },
-          ],
-        }
-        this.#emit({
-          type: 'turn_end',
-          verdict: turn.verdict,
-          synthesized: true,
-          turnKey: turn.key,
-          seq: this.#next(),
-          at: Date.now(),
-          provisional: false,
-        })
+        this.#apply(turn, turn.tracker.observeTranscript({}) ?? undefined, true)
+        this.#apply(
+          turn,
+          {
+            verdict: {
+              outcome: 'transport_lost',
+              confidence: 'uncertain',
+              provenance: [
+                { source: 'transport', detail: 'adapter abandoned the session' },
+                { source: 'transport', detail: 'the child may still be running', caveat: true },
+              ],
+            },
+          },
+          true,
+        )
       }
     }
 

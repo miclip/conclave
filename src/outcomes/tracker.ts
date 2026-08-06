@@ -20,7 +20,12 @@ import type { Verdict } from '../contract/outcome.ts'
 import { classify, evidence, type Evidence } from './classify.ts'
 
 export interface VerdictUpdate {
-  verdict: Verdict
+  /**
+   * Absent when a previously reported verdict was WITHDRAWN without a replacement --
+   * only possible via `resetTranscript`, when compaction removed the evidence a verdict
+   * rested on.
+   */
+  verdict?: Verdict
   /**
    * Present when this replaces a terminal verdict already reported. The adapter should
    * emit a `revision` event withdrawing the earlier `turn_end` before emitting this one.
@@ -68,6 +73,42 @@ export class TurnVerdictTracker {
   observeTranscript(patch: Partial<Evidence['transcript']>): VerdictUpdate | undefined {
     this.#evidence.transcript = { ...this.#evidence.transcript, ...patch }
     return this.#reclassify()
+  }
+
+  /**
+   * REPLACE transcript evidence rather than merging it.
+   *
+   * Everything else here is monotonic, which is what makes weaker repeated evidence
+   * unable to resurrect a verdict. Compaction is the one thing that breaks that
+   * assumption: a rewritten transcript may no longer contain a record the tracker has
+   * already seen, and continuing to hold it would mean asserting something the source of
+   * truth now denies.
+   *
+   * So after a rewrite the transcript half is rebuilt from what the transcript currently
+   * says, not merged into what it used to say. A verdict resting solely on removed
+   * evidence is withdrawn -- returned as an update with `supersedes` set and no
+   * `verdict`. Hook and orchestrator evidence are untouched: those channels were not
+   * rewritten.
+   */
+  resetTranscript(state: Evidence['transcript']): VerdictUpdate | undefined {
+    this.#evidence.transcript = { ...state }
+    const previous = this.#verdict
+    const got = classify(this.#evidence)
+
+    if (got.state === 'in_progress') {
+      if (!previous) return undefined
+      this.#verdict = undefined
+      return { supersedes: previous }
+    }
+
+    const next: Verdict = {
+      outcome: got.outcome!,
+      confidence: got.confidence!,
+      provenance: got.provenance!,
+    }
+    if (previous && sameVerdict(previous, next)) return undefined
+    this.#verdict = next
+    return previous ? { verdict: next, supersedes: previous } : { verdict: next }
   }
 
   observeProcess(patch: Partial<Evidence['process']>): VerdictUpdate | undefined {

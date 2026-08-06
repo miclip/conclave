@@ -111,6 +111,10 @@ Failure boundaries it is tested against (`npm run test:live`):
   against the transcript *before* anything is finalised — a completed turn whose `Stop`
   was lost comes back as `completed` (confidence `inferred`, with a caveat), never as
   `process_exited`.
+- Terminal handling runs through `outcomes/tracker.ts`, so a verdict already reported can
+  be **withdrawn by seq** and replaced when stronger cross-channel evidence lands.
+  Explicit orchestrator actions outrank process death: closing a session cannot downgrade
+  a turn we already cancelled, refused, or saw complete.
 - `close('graceful')` and `close('abandoned')` differ: abandonment yields
   `transport_lost` with the caveat that the child may still be running, rather than
   asserting a death.
