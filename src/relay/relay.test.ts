@@ -25,7 +25,8 @@ import type {
 import { guaranteesFor, turnKey } from '../contract/session.ts'
 import { AgentRegistry } from '../registry/registry.ts'
 import { Relay } from './relay.ts'
-import { outranks } from './message.ts'
+import { outranks, type RelayMessage } from './message.ts'
+import type { RelayEvent } from './observe.ts'
 
 /** Records everything it was sent and replies with scripted prose. */
 class FakeSession implements AgentSession {
@@ -41,11 +42,14 @@ class FakeSession implements AgentSession {
   // rejects those, since native type stripping cannot erase them.
   readonly agent: string
   readonly sessionId: string
+  /** Emitted before each turn_end, so a turn is not a single instantaneous event. */
+  #tools: string[]
 
-  constructor(agent: string, sessionId: string, replies: string[]) {
+  constructor(agent: string, sessionId: string, replies: string[], tools: string[] = []) {
     this.agent = agent
     this.sessionId = sessionId
     this.#replies = [...replies]
+    this.#tools = tools
   }
 
   async send(message: string): Promise<TurnKey> {
@@ -53,6 +57,17 @@ class FakeSession implements AgentSession {
     const key = turnKey(`${this.sessionId}-turn-${this.#turns.length}`)
     const prose = this.#replies.shift() ?? '(no further scripted reply)'
     this.#turns.push({ key, prose })
+    for (const tool of this.#tools) {
+      this.#emit({
+        type: 'tool_use',
+        tool,
+        input: {},
+        turnKey: key,
+        seq: ++this.#seq,
+        at: Date.now(),
+        provisional: true,
+      })
+    }
     this.#emit({
       type: 'turn_end',
       verdict: { outcome: 'completed', confidence: 'proven', provenance: [{ source: 'hook', detail: 'Stop' }] },
@@ -63,6 +78,23 @@ class FakeSession implements AgentSession {
       provisional: false,
     })
     return key
+  }
+
+  /**
+   * Emit a tool call after a delay, with nothing driving it. Stands in for a child still
+   * emitting while the relay tears down around it.
+   */
+  emitLate(tool: string, delayMs: number): void {
+    setTimeout(() => {
+      this.#emit({
+        type: 'tool_use',
+        tool,
+        input: {},
+        seq: ++this.#seq,
+        at: Date.now(),
+        provisional: true,
+      })
+    }, delayMs).unref()
   }
 
   #emit(e: AgentEvent): void {
@@ -144,15 +176,21 @@ function registryWith(sessions: Record<string, FakeSession>): AgentRegistry {
   return r
 }
 
-async function twoParty(leadReplies: string[], implReplies: string[]) {
+async function twoParty(
+  leadReplies: string[],
+  implReplies: string[],
+  implTools: string[] = [],
+  onLog?: (m: RelayMessage) => void,
+) {
   const lead = new FakeSession('fake-lead', 'lead-1', leadReplies)
-  const impl = new FakeSession('fake-impl', 'impl-1', implReplies)
+  const impl = new FakeSession('fake-impl', 'impl-1', implReplies, implTools)
   const relay = await Relay.start({
     registry: registryWith({ 'fake-lead': lead, 'fake-impl': impl }),
     cwd: '/tmp',
     lead: { id: 'advisor', agent: 'fake-lead', role: 'advisor' },
     implementer: { id: 'implementer', agent: 'fake-impl', role: 'implementer' },
     maxRounds: 3,
+    ...(onLog ? { onLog } : {}),
   })
   return { relay, lead, impl }
 }
@@ -305,4 +343,169 @@ test('stopping closes every session gracefully', async () => {
   await relay.stop()
   assert.equal(lead.closedAs, 'graceful')
   assert.equal(impl.closedAs, 'graceful')
+})
+
+// --- observing a run in progress ------------------------------------------------------
+
+function messagesIn(events: RelayEvent[]): RelayMessage[] {
+  return events.flatMap((e) => (e.type === 'message' ? [e.message] : []))
+}
+
+/** Reads a subscription to completion. Hangs if the stream never terminates, on purpose. */
+async function drain(stream: AsyncIterable<RelayEvent>): Promise<RelayEvent[]> {
+  const out: RelayEvent[] = []
+  for await (const e of stream) out.push(e)
+  return out
+}
+
+test('an observer sees the routing log in order, and the turn happening between entries', async () => {
+  // The tools are the point. A stream carrying only log entries goes silent from the
+  // instruction until the report -- which is the entire duration of the work, and exactly
+  // the interval a live view exists to show.
+  const { relay } = await twoParty(['do the thing', 'DONE'], ['done it'], ['Read', 'Edit'])
+  const collected = drain(relay.observe())
+  await relay.run('a goal')
+  const events = await collected
+
+  assert.deepEqual(
+    messagesIn(events).map((m) => m.seq),
+    relay.log.map((m) => m.seq),
+    'every log entry reaches the observer, in log order',
+  )
+
+  const at = (kind: string) => events.findIndex((e) => e.type === 'message' && e.message.kind === kind)
+  const instruction = at('instruction')
+  const report = at('report')
+  assert.ok(instruction >= 0 && report > instruction, 'an instruction, then the report answering it')
+  const during = events
+    .slice(instruction, report)
+    .filter((e) => e.type === 'activity' && e.event.type === 'tool_use')
+  assert.ok(during.length > 0, 'the wait for a turn is not silent')
+
+  const end = events.at(-1)!
+  assert.equal(end.type, 'run_end', 'terminal, and the iteration completed rather than hanging')
+  if (end.type === 'run_end') assert.equal(end.reason, 'done')
+})
+
+test('a subscriber attaching mid-run replays what it missed, then follows live', async () => {
+  const { relay } = await twoParty(['do the thing', 'DONE'], ['done it'], ['Read'])
+  const running = relay.run('a goal')
+  while (!relay.log.some((m) => m.kind === 'instruction')) {
+    await new Promise((r) => setTimeout(r, 5))
+  }
+
+  const late = drain(relay.observe())
+  await running
+  const events = await late
+
+  // Including the goal and both briefings, which were routed before it attached. A gap
+  // here would be invisible to the subscriber, which is what makes it worth closing.
+  assert.deepEqual(
+    messagesIn(events).map((m) => m.seq),
+    relay.log.map((m) => m.seq),
+    'replay covers everything before the attach',
+  )
+  assert.equal(events.at(-1)?.type, 'run_end')
+
+  const nothing = await drain(relay.observe({ replay: false }))
+  assert.deepEqual(nothing, [], 'opting out of replay after the run yields nothing at all')
+})
+
+test('two subscribers each receive the whole stream', async () => {
+  const { relay } = await twoParty(['do the thing', 'DONE'], ['done it'], ['Read'])
+  const a = drain(relay.observe())
+  const b = drain(relay.observe())
+  await relay.run('a goal')
+  const [ea, eb] = await Promise.all([a, b])
+
+  assert.ok(ea.length > 0)
+  assert.deepEqual(
+    ea.map((e) => e.seq),
+    eb.map((e) => e.seq),
+    'one shared queue would have them stealing events from each other',
+  )
+})
+
+test('breaking out of one subscription detaches it and leaves the others intact', async () => {
+  const { relay } = await twoParty(['do the thing', 'DONE'], ['done it'], ['Read'])
+  const survivor = drain(relay.observe())
+
+  const quitter: RelayEvent[] = []
+  for await (const e of relay.observe()) {
+    quitter.push(e)
+    break
+  }
+
+  await relay.run('a goal')
+  const events = await survivor
+
+  assert.equal(quitter.length, 1, 'it stopped where it broke rather than draining the run')
+  assert.ok(events.length > 1)
+  assert.equal(events.at(-1)?.type, 'run_end', 'and the subscriber that stayed ran to completion')
+})
+
+test('run_end is terminal for a late subscriber too, not just a live one', async () => {
+  // A child does not stop emitting because the relay decided the run was over. If those
+  // events reached the history, a subscriber attaching afterwards would replay tool calls
+  // sitting AFTER the run they belong to -- a live subscriber and a replayed one would
+  // disagree about where the session ended.
+  const { relay, impl } = await twoParty(['do the thing', 'DONE'], ['done it'], ['Read'])
+  const live = drain(relay.observe())
+  await relay.run('a goal')
+  const liveEvents = await live
+
+  impl.emitLate('LateWrite', 5)
+  impl.emitLate('LaterWrite', 20)
+  await new Promise((r) => setTimeout(r, 120))
+
+  assert.equal(liveEvents.at(-1)?.type, 'run_end', 'the subscriber that watched it happen')
+
+  const replayed = await drain(relay.observe())
+  assert.equal(replayed.at(-1)?.type, 'run_end', 'and one attaching after the fact')
+  assert.deepEqual(
+    replayed.map((e) => e.seq),
+    liveEvents.map((e) => e.seq),
+    'both see exactly the same stream',
+  )
+  assert.equal(
+    replayed.findIndex((e) => e.type === 'activity' && e.event.type === 'tool_use' && /Late/.test(e.event.tool)),
+    -1,
+    'nothing from after the run appears anywhere in it',
+  )
+
+  assert.equal(relay.droppedAfterEnd, 2, 'the refused events are counted, not silently eaten')
+  assert.ok(
+    relay.participants
+      .find((p) => p.id === 'implementer')!
+      .events.some((e) => e.type === 'tool_use' && e.tool === 'LateWrite'),
+    'and the participant still holds them -- the stream declined them, nothing was destroyed',
+  )
+})
+
+test('observing changes neither the routing log numbering nor onLog', async () => {
+  // audit() and asymmetryAt() are defined over RelayMessage.seq. Interleaving activity
+  // into that numbering would silently change what a recorded asymmetry refers to.
+  const pushed: RelayMessage[] = []
+  const { relay } = await twoParty(['instruction', 'DONE'], ['a report'], ['Read', 'Edit'], (m) =>
+    pushed.push(m),
+  )
+  const aside = relay.say('withheld from the advisor', { only: 'implementer' }, 'aside')
+  const collected = drain(relay.observe())
+  await relay.run('a goal')
+  const events = await collected
+
+  assert.deepEqual(
+    relay.log.map((m) => m.seq),
+    relay.log.map((_, i) => i + 1),
+    'message numbering stays contiguous',
+  )
+  assert.deepEqual(pushed.map((m) => m.seq), relay.log.map((m) => m.seq), 'onLog still receives every entry')
+  assert.equal(relay.audit()[0]!.seq, aside.seq)
+  assert.deepEqual(relay.asymmetryAt(relay.log.at(-1)!.seq).excluded, ['advisor'])
+
+  const lastMessageEvent = events.filter((e) => e.type === 'message').at(-1)!
+  assert.ok(
+    lastMessageEvent.seq > lastMessageEvent.message.seq,
+    'the stream counts its own events; activity does not consume message numbers',
+  )
 })

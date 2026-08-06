@@ -1,0 +1,171 @@
+/**
+ * Watching a relay while it runs.
+ *
+ * The routing log is the complete account of a session, but it is only complete once the
+ * session is over, and `onLog` — a single callback fixed at construction — cannot serve a
+ * consumer that attaches later or a second consumer alongside the first. This is the same
+ * account as a stream: attach at any point, receive everything that already happened, then
+ * follow live until the run ends.
+ *
+ * Two things move through it, and the difference matters:
+ *
+ *   message   an entry in the routing log. What the orchestrator ROUTED.
+ *   activity  an adapter event from one participant. What a child is DOING right now.
+ *
+ * Only the second makes a live view worth having. A relay round records an instruction,
+ * then waits — with no deadline, deliberately (see `Relay.#exchange`) — for the turn to
+ * end, and that wait is where the work happens. A view fed only by the routing log shows
+ * nothing at all for the whole of it.
+ *
+ * OBSERVATION IS NOT INTERVENTION. See the brief, "Streaming to the human, and the
+ * intervention gap": neither child CLI ingests input mid-turn, so seeing a turn as it
+ * happens does not mean a reaction to it can land while it is still happening. A human
+ * message written against activity seen here is still delivered at the next turn boundary,
+ * where it reads as context for the NEXT action. Anchoring such a message to the point it
+ * was written against is not implemented, and this stream does not solve it.
+ */
+
+import type { AgentEvent } from '../contract/session.ts'
+import { AsyncQueue } from '../adapters/asyncQueue.ts'
+import type { Rank, RelayMessage } from './message.ts'
+
+/** Why a run stopped. The relay decides none of these beyond `budget`. */
+export type RunReason = 'done' | 'escalated' | 'budget' | 'stopped'
+
+export interface RelayEventBase {
+  /**
+   * Position in this stream. Its own counter, NOT `RelayMessage.seq` -- the message
+   * numbering is what `audit()` and `asymmetryAt()` are defined over, and interleaving
+   * activity into it would silently change what those mean.
+   */
+  seq: number
+  at: number
+}
+
+/** An entry was added to the routing log. */
+export interface RelayMessageEvent extends RelayEventBase {
+  type: 'message'
+  message: RelayMessage
+}
+
+/** A participant's adapter emitted an event. Provisional and revisable, as ever. */
+export interface RelayActivityEvent extends RelayEventBase {
+  type: 'activity'
+  participant: string
+  rank: Rank
+  event: AgentEvent
+}
+
+/** Terminal. Nothing follows it, and every subscriber's iteration completes. */
+export interface RelayRunEndEvent extends RelayEventBase {
+  type: 'run_end'
+  reason: RunReason
+  detail?: string | undefined
+}
+
+export type RelayEvent = RelayMessageEvent | RelayActivityEvent | RelayRunEndEvent
+
+/** Distributes over the union; a plain Omit would collapse it to the common keys. */
+type WithoutEnvelope<T> = T extends unknown ? Omit<T, 'seq' | 'at'> : never
+export type RelayEventInput = WithoutEnvelope<RelayEvent>
+
+export interface ObserveOptions {
+  /**
+   * Replay everything already emitted before following live. Default true: a subscriber
+   * that attaches mid-run and silently misses the goal and the briefings is worse than
+   * one that cannot attach at all, because the gap is invisible to it.
+   */
+  replay?: boolean | undefined
+}
+
+/**
+ * Fan-out to any number of independent subscribers.
+ *
+ * One queue per subscriber rather than one shared queue: `AsyncQueue` delivers each item
+ * to exactly one reader, which is right for an adapter's event stream and exactly wrong
+ * for a broadcast. Sharing one would have subscribers stealing each other's events.
+ */
+export class RelayEventStream {
+  #history: RelayEvent[] = []
+  #subscribers = new Set<AsyncQueue<RelayEvent>>()
+  #seq = 0
+  #closed = false
+  #droppedAfterClose = 0
+
+  get closed(): boolean {
+    return this.#closed
+  }
+
+  /**
+   * Emissions that arrived after the terminal event and were refused. A child can still
+   * be emitting while the relay tears down, so this is expected rather than alarming --
+   * but it is counted rather than silently swallowed, because a stream that quietly eats
+   * events is indistinguishable from one that lost them.
+   */
+  get droppedAfterClose(): number {
+    return this.#droppedAfterClose
+  }
+
+  emit(input: RelayEventInput): void {
+    // `run_end` is terminal, and it has to be terminal for EVERY subscriber -- including
+    // one that attaches later and reads the history. Dropping post-close emissions from
+    // the history is what makes that true; without it a late subscriber would replay
+    // activity sitting after the run it belongs to.
+    //
+    // Nothing is lost by this. The participant's own event array still holds the event,
+    // and `snapshot()` remains authoritative; only the observation stream declines it.
+    if (this.#closed) {
+      this.#droppedAfterClose++
+      return
+    }
+    // The cast is the price of building the envelope once for a union of three shapes.
+    const event = { ...input, seq: ++this.#seq, at: Date.now() } as RelayEvent
+    // Retained even with no subscribers, so one attaching later still gets the history.
+    // These hold references to the same RelayMessage and AgentEvent objects the log and
+    // the participants already keep, so it is an envelope per event and not a second copy
+    // of the prose.
+    this.#history.push(event)
+    for (const q of this.#subscribers) q.push(event)
+  }
+
+  /** Ends every subscription. Emit the terminal `run_end` before calling this. */
+  close(): void {
+    if (this.#closed) return
+    this.#closed = true
+    for (const q of this.#subscribers) q.close()
+    this.#subscribers.clear()
+  }
+
+  /**
+   * Iterate the session as it happens.
+   *
+   * One iterable is one subscription: iterate it once. Breaking out of a `for await`
+   * detaches it, because an abandoned subscriber that stayed attached would accumulate
+   * every event for the rest of the run with nobody reading them.
+   */
+  observe(opts: ObserveOptions = {}): AsyncIterable<RelayEvent> {
+    const queue = new AsyncQueue<RelayEvent>()
+    if (opts.replay !== false) for (const e of this.#history) queue.push(e)
+    // Already-queued replay still drains before the iterator reports done.
+    if (this.#closed) queue.close()
+    else this.#subscribers.add(queue)
+
+    const detach = () => {
+      this.#subscribers.delete(queue)
+      queue.close()
+    }
+
+    return {
+      [Symbol.asyncIterator]: () => {
+        const inner = queue[Symbol.asyncIterator]()
+        return {
+          next: () => inner.next(),
+          return: async () => {
+            detach()
+            return { value: undefined as never, done: true }
+          },
+        }
+      },
+    }
+  }
+}

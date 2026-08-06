@@ -889,6 +889,35 @@ provenance and what superseded what.
 Together they answer the question the project's premise depends on: is this still two
 participants, or one participant and an expensive echo?
 
+### Epistemic calibration [Added 2026-08-05, from experiment 2]
+
+A fifth dimension, and the one the first natural experiment actually surfaced. The four
+above measure whether a participant *engages*. This measures whether it knows the limits of
+what it knows.
+
+| behaviour | value |
+|---|---|
+| prescribes immediately | fast, and may be confidently wrong |
+| requests inspection, **then** reasons | slower, calibrated |
+| always requests inspection | safe, and may contribute nothing |
+
+The middle and bottom rows are indistinguishable from a single run, which is exactly why
+this needs measuring rather than judging. The separable question is whether a request for
+inspection is **epistemic** or **procedural**:
+
+> *"Inspect the current design, because I do not know enough to recommend"* is calibration.
+> *"Go inspect"* regardless of task is boilerplate.
+
+Three measures distinguish them:
+
+- what fraction of tasks draw a request for inspection at all;
+- what fraction of those requests actually **change** the subsequent recommendation;
+- what fraction of the initial uncertainty was **warranted** — did the repository in fact
+  hold something that mattered?
+
+An advisor that asks only when repository state matters is doing real work. One that always
+asks is inserting latency and scoring well on every other metric while doing it.
+
 ## 7a. Ending a session [Added 2026-08-05]
 
 Ending is a **distinct capability** from steering, not the absence of a next instruction.

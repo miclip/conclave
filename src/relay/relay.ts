@@ -27,6 +27,16 @@ import {
   type RelayMessage,
   type Visibility,
 } from './message.ts'
+import { RelayEventStream, type ObserveOptions, type RelayEvent, type RunReason } from './observe.ts'
+
+export type {
+  ObserveOptions,
+  RelayActivityEvent,
+  RelayEvent,
+  RelayMessageEvent,
+  RelayRunEndEvent,
+  RunReason,
+} from './observe.ts'
 
 export interface RelayParticipant {
   id: string
@@ -45,6 +55,11 @@ export interface RelayOptions {
   maxRounds?: number
   /** Per-turn deadline, handed to each adapter's watchdog rather than kept here. */
   turnWatchdogMs?: number
+  /**
+   * Routing-log entries as they are recorded. Kept for callers that only want the log and
+   * only want it pushed at them; `observe()` is the fuller surface, and carries the
+   * participant activity this does not.
+   */
   onLog?: (m: RelayMessage) => void
 }
 
@@ -76,6 +91,8 @@ export class Relay {
   #seq = 0
   #opts: RelayOptions
   #stopped = false
+  #stream = new RelayEventStream()
+  #ended = false
 
   private constructor(opts: RelayOptions) {
     this.#opts = opts
@@ -108,8 +125,14 @@ export class Relay {
     const p: RelayParticipant = { id: spec.id, rank, session, events: [] }
     this.#participants.set(spec.id, p)
     // One consumer per session: the event queue delivers each event to exactly one reader.
+    // This loop is that reader, and forwarding from here is what lets an observer see a
+    // turn in progress -- the routing log says nothing between an instruction and the
+    // report that answers it, which is the entire duration of the work.
     void (async () => {
-      for await (const e of session.events()) p.events.push(e)
+      for await (const e of session.events()) {
+        p.events.push(e)
+        this.#stream.emit({ type: 'activity', participant: p.id, rank: p.rank, event: e })
+      }
     })()
     this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text: `${spec.id} joined as ${rank} (${spec.agent})` })
   }
@@ -132,7 +155,39 @@ export class Relay {
     const full: RelayMessage = { ...m, visibility, excluded, seq: ++this.#seq, at: Date.now() }
     this.log.push(full)
     this.#opts.onLog?.(full)
+    this.#stream.emit({ type: 'message', message: full })
     return full
+  }
+
+  /**
+   * Follow the session as it happens: everything already emitted, then live, until the
+   * run ends. Attach before `run()` or during it; a late subscriber is not short of
+   * anything an early one had.
+   *
+   * One call is one subscription -- iterate the returned iterable once. Breaking out of
+   * the loop detaches it.
+   */
+  observe(opts: ObserveOptions = {}): AsyncIterable<RelayEvent> {
+    return this.#stream.observe(opts)
+  }
+
+  /**
+   * Participant events that arrived after the run ended and were refused by the stream.
+   * Expected during teardown -- a child can still be emitting -- and reported rather than
+   * silently swallowed. They remain on the participant and in its transcript.
+   */
+  get droppedAfterEnd(): number {
+    return this.#stream.droppedAfterClose
+  }
+
+  /** Terminal, and emitted exactly once however the run and `stop()` interleave. */
+  #end(reason: RunReason, detail?: string): { reason: RunReason; detail?: string } {
+    if (!this.#ended) {
+      this.#ended = true
+      this.#stream.emit({ type: 'run_end', reason, detail })
+      this.#stream.close()
+    }
+    return detail === undefined ? { reason } : { reason, detail }
   }
 
   /**
@@ -231,7 +286,7 @@ export class Relay {
    * advisor's calls, and both hand back to the human rather than being acted on. §7a's
    * rotation and termination authority is not implemented here.
    */
-  async run(goal: string): Promise<{ reason: 'done' | 'escalated' | 'budget' | 'stopped'; detail?: string }> {
+  async run(goal: string): Promise<{ reason: RunReason; detail?: string }> {
     const lead = this.participants.find((p) => p.rank === 'advisor')!
     const impl = this.participants.find((p) => p.rank === 'implementer')!
 
@@ -242,16 +297,16 @@ export class Relay {
 
     const maxRounds = this.#opts.maxRounds ?? 6
     for (let round = 1; round <= maxRounds; round++) {
-      if (this.#stopped) return { reason: 'stopped' }
+      if (this.#stopped) return this.#end('stopped')
 
       const instruction = next.prose.trim()
       if (/^DONE\b/i.test(instruction)) {
         this.#record({ from: lead.id, fromRank: 'advisor', to: [], kind: 'note', text: `advisor reports the work complete: ${instruction}` })
-        return { reason: 'done', detail: instruction }
+        return this.#end('done', instruction)
       }
       if (/^ESCALATE\b/i.test(instruction)) {
         this.#record({ from: lead.id, fromRank: 'advisor', to: [], kind: 'note', text: instruction })
-        return { reason: 'escalated', detail: instruction }
+        return this.#end('escalated', instruction)
       }
 
       this.#record({ from: lead.id, fromRank: 'advisor', to: [impl.id], kind: 'instruction', text: instruction })
@@ -269,10 +324,7 @@ export class Relay {
       // here rather than relaying the partial prose keeps the advisor from steering on a
       // report that never finished being written.
       if (report.end.verdict.outcome !== 'completed') {
-        return {
-          reason: 'escalated',
-          detail: `${impl.id} turn ended ${formatVerdict(report.end.verdict)}`,
-        }
+        return this.#end('escalated', `${impl.id} turn ended ${formatVerdict(report.end.verdict)}`)
       }
 
       const leadAside = this.#drain(lead.id)
@@ -283,11 +335,14 @@ export class Relay {
           .join('\n\n'),
       )
     }
-    return { reason: 'budget' }
+    return this.#end('budget')
   }
 
   async stop(): Promise<void> {
     this.#stopped = true
+    // A run that already ended keeps the reason it ended for; teardown is not a second
+    // outcome. Only a relay stopped without ever finishing a run reports 'stopped'.
+    this.#end('stopped')
     for (const p of this.participants) await p.session.close('graceful')
     release(this.#opts.cwd)
   }
