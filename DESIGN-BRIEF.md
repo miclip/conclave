@@ -1469,6 +1469,21 @@ have been recorded as `replacement_could_not_reproduce`: **the transaction refus
 transfer and blaming the replacement for a defect of ours.** The example is now generated
 from the actual checks.
 
+Confirmed live (`test:live:claim`, 91s): one configured check, one claim, matching the
+arbiter, no invented second, transfer accepted.
+
+```
+[claimed]  [{"index":1,"exitCode":0}]
+[observed] [{"command":"sh -c 'true'","exitCode":0}]
+[status]   rotated
+```
+
+That test also asserts on the **rendered prompt**, not only on the outcome. The first three
+properties can all hold against a broken template if the replacement happens to be the
+careful kind that flags the discrepancy rather than filling it in — and both behaviours
+came from the same prompt. Testing the outcome alone lets the model's judgement mask the
+orchestrator's defect.
+
 Worth stating plainly because it cuts against the design's own instinct: strictness about
 the reported format is right, and a strict format the orchestrator itself renders
 incorrectly converts a compliant answer into evidence of non-compliance. This is the second
@@ -1487,10 +1502,20 @@ and, more carefully, in another run:
 > I can't tell from here whether the sentinel is a deliberate tripwire meant to route this
 > back to the frozen implementer, or a leftover the handoff simply failed to record.
 
-The second is the better answer. It is the §7 calibration question again — *does the
-advisor know when it doesn't know?* — arriving from the implementer's side, and it is the
-distinction between separating "I can reproduce the file state" from "I can reproduce the
-check it was paired with" that makes the acceptance step worth having at all.
+The second is the better answer, and it generalises: in the confirmation run the
+replacement gave a byte-level digest match for the handed-off file and then declined to
+overclaim about provenance —
+
+> `.conclave/` doesn't appear at all, which is consistent with the claim that nothing
+> outside the scratch directory was touched, though it's also consistent with `.conclave/`
+> being ignored; I did not chase that further since it wasn't asked for.
+
+This is the §7 calibration question — *does it know when it doesn't know?* — arriving from
+the implementer's side. The acceptance step is doing more than format compliance here: it
+**exposed uncertainty in the handoff rather than laundering it into a confident claim.**
+Separating "I can reproduce the file state" from "I can reproduce the check it was paired
+with", and "the tree is clean" from "the tree is clean where I can see", is the whole
+reason to demand a demonstration instead of an acknowledgement.
 
 #### Evidence ledger for §7a
 
