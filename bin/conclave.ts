@@ -11,6 +11,7 @@ import {
   installConfig,
 } from '../src/config/install.ts'
 import { defaultRegistry } from '../src/registry/builtin.ts'
+import { runSession } from '../src/repl/session.ts'
 import { Relay } from '../src/relay/relay.ts'
 import { guard } from '../src/workspace/sessionLock.ts'
 
@@ -29,9 +30,18 @@ Commands:
                                    paths changed since they started. Exits non-zero while
                                    live, so it can gate a commit helper.
   relay "<goal>" [--lead codex] [--implementer claude] [--rounds N]
-                                   Run a two-agent session: the lead steers, the
-                                   implementer works, prose only in both directions.
+                                   Run a two-agent session unattended and print the
+                                   routing log. Every pause point ENDS the run, because a
+                                   call that returns an outcome has nowhere to suspend to.
                                    Spawns real sessions and uses real quota.
+  session "<goal>" [--lead codex] [--implementer claude] [--rounds N]
+                   [--checks "npm test"]
+                                   The same session, interactively. Pauses become decision
+                                   points you resolve: /continue, /rotate, /abort, or a
+                                   line of text addressed with @advisor / @implementer.
+                                   Shows participant activity while a turn is running.
+                                   --checks enables rotation; without it a degraded
+                                   implementer escalates rather than rotating unverified.
 `
 
 async function main(argv: string[]): Promise<number> {
@@ -110,6 +120,27 @@ async function main(argv: string[]): Promise<number> {
       await relay.stop()
     }
     return 0
+  }
+
+  if (command === 'session') {
+    const goal = sub
+    if (!goal) {
+      console.error('session needs a goal: conclave session "<goal>"\n')
+      return 1
+    }
+    const flag = (name: string, fallback: string) => {
+      const i = rest.indexOf(`--${name}`)
+      return i >= 0 ? (rest[i + 1] ?? fallback) : fallback
+    }
+    const checks = flag('checks', '').split(',').map((c) => c.trim()).filter(Boolean)
+    return runSession({
+      cwd: process.cwd(),
+      goal,
+      lead: flag('lead', 'codex'),
+      implementer: flag('implementer', 'claude'),
+      rounds: Number(flag('rounds', '8')),
+      checks,
+    })
   }
 
   if (command === 'help' || command === '--help' || command === undefined) {

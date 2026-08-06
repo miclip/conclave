@@ -46,8 +46,9 @@ Full reasoning, including the commercial risk that drove the transport choice, i
 | 6. Round budgets / anti-spiral | partial — round budget and stall metrics; the spiral ladder is not built |
 | **7. Rotation** | **done — replace a degraded implementer transactionally, proven live** |
 | 8. Orchestrator model | not built |
-| 9. Panel / REPL | not built |
-| 10. Third participant | not built |
+| 9. REPL | done — pauses as decision points, addressed asides, live activity |
+| 10. Panel / summariser | not built |
+| 11. Third participant | not built |
 
 The brief says to stop after step 5 and evaluate honestly whether two agents beat one.
 Two controlled experiments have run ([`spikes/experiments/`](spikes/experiments)) and the
@@ -61,7 +62,7 @@ is narrower than "one catches the other's blind spots": the participants contrib
 ```bash
 npm install
 npm run config:install     # render hook registrations for this checkout
-npm test                   # typecheck + 247 tests (225 offline, 22 live-gated)
+npm test                   # typecheck + 268 tests (243 offline, 25 live-gated)
 ```
 
 Both adapters implement the same contract and pass the same acceptance boundary, built
@@ -133,8 +134,31 @@ for (;;) {
 }
 ```
 
-Still a library: **there is no REPL and no summariser.** Everything below exists and is
-driven from code.
+### The REPL
+
+```bash
+npm run session -- "Add a rate limiter to the request path." --checks "npm test"
+```
+
+```
+<text>                 to everyone, at human rank
+@advisor <text>        to the advisor only — the implementer will not see it
+@implementer <text>    to the implementer only — the advisor will not see it
+
+/pause  /continue  /rotate [reason]  /abort
+/state  /log [n]  /audit  /help
+```
+
+Pauses become decision points rather than the end of the run, and participant **activity**
+is shown while a turn is running — the interval between an instruction and the report
+answering it, which is the whole duration of the work and is otherwise silent.
+
+It holds no lifecycle logic: every transition is a method on `RunHandle`, so the console is
+a client of the state machine rather than the place it lives. A line you type is reported as
+*queued for the next exchange*, not delivered — neither child CLI ingests input mid-turn, so
+seeing sooner is not intervening sooner.
+
+Still no summariser, and no third participant.
 
 ## The ideas that shaped it
 
@@ -248,6 +272,7 @@ produces a recommendation, never an automatic upgrade.
 | [`TODO.md`](TODO.md) | deferrals with reasons, and the invariants protecting them |
 | [`src/`](src/README.md) | the contract, adapters, classifier and registry |
 | `src/relay/` | the two-party relay, the audit trail, and the resumable run handle |
+| `src/repl/` | the console — a client of the run handle, holding no lifecycle logic |
 | `src/rotation/` | the rotation transaction: record, handoff, degradation, rollback |
 | `spikes/pty/` | step 1 — transport, and what it corrected about the brief |
 | `spikes/hooks/` | step 2 — hook lifecycle, delivery semantics, the evidence corpus |

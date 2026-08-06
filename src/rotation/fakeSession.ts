@@ -36,6 +36,14 @@ export class FakeRotationSession implements AgentSession {
   // so the build has no transform to desugar them.
   readonly sessionId: string
   readonly agent: string
+  /**
+   * How long a turn takes before `turn_end`. Default 0 — instantaneous, which is what most
+   * tests want. A console test does not: with instant turns the whole run completes before
+   * scripted stdin delivers its first line, and the test races itself rather than the code.
+   */
+  delayMs = 0
+  /** Compact when this turn index starts (0-based). Deterministic, unlike a timer. */
+  compactOnTurn: number | undefined
 
   constructor(sessionId: string, agent: string, replies: string[] = []) {
     this.sessionId = sessionId
@@ -57,8 +65,19 @@ export class FakeRotationSession implements AgentSession {
       throw new Error(`cannot send to a session in state '${this.#state}'`)
     }
     this.received.push(message)
-    const key = turnKey(`${this.sessionId}-turn-${this.#turns.length}`)
+    const index = this.#turns.length
+    const key = turnKey(`${this.sessionId}-turn-${index}`)
     this.#turns.push({ key, prose: this.#replies.shift() ?? '' })
+    if (this.compactOnTurn === index) this.compact()
+    if (this.delayMs > 0) {
+      setTimeout(() => this.#endTurn(key), this.delayMs).unref()
+      return key
+    }
+    this.#endTurn(key)
+    return key
+  }
+
+  #endTurn(key: TurnKey): void {
     this.emit({
       type: 'turn_end',
       verdict: { outcome: 'completed', confidence: 'proven', provenance: [{ source: 'hook', detail: 'Stop' }] },
@@ -68,7 +87,6 @@ export class FakeRotationSession implements AgentSession {
       at: Date.now(),
       provisional: false,
     })
-    return key
   }
 
   /** Push an event to whichever reader is waiting, or queue it. Single-consumer, as ever. */
