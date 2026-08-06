@@ -25,17 +25,24 @@
  * the human resolves in one word; a false negative leaves exactly the status quo, where the
  * implementer decides alone. Under-detecting is the failure it is tuned away from.
  *
- * WHERE ITS AUTHORITY EXCEEDS ITS EVIDENCE. Token matching is scoped to what the aside
- * actually said. Artifact attribution is not: it diffs `git status --porcelain`, which is
- * global to the repository rather than scoped to Conclave's own actions, so anything that
- * became dirty in the interval is attributed to the aside — including edits by whoever else
- * is working in the tree.
+ * WHAT ITS EVIDENCE NOW IS. Token matching is scoped to what the aside actually said.
+ * Artifact attribution used to be scoped to nothing: it diffed `git status --porcelain`,
+ * which is global to the repository, so anything that became dirty in the interval was
+ * attributed to the aside — including edits by whoever else was working in the tree. Its
+ * authority exceeded its evidence in exactly the case where a second editor was present.
  *
- * In a single-operator checkout that is sound and has been exercised live. In a shared one
- * it is not: the false-positive rate depends on who else is present, and observing a session
- * begins to constrain how the session may be observed. The honest statement is not "the
- * detector is finished" but **its authority exceeds its evidence in multi-editor
- * repositories** — narrow the evidence source before trusting it there.
+ * It is now an intersection. `git status` still supplies the candidates, because it is the
+ * only thing that knows a file changed at all, but a candidate is attributed only when the
+ * informed participant's own tool inputs name it. See `attributable`.
+ *
+ * The remaining gaps are named rather than closed, because each fails toward over-detection
+ * or is bounded:
+ *
+ *   - reading a file counts as touching it. `cat foo.ts` corroborates `foo.ts`.
+ *   - a path a participant never names — a build artifact, `npm install` — is not
+ *     attributed, even if that participant did cause it.
+ *   - compaction rewrites the transcript the evidence is read from. Attribution is
+ *     cumulative and runs immediately after each turn, so the exposure is one turn wide.
  */
 
 import { execFileSync } from 'node:child_process'
@@ -167,6 +174,46 @@ export function dirtyPaths(repoRoot: string): string[] {
   } catch {
     return []
   }
+}
+
+/**
+ * Of the paths that became dirty, the ones the participant can be shown to have touched.
+ *
+ * `git status` answers "what changed in this repository", which is not the question. It
+ * cannot distinguish the implementer's work from a colleague's, so on its own it attributed
+ * every dirty path to the aside — the overreach this module's header used to concede.
+ *
+ * The narrowing keeps `git status` as the candidate set and requires corroboration from the
+ * participant's OWN tool inputs before attributing anything. A path another editor dirtied
+ * is dropped, because nothing the participant did names it.
+ *
+ * Substring matching over raw argument text, deliberately, rather than reading structured
+ * path fields. Measured over this repository's own sessions, ~65% of file mutations happen
+ * through shell commands — `python3 - <<'PY'` heredocs and redirects — not through `Write`
+ * or `Edit`. A structured-field rule would score well on the tools that announce a
+ * `file_path` and miss the majority that do not, which is under-detection, the direction
+ * this must not fail in.
+ *
+ * It over-attributes instead: `cat foo.ts` reads a file and counts as evidence of touching
+ * it. That is accepted. Over-attribution costs a pause the human resolves in one word, and
+ * this is still strictly narrower than attributing the entire working tree.
+ */
+export function attributable(candidates: string[], evidence: string[]): string[] {
+  if (evidence.length === 0) return []
+  const haystack = evidence.join('\n')
+  return candidates.filter((path) => {
+    // Both forms, because the two sides disagree on shape: `git status` reports paths
+    // relative to the repository root, while a tool input usually names an absolute one.
+    // Without the basename test, `src/a.ts` and `/repo/src/a.ts` never match.
+    //
+    // The same length floor on both, and on the whole path rather than only the basename.
+    // Guarding just the fallback left a two-character path matching on the full-path
+    // branch, where a substring that short appears in almost any command by coincidence.
+    // `detectConflict` applies the identical floor for the identical reason.
+    if (path.length >= 3 && haystack.includes(path)) return true
+    const b = base(path)
+    return b.length >= 3 && haystack.includes(b)
+  })
 }
 
 /** Build an origin record from a restricted message as it is sent. */

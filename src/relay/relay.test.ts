@@ -14,7 +14,11 @@
  */
 
 import { strict as assert } from 'node:assert'
-import test from 'node:test'
+import { execFileSync } from 'node:child_process'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import test, { type TestContext } from 'node:test'
 import type {
   AgentEvent,
   AgentSession,
@@ -34,7 +38,7 @@ class FakeSession implements AgentSession {
   readonly guarantees = guaranteesFor('mediated')
   readonly received: string[] = []
   #replies: string[]
-  #turns: { key: TurnKey; prose: string }[] = []
+  #turns: { key: TurnKey; prose: string; args: string[] }[] = []
   #queue: AgentEvent[] = []
   #waiters: ((e: IteratorResult<AgentEvent>) => void)[] = []
   #seq = 0
@@ -45,19 +49,37 @@ class FakeSession implements AgentSession {
   readonly sessionId: string
   /** Emitted before each turn_end, so a turn is not a single instantaneous event. */
   #tools: string[]
+  /**
+   * Serialized tool inputs this session reports for a turn, chosen from what that turn was
+   * asked to do. Attribution reads these and nothing else, so a fake that reports none is a
+   * session that touched nothing.
+   *
+   * A function of the prompt rather than an array indexed by turn number, because the turn
+   * numbering is not what a test means. The implementer's turn 0 is the briefing exchange,
+   * so `[[], [args]]` puts the args on the briefing's successor and not, as it reads, on
+   * the turn after the aside — which is how these tests first failed.
+   */
+  #toolArgsFor: (message: string) => string[]
 
-  constructor(agent: string, sessionId: string, replies: string[], tools: string[] = []) {
+  constructor(
+    agent: string,
+    sessionId: string,
+    replies: string[],
+    tools: string[] = [],
+    toolArgsFor: (message: string) => string[] = () => [],
+  ) {
     this.agent = agent
     this.sessionId = sessionId
     this.#replies = [...replies]
     this.#tools = tools
+    this.#toolArgsFor = toolArgsFor
   }
 
   async send(message: string): Promise<TurnKey> {
     this.received.push(message)
     const key = turnKey(`${this.sessionId}-turn-${this.#turns.length}`)
     const prose = this.#replies.shift() ?? '(no further scripted reply)'
-    this.#turns.push({ key, prose })
+    this.#turns.push({ key, prose, args: this.#toolArgsFor(message) })
     for (const tool of this.#tools) {
       this.#emit({
         type: 'tool_use',
@@ -128,7 +150,7 @@ class FakeSession implements AgentSession {
         prompt: '',
         state: 'completed' as const,
         assistantText: t.prose,
-        toolCalls: [],
+        toolCalls: t.args.map((args) => ({ tool: 'Bash', failed: false, args })),
       })),
       guarantees: this.guarantees,
       compactionGeneration: 0,
@@ -525,4 +547,122 @@ test('observing changes neither the routing log numbering nor onLog', async () =
     lastMessageEvent.seq > lastMessageEvent.message.seq,
     'the stream counts its own events; activity does not consume message numbers',
   )
+})
+
+// --- artifact attribution -----------------------------------------------------------
+//
+// The evidence question, not the matching question. `authority.test.ts` covers what
+// `attributable` decides given evidence; these cover whether the relay hands it the right
+// evidence, against a real `git status` in a real repository.
+
+/** A throwaway git repo, so `dirtyPaths` has something true to report. */
+function scratchRepo(t: TestContext): string {
+  const dir = mkdtempSync(join(tmpdir(), 'relay-attribution-'))
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const git = (...args: string[]) => execFileSync('git', args, { cwd: dir, stdio: 'ignore' })
+  git('init', '-q')
+  git('config', 'user.email', 'test@example.com')
+  git('config', 'user.name', 'test')
+  writeFileSync(join(dir, 'seed.txt'), 'seed\n')
+  git('add', '-A')
+  git('commit', '-qm', 'seed')
+  return dir
+}
+
+/**
+ * Run a two-party relay in `cwd`, sending an aside and dirtying the tree mid-run.
+ *
+ * `dirty` fires from `onLog` when the first report is recorded — after `say()` has
+ * snapshotted the tree and before the turn that triggers attribution — which is the window
+ * a real participant writes in.
+ *
+ * `implToolArgs` is given the prompt of each implementer turn. `ASIDE` appears verbatim in
+ * the prompt of the turn that received it, so a test says "the turn that was told the
+ * aside" instead of guessing a turn index.
+ */
+const ASIDE = 'quietly, please'
+
+async function attributionRun(
+  cwd: string,
+  implToolArgs: (message: string) => string[],
+  dirty: () => void,
+) {
+  // Three advisor replies, so the implementer gets a turn AFTER the aside. With two, the
+  // advisor says DONE off the back of the first report and the run ends before the turn
+  // that attribution is meant to read.
+  const lead = new FakeSession('fake-lead', 'lead-1', ['first instruction', 'second instruction', 'DONE'])
+  const impl = new FakeSession('fake-impl', 'impl-1', ['first report', 'second report'], [], implToolArgs)
+  let relay: Relay
+  let armed = false
+  relay = await Relay.start({
+    registry: registryWith({ 'fake-lead': lead, 'fake-impl': impl }),
+    cwd,
+    lead: { id: 'advisor', agent: 'fake-lead', role: 'advisor' },
+    implementer: { id: 'implementer', agent: 'fake-impl', role: 'implementer' },
+    maxRounds: 3,
+    onLog: (m) => {
+      if (m.kind !== 'report' || armed) return
+      armed = true
+      relay.say(ASIDE, { only: 'implementer' }, 'aside')
+      dirty()
+    },
+  })
+  await relay.run('a goal')
+  return relay.restrictedOrigins.at(-1)!
+}
+
+/** A heredoc, not a `Write`. Most file work in this repository looks like this, and a
+ *  structured `file_path` rule would see nothing in it. */
+const HEREDOC = `python3 - <<'PY'\nopen('asked-for.txt','w').write('x')\nPY`
+
+test('a path the implementer names in a tool call is attributed to the aside', async (t) => {
+  const dir = scratchRepo(t)
+  const origin = await attributionRun(
+    dir,
+    (msg) => (msg.includes(ASIDE) ? [HEREDOC] : []),
+    () => writeFileSync(join(dir, 'asked-for.txt'), 'x\n'),
+  )
+  assert.deepEqual(origin.artifacts, ['asked-for.txt'])
+})
+
+test('a path another editor dirtied is NOT attributed to the aside', async (t) => {
+  // The whole reason this changed. `git status` reports this file exactly as it reports the
+  // implementer's; only the absence of participant evidence separates them.
+  const dir = scratchRepo(t)
+  const origin = await attributionRun(
+    dir,
+    (msg) => (msg.includes(ASIDE) ? [HEREDOC] : []),
+    () => {
+      writeFileSync(join(dir, 'asked-for.txt'), 'x\n')
+      writeFileSync(join(dir, 'colleague-was-here.txt'), 'not ours\n')
+    },
+  )
+  assert.deepEqual(origin.artifacts, ['asked-for.txt'])
+  assert.ok(
+    !origin.artifacts.includes('colleague-was-here.txt'),
+    'a concurrent editor must not have their work attributed to a message they never saw',
+  )
+})
+
+test('with no tool evidence at all, nothing is attributed rather than everything', async (t) => {
+  // The direction of failure, asserted explicitly. A participant whose transcript yields no
+  // tool inputs — an adapter that cannot supply them — attributes nothing. That is
+  // under-detection, and it is chosen over reinstating the whole working tree.
+  const dir = scratchRepo(t)
+  const origin = await attributionRun(dir, () => [], () => {
+    writeFileSync(join(dir, 'appeared.txt'), 'x\n')
+  })
+  assert.deepEqual(origin.artifacts, [])
+})
+
+test('tool calls made BEFORE the aside are not evidence for it', async (t) => {
+  // Work already done cannot have been caused by a message that had not been sent, so
+  // naming the path on an earlier turn must not attribute it.
+  const dir = scratchRepo(t)
+  const origin = await attributionRun(
+    dir,
+    (msg) => (msg.includes(ASIDE) ? [] : ['cat asked-for.txt']),
+    () => writeFileSync(join(dir, 'asked-for.txt'), 'x\n'),
+  )
+  assert.deepEqual(origin.artifacts, [])
 })

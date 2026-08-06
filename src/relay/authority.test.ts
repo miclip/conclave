@@ -11,7 +11,7 @@
 
 import { strict as assert } from 'node:assert'
 import test from 'node:test'
-import { describeConflict, detectConflict, extractTokens, originOf } from './authority.ts'
+import { attributable, describeConflict, detectConflict, extractTokens, originOf } from './authority.ts'
 import type { RelayMessage } from './message.ts'
 
 function restricted(text: string, seq = 4): RelayMessage {
@@ -126,4 +126,61 @@ test('the description gives the human both sides and never a recommendation', ()
   // §9: assembled, not narrated. It must not tell the human what to conclude.
   assert.ok(/may\s+be correcting a genuine mistake/.test(text))
   assert.ok(!/should (continue|abort|refuse)/i.test(text))
+})
+
+// --- attribution --------------------------------------------------------------------
+//
+// What counts as evidence that a participant touched a path. `relay.test.ts` covers
+// whether the relay collects the right evidence; these cover what is done with it.
+
+test('a candidate the evidence names is attributed; one it does not is dropped', () => {
+  // The multi-editor case, reduced to its core. Both paths are equally dirty and `git
+  // status` cannot tell them apart; only the participant's own tool calls can.
+  const kept = attributable(
+    ['src/mine.ts', 'src/theirs.ts'],
+    [JSON.stringify({ file_path: '/repo/src/mine.ts', content: 'x' })],
+  )
+  assert.deepEqual(kept, ['src/mine.ts'])
+})
+
+test('a repo-relative candidate matches an absolute path in the evidence', () => {
+  // The two sides genuinely disagree on shape: `git status` reports relative, a tool input
+  // usually names absolute. Without basename matching these never meet, and attribution
+  // would be empty in the ordinary case rather than the exceptional one.
+  assert.deepEqual(
+    attributable(['src/relay/authority.ts'], ['{"file_path":"/Users/me/repo/src/relay/authority.ts"}']),
+    ['src/relay/authority.ts'],
+  )
+})
+
+test('a path named only inside a shell command is attributed', () => {
+  // ~65% of file mutations in this repository happen this way. A rule that read structured
+  // path fields would score well on `Write` and miss the majority.
+  assert.deepEqual(
+    attributable(['notes.md'], [`python3 - <<'PY'\nopen('notes.md','w').write('x')\nPY`]),
+    ['notes.md'],
+  )
+})
+
+test('with no evidence, nothing is attributed', () => {
+  // Stated as a property, not an accident of the loop. An adapter that cannot supply tool
+  // inputs must under-detect rather than fall back to attributing the whole tree.
+  assert.deepEqual(attributable(['a.ts', 'b.ts'], []), [])
+})
+
+test('reading a file counts as touching it, and that is the accepted cost', () => {
+  // Substring matching cannot tell `cat` from `>`. Documented as a test rather than a
+  // comment so that changing it is a deliberate act: it errs toward over-attribution,
+  // which costs a pause, not a silent miss.
+  assert.deepEqual(attributable(['config.json'], ['{"command":"cat config.json"}']), ['config.json'])
+})
+
+test('a path too short to identify anything is never attributed, on either branch', () => {
+  // Mirrors the length floor `detectConflict` already applies. A two-character string
+  // appearing somewhere in a command is coincidence, not evidence -- and it must not slip
+  // through by matching the full path when the basename check would have rejected it.
+  assert.deepEqual(attributable(['ab'], ['{"command":"grep ab somewhere-else.txt"}']), [])
+  assert.deepEqual(attributable(['x.'], ['{"command":"echo x. > /dev/null"}']), [])
+  // Three characters is enough, and is the boundary.
+  assert.deepEqual(attributable(['abc'], ['{"command":"touch abc"}']), ['abc'])
 })

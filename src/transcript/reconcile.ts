@@ -147,7 +147,10 @@ export class TranscriptSessionView {
         out.push({
           type: 'tool_use',
           tool: turn.toolCalls[i]!.tool,
-          input: undefined,
+          // The serialized input, not the parsed object: this is the only channel through
+          // which a consumer watching events -- rather than polling snapshots -- can see
+          // which files a participant touched.
+          input: turn.toolCalls[i]!.args,
           failed: turn.toolCalls[i]!.failed,
           turnKey: turn.key,
           seq,

@@ -14,7 +14,7 @@
  *     implemented here.
  */
 
-import type { AgentEvent, AgentSession, TurnEndEvent } from '../contract/session.ts'
+import type { AgentEvent, AgentSession, SessionSnapshot, TurnEndEvent } from '../contract/session.ts'
 import { formatVerdict } from '../contract/outcome.ts'
 import { AgentRegistry } from '../registry/registry.ts'
 import type { ParticipantSpec } from '../registry/types.ts'
@@ -30,6 +30,7 @@ import {
 import { RelayEventStream, type ObserveOptions, type RelayEvent, type RunReason } from './observe.ts'
 import { RunHandle, type PauseReason, type RunOutcome, type RunPause } from './run.ts'
 import {
+  attributable,
   describeConflict,
   detectConflict,
   dirtyPaths,
@@ -326,8 +327,34 @@ export class Relay {
     }
 
     const snap = await p.session.snapshot()
+    this.#collectEvidence(p, snap)
     const prose = snap.turns.at(-1)?.assistantText ?? ''
     return { prose, end }
+  }
+
+  /**
+   * Tool inputs each participant's session has recorded, in the order they were observed.
+   *
+   * Append-only, and that is the point: a snapshot is REBUILT from the transcript, and
+   * compaction can shorten it. Holding an index into a list that shrinks under us would
+   * silently re-read the wrong turns, so evidence accumulates here and only the count of
+   * turns already consumed is tracked against the snapshot.
+   */
+  #evidence = new Map<string, string[]>()
+  #turnsConsumed = new Map<string, number>()
+  /** How much evidence each participant had when the last restricted message was sent. */
+  #evidenceAtOrigin = new Map<string, number>()
+
+  #collectEvidence(p: RelayParticipant, snap: SessionSnapshot): void {
+    const consumed = this.#turnsConsumed.get(p.id) ?? 0
+    // Never index past the end: a compacted transcript can hold fewer turns than we have
+    // already read, and `slice` past the end must mean "nothing new", not "start over".
+    const fresh = snap.turns.slice(Math.min(consumed, snap.turns.length))
+    const args = fresh.flatMap((t) =>
+      t.toolCalls.map((c) => c.args).filter((a): a is string => Boolean(a)),
+    )
+    if (args.length > 0) this.#evidence.set(p.id, [...(this.#evidence.get(p.id) ?? []), ...args])
+    this.#turnsConsumed.set(p.id, snap.turns.length)
   }
 
   /**
@@ -355,6 +382,9 @@ export class Relay {
       this.restrictedOrigins.push(originOf(m))
       // Snapshot the tree so paths appearing after this message can be attributed to it.
       this.#treeAtOrigin = dirtyPaths(this.#opts.cwd)
+      // And mark where each recipient's evidence stands, so attribution reads only the
+      // tool calls made AFTER the message — work done before it cannot have come from it.
+      for (const id of to) this.#evidenceAtOrigin.set(id, (this.#evidence.get(id) ?? []).length)
     }
     for (const id of to) {
       const queue = this.#pending.get(id) ?? []
@@ -399,16 +429,29 @@ export class Relay {
   /**
    * Attribute paths that appeared since a restricted message to that message.
    *
-   * Coarse on purpose: it claims only that a path was not dirty when the aside was sent and
-   * is now. That is enough to show the human *what* an advisor is proposing to undo, which
-   * is what the adjudication needs, and it never asserts the implementer's intent.
+   * Two conditions, not one. A path must have become dirty since the aside — `git status`
+   * is the only thing that knows that — AND be named by a tool input from a participant
+   * that actually received the aside. The second is what makes this attribution rather
+   * than a repository diff: a colleague editing in the same checkout dirties paths that
+   * no participant's tool calls mention, and those are now dropped.
+   *
+   * Still coarse, and still never asserts intent. It claims the participant touched the
+   * path, not that it meant to, and not that the aside is why.
    */
   #attributeArtifacts(): void {
     const origin = this.restrictedOrigins.at(-1)
     if (!origin || !this.#treeAtOrigin) return
     const before = new Set(this.#treeAtOrigin)
-    for (const path of dirtyPaths(this.#opts.cwd)) {
-      if (!before.has(path) && !origin.artifacts.includes(path)) origin.artifacts.push(path)
+    const candidates = dirtyPaths(this.#opts.cwd).filter((p) => !before.has(p))
+    if (candidates.length === 0) return
+
+    // Only the participants that were told. One kept from the aside cannot have acted on
+    // it, so its tool calls are not evidence of what the aside caused.
+    const evidence = origin.informed.flatMap((id) =>
+      (this.#evidence.get(id) ?? []).slice(this.#evidenceAtOrigin.get(id) ?? 0),
+    )
+    for (const path of attributable(candidates, evidence)) {
+      if (!origin.artifacts.includes(path)) origin.artifacts.push(path)
     }
   }
 

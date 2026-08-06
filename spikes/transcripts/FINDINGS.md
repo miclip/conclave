@@ -120,6 +120,40 @@ does not surface it live (spike 2, objective 5).
 Note `compacted` and `context_compacted` — compaction rewrites history, so a reader that
 caches parsed transcript state must invalidate on those.
 
+## Where tool arguments live, and why it is not one field
+
+Added when artifact attribution began reading tool inputs (`src/relay/authority.ts`). The
+record types above were characterized; their *argument* fields were not, and the obvious
+guess is wrong on Codex.
+
+Counted over 654 Codex sessions and 173 Claude sessions on a working machine:
+
+| agent | record | field | calls | names observed |
+|---|---|---|---|---|
+| Codex | `custom_tool_call` | **`input`** | 2839 | `exec` (2831), `apply_patch` (8) |
+| Codex | `function_call` | **`arguments`** | 1454 | `exec_command` (1307), `wait` (127), `write_stdin` (10) |
+| Claude | `tool_use` block | `input` | — | `Bash` (10060), `Edit` (1883), `Write` (475) |
+
+**Codex splits arguments across two fields by record type.** Reading only `arguments`
+covers 34% of its tool calls. Both must be read.
+
+Content shapes differ in how usable they are:
+
+- `apply_patch` (`input`) — raw patch text with `*** Update File: <path>` headers.
+  Structured and reliable, and **8 calls in 654 sessions**.
+- `exec` (`input`) — a JavaScript program string, `const r = await tools.exec_command({...})`.
+  Not JSON.
+- `exec_command` (`arguments`) — JSON, `{"cmd":"..."}`.
+- Claude `Write`/`Edit` — `file_path` present on 475/475 and 1883/1883 respectively, with
+  no observed absences. `Bash` — `command`, always present.
+
+**There is no structured path field the two agents share.** Claude offers `file_path` on
+~19% of calls, Codex offers patch headers on ~0.2%. The only representation both express is
+the argument text itself, which is why `TurnRecord.toolCalls[].args` is a raw string and
+attribution matches substrings rather than reading fields. Restricted to this repository's
+own sessions, ~65% of file mutations happen through shell commands rather than `Write` or
+`Edit`, so a structured-field rule would miss the majority of real edits.
+
 ## The classifier
 
 `spikes/transcripts/outcomes.py` implements the outcome enum with provenance and a

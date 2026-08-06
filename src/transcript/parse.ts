@@ -24,6 +24,36 @@ export interface ParsedTranscript {
   sessionId?: string | undefined
 }
 
+/**
+ * A tool input, flattened to text for attribution evidence.
+ *
+ * Whole-value serialization rather than picking out known path fields. A `file_path` and an
+ * `apply_patch` header are both substrings of the serialized form, so one mechanism covers
+ * every tool on both agents, including the shell commands that carry most real file work.
+ *
+ * Capped, because a `Write` input embeds the entire file content and this is retained for
+ * the life of the session. The cap is far above any realistic path-bearing prefix; it exists
+ * to bound a pathological single call, not to trim ordinary ones.
+ */
+const ARGS_CAP = 64 * 1024
+
+function serializeArgs(input: unknown): string | undefined {
+  if (input === undefined || input === null) return undefined
+  let s: string
+  if (typeof input === 'string') {
+    s = input
+  } else {
+    try {
+      s = JSON.stringify(input) ?? ''
+    } catch {
+      // A transcript record that will not serialize is not worth failing a parse over.
+      return undefined
+    }
+  }
+  if (!s) return undefined
+  return s.length > ARGS_CAP ? s.slice(0, ARGS_CAP) : s
+}
+
 // --- Claude Code -------------------------------------------------------------------
 
 const CLAUDE_COMPACTION_ATTACHMENTS = new Set(['compact_file_reference'])
@@ -74,7 +104,14 @@ export function parseClaude(records: Record<string, any>[]): ParsedTranscript {
           if (block?.type === 'text' && block.text) {
             current.assistantText = (current.assistantText ?? '') + block.text
           } else if (block?.type === 'tool_use') {
-            current.toolCalls.push({ tool: String(block.name), failed: false })
+            // `input` carries `file_path` on Write/Edit and `command` on Bash. Verified
+            // present on 1883/1883 Edit and 475/475 Write calls across 173 sessions; Bash
+            // is 81% of all calls, so the command text is the bulk of the evidence.
+            current.toolCalls.push({
+              tool: String(block.name),
+              failed: false,
+              args: serializeArgs(block.input),
+            })
           }
         }
         // Only `end_turn` closes a turn. `tool_use` means the model is mid-flight, and
@@ -201,7 +238,16 @@ export function parseCodex(records: Record<string, any>[]): ParsedTranscript {
 
     if (d.type === 'response_item' && current) {
       if (p.type === 'function_call' || p.type === 'custom_tool_call') {
-        current.toolCalls.push({ tool: String(p.name ?? p.tool_name ?? 'unknown'), failed: false })
+        // The two record types carry arguments in DIFFERENT fields, and the split is not
+        // marginal: across 654 sessions, `custom_tool_call.input` holds 2839 calls and
+        // `function_call.arguments` holds 1454. Reading only `arguments` -- the obvious
+        // guess, and the one this nearly shipped with -- would see 34% of Codex tool use.
+        const args = p.type === 'custom_tool_call' ? p.input : p.arguments
+        current.toolCalls.push({
+          tool: String(p.name ?? p.tool_name ?? 'unknown'),
+          failed: false,
+          args: serializeArgs(args),
+        })
       } else if (p.type === 'function_call_output' || p.type === 'custom_tool_call_output') {
         const last = current.toolCalls.at(-1)
         if (last) last.failed = Boolean(p.output?.success === false || p.is_error)

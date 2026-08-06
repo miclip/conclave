@@ -159,7 +159,16 @@ export interface TurnRecord {
   confidence?: Confidence | undefined
   provenance?: Provenance[] | undefined
   assistantText?: string | undefined
-  toolCalls: { tool: string; failed: boolean }[]
+  /**
+   * `args` is the tool's input, serialized. Retained because it is the only per-participant
+   * evidence of which files a session touched: no adapter emits `tool_use`, and
+   * `PermissionRequest` does not fire for in-workspace writes. See `relay/authority.ts`.
+   *
+   * Deliberately a raw string rather than parsed fields. The two agents share no structured
+   * path field -- Claude has `file_path` on 19% of calls, Codex has `apply_patch` headers on
+   * 0.2% -- so the only representation both express is the text itself.
+   */
+  toolCalls: { tool: string; failed: boolean; args?: string | undefined }[]
   startedAt?: number | undefined
   endedAt?: number | undefined
 }
