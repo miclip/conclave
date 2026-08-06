@@ -38,6 +38,12 @@ if (!existsSync(PKG)) {
 }
 
 if (!existsSync(PREBUILDS)) {
+  // A source build puts the addon in build/Release rather than shipping prebuilds. Only
+  // darwin depends on a prebuilt spawn-helper, so only darwin can be broken by its absence.
+  if (process.platform !== 'darwin') {
+    console.log(`[fix-node-pty] no prebuilds directory; node-pty was built from source`)
+    process.exit(0)
+  }
   fail(`expected prebuilds directory at ${PREBUILDS}, but it does not exist`)
 }
 
@@ -56,6 +62,13 @@ for (const dir of readdirSync(PREBUILDS)) {
   repaired.push(dir)
 }
 
+// Likewise: on a platform that builds node-pty from source there are no prebuilt helpers
+// to chmod, and that is not a broken install.
+if (repaired.length === 0 && process.platform !== 'darwin') {
+  console.log(`[fix-node-pty] ${expectedDir}: no spawn-helper needed on this platform`)
+  process.exit(0)
+}
+
 if (repaired.length === 0) {
   fail(
     `found no spawn-helper under ${PREBUILDS}\n` +
@@ -63,7 +76,13 @@ if (repaired.length === 0) {
   )
 }
 
-if (!existsSync(expectedHelper)) {
+// `spawn-helper` is a macOS-specific binary: node-pty uses it there to work around
+// posix_spawn, and forks directly everywhere else. So its absence is only evidence of a
+// problem ON DARWIN — demanding one on Linux failed `npm ci` outright the first time this
+// ran in CI, on a platform where there was never anything to repair.
+//
+// The guard is kept where it means something rather than relaxed everywhere.
+if (process.platform === 'darwin' && !existsSync(expectedHelper)) {
   fail(
     `no spawn-helper for this platform (${expectedDir}).\n` +
       `  Repaired: ${repaired.join(', ')}\n` +
