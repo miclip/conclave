@@ -26,6 +26,7 @@
  * tests, scripts, a daemon -- would have to reimplement them.
  */
 
+import type { AuthorityConflict } from './authority.ts'
 import type { Audience, RelayMessage } from './message.ts'
 import type { RunReason } from './observe.ts'
 import type { RotationResult } from '../rotation/rotate.ts'
@@ -39,6 +40,14 @@ export type PauseReason =
   | 'advisor_escalated'
   /** A turn ended as something other than `completed`. */
   | 'turn_incomplete'
+  /**
+   * An advisor instruction would reverse work traceable to a restricted human message.
+   *
+   * The orchestrator neither adjudicates nor prohibits: prohibition would make an aside an
+   * invisible veto over legitimate correction. It notices, and hands the case to the only
+   * party holding both sides. See `authority.ts`.
+   */
+  | 'authority_conflict'
   /**
    * The operator asked to stop at the next round boundary.
    *
@@ -64,6 +73,8 @@ export interface RunPause {
    */
   evidence: string[]
   options: PauseOption[]
+  /** Present only on `authority_conflict`: both sides, so the human can adjudicate. */
+  conflict?: AuthorityConflict | undefined
   /** Position in the routing log when the run paused, for lining up against `audit()`. */
   atSeq: number
   at: number

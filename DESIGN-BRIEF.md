@@ -1571,11 +1571,46 @@ asymmetry faithfully, so the undo is *attributable* after the fact, which is the
 §5c actually promises. It is not prevention, and this run shows the difference is real
 rather than theoretical.
 
-Left unresolved. The obvious repair — telling the implementer never to undo human-originated
-work on advisor instruction — would make an advisor unable to correct a genuine mistake the
-human made in an aside, which is worse. What the orchestrator *could* do without deciding
-the question is notice: an instruction that reverses work traceable to a restricted message
-is exactly the case the audit can already identify.
+##### Resolved as a control-plane state, not a rule [2026-08-06]
+
+Prohibition was the wrong repair: forbidding the implementer to undo human-originated work
+turns every aside into an invisible veto over legitimate correction, and an advisor must be
+able to say the human made a mistake. So the orchestrator neither adjudicates nor forbids —
+it **notices**, and hands the case to the only party holding both sides.
+
+```
+advisor instruction would reverse work attributable to restricted human input
+  → pause BEFORE delivery, as `authority_conflict`
+  → show the human: the restricted instruction, who was excluded, the changes
+    attributed to it, the advisor's conflicting instruction, and what matched
+  → the human continues, constrains first, or aborts
+```
+
+Before delivery is the point: while the human decides, the instruction is still a proposal
+and the implementer has not seen it. `src/relay/authority.ts`; the pause carries the
+conflict on `RunPause.conflict`.
+
+**Detection requires both a reversal verb and a reference to something traceable to the
+aside.** Either alone is ordinary traffic — advisors delete things constantly and mention
+files constantly. References are matched against identifiers named in the aside *and*
+against repository paths that appeared after it was delivered, since an aside may name
+nothing the advisor later mentions while the file it produced certainly will be.
+
+It is a heuristic, and biased on purpose: a false positive costs one pause resolved in a
+word; a false negative leaves the status quo, where the implementer decides alone and three
+runs gave three answers. Under-detection is the direction it is tuned away from.
+
+**Reversibility is not the criterion.** The implementer's own reasoning was better than the
+design's, and still belongs to a different question: *reversibility informs urgency and
+risk; provenance conflict determines whether a human must adjudicate.* A seven-byte file and
+a schema migration differ operationally and can equally represent deliberate intent. The
+observed behaviour is recorded above as behaviour; it is not the rule.
+
+What this preserves and what it does not: restricted input remains **auditable, not
+durable**. Once an artifact becomes visible it enters the shared world and may be
+challenged. The orchestrator can say who received the aside, who was excluded, what is
+traceable to it, and when a later instruction would reverse that — and now it stops there
+and asks, rather than leaving the answer to whichever model turned up.
 
 ##### And an instrument note
 

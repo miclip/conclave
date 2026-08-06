@@ -417,6 +417,83 @@ test('settled() resolves immediately when the run is already paused or ended', a
   assert.equal((await run.settled()).kind, 'ended', 'already ended')
 })
 
+test('an advisor instruction that would undo an aside pauses BEFORE it is delivered', async (t) => {
+  // The live case, in miniature. The advisor never saw the aside, meets work it did not
+  // ask for, and says to remove it. The orchestrator neither adjudicates nor prohibits --
+  // it stops before the instruction reaches the implementer and hands the human both sides.
+  const dir = repo()
+  const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Wrote two.txt.', 'Removed it.'])
+  const advisor = new FakeRotationSession('advisor', 'codex', ['Do it.', 'Remove two.txt and wait.', 'DONE'])
+  const relay = await relayOf(dir, advisor, [impl])
+  t.after(() => relay.stop())
+
+  const run = relay.start('Keep the work moving.')
+  relay.say('Also write the word into two.txt.', { only: 'implementer' }, 'aside')
+
+  const pause = await run.untilPause()
+  assert.ok(pause)
+  assert.equal(pause.reason, 'authority_conflict')
+  assert.ok(pause.conflict)
+  assert.deepEqual(pause.conflict.matched, ['two.txt'])
+  assert.equal(pause.conflict.origin.excluded[0], 'advisor')
+
+  // BEFORE delivery is the whole point: the instruction is still a proposal.
+  assert.ok(
+    !impl.received.some((m) => m.includes('Remove two.txt')),
+    'the implementer must not have seen the instruction while the human is deciding',
+  )
+  assert.ok(
+    !relay.log.some((m) => m.kind === 'instruction' && m.text.includes('Remove two.txt')),
+    'and it must not be recorded as delivered',
+  )
+
+  // The human lets it through; the advisor may well be right.
+  await run.continue()
+  assert.equal((await run.result()).reason, 'done')
+  assert.ok(impl.received.some((m) => m.includes('Remove two.txt')), 'continuing delivers it')
+})
+
+test('an adjudicated conflict is not raised again for the same instruction', async (t) => {
+  // Same rule as a declined rotation candidate: a decision the human has already made must
+  // not re-present itself, or the pause becomes noise and stops being read.
+  const dir = repo()
+  const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Wrote two.txt.', 'Removed it.', 'Again.'])
+  const advisor = new FakeRotationSession('advisor', 'codex', [
+    'Do it.',
+    'Remove two.txt and wait.',
+    'Remove two.txt and wait.',
+    'DONE',
+  ])
+  const relay = await relayOf(dir, advisor, [impl], { maxRounds: 5 })
+  t.after(() => relay.stop())
+
+  const run = relay.start('Keep the work moving.')
+  relay.say('Also write the word into two.txt.', { only: 'implementer' }, 'aside')
+
+  let pauses = 0
+  for (;;) {
+    const s = await run.settled()
+    if (s.kind === 'ended') break
+    pauses += 1
+    await run.continue()
+  }
+  assert.equal(pauses, 1, 'the identical instruction must be adjudicated once, not every round')
+})
+
+test('an advisor instruction unrelated to the aside is delivered without a pause', async (t) => {
+  const dir = repo()
+  const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it.'])
+  const advisor = new FakeRotationSession('advisor', 'codex', ['Remove the unused import.', 'DONE'])
+  const relay = await relayOf(dir, advisor, [impl])
+  t.after(() => relay.stop())
+
+  const run = relay.start('Keep the work moving.')
+  relay.say('Also write the word into two.txt.', { only: 'implementer' }, 'aside')
+
+  assert.equal(await run.untilPause(), undefined, 'ordinary traffic must not pause')
+  assert.equal((await run.result()).reason, 'done')
+})
+
 test('a pause suspends orchestration, not observation', async (t) => {
   // The invariant a paused session has to hold: no participant is given new relay work,
   // but everything that watches them keeps working. A pause that also stopped ingestion

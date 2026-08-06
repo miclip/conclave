@@ -178,7 +178,11 @@ product bugs invisible to the offline suite.
 2. ~~**Human-scale long pause.**~~ **DONE 2026-08-06** — 30 minutes, no degradation. A duration resembling actual operator behaviour, not
    another two-minute probe. Confirm observation stays live while orchestration stays
    suspended. `ORCH_PAUSE_SECONDS` exists for this; the longest run so far is 120s.
-3. **Acceptance relevance semantics.** A contract design question, not another boolean: a
+3. **Authority-conflict coverage is offline only.** `authority_conflict` is built and
+   mutation-verified against fakes; no live run has triggered it. The 30-minute pause run
+   would now pause instead of failing, and re-running it is the cheapest live confirmation.
+
+4. **Acceptance relevance semantics.** A contract design question, not another boolean: a
    check may reproduce faithfully and still be irrelevant to the transferred artifact.
    Likely `required` / `informational` / `unrelated`, **declared by the orchestrator** —
    a replacement classifying its own checks is the evidence-into-judgement collapse this

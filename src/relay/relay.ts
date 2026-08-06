@@ -29,6 +29,14 @@ import {
 } from './message.ts'
 import { RelayEventStream, type ObserveOptions, type RelayEvent, type RunReason } from './observe.ts'
 import { RunHandle, type PauseReason, type RunOutcome, type RunPause } from './run.ts'
+import {
+  describeConflict,
+  detectConflict,
+  dirtyPaths,
+  originOf,
+  type AuthorityConflict,
+  type RestrictedOrigin,
+} from './authority.ts'
 import { assess, ComplaintLedger, topicOf } from '../rotation/degradation.ts'
 import { rotate, type RotationResult } from '../rotation/rotate.ts'
 
@@ -329,10 +337,25 @@ export class Relay {
    * constraint does not consume a turn of its own.
    */
   #pending = new Map<string, string[]>()
+  /** Conflicts the human has already ruled on, so continuing does not re-raise them. */
+  #adjudicated = new Set<string>()
+
+  /**
+   * Restricted human messages, and what can be traced to each. Only these can produce an
+   * authority conflict: an instruction everyone saw cannot be reversed by someone who
+   * could not see it.
+   */
+  readonly restrictedOrigins: RestrictedOrigin[] = []
+  #treeAtOrigin: string[] | undefined
 
   say(text: string, audience: Audience = 'all', kind: MessageKind = 'constraint'): RelayMessage {
     const to = this.#resolve(audience)
     const m = this.#record({ from: 'human', fromRank: 'human', to, kind, text })
+    if (m.visibility === 'restricted') {
+      this.restrictedOrigins.push(originOf(m))
+      // Snapshot the tree so paths appearing after this message can be attributed to it.
+      this.#treeAtOrigin = dirtyPaths(this.#opts.cwd)
+    }
     for (const id of to) {
       const queue = this.#pending.get(id) ?? []
       queue.push(envelope({ from: 'human', fromRank: 'human', kind, text }))
@@ -355,6 +378,22 @@ export class Relay {
    * rotation and termination authority is not implemented here.
    */
   /**
+   * Attribute paths that appeared since a restricted message to that message.
+   *
+   * Coarse on purpose: it claims only that a path was not dirty when the aside was sent and
+   * is now. That is enough to show the human *what* an advisor is proposing to undo, which
+   * is what the adjudication needs, and it never asserts the implementer's intent.
+   */
+  #attributeArtifacts(): void {
+    const origin = this.restrictedOrigins.at(-1)
+    if (!origin || !this.#treeAtOrigin) return
+    const before = new Set(this.#treeAtOrigin)
+    for (const path of dirtyPaths(this.#opts.cwd)) {
+      if (!before.has(path) && !origin.artifacts.includes(path)) origin.artifacts.push(path)
+    }
+  }
+
+  /**
    * A point where a human is meant to decide.
    *
    * Attended and unattended runs differ here and nowhere else. `start()` suspends the loop
@@ -364,7 +403,7 @@ export class Relay {
    */
   async #halt(
     handle: RunHandle | undefined,
-    p: { reason: PauseReason; detail: string; evidence: string[] },
+    p: { reason: PauseReason; detail: string; evidence: string[]; conflict?: AuthorityConflict },
   ): Promise<RunOutcome | undefined> {
     this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text: `paused (${p.reason}): ${p.detail}` })
     if (!handle) {
@@ -379,6 +418,7 @@ export class Relay {
       detail: p.detail,
       evidence: p.evidence,
       options: ['continue', 'rotate', 'constrain', 'abort'],
+      ...(p.conflict === undefined ? {} : { conflict: p.conflict }),
       atSeq: this.#seq,
     })
     if (decision.kind === 'abort') return this.#end('stopped', decision.detail)
@@ -596,6 +636,22 @@ export class Relay {
         continue
       }
 
+      // BEFORE delivery, not after. The point of the pause is that the human adjudicates
+      // while the instruction is still a proposal.
+      const conflict = detectConflict(instruction, this.restrictedOrigins)
+      if (conflict && !this.#adjudicated.has(`${conflict.origin.seq}:${instruction}`)) {
+        this.#adjudicated.add(`${conflict.origin.seq}:${instruction}`)
+        const halted = await this.#halt(handle, {
+          reason: 'authority_conflict',
+          detail:
+            `the advisor's instruction would reverse work traceable to your restricted ` +
+            `message #${conflict.origin.seq} (matched: ${conflict.matched.join(', ')})`,
+          evidence: describeConflict(conflict).split('\n'),
+          conflict,
+        })
+        if (halted) return halted
+      }
+
       this.#record({ from: lead.id, fromRank: 'advisor', to: [impl.id], kind: 'instruction', text: instruction })
       const aside = this.#drain(impl.id)
       const report = await this.#exchange(
@@ -606,6 +662,7 @@ export class Relay {
       )
       this.#record({ from: impl.id, fromRank: 'implementer', to: [lead.id], kind: 'report', text: report.prose })
       this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text: `${impl.id} turn: ${formatVerdict(report.end.verdict)}` })
+      this.#attributeArtifacts()
 
       // A turn that did not complete is the human's call, not the advisor's. Escalating
       // here rather than relaying the partial prose keeps the advisor from steering on a
