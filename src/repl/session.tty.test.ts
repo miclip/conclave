@@ -105,26 +105,6 @@ async function spawnConsole(dir: string) {
   }
 }
 
-test('the status line stands down while the operator is typing', async () => {
-  // Spinner and prompt occupy the same line. An unconditional spinner overwrites a
-  // half-typed message every 90ms; deferring to the human is the only sane precedence.
-  const dir = repo()
-  const c = await spawnConsole(dir)
-  assert.ok(await c.until((s) => s.includes('›')))
-  assert.ok(await c.until((s) => /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/.test(s)), 'the spinner should run when idle')
-
-  c.type('a half typed message')
-  assert.ok(await c.until((s) => s.includes('a half typed message')))
-  const mark = c.text().length
-  await new Promise((r) => setTimeout(r, 1200))
-  const during = c.text().slice(mark)
-  assert.ok(
-    !/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/.test(during),
-    `the spinner kept drawing over a typed line:\n${JSON.stringify(during.slice(0, 300))}`,
-  )
-  c.proc.kill()
-})
-
 test('typed-but-unsubmitted text survives asynchronous output', async () => {
   const dir = repo()
   const c = await spawnConsole(dir)
@@ -157,30 +137,31 @@ test('typed-but-unsubmitted text survives asynchronous output', async () => {
   c.proc.kill()
 })
 
-test('the spinner keeps ticking after output, and leaves nothing stranded', async () => {
-  // Observed live: the implementer was demonstrably working and the console had stopped
-  // saying so. `write()` cleared the status by cancelling its timer, so the first message
-  // of a turn froze the spinner at 0s and every later message stranded another dead copy.
+test('progress is append-only, so nothing is ever stranded or duplicated', async () => {
+  // An in-place status line and readline both owned the last line of the terminal, and
+  // readline redraws on its own schedule. Whichever wrote last won and the loser stayed in
+  // the transcript — three rounds of fixes to the erase logic each passed offline and each
+  // still duplicated live, because two subsystems cannot both own the cursor.
+  //
+  // Append-only output cannot strand a line, because it never goes back.
   const dir = repo()
   const c = await spawnConsole(dir)
-  assert.ok(await c.until((s) => s.includes('›')))
-  assert.ok(await c.until((s) => /working/.test(s)), 'the status should appear')
-
-  // Wait for a message to be written over the top of it, then for the clock to move.
-  assert.ok(await c.until((s) => s.includes('●')), 'a routed message should arrive')
-  // Strip ANSI before matching: the elapsed time is dim, so the raw bytes read
-  // "working \x1b[2m1s" and a naive regex sees a frozen clock that is not frozen.
   const plain = (s: string) => s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '')
-  const after = c.text().length
-  assert.ok(
-    await c.until((s) => /working [1-9]\d*s/.test(plain(s.slice(after))), 8_000),
-    `the spinner froze after output:\n${JSON.stringify(plain(c.text()).slice(-300))}`,
-  )
+  assert.ok(await c.until((s) => s.includes('›')))
+  assert.ok(await c.until((s) => /⋯/.test(plain(s)), 15_000), 'a progress line should appear')
 
-  // And nothing stranded: a status line followed by a newline is a dead copy left in the
-  // transcript. A live one is always the last thing on its line.
-  const stranded = (plain(c.text()).match(/working \d+s[^\r\n]*\n/g) ?? []).length
-  assert.equal(stranded, 0, `stranded ${stranded} dead status lines in the transcript`)
+  // Let several turns run, then assert every progress line is distinct: a duplicate is the
+  // exact symptom the in-place version produced.
+  await new Promise((r) => setTimeout(r, 4_000))
+  const lines = plain(c.text())
+    .split('\n')
+    .map((l) => l.trim())
+    // `includes`, not `startsWith`: readline's prompt shares the line, so a progress line
+    // reads as "›   ⋯ implementer 1s · Read".
+    .filter((l) => l.includes('⋯'))
+    .map((l) => l.slice(l.indexOf('⋯')))
+  assert.ok(lines.length > 0)
+  assert.equal(new Set(lines).size, lines.length, `duplicate progress lines:\n${lines.join('\n')}`)
   c.proc.kill()
 })
 

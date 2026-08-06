@@ -24,8 +24,10 @@
  * prompt says so rather than implying otherwise.
  */
 
+import { createWriteStream } from 'node:fs'
+import { Writable } from 'node:stream'
 import { clearLine, createInterface, cursorTo, type Interface } from 'node:readline'
-import { banner, bold, colorFor, dim, grey, markdown, rule, setColor, speakerColor, Status, yellow } from './render.ts'
+import { banner, bold, colorFor, dim, elapsedSince, grey, markdown, Progress, rule, setColor, speakerColor, yellow } from './render.ts'
 import type { AgentEvent } from '../contract/session.ts'
 import { defaultRegistry } from '../registry/builtin.ts'
 import type { AgentRegistry } from '../registry/registry.ts'
@@ -49,6 +51,16 @@ export interface SessionOptions {
   registry?: AgentRegistry
   /** Shown in the banner. */
   version?: string
+  /** How often to print a progress line per participant. Default 10s. */
+  progressEveryMs?: number
+  /**
+   * Tee every byte written to the terminal, escape codes included, to this file.
+   *
+   * Rendering faults live in the bytes. Three of them were diagnosed from screenshots,
+   * which cannot show whether a line was erased or merely scrolled past — a recording can,
+   * and can be asserted over.
+   */
+  record?: string
 }
 
 const HELP = `
@@ -120,13 +132,24 @@ function renderPause(p: RunPause, width: number): string {
 }
 
 export async function runSession(opts: SessionOptions): Promise<number> {
-  const out = opts.output ?? process.stdout
-  const width = Math.min(100, (out as NodeJS.WriteStream).columns ?? 100)
-  setColor(colorFor(out as NodeJS.WriteStream))
+  const target = opts.output ?? process.stdout
+  const tee = opts.record ? createWriteStream(opts.record) : undefined
+  const out: NodeJS.WritableStream = tee
+    ? new Writable({
+        write(chunk, _enc, cb) {
+          tee.write(chunk)
+          target.write(chunk)
+          cb()
+        },
+      })
+    : target
+  const width = Math.min(100, (target as NodeJS.WriteStream).columns ?? 100)
+  // Colour follows the real terminal, not the tee: a recording of a colourless session
+  // would show none of the rendering it was made to inspect.
+  setColor(colorFor(target as NodeJS.WriteStream))
   const interactive =
     (opts.input ?? process.stdin) === process.stdin && process.stdin.isTTY === true
   let rl: Interface | undefined
-  let statusRef: Status | undefined
 
   /**
    * Write a line without eating what the operator is halfway through typing.
@@ -136,10 +159,11 @@ export async function runSession(opts: SessionOptions): Promise<number> {
    * current line, writing, and re-prompting with `preserveCursor` redraws the prompt AND
    * the buffer, which is what makes this usable rather than merely functional.
    */
+  /** Output has happened since the prompt was last drawn, so the rule needs redrawing. */
+  let dirtySincePrompt = false
+
   const write = (s: string) => {
-    // Erase, do not stop: the turn is still running and the spinner belongs below whatever
-    // is about to be written.
-    statusRef?.erase()
+    dirtySincePrompt = true
     if (!rl || !interactive) {
       out.write(`${s}\n`)
       return
@@ -189,21 +213,15 @@ export async function runSession(opts: SessionOptions): Promise<number> {
   // Activity as a status line that updates in place, not a scrolling list of dots. The
   // wait between an instruction and its report is the whole duration of the work, and a
   // spinner carrying the current tool says "working" without burying the prose above it.
-  const status = new Status(out, interactive, () => (rl?.line?.length ?? 0) > 0)
-  statusRef = status
+  const progress = new Progress(out, true, opts.progressEveryMs ?? 10_000)
+  const turnStartedAt = new Map<string, number>()
 
   /**
    * Narration streams to the human; the report goes to the other participant.
    *
-   * The transcript view emits each new span of assistant text as a `message` delta, which
-   * is the running commentary — "now let me check X" — written to tell a watching human
-   * what is happening. It used to surface only after the turn ended, concatenated into the
-   * report, which is both too late to be useful and addressed to the wrong party.
-   *
    * The last delta before `turn_end` is the closing message, and that is the report. It is
    * held back rather than streamed, because the routed copy prints it a moment later under
    * `→ advisor` and printing it twice would make the routing harder to read, not easier.
-   * One delta of lookahead is all that requires.
    */
   const pendingNarration = new Map<string, string>()
   const narrating = new Set<string>()
@@ -220,25 +238,27 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     for await (const e of relay.observe({ replay: false })) {
       if (e.type !== 'activity') continue
       const ev = e.event
+      const colour = speakerColor(e.participant, e.rank)
       if (ev.type === 'turn_start') {
-        status.start(`${speakerColor(e.participant, e.rank)(e.participant)} working`)
+        turnStartedAt.set(e.participant, Date.now())
+        progress.start(e.participant)
       } else if (ev.type === 'turn_end') {
-        // Drop the held delta: it is the closing message, and the routed copy follows.
+        const startedAt = turnStartedAt.get(e.participant)
+        progress.done(e.participant)
         pendingNarration.delete(e.participant)
         narrating.delete(e.participant)
-        status.clear()
+        if (startedAt) write(grey(`  ${e.participant} finished in ${elapsedSince(startedAt)}`))
+        turnStartedAt.delete(e.participant)
       } else if (ev.type === 'tool_use') {
-        status.detail(ev.tool)
+        progress.activity(e.participant, colour, ev.tool)
       } else if (ev.type === 'message' && ev.role === 'assistant') {
+        progress.activity(e.participant, colour)
         const held = pendingNarration.get(e.participant)
         if (held !== undefined) narrate(e.participant, e.rank, held)
         pendingNarration.set(e.participant, ev.text)
       } else {
         const line = renderActivity(e.participant, ev)
-        if (line) {
-          status.clear()
-          write(line)
-        }
+        if (line) write(line)
       }
     }
   })()
@@ -293,8 +313,21 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     // was drawing a prompt for a pipe.
     terminal: interactive,
   })
+  /**
+   * Separate the input area from the transcript.
+   *
+   * A rule drawn immediately above the prompt, and only when something has been written
+   * since the last one — otherwise every keystroke would stack rules. It is not pinned to
+   * the bottom of the screen: that needs the console to own the screen, which is a
+   * different piece of work (see the note in render.ts).
+   */
   const prompt = () => {
-    if (!done) rl!.prompt()
+    if (done) return
+    if (dirtySincePrompt && interactive) {
+      out.write(`\n${rule(width)}\n`)
+      dirtySincePrompt = false
+    }
+    rl!.prompt()
   }
   prompt()
 
@@ -435,9 +468,9 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     // to start on a lock it does not recognise.
     process.off('SIGINT', onInterrupt)
     process.off('SIGTERM', onInterrupt)
-    status.clear()
     rl.close()
     await relay.stop()
+    tee?.end()
   }
   return 0
 }

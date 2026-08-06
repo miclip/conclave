@@ -36,6 +36,12 @@ Commands:
                                    routing log. Every pause point ENDS the run, because a
                                    call that returns an outcome has nowhere to suspend to.
                                    Spawns real sessions and uses real quota.
+  demo [--record <file>]           Run the console against scripted participants: real
+                                   terminal, real readline, no agents and no quota. For
+                                   looking at rendering changes in seconds rather than
+                                   minutes. --record tees every byte, escape codes
+                                   included, so a rendering fault can be inspected rather
+                                   than screenshotted.
   session "<goal>" [--lead codex] [--implementer claude] [--rounds N]
                    [--checks "npm test"]
                                    The same session, interactively. Pauses become decision
@@ -173,6 +179,13 @@ async function main(argv: string[]): Promise<number> {
       checks,
       ...(turnTimeout ? { turnWatchdogMs: Number(turnTimeout) * 1000 } : {}),
     })
+  }
+
+  if (command === 'demo') {
+    const i = [sub, ...rest].indexOf('--record')
+    const record = i >= 0 ? [sub, ...rest][i + 1] : undefined
+    const { runDemo } = await import('../src/repl/demo.ts')
+    return runDemo({ record })
   }
 
   if (command === 'help' || command === '--help' || command === undefined) {

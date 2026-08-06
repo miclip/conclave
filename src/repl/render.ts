@@ -226,95 +226,76 @@ export function rule(width: number): string {
   return dim('─'.repeat(Math.max(8, width)))
 }
 
-const FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
-
 /**
- * A one-line status that updates in place while a turn runs, and is erased when it ends.
+ * Progress while a turn runs: append-only, throttled, never redrawn.
  *
- * The interval is unref'd so it can never hold the process open — the console already
- * learned that lesson from a child process that outlived its test by 26 minutes.
+ * This replaced an in-place spinner, and the reason is worth keeping. The spinner and
+ * readline both wrote to the last line of the terminal, and readline redraws on its own
+ * schedule — on every keypress, on every `prompt()`. So whichever wrote last won, and the
+ * loser was left stranded in the transcript. Three rounds of fixes to the erase logic each
+ * looked right offline and each still duplicated live, because the premise was wrong: two
+ * subsystems cannot both own the cursor.
+ *
+ * Append-only output has no such contention. It cannot strand a line because it never goes
+ * back, and it cannot duplicate because it only ever moves forward. The cost is that there
+ * is no animation, which is a real loss and a smaller one than a console that lies about
+ * what is happening.
+ *
+ * A pinned status line is still the nicer answer, and it needs the console to own the
+ * screen — a scroll region or an alternate buffer, with readline replaced by its own input
+ * handling. That is a different piece of work, not a tweak to this one.
  */
-export class Status {
+export class Progress {
   #out: NodeJS.WritableStream
-  #timer: NodeJS.Timeout | undefined
-  #frame = 0
-  #started = 0
-  #label = ''
-  #detail = ''
-  #drawn = false
   #enabled: boolean
+  #everyMs: number
+  #started = new Map<string, number>()
+  #lastPrinted = new Map<string, number>()
 
   /**
-   * `suppressed` yields true while the operator has typed something.
-   *
-   * The spinner and readline's prompt occupy the same line, so an unconditional spinner
-   * overwrites a half-typed message every 90ms. Deferring to the human is the only sane
-   * precedence: readline redraws on keypress and owns the line, and the spinner resumes
-   * once the buffer is empty again.
+   * `enabled` gates nothing about the cursor, because this writes no escape codes — it is
+   * here only so a caller can silence progress entirely. It must NOT be tied to whether the
+   * stream is a terminal: gating it that way made a piped run print no progress at all,
+   * which is precisely the run used to inspect it.
    */
-  #suppressed: () => boolean
-
-  constructor(out: NodeJS.WritableStream, enabled: boolean, suppressed: () => boolean = () => false) {
+  constructor(out: NodeJS.WritableStream, enabled = true, everyMs = 10_000) {
     this.#out = out
     this.#enabled = enabled
-    this.#suppressed = suppressed
+    this.#everyMs = everyMs
   }
 
-  start(label: string): void {
-    // Restarting the same status must not reset its clock. A turn that reported "working
-    // 0s" repeatedly was being started twice, and the elapsed time is the one part of this
-    // line that says whether anything is happening.
-    if (this.#timer && this.#label === label) return
-    this.#label = label
-    this.#detail = ''
-    this.#started = Date.now()
-    if (!this.#enabled || this.#timer) return
-    this.#timer = setInterval(() => this.#draw(), 90)
-    this.#timer.unref()
-  }
-
-  detail(d: string): void {
-    this.#detail = d
-    // Only while running. Drawing from `detail()` alone renders a spinner whose elapsed
-    // time is measured from the epoch, which is how a test came to pass on a status that
-    // had never been started.
-    if (this.#enabled && this.#timer) this.#draw()
+  start(participant: string): void {
+    this.#started.set(participant, Date.now())
+    this.#lastPrinted.delete(participant)
   }
 
   /**
-   * Erase the line, but keep running.
+   * Report activity, at most once per interval per participant.
    *
-   * Output has to clear the status before writing or the two overlap — but clearing it used
-   * to cancel the timer too, so the first message of a turn froze the spinner forever. It
-   * sat at `0s` while the implementer was demonstrably still working, and every later
-   * message stranded another dead copy in the transcript. Erase and stand-down are
-   * different operations and now say so.
+   * Throttled rather than per-event because a busy turn emits a tool call every few hundred
+   * milliseconds, and a line each would bury the prose the console exists to show.
    */
-  erase(): void {
-    if (this.#drawn) this.#out.write('\r\x1b[2K')
-    this.#drawn = false
+  activity(participant: string, colour: Style, detail?: string): void {
+    if (!this.#enabled) return
+    const startedAt = this.#started.get(participant)
+    if (startedAt === undefined) return
+    const last = this.#lastPrinted.get(participant) ?? 0
+    const now = Date.now()
+    if (now - last < this.#everyMs) return
+    this.#lastPrinted.set(participant, now)
+    const parts = [dim('⋯'), colour(participant), dim(elapsedSince(startedAt))]
+    if (detail) parts.push(dim('·'), dim(detail))
+    this.#out.write(`  ${parts.join(' ')}\n`)
   }
 
-  get elapsed(): string {
-    const s = Math.round((Date.now() - this.#started) / 1000)
-    return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m${String(s % 60).padStart(2, '0')}s`
+  /** The turn ended; the report follows, so nothing is printed here. */
+  done(participant: string): void {
+    this.#started.delete(participant)
+    this.#lastPrinted.delete(participant)
   }
+}
 
-  #draw(): void {
-    if (this.#suppressed()) return
-    const frame = FRAMES[this.#frame++ % FRAMES.length]!
-    const parts = [cyan(frame), this.#label, dim(this.elapsed)]
-    if (this.#detail) parts.push(dim('·'), dim(this.#detail))
-    // A leading blank line the first time, so the spinner does not butt straight against
-    // the last line of a report. Only once per turn: doing it per frame would scroll.
-    this.#out.write(`${this.#drawn ? '' : '\n'}\r\x1b[2K  ${parts.join(' ')}`)
-    this.#drawn = true
-  }
-
-  /** Erase and stand down. The turn is over; nothing should redraw. */
-  clear(): void {
-    if (this.#timer) clearInterval(this.#timer)
-    this.#timer = undefined
-    this.erase()
-  }
+export function elapsedSince(startedAt: number): string {
+  const s = Math.round((Date.now() - startedAt) / 1000)
+  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m${String(s % 60).padStart(2, '0')}s`
 }
