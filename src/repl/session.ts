@@ -137,7 +137,9 @@ export async function runSession(opts: SessionOptions): Promise<number> {
    * the buffer, which is what makes this usable rather than merely functional.
    */
   const write = (s: string) => {
-    statusRef?.clear()
+    // Erase, do not stop: the turn is still running and the spinner belongs below whatever
+    // is about to be written.
+    statusRef?.erase()
     if (!rl || !interactive) {
       out.write(`${s}\n`)
       return
@@ -276,7 +278,9 @@ export async function runSession(opts: SessionOptions): Promise<number> {
    * status already uses.
    */
   const refreshPrompt = () => {
-    const queued = relay.pending().reduce((n, p) => n + p.texts.length, 0)
+    // Distinct messages, not deliveries. One line addressed to everyone is one thing the
+    // operator typed; counting recipients reported "(2 queued)" for a single "continue".
+    const queued = new Set(relay.pending().flatMap((p) => p.texts)).size
     rl?.setPrompt(queued > 0 ? `${dim(`(${queued} queued)`)} ${bold('›')} ` : `${bold('›')} `)
   }
 

@@ -264,9 +264,6 @@ export class Status {
     this.#label = label
     this.#detail = ''
     this.#started = Date.now()
-    // A blank line between the prose above and the status below. Without it the spinner
-    // butts straight up against the last line of a report and the two read as one block.
-    if (this.#enabled) this.#out.write('\n')
     if (!this.#enabled || this.#timer) return
     this.#timer = setInterval(() => this.#draw(), 90)
     this.#timer.unref()
@@ -280,6 +277,20 @@ export class Status {
     if (this.#enabled && this.#timer) this.#draw()
   }
 
+  /**
+   * Erase the line, but keep running.
+   *
+   * Output has to clear the status before writing or the two overlap — but clearing it used
+   * to cancel the timer too, so the first message of a turn froze the spinner forever. It
+   * sat at `0s` while the implementer was demonstrably still working, and every later
+   * message stranded another dead copy in the transcript. Erase and stand-down are
+   * different operations and now say so.
+   */
+  erase(): void {
+    if (this.#drawn) this.#out.write('\r\x1b[2K')
+    this.#drawn = false
+  }
+
   get elapsed(): string {
     const s = Math.round((Date.now() - this.#started) / 1000)
     return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m${String(s % 60).padStart(2, '0')}s`
@@ -290,15 +301,16 @@ export class Status {
     const frame = FRAMES[this.#frame++ % FRAMES.length]!
     const parts = [cyan(frame), this.#label, dim(this.elapsed)]
     if (this.#detail) parts.push(dim('·'), dim(this.#detail))
-    this.#out.write(`\r\x1b[2K  ${parts.join(' ')}`)
+    // A leading blank line the first time, so the spinner does not butt straight against
+    // the last line of a report. Only once per turn: doing it per frame would scroll.
+    this.#out.write(`${this.#drawn ? '' : '\n'}\r\x1b[2K  ${parts.join(' ')}`)
     this.#drawn = true
   }
 
-  /** Erase, so the transcript above stays clean rather than accumulating spinner corpses. */
+  /** Erase and stand down. The turn is over; nothing should redraw. */
   clear(): void {
     if (this.#timer) clearInterval(this.#timer)
     this.#timer = undefined
-    if (this.#drawn) this.#out.write('\r\x1b[2K')
-    this.#drawn = false
+    this.erase()
   }
 }

@@ -157,6 +157,33 @@ test('typed-but-unsubmitted text survives asynchronous output', async () => {
   c.proc.kill()
 })
 
+test('the spinner keeps ticking after output, and leaves nothing stranded', async () => {
+  // Observed live: the implementer was demonstrably working and the console had stopped
+  // saying so. `write()` cleared the status by cancelling its timer, so the first message
+  // of a turn froze the spinner at 0s and every later message stranded another dead copy.
+  const dir = repo()
+  const c = await spawnConsole(dir)
+  assert.ok(await c.until((s) => s.includes('›')))
+  assert.ok(await c.until((s) => /working/.test(s)), 'the status should appear')
+
+  // Wait for a message to be written over the top of it, then for the clock to move.
+  assert.ok(await c.until((s) => s.includes('●')), 'a routed message should arrive')
+  // Strip ANSI before matching: the elapsed time is dim, so the raw bytes read
+  // "working \x1b[2m1s" and a naive regex sees a frozen clock that is not frozen.
+  const plain = (s: string) => s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '')
+  const after = c.text().length
+  assert.ok(
+    await c.until((s) => /working [1-9]\d*s/.test(plain(s.slice(after))), 8_000),
+    `the spinner froze after output:\n${JSON.stringify(plain(c.text()).slice(-300))}`,
+  )
+
+  // And nothing stranded: a status line followed by a newline is a dead copy left in the
+  // transcript. A live one is always the last thing on its line.
+  const stranded = (plain(c.text()).match(/working \d+s[^\r\n]*\n/g) ?? []).length
+  assert.equal(stranded, 0, `stranded ${stranded} dead status lines in the transcript`)
+  c.proc.kill()
+})
+
 test('Ctrl-C tears the session down instead of orphaning it', async () => {
   // The failure this guards against is the one that held a test process open for 26
   // minutes: children with nothing to reap them. A fake has no PTY, so what is asserted
