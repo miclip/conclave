@@ -527,11 +527,25 @@ third field on the same envelope.
 
 Consequences, each of which needs handling rather than noting:
 
-- **Privacy holds for one hop only.** The channel is confidential; the recipient is not.
-  An aside can be repeated verbatim in the recipient's next status update, which is
-  ordinary prose and goes straight to the other side. Undecided: mark asides confidential
-  in the instruction (a request, not a guarantee), accept the leak, or filter outbound
-  prose — which means reading it, and that is its own problem.
+- **Privacy holds for one hop only — confirmed live, and the vector is worse than
+  expected.** [Observed 2026-08-05] An aside told the implementer to use a naming prefix
+  and explicitly not to mention the instruction. It complied with the letter: it never
+  said it had been told anything. It then quoted its own source in its report, and the
+  source contained the prefix. The advisor saw it within one turn.
+
+  **The leak vector is the artifact, not the instruction.** Any report that shows its work
+  leaks anything embedded in that work. This is structural rather than a compliance
+  failure, and no phrasing fixes it: an aside that shapes something the implementer will
+  show cannot stay private. That narrows what a private instruction can usefully be —
+  process guidance ("push back harder", "prefer the simpler option") can stay private;
+  anything that changes an observable artifact cannot.
+
+  Filtering outbound prose would not work either, for the same reason: the leak was a
+  legitimate code quotation, and stripping it would corrupt the report.
+
+  **So the mitigation is attribution, not prevention.** When the advisor sees a prefix
+  nobody asked for, `audit()` explains where it came from. That is the whole reason the
+  restricted label exists, and it survives the leak intact.
 - **A single-recipient message can manufacture apparent disagreement.** Positions diverge for reasons that
   look technical but are actually informational. The orchestrator must be able to tell
   that apart from a real design dispute, or it will escalate its own routing to the human
