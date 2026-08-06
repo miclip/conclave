@@ -592,13 +592,28 @@ export class Relay {
       const known = [...this.#participants.keys()].sort().join(', ')
       throw new Error(`unknown participant '${participantId}'. Known: ${known}`)
     }
-    this.#record({ from: 'human', fromRank: 'human', to: [participantId], kind: 'constraint', text })
-    const turn = await this.#exchange(p, text)
-    // `to: []` because it is going to the human, who is not a routed participant. The
-    // console renders an unaddressed participant message as `→ you`.
-    this.#record({ from: p.id, fromRank: p.rank, to: [], kind: 'report', text: turn.prose })
-    return turn.prose
+    // Per PARTICIPANT, not globally. A session runs one turn at a time, so a second
+    // question to the same one has to wait — but the participants are independent, and
+    // asking the implementer to start a server has no bearing on asking the advisor to
+    // look at something while it does.
+    if (this.#asking.has(participantId)) {
+      throw new Error(`${participantId} is still answering; one question at a time each`)
+    }
+    this.#asking.add(participantId)
+    try {
+      this.#record({ from: 'human', fromRank: 'human', to: [participantId], kind: 'constraint', text })
+      const turn = await this.#exchange(p, text)
+      // `to: []` because it is going to the human, who is not a routed participant. The
+      // console renders an unaddressed participant message as `→ you`.
+      this.#record({ from: p.id, fromRank: p.rank, to: [], kind: 'report', text: turn.prose })
+      return turn.prose
+    } finally {
+      this.#asking.delete(participantId)
+    }
   }
+
+  /** Participants with an out-of-run question in flight. See `ask`. */
+  #asking = new Set<string>()
 
   async #exchange(p: RelayParticipant, text: string): Promise<{ prose: string; end: TurnEndEvent }> {
     const before = p.events.length

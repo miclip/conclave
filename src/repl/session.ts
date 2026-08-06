@@ -259,8 +259,16 @@ export async function runSession(opts: SessionOptions): Promise<number> {
   // Cleared by `leave`, alongside the screen it draws to: an interval still firing after
   // the scrolling region is gone would write over whatever the operator ran next.
   let stopAnimation: (() => void) | undefined
-  /** Which participant an out-of-run question is waiting on, if any. */
-  let asking: string | undefined
+  /**
+   * Participants with an out-of-run question in flight.
+   *
+   * A SET, not a single flag. A session can only run one turn at a time, so a second
+   * question to the same participant has to wait — but the participants are independent,
+   * and asking the implementer to start the server should not stop you asking the advisor
+   * to look at something while it does. The first version serialised across everyone and
+   * turned two unrelated questions into a queue.
+   */
+  const asking = new Set<string>()
   /** Resolves when an interactive console closes. */
   let closed: (() => void) | undefined
 
@@ -654,8 +662,10 @@ export async function runSession(opts: SessionOptions): Promise<number> {
    * they see anything else said to one participant and not the other.
    */
   function askDirectly(who: string, text: string): void {
-    if (asking) return void write(dim(`  still waiting on ${asking}; one at a time`))
-    asking = who
+    if (asking.has(who)) {
+      return void write(dim(`  ${who} is still answering; one question at a time each`))
+    }
+    asking.add(who)
     progress.start(who)
     progress.note(who, 'answering you')
     if (screen) screen.draw()
@@ -665,7 +675,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
         write(dim(`  ${who} could not answer: ${err.message}`))
       })
       .finally(() => {
-        asking = undefined
+        asking.delete(who)
         progress.done(who)
         if (screen) screen.draw()
       })

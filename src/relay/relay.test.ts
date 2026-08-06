@@ -388,6 +388,31 @@ test('asking is refused while a run is in flight, rather than racing its turns',
   await relay.ask('implementer', 'now that it is over')
 })
 
+test('two participants can be asked at once; the same one, not twice', async () => {
+  // The sessions are independent. Asking the implementer to start a server has no bearing
+  // on asking the advisor to look at something while it does — and a guard that serialised
+  // across everyone turned two unrelated questions into a queue, which is what the operator
+  // saw as "still waiting on implementer; one at a time".
+  // 'DONE' ends the run at the advisor's first turn, so the second reply of each is left
+  // for the questions rather than being eaten by the loop.
+  const { relay, lead, impl } = await twoParty(['DONE', 'looked at it'], ['ack', 'server is up'])
+  await relay.run('a goal')
+
+  const both = await Promise.all([
+    relay.ask('implementer', 'start the web server'),
+    relay.ask('advisor', 'meanwhile, look at the routes'),
+  ])
+  assert.deepEqual(both, ['server is up', 'looked at it'], 'both were asked, neither waited')
+  assert.ok(impl.received.some((m) => m.includes('start the web server')))
+  assert.ok(lead.received.some((m) => m.includes('look at the routes')))
+
+  // The same participant twice IS serialised: a session runs one turn at a time, so the
+  // second would interleave with the first.
+  const first = relay.ask('implementer', 'and now this')
+  await assert.rejects(() => relay.ask('implementer', 'and this too'), /still answering/)
+  await first
+})
+
 test('asking an unknown participant names the ones that exist', async () => {
   const { relay } = await twoParty(['DONE'], [])
   await relay.run('a goal')
