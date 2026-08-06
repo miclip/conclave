@@ -351,19 +351,26 @@ export class Relay {
   #awaitingPermission = new Map<string, { tool: string }>()
 
   /**
-   * A request stands until the participant moves on.
+   * A request stands until the turn ends or another replaces it.
    *
-   * Cleared on ANY later event from the same participant, not only on a decision of ours.
-   * A permission can be answered in the child's own terminal, or the turn can end without
-   * one, and either way a stale `awaiting` would have the console offering to decide
-   * something nobody is waiting on.
+   * The first cut cleared on ANY later event, reasoning that a permission answered in the
+   * child's own terminal would otherwise leave a stale entry. That was wrong about what a
+   * waiting session emits: the transcript poller reports the very tool call being waited
+   * on, so a `tool_use` arrives immediately AFTER `permission_requested` and cancelled the
+   * request microseconds after it appeared. The console printed "needs a permission
+   * decision", and `/allow` a moment later answered "nobody is waiting" — which is exactly
+   * as useless as having no command at all.
+   *
+   * `turn_end` is the honest boundary: a turn that ended is not sitting at a prompt. A
+   * second request replaces the first, since only one dialog can be up at a time.
+   *
+   * The stale case that motivated the first version is real but cheap: answering in the
+   * child's terminal and then using `/allow` writes a keystroke that no dialog consumes.
+   * That is a stray key in a session, against a request that could not be answered at all.
    */
   #trackPermission(p: RelayParticipant, e: AgentEvent): void {
-    if (e.type === 'permission_requested') {
-      this.#awaitingPermission.set(p.id, { tool: e.tool })
-      return
-    }
-    this.#awaitingPermission.delete(p.id)
+    if (e.type === 'permission_requested') this.#awaitingPermission.set(p.id, { tool: e.tool })
+    else if (e.type === 'turn_end') this.#awaitingPermission.delete(p.id)
   }
 
   /** Participants stopped at a permission prompt right now, with the tool each named. */

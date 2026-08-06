@@ -420,22 +420,49 @@ test('a permission request can be answered, and reaches the session', async () =
   assert.match(relay.log.at(-1)!.text, /you allowed implementer: exec/)
 })
 
-test('a request the participant moved past is not still offered', async () => {
-  // A permission can be answered in the child's own terminal, or the turn can end without
-  // one. Either way the console would go on offering to decide something nobody is waiting
-  // on — and `decidePermission` would send a keystroke into a session that is not at a
-  // prompt. Any later event from that participant clears it.
+test('a request survives the activity that a waiting session keeps emitting', async () => {
+  // The regression that made the feature useless in practice. A session stopped at a
+  // permission dialog is not silent: the transcript poller reports the very tool call
+  // being waited on, so `tool_use` lands immediately after `permission_requested`. Clearing
+  // on any later event cancelled the request microseconds after it appeared — the console
+  // printed "needs a permission decision" and `/allow` answered "nobody is waiting".
   const { relay, impl } = await twoParty(['DONE'], ['ack'])
   await relay.run('a goal')
 
-  impl.emit({ type: 'permission_requested', tool: 'exec', input: {}, seq: 901, at: Date.now(), provisional: true })
-  await settle()
-  assert.equal(relay.permissionsPending().length, 1)
-
+  impl.emit({ type: 'permission_requested', tool: 'Bash', input: {}, seq: 901, at: Date.now(), provisional: false })
   impl.emit({ type: 'tool_use', tool: 'Bash', input: {}, seq: 902, at: Date.now(), provisional: true })
   await settle()
 
-  assert.deepEqual(relay.permissionsPending(), [], 'it moved on, so there is nothing to decide')
+  assert.deepEqual(
+    relay.permissionsPending(),
+    [{ id: 'implementer', tool: 'Bash' }],
+    'the session is still at the dialog; its own reporting must not dismiss it',
+  )
+  await relay.decidePermission('implementer', 'allow')
+  assert.equal(impl.decided, 'allow')
+})
+
+test('a request does not outlive the turn that raised it', async () => {
+  // `turn_end` is the honest boundary: a turn that ended is not sitting at a prompt, so
+  // offering to decide would send a keystroke nothing consumes.
+  const { relay, impl } = await twoParty(['DONE'], ['ack'])
+  await relay.run('a goal')
+
+  impl.emit({ type: 'permission_requested', tool: 'exec', input: {}, seq: 903, at: Date.now(), provisional: false })
+  await settle()
+  assert.equal(relay.permissionsPending().length, 1)
+
+  impl.emit({
+    type: 'turn_end',
+    verdict: { outcome: 'completed', confidence: 'proven', provenance: [{ source: 'hook', detail: 'Stop' }] },
+    synthesized: false,
+    seq: 904,
+    at: Date.now(),
+    provisional: false,
+  })
+  await settle()
+
+  assert.deepEqual(relay.permissionsPending(), [], 'the turn is over, so there is nothing to decide')
   await assert.rejects(
     () => relay.decidePermission('implementer', 'allow'),
     /not waiting on a permission decision/,
