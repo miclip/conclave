@@ -29,12 +29,30 @@ collapsed into the lead, which is one of the two agents rather than a third one.
 The earlier peer framing is preserved below where it still applies, but the exchange is
 asymmetric now: the lead directs and the implementer executes.
 
-The observed behavior this is built around: two frontier models with different training
-and different harness prompts have genuinely different blind spots, and routing an
-architectural question through one while the other holds the implementation context
-produces better outcomes than either alone. Part of the benefit is model diversity and
-part is context isolation, since the advisor never accumulates the implementation detail
-that bogs down the implementer.
+**[Sharpened 2026-08-05 — the actual problem.]** A single agent session runs on
+*unchallenged*. Nothing checks it as it goes. The human has two options, both bad: read
+everything, which costs as much attention as doing the work, or trust it and find out
+later.
+
+So: the agents answer to each other, continuously, and the human keeps up via a summary.
+Review becomes something that happens *during* the session rather than after it, and the
+human's cost becomes proportional to **following** rather than **doing**.
+
+That reframes what success means. Not "produces better architecture" — hard to measure and
+easy to argue about. Two things that can actually be checked:
+
+1. Did the exchange catch things an unchallenged session would have drifted past?
+2. Did following it cost meaningfully less attention than doing the work?
+
+If the answer to (2) is no, the design has failed even if (1) is yes — §9's test is that
+reading the panel must not cost as much as doing the work.
+
+The mechanism underneath: two frontier models with different training and different
+harness prompts have genuinely different blind spots, and routing an architectural
+question through one while the other holds the implementation context produces better
+outcomes than either alone. Part of the benefit is model diversity and part is context
+isolation, since the advisor never accumulates the implementation detail that bogs down
+the implementer.
 
 ## 2. What this is not
 
@@ -749,6 +767,20 @@ consistently target shared and unattended use.
 not a transport.
 
 ## 9. The panel
+
+The summary is the product for the human, not a convenience. It is what makes the cost of
+following the session lower than the cost of doing the work, which is the whole premise
+(§1).
+
+**Assembled, not narrated.** The summary is built from things already recorded — turn
+verdicts with their confidence and provenance, the prose each side actually sent, dissent
+events, arbiter results — rather than written by a model. A model-authored summary is one
+more unfalsifiable claim in a system whose entire discipline is that claims carry their
+evidence, and it would be the one claim the human cannot check without doing the reading
+the summary exists to avoid.
+
+It also has to be **incremental**: the human reads asynchronously and needs what changed
+since they last looked, not a growing document re-read from the top.
 
 The panel should probably not show the transcript at all. What is useful is the diff of
 positions over time:
