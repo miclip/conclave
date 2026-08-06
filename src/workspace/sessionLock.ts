@@ -111,6 +111,20 @@ export interface GuardReport {
   messages: string[]
 }
 
+/**
+ * The report as JSON, for a caller that parses the guard rather than reads it.
+ *
+ * The mirror of `formatInstallResultJson`: same information as the prose, JSON on stdout,
+ * exit code untouched. Every field of the report is emitted rather than a hand-picked
+ * subset, so a consumer gating on the guard sees what the prose reader sees — including
+ * `session`, which names who is live and when they started. `session` is simply absent
+ * when there is no lock; `live: false, stale: false` is the machine-readable form of the
+ * prose "no participant sessions are live".
+ */
+export function formatGuardReportJson(r: GuardReport): string {
+  return JSON.stringify(r, null, 2)
+}
+
 export function guard(repoRoot: string): GuardReport {
   const found = read(repoRoot)
   if (!found) {

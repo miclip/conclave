@@ -13,7 +13,7 @@ import {
 import { defaultRegistry } from '../src/registry/builtin.ts'
 import { runSession } from '../src/repl/session.ts'
 import { Relay } from '../src/relay/relay.ts'
-import { guard } from '../src/workspace/sessionLock.ts'
+import { formatGuardReportJson, guard } from '../src/workspace/sessionLock.ts'
 
 const USAGE = `conclave <command>
 
@@ -26,9 +26,11 @@ Commands:
                                    before anything that depends on stable Codex trust.
                                    --json prints the report as JSON on stdout instead of
                                    prose; the exit code is unchanged.
-  guard                            Report whether participant sessions are live and which
+  guard          [--json]          Report whether participant sessions are live and which
                                    paths changed since they started. Exits non-zero while
-                                   live, so it can gate a commit helper.
+                                   live, so it can gate a commit helper. --json prints the
+                                   report as JSON on stdout instead of prose; the exit
+                                   code is unchanged.
   relay "<goal>" [--lead codex] [--implementer claude] [--rounds N]
                                    Run a two-agent session unattended and print the
                                    routing log. Every pause point ENDS the run, because a
@@ -68,12 +70,18 @@ async function main(argv: string[]): Promise<number> {
   }
 
   if (command === 'guard') {
+    // `guard` takes no subcommand, so its own flags arrive in `sub` as well as `rest`.
+    const flags = [sub, ...rest]
     const report = guard(process.cwd())
-    if (!report.live && !report.stale) {
+    // As with `config check --json`: the format is a rendering choice, and the exit code
+    // below — which is what a commit helper gates on — must not depend on it.
+    if (flags.includes('--json')) {
+      console.log(formatGuardReportJson(report))
+    } else if (!report.live && !report.stale) {
       console.log('no participant sessions are live')
-      return 0
+    } else {
+      for (const m of report.messages) console.log(m)
     }
-    for (const m of report.messages) console.log(m)
     // Stale exits 0: a crashed run must not block the repository forever, but it is
     // reported so the files can be accounted for rather than silently absorbed.
     return report.live ? 1 : 0

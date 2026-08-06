@@ -41,8 +41,8 @@ function repo(): string {
   return dir
 }
 
-function runGuard(cwd: string) {
-  const r = spawnSync(process.execPath, [CLI, 'guard'], { cwd, encoding: 'utf8' })
+function runGuard(cwd: string, ...flags: string[]) {
+  const r = spawnSync(process.execPath, [CLI, 'guard', ...flags], { cwd, encoding: 'utf8' })
   if (r.error) throw r.error
   return { status: r.status, stdout: r.stdout, stderr: r.stderr }
 }
@@ -110,6 +110,82 @@ test('a crashed session is reported but does not fail the command', () => {
   assert.equal(status, 0, 'a stale lock must not block the repository forever')
   assert.ok(stdout.includes('crashed run'))
   assert.ok(stdout.includes('orphaned.txt'), 'the orphaned files must still be accounted for')
+})
+
+test('--json prints the report as JSON and nothing else', () => {
+  const dir = repo()
+  acquire(dir, PARTICIPANTS)
+  writeFileSync(join(dir, 'theirs.txt'), 'implementer work in progress\n')
+
+  const { status, stdout } = runGuard(dir, '--json')
+
+  // Parse the whole stream, not a substring: a stray prose line alongside valid JSON is
+  // exactly the failure that makes a machine-readable mode useless.
+  const report = JSON.parse(stdout)
+
+  assert.equal(report.live, true)
+  assert.equal(report.stale, false)
+  assert.deepEqual(report.changedSinceStart, ['theirs.txt'])
+  // Who is live is the part an operator acts on, so it must survive the format change.
+  assert.deepEqual(
+    report.session.participants.map((p: { id: string }) => p.id).sort(),
+    ['advisor', 'implementer'],
+  )
+  assert.ok(report.messages.some((m: string) => m.includes('participants are live')))
+  assert.equal(status, 1, 'a live session must still exit non-zero under --json')
+})
+
+test('--json reports a quiet repository without prose', () => {
+  const dir = repo()
+  const { status, stdout } = runGuard(dir, '--json')
+  const report = JSON.parse(stdout)
+
+  assert.equal(report.live, false)
+  assert.equal(report.stale, false)
+  assert.deepEqual(report.changedSinceStart, [])
+  // `live: false, stale: false` IS the "no participant sessions are live" sentence. There
+  // is deliberately no synthesised message, so a consumer branches on the booleans rather
+  // than matching prose.
+  assert.deepEqual(report.messages, [])
+  assert.equal(status, 0)
+})
+
+test('--json carries the crashed-run asymmetry', () => {
+  const dir = repo()
+  acquire(dir, PARTICIPANTS)
+  writeFileSync(join(dir, 'orphaned.txt'), 'left behind by the crashed run\n')
+  orphan(dir)
+
+  const { status, stdout } = runGuard(dir, '--json')
+  const report = JSON.parse(stdout)
+
+  assert.equal(report.stale, true)
+  assert.equal(report.live, false)
+  assert.deepEqual(report.changedSinceStart, ['orphaned.txt'])
+  assert.ok(report.messages.some((m: string) => m.includes('crashed run')))
+  assert.equal(status, 0, 'a stale lock must not block the repository under --json either')
+})
+
+test('the exit code is the same with and without --json', () => {
+  const live = repo()
+  acquire(live, PARTICIPANTS)
+  assert.equal(runGuard(live).status, 1)
+  assert.equal(runGuard(live, '--json').status, 1)
+
+  const quiet = repo()
+  assert.equal(runGuard(quiet).status, 0)
+  assert.equal(runGuard(quiet, '--json').status, 0)
+})
+
+test('prose remains the default output', () => {
+  const dir = repo()
+  acquire(dir, PARTICIPANTS)
+
+  const { status, stdout } = runGuard(dir)
+
+  assert.throws(() => JSON.parse(stdout), 'the default output must not have become JSON')
+  assert.ok(stdout.includes('participants are live'))
+  assert.equal(status, 1)
 })
 
 test('a released session stops failing the command', () => {
