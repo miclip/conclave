@@ -734,6 +734,35 @@ fix is structural, not prompt engineering.
   moving, stop the loop. Do not wait for the round budget.
 - **Cost ceiling per topic.** Both usage meters are finite.
 
+### Health metrics [Added 2026-08-05]
+
+Four measures of whether the second model is still doing work. None is visible from
+reading the prose, which is a large part of why the orchestrator exists at all rather
+than being a message bus.
+
+| metric | failure it detects |
+|---|---|
+| dissent rate → 0 | the implementer stopped contributing |
+| unbacked complaints ↑ | the implementer started stalling |
+| concession rate → 100% | the advisor stopped discriminating |
+| novel contribution rate → 0 | the participant is present but adding nothing |
+
+The first three measure *willingness*: to disagree, to keep going, to evaluate a
+disagreement. The fourth measures *information*, and it is the one that catches what the
+others miss — a participant can disagree constantly while saying nothing new, or concede
+selectively while introducing valuable ideas. Measuring only disagreement would score both
+of those wrongly.
+
+**Novel contribution** is not messages sent. It is how often a participant introduced
+evidence, an objection, or a design change **that survived**. That is harder to instrument
+than the others and needs defining rather than hand-waving: an objection that changed a
+decision, evidence that changed a verdict, a change still standing N turns later. The
+orchestrator is in a position to know all three, because it already records verdicts,
+provenance and what superseded what.
+
+Together they answer the question the project's premise depends on: is this still two
+participants, or one participant and an expensive echo?
+
 ## 7a. Ending a session [Added 2026-08-05]
 
 Ending is a **distinct capability** from steering, not the absence of a next instruction.
@@ -1016,6 +1045,29 @@ local web view; do not fight the child TUIs for the terminal.
    enough to run several and take a majority. It is a poor fit for architectural
    judgment, where a weak participant adds plausible noise the strong models then spend
    rounds refuting. Tier roles by what the seat needs.
+
+   **[Added] The third adapter should violate an assumption, not merely work.** Another
+   PTY-driven TUI would prove nothing: both current adapters are siblings, and an
+   abstraction is only tested by something it was not shaped around. Candidates, roughly
+   in order of how much they would hurt:
+
+   - an **API-native agent with no PTY** — kills the terminal-transport assumption
+   - a **local model with no transcript** — kills the file-as-source-of-truth assumption
+   - an **arbiter that is a compiler or test runner** — a participant that is not a model
+     at all, and produces only checkable facts
+   - eventually a **human participant** — a seat with unbounded latency and no API
+
+   If `AgentSession` survives those without growing terminal-specific concepts, the
+   abstraction has earned its generality. If it needs reshaping, far better to learn that
+   from a third adapter than from a rewrite.
+
+   This is also the distinction between **architectural role** and **empirical claim**.
+   Conclave already *occupies* the role of a session kernel — process lifecycle, evidence
+   reconciliation, deployment preflight, participant registration, readiness, provenance,
+   terminal-state semantics all sit below "how do two agents solve a problem" and above
+   PTYs and JSONL. That is the architecture, and it is true today. The claim that the
+   abstraction is *general enough to support multiple classes of AI participant* is
+   separate, and unproven.
 
 Stop after step 5 and evaluate honestly whether the output is better than a single agent.
 It may not be. That is a real possible finding and worth recording either way.
