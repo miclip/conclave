@@ -1,0 +1,122 @@
+/**
+ * `conclave guard` at the CLI boundary.
+ *
+ * `sessionLock.test.ts` already covers the guard *function* thoroughly. What it cannot
+ * see is the thing a caller actually gates on: the exit code the command hands back, and
+ * whether the reasons reach stdout where an operator will read them. The whole point of
+ * the subcommand is to be usable as `conclave guard && git add -A`, so the exit code is
+ * the contract -- a guard that reported perfectly and always exited 0 would be silently
+ * useless.
+ *
+ * These spawn the real entry point. `guard` resolves the repository from `process.cwd()`,
+ * so a fixture can only be targeted via a spawned child's `cwd`.
+ *
+ *   node --test src/workspace/guardCli.test.ts
+ */
+
+import { strict as assert } from 'node:assert'
+import { execFileSync, spawnSync } from 'node:child_process'
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import test from 'node:test'
+import { resolveRepoRoot } from '../config/install.ts'
+import { acquire, lockPath, release } from './sessionLock.ts'
+
+const CLI = join(resolveRepoRoot(import.meta.dirname), 'bin', 'conclave.ts')
+
+const PARTICIPANTS = [
+  { id: 'advisor', agent: 'codex' },
+  { id: 'implementer', agent: 'claude' },
+]
+
+function repo(): string {
+  const dir = mkdtempSync(join(tmpdir(), 'conclave-guard-cli-'))
+  execFileSync('git', ['init', '-q'], { cwd: dir })
+  writeFileSync(join(dir, 'tracked.txt'), 'original\n')
+  execFileSync('git', ['add', '.'], { cwd: dir })
+  execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'init'], {
+    cwd: dir,
+  })
+  return dir
+}
+
+function runGuard(cwd: string) {
+  const r = spawnSync(process.execPath, [CLI, 'guard'], { cwd, encoding: 'utf8' })
+  if (r.error) throw r.error
+  return { status: r.status, stdout: r.stdout, stderr: r.stderr }
+}
+
+/** Rewrite the lock's pid to one that cannot be running, i.e. simulate a crashed run. */
+function orphan(dir: string) {
+  const raw = JSON.parse(readFileSync(lockPath(dir), 'utf8'))
+  writeFileSync(lockPath(dir), JSON.stringify({ ...raw, pid: 2147483647 }))
+}
+
+test('guard exits non-zero while a participant session is live', () => {
+  const dir = repo()
+  // `acquire` stamps this test process's pid, which is by definition alive when the child
+  // checks it -- so the child sees a genuinely live session, not a mocked one.
+  acquire(dir, PARTICIPANTS)
+
+  const { status, stdout } = runGuard(dir)
+
+  assert.equal(status, 1, 'a live session must fail the command so it can gate a commit helper')
+  assert.ok(
+    stdout.includes('participants are live'),
+    `the reason must reach stdout, got: ${stdout}`,
+  )
+  // Naming them matters: an operator who cannot see who is live will override the guard
+  // without knowing whose work is at stake.
+  assert.ok(stdout.includes('implementer'))
+  assert.ok(stdout.includes('advisor'))
+})
+
+test('guard names the paths that appeared after the session started', () => {
+  const dir = repo()
+  writeFileSync(join(dir, 'mine.txt'), 'operator edit before the session\n')
+  acquire(dir, PARTICIPANTS)
+  writeFileSync(join(dir, 'theirs.txt'), 'implementer work in progress\n')
+
+  const { status, stdout } = runGuard(dir)
+
+  assert.equal(status, 1)
+  assert.ok(stdout.includes('theirs.txt'), 'work in progress must be listed, not just counted')
+  assert.ok(
+    !stdout.includes('mine.txt'),
+    'a file already dirty at session start is the operator\'s own, not a participant\'s',
+  )
+})
+
+test('guard exits zero when no session is live', () => {
+  const dir = repo()
+  const { status, stdout } = runGuard(dir)
+
+  assert.equal(status, 0)
+  assert.ok(stdout.includes('no participant sessions are live'))
+})
+
+test('a crashed session is reported but does not fail the command', () => {
+  // The deliberate asymmetry in the subcommand: live exits 1, stale exits 0. A guard that
+  // refused forever after a crash would be deleted within a day, so the crash is surfaced
+  // for accounting rather than made binding.
+  const dir = repo()
+  acquire(dir, PARTICIPANTS)
+  writeFileSync(join(dir, 'orphaned.txt'), 'left behind by the crashed run\n')
+  orphan(dir)
+
+  const { status, stdout } = runGuard(dir)
+
+  assert.equal(status, 0, 'a stale lock must not block the repository forever')
+  assert.ok(stdout.includes('crashed run'))
+  assert.ok(stdout.includes('orphaned.txt'), 'the orphaned files must still be accounted for')
+})
+
+test('a released session stops failing the command', () => {
+  const dir = repo()
+  acquire(dir, PARTICIPANTS)
+  assert.equal(runGuard(dir).status, 1)
+
+  release(dir)
+  assert.equal(runGuard(dir).status, 0, 'the gate must reopen once the session ends')
+})
