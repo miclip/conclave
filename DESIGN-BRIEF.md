@@ -777,12 +777,71 @@ the implementer has stopped contributing; complaints *without* mechanical backin
 means it has started to stall instead. Both are measurable, and neither is visible from
 reading the prose alone.
 
-### Open
+### Authority to end [Decided 2026-08-05]
 
-Whether the advisor's decision to end takes effect immediately with the human able to
-restart, or is a proposal that waits. Waiting is safer and stalls an unattended session;
-acting is responsive and can discard work the human wanted. Probably acts, since a rotate
-loses nothing and the human outranks it either way.
+**The advisor may preserve continuity autonomously, but it may not decide that the
+human's objective should be abandoned.** Mechanical evidence decides facts, the advisor
+manages perspective and continuity, the human retains control of intent.
+
+| situation | advisor may |
+|---|---|
+| arbiter proves the work complete | stop — but see the objection below |
+| verified context degradation | **rotate automatically** |
+| progress halted, or mistakes compounding | **pause and escalate** to the human |
+| complaint with no mechanical backing | **record and continue** |
+
+Rotation acts immediately because it is reversible and preserves the work. Termination
+does not, because it is not.
+
+#### Rotation is transactional
+
+The advisor produces a bounded, auditable handoff:
+
+```
+goal · current state · decisions already made · evidence and test status
+files changed · open disagreement · next concrete action · constraints that must survive
+```
+
+The replacement implementer starts, authoritative human constraints are replayed
+**separately** rather than folded into the handoff — they must arrive at human privilege,
+not as advisor prose (§6, and the rank rules above) — and the old session is kept **alive
+but frozen** until the new one has accepted the transfer. Rotation is therefore
+transactional rather than destructive: if the replacement fails to start or fails to
+accept, nothing has been lost.
+
+Freezing is cheap and already expressible: an idle session costs nothing and holds its
+context. It is a third state the adapter contract does not yet name, though — neither
+`close('graceful')` nor `close('abandoned')` covers "alive, quiesced, not receiving".
+
+#### Objections recorded
+
+Raised by the implementer against the advisor's proposal, and kept rather than resolved
+away — this is the dissent §2 says must be surfaced rather than absorbed.
+
+1. **"Tests prove done → stop" sits uneasily with the principle it is stated beside.** The
+   arbiter proves *a check passes*, not that the human's objective is met. Whether green
+   tests represent the goal is exactly the judgement reserved for the human, so an advisor
+   stopping on green is deciding the objective is complete.
+
+   The load-bearing axis is not stop-versus-rotate but **destructive versus recoverable**.
+   Rotation is safe because it carries a handoff; a stop that carries one is equally safe.
+   Requiring a handoff on *any* advisor-initiated end collapses the distinction to who
+   decides we are finished, which stays with the human.
+
+2. **Acknowledgement is prose, and prose is the one thing established as unverifiable.** A
+   model will acknowledge almost anything, so "acknowledged" does not imply "understood".
+   Make acceptance mechanical: the handoff carries test status, and the replacement's
+   first action is to run the suite and confirm it observes the same state. A checkable
+   transfer rather than a verbal one.
+
+3. **Degradation should not require a complaint.** The table says "verified context
+   degradation", but the surrounding prose ties rotation to corroborating a complaint. A
+   model may compact without noticing, or notice and not say. The mechanical signal is
+   sufficient on its own; the complaint is optional evidence, not a precondition.
+
+4. **"Record and continue" must count, not merely log.** §7a already treats unbacked
+   complaints rising as a stall indicator, so the record has to feed a metric rather than
+   a log line nobody reads.
 
 ## 8. Commercial risk (important, affects architecture)
 
