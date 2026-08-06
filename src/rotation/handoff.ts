@@ -164,6 +164,17 @@ export function parseHandoff(text: string): ParseResult {
  * form that can be compared — a reply that cannot be compared is itself a failed transfer.
  */
 export function acceptancePrompt(h: Handoff): string {
+  // The example is generated from the actual checks, not written as a fixed pair.
+  //
+  // It used to show `CHECK 1` and `CHECK 2` whatever the real count. Given one command,
+  // two live replacements did two different things with that: one flagged it -- "there is
+  // no CHECK 2 to report. I'm flagging that rather than inventing a line to fill the
+  // template" -- and the other filled it in, reporting a CHECK 1 exit code that the
+  // arbiter had not observed alongside a CHECK 2 that did not exist.
+  //
+  // The second is a claim mismatch manufactured by the prompt. Had the repository not
+  // diverged first, the transaction would have refused the transfer and blamed the
+  // replacement for a template defect of ours.
   const checks = h.record.checks.map((c, i) => `${i + 1}. \`${c.command}\``).join('\n')
   const files = h.narrative.files.length > 0 ? h.narrative.files.map((f) => `- ${f}`).join('\n') : '- (none named)'
   return `You are replacing an implementer session that is being retired. It is still alive and
@@ -181,10 +192,10 @@ Before doing any of the work, demonstrate that you can continue it:
 ${files}
 2. Run each of these commands and report its exit code:
 ${checks}
-3. Report using exactly this format, one line per command, before anything else:
+3. Report using exactly this format, before anything else — ${h.record.checks.length} line(s),
+   one per command above, and no others:
 
-CHECK 1: exit <code>
-CHECK 2: exit <code>
+${h.record.checks.map((_, i) => `CHECK ${i + 1}: exit <code>`).join('\n')}
 
 Then, in prose: what you found, and anything in the handoff that the repository
 contradicts. If something does not match, say that plainly — a mismatch reported is a

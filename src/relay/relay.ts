@@ -91,6 +91,8 @@ export interface RotationConfig {
   /** Files whose exact content the transfer depends on, beyond those the advisor names. */
   files?: string[]
   checkTimeoutMs?: number
+  /** TEST-ONLY. See `RotationDeps.hooks`; never set in production. */
+  hooks?: { afterCapture?: () => Promise<void> }
 }
 
 export interface RelayOptions {
@@ -689,6 +691,7 @@ export class Relay {
         checks: cfg.checks,
         ...(cfg.files === undefined ? {} : { files: cfg.files }),
         ...(cfg.checkTimeoutMs === undefined ? {} : { checkTimeoutMs: cfg.checkTimeoutMs }),
+        ...(cfg.hooks === undefined ? {} : { hooks: cfg.hooks }),
         // Human messages only. Advisor instructions are the old session's history and
         // belong in the handoff narrative; constraints outrank it and are replayed intact.
         constraints: this.log.filter((m) => m.fromRank === 'human' && m.kind === 'constraint' && m.to.includes(impl.id)),

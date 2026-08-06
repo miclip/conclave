@@ -1405,13 +1405,101 @@ acceptance step working; acting on it unilaterally would not be.
 Unresolved deliberately. The right shape depends on whether a rotation with no `required`
 check should be refused outright, which is a policy question and not yet answerable.
 
+**Provisional invariant, policy not implementation:**
+
+> Automatic rotation requires at least one orchestrator-declared `required` check.
+> Otherwise, pause and ask the human.
+
+`informational` and `unrelated` are meaningless until some authority has declared what
+continuity must be proven — without that, a rotation can carry a long list of green checks
+while proving nothing about the work being handed over, which is worse than carrying none,
+because it *looks* verified. This is exactly the shape of the first live rotation, where
+`npx tsc --noEmit` reproduced faithfully and covered nothing.
+
+It stays policy until the live rollback branch is closed and there is evidence about how
+often a real project can actually supply a meaningful `required` check. Encoding it now
+would be guessing at the answer to the question it exists to keep open.
+
+#### The rollback branch, live [2026-08-06]
+
+Closed, and it took three runs. **Two separate findings, and the first is not a weaker
+version of the second:**
+
+1. **A failing check reproduced identically is accepted.** Run 1's trigger was keyed to
+   wall-clock time from test start and fired *before* the record was captured, so the check
+   read exit 1 on both sides. The transaction proceeded — correctly. That is
+   `carriedFailures`, and until then it had only ever been asserted against fakes. A useless
+   rollback experiment and real evidence for a different claim.
+2. **A like-for-like check going 0 → 1 between capture and acceptance rolls back.**
+   `check_exit_changed`, blocking, `repository_diverged`; the original unquiesced and back
+   in service; the replacement terminated; no process, lock, sentinel or scratch directory
+   surviving; the working tree byte-identical.
+
+The divergence must be **injected from outside both participants**. A rollback triggered by
+provoking a model tests the model, not the transaction.
+
+##### The trigger has to be causal, not timed
+
+No constant works. The interval from `rotate()` to capture contains the advisor's handoff
+turn, and the window between the two captures was 23-32s in observed runs — both are a
+model's business. `RotationDeps.hooks.afterCapture` is a **test-only barrier** awaited
+between the record being taken and the replacement being started, so "nothing downstream of
+capture observed the pre-flip state" holds by construction.
+
+An intermediate version polled the orchestrator's own `handoff recorded` note. That gets the
+ordering right but only *probabilistically* ahead of the replacement, which is the
+difference between a proof and a passing test.
+
+Because the sentinel lives under gitignored `.conclave/`, **repository cleanliness cannot
+prove transaction scratch cleanup**. Its removal is asserted directly. A leaked trip-wire is
+invisible to `git status` and would poison the next run — the same shape as the frozen-corpus
+contamination this project has already had once.
+
+##### The prompt manufactured a claim mismatch
+
+`acceptancePrompt` showed a fixed `CHECK 1` / `CHECK 2` example whatever the real number of
+checks. Given one check, two live replacements diverged:
+
+> Only one command was listed under step 2, so there is no CHECK 2 to report. I'm flagging
+> that rather than inventing a line to fill the template.
+
+and the other filled it in — reporting a `CHECK 1` exit code the arbiter had not observed
+alongside a `CHECK 2` that did not exist. Had the repository not diverged first, that would
+have been recorded as `replacement_could_not_reproduce`: **the transaction refusing a
+transfer and blaming the replacement for a defect of ours.** The example is now generated
+from the actual checks.
+
+Worth stating plainly because it cuts against the design's own instinct: strictness about
+the reported format is right, and a strict format the orchestrator itself renders
+incorrectly converts a compliant answer into evidence of non-compliance. This is the second
+time that has happened — the first was the line anchor.
+
+##### What the replacements did unprompted
+
+In all three runs the replacement diagnosed the harness rather than merely obeying it:
+
+> It was created at 06:15, one minute after `note.txt` at 06:14 — that is, after the
+> implementer's work, not by it. […] the sentinel is a deliberate trip-wire placed after the
+> work completed, and it says so in its own text.
+
+and, more carefully, in another run:
+
+> I can't tell from here whether the sentinel is a deliberate tripwire meant to route this
+> back to the frozen implementer, or a leftover the handoff simply failed to record.
+
+The second is the better answer. It is the §7 calibration question again — *does the
+advisor know when it doesn't know?* — arriving from the implementer's side, and it is the
+distinction between separating "I can reproduce the file state" from "I can reproduce the
+check it was paired with" that makes the acceptance step worth having at all.
+
 #### Evidence ledger for §7a
 
 | level | what |
 |---|---|
 | **observed, live** | the transaction end to end; promotion with participant identity preserved; the original terminated after the replacement demonstrated transfer; a real advisor producing the seven headings; a real replacement emitting `CHECK n: exit <code>`; quiescence across a human-scale pause with no drift; a pause suspending orchestration while ingestion, inspection and audit continue |
-| **observed, fakes** | rollback; continuity verification; carried failures; single-reader hand-off; the unsatisfiable-wait guard |
-| **unverified live** | rollback against real sessions — both live runs took the promotion path, so leak-free abandonment is still only reasoned; pauses longer than a few minutes |
+| **observed, live** (rollback branch) | a like-for-like check diverging 0 → 1 rolls back; the original is restored and driveable; the replacement is terminated; no process, lock or scratch state survives; the tree is unchanged; a check failing identically on both sides is accepted as a carried failure |
+| **observed, fakes** | continuity verification; single-reader hand-off; the unsatisfiable-wait guard |
+| **unverified live** | pauses longer than a couple of minutes |
 | **reasoned but unverified** | compaction is a useful proxy for degradation |
 
 Sequencing — that retirement happens only after promotion — is carried by the offline

@@ -131,6 +131,25 @@ test('the acceptance prompt asks for demonstration, not acknowledgement', () => 
   assert.ok(p.includes('claim to check, not as fact'))
 })
 
+test('the reported-format example has exactly one line per declared check', () => {
+  // A fixed two-line example invites a model with one check to invent a second. One live
+  // replacement did exactly that, producing a claim mismatch the prompt manufactured.
+  const two = acceptancePrompt(handoff())
+  assert.ok(two.includes('CHECK 1: exit <code>'))
+  assert.ok(two.includes('CHECK 2: exit <code>'))
+  assert.ok(!two.includes('CHECK 3: exit <code>'))
+
+  const one = handoff()
+  one.record.checks = [one.record.checks[0]!]
+  const rendered = acceptancePrompt(one)
+  assert.ok(rendered.includes('CHECK 1: exit <code>'))
+  assert.ok(
+    !rendered.includes('CHECK 2'),
+    'a single-check handoff must not show an example line for a check that does not exist',
+  )
+  assert.ok(rendered.includes('1 line(s)'))
+})
+
 test('the handoff carries the narrative, and constraints are not folded into it', () => {
   // Human constraints are replayed separately so they arrive at human rank. Quoting them
   // inside advisor prose would silently demote every one of them.

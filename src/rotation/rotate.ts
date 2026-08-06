@@ -58,6 +58,22 @@ export interface RotationDeps {
   /** Human-rank messages to replay. Delivered separately, at human rank. */
   constraints?: RelayMessage[]
   note?: (text: string) => void
+  /**
+   * TEST-ONLY synchronization points. Never set in production.
+   *
+   * `afterCapture` is awaited between the record being taken and the replacement being
+   * started, which is the only place a test can inject a divergence and *know* nothing
+   * downstream saw the state before it. Keying that to elapsed time does not work: the
+   * interval from `rotate()` to capture contains the advisor's handoff turn, whose
+   * duration is a model's business. The first live rollback attempt guessed 45 seconds and
+   * flipped before capture instead of after, producing a faithfully reproduced failing
+   * state -- correct behaviour, and a useless experiment.
+   *
+   * A poll on the orchestrator's own log gets the ordering right but only probabilistically
+   * ahead of the replacement. This is a barrier, so "nothing downstream of capture saw the
+   * old state" is structural rather than a timing that happened to hold.
+   */
+  hooks?: { afterCapture?: () => Promise<void> }
 }
 
 export interface Acceptance {
@@ -182,6 +198,10 @@ export async function rotate(opts: {
     at: Date.now(),
   }
   note(`handoff recorded: ${record.checks.length} check(s), ${record.files.length} file(s)`)
+  // Test instrumentation only. Awaited here so that everything after this point -- the
+  // replacement, its own run of the checks, and the acceptance capture -- observes the
+  // same world, and it is not the world the record was taken from.
+  if (deps.hooks?.afterCapture) await deps.hooks.afterCapture()
 
   // 3. Start the replacement.
   let replacement: AgentSession

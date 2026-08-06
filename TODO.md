@@ -171,10 +171,10 @@ product bugs invisible to the offline suite.
 
 **Next, in order:**
 
-1. **Live rollback proof.** Both runs took the promotion path, so leak-free
+1. ~~**Live rollback proof.**~~ **DONE 2026-08-06** — Both runs took the promotion path, so leak-free
    abandonment rests on the run-1 diagnosis plus offline tests. Needs a deliberately
-   failing acceptance. Assert the replacement terminates, the original unquiesces, the run
-   escalates, and no child process survives. `rotate.rollback.live.test.ts`.
+   `npm run test:live:rollback` passes. Divergence injected through the test-only
+   `hooks.afterCapture` barrier. See DESIGN-BRIEF §7a, "The rollback branch, live".
 2. **Human-scale long pause.** A duration resembling actual operator behaviour, not
    another two-minute probe. Confirm observation stays live while orchestration stays
    suspended. `ORCH_PAUSE_SECONDS` exists for this; the longest run so far is 120s.
