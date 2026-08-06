@@ -43,6 +43,7 @@ import {
   waitForCodexHooksExecutable,
 } from '../deployment/codexHookTrust.ts'
 import { AGENT_KINDS, installConfig, type AgentKind } from '../config/install.ts'
+import { CONFIG_RELATIVE, launchArgsFor, permissionModeFor, readProjectConfig } from '../config/project.ts'
 
 /**
  * A role can be filled by an agent this installer knows nothing about — the registry is
@@ -435,11 +436,33 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     }
   }
 
+  // Read before anything is launched, and loudly: a malformed config that silently meant
+  // "ask" would present as a session that stops on every command for no stated reason.
+  const projectConfig = readProjectConfig(opts.cwd)
+  const leadArgs = launchArgsFor(projectConfig, opts.lead)
+  const implArgs = launchArgsFor(projectConfig, opts.implementer)
+
+  // Said once, at the top, naming who. A session that never asks permission is a thing
+  // the operator should be reminded of while it runs, not something they configured weeks
+  // ago in a file they are not looking at.
+  const bypassing = [
+    permissionModeFor(projectConfig, opts.lead) === 'bypass' ? `advisor (${opts.lead})` : '',
+    permissionModeFor(projectConfig, opts.implementer) === 'bypass' ? `implementer (${opts.implementer})` : '',
+  ].filter(Boolean)
+  if (bypassing.length > 0) {
+    write(yellow(`  permission prompts bypassed for ${bypassing.join(' and ')} — per ${CONFIG_RELATIVE}`))
+  }
+
   const relay = await Relay.start({
     registry: opts.registry ?? defaultRegistry(),
     cwd: opts.cwd,
-    lead: { id: 'advisor', agent: opts.lead, role: 'advisor' },
-    implementer: { id: 'implementer', agent: opts.implementer, role: 'implementer' },
+    lead: { id: 'advisor', agent: opts.lead, role: 'advisor', ...(leadArgs.length > 0 ? { args: leadArgs } : {}) },
+    implementer: {
+      id: 'implementer',
+      agent: opts.implementer,
+      role: 'implementer',
+      ...(implArgs.length > 0 ? { args: implArgs } : {}),
+    },
     maxRounds: opts.rounds,
     ...(opts.checks.length > 0 ? { rotation: { checks: opts.checks } } : {}),
     onLog: (m) => {

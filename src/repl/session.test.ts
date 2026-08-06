@@ -11,7 +11,7 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PassThrough, Writable } from 'node:stream'
@@ -32,7 +32,11 @@ function repo(): string {
   return dir
 }
 
-function registryOf(sessions: Record<string, AgentSession[]>): AgentRegistry {
+function registryOf(
+  sessions: Record<string, AgentSession[]>,
+  /** Observes the args a participant was launched with, which is otherwise invisible. */
+  onLaunch?: (agent: string, args: string[] | undefined) => void,
+): AgentRegistry {
   const r = new AgentRegistry()
   for (const [agent, queue] of Object.entries(sessions)) {
     const remaining = [...queue]
@@ -54,7 +58,8 @@ function registryOf(sessions: Record<string, AgentSession[]>): AgentRegistry {
         },
       },
       launch: { command: agent, baseArgs: [] },
-      async create() {
+      async create(resolved) {
+        onLaunch?.(agent, resolved.spec.args)
         const next = remaining.shift()
         if (!next) throw new Error(`no session left for ${agent}`)
         return next
@@ -149,6 +154,41 @@ test('a session registers its hooks in the project, for the CLIs it will actuall
   const settings = readFileSync(join(dir, '.claude', 'settings.json'), 'utf8')
   assert.ok(settings.includes('hook_post.py'))
   assert.ok(!settings.includes(dir), 'a command must not point into the project being registered')
+})
+
+test('a bypass config reaches the launch, and the console says so', async () => {
+  // The flags are the whole point — a config that parsed correctly and never reached the
+  // child would look identical from here until a permission prompt appeared mid-run.
+  const dir = repo()
+  mkdirSync(join(dir, '.conclave'), { recursive: true })
+  writeFileSync(join(dir, '.conclave', 'config.json'), '{"permissions":"bypass"}')
+
+  const launched: Record<string, string[] | undefined> = {}
+  const out = collect()
+  const code = await runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'claude',
+    rounds: 2,
+    checks: [],
+    registry: registryOf(
+      {
+        codex: [slow('advisor', 'codex', ['DONE'])],
+        claude: [slow('impl', 'claude', ['ack'])],
+      },
+      (agent, args) => {
+        launched[agent] = args
+      },
+    ),
+    input: script([]),
+    output: out.stream,
+  })
+  assert.equal(code, 0)
+  assert.deepEqual(launched['codex'], ['--dangerously-bypass-approvals-and-sandbox'])
+  assert.deepEqual(launched['claude'], ['--dangerously-skip-permissions'])
+  // Said while it runs, not only in a file configured weeks ago and not being looked at.
+  assert.match(out.text(), /permission prompts bypassed for advisor \(codex\) and implementer \(claude\)/)
 })
 
 test('a pause is rendered with its evidence and the operator resumes it', async () => {

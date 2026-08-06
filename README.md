@@ -338,3 +338,36 @@ the empirical work were done by Claude (Opus 5) in Claude Code.
 Node 24+ (executes TypeScript directly via native type stripping — no build step),
 Python 3 for the spike tooling, and the `claude` and `codex` CLIs installed and
 authenticated. One runtime dependency, `node-pty`.
+
+## Permission prompts
+
+By default each participant uses its own CLI's default approval behaviour, which means a
+session can stop and wait for you to approve a command. `conclave` surfaces that as
+`! advisor needs a permission decision for Bash — /allow or /deny`, and you answer it at
+the console.
+
+To run without those prompts, create `.conclave/config.json` in the project:
+
+```json
+{ "permissions": "bypass" }
+```
+
+Or per agent — an implementer that acts freely, an advisor that still asks:
+
+```json
+{
+  "permissions": "ask",
+  "agents": { "claude": { "permissions": "bypass" } }
+}
+```
+
+`bypass` launches each CLI in its most permissive mode: `--dangerously-skip-permissions`
+for Claude Code, `--dangerously-bypass-approvals-and-sandbox` for Codex. Codex's own
+description of that flag is "Skip all confirmation prompts and execute commands without
+sandboxing. EXTREMELY DANGEROUS. Intended solely for running in environments that are
+externally sandboxed." Two models will run commands in your working directory with nothing
+asking first — worth having a clean git state and knowing what is in the directory.
+
+The console says so at the top of every session that has it enabled, naming which
+participants. `.conclave/` is gitignored, so this stays a decision about your machine
+rather than one you hand to everyone who clones the repository.
