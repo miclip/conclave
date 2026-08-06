@@ -26,9 +26,9 @@ export interface InputAction {
   at: number
   /** Who asked for it. `external` means it did not come through the orchestrator. */
   origin: 'orchestrator' | 'external'
-  detail?: string
+  detail?: string | undefined
   /** Bytes actually written. Transport evidence, kept for debugging only. */
-  bytes?: string
+  bytes?: string | undefined
 }
 
 /**

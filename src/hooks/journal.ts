@@ -22,16 +22,16 @@ export interface HookDelivery {
   deliveryId: string
   agent: string
   event: string
-  sessionId?: string
+  sessionId?: string | undefined
   /** prompt_id (claude) / turn_id (codex), when the payload carries one. */
-  turnKey?: string
+  turnKey?: string | undefined
   /** The payload exactly as the CLI produced it. Never normalised here. */
   payload: Record<string, any>
   firedAt: number
   hookPid: number
-  receivedAt?: number
+  receivedAt?: number | undefined
   /** True when this arrived again after already being journalled. */
-  replay?: boolean
+  replay?: boolean | undefined
 }
 
 /**

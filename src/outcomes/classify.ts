@@ -20,12 +20,12 @@ import type {
 export interface ProcessState {
   alive: boolean
   /** How it ended, when known: 'graceful' | 'sigterm' | 'sigkill' | 'already-exited'. */
-  howEnded?: string
+  howEnded?: string | undefined
 }
 
 export interface OrchestratorActions {
   sentCancel: boolean
-  sentPermissionDecision?: 'allow' | 'deny'
+  sentPermissionDecision?: 'allow' | 'deny' | undefined
   /** False once anyone other than the orchestrator can type into the child. */
   inputIsMediated: boolean
 }
@@ -33,10 +33,10 @@ export interface OrchestratorActions {
 export interface TranscriptState {
   exists: boolean
   hasAssistantAfterPrompt: boolean
-  finalStopReason?: string
+  finalStopReason?: string | undefined
   toolResultError: boolean
   /** Codex only. Claude Code writes no equivalent record anywhere. */
-  turnAbortedReason?: string
+  turnAbortedReason?: string | undefined
   taskComplete: boolean
 }
 

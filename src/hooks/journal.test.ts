@@ -100,7 +100,7 @@ test('the receiver journals durably before acknowledging', async (t) => {
   const onDisk = readFileSync(path, 'utf8')
   assert.ok(onDisk.includes('fixed-id'), 'the delivery must be durable before the ack')
 
-  const parsed = await res.json()
+  const parsed = (await res.json()) as { duplicate: boolean }
   assert.equal(parsed.duplicate, false)
   assert.equal(receiver.journal.has('fixed-id'), true)
 })
@@ -116,12 +116,12 @@ test('a replayed delivery is acknowledged, reported, and not double-counted', as
   receiver.on('delivery', (d) => fresh.push(d.deliveryId))
   receiver.on('duplicate', (d) => dupes.push(d.deliveryId))
 
-  const post = () =>
+  const post = (): Promise<{ duplicate: boolean }> =>
     fetch(url, {
       method: 'POST',
       body: JSON.stringify({ hook_event_name: 'Stop' }),
       headers: { 'content-type': 'application/json', 'x-orch-delivery-id': 'replayed' },
-    }).then((r) => r.json())
+    }).then((r) => r.json() as Promise<{ duplicate: boolean }>)
 
   assert.equal((await post()).duplicate, false)
   assert.equal((await post()).duplicate, true)

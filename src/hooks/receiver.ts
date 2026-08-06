@@ -23,8 +23,8 @@ export interface ReceiverEvents {
 
 export class HookReceiver extends EventEmitter<ReceiverEvents> {
   readonly journal: HookJournal
-  #server?: Server
-  #url?: string
+  #server: Server | undefined
+  #url: string | undefined
 
   constructor(journalPath: string) {
     super()

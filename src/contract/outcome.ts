@@ -71,7 +71,7 @@ export interface Provenance {
    * Set when this entry is a caveat rather than support. A verdict carrying caveats is
    * still a verdict, but callers rendering it must not drop these.
    */
-  caveat?: boolean
+  caveat?: boolean | undefined
 }
 
 export interface Verdict {

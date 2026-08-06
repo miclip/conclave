@@ -40,12 +40,14 @@ interface Observation {
   scenario: string
   runId: string
   hooks: { event: string; turnId?: string; payload: Record<string, any> }[]
-  transcript?: {
-    path: string
-    eventTypes: Record<string, number>
-    turns: { key: string; state: string; confidence?: string }[]
-    abortReasons: string[]
-  }
+  transcript?:
+    | {
+        path: string
+        eventTypes: Record<string, number>
+        turns: { key: string; state: string; confidence?: string | undefined }[]
+        abortReasons: string[]
+      }
+    | undefined
   notes: Record<string, unknown>
 }
 

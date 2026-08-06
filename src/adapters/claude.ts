@@ -59,8 +59,8 @@ interface TurnState {
    */
   tracker: TurnVerdictTracker
   /** Seq of the last `turn_end` emitted, so a revision can withdraw it by number. */
-  endSeq?: number
-  assistantText?: string
+  endSeq: number | undefined
+  assistantText: string | undefined
 }
 
 class AsyncQueue<T> {
@@ -95,12 +95,12 @@ class AsyncQueue<T> {
 export interface ClaudeAdapterOptions {
   cwd: string
   role: Role
-  inputOwnership?: InputOwnership
+  inputOwnership?: InputOwnership | undefined
   /** Extra CLI args, e.g. ['--permission-mode', 'default']. */
-  args?: string[]
-  readyTimeoutMs?: number
+  args?: string[] | undefined
+  readyTimeoutMs?: number | undefined
   /** How long an unmatched turn may run before the watchdog calls it uncertain. */
-  watchdogMs?: number
+  watchdogMs?: number | undefined
 }
 
 export class ClaudePtyHookAdapter implements AgentSession {
@@ -113,16 +113,16 @@ export class ClaudePtyHookAdapter implements AgentSession {
   #events = new AsyncQueue<AgentEvent>()
   #turns = new Map<string, TurnState>()
   #order: string[] = []
-  #view?: TranscriptSessionView
+  #view: TranscriptSessionView | undefined
   #sessionId = ''
-  #transcriptPath?: string
+  #transcriptPath: string | undefined
   #seq = 0
   #ready = false
   #closed = false
-  #closeMode?: 'graceful' | 'abandoned'
-  #pendingPrompt?: { resolve: (k: TurnKey) => void; reject: (e: Error) => void; prompt: string }
+  #closeMode: 'graceful' | 'abandoned' | undefined
+  #pendingPrompt: { resolve: (k: TurnKey) => void; reject: (e: Error) => void; prompt: string } | undefined
   #opts: ClaudeAdapterOptions
-  #settingsDir?: string
+  #settingsDir: string | undefined
 
   private constructor(opts: ClaudeAdapterOptions) {
     this.#opts = opts
@@ -256,6 +256,8 @@ export class ClaudePtyHookAdapter implements AgentSession {
           prompt: String(d.payload.prompt ?? ''),
           startedAt: Date.now(),
           tracker,
+          endSeq: undefined,
+          assistantText: undefined,
         }
         this.#turns.set(String(key), turn)
         this.#order.push(String(key))

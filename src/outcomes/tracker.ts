@@ -25,12 +25,12 @@ export interface VerdictUpdate {
    * only possible via `resetTranscript`, when compaction removed the evidence a verdict
    * rested on.
    */
-  verdict?: Verdict
+  verdict?: Verdict | undefined
   /**
    * Present when this replaces a terminal verdict already reported. The adapter should
    * emit a `revision` event withdrawing the earlier `turn_end` before emitting this one.
    */
-  supersedes?: Verdict
+  supersedes?: Verdict | undefined
 }
 
 function sameVerdict(a: Verdict, b: Verdict): boolean {
@@ -44,7 +44,7 @@ function sameVerdict(a: Verdict, b: Verdict): boolean {
 
 export class TurnVerdictTracker {
   #evidence: Evidence
-  #verdict?: Verdict
+  #verdict: Verdict | undefined
 
   constructor(base: Partial<Evidence> & { agent: string }) {
     this.#evidence = evidence(base)

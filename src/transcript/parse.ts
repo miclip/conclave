@@ -21,7 +21,7 @@ export interface ParsedTranscript {
   turns: TurnRecord[]
   /** The transcript declared a compaction. Distinct from a detected rewrite. */
   declaredCompaction: boolean
-  sessionId?: string
+  sessionId?: string | undefined
 }
 
 // --- Claude Code -------------------------------------------------------------------

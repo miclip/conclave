@@ -8,7 +8,7 @@
     "node": ">=24.0.0"
   },
   "scripts": {
-    "test": "node --test 'src/**/*.test.ts'",
+    "test": "npm run typecheck && node --test 'src/**/*.test.ts'",
     "test:live": "ORCH_LIVE=1 node --test src/adapters/claude.live.test.ts",
     "conformance": "node src/conformance/report.ts",
     "postinstall": "node scripts/fix-node-pty.cjs",
@@ -18,12 +18,18 @@
     "test:codex": "ORCH_CODEX=1 node --test src/deployment/codexHookTrust.test.ts",
     "config:install": "node bin/conclave.ts config install",
     "test:codex:real": "ORCH_CODEX_REAL=1 node --test src/deployment/codexHookTrust.test.ts",
-    "config:check": "node bin/conclave.ts config check"
+    "config:check": "node bin/conclave.ts config check",
+    "typecheck": "tsc --noEmit",
+    "test:unit": "node --test 'src/**/*.test.ts'"
   },
   "dependencies": {
     "node-pty": "^1.0.0"
   },
   "bin": {
     "conclave": "bin/conclave.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.2",
+    "typescript": "^7.0.2"
   }
 }

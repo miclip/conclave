@@ -93,7 +93,7 @@ test('SYNTHETIC: turn_aborted then Stop', () => {
   const t = new TurnVerdictTracker({ agent: 'codex' })
 
   const first = t.observeTranscript({ exists: true, ...ABORT })
-  assert.ok(first)
+  assert.ok(first?.verdict)
   assert.equal(first.verdict.outcome, 'cancelled')
   assert.equal(first.supersedes, undefined, 'nothing to withdraw yet')
 
@@ -101,7 +101,7 @@ test('SYNTHETIC: turn_aborted then Stop', () => {
   // The verdict does not change outcome, but provenance gains the corroborating channel,
   // so the tracker reports an update rather than silently dropping the observation.
   assert.equal(t.verdict!.outcome, 'cancelled')
-  if (second) {
+  if (second?.verdict) {
     assert.equal(second.verdict.outcome, 'cancelled')
     assert.equal(second.supersedes?.outcome, 'cancelled', 'outcome must not flip')
   }
@@ -111,12 +111,12 @@ test('SYNTHETIC: Stop then turn_aborted withdraws the provisional completed', ()
   const t = new TurnVerdictTracker({ agent: 'codex' })
 
   const first = t.observeHook('Stop', { hook_event_name: 'Stop' })
-  assert.ok(first)
+  assert.ok(first?.verdict)
   assert.equal(first.verdict.outcome, 'completed', 'with only Stop, completed is correct')
   assert.equal(first.supersedes, undefined)
 
   const second = t.observeTranscript({ exists: true, ...ABORT })
-  assert.ok(second, 'the later record must produce an update, not be ignored')
+  assert.ok(second?.verdict, 'the later record must produce an update, not be ignored')
   assert.equal(second.verdict.outcome, 'cancelled')
   assert.ok(second.supersedes, 'the earlier terminal verdict must be withdrawn, not left standing')
   assert.equal(second.supersedes.outcome, 'completed')
@@ -158,6 +158,6 @@ test('claude is unaffected: it has no turn_aborted record to outrank anything', 
   // recorded nowhere in the child at all.
   const t = new TurnVerdictTracker({ agent: 'claude' })
   const update = t.observeHook('Stop', { hook_event_name: 'Stop' })
-  assert.equal(update?.verdict.outcome, 'completed')
-  assert.equal(update?.verdict.confidence, 'proven')
+  assert.equal(update?.verdict?.outcome, 'completed')
+  assert.equal(update?.verdict?.confidence, 'proven')
 })

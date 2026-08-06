@@ -1,0 +1,27 @@
+{
+  "compilerOptions": {
+    "target": "ES2024",
+    "lib": ["ES2024"],
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "types": ["node"],
+
+    // Node 24 executes this TypeScript directly. There is no build step, so the compiler
+    // is here to VALIDATE the contract, never to emit anything.
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    // Enforce the subset native type stripping can actually erase: no enums, no
+    // namespaces, no parameter properties. Without this the checker would happily accept
+    // syntax that fails at runtime.
+    "erasableSyntaxOnly": true,
+    "verbatimModuleSyntax": true,
+
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "skipLibCheck": true
+  },
+  "include": ["src/**/*.ts", "bin/**/*.ts", "spikes/**/*.ts"]
+}

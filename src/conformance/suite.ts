@@ -33,11 +33,11 @@ const RESULTS = join(ROOT, 'spikes', 'hooks', 'results.ndjson')
 
 export interface FixtureEvidence {
   found: boolean
-  where?: string
+  where?: string | undefined
   /** CLI version that produced the fixture, when the transcript records it. */
-  cliVersion?: string
+  cliVersion?: string | undefined
   /** True when the fixture predates the installed CLI. */
-  historical?: boolean
+  historical?: boolean | undefined
 }
 
 export interface ConformanceRow {
@@ -46,7 +46,7 @@ export interface ConformanceRow {
   claimed: EvidenceLevel
   fixture: FixtureEvidence
   verdict: 'ok' | 'unsupported_claim' | 'upgrade_available' | 'contradiction'
-  note?: string
+  note?: string | undefined
 }
 
 export interface ConformanceReport {

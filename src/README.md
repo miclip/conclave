@@ -10,11 +10,20 @@ Note `scripts/fix-node-pty.cjs`, wired as a postinstall: node-pty's prebuilt
 fails with a bare `posix_spawnp failed` that reads like a native build failure.
 
 Erasable-syntax-only is a hard constraint of native stripping: no `enum`, no `namespace`,
-no parameter properties. Const-object-plus-union is used instead, which is better for
-this contract anyway.
+no parameter properties. Const-object-plus-union is used instead, which is better for this
+contract anyway. `tsconfig.json` sets `erasableSyntaxOnly` so the checker enforces that
+subset rather than accepting syntax that would fail at runtime.
+
+Node strips types **without checking them**, so `tsc --noEmit` is not optional here: it is
+the only thing validating the contract that is this project's main artifact. `npm test`
+runs it first and stops on failure. `exactOptionalPropertyTypes` and
+`noUncheckedIndexedAccess` are on deliberately — an optional property that may genuinely
+be `undefined` says so, which matters for a codebase whose central idea is distinguishing
+absent evidence from present evidence.
 
 ```
-npm test          # 66 tests
+npm run typecheck # tsc --noEmit; `npm test` runs this first and stops on failure
+npm test          # 97 tests
 npm run test:codex # 3 more, mutates ~/.codex/config.toml then restores it
 npm run test:live # 6 more, spawns real Claude sessions and uses quota
 npm run conformance

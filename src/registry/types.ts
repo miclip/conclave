@@ -33,17 +33,17 @@ export interface LaunchSpec {
   command: string
   baseArgs: string[]
   /** Documented reasons for each suppression flag, keyed by what it suppresses. */
-  suppresses?: Record<string, string>
+  suppresses?: Record<string, string> | undefined
   /** Preconditions the adapter cannot fix itself, e.g. Codex hook trust. */
-  deploymentState?: string[]
+  deploymentState?: string[] | undefined
 }
 
 export interface CreateParticipantContext {
   cwd: string
   /** Extra CLI args for this participant, from configuration. */
-  args?: string[]
-  watchdogMs?: number
-  readyTimeoutMs?: number
+  args?: string[] | undefined
+  watchdogMs?: number | undefined
+  readyTimeoutMs?: number | undefined
 }
 
 /**
@@ -84,9 +84,9 @@ export interface ParticipantSpec {
   agent: string
   role: RoleId
   /** Overrides the role's default. */
-  inputOwnership?: InputOwnership
-  args?: string[]
-  displayName?: string
+  inputOwnership?: InputOwnership | undefined
+  args?: string[] | undefined
+  displayName?: string | undefined
 }
 
 export interface ResolvedParticipant {

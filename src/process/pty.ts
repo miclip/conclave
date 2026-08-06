@@ -55,7 +55,7 @@ export type ExitReason = 'graceful' | 'sigterm' | 'sigkill' | 'spontaneous'
 
 export interface ExitInfo {
   exitCode: number
-  signal?: number
+  signal?: number | undefined
   reason: ExitReason
 }
 
@@ -69,8 +69,8 @@ export class PtyProcess extends EventEmitter<PtyProcessEvents> {
   #pty: any
   #buffer = ''
   #alive = true
-  #exit?: ExitInfo
-  #requestedReason?: ExitReason
+  #exit: ExitInfo | undefined
+  #requestedReason: ExitReason | undefined
   #markers = new Set<string>()
 
   private constructor(pty: any) {
@@ -92,7 +92,7 @@ export class PtyProcess extends EventEmitter<PtyProcessEvents> {
         // close() must not manufacture an outcome for a child that died on its own.
         reason: this.#requestedReason ?? 'spontaneous',
       }
-      this.emit('exit', this.#exit)
+      this.emit('exit', this.#exit!)
     })
   }
 

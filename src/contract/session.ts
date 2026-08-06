@@ -70,7 +70,7 @@ export function guaranteesFor(ownership: InputOwnership): Guarantees {
 // --- events ------------------------------------------------------------------------
 
 export interface EventBase {
-  turnKey?: TurnKey
+  turnKey?: TurnKey | undefined
   /** Adapter-local monotonic sequence. Not comparable across adapters. */
   seq: number
   at: number
@@ -97,7 +97,7 @@ export interface ToolUseEvent extends EventBase {
   tool: string
   input: unknown
   /** Set once the result is known; a tool failing is not a turn failing. */
-  failed?: boolean
+  failed?: boolean | undefined
 }
 
 export interface PermissionRequestedEvent extends EventBase {
@@ -131,7 +131,7 @@ export interface RevisionEvent extends EventBase {
   type: 'revision'
   reason: 'compaction' | 'late_signal' | 'resync'
   replaces: number[]
-  supersededBy?: AgentEvent
+  supersededBy?: AgentEvent | undefined
   provenance: Provenance[]
 }
 
@@ -156,19 +156,19 @@ export interface TurnRecord {
   key: TurnKey
   prompt: string
   state: TurnLiveness
-  confidence?: Confidence
-  provenance?: Provenance[]
-  assistantText?: string
+  confidence?: Confidence | undefined
+  provenance?: Provenance[] | undefined
+  assistantText?: string | undefined
   toolCalls: { tool: string; failed: boolean }[]
-  startedAt?: number
-  endedAt?: number
+  startedAt?: number | undefined
+  endedAt?: number | undefined
 }
 
 export interface SessionSnapshot {
   sessionId: string
   agent: string
   cwd: string
-  role?: Role
+  role?: Role | undefined
   turns: TurnRecord[]
   guarantees: Guarantees
   /** Bumped whenever the underlying transcript was rewritten under us. */
@@ -182,8 +182,8 @@ export interface SessionSnapshot {
 export interface StartOptions {
   cwd: string
   role: Role
-  systemContext?: string
-  inputOwnership?: InputOwnership
+  systemContext?: string | undefined
+  inputOwnership?: InputOwnership | undefined
 }
 
 export type Provenanced<T> = { value: T; provenance: Provenance[] }
@@ -196,8 +196,8 @@ export type Provenanced<T> = { value: T; provenance: Provenance[] }
 export interface SendProvenance {
   kind: 'human_constraint' | 'peer_relay' | 'orchestrator'
   /** Whether to name the peer as the source. Brief section 5: attribution is a variable. */
-  attributed?: boolean
-  attributedTo?: string
+  attributed?: boolean | undefined
+  attributedTo?: string | undefined
 }
 
 export interface AgentSession {
