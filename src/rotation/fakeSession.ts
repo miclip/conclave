@@ -76,6 +76,16 @@ export class FakeRotationSession implements AgentSession {
     const index = this.#turns.length
     const key = turnKey(`${this.sessionId}-turn-${index}`)
     this.#turns.push({ key, prose: this.#replies.shift() ?? '' })
+    // Real adapters emit this; the fake did not, so anything keyed to a turn beginning was
+    // never exercised — including the console's status line.
+    this.emit({
+      type: 'turn_start',
+      prompt: message,
+      turnKey: key,
+      seq: ++this.#seq,
+      at: Date.now(),
+      provisional: false,
+    })
     if (this.compactOnTurn === index) this.compact()
     if (this.#narration && index > 0) {
       const { blocks, report } = this.#narration

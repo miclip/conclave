@@ -110,7 +110,7 @@ test('the status line stands down while the operator is typing', async () => {
   // half-typed message every 90ms; deferring to the human is the only sane precedence.
   const dir = repo()
   const c = await spawnConsole(dir)
-  assert.ok(await c.until((s) => s.includes('> ')))
+  assert.ok(await c.until((s) => s.includes('›')))
   assert.ok(await c.until((s) => /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/.test(s)), 'the spinner should run when idle')
 
   c.type('a half typed message')
@@ -128,7 +128,7 @@ test('the status line stands down while the operator is typing', async () => {
 test('typed-but-unsubmitted text survives asynchronous output', async () => {
   const dir = repo()
   const c = await spawnConsole(dir)
-  assert.ok(await c.until((s) => s.includes('> ')), 'the prompt should appear')
+  assert.ok(await c.until((s) => s.includes('›')), 'the prompt should appear')
 
   // Type a partial line and leave it uncommitted.
   c.type('@implementer keep the diff small')
@@ -164,7 +164,7 @@ test('Ctrl-C tears the session down instead of orphaning it', async () => {
   // termination is covered by the rollback suite.
   const dir = repo()
   const c = await spawnConsole(dir)
-  assert.ok(await c.until((s) => s.includes('> ')))
+  assert.ok(await c.until((s) => s.includes('›')))
 
   const exited = new Promise<number>((resolve) => c.proc.onExit(({ exitCode }) => resolve(exitCode)))
   c.type('\x03')

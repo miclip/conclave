@@ -274,7 +274,10 @@ export class Status {
 
   detail(d: string): void {
     this.#detail = d
-    if (this.#enabled) this.#draw()
+    // Only while running. Drawing from `detail()` alone renders a spinner whose elapsed
+    // time is measured from the epoch, which is how a test came to pass on a status that
+    // had never been started.
+    if (this.#enabled && this.#timer) this.#draw()
   }
 
   get elapsed(): string {
