@@ -365,3 +365,49 @@ test('an address and a path compose: >advisor read @path', async () => {
   assert.ok(!sent.includes('>implementer'), 'the address is consumed, not forwarded')
   assert.match(out.text(), /withheld from advisor/, 'and it stays restricted')
 })
+
+test('/exit ends the session, stopping the participants with it', async () => {
+  const dir = repo()
+  const advisor = slow('advisor', 'codex', ['Keep going.', 'Still going.', 'And on.'])
+  const impl = slow('impl', 'claude', ['ack', 'Working.', 'Still working.'])
+  const out = collect()
+  const code = await runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'claude',
+    rounds: 20,
+    checks: [],
+    registry: registryOf({ codex: [advisor], claude: [impl] }),
+    input: script(['/exit']),
+    output: out.stream,
+  })
+  assert.equal(code, 0)
+  // The run was nowhere near its 20 rounds, so leaving has to abort it rather than wait.
+  assert.match(out.text(), /aborting the run and stopping participants/)
+  assert.equal(advisor.state, 'terminated', 'a console that exits must not leave CLIs running')
+  assert.equal(impl.state, 'terminated')
+})
+
+test('/abort ends the run but keeps the console, and says so when there is no run', async () => {
+  // These were one command: `/abort` with nothing running used to exit. That made abort mean
+  // two different things depending on state the operator could not see.
+  const dir = repo()
+  const out = collect()
+  const code = await runSession({
+    cwd: dir,
+    lead: 'codex',
+    implementer: 'claude',
+    rounds: 3,
+    checks: [],
+    registry: registryOf({
+      codex: [slow('advisor', 'codex', ['Go.'])],
+      claude: [slow('impl', 'claude', ['ack'])],
+    }),
+    // No goal, so no run — participants are up but nothing is in flight.
+    input: script(['/abort', '/exit']),
+    output: out.stream,
+  })
+  assert.equal(code, 0)
+  assert.match(out.text(), /nothing is running — \/exit to leave/)
+})

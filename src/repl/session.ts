@@ -86,10 +86,10 @@ const COMMANDS = [
   '/queue',
   '/audit',
   '/help',
+  '/exit',
 ]
 
 const HELP = `
-  <text>                 send to everyone, at human rank
   <text>                 to BOTH, at human rank — the default, no prefix needed
   >advisor <text>        to the advisor only — the implementer will not see it
   >implementer <text>    to the implementer only — the advisor will not see it
@@ -105,13 +105,14 @@ const HELP = `
   /pause                 pause at the next round boundary
   /continue              resume from a pause
   /rotate [reason]       replace the implementer, carrying a handoff forward
-  /abort [reason]        end the run
+  /abort [reason]        end the run, and stay here for the next one
 
   /state                 run state, participants, pending pause
   /log [n]               last n routing entries (default 20)
   /queue                 what you have typed that has not been delivered yet
   /audit                 restricted messages: who was informed, who was excluded
   /help                  this
+  /exit                  leave, stopping the run and the participants (or Ctrl-C)
 `
 
 /** One line per event. Verbose enough to see progress, quiet enough to read the prose. */
@@ -533,6 +534,19 @@ export async function runSession(opts: SessionOptions): Promise<number> {
    * fixed to terminate. First interrupt aborts the run and tears down; a second gives up
    * and exits, because a teardown that itself hangs must not trap the operator.
    */
+  /**
+   * Put the terminal back and stop reading. Shared by the interrupt and by `/exit`, because
+   * an operator who typed a command to leave has the same claim on a restored terminal as
+   * one who pressed Ctrl-C, and a second way out that forgot `screen.close()` would leave
+   * the scrolling region set over whatever they ran next.
+   */
+  const leave = () => {
+    done = true
+    screen?.close()
+    rl?.close()
+    closed?.()
+  }
+
   let interrupting = false
   const onInterrupt = () => {
     if (interrupting) {
@@ -544,12 +558,6 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     // Abort the run AND close the console. The session outliving a run is right when the
     // run ends on its own — you carry on with the next task — but an interrupt is a request
     // to leave, and aborting while staying at the prompt is not what Ctrl-C means.
-    const leave = () => {
-      done = true
-      screen?.close()
-      rl?.close()
-      closed?.()
-    }
     if (run) void run.abort('interrupted at the console').then(leave, leave)
     else leave()
   }
@@ -647,13 +655,22 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     }
 
     if (word === '/abort') {
-      if (!run) {
-        done = true
-        rl?.close()
-        return
-      }
+      // Ends the RUN, not the session — participants stay up and you can start another
+      // task. `/exit` is the one that ends the session. These used to be the same command
+      // when nothing was running, which made "abort" mean two different things depending on
+      // state the operator could not see.
+      if (!run) return void write(dim('  nothing is running — /exit to leave'))
       await run.abort(rest || 'aborted by the operator')
       wake()
+      return
+    }
+
+    if (word === '/exit' || word === '/quit') {
+      if (run) {
+        write('  aborting the run and stopping participants')
+        await run.abort(rest || 'exited at the console')
+      }
+      leave()
       return
     }
 
