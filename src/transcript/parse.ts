@@ -203,8 +203,21 @@ export function parseCodex(records: Record<string, any>[]): ParsedTranscript {
           break
         }
         case 'task_started': {
-          // Now the turn has a real id; adopt it rather than creating a duplicate.
-          if (current && p.turn_id) {
+          // Adopt only a record that has not been given a real id yet.
+          //
+          // This used to adopt `current` whenever a turn_id existed, which meant the SECOND
+          // exchange's `task_started` renamed the FIRST exchange's completed record. Its
+          // `user_message` then found a non-empty prompt and created a fresh record, so
+          // every codex transcript ended with a phantom `in_progress` turn carrying the
+          // previous turn's report.
+          //
+          // Nothing noticed because the phantom duplicated a real report, so the relay read
+          // plausible prose. It surfaced only when `#exchange` began waiting for the last
+          // turn to leave `in_progress` — which it never did, costing the settle window on
+          // every advisor turn and logging a truncation warning about a turn that had
+          // completed normally.
+          const pending = current?.key.startsWith('codex-pending-') === true
+          if (current && p.turn_id && pending) {
             current.key = turnKey(p.turn_id)
             byId.set(p.turn_id, current)
           } else {

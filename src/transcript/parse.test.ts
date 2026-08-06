@@ -158,3 +158,35 @@ test('narration and report are separated, and the narration is readable', () => 
     'the narration still contains everything, including the close',
   )
 })
+
+test('codex turns do not leave a phantom, and reports align with their prompts', () => {
+  // Record order verified against real rollouts: `task_started` precedes `user_message`.
+  //
+  // The second exchange's `task_started` used to adopt the FIRST exchange's completed
+  // record, so its `user_message` created a fresh one and every transcript ended with a
+  // phantom `in_progress` turn carrying the previous turn's report. Reports were off by one
+  // against prompts, and the relay only read plausible prose because the phantom duplicated
+  // the last real report.
+  const rows = [
+    { type: 'event_msg', payload: { type: 'task_started', turn_id: 'T1' } },
+    { type: 'event_msg', payload: { type: 'user_message', message: 'first prompt' } },
+    { type: 'event_msg', payload: { type: 'task_complete', turn_id: 'T1', last_agent_message: 'first answer' } },
+    { type: 'event_msg', payload: { type: 'task_started', turn_id: 'T2' } },
+    { type: 'event_msg', payload: { type: 'user_message', message: 'second prompt' } },
+    { type: 'event_msg', payload: { type: 'task_complete', turn_id: 'T2', last_agent_message: 'second answer' } },
+  ]
+  const { turns } = parseCodex(rows)
+
+  assert.equal(turns.length, 2, 'two exchanges, two turns — no phantom')
+  assert.deepEqual(
+    turns.map((t) => t.state),
+    ['completed', 'completed'],
+    'a trailing in_progress turn makes every settle window expire',
+  )
+  assert.deepEqual(turns.map((t) => t.prompt), ['first prompt', 'second prompt'])
+  assert.deepEqual(
+    turns.map((t) => t.report),
+    ['first answer', 'second answer'],
+    'each report belongs to its own prompt',
+  )
+})
