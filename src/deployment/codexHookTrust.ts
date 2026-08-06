@@ -52,6 +52,8 @@ export type HookTrustStatus = 'managed' | 'untrusted' | 'trusted' | 'modified'
  * existing decision, and a semantic change invalidates only the handler it touched.
  */
 export interface CodexHookStatus {
+  /** Codex's own key for this hook, and what a `hooks.state` entry is keyed by. */
+  key?: string | undefined
   eventName: string
   handlerType: string
   source: string
@@ -144,6 +146,7 @@ export async function readCodexHooks(cwd: string, timeoutMs = 30_000): Promise<C
           sourcePath: h.sourcePath,
           command: h.command ?? undefined,
           currentHash: h.currentHash,
+          key: h.key,
         }
       }),
       errors: entry.errors ?? [],
@@ -307,3 +310,4 @@ export function ensureCodexTrust(cwd: string): { alreadyTrusted: boolean; added?
   appendFileSync(configPath, addition)
   return { alreadyTrusted: false, added: addition.trim(), path: configPath }
 }
+

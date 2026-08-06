@@ -35,7 +35,7 @@ import type { AgentRegistry } from '../registry/registry.ts'
 import { Relay } from '../relay/relay.ts'
 import type { RelayMessage } from '../relay/message.ts'
 import type { RunHandle, RunPause } from '../relay/run.ts'
-import { ensureCodexTrust } from '../deployment/codexHookTrust.ts'
+import { ensureCodexTrust, trustCodexHooks } from '../deployment/codexHookTrust.ts'
 import { installConfig } from '../config/install.ts'
 import { guard } from '../workspace/sessionLock.ts'
 
@@ -266,16 +266,25 @@ export async function runSession(opts: SessionOptions): Promise<number> {
         for (const l of (trust.added ?? '').split('\n')) write(dim(`      ${l}`))
         write(dim('  remove that stanza to undo it'))
       }
-      // Directory trust is not hook trust. Each hook additionally needs a
-      // `[hooks.state."<sidecar>:<event>:0:0"] trusted_hash = "sha256:…"` entry, and that
-      // hash is over content whose canonicalisation is Codex's business, not ours. Writing
-      // a guessed hash would leave junk in the operator's global config AND still not work,
-      // so this asks Codex to produce them rather than fabricating them.
-      write('')
-      write(dim('  the hooks still need trusting individually — each carries a content hash'))
-      write(dim('  only Codex can compute. Run `codex` once in this directory and accept the'))
-      write(dim('  prompt; it writes the entries, and this check will pass from then on.'))
-      write('')
+      // Directory trust is not hook trust: each hook additionally needs a
+      // `[hooks.state."<sidecar>:<event>:0:0"] trusted_hash` entry, over a hash Codex
+      // computes from a normalized rendering of the hook identity. Reproducing that here
+      // would be a copy of a private detail that breaks silently — the failure mode being
+      // hooks that look trusted and never run.
+      //
+      // So Codex is asked to do it, through the interstitial it already shows: this drives
+      // a real Codex TUI and answers "Trust all and continue" once. It costs no model
+      // tokens and it is the supported path; openai/codex#21615 asks for a CLI equivalent
+      // and does not have one yet.
+      write(dim('  trusting the hooks with Codex — this drives its own review prompt once'))
+      const hookTrust = await trustCodexHooks(opts.cwd)
+      write(
+        dim(
+          hookTrust.prompted
+            ? '  hooks trusted'
+            : '  Codex showed no review prompt; if turns end on the watchdog, run `codex` here once',
+        ),
+      )
     }
   }
 
