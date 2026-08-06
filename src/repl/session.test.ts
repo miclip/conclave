@@ -313,26 +313,26 @@ test('the console refuses to start while another session holds the lock', async 
   assert.match(out.text(), /refusing to start/)
 })
 
-test('a flag in the goal position is a missing goal, not a goal named --lead', async () => {
-  // `conclave session --lead codex --implementer claude` started a session whose objective
-  // was the literal string "--lead", and picked the right agents by coincidence. The CLI
-  // owns this check; the test pins the behaviour the CLI depends on.
+test('a flag in the goal position is flags, not a goal named --lead', async () => {
+  // `conclave session --lead codex` once started a session whose objective was the literal
+  // string "--lead", picking the right agents by coincidence. The goal is optional now, so
+  // that invocation is legitimate — what must not happen is the flag being eaten as a goal.
+  //
+  // Proven with an agent name that cannot resolve: reaching "unknown agent" means the flag
+  // was parsed as a flag. It also means no session is spawned, which a test asserting on
+  // the CLI must not do.
   const { execFileSync } = await import('node:child_process')
   const root = join(import.meta.dirname, '..', '..')
-  let code = 0
   let stderr = ''
   try {
-    execFileSync(process.execPath, [join(root, 'bin/conclave.ts'), 'session', '--lead', 'codex'], {
+    execFileSync(process.execPath, [join(root, 'bin/conclave.ts'), 'session', '--lead', 'nope'], {
       cwd: root,
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: 30_000,
     })
   } catch (err) {
-    const e = err as { status?: number; stderr?: string }
-    code = e.status ?? 0
-    stderr = e.stderr ?? ''
+    stderr = (err as { stderr?: string }).stderr ?? ''
   }
-  assert.equal(code, 1, 'it must refuse rather than run')
-  assert.match(stderr, /needs a goal/)
-  assert.match(stderr, /--lead/, 'and name what it found instead')
+  assert.match(stderr, /unknown agent 'nope'/, `--lead was not parsed as a flag; stderr was:\n${stderr}`)
 })

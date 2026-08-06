@@ -78,7 +78,14 @@ function repo(): string {
   return dir
 }
 
-async function spawnConsole(dir: string) {
+/**
+ * Spawn the console under a pty, and kill it on teardown WHATEVER happens.
+ *
+ * Killing at the end of the happy path meant a failed assertion threw first, the child
+ * survived, and node could not exit — so one broken expectation hung the whole suite past
+ * every per-test timeout. A test that cannot fail cleanly is worse than no test.
+ */
+async function spawnConsole(dir: string, t?: { after: (fn: () => void) => void }) {
   const { default: pty } = await import('node-pty')
   const p = pty.spawn(process.execPath, [driver(dir)], {
     name: 'xterm-256color',
@@ -89,6 +96,13 @@ async function spawnConsole(dir: string) {
   })
   let buf = ''
   p.onData((d: string) => (buf += d))
+  t?.after(() => {
+    try {
+      p.kill()
+    } catch {
+      /* already gone */
+    }
+  })
   return {
     proc: p,
     text: () => buf,
@@ -105,9 +119,9 @@ async function spawnConsole(dir: string) {
   }
 }
 
-test('typed-but-unsubmitted text survives asynchronous output', async () => {
+test('typed-but-unsubmitted text survives asynchronous output', async (t) => {
   const dir = repo()
-  const c = await spawnConsole(dir)
+  const c = await spawnConsole(dir, t)
   assert.ok(await c.until((s) => s.includes('›')), 'the prompt should appear')
 
   // Type a partial line and leave it uncommitted.
@@ -137,7 +151,7 @@ test('typed-but-unsubmitted text survives asynchronous output', async () => {
   c.proc.kill()
 })
 
-test('progress is append-only, so nothing is ever stranded or duplicated', async () => {
+test('progress is append-only, so nothing is ever stranded or duplicated', async (t) => {
   // An in-place status line and readline both owned the last line of the terminal, and
   // readline redraws on its own schedule. Whichever wrote last won and the loser stayed in
   // the transcript — three rounds of fixes to the erase logic each passed offline and each
@@ -145,7 +159,7 @@ test('progress is append-only, so nothing is ever stranded or duplicated', async
   //
   // Append-only output cannot strand a line, because it never goes back.
   const dir = repo()
-  const c = await spawnConsole(dir)
+  const c = await spawnConsole(dir, t)
   const plain = (s: string) => s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '')
   assert.ok(await c.until((s) => s.includes('›')))
   assert.ok(await c.until((s) => /⋯/.test(plain(s)), 15_000), 'a progress line should appear')
@@ -165,13 +179,13 @@ test('progress is append-only, so nothing is ever stranded or duplicated', async
   c.proc.kill()
 })
 
-test('Ctrl-C tears the session down instead of orphaning it', async () => {
+test('Ctrl-C tears the session down instead of orphaning it', async (t) => {
   // The failure this guards against is the one that held a test process open for 26
   // minutes: children with nothing to reap them. A fake has no PTY, so what is asserted
   // here is that the interrupt reaches the run and the process exits — the adapter-side
   // termination is covered by the rollback suite.
   const dir = repo()
-  const c = await spawnConsole(dir)
+  const c = await spawnConsole(dir, t)
   assert.ok(await c.until((s) => s.includes('›')))
 
   const exited = new Promise<number>((resolve) => c.proc.onExit(({ exitCode }) => resolve(exitCode)))

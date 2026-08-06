@@ -45,9 +45,11 @@ Commands:
                                    minutes. --record tees every byte, escape codes
                                    included, so a rendering fault can be inspected rather
                                    than screenshotted.
-  session "<goal>" [--lead codex] [--implementer claude] [--rounds N]
+  session ["<goal>"] [--lead codex] [--implementer claude] [--rounds N]
                    [--checks "npm test"]
-                                   The same session, interactively. Pauses become decision
+                                   The same session, interactively. The goal is optional:
+                                   without one the console waits and the first thing you
+                                   type starts the run. Pauses become decision
                                    points you resolve: /continue, /rotate, /abort, or a
                                    line of text addressed with @advisor / @implementer.
                                    Shows participant activity while a turn is running.
@@ -155,27 +157,16 @@ async function main(argv: string[]): Promise<number> {
   }
 
   if (command === 'session') {
-    const goal = sub
-    // A flag in the goal's position means the goal is missing, not that it is named
-    // `--lead`. Accepting it started a session whose objective was the literal string
-    // "--lead", and picked the right agents by coincidence.
-    if (!goal || goal.startsWith('--')) {
-      console.error(
-        `session needs a goal, and the first argument was ${goal ? `\`${goal}\`` : 'missing'}.\n\n` +
-          `  conclave session "<goal>" --checks "npm test"\n\n` +
-          `Keep the goal on one line: a multi-line paste ends the command at the closing\n` +
-          `quote, and everything after it becomes a separate shell command.\n`,
-      )
-      return 1
-    }
-    // A flag whose value went missing must not be silently ignored. `npm run x -- ...`
-    // mangles quoted arguments containing spaces, and a session once ran for half an hour
-    // with rotation disabled because `--checks "npm test"` arrived as a bare `--checks`.
+    // The goal is optional: without one the console comes up and waits, and the first
+    // thing typed starts the run. So a flag in the first position is not a goal named
+    // `--lead` — it is a session with no goal and some flags, which is legitimate.
+    const args = [sub, ...rest].filter((a): a is string => a !== undefined)
+    const goal = args[0] && !args[0].startsWith('--') ? args[0] : undefined
     let bad: string | undefined
     const flag = (name: string, fallback: string) => {
-      const i = rest.indexOf(`--${name}`)
+      const i = args.indexOf(`--${name}`)
       if (i < 0) return fallback
-      const value = rest[i + 1]
+      const value = args[i + 1]
       if (value === undefined || value.startsWith('--')) {
         bad = name
         return fallback
@@ -198,7 +189,7 @@ async function main(argv: string[]): Promise<number> {
     }
     return runSession({
       cwd: process.cwd(),
-      goal,
+      ...(goal === undefined ? {} : { goal }),
       lead,
       implementer,
       rounds: Number(rounds),

@@ -24,7 +24,8 @@
  * prompt says so rather than implying otherwise.
  */
 
-import { createWriteStream } from 'node:fs'
+import { createWriteStream, existsSync, realpathSync } from 'node:fs'
+import { join } from 'node:path'
 import { Writable } from 'node:stream'
 import { clearLine, createInterface, cursorTo, type Interface } from 'node:readline'
 import { banner, bold, colorFor, dim, elapsedSince, grey, markdown, Progress, rule, setColor, speakerColor, yellow } from './render.ts'
@@ -34,11 +35,20 @@ import type { AgentRegistry } from '../registry/registry.ts'
 import { Relay } from '../relay/relay.ts'
 import type { RelayMessage } from '../relay/message.ts'
 import type { RunHandle, RunPause } from '../relay/run.ts'
+import { ensureCodexTrust } from '../deployment/codexHookTrust.ts'
+import { installConfig } from '../config/install.ts'
 import { guard } from '../workspace/sessionLock.ts'
 
 export interface SessionOptions {
   cwd: string
-  goal: string
+  /**
+   * Optional. Without one the console starts and waits: the first thing typed becomes the
+   * goal and starts the run.
+   *
+   * Requiring it up front assumed a session is a task handed over complete, which is not
+   * how anyone actually arrives at one — you open the console, then work out what you want.
+   */
+  goal?: string | undefined
   lead: string
   implementer: string
   rounds: number
@@ -200,6 +210,75 @@ export async function runSession(opts: SessionOptions): Promise<number> {
   }
   write(rule(width))
 
+  /**
+   * Register the hooks for this checkout, if they are not already.
+   *
+   * Codex loads hooks from a sidecar in the working directory and Claude from project-local
+   * settings, so a fresh checkout has neither and a session there would have no
+   * turn-completion signal at all. Refusing with "run config install" was friction for a
+   * fix the tool already knows how to perform.
+   *
+   * Both files are checkout-specific — they contain absolute paths — which is why they are
+   * gitignored and never shipped, and why every new clone needs this once. Rendering is
+   * idempotent, so this is a no-op on every run after the first and stays silent then.
+   *
+   * TRUST IS NOT TOUCHED. Codex will not run hooks in a directory it does not trust, and
+   * that lives in the user's global `~/.codex/config.toml`. Writing project-local files
+   * into a checkout the operator just asked to run a session in is theirs to expect;
+   * silently editing their global configuration is not. It is reported instead.
+   */
+  // Only when the working directory IS the Conclave checkout.
+  //
+  // `installConfig` reads its templates relative to the root it is given, so pointing it at
+  // an arbitrary working directory fails outright — the templates live with Conclave and
+  // only the rendered output belongs in the target. Registering hooks into someone else's
+  // repository from an installed release is a real gap, and a larger change than this:
+  // `conclave config install` has the same shape and the same limit.
+  // From the MODULE's location, not `resolveRepoRoot()` — that resolves from cwd, so it
+  // reported every working directory as the Conclave checkout and sent installConfig
+  // looking for templates that were never there.
+  const ownCheckout = join(import.meta.dirname, '..', '..')
+  const selfHosted =
+    existsSync(opts.cwd) && realpathSync(opts.cwd) === realpathSync(ownCheckout)
+  const installed = selfHosted
+    ? await installConfig({ diagnose: false })
+    : { written: [] as { label: string; path: string; changed: boolean }[] }
+  const changed = installed.written.filter((w) => w.changed)
+  if (changed.length > 0) {
+    write(dim(`  registered hooks for this checkout: ${changed.map((w) => w.label).join(', ')}`))
+    // Diagnose only on the run that actually wrote something: it spawns `codex app-server`
+    // and costs a second or two, and it is only informative the first time. Registration
+    // alone is not enough — Codex will not load hooks from a directory it does not trust,
+    // and the preflight's own message ("check the sidecar file format") is misleading once
+    // the sidecar is demonstrably correct.
+    const diagnosed = await installConfig({ dryRun: true, diagnose: true })
+    for (const m of diagnosed.codex?.messages ?? []) write(dim(`  ${m}`))
+    if (diagnosed.codex && !diagnosed.codex.ready) {
+      // Registration is not enough: Codex never executes hooks in a directory it does not
+      // trust, and does so silently — turns end on watchdog inference, every verdict is
+      // `uncertain`, and nothing says why.
+      //
+      // This writes to the operator's GLOBAL config, which is heavier than anything else
+      // here, so it is append-only, idempotent, and announced with the exact lines added.
+      const trust = ensureCodexTrust(opts.cwd)
+      if (!trust.alreadyTrusted) {
+        write(dim(`  trusted this directory for Codex, by appending to ${trust.path}:`))
+        for (const l of (trust.added ?? '').split('\n')) write(dim(`      ${l}`))
+        write(dim('  remove that stanza to undo it'))
+      }
+      // Directory trust is not hook trust. Each hook additionally needs a
+      // `[hooks.state."<sidecar>:<event>:0:0"] trusted_hash = "sha256:…"` entry, and that
+      // hash is over content whose canonicalisation is Codex's business, not ours. Writing
+      // a guessed hash would leave junk in the operator's global config AND still not work,
+      // so this asks Codex to produce them rather than fabricating them.
+      write('')
+      write(dim('  the hooks still need trusting individually — each carries a content hash'))
+      write(dim('  only Codex can compute. Run `codex` once in this directory and accept the'))
+      write(dim('  prompt; it writes the entries, and this check will pass from then on.'))
+      write('')
+    }
+  }
+
   const relay = await Relay.start({
     registry: opts.registry ?? defaultRegistry(),
     cwd: opts.cwd,
@@ -263,7 +342,18 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     }
   })()
 
-  const run: RunHandle = relay.start(opts.goal)
+  let run: RunHandle | undefined
+  /** Resolves when a run reaches a terminal outcome. Used by the non-interactive form. */
+  let runEnded: (() => void) | undefined
+  const firstRunEnded = new Promise<void>((resolve) => {
+    runEnded = resolve
+  })
+  /** Start a run. Declared here because the line handler may call it before it is read. */
+  const begin = (goal: string): void => {
+    run = relay.start(goal)
+    void supervise(run)
+    refreshPrompt()
+  }
   let done = false
   /** Resolvers for the pause loop, released when the operator resumes or aborts. */
   const resumed: (() => void)[] = []
@@ -274,20 +364,31 @@ export async function runSession(opts: SessionOptions): Promise<number> {
 
   // The pause loop. `settled()` covers both a pause and the end, which is what a supervising
   // caller wants and why holding `result()` here would be wrong.
-  const supervising = (async () => {
+  /**
+   * Drive one run to its end, pausing for the operator on the way.
+   *
+   * A function rather than a started promise, because a session may now begin without a
+   * goal: the console comes up, waits, and the first thing typed starts the run.
+   */
+  const supervise = async (handle: RunHandle): Promise<void> => {
     for (;;) {
-      const s = await run.settled()
+      const s = await handle.settled()
       if (s.kind === 'ended') {
-        done = true
         write(`\n=== run ended: ${s.outcome.reason}${s.outcome.detail ? ` — ${s.outcome.detail}` : ''}`)
         write(`=== ${relay.log.length} messages routed`)
+        // The session does not end with the run. There are participants alive and a human
+        // at the prompt; ending here would throw away a working session at the exact moment
+        // the next instruction was about to arrive.
+        run = undefined
+        runEnded?.()
+        refreshPrompt()
+        prompt()
         return
       }
       write(renderPause(s.pause, width))
-      // Nothing further happens until the operator says so. That is the point.
       await new Promise<void>((resolve) => resumed.push(resolve))
     }
-  })()
+  }
 
   /**
    * The prompt carries the queue depth.
@@ -301,6 +402,10 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     // Distinct messages, not deliveries. One line addressed to everyone is one thing the
     // operator typed; counting recipients reported "(2 queued)" for a single "continue".
     const queued = new Set(relay.pending().flatMap((p) => p.texts)).size
+    if (!run) {
+      rl?.setPrompt(`${dim('goal')} ${bold('›')} `)
+      return
+    }
     rl?.setPrompt(queued > 0 ? `${dim(`(${queued} queued)`)} ${bold('›')} ` : `${bold('›')} `)
   }
 
@@ -347,7 +452,15 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     }
     interrupting = true
     write('\n  interrupt — aborting the run and stopping participants (again to force)')
-    void run.abort('interrupted at the console').then(wake, wake)
+    // Abort the run AND close the console. The session outliving a run is right when the
+    // run ends on its own — you carry on with the next task — but an interrupt is a request
+    // to leave, and aborting while staying at the prompt is not what Ctrl-C means.
+    const leave = () => {
+      done = true
+      rl?.close()
+    }
+    if (run) void run.abort('interrupted at the console').then(leave, leave)
+    else leave()
   }
   rl.on('SIGINT', onInterrupt)
   process.on('SIGINT', onInterrupt)
@@ -384,8 +497,8 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     }
 
     if (word === '/state') {
-      write(`  run: ${run.state}${run.pause ? ` (${run.pause.reason})` : ''}`)
-      if (run.pause?.superseded) write(`  ${yellow('~')} ${run.pause.superseded.note}`)
+      write(`  run: ${run ? `${run.state}${run.pause ? ` (${run.pause.reason})` : ''}` : 'not started'}`)
+      if (run?.pause?.superseded) write(`  ${yellow('~')} ${run.pause.superseded.note}`)
       for (const p of relay.participants) {
         write(`  ${p.id} (${p.rank}): session ${p.session.state}, ${p.events.length} events`)
       }
@@ -409,6 +522,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     }
 
     if (word === '/pause') {
+      if (!run) return void write(dim('  nothing is running; type a goal to start'))
       if (run.state === 'paused') return void write('  already paused')
       write('  pausing at the next round boundary — a turn in flight has to finish first')
       void run.requestPause('the operator asked to pause')
@@ -416,6 +530,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     }
 
     if (word === '/continue') {
+      if (!run) return void write(dim('  nothing is running; type a goal to start'))
       if (run.state !== 'paused') return void write(`  not paused (${run.state})`)
       await run.continue()
       wake()
@@ -423,6 +538,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     }
 
     if (word === '/rotate') {
+      if (!run) return void write(dim('  nothing is running; type a goal to start'))
       if (run.state !== 'paused') return void write('  pause first: /pause, then /rotate')
       write('  rotating — the advisor writes a handoff, then a replacement must reproduce the record')
       const result = await run.rotateImplementer(rest || undefined)
@@ -439,6 +555,11 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     }
 
     if (word === '/abort') {
+      if (!run) {
+        done = true
+        rl?.close()
+        return
+      }
       await run.abort(rest || 'aborted by the operator')
       wake()
       return
@@ -452,8 +573,16 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     if (word === '@advisor' || word === '@implementer') {
       const who = word.slice(1)
       if (!rest) return void write(`  ${word} needs something to say`)
+      if (!run) return void write(dim('  nothing is running; type a goal to start'))
       const m = run.injectConstraint(rest, { only: who })
       write(`  queued for ${who} at the next exchange — withheld from ${m.excluded.join(', ')}`)
+      return
+    }
+    // The first thing typed is the goal; everything after it is a constraint on the run in
+    // progress. A session that demanded its objective up front assumed you arrive knowing
+    // it, which is not how anyone gets to one.
+    if (!run) {
+      begin(line)
       return
     }
     run.injectConstraint(line, 'all')
@@ -461,7 +590,24 @@ export async function runSession(opts: SessionOptions): Promise<number> {
   }
 
   try {
-    await supervising
+    if (opts.goal) begin(opts.goal)
+    else write(dim('  no goal given — type one to start, or /help'))
+
+    // At a terminal, the session outlives a run: participants stay alive between tasks so
+    // the next instruction does not pay for a fresh pair of sessions, and the console
+    // returns to the prompt.
+    //
+    // Piped, it does not. A script has no way to say "I am finished thinking" other than
+    // closing its input, and a console that waits for that after the work is done is a
+    // hang — which is exactly what it became, for every test, until this distinction.
+    if (interactive) {
+      await new Promise<void>((resolve) => rl!.once('close', () => resolve()))
+    } else {
+      await Promise.race([
+        firstRunEnded,
+        new Promise<void>((resolve) => rl!.once('close', () => resolve())),
+      ])
+    }
   } finally {
     // Every exit path tears down. A console that leaks participants on an unexpected throw
     // is worse than no console, because the leak is invisible until the next run refuses

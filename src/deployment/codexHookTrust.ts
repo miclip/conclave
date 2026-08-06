@@ -1,3 +1,6 @@
+import { dirname, join } from 'node:path'
+import { homedir } from 'node:os'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync } from 'node:fs'
 /**
  * Codex hook trust — a configuration/deployment invariant, not lifecycle evidence.
  *
@@ -184,7 +187,7 @@ export function diagnoseHookTrust(report: CodexHookReport, matchCommand?: string
       `${h.eventName}: loaded=${h.loaded} enabled=${h.enabled} trusted=${h.trusted} ` +
         `executable=${h.executable} (trustStatus=${h.trustStatus}) — it is registered and ` +
         `enabled but will NOT run. Trust it via the Codex TUI, or pre-seed ` +
-        `[hooks.state."${h.sourcePath}:${h.eventName.toLowerCase()}:0:0"] in ~/.codex/config.toml.`,
+        `[hooks.state."${h.sourcePath}:${snakeEvent(h.eventName)}:0:0"] in ~/.codex/config.toml.`,
     )
   }
   if (ours.length === 0) {
@@ -257,4 +260,50 @@ export async function trustCodexHooks(
   } finally {
     await pty.terminate()
   }
+}
+
+/**
+ * Ensure Codex trusts a directory, so the hooks registered in it actually run.
+ *
+ * Hooks that are loaded and enabled but sit in an untrusted directory never execute, and
+ * the failure is silent: turns end on watchdog inference rather than on `Stop`, every
+ * verdict is `uncertain`, and nothing says why. That distinction cost this project a day.
+ *
+ * This writes to the operator's GLOBAL `~/.codex/config.toml`, which is a heavier step than
+ * anything else Conclave does automatically, so it is deliberately narrow:
+ *
+ *   - append-only. Existing keys are never parsed, rewritten or reordered; the file is
+ *     read, checked for the stanza, and left byte-identical if it is present.
+ *   - idempotent. A second call on a trusted directory does nothing.
+ *   - reported. The caller is told exactly what was added so it can be undone by hand.
+ *
+ * The path is resolved through `realpath` first. On macOS `/var` is a symlink to
+ * `/private/var`, and a trust entry keyed to the unresolved path silently fails to match —
+ * which is exactly the shape of bug this function exists to prevent.
+ */
+/**
+ * The event name as Codex writes it in `hooks.state` keys: snake_case, not lowercased.
+ *
+ * This message used to print `sessionstart`, and the real key is `session_start` — so the
+ * remedy it offered named an entry that could never match. Verified against the entries
+ * Codex itself wrote for a trusted checkout.
+ */
+export function snakeEvent(eventName: string): string {
+  return eventName.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase()
+}
+
+export function ensureCodexTrust(cwd: string): { alreadyTrusted: boolean; added?: string; path: string } {
+  const configPath = join(homedir(), '.codex', 'config.toml')
+  const resolved = existsSync(cwd) ? realpathSync(cwd) : cwd
+  const stanza = `[projects."${resolved}"]`
+
+  const existing = existsSync(configPath) ? readFileSync(configPath, 'utf8') : ''
+  if (existing.includes(stanza)) return { alreadyTrusted: true, path: configPath }
+
+  const addition = `\n${stanza}\ntrust_level = "trusted"\n`
+  mkdirSync(dirname(configPath), { recursive: true })
+  // Append rather than rewrite: this file is the operator's, and Conclave has no business
+  // reformatting the rest of it to add four lines.
+  appendFileSync(configPath, addition)
+  return { alreadyTrusted: false, added: addition.trim(), path: configPath }
 }
