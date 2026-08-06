@@ -285,9 +285,18 @@ export class Progress {
   line(colour: (s: string) => string = (x) => x): string {
     const active = [...this.#started.entries()]
     if (active.length === 0) return ''
-    const [participant, startedAt] = active[active.length - 1]!
-    const detail = this.#detail.get(participant)
-    return `${dim(Progress.SPINNER[this.#frame]!)} ${colour(participant)} ${dim(elapsedSince(startedAt))}${detail ? ` ${dim('·')} ${dim(detail)}` : ''}`
+    // EVERY participant that is working, not just the most recent to start. Turns overlap
+    // — an advisor asked to research while the implementer builds is the case the whole
+    // committee exists for — and showing one of them made the other look idle, or worse,
+    // made the operator think their instruction had gone nowhere.
+    const frame = dim(Progress.SPINNER[this.#frame]!)
+    return active
+      .map(([participant, startedAt]) => {
+        const detail = this.#detail.get(participant)
+        const suffix = detail ? ` ${dim('·')} ${dim(detail)}` : ''
+        return `${frame} ${colour(participant)} ${dim(elapsedSince(startedAt))}${suffix}`
+      })
+      .join(dim('   '))
   }
 
   /**

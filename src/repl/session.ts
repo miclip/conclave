@@ -414,7 +414,17 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     implementer: { id: 'implementer', agent: opts.implementer, role: 'implementer' },
     maxRounds: opts.rounds,
     ...(opts.checks.length > 0 ? { rotation: { checks: opts.checks } } : {}),
-    onLog: (m) => write(renderMessage(m, width)),
+    onLog: (m) => {
+      // A message the operator just typed is already on screen twice over: the pinned row
+      // shows the text itself while it waits, and `pendingRows` promotes it to a speaker
+      // block the moment a participant takes it. Rendering it here as well put the
+      // delivered block above and the queued row below — the same sentence, twice, with
+      // nothing to say which was which.
+      //
+      // Piped input has no box, so there this is the only copy and it must still print.
+      if (screen && injectedHere.delete(m.text)) return
+      write(renderMessage(m, width))
+    },
   })
 
   // Activity as a status line that updates in place, not a scrolling list of dots. The
@@ -547,6 +557,24 @@ export async function runSession(opts: SessionOptions): Promise<number> {
    */
   const queuedFor = new Map<string, Set<string>>()
 
+  /**
+   * Text the console just injected, so `onLog` can decline to render it.
+   *
+   * A typed message is recorded and queued in one call, and `onLog` fires from inside the
+   * record — before the text reaches the queue. So the pinned row cannot yet be consulted
+   * to ask "will this be shown below anyway"; the console has to say so itself.
+   *
+   * The alternative, suppressing every human message, would have swallowed the GOAL, which
+   * takes `relay.start` rather than this path and is never queued.
+   */
+  const injectedHere = new Set<string>()
+
+  function inject(text: string, audience: Parameters<NonNullable<typeof run>['injectConstraint']>[1]) {
+    if (!run) return
+    injectedHere.add(text)
+    return run.injectConstraint(text, audience)
+  }
+
   // This is a render callback that WRITES: a message leaving every queue is how the console
   // learns it was delivered, and it emits the speaker block for it. Writing re-enters the
   // screen, which calls this again. That was harmless while draws were event-driven and
@@ -626,7 +654,11 @@ export async function runSession(opts: SessionOptions): Promise<number> {
    * and nothing repeats.
    */
   const status = (): string => {
-    const active = progress.line((p) => speakerColor(p, 'implementer')(p))
+    // Each participant in its OWN colour. It was hardcoded to the implementer's, which was
+    // invisible while only one could ever be shown and becomes a lie once both are: two
+    // names in the same colour is the one thing that would stop the operator telling the
+    // advisor's work from the implementer's at a glance.
+    const active = progress.line((p) => speakerColor(p, p === 'advisor' ? 'advisor' : 'implementer')(p))
     const idle = !run && !active ? dim('type a goal to start') : ''
     // No queue count here: the pinned rows above the box show the messages themselves, and
     // a number beside them is a worse version of the same fact. It was one of three places
@@ -869,7 +901,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
         begin(rest)
         return
       }
-      run.injectConstraint(rest, 'all')
+      inject(rest, 'all')
       queued('everyone')
       return
     }
@@ -878,7 +910,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
       const who = word.slice(1)
       if (!rest) return void write(`  ${word} needs something to say`)
       if (!run) return void write(dim('  nothing is running; type a goal to start'))
-      run.injectConstraint(rest, { only: who })
+      inject(rest, { only: who })
       // Nothing written about the exclusion. The pinned row says `→ implementer` while the
       // message waits and the speaker block says it again when it lands, so a line stating
       // who did NOT get it is a third telling of the same fact — and the one that reads
@@ -893,7 +925,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
       begin(line)
       return
     }
-    run.injectConstraint(line, 'all')
+    inject(line, 'all')
     queued('everyone')
   }
 

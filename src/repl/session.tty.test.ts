@@ -191,6 +191,36 @@ test('the pinned status keeps moving, so a silent turn cannot read as a hung one
   c.proc.kill()
 })
 
+test('a typed message appears once, not as a block and a queued row at the same time', async (t) => {
+  // A typed line is recorded and queued in one call. The record was rendered immediately as
+  // a `● you → advisor` block, AND the queue put the same sentence in the pinned rows — so
+  // the transcript showed it delivered while the box below still showed it waiting. Two
+  // copies, disagreeing about whether it had been read.
+  const dir = repo()
+  const c = await spawnConsole(dir, t)
+  const plain = (s: string) => s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '')
+  assert.ok(await c.until((s) => s.includes('›')))
+
+  const line = 'check the error path too'
+  c.type(`>implementer ${line}\r`)
+  assert.ok(await c.until((s) => plain(s).includes(line)), 'the message should appear somewhere')
+
+  // The box redraws continuously, so the pinned row legitimately recurs in the byte
+  // stream. What must never happen is the SPEAKER BLOCK and a pinned row coexisting: take
+  // the final frame and require at most one of the two forms.
+  await new Promise((r) => setTimeout(r, 1_500))
+  const frame = plain(c.text()).slice(-4_000)
+  // Discriminated by ADDRESSEE, not by the `● you` glyph: the goal is also a `you` block,
+  // but it is addressed `→ advisor, implementer`. Only this message is implementer-only.
+  const asBlock = /● you → implementer(?!,)/.test(frame)
+  const asRow = new RegExp(`→ implementer\\s{2,}${line}`).test(frame)
+  assert.ok(
+    !(asBlock && asRow),
+    `the same message was shown as a delivered block AND a queued row:\n${frame.slice(-1_200)}`,
+  )
+  c.proc.kill()
+})
+
 test('Ctrl-C tears the session down instead of orphaning it', async (t) => {
   // The failure this guards against is the one that held a test process open for 26
   // minutes: children with nothing to reap them. A fake has no PTY, so what is asserted
