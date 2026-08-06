@@ -105,6 +105,26 @@ async function spawnConsole(dir: string) {
   }
 }
 
+test('the status line stands down while the operator is typing', async () => {
+  // Spinner and prompt occupy the same line. An unconditional spinner overwrites a
+  // half-typed message every 90ms; deferring to the human is the only sane precedence.
+  const dir = repo()
+  const c = await spawnConsole(dir)
+  assert.ok(await c.until((s) => s.includes('> ')))
+  assert.ok(await c.until((s) => /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/.test(s)), 'the spinner should run when idle')
+
+  c.type('a half typed message')
+  assert.ok(await c.until((s) => s.includes('a half typed message')))
+  const mark = c.text().length
+  await new Promise((r) => setTimeout(r, 1200))
+  const during = c.text().slice(mark)
+  assert.ok(
+    !/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/.test(during),
+    `the spinner kept drawing over a typed line:\n${JSON.stringify(during.slice(0, 300))}`,
+  )
+  c.proc.kill()
+})
+
 test('typed-but-unsubmitted text survives asynchronous output', async () => {
   const dir = repo()
   const c = await spawnConsole(dir)
@@ -115,8 +135,10 @@ test('typed-but-unsubmitted text survives asynchronous output', async () => {
   assert.ok(await c.until((s) => s.includes('keep the diff small')), 'the typed text should echo')
 
   const before = c.text().length
-  // Activity lands on top of it — this is the case a bare out.write() destroys.
-  assert.ok(await c.until((s) => s.slice(before).includes('· implementer Read')), 'activity should arrive')
+  // A routed message lands on top of it — the case a bare out.write() destroys. Tool
+  // activity no longer qualifies: it is a status line that deliberately stands down while
+  // the operator is typing, so it cannot be the thing that tests interleaving.
+  assert.ok(await c.until((s) => s.slice(before).includes('●')), 'a message should arrive')
 
   // After the interleaved write, the prompt AND the buffer must have been redrawn, or the
   // operator is left staring at a line they cannot see.

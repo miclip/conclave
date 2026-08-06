@@ -25,6 +25,7 @@
  */
 
 import { clearLine, createInterface, cursorTo, type Interface } from 'node:readline'
+import { bold, colorFor, dim, grey, markdown, setColor, speakerColor, Status, yellow } from './render.ts'
 import type { AgentEvent } from '../contract/session.ts'
 import { defaultRegistry } from '../registry/builtin.ts'
 import type { AgentRegistry } from '../registry/registry.ts'
@@ -80,30 +81,45 @@ function renderActivity(participant: string, e: AgentEvent): string | undefined 
   }
 }
 
-function renderMessage(m: RelayMessage): string {
-  if (m.visibility === 'internal') return `  · ${m.text}`
-  const arrow = m.to.length ? `→ ${m.to.join(', ')}` : '→ (recorded only)'
+/**
+ * One message.
+ *
+ * `human (human)` was the old header — the rank repeated the name, and the goal was printed
+ * again immediately after the shell had already echoed it. Speakers are named once, in a
+ * stable colour, and the body is rendered rather than dumped.
+ */
+function renderMessage(m: RelayMessage, width: number): string {
+  if (m.visibility === 'internal') return grey(`  ${m.text}`)
+  const colour = speakerColor(m.from, m.fromRank)
+  // The name alone when it already carries the rank; both only when they differ.
+  const who = m.from === m.fromRank ? (m.fromRank === 'human' ? 'you' : m.from) : m.from
+  const to = m.to.length ? dim(` → ${m.to.join(', ')}`) : dim(' → (recorded only)')
   const restricted =
-    m.visibility === 'restricted' ? `  RESTRICTED — withheld from ${m.excluded.join(', ')}` : ''
-  const body = m.text.trim().split('\n').map((l) => `    ${l}`).join('\n')
-  return `\n[${m.seq}] ${m.from} (${m.fromRank}) ${arrow}${restricted}\n${body}`
+    m.visibility === 'restricted' ? dim(`  ·  withheld from ${m.excluded.join(', ')}`) : ''
+  return `\n${colour('●')} ${bold(who)}${to}${restricted}\n${markdown(m.text, { width })}`
 }
 
-function renderPause(p: RunPause): string {
-  const lines = [``, `── PAUSED: ${p.reason} ─────────────────────────────`, `  ${p.detail}`]
+function renderPause(p: RunPause, width: number): string {
+  const lines = ['', `${yellow('●')} ${bold('paused')} ${dim(p.reason)}`, markdown(p.detail, { width })]
   if (p.evidence.length > 0) {
-    lines.push(``)
-    for (const e of p.evidence) lines.push(`  ${e}`)
+    lines.push('')
+    for (const e of p.evidence) lines.push(grey(`  ${e}`))
   }
-  lines.push(``, `  ${p.options.map((o) => `/${o}`).join('  ')}`, ``)
+  // `constrain` is not a command — you constrain by typing. Offering it as one sent people
+  // looking for a slash command that does not exist.
+  const commands = p.options.filter((o) => o !== 'constrain').map((o) => `/${o}`)
+  lines.push('', `  ${dim(commands.join('   '))}   ${dim('or type a message')}`, '')
   return lines.join('\n')
 }
 
 export async function runSession(opts: SessionOptions): Promise<number> {
   const out = opts.output ?? process.stdout
+  const width = Math.min(100, (out as NodeJS.WriteStream).columns ?? 100)
+  setColor(colorFor(out as NodeJS.WriteStream))
   const interactive =
     (opts.input ?? process.stdin) === process.stdin && process.stdin.isTTY === true
   let rl: Interface | undefined
+  let statusRef: Status | undefined
 
   /**
    * Write a line without eating what the operator is halfway through typing.
@@ -114,6 +130,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
    * the buffer, which is what makes this usable rather than merely functional.
    */
   const write = (s: string) => {
+    statusRef?.clear()
     if (!rl || !interactive) {
       out.write(`${s}\n`)
       return
@@ -145,15 +162,31 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     implementer: { id: 'implementer', agent: opts.implementer, role: 'implementer' },
     maxRounds: opts.rounds,
     ...(opts.checks.length > 0 ? { rotation: { checks: opts.checks } } : {}),
-    onLog: (m) => write(renderMessage(m)),
+    onLog: (m) => write(renderMessage(m, width)),
   })
 
-  // Activity, so the wait between an instruction and its report is not silent.
+  // Activity as a status line that updates in place, not a scrolling list of dots. The
+  // wait between an instruction and its report is the whole duration of the work, and a
+  // spinner carrying the current tool says "working" without burying the prose above it.
+  const status = new Status(out, interactive, () => (rl?.line?.length ?? 0) > 0)
+  statusRef = status
   void (async () => {
     for await (const e of relay.observe({ replay: false })) {
       if (e.type !== 'activity') continue
-      const line = renderActivity(e.participant, e.event)
-      if (line) write(line)
+      const ev = e.event
+      if (ev.type === 'turn_start') {
+        status.start(`${speakerColor(e.participant, e.rank)(e.participant)} working`)
+      } else if (ev.type === 'turn_end') {
+        status.clear()
+      } else if (ev.type === 'tool_use') {
+        status.detail(ev.tool)
+      } else {
+        const line = renderActivity(e.participant, ev)
+        if (line) {
+          status.clear()
+          write(line)
+        }
+      }
     }
   })()
 
@@ -177,7 +210,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
         write(`=== ${relay.log.length} messages routed`)
         return
       }
-      write(renderPause(s.pause))
+      write(renderPause(s.pause, width))
       // Nothing further happens until the operator says so. That is the point.
       await new Promise<void>((resolve) => resumed.push(resolve))
     }
@@ -247,7 +280,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
 
     if (word === '/log') {
       const n = Number(rest) || 20
-      for (const m of relay.log.slice(-n)) write(renderMessage(m))
+      for (const m of relay.log.slice(-n)) write(renderMessage(m, width))
       return
     }
 
@@ -321,6 +354,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     // to start on a lock it does not recognise.
     process.off('SIGINT', onInterrupt)
     process.off('SIGTERM', onInterrupt)
+    status.clear()
     rl.close()
     await relay.stop()
   }

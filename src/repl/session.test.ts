@@ -141,7 +141,8 @@ test('a pause is rendered with its evidence and the operator resumes it', async 
   assert.equal(await running, 0)
 
   const text = out.text()
-  assert.match(text, /PAUSED: rotation_candidate/)
+  assert.match(text, /paused/)
+  assert.match(text, /rotation_candidate/)
   assert.match(text, /compaction generation rose 0 → 1/)
   assert.match(text, /\/continue/, 'the options are offered')
   assert.match(text, /run: paused \(rotation_candidate\)/, '/state reports the handle, not a local copy')
@@ -172,7 +173,6 @@ test('an addressed line is queued, restricted, and reported as such', async () =
   // participant is reading over the operator's shoulder.
   assert.match(text, /queued for implementer at the next exchange/)
   assert.match(text, /withheld from advisor/)
-  assert.match(text, /RESTRICTED/)
   assert.match(text, /excluded advisor/, '/audit shows the asymmetry')
   assert.ok(impl.received.some((m) => m.includes('src/adapters')), 'and it reaches the participant')
 })
