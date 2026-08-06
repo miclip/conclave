@@ -9,7 +9,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
 import { ALL_CAPABILITIES, CLAUDE_CAPABILITIES, CODEX_CAPABILITIES } from './capabilities.ts'
-import { checkAdapter, runConformance } from './suite.ts'
+import { checkAdapter, currentVersion, runConformance } from './suite.ts'
 import { OUTCOMES } from '../contract/outcome.ts'
 
 test('every adapter grades every outcome', () => {
@@ -23,7 +23,27 @@ test('every adapter grades every outcome', () => {
   }
 })
 
-test('no adapter claims evidence it does not have', () => {
+/**
+ * Conformance is a claim about the CLIs installed HERE.
+ *
+ * `currentVersion` shells out to each CLI and returns `unknown` when it is absent, and
+ * unknown compares unequal to everything — so with no CLIs present every fixture is
+ * unverifiable and every `observed` claim is correctly downgraded. That is the suite
+ * working, not failing.
+ *
+ * It is skipped rather than relaxed. Making "both unknown" count as a match would let an
+ * environment with no evidence at all confirm every claim, which is precisely the inflation
+ * this suite exists to catch — and CI, where it would happen silently, is the worst place
+ * to allow it.
+ */
+const missing = ['claude', 'codex'].filter((a) => currentVersion(a) === 'unknown')
+const gradable =
+  missing.length === 0
+    ? false
+    : `needs ${missing.join(' and ')} installed: conformance grades claims against the CLI ` +
+      `versions present, and with none present nothing is gradable`
+
+test('no adapter claims evidence it does not have', { skip: gradable }, () => {
   const report = runConformance(ALL_CAPABILITIES)
   assert.deepEqual(
     report.failures.map((f) => `${f.agent}/${f.outcome}: ${f.note}`),
