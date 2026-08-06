@@ -277,6 +277,8 @@ export class Relay {
   #verdictPause: VerdictPause | undefined
   #stream = new RelayEventStream()
   #ended = false
+  /** True while `#loop` owns the participants. `ask` refuses rather than racing it. */
+  #looping = false
 
   private constructor(opts: RelayOptions) {
     this.#opts = opts
@@ -498,6 +500,40 @@ export class Relay {
    * Prose comes from the snapshot rather than the event stream: the snapshot is
    * authoritative and carries the full narration, where a turn_end carries only a verdict.
    */
+  /**
+   * One exchange with one participant, with no run in flight.
+   *
+   * `say` QUEUES: it puts text in a participant's pending queue, and the run loop delivers
+   * it at the next turn boundary. That is right during a run and useless between runs --
+   * with no loop to drain it the message waits forever, so the console refused to accept
+   * one at all. But the sessions are still alive when a run ends; only the loop stopped.
+   * Asking the implementer to start the server so you can try what it just built is not a
+   * new goal, and having to invent one to be heard is the wrong shape.
+   *
+   * A turn, not a queue: this sends and waits, so the caller gets the reply. It routes to
+   * nobody else -- the other participant neither sees the question nor the answer, exactly
+   * as `>advisor` means during a run.
+   *
+   * Refuses while a run is in flight. Two things sending turns to one session would
+   * interleave with the loop's own, and the resulting transcript would be neither's.
+   */
+  async ask(participantId: string, text: string): Promise<string> {
+    if (this.#looping) {
+      throw new Error('a run is in flight; use the run handle to address a participant')
+    }
+    const p = this.#participants.get(participantId)
+    if (!p) {
+      const known = [...this.#participants.keys()].sort().join(', ')
+      throw new Error(`unknown participant '${participantId}'. Known: ${known}`)
+    }
+    this.#record({ from: 'human', fromRank: 'human', to: [participantId], kind: 'constraint', text })
+    const turn = await this.#exchange(p, text)
+    // `to: []` because it is going to the human, who is not a routed participant. The
+    // console renders an unaddressed participant message as `→ you`.
+    this.#record({ from: p.id, fromRank: p.rank, to: [], kind: 'report', text: turn.prose })
+    return turn.prose
+  }
+
   async #exchange(p: RelayParticipant, text: string): Promise<{ prose: string; end: TurnEndEvent }> {
     const before = p.events.length
     await p.session.send(text, { kind: 'peer_relay' })
@@ -874,6 +910,15 @@ export class Relay {
   }
 
   async #loop(goal: string, handle: RunHandle | undefined): Promise<RunOutcome> {
+    this.#looping = true
+    try {
+      return await this.#runLoop(goal, handle)
+    } finally {
+      this.#looping = false
+    }
+  }
+
+  async #runLoop(goal: string, handle: RunHandle | undefined): Promise<RunOutcome> {
     const lead = this.participants.find((p) => p.rank === 'advisor')!
     const impl = this.participants.find((p) => p.rank === 'implementer')!
 

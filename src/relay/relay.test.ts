@@ -337,6 +337,55 @@ test('the advisor is told to investigate itself rather than delegate everything'
   assert.match(opening, /what you FOUND/)
 })
 
+// --- asking a participant outside a run ----------------------------------------------
+
+test('a participant can be asked directly once the run has ended', async () => {
+  // A run ending does not end the sessions — only `stop()` does that, when the console
+  // closes. The loose ends are the reason to stay: start the server so I can try what you
+  // built, explain that change. `say` cannot serve them, because it QUEUES and the queue
+  // is drained by a run loop that is no longer running.
+  // 'ack' is consumed by the briefing exchange; the second reply answers the question.
+  const { relay, lead, impl } = await twoParty(['DONE'], ['ack', 'server is up on :3000'])
+  await relay.run('a goal')
+
+  const answer = await relay.ask('implementer', 'start the server so I can test it')
+
+  assert.equal(answer, 'server is up on :3000', 'a turn, not a queue: the answer comes back')
+  assert.ok(impl.received.some((m) => m.includes('start the server so I can test it')))
+  assert.ok(
+    !lead.received.some((m) => m.includes('start the server')),
+    'the other participant sees neither the question nor the answer',
+  )
+
+  // Both halves are recorded, so `/log` and `/audit` see this as they see anything else
+  // said to one participant and not the other.
+  const question = relay.log.find((m) => m.text.includes('start the server so I can test it'))!
+  assert.deepEqual(question.to, ['implementer'])
+  assert.equal(question.visibility, 'restricted', 'the advisor was not told, and that is auditable')
+  const reply = relay.log.at(-1)!
+  assert.equal(reply.from, 'implementer')
+  assert.deepEqual(reply.to, [], 'addressed to the human, who is not a routed participant')
+})
+
+test('asking is refused while a run is in flight, rather than racing its turns', async () => {
+  // Two things sending turns to one session would interleave with the loop's own, and the
+  // transcript would be neither's. During a run the run handle is the way in.
+  const { relay } = await twoParty(['instruction', 'DONE'], ['done it'])
+  const running = relay.run('a goal')
+  await assert.rejects(() => relay.ask('implementer', 'sneak this in'), /run is in flight/)
+  await running
+
+  // And it works again the moment the loop lets go.
+  await relay.ask('implementer', 'now that it is over')
+})
+
+test('asking an unknown participant names the ones that exist', async () => {
+  const { relay } = await twoParty(['DONE'], [])
+  await relay.run('a goal')
+  await assert.rejects(() => relay.ask('archivist', 'hello'), /unknown participant 'archivist'/)
+  await assert.rejects(() => relay.ask('archivist', 'hello'), /advisor, implementer/)
+})
+
 // --- visibility ---------------------------------------------------------------------
 
 test('ordinary point-to-point relay traffic is NOT restricted', async () => {

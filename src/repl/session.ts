@@ -139,6 +139,11 @@ const HELP = `
   >advisor <text>        to the advisor only — the implementer will not see it
   >implementer <text>    to the implementer only — the advisor will not see it
   >both <text>           the same as no prefix; spelled out so the menu can offer it
+
+  With a run going, an addressed line is QUEUED and delivered at the next turn
+  boundary. With no run, it is asked directly and you wait for the answer — the
+  participants are still alive between runs, which is where the loose ends live:
+  start the server so I can try it, explain that change, tidy this up.
   @src/relay/relay.ts    a path, anywhere in the line. Tab completes both sigils.
 
   They compose:  >advisor read @src/relay/relay.ts and tell me what it settles
@@ -197,7 +202,12 @@ function renderMessage(m: RelayMessage, width: number): string {
   // two-participant run the exclusion is the arithmetic — naming it restates the header in
   // longer words on every restricted line. It remains in `/audit`, which is where a
   // question about who was excluded is actually asked, and in the relay's own record.
-  const to = m.to.length ? dim(` → ${m.to.join(', ')}`) : dim(' → (recorded only)')
+  // An unaddressed message FROM a participant is going to the human — that is what
+  // `relay.ask` records between runs. `(recorded only)` is right for the orchestrator's
+  // own entries and wrong here: the operator asked a question and this is the answer.
+  const to = m.to.length
+    ? dim(` → ${m.to.join(', ')}`)
+    : dim(m.fromRank === 'human' ? ' → (recorded only)' : ' → you')
   return `\n${colour('●')} ${bold(who)}${to}\n${markdown(m.text, { width })}`
 }
 
@@ -241,6 +251,8 @@ export async function runSession(opts: SessionOptions): Promise<number> {
   // Cleared by `leave`, alongside the screen it draws to: an interval still firing after
   // the scrolling region is gone would write over whatever the operator ran next.
   let stopAnimation: (() => void) | undefined
+  /** Which participant an out-of-run question is waiting on, if any. */
+  let asking: string | undefined
   /** Resolves when an interactive console closes. */
   let closed: (() => void) | undefined
 
@@ -623,6 +635,35 @@ export async function runSession(opts: SessionOptions): Promise<number> {
   }
 
   /**
+   * Ask one participant something with no run in flight, and wait for the answer.
+   *
+   * A run ending does not end the session: both participants are still alive, holding
+   * everything they just did, until the console is closed. The loose ends are the reason
+   * to stay — start the server so I can try what you built, explain that change, tidy this
+   * up — and none of them is a new goal.
+   *
+   * Both the question and the answer are recorded, so `/log` and `/audit` see this the way
+   * they see anything else said to one participant and not the other.
+   */
+  function askDirectly(who: string, text: string): void {
+    if (asking) return void write(dim(`  still waiting on ${asking}; one at a time`))
+    asking = who
+    progress.start(who)
+    progress.note(who, 'answering you')
+    if (screen) screen.draw()
+    void relay
+      .ask(who, text)
+      .catch((err: Error) => {
+        write(dim(`  ${who} could not answer: ${err.message}`))
+      })
+      .finally(() => {
+        asking = undefined
+        progress.done(who)
+        if (screen) screen.draw()
+      })
+  }
+
+  /**
    * Confirm a queued message. With the box, the pinned row IS the confirmation and shows
    * the text itself — better than a sentence about it. Piped input has no box, so it still
    * gets the sentence; otherwise a scripted session would lose the fact entirely.
@@ -659,7 +700,9 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     // names in the same colour is the one thing that would stop the operator telling the
     // advisor's work from the implementer's at a glance.
     const active = progress.line((p) => speakerColor(p, p === 'advisor' ? 'advisor' : 'implementer')(p))
-    const idle = !run && !active ? dim('type a goal to start') : ''
+    // Names the other door too. "Type a goal to start" was the only one offered, which is
+    // why a question for one participant looked impossible rather than merely unqueued.
+    const idle = !run && !active ? dim('type a goal to start, or >advisor / >implementer to ask') : ''
     // No queue count here: the pinned rows above the box show the messages themselves, and
     // a number beside them is a worse version of the same fact. It was one of three places
     // reporting the queue at once — the failure this whole box exists to stop.
@@ -909,7 +952,11 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     if (word === '>advisor' || word === '>implementer') {
       const who = word.slice(1)
       if (!rest) return void write(`  ${word} needs something to say`)
-      if (!run) return void write(dim('  nothing is running; type a goal to start'))
+      // With no run there is no loop to drain a queue, so this is a direct exchange rather
+      // than a queued message. The participants are still alive — only the loop stopped —
+      // and the things you want between runs are exactly the ones that are not a new goal:
+      // start the server so I can try it, explain what you changed, tidy that up.
+      if (!run) return void askDirectly(who, rest)
       inject(rest, { only: who })
       // Nothing written about the exclusion. The pinned row says `→ implementer` while the
       // message waits and the speaker block says it again when it lands, so a line stating
