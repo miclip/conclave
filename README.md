@@ -15,6 +15,41 @@ accounting differs from someone typing.
 
 ---
 
+## Install
+
+Requires **Node 24 or newer** — Conclave runs its TypeScript directly, with no build step.
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/miclip/conclave/main/scripts/install.sh | sh
+```
+
+That clones into `~/.local/share/conclave`, compiles its one native dependency
+(`node-pty`), and symlinks `conclave` into `~/.local/bin`. Re-running it updates in place.
+Override `CONCLAVE_PREFIX`, `CONCLAVE_BINDIR` or `CONCLAVE_REF` if you want it elsewhere.
+
+There is no zip of prebuilt artefacts, deliberately. `node-pty` is native and has to be
+compiled against the Node that will run it, so an archive built on one machine would fail
+on the next — at the first pty spawn, long after install, which is the worst place to find
+out.
+
+If you would rather do it by hand, or want to work on Conclave itself:
+
+```sh
+git clone https://github.com/miclip/conclave.git && cd conclave
+npm install
+ln -sf "$PWD/bin/conclave.ts" ~/.local/bin/conclave
+```
+
+Then run it in whatever project you want a session in — Conclave registers its hooks
+there, pointing back at itself, so the project needs nothing installed:
+
+```sh
+cd ~/some/project
+conclave session "make the failing test pass" --checks "npm test"
+```
+
+---
+
 ## The idea
 
 Two frontier models with different training and different harness prompts have genuinely
