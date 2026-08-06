@@ -312,3 +312,27 @@ test('the console refuses to start while another session holds the lock', async 
   assert.equal(code, 1)
   assert.match(out.text(), /refusing to start/)
 })
+
+test('a flag in the goal position is a missing goal, not a goal named --lead', async () => {
+  // `conclave session --lead codex --implementer claude` started a session whose objective
+  // was the literal string "--lead", and picked the right agents by coincidence. The CLI
+  // owns this check; the test pins the behaviour the CLI depends on.
+  const { execFileSync } = await import('node:child_process')
+  const root = join(import.meta.dirname, '..', '..')
+  let code = 0
+  let stderr = ''
+  try {
+    execFileSync(process.execPath, [join(root, 'bin/conclave.ts'), 'session', '--lead', 'codex'], {
+      cwd: root,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+  } catch (err) {
+    const e = err as { status?: number; stderr?: string }
+    code = e.status ?? 0
+    stderr = e.stderr ?? ''
+  }
+  assert.equal(code, 1, 'it must refuse rather than run')
+  assert.match(stderr, /needs a goal/)
+  assert.match(stderr, /--lead/, 'and name what it found instead')
+})

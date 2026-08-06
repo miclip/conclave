@@ -156,8 +156,16 @@ async function main(argv: string[]): Promise<number> {
 
   if (command === 'session') {
     const goal = sub
-    if (!goal) {
-      console.error('session needs a goal: conclave session "<goal>"\n')
+    // A flag in the goal's position means the goal is missing, not that it is named
+    // `--lead`. Accepting it started a session whose objective was the literal string
+    // "--lead", and picked the right agents by coincidence.
+    if (!goal || goal.startsWith('--')) {
+      console.error(
+        `session needs a goal, and the first argument was ${goal ? `\`${goal}\`` : 'missing'}.\n\n` +
+          `  conclave session "<goal>" --checks "npm test"\n\n` +
+          `Keep the goal on one line: a multi-line paste ends the command at the closing\n` +
+          `quote, and everything after it becomes a separate shell command.\n`,
+      )
       return 1
     }
     // A flag whose value went missing must not be silently ignored. `npm run x -- ...`
