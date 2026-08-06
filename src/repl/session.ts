@@ -25,7 +25,7 @@
  */
 
 import { clearLine, createInterface, cursorTo, type Interface } from 'node:readline'
-import { bold, colorFor, dim, grey, markdown, setColor, speakerColor, Status, yellow } from './render.ts'
+import { banner, bold, colorFor, dim, grey, markdown, rule, setColor, speakerColor, Status, yellow } from './render.ts'
 import type { AgentEvent } from '../contract/session.ts'
 import { defaultRegistry } from '../registry/builtin.ts'
 import type { AgentRegistry } from '../registry/registry.ts'
@@ -47,6 +47,8 @@ export interface SessionOptions {
   output?: NodeJS.WritableStream
   /** Injected for testing. Production uses the built-in registry. */
   registry?: AgentRegistry
+  /** Shown in the banner. */
+  version?: string
 }
 
 const HELP = `
@@ -61,6 +63,7 @@ const HELP = `
 
   /state                 run state, participants, pending pause
   /log [n]               last n routing entries (default 20)
+  /queue                 what you have typed that has not been delivered yet
   /audit                 restricted messages: who was informed, who was excluded
   /help                  this
 `
@@ -150,10 +153,22 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     return 1
   }
 
-  write(`starting ${opts.lead} (advisor) and ${opts.implementer} (implementer) in ${opts.cwd}`)
+  write(
+    banner({
+      version: opts.version ?? '0.0.0',
+      advisor: opts.lead,
+      implementer: opts.implementer,
+      cwd: opts.cwd,
+      checks: opts.checks,
+    }),
+  )
   if (opts.checks.length === 0) {
-    write(`no rotation checks configured — a degraded implementer will escalate rather than rotate`)
+    // Phrased as a possible mistake rather than a fact. A shell that split a multi-line
+    // paste drops the flag entirely, which is indistinguishable from never passing one.
+    write(dim('  pass --checks "npm test" to enable rotation; without it a degraded'))
+    write(dim('  implementer escalates to you rather than being replaced'))
   }
+  write(rule(width))
 
   const relay = await Relay.start({
     registry: opts.registry ?? defaultRegistry(),
@@ -248,10 +263,23 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     }
   })()
 
+  /**
+   * The prompt carries the queue depth.
+   *
+   * Anything typed while a turn is running is delivered at the next boundary, not now — so
+   * the operator needs to see that it is stacked up somewhere. Putting it in the prompt
+   * means readline redraws it for free, with no second line competing for the one the
+   * status already uses.
+   */
+  const refreshPrompt = () => {
+    const queued = relay.pending().reduce((n, p) => n + p.texts.length, 0)
+    rl?.setPrompt(queued > 0 ? `${dim(`(${queued} queued)`)} ${bold('›')} ` : `${bold('›')} `)
+  }
+
   rl = createInterface({
     input: opts.input ?? process.stdin,
     output: out,
-    prompt: '> ',
+    prompt: `${bold('›')} `,
     // Keyed off whether it IS a terminal, not whether a stream was injected. The first
     // live run piped stdin and got `[1G[0J>` escape sequences in the log, because readline
     // was drawing a prompt for a pipe.
@@ -292,6 +320,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
       } catch (err) {
         write(`  ! ${err instanceof Error ? err.message : String(err)}`)
       }
+      refreshPrompt()
       prompt()
     })()
   })
@@ -301,6 +330,17 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     const rest = restWords.join(' ')
 
     if (word === '/help') return void write(HELP)
+
+    if (word === '/queue') {
+      const q = relay.pending()
+      if (q.length === 0) return void write(dim('  nothing queued'))
+      for (const { id, texts } of q) {
+        write(`  ${dim('→')} ${bold(id)}`)
+        for (const t of texts) write(`      ${t.split('\n')[0]}`)
+      }
+      write(dim('  delivered at the next exchange — no child ingests input mid-turn'))
+      return
+    }
 
     if (word === '/state') {
       write(`  run: ${run.state}${run.pause ? ` (${run.pause.reason})` : ''}`)

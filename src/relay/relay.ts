@@ -404,6 +404,20 @@ export class Relay {
    * constraint does not consume a turn of its own.
    */
   #pending = new Map<string, string[]>()
+  /**
+   * The same queue in the operator's own words, for display.
+   *
+   * `#pending` holds enveloped text — rank header and all — which is what a participant
+   * must receive and not what a human wants read back to them.
+   */
+  #pendingRaw = new Map<string, string[]>()
+
+  /** What is queued for delivery at the next exchange, per participant. */
+  pending(): { id: string; texts: string[] }[] {
+    return [...this.#pendingRaw]
+      .filter(([, texts]) => texts.length > 0)
+      .map(([id, texts]) => ({ id, texts: [...texts] }))
+  }
   /** Conflicts the human has already ruled on, so continuing does not re-raise them. */
   #adjudicated = new Set<string>()
 
@@ -430,6 +444,9 @@ export class Relay {
       const queue = this.#pending.get(id) ?? []
       queue.push(envelope({ from: 'human', fromRank: 'human', kind, text }))
       this.#pending.set(id, queue)
+      const raw = this.#pendingRaw.get(id) ?? []
+      raw.push(text)
+      this.#pendingRaw.set(id, raw)
     }
     return m
   }
@@ -451,11 +468,14 @@ export class Relay {
     const queue = this.#pending.get(participantId) ?? []
     queue.push(envelope({ from: 'human', fromRank: 'human', kind: 'constraint', text }))
     this.#pending.set(participantId, queue)
+    // Deliberately not in `#pendingRaw`: an adjudication the orchestrator wrote is not
+    // something the operator typed, and reading it back to them as "queued" would be a lie.
   }
 
   #drain(id: string): string {
     const queue = this.#pending.get(id) ?? []
     this.#pending.set(id, [])
+    this.#pendingRaw.set(id, [])
     return queue.join('\n\n')
   }
 

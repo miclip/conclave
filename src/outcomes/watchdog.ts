@@ -53,6 +53,15 @@ export interface WatchdogTarget {
  * Forty-five minutes still bounds a genuinely hung turn -- which is all this is for -- and
  * stops manufacturing pauses out of ordinary work. Override with `--turn-timeout <seconds>`.
  */
+/**
+ * How often to tail the transcript while a turn is running.
+ *
+ * Fast enough that narration feels live, slow enough that a long turn does not spend its
+ * time re-reading a file. The tail is incremental — it reads from the last byte offset —
+ * so the cost is a stat plus whatever was appended.
+ */
+export const TAIL_INTERVAL_MS = 400
+
 export const DEFAULT_WATCHDOG_MS = 45 * 60 * 1000
 
 export class TurnWatchdog<T extends WatchdogTarget> {

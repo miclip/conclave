@@ -195,6 +195,37 @@ export function markdown(text: string, opts: MarkdownOptions = {}): string {
   return out.join('\n')
 }
 
+/**
+ * The opening banner.
+ *
+ * The three dots are the speaker legend: the colours used throughout for you, the advisor
+ * and the implementer. Teaching the code once here means every later line reads without a
+ * key, which is the only reason to spend four lines on a banner at all.
+ */
+export function banner(opts: {
+  version: string
+  advisor: string
+  implementer: string
+  cwd: string
+  checks: string[]
+}): string {
+  const legend = `${magenta('●')} ${cyan('●')} ${green('●')}`
+  const rotation = opts.checks.length > 0 ? opts.checks.join(', ') : dim('off — no checks configured')
+  return [
+    '',
+    `  ${legend}  ${bold('conclave')} ${dim(opts.version)}`,
+    `        ${dim('you')} · ${cyan(`advisor ${opts.advisor}`)} · ${green(`implementer ${opts.implementer}`)}`,
+    `        ${dim(opts.cwd)}`,
+    `        ${dim('rotation:')} ${rotation}`,
+    '',
+  ].join('\n')
+}
+
+/** A full-width rule, for separating the transcript from the input area. */
+export function rule(width: number): string {
+  return dim('─'.repeat(Math.max(8, width)))
+}
+
 const FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
 
 /**
@@ -233,6 +264,9 @@ export class Status {
     this.#label = label
     this.#detail = ''
     this.#started = Date.now()
+    // A blank line between the prose above and the status below. Without it the spinner
+    // butts straight up against the last line of a report and the two read as one block.
+    if (this.#enabled) this.#out.write('\n')
     if (!this.#enabled || this.#timer) return
     this.#timer = setInterval(() => this.#draw(), 90)
     this.#timer.unref()

@@ -38,7 +38,7 @@ import { guaranteesFor, turnKey } from '../contract/session.ts'
 import { emptyTranscriptState } from '../outcomes/classify.ts'
 import { TurnVerdictTracker, type VerdictUpdate } from '../outcomes/tracker.ts'
 
-import { DEFAULT_WATCHDOG_MS, TurnWatchdog } from '../outcomes/watchdog.ts'
+import { DEFAULT_WATCHDOG_MS, TAIL_INTERVAL_MS, TurnWatchdog } from '../outcomes/watchdog.ts'
 import { sanitizedCopy } from '../process/childenv.ts'
 import { PtyProcess } from '../process/pty.ts'
 import { InputQueue } from '../process/input.ts'
@@ -198,6 +198,51 @@ export class ClaudePtyHookAdapter implements AgentSession {
     return ++this.#seq
   }
 
+/**
+   * Tail the transcript while a turn is in flight, so its events exist while they matter.
+   *
+   * The transcript view emits `message` deltas and `tool_use` as they appear — the running
+   * commentary a watching human wants, and the per-participant evidence attribution needs.
+   * Nothing was calling it during a turn: `#view.poll()` ran only inside `snapshot()`, which
+   * the relay calls at turn boundaries. So every transcript-derived event materialised in a
+   * burst AFTER the turn ended, and "live activity" was live in name only.
+   *
+   * The fan-out in `relay/observe.ts` was built for exactly this stream and had nothing
+   * feeding it. Found by a human saying they could not see the implementer working.
+   *
+   * Unref'd, and serialized against itself: two concurrent polls would read the same tail
+   * offset twice. `snapshot()` shares the view, so a poll in flight is awaited rather than
+   * duplicated.
+   */
+  #tailTimer: NodeJS.Timeout | undefined
+  #polling: Promise<void> | undefined
+
+  async #pollTranscript(): Promise<void> {
+    if (!this.#view) return
+    if (this.#polling) return this.#polling
+    this.#polling = (async () => {
+      try {
+        for (const e of await this.#view!.poll()) this.#emit(e)
+      } catch {
+        // Unreadable mid-write is ordinary; the next tick picks it up.
+      } finally {
+        this.#polling = undefined
+      }
+    })()
+    return this.#polling
+  }
+
+  #startTailing(): void {
+    if (this.#tailTimer) return
+    this.#tailTimer = setInterval(() => void this.#pollTranscript(), TAIL_INTERVAL_MS)
+    this.#tailTimer.unref()
+  }
+
+  #stopTailing(): void {
+    if (this.#tailTimer) clearInterval(this.#tailTimer)
+    this.#tailTimer = undefined
+  }
+
   #emit(e: AgentEvent): void {
     this.#events.push(e)
   }
@@ -245,6 +290,9 @@ export class ClaudePtyHookAdapter implements AgentSession {
         this.#turns.set(String(key), turn)
         this.#order.push(String(key))
         this.#watchdog.arm(String(key), turn)
+        // A turn is running: tail the transcript so its narration and tool use exist while
+        // they are useful, not in a burst after it ends.
+        this.#startTailing()
         this.#emit({
           type: 'turn_start',
           prompt: turn.prompt,
@@ -349,6 +397,10 @@ export class ClaudePtyHookAdapter implements AgentSession {
 
     const seq = this.#next()
     turn.endSeq = seq
+    // One last read before standing down, so the closing message is not left for the next
+    // turn's tail to discover.
+    this.#stopTailing()
+    void this.#pollTranscript()
     this.#emit({
       type: 'turn_end',
       verdict: update.verdict,
@@ -628,6 +680,7 @@ export class ClaudePtyHookAdapter implements AgentSession {
       if (this.#pty.alive) await this.#pty.terminate()
     }
 
+    this.#stopTailing()
     await this.#receiver.stop()
     this.#state = 'terminated'
     this.#events.close()

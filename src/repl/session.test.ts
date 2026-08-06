@@ -115,7 +115,7 @@ test('a session runs to completion and reports the outcome', async () => {
   assert.equal(code, 0)
   assert.match(out.text(), /run ended: done/)
   // Without checks, rotation is refused rather than done unverified — and it says so.
-  assert.match(out.text(), /no rotation checks configured/)
+  assert.match(out.text(), /pass --checks/)
 })
 
 test('a pause is rendered with its evidence and the operator resumes it', async () => {
@@ -212,6 +212,82 @@ test('narration streams to the human, and only the report is shown going to the 
     text.split('Done. guard --json is in.').length - 1,
     1,
     'the closing message is shown once, as the routed report — not streamed and repeated',
+  )
+})
+
+test('the banner names the participants, the checks and the colour legend', async () => {
+  const dir = repo()
+  const out = collect()
+  await runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'claude',
+    rounds: 2,
+    checks: ['npm test'],
+    version: '9.9.9',
+    registry: registryOf({
+      codex: [new FakeRotationSession('advisor', 'codex', ['Do it.', 'DONE'])],
+      claude: [new FakeRotationSession('impl', 'claude', ['ack', 'Did it.'])],
+    }),
+    input: script([]),
+    output: out.stream,
+  })
+  const text = out.text()
+  assert.match(text, /conclave 9\.9\.9/)
+  assert.match(text, /advisor codex/)
+  assert.match(text, /implementer claude/)
+  assert.match(text, /rotation:.*npm test/)
+})
+
+test('with no checks the console reads as a possible mistake, not a statement of fact', async () => {
+  // A shell that splits a multi-line paste drops the flag entirely, which is
+  // indistinguishable from never passing one. It has cost two sessions their rotation.
+  const dir = repo()
+  const out = collect()
+  await runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'claude',
+    rounds: 2,
+    checks: [],
+    registry: registryOf({
+      codex: [new FakeRotationSession('advisor', 'codex', ['Do it.', 'DONE'])],
+      claude: [new FakeRotationSession('impl', 'claude', ['ack', 'Did it.'])],
+    }),
+    input: script([]),
+    output: out.stream,
+  })
+  assert.match(out.text(), /pass --checks/)
+})
+
+test('typed instructions queue visibly and are listed on demand', async () => {
+  // Nothing is delivered mid-turn, so the operator has to be able to see what is stacked
+  // up. `/queue` reads back their own words, not the enveloped copy a participant gets.
+  const dir = repo()
+  const impl = slow('impl', 'claude', ['ack', 'Did it.', 'And again.'])
+  const out = collect()
+  await runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'claude',
+    rounds: 3,
+    checks: [],
+    registry: registryOf({
+      codex: [slow('advisor', 'codex', ['Do it.', 'More.', 'DONE'])],
+      claude: [impl],
+    }),
+    input: script(['@implementer touch nothing under src/adapters', '/queue'], 200),
+    output: out.stream,
+  })
+  const text = out.text()
+  assert.match(text, /touch nothing under src\/adapters/)
+  assert.match(text, /delivered at the next exchange/)
+  assert.ok(
+    !/FROM THE HUMAN[\s\S]{0,80}delivered at the next exchange/.test(text),
+    '/queue reads back what was typed, not the enveloped copy',
   )
 })
 
