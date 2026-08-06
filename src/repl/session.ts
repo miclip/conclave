@@ -126,6 +126,8 @@ const COMMANDS = [
   '/continue',
   '/rotate',
   '/abort',
+  '/allow',
+  '/deny',
   '/state',
   '/log',
   '/queue',
@@ -139,14 +141,14 @@ const HELP = `
   >advisor <text>        to the advisor only — the implementer will not see it
   >implementer <text>    to the implementer only — the advisor will not see it
   >both <text>           the same as no prefix; spelled out so the menu can offer it
+  @src/relay/relay.ts    a path, anywhere in the line. Tab completes both sigils.
+
+  They compose:  >advisor read @src/relay/relay.ts and tell me what it settles
 
   With a run going, an addressed line is QUEUED and delivered at the next turn
   boundary. With no run, it is asked directly and you wait for the answer — the
   participants are still alive between runs, which is where the loose ends live:
   start the server so I can try it, explain that change, tidy this up.
-  @src/relay/relay.ts    a path, anywhere in the line. Tab completes both sigils.
-
-  They compose:  >advisor read @src/relay/relay.ts and tell me what it settles
 
   Paths are references, not inlined. Both participants share this directory and
   open the file themselves, and @path means the same to their own CLIs — so the
@@ -156,6 +158,9 @@ const HELP = `
   /continue              resume from a pause
   /rotate [reason]       replace the implementer, carrying a handoff forward
   /abort [reason]        end the run, and stay here for the next one
+
+  /allow [who]           answer a participant stopped at a permission prompt
+  /deny  [who]           refuse it. The name is only needed if both are waiting.
 
   /state                 run state, participants, pending pause
   /log [n]               last n routing entries (default 20)
@@ -171,7 +176,10 @@ function renderActivity(participant: string, e: AgentEvent): string | undefined 
     case 'tool_use':
       return `    · ${participant} ${e.tool}`
     case 'permission_requested':
-      return `    ! ${participant} awaiting a permission decision`
+      // Naming the answer at the moment the question appears. It read as a status —
+      // something being waited out — when it is the one event in a turn that cannot
+      // proceed without the operator.
+      return `    ! ${participant} needs a permission decision for ${e.tool} — /allow or /deny`
     case 'revision':
       return `    ~ ${participant} transcript revised (${e.reason})`
     case 'error':
@@ -876,6 +884,24 @@ export async function runSession(opts: SessionOptions): Promise<number> {
         write(`  [${a.seq}] informed ${a.informed.join(', ')} · excluded ${a.excluded.join(', ')}`)
         write(`        ${a.text.split('\n')[0]}`)
       }
+      return
+    }
+
+    if (word === '/allow' || word === '/deny') {
+      const decision = word === '/allow' ? 'allow' : 'deny'
+      const waiting = relay.permissionsPending()
+      if (waiting.length === 0) return void write(dim('  nobody is waiting on a permission decision'))
+      // The argument is only needed to disambiguate. One waiting participant is the case
+      // that matters, and making the operator name it there would be ceremony for its own
+      // sake — the console already told them who it was.
+      const target = rest.trim() || (waiting.length === 1 ? waiting[0]!.id : '')
+      if (!target) {
+        const who = waiting.map((w) => `${w.id} (${w.tool})`).join(', ')
+        return void write(`  ${word} needs a name — waiting: ${who}`)
+      }
+      void relay.decidePermission(target, decision).catch((err: Error) => {
+        write(dim(`  ${err.message}`))
+      })
       return
     }
 

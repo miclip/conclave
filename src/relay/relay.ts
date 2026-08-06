@@ -332,10 +332,69 @@ export class Relay {
       for await (const e of session.events()) {
         if (p.session !== session) return
         p.events.push(e)
+        this.#trackPermission(p, e)
         this.#trackSupersession(p, e)
         this.#stream.emit({ type: 'activity', participant: p.id, rank: p.rank, event: e })
       }
     })()
+  }
+
+  /**
+   * Which participants are stopped at a permission prompt, and for what.
+   *
+   * Both adapters implement `decidePermission` down to the keystroke, and nothing above
+   * them ever called it: the console rendered `awaiting a permission decision` and offered
+   * no way to answer, so the turn sat there until a watchdog ended it. The event was
+   * already on the stream — what was missing was somewhere to remember it and something
+   * able to reply.
+   */
+  #awaitingPermission = new Map<string, { tool: string }>()
+
+  /**
+   * A request stands until the participant moves on.
+   *
+   * Cleared on ANY later event from the same participant, not only on a decision of ours.
+   * A permission can be answered in the child's own terminal, or the turn can end without
+   * one, and either way a stale `awaiting` would have the console offering to decide
+   * something nobody is waiting on.
+   */
+  #trackPermission(p: RelayParticipant, e: AgentEvent): void {
+    if (e.type === 'permission_requested') {
+      this.#awaitingPermission.set(p.id, { tool: e.tool })
+      return
+    }
+    this.#awaitingPermission.delete(p.id)
+  }
+
+  /** Participants stopped at a permission prompt right now, with the tool each named. */
+  permissionsPending(): { id: string; tool: string }[] {
+    return [...this.#awaitingPermission].map(([id, { tool }]) => ({ id, tool }))
+  }
+
+  /**
+   * Answer a participant's permission prompt.
+   *
+   * Recorded, because it is a human decision about what a participant may do — the same
+   * class of thing as an instruction, and exactly what someone reading the log afterwards
+   * needs in order to explain why a tool call did or did not happen.
+   */
+  async decidePermission(participantId: string, decision: 'allow' | 'deny'): Promise<void> {
+    const p = this.#participants.get(participantId)
+    if (!p) {
+      const known = [...this.#participants.keys()].sort().join(', ')
+      throw new Error(`unknown participant '${participantId}'. Known: ${known}`)
+    }
+    const pending = this.#awaitingPermission.get(participantId)
+    if (!pending) throw new Error(`${participantId} is not waiting on a permission decision`)
+    await p.session.decidePermission(decision)
+    this.#awaitingPermission.delete(participantId)
+    this.#record({
+      from: 'orchestrator',
+      fromRank: 'human',
+      to: [],
+      kind: 'note',
+      text: `you ${decision === 'allow' ? 'allowed' : 'denied'} ${participantId}: ${pending.tool}`,
+    })
   }
 
   /**

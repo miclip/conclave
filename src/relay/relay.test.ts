@@ -103,6 +103,11 @@ class FakeSession implements AgentSession {
     return key
   }
 
+  /** Push an event as the child would, for cases the scripted turn cannot produce. */
+  emit(e: AgentEvent): void {
+    this.#emit(e)
+  }
+
   /**
    * Emit a tool call after a delay, with nothing driving it. Stands in for a child still
    * emitting while the relay tears down around it.
@@ -202,7 +207,11 @@ class FakeSession implements AgentSession {
   async cancel(): Promise<TurnKey | undefined> {
     return undefined
   }
-  async decidePermission(): Promise<void> {}
+  /** What the orchestrator decided, so a test can assert it REACHED the session. */
+  decided: 'allow' | 'deny' | undefined
+  async decidePermission(decision: 'allow' | 'deny'): Promise<void> {
+    this.decided = decision
+  }
   async fork(): Promise<AgentSession> {
     throw new Error('not implemented')
   }
@@ -384,6 +393,53 @@ test('asking an unknown participant names the ones that exist', async () => {
   await relay.run('a goal')
   await assert.rejects(() => relay.ask('archivist', 'hello'), /unknown participant 'archivist'/)
   await assert.rejects(() => relay.ask('archivist', 'hello'), /advisor, implementer/)
+})
+
+/** Let the relay's event pump drain what was just emitted. */
+const settle = () => new Promise((r) => setTimeout(r, 10))
+
+// --- permission decisions -------------------------------------------------------------
+
+test('a permission request can be answered, and reaches the session', async () => {
+  // Both adapters implement `decidePermission` down to the keystroke, and nothing above
+  // them ever called it. The console rendered `awaiting a permission decision` and offered
+  // no way to answer, so the turn sat at the prompt until a watchdog ended it.
+  const { relay, impl } = await twoParty(['DONE'], ['ack'])
+  await relay.run('a goal')
+
+  impl.emit({ type: 'permission_requested', tool: 'exec', input: {}, seq: 900, at: Date.now(), provisional: true })
+  await settle()
+
+  assert.deepEqual(relay.permissionsPending(), [{ id: 'implementer', tool: 'exec' }])
+  await relay.decidePermission('implementer', 'allow')
+
+  assert.equal(impl.decided, 'allow', 'the decision reaches the session, not just the log')
+  assert.deepEqual(relay.permissionsPending(), [], 'and the request is no longer outstanding')
+  // Recorded: a human decision about what a participant may do is exactly what someone
+  // reading the log later needs in order to explain why a tool call did or did not happen.
+  assert.match(relay.log.at(-1)!.text, /you allowed implementer: exec/)
+})
+
+test('a request the participant moved past is not still offered', async () => {
+  // A permission can be answered in the child's own terminal, or the turn can end without
+  // one. Either way the console would go on offering to decide something nobody is waiting
+  // on — and `decidePermission` would send a keystroke into a session that is not at a
+  // prompt. Any later event from that participant clears it.
+  const { relay, impl } = await twoParty(['DONE'], ['ack'])
+  await relay.run('a goal')
+
+  impl.emit({ type: 'permission_requested', tool: 'exec', input: {}, seq: 901, at: Date.now(), provisional: true })
+  await settle()
+  assert.equal(relay.permissionsPending().length, 1)
+
+  impl.emit({ type: 'tool_use', tool: 'Bash', input: {}, seq: 902, at: Date.now(), provisional: true })
+  await settle()
+
+  assert.deepEqual(relay.permissionsPending(), [], 'it moved on, so there is nothing to decide')
+  await assert.rejects(
+    () => relay.decidePermission('implementer', 'allow'),
+    /not waiting on a permission decision/,
+  )
 })
 
 // --- visibility ---------------------------------------------------------------------
