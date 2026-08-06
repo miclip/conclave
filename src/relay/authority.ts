@@ -65,6 +65,12 @@ const NOISE = new Set([
   'instruction', 'instructions', 'anything', 'something', 'please', 'would', 'should',
 ])
 
+/** Just the basename, so `/abs/path/two.txt` matches an instruction saying `two.txt`. */
+function base(token: string): string {
+  const parts = token.split('/')
+  return parts[parts.length - 1] || token
+}
+
 /**
  * Identifiers a later instruction could plausibly refer to.
  *
@@ -89,18 +95,26 @@ export function extractTokens(text: string): string[] {
   // Identifiers: snake_case, camelCase, SCREAMING, or a distinctive prefix like `ZQX_`.
   for (const m of text.matchAll(/\b[A-Za-z][A-Za-z0-9]*(?:[_-][A-Za-z0-9]+)+\b/g)) add(m[0]!)
   for (const m of text.matchAll(/\b[a-z]+[A-Z][A-Za-z0-9]*\b/g)) add(m[0]!)
-  return [...out]
+
+  // Drop path SEGMENTS. `/Users/me/coding-repl/.conclave/two.txt` legitimately yields the
+  // full path and `two.txt`, but the identifier rules also pick out `coding-repl` and
+  // `scratch-authority` — and matching on a repository name would fire on any two absolute
+  // paths in the same checkout. Over-detection is the safe direction, but not this kind:
+  // a detector that cries conflict on every path erodes the trust that makes the pause
+  // worth reading.
+  const paths = [...out].filter((t) => t.includes('/'))
+  const keep = new Set<string>()
+  for (const t of out) {
+    const isSegment = paths.some((p) => p !== t && p.includes(t) && base(p) !== t)
+    if (!isSegment) keep.add(t)
+  }
+  for (const p of paths) keep.add(base(p))
+  return [...keep]
 }
 
 /** Verbs that undo rather than change. `restore` is included: it reverses a removal. */
 const REVERSAL =
   /\b(remove|removing|delete|deleting|revert|reverting|undo|undoing|roll ?back|drop|dropping|strip|stripping|discard|discarding|back out|take out|get rid of|restore|restoring|unwind|revert to)\b/i
-
-/** Just the basename, so `/abs/path/two.txt` matches an instruction saying `two.txt`. */
-function base(token: string): string {
-  const parts = token.split('/')
-  return parts[parts.length - 1] || token
-}
 
 /**
  * Would this advisor instruction reverse something a restricted message caused?

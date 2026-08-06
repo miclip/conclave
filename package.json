@@ -26,7 +26,8 @@
     "test:live:pause": "ORCH_LIVE_PAUSE=1 node --test src/relay/pause.live.test.ts",
     "test:live:rotate": "ORCH_LIVE_ROTATE=1 node --test src/rotation/rotate.live.test.ts",
     "test:live:rollback": "ORCH_LIVE_ROLLBACK=1 node --test src/rotation/rotate.rollback.live.test.ts",
-    "test:live:claim": "ORCH_LIVE_CLAIM=1 node --test src/rotation/acceptanceClaim.live.test.ts"
+    "test:live:claim": "ORCH_LIVE_CLAIM=1 node --test src/rotation/acceptanceClaim.live.test.ts",
+    "test:live:authority": "ORCH_LIVE_AUTHORITY=1 node --test src/relay/authority.live.test.ts"
   },
   "dependencies": {
     "node-pty": "^1.0.0"

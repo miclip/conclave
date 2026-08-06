@@ -451,6 +451,15 @@ test('an advisor instruction that would undo an aside pauses BEFORE it is delive
   await run.continue()
   assert.equal((await run.result()).reason, 'done')
   assert.ok(impl.received.some((m) => m.includes('Remove two.txt')), 'continuing delivers it')
+
+  // And the decision REACHES the implementer, at human rank. Found live: without this the
+  // implementer declined the delivered instruction because, from its side, the conflict
+  // was still unacknowledged — "what I won't do is delete it while the conflict is
+  // unacknowledged". The pause bought a delay and nothing else.
+  const delivered = impl.received.find((m) => m.includes('Remove two.txt'))!
+  assert.ok(delivered.includes('FROM THE HUMAN'), 'the adjudication rides with the instruction')
+  assert.ok(delivered.includes('I am allowing the advisor'))
+  assert.ok(delivered.includes('not the advisor overriding me'))
 })
 
 test('an adjudicated conflict is not raised again for the same instruction', async (t) => {

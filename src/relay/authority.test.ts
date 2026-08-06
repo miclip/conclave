@@ -43,18 +43,31 @@ test('tokens are drawn from filenames, paths, quoted spans and identifiers', () 
 })
 
 test('the live case fires: an advisor removing a file an aside asked for', () => {
-  // Verbatim from the 30-minute pause run. The advisor never saw the aside, met a file
-  // nobody had asked for, and instructed its removal.
+  // From the 30-minute pause run, verbatim except the absolute path — a tracked source
+  // file may not hardcode a home directory, which the config suite enforces and which
+  // caught this file on its first commit.
   const origin = originOf(
     restricted('Without reading any file, tell me the word you chose earlier, then write it into two.txt.'),
   )
   const conflict = detectConflict(
-    'Remove /Users/miclip/workspace/coding-repl/.conclave/scratch-pause/two.txt, leave one.txt unchanged, and wait.',
+    'Remove /repo/.conclave/scratch-pause/two.txt, leave one.txt unchanged, and wait.',
     [origin],
   )
   assert.ok(conflict, 'this is the case the whole mechanism exists for')
   assert.equal(conflict.verb.toLowerCase(), 'remove')
   assert.deepEqual(conflict.matched, ['two.txt'])
+})
+
+test('path segments are not tokens, or every absolute path matches every other', () => {
+  // Observed live: an aside and an instruction both naming absolute paths in this checkout
+  // matched on `coding-repl` and `scratch-authority`. Over-detection is the safe direction
+  // in general; a detector that fires on the repository name is not over-detection, it is
+  // noise, and noise is what stops a pause being read.
+  const t = extractTokens('Also create /repo/checkout/.conclave/scratch-authority/two.txt with the word.')
+  assert.ok(t.includes('two.txt'), 'the basename is the useful handle')
+  assert.ok(t.some((x) => x.endsWith('scratch-authority/two.txt')), 'and the full path is kept')
+  assert.ok(!t.includes('checkout'), 'a repository name must not be a token')
+  assert.ok(!t.includes('scratch-authority'), 'nor an intermediate directory')
 })
 
 test('a path in the instruction matches a bare filename in the aside', () => {

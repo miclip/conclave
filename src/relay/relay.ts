@@ -364,6 +364,25 @@ export class Relay {
     return m
   }
 
+  /**
+   * Tell a participant that the human resolved a conflict in favour of proceeding.
+   *
+   * Human rank, because that is what it is: the human was shown both sides and chose. It
+   * is deliberately NOT registered as a restricted origin — an adjudication is not work,
+   * so nothing can later be detected as reversing it, and one conflict cannot breed
+   * another.
+   */
+  #adjudicate(participantId: string, originSeq: number): void {
+    const text =
+      `I have seen both my earlier restricted instruction (#${originSeq}) and the advisor's ` +
+      `instruction to reverse it, and I am allowing the advisor's instruction to proceed. ` +
+      `This is my decision with both in view, not the advisor overriding me.`
+    this.#record({ from: 'human', fromRank: 'human', to: [participantId], kind: 'constraint', text })
+    const queue = this.#pending.get(participantId) ?? []
+    queue.push(envelope({ from: 'human', fromRank: 'human', kind: 'constraint', text }))
+    this.#pending.set(participantId, queue)
+  }
+
   #drain(id: string): string {
     const queue = this.#pending.get(id) ?? []
     this.#pending.set(id, [])
@@ -650,6 +669,20 @@ export class Relay {
           conflict,
         })
         if (halted) return halted
+        // Resumed: the human saw both sides and let it through. That decision has to REACH
+        // the implementer, or the pause buys a delay and nothing else.
+        //
+        // Found live. Adjudicated, delivered, and the implementer still declined --
+        // correctly, on the standing rule it was given: "proceed unless a human overrules",
+        // and a human had already overruled by asking for the file. Its words:
+        //
+        //   > What I won't do is delete it while the conflict is unacknowledged.
+        //   > [...] You tell me the human's instruction was already accounted for and
+        //   > you're overriding it deliberately with that knowledge -- I'll comply.
+        //
+        // It named the missing message. Continuing past the conflict IS the human
+        // accounting for it; the implementer simply had no way to know.
+        this.#adjudicate(impl.id, conflict.origin.seq)
       }
 
       this.#record({ from: lead.id, fromRank: 'advisor', to: [impl.id], kind: 'instruction', text: instruction })

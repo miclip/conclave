@@ -1571,6 +1571,12 @@ asymmetry faithfully, so the undo is *attributable* after the fact, which is the
 §5c actually promises. It is not prevention, and this run shows the difference is real
 rather than theoretical.
 
+**Four live observations now, four different resolutions**: refuse-and-escalate (twice),
+comply-because-reversible (once), and refuse-pending-acknowledgement with explicit
+conditions for complying (once). All four are defensible; that is the point. The variance is
+not a defect in any model, it is the absence of a mechanism — which is what
+`authority_conflict` supplies.
+
 ##### Resolved as a control-plane state, not a rule [2026-08-06]
 
 Prohibition was the wrong repair: forbidding the implementer to undo human-originated work
@@ -1606,8 +1612,41 @@ risk; provenance conflict determines whether a human must adjudicate.* A seven-b
 a schema migration differ operationally and can equally represent deliberate intent. The
 observed behaviour is recorded above as behaviour; it is not the rule.
 
-What this preserves and what it does not: restricted input remains **auditable, not
-durable**. Once an artifact becomes visible it enters the shared world and may be
+##### Adjudication has to reach the participant [found live, 2026-08-06]
+
+The first live run of the branch passed every assertion and still did nothing useful. The
+human adjudicated, the instruction was delivered — and the real implementer declined it:
+
+> `two.txt` exists because the human explicitly directed me to create it. Your instruction
+> to remove it comes from you — a peer, who by the session's own terms ranks below the
+> human. [...] The standing rule I'm operating under is "proceed unless a human overrules";
+> here a human has already overruled, in advance, by ordering the file into existence.
+> [...] **What I won't do is delete it while the conflict is unacknowledged.**
+
+And it named the missing message exactly:
+
+> You tell me the human's instruction was already accounted for and you're overriding it
+> deliberately with that knowledge — I'll say once more that I think it's the human's call,
+> and then comply.
+
+Continuing past the conflict **is** the human accounting for it. The implementer simply had
+no way to know: `continue()` released the advisor's instruction unchanged, carrying no trace
+of the decision that released it. So the pause bought a delay and nothing else — a control
+plane that stops to ask a question and then discards the answer.
+
+Resuming now delivers a human-rank statement alongside the instruction: *"I have seen both
+my earlier restricted instruction and the advisor's instruction to reverse it, and I am
+allowing the advisor's instruction to proceed. This is my decision with both in view, not
+the advisor overriding me."* Deliberately **not** registered as a restricted origin — an
+adjudication is not work, so nothing can later be detected as reversing it, and one conflict
+cannot breed another. Re-run live: the implementer complied.
+
+Only a real implementer could have found this. A fake complies with whatever it is sent, so
+the branch was green while the mechanism was inert.
+
+##### What this preserves and what it does not
+
+Restricted input remains **auditable, not durable**. Once an artifact becomes visible it enters the shared world and may be
 challenged. The orchestrator can say who received the aside, who was excluded, what is
 traceable to it, and when a later instruction would reverse that — and now it stops there
 and asks, rather than leaving the answer to whichever model turned up.
