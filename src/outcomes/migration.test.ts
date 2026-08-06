@@ -24,36 +24,68 @@ const abort = { ...emptyTranscriptState(), exists: true, turnAbortedReason: 'int
 
 // --- (2) verdicts are revisable when stronger cross-channel evidence arrives ---------
 
-test('a permission deny recorded after PermissionRequest revises the verdict', () => {
-  // The Codex shape: the hook says a decision was pending, the input log says which way
-  // it went, and they arrive separately.
+test('a pending permission is in_progress until a decision is recorded', () => {
+  // Corrected by the live Codex acceptance run. PermissionRequest fires when the dialog
+  // OPENS, so inferring refusal from "no Stop yet" settled the turn while the user was
+  // still being asked -- and every subsequent allow had to be walked back.
   const t = new TurnVerdictTracker({ agent: 'codex' })
 
   const pending = t.observeHook('PermissionRequest', { tool_name: 'apply_patch' })
-  assert.equal(pending?.verdict?.outcome, 'permission_refused')
-  assert.equal(pending?.verdict?.confidence, 'inferred')
-  assert.ok(
-    pending!.verdict!.provenance.some((p) => p.detail.includes('no allow recorded')),
-    'with no decision recorded it must rest on the mediated-input inference',
-  )
+  assert.equal(pending, undefined, 'an open dialog is not yet an outcome')
+  assert.equal(t.settled, false)
 
   const decided = t.observeOrchestrator({ sentPermissionDecision: 'deny' })
-  assert.ok(decided, 'the explicit decision must produce an update, not be swallowed')
+  assert.ok(decided, 'the explicit decision is what settles it')
   assert.equal(decided.verdict?.outcome, 'permission_refused')
-  assert.ok(decided.supersedes, 'the weaker inference must be withdrawn by name')
+  assert.equal(decided.supersedes, undefined, 'nothing was reported before, so nothing is withdrawn')
   assert.ok(
     decided.verdict!.provenance.some((p) => p.source === 'orchestrator' && p.detail === 'denied'),
-    'the stronger verdict must cite the decision it now rests on',
+    'the verdict must cite the decision it rests on',
   )
 })
 
-test('a transcript abort revises a verdict that rested on the hook stream alone', () => {
+test('an allowed permission completes rather than being walked back', () => {
+  // The flow the premature inference broke: dialog opens, user allows, turn runs on and
+  // Stops. There must never have been a refusal verdict to withdraw.
   const t = new TurnVerdictTracker({ agent: 'codex' })
   t.observeHook('PermissionRequest', { tool_name: 'apply_patch' })
+  t.observeOrchestrator({ sentPermissionDecision: 'allow' })
+  assert.equal(t.settled, false, 'an allow does not end the turn')
+
+  const done = t.observeHook('Stop', { hook_event_name: 'Stop' })
+  assert.equal(done?.verdict?.outcome, 'completed')
+  assert.equal(done?.supersedes, undefined, 'no bogus refusal should have been reported')
+})
+
+test('an explicit deny outranks the abort that implements it', () => {
+  // On Codex a refusal IS an abort: denying writes turn_aborted reason=interrupted,
+  // byte-identical to a user cancellation. Ranking the abort first would report every
+  // refused permission as a plain cancellation and lose why the turn ended.
+  const t = new TurnVerdictTracker({ agent: 'codex' })
+  t.observeHook('PermissionRequest', { tool_name: 'apply_patch' })
+  t.observeOrchestrator({ sentPermissionDecision: 'deny' })
+  const withAbort = t.observeTranscript({ exists: true, turnAbortedReason: 'interrupted' })
+
+  assert.equal(t.verdict?.outcome, 'permission_refused', 'not cancelled')
+  if (withAbort?.verdict) {
+    assert.ok(
+      withAbort.verdict.provenance.some((p) => p.detail.includes('how the refusal ended the turn')),
+      'the abort should be reported as the mechanism, not the reason',
+    )
+  }
+})
+
+test('a transcript abort upgrades a cancellation from assumed to proven', () => {
+  // The Codex cancel path: we know we sent ESC, then the child records turn_aborted and
+  // the verdict stops resting on our bookkeeping.
+  const t = new TurnVerdictTracker({ agent: 'codex' })
+  const assumed = t.observeOrchestrator({ sentCancel: true })
+  assert.equal(assumed?.verdict?.confidence, 'assumed')
+
   const revised = t.observeTranscript({ exists: true, turnAbortedReason: 'interrupted' })
   assert.equal(revised?.verdict?.outcome, 'cancelled')
   assert.equal(revised?.verdict?.confidence, 'proven')
-  assert.ok(revised?.supersedes, 'the earlier permission_refused must be superseded')
+  assert.ok(revised?.supersedes, 'the weaker verdict must be withdrawn by name')
 })
 
 // --- (3) external ownership degrades attribution ------------------------------------
@@ -67,7 +99,8 @@ test('external input ownership degrades cancellation and refusal attribution', (
   assert.equal(c?.verdict?.confidence, 'uncertain', 'mediated would be `assumed`')
 
   const refusal = new TurnVerdictTracker({ agent: 'codex', orchestrator: external })
-  const r = refusal.observeHook('PermissionRequest', { tool_name: 'apply_patch' })
+  refusal.observeHook('PermissionRequest', { tool_name: 'apply_patch' })
+  const r = refusal.observeOrchestrator({ sentPermissionDecision: 'deny' })
   assert.equal(r?.verdict?.outcome, 'permission_refused')
   assert.equal(r?.verdict?.confidence, 'uncertain')
   assert.ok(

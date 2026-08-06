@@ -55,6 +55,9 @@ async function main(): Promise<number> {
       firedAt,
       hookPid: process.pid,
       bytes: raw.length,
+      // The payload itself, so the local journal is sufficient for replay and for
+      // fixture collection without a receiver running.
+      body: raw,
     })
   }
 

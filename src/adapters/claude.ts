@@ -31,6 +31,7 @@ import type {
   SendProvenance,
   SessionSnapshot,
   TurnKey,
+  TurnRecord,
 } from '../contract/session.ts'
 import { guaranteesFor, turnKey } from '../contract/session.ts'
 import { emptyTranscriptState } from '../outcomes/classify.ts'
@@ -41,6 +42,7 @@ import { InputQueue } from '../process/input.ts'
 import { HookReceiver } from '../hooks/receiver.ts'
 import type { HookDelivery } from '../hooks/journal.ts'
 import { TranscriptSessionView } from '../transcript/reconcile.ts'
+import { AsyncQueue } from './asyncQueue.ts'
 
 const CLIENT = join(import.meta.dirname, '..', 'hooks', 'client.ts')
 const HOOK_EVENTS = ['SessionStart', 'UserPromptSubmit', 'PermissionRequest', 'Stop', 'SessionEnd']
@@ -61,35 +63,6 @@ interface TurnState {
   /** Seq of the last `turn_end` emitted, so a revision can withdraw it by number. */
   endSeq: number | undefined
   assistantText: string | undefined
-}
-
-class AsyncQueue<T> {
-  #items: T[] = []
-  #waiters: ((v: IteratorResult<T>) => void)[] = []
-  #closed = false
-
-  push(item: T): void {
-    const w = this.#waiters.shift()
-    if (w) w({ value: item, done: false })
-    else this.#items.push(item)
-  }
-
-  close(): void {
-    this.#closed = true
-    for (const w of this.#waiters.splice(0)) w({ value: undefined as any, done: true })
-  }
-
-  [Symbol.asyncIterator](): AsyncIterator<T> {
-    return {
-      next: () =>
-        new Promise<IteratorResult<T>>((resolve) => {
-          const item = this.#items.shift()
-          if (item !== undefined) resolve({ value: item, done: false })
-          else if (this.#closed) resolve({ value: undefined as any, done: true })
-          else this.#waiters.push(resolve)
-        }),
-    }
-  }
 }
 
 export interface ClaudeAdapterOptions {
@@ -490,7 +463,7 @@ export class ClaudePtyHookAdapter implements AgentSession {
     const action = await this.#input.decidePermission(decision)
     // The decision is evidence: on both agents a refused permission is otherwise
     // indistinguishable from a user cancellation.
-    const turn = this.#latestLiveTurn()
+    const turn = this.#latestSettleableTurn()
     if (turn) {
       this.#apply(
         turn,
@@ -519,22 +492,27 @@ export class ClaudePtyHookAdapter implements AgentSession {
       }
     }
     const snap = await this.#view.snapshot()
-    // Hook-derived verdicts outrank transcript inference: Stop proves completion, the
-    // transcript only suggests it.
-    for (let i = 0; i < snap.turns.length; i++) {
-      const known = this.#turns.get(this.#order[i] ?? '')
-      const verdict = known?.tracker.verdict
-      if (known && verdict) {
-        snap.turns[i] = {
-          ...snap.turns[i]!,
-          key: known.key,
-          state: verdict.outcome,
-          confidence: verdict.confidence,
-          provenance: verdict.provenance,
-        }
+
+    // Claude Code writes no per-turn id into its transcript, so correspondence is
+    // positional. Hook-derived verdicts outrank transcript inference -- Stop proves
+    // completion, the transcript only suggests it -- and any turn the adapter knows about
+    // beyond what the transcript has yet recorded is appended rather than dropped.
+    // Omitting it would make a consumer folding events() disagree with snapshot().
+    const turns = [...snap.turns]
+    this.#order.forEach((key, i) => {
+      const known = this.#turns.get(key)
+      if (!known) return
+      const verdict = known.tracker.verdict
+      const base = turns[i] ?? { key: known.key, prompt: known.prompt, state: 'in_progress' as const, toolCalls: [] }
+      const merged: TurnRecord = { ...base, key: known.key }
+      if (verdict) {
+        merged.state = verdict.outcome
+        merged.confidence = verdict.confidence
+        merged.provenance = verdict.provenance
       }
-    }
-    return { ...snap, role: this.#opts.role }
+      turns[i] = merged
+    })
+    return { ...snap, turns, role: this.#opts.role }
   }
 
   async fork(): Promise<AgentSession> {
@@ -560,24 +538,11 @@ export class ClaudePtyHookAdapter implements AgentSession {
       await this.#pty.terminate()
     } else if (mode === 'abandoned') {
       // We are walking away from the transport, not asserting anything about the turns.
-      // Only turns with no verdict yet. Abandonment asserts nothing about a turn whose
-      // outcome is already established -- walking away does not un-complete it.
+      // Only turns with no verdict yet: abandonment asserts nothing about a turn whose
+      // outcome is already established -- walking away does not un-complete it. Routed
+      // through the tracker so the verdict it holds matches what the stream reported.
       for (const turn of this.#liveTurns()) {
-        this.#apply(turn, turn.tracker.observeTranscript({}) ?? undefined, true)
-        this.#apply(
-          turn,
-          {
-            verdict: {
-              outcome: 'transport_lost',
-              confidence: 'uncertain',
-              provenance: [
-                { source: 'transport', detail: 'adapter abandoned the session' },
-                { source: 'transport', detail: 'the child may still be running', caveat: true },
-              ],
-            },
-          },
-          true,
-        )
+        this.#apply(turn, turn.tracker.observeObservationGap(), true)
       }
     }
 

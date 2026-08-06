@@ -1,0 +1,564 @@
+/**
+ * CodexPtyHookAdapter — the second live adapter.
+ *
+ * Written against the fixtures in spikes/codex/FINDINGS.md rather than by analogy with
+ * the Claude adapter, because the two genuinely differ in what they can know:
+ *
+ *   readiness      Codex fires NO hook before the first turn -- not even SessionStart.
+ *                  Readiness is the TUI negotiating raw mode, and session identity
+ *                  (session_id, transcript_path) is unknown until a turn exists.
+ *   completion     Stop fires AND the transcript records task_complete.
+ *   cancellation   turn_aborted reason=interrupted in the transcript. Stop does NOT
+ *                  fire; on 0.146.0 the two are mutually exclusive.
+ *   refusal        PermissionRequest fires and the transcript records turn_aborted --
+ *                  byte-identical to a user cancellation. Only the permission event plus
+ *                  our own record of the mediated deny separates them.
+ *   correlation    turn_id, present on every hook except SessionStart.
+ *
+ * The adapter owns process lifecycle, sanitized environment, input serialization, hook
+ * ingestion, transcript reconciliation and evidence classification. No relay policy, no
+ * round budgets, no role prompting, no summarisation.
+ *
+ * Hook registration is NOT generated per session the way Claude's is: Codex reads a
+ * project-local `.codex/hooks.json`, and its trust hash covers the command string. The
+ * registry preflight therefore refuses to construct this adapter until those hooks are
+ * loaded, enabled AND trusted -- a session whose hooks cannot execute has no
+ * turn-completion signal at all.
+ */
+
+import { mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import type {
+  AgentEvent,
+  AgentSession,
+  Guarantees,
+  InputOwnership,
+  Role,
+  SendProvenance,
+  SessionSnapshot,
+  TurnKey,
+  TurnRecord,
+} from '../contract/session.ts'
+import { guaranteesFor, turnKey } from '../contract/session.ts'
+import { emptyTranscriptState } from '../outcomes/classify.ts'
+import { TurnVerdictTracker, type VerdictUpdate } from '../outcomes/tracker.ts'
+import { sanitizedCopy } from '../process/childenv.ts'
+import { PtyProcess } from '../process/pty.ts'
+import { CODEX_PERMISSION_ENCODING, InputQueue } from '../process/input.ts'
+import { HookReceiver } from '../hooks/receiver.ts'
+import type { HookDelivery } from '../hooks/journal.ts'
+import { TranscriptSessionView } from '../transcript/reconcile.ts'
+import { AsyncQueue } from './asyncQueue.ts'
+
+interface TurnState {
+  key: TurnKey
+  prompt: string
+  startedAt: number
+  tracker: TurnVerdictTracker
+  /** Seq of the last `turn_end` emitted, so a revision can withdraw it by number. */
+  endSeq: number | undefined
+  assistantText: string | undefined
+}
+
+export interface CodexAdapterOptions {
+  cwd: string
+  role: Role
+  inputOwnership?: InputOwnership | undefined
+  /** Extra CLI args from the participant spec. */
+  args?: string[] | undefined
+  readyTimeoutMs?: number | undefined
+  watchdogMs?: number | undefined
+}
+
+export class CodexPtyHookAdapter implements AgentSession {
+  readonly agent = 'codex'
+  readonly guarantees: Guarantees
+
+  #pty!: PtyProcess
+  #input!: InputQueue
+  #receiver!: HookReceiver
+  #events = new AsyncQueue<AgentEvent>()
+  #turns = new Map<string, TurnState>()
+  #order: string[] = []
+  #view: TranscriptSessionView | undefined
+  #sessionId = ''
+  #transcriptPath: string | undefined
+  #seq = 0
+  #interactive = false
+  #closed = false
+  #closeMode: 'graceful' | 'abandoned' | undefined
+  #pendingPrompt:
+    | { resolve: (k: TurnKey) => void; reject: (e: Error) => void; prompt: string }
+    | undefined
+  #opts: CodexAdapterOptions
+
+  private constructor(opts: CodexAdapterOptions) {
+    this.#opts = opts
+    this.guarantees = guaranteesFor(opts.inputOwnership ?? 'mediated')
+  }
+
+  get sessionId(): string {
+    return this.#sessionId
+  }
+
+  /**
+   * Codex fires no hook before the first turn, so there is no lifecycle event that means
+   * "the session exists". Readiness here is honestly weaker than Claude's: the terminal
+   * is live and will accept a prompt. It deliberately does NOT pretend to be SessionStart
+   * -- session identity stays unknown until the first turn produces it.
+   */
+  get isReady(): boolean {
+    return this.#interactive && this.#pty?.alive === true
+  }
+
+  get acceptsInput(): boolean {
+    return this.#pty?.alive === true && this.#pty.isInteractive
+  }
+
+  /** True once a hook has told us which session and transcript this is. */
+  get sessionIdentified(): boolean {
+    return this.#transcriptPath !== undefined
+  }
+
+  static async start(opts: CodexAdapterOptions): Promise<CodexPtyHookAdapter> {
+    const self = new CodexPtyHookAdapter(opts)
+    await self.#boot()
+    return self
+  }
+
+  async #boot(): Promise<void> {
+    const runDir = mkdtempSync(join(tmpdir(), 'orch-codex-'))
+
+    this.#receiver = new HookReceiver(join(runDir, 'hooks.ndjson'))
+    const url = await this.#receiver.start()
+    this.#receiver.on('delivery', (d) => this.#onHook(d))
+    this.#receiver.on('duplicate', (d) =>
+      this.#emit({
+        type: 'error',
+        message: `replayed hook delivery ${d.deliveryId} (${d.event}); ignored`,
+        fatal: false,
+        seq: this.#next(),
+        at: Date.now(),
+        provisional: false,
+      }),
+    )
+
+    const env = sanitizedCopy(process.env as Record<string, string>, {
+      extra: {
+        ORCH_HOOK_URL: url,
+        ORCH_HOOK_ATTEMPT_JOURNAL: join(runDir, 'attempts.ndjson'),
+        ORCH_HOOK_TIMEOUT_MS: '5000',
+      },
+    })
+
+    this.#pty = await PtyProcess.spawn({
+      file: 'codex',
+      args: this.#opts.args ?? [],
+      cwd: this.#opts.cwd,
+      env,
+    })
+    this.#input = new InputQueue(this.#pty, CODEX_PERMISSION_ENCODING)
+    this.#pty.on('exit', (info) => void this.#onExit(info.reason))
+
+    // Raw-mode negotiation is the only readiness evidence Codex offers before a turn.
+    const interactive = await this.#pty.waitForOutput(
+      () => this.#pty.isInteractive,
+      this.#opts.readyTimeoutMs ?? 60_000,
+    )
+    if (!interactive) throw new Error('codex did not negotiate an interactive terminal')
+    this.#interactive = true
+    await this.#pty.waitQuiet(1200, 25_000)
+  }
+
+  #next(): number {
+    return ++this.#seq
+  }
+
+  #emit(e: AgentEvent): void {
+    this.#events.push(e)
+  }
+
+  #newTracker(): TurnVerdictTracker {
+    return new TurnVerdictTracker({
+      agent: this.agent,
+      orchestrator: {
+        sentCancel: false,
+        inputIsMediated: this.guarantees.inputOwnership === 'mediated',
+      },
+      watchdogSeconds: (this.#opts.watchdogMs ?? 600_000) / 1000,
+    })
+  }
+
+  /**
+   * Hook payloads are consumed as delivered and normalised only here, at the adapter
+   * boundary. The receiver journals them byte-for-byte; nothing upstream reshapes them.
+   */
+  #onHook(d: HookDelivery): void {
+    // SessionStart carries the transcript path but no turn_id: it is the first chance to
+    // learn session identity, and on Codex it arrives with the first turn rather than at
+    // boot.
+    if (d.payload['transcript_path'] && !this.#transcriptPath) {
+      this.#sessionId = String(d.payload['session_id'] ?? '')
+      this.#transcriptPath = String(d.payload['transcript_path'])
+      this.#view = new TranscriptSessionView({
+        path: this.#transcriptPath,
+        agent: 'codex',
+        sessionId: this.#sessionId,
+        cwd: this.#opts.cwd,
+        guarantees: this.guarantees,
+      })
+    }
+
+    switch (d.event) {
+      case 'SessionStart':
+        return
+
+      case 'UserPromptSubmit': {
+        const key = turnKey(String(d.turnKey ?? `unkeyed-${this.#order.length}`))
+        const tracker = this.#newTracker()
+        tracker.observeHook('UserPromptSubmit', d.payload)
+        const turn: TurnState = {
+          key,
+          prompt: String(d.payload['prompt'] ?? ''),
+          startedAt: Date.now(),
+          tracker,
+          endSeq: undefined,
+          assistantText: undefined,
+        }
+        this.#turns.set(String(key), turn)
+        this.#order.push(String(key))
+        this.#emit({
+          type: 'turn_start',
+          prompt: turn.prompt,
+          turnKey: key,
+          seq: this.#next(),
+          at: turn.startedAt,
+          provisional: false,
+        })
+        this.#pendingPrompt?.resolve(key)
+        this.#pendingPrompt = undefined
+        return
+      }
+
+      case 'PermissionRequest': {
+        const turn = this.#turnFor(d) ?? this.#latestLiveTurn()
+        if (turn) this.#apply(turn, turn.tracker.observeHook('PermissionRequest', d.payload), true)
+        this.#emit({
+          type: 'permission_requested',
+          tool: String(d.payload['tool_name'] ?? 'unknown'),
+          input: d.payload['tool_input'],
+          turnKey: turn?.key,
+          seq: this.#next(),
+          at: Date.now(),
+          provisional: false,
+        })
+        return
+      }
+
+      case 'Stop': {
+        const turn = this.#turnFor(d) ?? this.#latestSettleableTurn()
+        if (!turn) return
+        if (d.payload['last_assistant_message']) {
+          turn.assistantText = String(d.payload['last_assistant_message'])
+        }
+        this.#apply(turn, turn.tracker.observeHook('Stop', d.payload), false)
+        return
+      }
+
+      case 'SessionEnd': {
+        // Never observed on Codex in any fixture, and deliberately not depended on for
+        // readiness or terminal resolution. Recorded as audit evidence if it appears --
+        // it can only strengthen a process_exited verdict, never create one.
+        for (const t of this.#liveTurns()) {
+          this.#apply(t, t.tracker.observeHook('SessionEnd', d.payload), true)
+        }
+        return
+      }
+    }
+  }
+
+  #turnFor(d: HookDelivery): TurnState | undefined {
+    return d.turnKey ? this.#turns.get(String(d.turnKey)) : undefined
+  }
+
+  #allTurns(): TurnState[] {
+    return this.#order.map((k) => this.#turns.get(k)!).filter(Boolean)
+  }
+
+  #liveTurns(): TurnState[] {
+    return this.#allTurns().filter((t) => !t.tracker.settled)
+  }
+
+  #latestLiveTurn(): TurnState | undefined {
+    return this.#liveTurns().at(-1)
+  }
+
+  #latestSettleableTurn(): TurnState | undefined {
+    return this.#liveTurns().at(-1) ?? this.#allTurns().at(-1)
+  }
+
+  #apply(turn: TurnState, update: VerdictUpdate | undefined, synthesized: boolean): void {
+    if (!update) return
+
+    if (update.supersedes && turn.endSeq !== undefined) {
+      this.#emit({
+        type: 'revision',
+        reason: 'late_signal',
+        replaces: [turn.endSeq],
+        provenance: [
+          {
+            source: 'transcript',
+            detail:
+              `stronger evidence superseded ${update.supersedes.outcome}` +
+              (update.verdict ? ` with ${update.verdict.outcome}` : ' with no verdict'),
+          },
+          ...(update.verdict?.provenance ?? []),
+        ],
+        seq: this.#next(),
+        at: Date.now(),
+        provisional: false,
+      })
+      turn.endSeq = undefined
+    }
+
+    if (!update.verdict) return
+
+    const seq = this.#next()
+    turn.endSeq = seq
+    this.#emit({
+      type: 'turn_end',
+      verdict: update.verdict,
+      synthesized,
+      turnKey: turn.key,
+      seq,
+      at: Date.now(),
+      provisional: false,
+    })
+  }
+
+  /**
+   * Rebuild transcript evidence per turn from the transcript as it currently stands.
+   *
+   * Codex correlates far better than Claude here: turns are keyed by `turn_id` in both
+   * the hooks and the transcript, so this matches by key instead of Claude's positional
+   * credit accounting. `turn_aborted` is the only proof of cancellation Codex offers, and
+   * it lives only in the transcript -- so this is not an optional enrichment step, it is
+   * where cancelled turns get their verdict.
+   *
+   * `resetTranscript` rather than merge: compaction may remove a record already observed,
+   * and continuing to assert it would contradict the source of truth.
+   */
+  async #reconcileFromTranscript(): Promise<void> {
+    if (!this.#view) return
+    let snap: SessionSnapshot
+    try {
+      snap = await this.#view.snapshot()
+    } catch {
+      return
+    }
+
+    const byKey = new Map(snap.turns.map((t) => [String(t.key), t]))
+    for (const turn of this.#allTurns()) {
+      const record = byKey.get(String(turn.key))
+      if (!record) continue
+      const state = { ...emptyTranscriptState(), exists: true }
+      if (record.state === 'cancelled') {
+        // parseCodex only sets this from an explicit turn_aborted record.
+        state.turnAbortedReason =
+          record.provenance?.find((p) => p.detail.startsWith('turn_aborted'))?.detail.split('=')[1] ??
+          'interrupted'
+      } else if (record.state === 'completed') {
+        state.taskComplete = true
+        state.hasAssistantAfterPrompt = true
+        state.finalStopReason = 'end_turn'
+      }
+      if (record.assistantText) turn.assistantText = record.assistantText
+      this.#apply(turn, turn.tracker.resetTranscript(state), true)
+    }
+  }
+
+  async #onExit(reason: string): Promise<void> {
+    this.#pendingPrompt?.reject(new Error(`codex exited (${reason}) before accepting the prompt`))
+    this.#pendingPrompt = undefined
+
+    await this.#reconcileFromTranscript()
+    for (const turn of this.#liveTurns()) {
+      this.#apply(
+        turn,
+        turn.tracker.observeProcess({ alive: false, howEnded: this.#pty.exitInfo?.reason }),
+        true,
+      )
+    }
+
+    if (!this.#closed) {
+      this.#emit({
+        type: 'error',
+        message: `child exited unexpectedly (${reason})`,
+        fatal: true,
+        seq: this.#next(),
+        at: Date.now(),
+        provisional: false,
+      })
+    }
+    this.#events.close()
+  }
+
+  // --- AgentSession ---------------------------------------------------------------
+
+  async send(message: string, _provenance: SendProvenance): Promise<TurnKey> {
+    if (!this.acceptsInput) throw new Error('session is not accepting input')
+    const keyed = new Promise<TurnKey>((resolve, reject) => {
+      this.#pendingPrompt = { resolve, reject, prompt: message }
+    })
+    await this.#input.submit(message)
+    const timeout = new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error('no UserPromptSubmit hook after send')), 60_000),
+    )
+    return Promise.race([keyed, timeout])
+  }
+
+  /**
+   * ESC interrupts. Unlike Claude, the child records this: `turn_aborted` appears in the
+   * transcript, so the verdict becomes `proven` once reconciled rather than resting on
+   * our own bookkeeping.
+   */
+  async cancel(): Promise<TurnKey | undefined> {
+    const turn = this.#latestLiveTurn()
+    await this.#input.cancel(turn ? String(turn.key) : 'no live turn')
+    if (!turn) return undefined
+    this.#apply(turn, turn.tracker.observeOrchestrator({ sentCancel: true }), true)
+    // The child writes turn_aborted asynchronously, so poll rather than reconcile once.
+    // Until it lands the verdict rests on our own ESC record (`assumed`); once it does,
+    // the transcript upgrades it to `proven`. A single fixed sleep raced the write.
+    await this.#awaitTranscriptEvidence(turn, 15_000)
+    return turn.key
+  }
+
+  async decidePermission(decision: 'allow' | 'deny'): Promise<void> {
+    if (this.guarantees.inputOwnership !== 'mediated') {
+      throw new Error('permission decisions require mediated input ownership')
+    }
+    await this.#input.decidePermission(decision)
+    const turn = this.#latestSettleableTurn()
+    if (turn) {
+      this.#apply(turn, turn.tracker.observeOrchestrator({ sentPermissionDecision: decision }), true)
+    }
+    // A denial ends the turn via turn_aborted; an allow lets it continue to Stop, which
+    // arrives through the hook channel and needs no transcript polling.
+    if (decision === 'deny') {
+      const turnToWatch = turn
+      if (turnToWatch) await this.#awaitTranscriptEvidence(turnToWatch, 15_000)
+    }
+  }
+
+  /**
+   * Reconcile repeatedly until this turn's verdict stops resting on our own bookkeeping,
+   * or the budget runs out. Codex records `turn_aborted` after the fact, so the evidence
+   * that upgrades a verdict from `assumed` to `proven` simply is not there yet when the
+   * keystroke returns.
+   */
+  async #awaitTranscriptEvidence(turn: TurnState, budgetMs: number): Promise<void> {
+    const deadline = Date.now() + budgetMs
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 750))
+      await this.#reconcileFromTranscript()
+      const v = turn.tracker.verdict
+      if (v && v.confidence !== 'assumed') return
+    }
+  }
+
+  events(): AsyncIterable<AgentEvent> {
+    return this.#events
+  }
+
+  async snapshot(): Promise<SessionSnapshot> {
+    if (!this.#view) {
+      return {
+        sessionId: this.#sessionId,
+        agent: this.agent,
+        cwd: this.#opts.cwd,
+        role: this.#opts.role,
+        turns: [],
+        guarantees: this.guarantees,
+        compactionGeneration: 0,
+        builtAt: Date.now(),
+      }
+    }
+    const snap = await this.#view.snapshot()
+
+    // Union, not overlay. The adapter learns a turn exists from UserPromptSubmit, which
+    // arrives before Codex has written anything about it to the transcript -- so a
+    // transcript-only view silently omits in-flight turns, and a consumer folding
+    // events() would then disagree with snapshot(). Adapter-known turns lead; tracker
+    // verdicts outrank transcript inference; transcript turns we never saw a hook for
+    // are still reported.
+    const byKey = new Map(snap.turns.map((t) => [String(t.key), t]))
+    const turns: TurnRecord[] = []
+
+    for (const turn of this.#allTurns()) {
+      const record = byKey.get(String(turn.key))
+      byKey.delete(String(turn.key))
+      const verdict = turn.tracker.verdict
+      const merged: TurnRecord = {
+        key: turn.key,
+        prompt: turn.prompt || record?.prompt || '',
+        state: verdict?.outcome ?? record?.state ?? 'in_progress',
+        toolCalls: record?.toolCalls ?? [],
+      }
+      const confidence = verdict?.confidence ?? record?.confidence
+      if (confidence) merged.confidence = confidence
+      const provenance = verdict?.provenance ?? record?.provenance
+      if (provenance) merged.provenance = provenance
+      const text = turn.assistantText ?? record?.assistantText
+      if (text) merged.assistantText = text
+      merged.startedAt = record?.startedAt ?? turn.startedAt
+      turns.push(merged)
+    }
+
+    for (const orphan of byKey.values()) turns.push(orphan)
+
+    return { ...snap, turns, role: this.#opts.role }
+  }
+
+  async fork(): Promise<AgentSession> {
+    throw new Error('fork() not implemented for the PTY adapter yet')
+  }
+
+  async close(mode: 'graceful' | 'abandoned' = 'graceful'): Promise<void> {
+    if (this.#closed) return
+    this.#closed = true
+    this.#closeMode = mode
+
+    if (mode === 'graceful' && this.#pty.alive) {
+      await this.#input.drain()
+      // Reconcile before terminating: an established verdict must not be replaced by a
+      // weaker causal guess because cleanup killed the process.
+      await this.#reconcileFromTranscript()
+      await this.#pty.terminate()
+    } else if (mode === 'abandoned') {
+      // Through the tracker, never around it. Emitting a verdict the tracker does not
+      // hold is precisely what made events() and snapshot() disagree here.
+      for (const turn of this.#liveTurns()) {
+        this.#apply(turn, turn.tracker.observeObservationGap(), true)
+      }
+    }
+
+    await this.#receiver.stop()
+    this.#events.close()
+  }
+
+  /** Test and diagnostic access. */
+  get closeMode(): string | undefined {
+    return this.#closeMode
+  }
+  get inputLog() {
+    return this.#input.actions
+  }
+  get receiver(): HookReceiver {
+    return this.#receiver
+  }
+  get pty(): PtyProcess {
+    return this.#pty
+  }
+}

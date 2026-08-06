@@ -82,7 +82,10 @@ function readJournal(path: string) {
 
 async function launch(runId: string, extraArgs: string[] = []) {
   const env = sanitizedCopy(process.env as Record<string, string>, {
-    extra: { SPIKE_HOOK_JOURNAL: journalPath(runId), SPIKE_RUN_ID: runId },
+    // The sidecar now runs the adapter's own hook client, which journals attempts
+    // under ORCH_HOOK_ATTEMPT_JOURNAL. No URL is set: with no receiver the client still
+    // records the attempt before failing to deliver, which is all this collector needs.
+    extra: { ORCH_HOOK_ATTEMPT_JOURNAL: journalPath(runId), ORCH_RUN_ID: runId },
   })
   const pty = await PtyProcess.spawn({
     file: 'codex',

@@ -121,6 +121,17 @@ export class TurnVerdictTracker {
     return this.#reclassify()
   }
 
+  /**
+   * Record that we have stopped observing this turn -- the adapter walked away from the
+   * transport. Routed through the tracker rather than emitted directly, because a verdict
+   * the tracker does not hold makes `events()` and `snapshot()` disagree: the stream says
+   * transport_lost while the snapshot still reports in_progress.
+   */
+  observeObservationGap(): VerdictUpdate | undefined {
+    this.#evidence.observationGap = true
+    return this.#reclassify()
+  }
+
   observeElapsed(seconds: number): VerdictUpdate | undefined {
     this.#evidence.elapsedSeconds = seconds
     return this.#reclassify()

@@ -23,28 +23,49 @@ const spec = (over: Partial<ParticipantSpec> = {}): ParticipantSpec => ({
   ...over,
 })
 
-test('the default registry lists both agents but only one is constructible', () => {
+test('the default registry lists both agents, both constructible', () => {
   const r = defaultRegistry()
   assert.deepEqual(r.list().map((a) => a.id).sort(), ['claude', 'codex'])
-  assert.deepEqual(r.listAvailable().map((a) => a.id), ['claude'])
+  assert.deepEqual(r.listAvailable().map((a) => a.id).sort(), ['claude', 'codex'])
 })
 
 test('an agent without an adapter is described, not hidden', () => {
-  // Registering Codex without `create` keeps its lower confidence visible. Omitting it
-  // entirely would make it look finished by absence.
-  const r = defaultRegistry()
-  const codex = r.get('codex')
-  assert.equal(codex.create, undefined)
-  assert.ok(codex.unavailableReason?.includes('unverified'))
-  assert.ok(codex.capabilities, 'it must still be conformance-gradeable')
-  assert.ok(codex.launch.deploymentState?.length, 'its deployment preconditions are recorded')
+  // Codex used to be the subject here. Now that it is constructible, the property is
+  // pinned with a synthetic agent -- an agent may be listed, described and
+  // conformance-gradeable while remaining unbuildable, rather than looking finished by
+  // being absent.
+  const r = defaultRegistry().register({
+    id: 'future-agent',
+    displayName: 'Not built yet',
+    capabilities: { ...CODEX_AGENT.capabilities, agent: 'future-agent' },
+    launch: { command: 'future', baseArgs: [], deploymentState: ['needs an adapter'] },
+    unavailableReason: 'adapter not written',
+  })
+  const future = r.get('future-agent')
+  assert.equal(future.create, undefined)
+  assert.ok(future.capabilities, 'it must still be conformance-gradeable')
+  assert.ok(future.launch.deploymentState?.length)
+  assert.ok(!r.listAvailable().some((a) => a.id === 'future-agent'))
+})
+
+test('codex records its deployment preconditions', () => {
+  const codex = defaultRegistry().get('codex')
+  assert.ok(codex.create, 'codex is now constructible')
+  assert.ok(codex.preflight, 'and still gated on hook trust')
+  assert.ok(codex.launch.deploymentState?.some((d) => d.includes('Hook trust')))
 })
 
 test('constructing an unavailable agent explains why rather than failing obscurely', async () => {
-  const r = defaultRegistry()
+  const r = defaultRegistry().register({
+    id: 'future-agent',
+    displayName: 'Not built yet',
+    capabilities: { ...CODEX_AGENT.capabilities, agent: 'future-agent' },
+    launch: { command: 'future', baseArgs: [] },
+    unavailableReason: 'adapter not written',
+  })
   await assert.rejects(
-    () => r.createParticipant(spec({ agent: 'codex' }), { cwd: '/tmp' }),
-    /no adapter yet.*unverified/s,
+    () => r.createParticipant(spec({ agent: 'future-agent', role: 'advisor' }), { cwd: '/tmp' }),
+    /no adapter yet.*adapter not written/s,
   )
 })
 
@@ -103,7 +124,7 @@ test('a new adapter arrives by registration alone', () => {
     },
   }
   const r = defaultRegistry().register(fake)
-  assert.equal(r.listAvailable().length, 2)
+  assert.equal(r.listAvailable().length, 3)
   assert.equal(r.resolve(spec({ agent: 'local-critic', role: 'advisor' })).agent.id, 'local-critic')
 })
 

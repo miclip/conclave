@@ -83,15 +83,42 @@ function verdict(outcome: Outcome, confidence: Confidence, provenance: Provenanc
 export function classify(ev: Evidence): { state: TurnLiveness } & Partial<Verdict> {
   const p: Provenance[] = []
 
-  // 1. `turn_aborted` outranks `Stop`. This is an evidence PRECEDENCE rule, deliberately
-  //    not a first-one-wins rule, because the two records may arrive in either order and
-  //    arrival order is not semantics.
+  // 1. A permission we explicitly refused.
   //
-  //    The two say different things. `turn_aborted` establishes that the turn was
-  //    cancelled. `Stop` establishes only that the turn reached a terminal boundary --
-  //    it is the child announcing "this turn is over", which a cancelled turn also is.
-  //    Reading Stop as "completed" in the presence of an abort would upgrade a
-  //    cancellation into a success on the strength of a weaker signal.
+  //    This outranks `turn_aborted` because on Codex a refusal is *implemented* as an
+  //    abort: denying the dialog writes `turn_aborted reason=interrupted`, byte-identical
+  //    to a user cancellation. The abort is the mechanism, not the reason. Ranking the
+  //    abort first would report every refused permission as a plain cancellation and
+  //    lose why the turn ended.
+  if (ev.orchestrator.sentPermissionDecision === 'deny' && ev.hooks.includes('PermissionRequest')) {
+    const tool = ev.hookPayloads['PermissionRequest']?.['tool_name']
+    p.push({ source: 'hook', detail: `PermissionRequest tool=${String(tool)}` })
+    p.push({ source: 'orchestrator', detail: 'denied' })
+    if (ev.transcript.turnAbortedReason) {
+      p.push({
+        source: 'transcript',
+        detail: `turn_aborted reason=${ev.transcript.turnAbortedReason} (how the refusal ended the turn)`,
+      })
+    }
+    if (!ev.orchestrator.inputIsMediated) {
+      p.push({
+        source: 'orchestrator',
+        detail: 'input not mediated: another writer may have answered the dialog',
+        caveat: true,
+      })
+      return { state: 'permission_refused', ...verdict('permission_refused', 'uncertain', p) }
+    }
+    return { state: 'permission_refused', ...verdict('permission_refused', 'inferred', p) }
+  }
+
+  // 2. `turn_aborted` outranks `Stop`. An evidence PRECEDENCE rule, deliberately not
+  //    first-one-wins, because the two records may arrive in either order and arrival
+  //    order is not semantics.
+  //
+  //    `turn_aborted` establishes that the turn was cancelled. `Stop` establishes only
+  //    that the turn reached a terminal boundary -- "this turn is over" -- which a
+  //    cancelled turn also is. Reading Stop as completion in the presence of an abort
+  //    would upgrade a cancellation into a success on weaker evidence.
   //
   //    Codex writes this; Claude Code writes nothing equivalent anywhere.
   if (ev.transcript.turnAbortedReason) {
@@ -102,9 +129,6 @@ export function classify(ev: Evidence): { state: TurnLiveness } & Partial<Verdic
         detail: 'Stop also fired: a terminal boundary was reached, not that the turn completed',
         caveat: true,
       })
-      // Do NOT read agreement as independent confirmation. Both records plausibly come
-      // from one internal lifecycle transition, so they corroborate a single source
-      // rather than testing it twice. Confidence stays where turn_aborted alone puts it.
       p.push({
         source: 'transcript',
         detail: 'corroborating channel, not independent evidence: likely one shared cause',
@@ -114,7 +138,7 @@ export function classify(ev: Evidence): { state: TurnLiveness } & Partial<Verdic
     return { state: 'cancelled', ...verdict('cancelled', 'proven', p) }
   }
 
-  // 2. Positive completion, in the absence of any abort record.
+  // 3. Positive completion, with no abort record to outrank it.
   if (ev.hooks.includes('Stop')) {
     p.push({ source: 'hook', detail: 'Stop' })
     if (ev.transcript.finalStopReason) {
@@ -130,16 +154,10 @@ export function classify(ev: Evidence): { state: TurnLiveness } & Partial<Verdic
     return { state: 'completed', ...verdict('completed', 'proven', p) }
   }
 
-  // 2b. The transcript evidences completion even though no Stop arrived.
-  //
-  //     This is the hook-loss recovery path, and its position in the order is the whole
-  //     point: it must outrank the process-exit rule below. A turn that finished and
-  //     whose Stop delivery was lost, in a session we then shut down, would otherwise be
-  //     reported as `process_exited` -- cleanup manufacturing an outcome the evidence
-  //     contradicts.
-  //
-  //     Confidence is `inferred`, never `proven`: the transcript shows the model stopped
-  //     generating, while `Stop` is what the child uses to announce a finished turn.
+  // 3b. The transcript evidences completion even though no Stop arrived. Hook-loss
+  //     recovery, and it must outrank the process rule below: a turn that finished and
+  //     whose Stop was lost, in a session we then shut down, would otherwise be reported
+  //     as a death the evidence contradicts.
   if (
     ev.transcript.hasAssistantAfterPrompt &&
     (ev.transcript.finalStopReason === 'end_turn' || ev.transcript.finalStopReason === 'stop_sequence')
@@ -153,32 +171,8 @@ export function classify(ev: Evidence): { state: TurnLiveness } & Partial<Verdic
     return { state: 'completed', ...verdict('completed', 'inferred', p) }
   }
 
-  // 3. Terminal actions WE took, attributed to us at the time we took them.
-  //
-  //    These outrank process death on purpose. If the orchestrator ended a turn and the
-  //    session was then shut down, the turn was cancelled or refused -- the later death
-  //    says nothing about it. Ranking death first would let `close()` overwrite a
-  //    stronger, earlier verdict with a weaker causal guess, which is cleanup
-  //    manufacturing an outcome.
-  //
-  //    Only EXPLICIT actions get this precedence. The weaker inference from "a
-  //    permission was pending and no allow was recorded" stays below the process rule,
-  //    because a killed process explains that silence just as well.
-  if (ev.orchestrator.sentPermissionDecision === 'deny' && ev.hooks.includes('PermissionRequest')) {
-    const tool = ev.hookPayloads['PermissionRequest']?.['tool_name']
-    p.push({ source: 'hook', detail: `PermissionRequest tool=${String(tool)}` })
-    p.push({ source: 'orchestrator', detail: 'denied' })
-    if (!ev.orchestrator.inputIsMediated) {
-      p.push({
-        source: 'orchestrator',
-        detail: 'input not mediated: another writer may have answered the dialog',
-        caveat: true,
-      })
-      return { state: 'permission_refused', ...verdict('permission_refused', 'uncertain', p) }
-    }
-    return { state: 'permission_refused', ...verdict('permission_refused', 'inferred', p) }
-  }
-
+  // 3c. We cancelled it ourselves, with nothing from the child recording it. Outranks
+  //     process death: we ended the turn, and a later shutdown says nothing about it.
   if (ev.orchestrator.sentCancel) {
     p.push({ source: 'orchestrator', detail: 'sent ESC' })
     if (ev.orchestrator.inputIsMediated) {
@@ -223,28 +217,20 @@ export function classify(ev: Evidence): { state: TurnLiveness } & Partial<Verdic
     return { state: 'process_exited', ...verdict('process_exited', confidence, p) }
   }
 
-  // 5. A permission decision was pending and the turn never completed, with no explicit
-  //    decision recorded. Weaker than rule 3: this is an inference from silence, and it
-  //    sits below the process rule because a dead process explains the same silence.
-  if (ev.hooks.includes('PermissionRequest')) {
-    const tool = ev.hookPayloads['PermissionRequest']?.['tool_name']
-    p.push({ source: 'hook', detail: `PermissionRequest tool=${String(tool)}` })
-    p.push({ source: 'hook', detail: 'no Stop after the request' })
-    if (ev.orchestrator.inputIsMediated) {
-      p.push({ source: 'orchestrator', detail: 'mediated input, no allow recorded' })
-      return { state: 'permission_refused', ...verdict('permission_refused', 'inferred', p) }
-    }
-    p.push({
-      source: 'orchestrator',
-      detail: 'input not mediated: cannot tell refusal from cancellation at the dialog',
-      caveat: true,
-    })
-    return { state: 'permission_refused', ...verdict('permission_refused', 'uncertain', p) }
-  }
+  // A pending PermissionRequest with no decision recorded is deliberately NOT treated as
+  // a refusal. The live acceptance run showed why: the hook fires when the dialog opens,
+  // so inferring refusal from "no Stop yet" settled the turn while the user was still
+  // being asked -- and every allow then had to be walked back. A pending decision is
+  // `in_progress` until something actually ends the turn.
 
   // 6. We lost the ability to observe. Not a statement about the turn.
   if (ev.observationGap) {
     p.push({ source: 'transport', detail: 'observation channel lost; turn state unobservable' })
+    p.push({
+      source: 'transport',
+      detail: 'the child may still be running; this asserts nothing about the turn',
+      caveat: true,
+    })
     return { state: 'transport_lost', ...verdict('transport_lost', 'uncertain', p) }
   }
 

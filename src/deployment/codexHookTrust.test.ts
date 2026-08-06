@@ -27,14 +27,19 @@ import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, wri
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { diagnoseHookTrust, readCodexHooks, trustCodexHooks } from './codexHookTrust.ts'
+import {
+  CONCLAVE_HOOK_MATCH,
+  diagnoseHookTrust,
+  readCodexHooks,
+  trustCodexHooks,
+} from './codexHookTrust.ts'
 import type { CodexHookReport } from './codexHookTrust.ts'
 import { CODEX_CAPABILITIES } from '../conformance/capabilities.ts'
 import { render, TARGETS } from '../config/install.ts'
 
 const ROOT = join(import.meta.dirname, '..', '..')
 const CODEX_CONFIG = join(homedir(), '.codex', 'config.toml')
-const MATCH = 'hook_post.py'
+const MATCH = CONCLAVE_HOOK_MATCH
 
 const skip =
   process.env.ORCH_CODEX === '1' || process.env.ORCH_CODEX_REAL === '1'
@@ -318,11 +323,12 @@ test('the registry runs preflight before create, and refuses on failure', async 
   )
 })
 
-test('codex declares a preflight even though its adapter does not exist yet', async () => {
-  // Wired ahead of the adapter so it cannot be forgotten when the adapter lands.
+test('codex is constructible but still gated on hook trust', async () => {
+  // The preflight was wired ahead of the adapter precisely so it could not be forgotten
+  // once the adapter landed. It must still be there now that it has.
   const { CODEX_AGENT } = await import('../registry/builtin.ts')
   assert.equal(typeof CODEX_AGENT.preflight, 'function')
-  assert.equal(CODEX_AGENT.create, undefined)
+  assert.equal(typeof CODEX_AGENT.create, 'function')
 })
 
 test('GATED: the real installed sidecar is trusted and executable', { skip: skipReal }, async () => {

@@ -16,7 +16,7 @@
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync, unlinkSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
-import { diagnoseHookTrust, readCodexHooks } from '../deployment/codexHookTrust.ts'
+import { CONCLAVE_HOOK_MATCH, diagnoseHookTrust, readCodexHooks } from '../deployment/codexHookTrust.ts'
 
 export const TEMPLATE_TOKEN = '{{REPO_ROOT}}'
 
@@ -145,7 +145,7 @@ export async function installConfig(opts: InstallOptions = {}): Promise<InstallR
   if (opts.diagnose !== false) {
     try {
       const report = await readCodexHooks(repoRoot)
-      const diagnosis = diagnoseHookTrust(report, 'hook_post.py')
+      const diagnosis = diagnoseHookTrust(report, CONCLAVE_HOOK_MATCH)
       result.codex = {
         ready: diagnosis.ready,
         // Re-trust is needed when hooks loaded but are not permitted to execute. A

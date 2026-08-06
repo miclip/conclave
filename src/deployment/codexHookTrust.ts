@@ -20,6 +20,14 @@ import { createInterface } from 'node:readline'
 import { sanitizedCopy } from '../process/childenv.ts'
 import { PtyProcess, squash } from '../process/pty.ts'
 
+/**
+ * Substring identifying hooks this project installed, used to tell ours apart from any
+ * the user has configured. Kept here so the registry preflight, the installer and the
+ * tests cannot drift apart -- they did once, when the sidecar moved off the spike's
+ * Python client and the diagnostic silently reported "no matching hooks are loaded".
+ */
+export const CONCLAVE_HOOK_MATCH = 'src/hooks/client.ts'
+
 export type HookTrustStatus = 'managed' | 'untrusted' | 'trusted' | 'modified'
 
 /**

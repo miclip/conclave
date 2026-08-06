@@ -9,8 +9,9 @@
 
 import type { AgentSession } from '../contract/session.ts'
 import { ClaudePtyHookAdapter } from '../adapters/claude.ts'
+import { CodexPtyHookAdapter } from '../adapters/codex.ts'
 import { CLAUDE_CAPABILITIES, CODEX_CAPABILITIES } from '../conformance/capabilities.ts'
-import { assertCodexHooksExecutable } from '../deployment/codexHookTrust.ts'
+import { assertCodexHooksExecutable, CONCLAVE_HOOK_MATCH } from '../deployment/codexHookTrust.ts'
 import { AgentRegistry } from './registry.ts'
 import type { AgentDefinition, CreateParticipantContext, ResolvedParticipant } from './types.ts'
 
@@ -68,13 +69,32 @@ export const CODEX_AGENT: AgentDefinition = {
   // Wired ahead of the adapter so it cannot be forgotten when the adapter lands: a
   // Codex session whose hooks are enabled-but-untrusted has no turn-completion signal.
   preflight: async (_resolved, ctx) => {
-    await assertCodexHooksExecutable(ctx.cwd, 'hook_post.py')
+    await assertCodexHooksExecutable(ctx.cwd, CONCLAVE_HOOK_MATCH)
   },
-  // No adapter yet. Its hook lifecycle is entirely unverified -- SessionStart did not
-  // fire at boot or on thread/start, and every Stop scenario needs a real turn.
-  unavailableReason:
-    'hook lifecycle unverified; awaiting current-version fixtures after the quota reset',
+  async create(resolved: ResolvedParticipant, ctx: CreateParticipantContext): Promise<AgentSession> {
+    return CodexPtyHookAdapter.start({
+      cwd: ctx.cwd,
+      role: resolved.role.id,
+      inputOwnership: resolved.inputOwnership,
+      args: [...resolved.agent.launch.baseArgs, ...(resolved.spec.args ?? []), ...(ctx.args ?? [])],
+      watchdogMs: ctx.watchdogMs,
+      readyTimeoutMs: ctx.readyTimeoutMs,
+    })
+  },
 }
+
+/**
+ * Approval settings that force a permission dialog.
+ *
+ * Deliberately NOT part of the launch spec. With default settings Codex auto-approved an
+ * out-of-workspace write and no dialog appeared at all, so these are needed to exercise
+ * permission flows -- but making them the default would change production behaviour into
+ * something more restrictive than a user asked for. Pass them per participant.
+ */
+export const CODEX_PROMPT_ON_APPROVAL_ARGS = [
+  '-c', 'approval_policy="on-request"',
+  '-c', 'sandbox_mode="read-only"',
+]
 
 export function defaultRegistry(): AgentRegistry {
   return new AgentRegistry().register(CLAUDE_AGENT).register(CODEX_AGENT)

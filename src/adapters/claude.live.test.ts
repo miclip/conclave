@@ -18,7 +18,7 @@ import { strict as assert } from 'node:assert'
 import { existsSync } from 'node:fs'
 import test from 'node:test'
 import { ClaudePtyHookAdapter } from './claude.ts'
-import type { AgentEvent, TurnEndEvent } from '../contract/session.ts'
+import type { AgentEvent, SessionSnapshot, TurnEndEvent } from '../contract/session.ts'
 
 const LIVE = process.env.ORCH_LIVE === '1'
 const CWD = process.cwd()
@@ -49,6 +49,34 @@ async function collect(
 
 const endOf = (events: AgentEvent[]): TurnEndEvent | undefined =>
   events.find((e) => e.type === 'turn_end') as TurnEndEvent | undefined
+
+/**
+ * Fold the event stream the way an ordinary consumer would -- apply terminal verdicts,
+ * drop anything a revision withdrew -- and require it to agree with the authoritative
+ * snapshot.
+ *
+ * Applied to abandonment as well as the happy path, because that is where the two
+ * channels drifted apart: a verdict hand-constructed outside the tracker was reported on
+ * the stream while the snapshot still showed the turn in progress. Codex had this
+ * assertion and caught it; Claude shared the bypass and did not.
+ */
+function assertConverges(events: AgentEvent[], snap: SessionSnapshot, label: string): void {
+  const withdrawn = new Set(events.filter((e) => e.type === 'revision').flatMap((e) => e.replaces))
+  const folded = new Map<string, string>()
+  for (const e of events) {
+    if (e.type === 'turn_end' && !withdrawn.has(e.seq) && e.turnKey) {
+      folded.set(String(e.turnKey), e.verdict.outcome)
+    }
+  }
+  const authoritative = new Map(
+    snap.turns.filter((t) => t.state !== 'in_progress').map((t) => [String(t.key), t.state]),
+  )
+  assert.deepEqual(
+    [...folded.entries()].sort(),
+    [...authoritative.entries()].sort(),
+    `${label}: a consumer folding events() must agree with snapshot()`,
+  )
+}
 
 test('start -> ready -> send -> completed', { skip }, async (t) => {
   const session = await ClaudePtyHookAdapter.start({ cwd: CWD, role: 'implementer' })
@@ -187,6 +215,10 @@ test('abandoning the transport asserts nothing about the turn', { skip }, async 
     end.verdict.provenance.some((p) => p.caveat && p.detail.includes('may still be running')),
     'abandonment must not imply the child died',
   )
+
+  // The assertion Claude was missing. A synthetic outcome must be produced through the
+  // tracker like any other, or the stream and the snapshot become two sources of truth.
+  assertConverges(events, await session.snapshot(), 'abandoned')
 })
 
 test('the hook client exists where the adapter registers it', () => {
@@ -237,27 +269,12 @@ test('events() converges with snapshot() after revisions', { skip }, async (t) =
   )
   const events = await collecting
 
-  // Fold the event stream the way a consumer would: apply terminal verdicts, and drop
-  // any that a revision has withdrawn.
-  const withdrawn = new Set(
-    events.filter((e) => e.type === 'revision').flatMap((e) => e.replaces),
-  )
-  const folded = new Map<string, string>()
-  for (const e of events) {
-    if (e.type === 'turn_end' && !withdrawn.has(e.seq) && e.turnKey) {
-      folded.set(String(e.turnKey), e.verdict.outcome)
-    }
-  }
-
   const snap = await session.snapshot()
-  const authoritative = new Map(snap.turns.filter((tn) => tn.state !== 'in_progress').map((tn) => [String(tn.key), tn.state]))
-
-  assert.deepEqual(
-    [...folded.entries()].sort(),
-    [...authoritative.entries()].sort(),
-    'a consumer folding events() must agree with snapshot()',
+  assertConverges(events, snap, 'completed')
+  assert.equal(
+    snap.turns.find((tn) => String(tn.key) === String(key))?.state,
+    'completed',
   )
-  assert.equal(folded.get(String(key)), 'completed')
 })
 
 test('closing does not downgrade an already-completed turn', { skip }, async (t) => {
