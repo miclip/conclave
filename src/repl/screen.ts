@@ -63,7 +63,22 @@ export interface ScreenOptions {
    * three attempts.
    */
   suggest?: (line: string, cursor: number) => Suggestion | undefined
+  /**
+   * Messages typed but not yet delivered, shown ABOVE the input box.
+   *
+   * They belong in the pinned region rather than the transcript because their status
+   * changes: a line already scrolled past cannot stop being provisional. Pinning them is
+   * what lets them be dim while they wait and then be written into the transcript in
+   * normal type once a participant has actually taken them.
+   *
+   * Nothing pending means no rows spent, so the box is its usual four lines when there is
+   * nothing to say about it.
+   */
+  pending?: () => string[]
 }
+
+/** Pinned rows spent on the queue before it starts crowding the transcript. */
+const MAX_PENDING_ROWS = 3
 
 const ESC = '\x1b['
 const dimmed = (s: string) => `\x1b[2m${s}\x1b[0m`
@@ -85,12 +100,14 @@ export class Screen {
    */
   #menu: (Suggestion & { index: number }) | undefined
   #open = false
+  #base: number
   #onResize = () => this.#reserve()
 
   constructor(opts: ScreenOptions) {
     this.#o = opts
     this.#out = opts.output
     this.#height = opts.height ?? 4
+    this.#base = this.#height
   }
 
   /** What is currently typed. The hint row answers it, so it has to be able to see it. */
@@ -179,9 +196,44 @@ export class Screen {
     this.draw()
   }
 
+  /** The pending rows, capped, with an overflow line rather than an unbounded box. */
+  #pendingRows(): string[] {
+    const all = this.#o.pending?.() ?? []
+    if (all.length <= MAX_PENDING_ROWS) return all
+    const shown = all.slice(0, MAX_PENDING_ROWS - 1)
+    return [...shown, `${all.length - shown.length} more queued — /queue`]
+  }
+
+  /**
+   * Grow or shrink the reserved region as the queue changes.
+   *
+   * Growing has to push the transcript up FIRST. The region is shrinking from the bottom,
+   * so the rows it takes are rows that already hold text; writing newlines at the old
+   * bottom scrolls that text up into scrollback the way ordinary output does, instead of
+   * painting the box over the last thing a participant said.
+   */
+  #resize(height: number): void {
+    if (height === this.#height) return
+    if (height > this.#height) {
+      const last = Math.max(1, this.rows - this.#height)
+      this.#out.write(`${ESC}s${ESC}${last};1H${'\n'.repeat(height - this.#height)}${ESC}u`)
+    } else {
+      // Shrinking frees rows that still hold the old box; clear them so they do not linger
+      // above the transcript as text nothing will overwrite.
+      for (let r = this.rows - this.#height + 1; r <= this.rows; r++) {
+        this.#out.write(`${ESC}${r};1H${ESC}2K`)
+      }
+    }
+    this.#height = height
+    const last = Math.max(1, this.rows - this.#height)
+    this.#out.write(`${ESC}1;${last}r`)
+  }
+
   /** Redraw the reserved rows from scratch. */
   draw(): void {
     if (!this.#open) return
+    const queued = this.#pendingRows()
+    this.#resize(this.#base + queued.length)
     const w = this.columns
     const top = this.rows - this.#height + 1
     const rule = '─'.repeat(Math.max(4, w))
@@ -207,13 +259,20 @@ export class Screen {
         below += `  ${dimmed(menu.note)}`
       }
     }
-    const rows = [head, `${prompt}${this.#line}`, rule, below]
+    // Dim AND italic: two signals, because a terminal that drops one usually keeps the
+    // other, and this is the difference between "said" and "not yet said".
+    const waiting = queued.map((t) => {
+      const text = `  ${t}`
+      const clipped = text.length > w ? `${text.slice(0, Math.max(1, w - 1))}…` : text
+      return `\x1b[2;3m${clipped}\x1b[0m`
+    })
+    const rows = [...waiting, head, `${prompt}${this.#line}`, rule, below]
     let out = `${ESC}s`
     rows.forEach((text, i) => {
       out += `${ESC}${top + i};1H${ESC}2K${text}`
     })
     // Cursor into the input row, after the prompt and the typed text.
-    out += `${ESC}${top + 1};${visible(prompt) + this.#cursor + 1}H`
+    out += `${ESC}${top + waiting.length + 1};${visible(prompt) + this.#cursor + 1}H`
     this.#out.write(out)
   }
 

@@ -144,11 +144,17 @@ test('typed-but-unsubmitted text survives asynchronous output', async (t) => {
     `the typed line was not redrawn after async output. tail was:\n${JSON.stringify(tail.slice(-400))}`,
   )
 
-  // And it still submits as typed.
+  // And it still submits as typed. The confirmation is the message ITSELF, pinned above the
+  // box until a participant takes it — so this asserts the text made it through the
+  // redraw and into the queue, not merely that a sentence about it was printed.
   c.type('\r')
   assert.ok(
-    await c.until((s) => s.includes('queued for implementer at the next exchange')),
+    await c.until((s) => /→ implementer\s+keep the diff small/.test(s)),
     'the redrawn line must still be the line that gets sent',
+  )
+  assert.ok(
+    await c.until((s) => s.includes('withheld from advisor')),
+    'and who was excluded still reaches the transcript, where an audit can find it',
   )
   c.proc.kill()
 })

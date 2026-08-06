@@ -355,6 +355,10 @@ export async function runSession(opts: SessionOptions): Promise<number> {
       if (ev.type === 'turn_start') {
         turnStartedAt.set(e.participant, Date.now())
         progress.start(e.participant)
+        // A turn beginning is the moment the queue drained into it, so this is where a
+        // pending message stops being pending. Without the redraw it would sit dim in the
+        // box until the next unrelated event happened to repaint.
+        if (screen) screen.draw()
       } else if (ev.type === 'turn_end') {
         const startedAt = turnStartedAt.get(e.participant)
         progress.done(e.participant)
@@ -438,14 +442,55 @@ export async function runSession(opts: SessionOptions): Promise<number> {
    * means readline redraws it for free, with no second line competing for the one the
    * status already uses.
    */
+  /**
+   * Messages typed but not yet taken by a participant.
+   *
+   * Keyed by the text rather than by recipient: one line addressed to everyone is one thing
+   * the operator typed, and listing it once per recipient reported two pending messages for
+   * a single sentence. The label is who has NOT taken it yet, so a broadcast that the
+   * advisor picks up first visibly narrows to `→ implementer` rather than sitting there
+   * looking undelivered.
+   */
+  const queuedFor = new Map<string, Set<string>>()
+
+  function pendingRows(): string[] {
+    const live = new Map<string, Set<string>>()
+    for (const { id, texts } of relay.pending()) {
+      for (const t of texts) {
+        const set = live.get(t) ?? new Set<string>()
+        set.add(id)
+        live.set(t, set)
+      }
+    }
+    // Anything that has left every queue was delivered: write it into the transcript in
+    // normal type. This is the whole point of pinning it — a line that already scrolled
+    // past cannot stop being provisional, so the provisional copy has to live in the box
+    // until it can be replaced by a real one.
+    for (const [text, recipients] of [...queuedFor]) {
+      if (live.has(text)) continue
+      queuedFor.delete(text)
+      write(`  ${dim('›')} ${text.split('\n')[0]} ${dim(`— read by ${[...recipients].join(', ')}`)}`)
+    }
+    for (const [text, ids] of live) queuedFor.set(text, ids)
+    return [...live].map(([text, ids]) => `→ ${[...ids].join(', ')}  ${text.split('\n')[0]}`)
+  }
+
+  /**
+   * Confirm a queued message. With the box, the pinned row IS the confirmation and shows
+   * the text itself — better than a sentence about it. Piped input has no box, so it still
+   * gets the sentence; otherwise a scripted session would lose the fact entirely.
+   */
+  function queued(who: string): void {
+    if (screen) return void screen.draw()
+    write(`  queued for ${who} at the next exchange`)
+  }
+
   function promptText(): string {
-    // Distinct messages, not deliveries. One line addressed to everyone is one thing the
-    // operator typed; counting recipients reported "(2 queued)" for a single "continue".
-    // Always the chevron. A `goal ›` prefix when idle made the prompt shift under the
-    // cursor as a run started and ended, and the hint belongs in the footer, which is
-    // where everything else that is not typed lives.
-    const queued = new Set(relay.pending().flatMap((p) => p.texts)).size
-    return queued > 0 ? `${dim(`(${queued} queued)`)} ${bold('›')} ` : `${bold('›')} `
+    // Always the chevron, and nothing else. It carried a `(2 queued)` counter until the
+    // queue itself became visible directly above the box — at which point the count was the
+    // third place on screen saying the same thing, and the only one that made the prompt
+    // shift sideways under the cursor as messages were taken.
+    return `${bold('›')} `
   }
 
   const refreshPrompt = () => {
@@ -463,9 +508,11 @@ export async function runSession(opts: SessionOptions): Promise<number> {
    */
   const status = (): string => {
     const active = progress.line((p) => speakerColor(p, 'implementer')(p))
-    const queued = new Set(relay.pending().flatMap((p) => p.texts)).size
     const idle = !run && !active ? dim('type a goal to start') : ''
-    return [active, idle, queued > 0 ? dim(`${queued} queued`) : ''].filter(Boolean).join(dim('  ·  '))
+    // No queue count here: the pinned rows above the box show the messages themselves, and
+    // a number beside them is a worse version of the same fact. It was one of three places
+    // reporting the queue at once — the failure this whole box exists to stop.
+    return [active, idle].filter(Boolean).join(dim('  ·  '))
   }
 
   /**
@@ -494,6 +541,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
       hint,
       onLine: (raw) => submit(raw),
       suggest: (line, cursor) => suggest(line, cursor, opts.cwd, COMMANDS),
+      pending: pendingRows,
       onInterrupt: () => onInterrupt(),
     })
     screen.open()
@@ -687,7 +735,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
         return
       }
       run.injectConstraint(rest, 'all')
-      write('  queued for everyone at the next exchange')
+      queued('everyone')
       return
     }
 
@@ -696,7 +744,10 @@ export async function runSession(opts: SessionOptions): Promise<number> {
       if (!rest) return void write(`  ${word} needs something to say`)
       if (!run) return void write(dim('  nothing is running; type a goal to start'))
       const m = run.injectConstraint(rest, { only: who })
-      write(`  queued for ${who} at the next exchange — withheld from ${m.excluded.join(', ')}`)
+      // The exclusion is worth a transcript line even with the box: who did NOT get it is
+      // the part the pinned row cannot show, and the part an audit later turns on.
+      write(dim(`  withheld from ${m.excluded.join(', ')}`))
+      queued(who)
       return
     }
     // The first thing typed is the goal; everything after it is a constraint on the run in
@@ -707,7 +758,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
       return
     }
     run.injectConstraint(line, 'all')
-    write('  queued for everyone at the next exchange')
+    queued('everyone')
   }
 
   try {

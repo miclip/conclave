@@ -16,7 +16,7 @@ import { Screen } from './screen.ts'
 const ESC = '\x1b['
 const strip = (s: string) => s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '')
 
-function harness(suggestion?: Suggestion) {
+function harness(suggestion?: Suggestion, pending?: () => string[]) {
   const input = new PassThrough()
   const written: string[] = []
   const output = Object.assign(new PassThrough(), {
@@ -35,6 +35,7 @@ function harness(suggestion?: Suggestion) {
     hint: () => 'hint',
     prompt: () => '› ',
     ...(suggestion ? { suggest: () => suggestion } : {}),
+    ...(pending ? { pending } : {}),
   })
   screen.open()
 
@@ -52,6 +53,8 @@ function harness(suggestion?: Suggestion) {
       const at = frame.lastIndexOf(`${ESC}${row};1H`)
       return at < 0 ? '' : strip(frame.slice(at))
     },
+    /** Everything written since the harness was made, escape codes intact. */
+    raw: () => written.join(''),
     /** Which item is reverse-videoed, if any. */
     selected: () => /\x1b\[7m ([^\x1b]+) \x1b\[0m/.exec(written.at(-1) ?? '')?.[1],
   }
@@ -142,4 +145,40 @@ test('the note says how to reach both without picking anything', () => {
   const h = harness(PARTICIPANTS)
   h.type('>')
   assert.match(h.menuRow(), /plain text reaches both/)
+})
+
+
+test('pending messages are pinned above the box, dim and italic', () => {
+  // Both attributes, because a terminal that drops one usually keeps the other, and this is
+  // the difference between "said" and "not yet said".
+  let queue = ['→ advisor  check the error path']
+  const h = harness(undefined, () => queue)
+  h.screen.draw()
+  const frame = h.raw()
+  assert.match(frame, /check the error path/)
+  assert.match(frame, /\x1b\[2;3m {2}→ advisor {2}check the error path/)
+})
+
+test('the box grows and shrinks with the queue rather than reserving rows for nothing', () => {
+  let queue: string[] = []
+  const h = harness(undefined, () => queue)
+  const region = () => {
+    const all = [...h.raw().matchAll(/\x1b\[1;(\d+)r/g)]
+    return Number(all.at(-1)?.[1])
+  }
+  h.screen.draw()
+  const empty = region()
+  queue = ['→ advisor  one', '→ implementer  two']
+  h.screen.draw()
+  assert.equal(region(), empty - 2, 'two queued messages cost exactly two rows')
+  queue = []
+  h.screen.draw()
+  assert.equal(region(), empty, 'and the rows come back when the queue drains')
+})
+
+test('a long queue stops at a fixed height and says how much it is hiding', () => {
+  // An unbounded box would eat the transcript it exists to annotate.
+  const h = harness(undefined, () => ['a', 'b', 'c', 'd', 'e'])
+  h.screen.draw()
+  assert.match(h.raw(), /3 more queued — \/queue/)
 })
