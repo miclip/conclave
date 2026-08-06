@@ -1695,8 +1695,16 @@ that keeps running.
 
 #### Asking for missing information is evidence about the protocol [2026-08-06]
 
-> When a participant consistently asks for missing information instead of guessing, treat
-> that as evidence about the protocol before treating it as model behaviour.
+> Treat a request for protocol information as evidence about the protocol **until proven
+> otherwise**.
+
+The qualifier is load-bearing. Some requests really are stalls, or attempts to avoid
+committing to a claim — and §7 already has the discriminator, which is the same one used
+everywhere else here: **mechanical backing**. If the information the participant asks for is
+objectively absent from the protocol, the request is evidence. If it is present and the
+participant asked anyway, it is an unbacked complaint and counts toward the stall metric.
+The default is what changes: evidence first, stall on proof, rather than the other way
+round.
 
 Every protocol defect found by a live run in this project arrived that way, and each one
 reads as friction if you are looking for compliance:
@@ -1708,7 +1716,11 @@ reads as friction if you are looking for compliance:
 | *"I can't tell whether the sentinel is a deliberate tripwire or a leftover the handoff failed to record"* | the handoff had no field for it |
 | *"what I won't do is delete it while the conflict is unacknowledged"* | the protocol had no adjudication message |
 | *"`.conclave/` doesn't appear at all [...] I did not chase that further"* | `git status` cannot see an ignored directory |
-| *"inspect and report a concrete minimal design"* (experiment 2) | the task lacked information the advisor's role required |
+| *"inspect and report a concrete minimal design"* (experiment 2) | repository state was decisive and unavailable to the advisor |
+
+Read as a column of behaviours these look like refusals. Read as a column of defects, every
+one is a participant identifying a missing contract — and in five of the six the missing
+contract was ours, not the other participant's.
 
 The failure mode this guards against is specific and asymmetric: **a participant that asks
 for missing information looks worse than one that guesses plausibly**, because the guesser

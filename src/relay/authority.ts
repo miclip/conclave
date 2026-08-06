@@ -25,12 +25,17 @@
  * the human resolves in one word; a false negative leaves exactly the status quo, where the
  * implementer decides alone. Under-detecting is the failure it is tuned away from.
  *
- * LIMITATION, worth stating plainly: artifact attribution diffs `git status --porcelain`
- * before and after, so it attributes to the aside *anything* that became dirty in the
- * interval — including edits by whoever else is working in the tree. The false-positive
- * rate therefore depends on who else is present, and observing a session now constrains how
- * the session may be observed. That is a real cost of the mechanism, not only a sign it is
- * integrated. Token matching does not have this property; only the attribution half does.
+ * WHERE ITS AUTHORITY EXCEEDS ITS EVIDENCE. Token matching is scoped to what the aside
+ * actually said. Artifact attribution is not: it diffs `git status --porcelain`, which is
+ * global to the repository rather than scoped to Conclave's own actions, so anything that
+ * became dirty in the interval is attributed to the aside — including edits by whoever else
+ * is working in the tree.
+ *
+ * In a single-operator checkout that is sound and has been exercised live. In a shared one
+ * it is not: the false-positive rate depends on who else is present, and observing a session
+ * begins to constrain how the session may be observed. The honest statement is not "the
+ * detector is finished" but **its authority exceeds its evidence in multi-editor
+ * repositories** — narrow the evidence source before trusting it there.
  */
 
 import { execFileSync } from 'node:child_process'
