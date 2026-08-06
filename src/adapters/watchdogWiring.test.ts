@@ -210,3 +210,26 @@ test('claude: a turn that answers inside the deadline is completed, not timed_ou
     await session.close()
   }
 })
+
+test('the transcript tailer emits content, never lifecycle', async () => {
+  // The view derives turn_start/turn_end from the transcript, and those are the hooks' job:
+  // `Stop` PROVES completion, a parsed stop_reason merely suggests it. Emitting both put
+  // two lifecycle events in one stream — and `Relay#exchange` waits for the FIRST turn_end
+  // after a send, so a transcript-derived one could end an exchange before the
+  // authoritative verdict existed.
+  //
+  // Asserted against the source rather than a live session: the filter is one branch, and
+  // spawning a real CLI to prove a `continue` statement would be a worse test, not a
+  // better one.
+  const { readFileSync } = await import('node:fs')
+  const { join } = await import('node:path')
+  const root = join(import.meta.dirname, '..', '..')
+  for (const adapter of ['src/adapters/claude.ts', 'src/adapters/codex.ts']) {
+    const src = readFileSync(join(root, adapter), 'utf8')
+    const poller = src.slice(src.indexOf('async #pollTranscript'), src.indexOf('#startTailing'))
+    assert.ok(
+      /if \(e\.type === 'turn_start' \|\| e\.type === 'turn_end'\) continue/.test(poller),
+      `${adapter} must not re-emit lifecycle events from the transcript`,
+    )
+  }
+})

@@ -261,6 +261,10 @@ export class Status {
   }
 
   start(label: string): void {
+    // Restarting the same status must not reset its clock. A turn that reported "working
+    // 0s" repeatedly was being started twice, and the elapsed time is the one part of this
+    // line that says whether anything is happening.
+    if (this.#timer && this.#label === label) return
     this.#label = label
     this.#detail = ''
     this.#started = Date.now()

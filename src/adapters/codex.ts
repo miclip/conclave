@@ -208,7 +208,19 @@ export class CodexPtyHookAdapter implements AgentSession {
     if (this.#polling) return this.#polling
     this.#polling = (async () => {
       try {
-        for (const e of await this.#view!.poll()) this.#emit(e)
+        for (const e of await this.#view!.poll()) {
+          // CONTENT ONLY. The view also derives `turn_start` and `turn_end` from the
+          // transcript, and those are the hooks' job: `Stop` proves completion, a parsed
+          // `stop_reason` merely suggests it. Emitting both put two lifecycle events in one
+          // stream — the console started the status twice per turn, and worse, `#exchange`
+          // waits for the FIRST turn_end after a send, so a transcript-derived one could
+          // end an exchange before the authoritative verdict existed.
+          //
+          // Until this poller existed the view's events were never emitted at all, so the
+          // duplication had nowhere to show up.
+          if (e.type === 'turn_start' || e.type === 'turn_end') continue
+          this.#emit(e)
+        }
       } catch {
         // Unreadable mid-write is ordinary; the next tick picks it up.
       } finally {
