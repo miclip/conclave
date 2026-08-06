@@ -1177,23 +1177,50 @@ whatever the configuration — but the automatic response is withheld and the se
 escalates to the human. Rotating with nothing to verify against would be precisely the
 transfer nobody demonstrated.
 
-#### What this is NOT evidence for
+**Compaction is a rotation candidate, not a verdict.** `rotation.onDegradation` defaults
+to `'candidate'`: the run pauses and hands the decision to the human. `'automatic'` is
+opt-in. See below for why that default is not timidity.
 
-Every rotation test uses fake sessions. The transaction, the rollback, the identity swap
-and the reader hand-off are `observed`; **rotation has never run against a real Claude or
-Codex session**, so the following remain `reasoned_but_unverified`:
+#### Two claims, and only one of them is nearly answerable [Settled 2026-08-05]
 
-- that a real advisor will produce the seven headings on request
-- that a real replacement will emit `CHECK n: exit <code>` in a comparable form
-- that a quiesced real session survives a long freeze and is still usable after
-  `unquiesce()` — the adapter refuses sends while quiesced, but nothing has held a real
-  PTY idle for an hour and then resumed it
-- that `snapshot().compactionGeneration` rises in a real long session at the point the
-  model's quality actually degrades. Compaction is the *observable* proxy for degradation,
-  and the two have not been shown to coincide.
+These were being run together, and they are not the same claim:
 
-The last one is the load-bearing assumption of the whole section and the cheapest to
-falsify: a session can be run to compaction and its output quality compared either side.
+| | claim | what would settle it |
+|---|---|---|
+| **1** | Conclave can execute a real transactional rotation | **one live run**: implementer works → compaction observed → quiesce → advisor handoff → replacement starts → independent checks reproduce the record → replacement continues → old session terminates |
+| **2** | Compaction predicts quality degradation strongly enough to rotate on it unattended | **a comparison**, not a success. A session may compact without degrading, and may degrade before compacting |
+
+A successful rotation is evidence for 1 and *no* evidence for 2. Defaulting to automatic
+rotation would encode 2 as settled on the strength of evidence for 1 — the exact
+evidence-into-judgement collapse this design exists to prevent — so the policy encoded is:
+
+```
+compaction → rotation candidate       (human decides; the default)
+compaction → automatic rotation       (opt-in, and unearned until claim 2 has evidence)
+```
+
+Automatic becomes earned one of two ways: compaction repeatedly correlates with degraded
+work, **or** the operational cost of rotating proves low enough that false positives are
+cheap. The second is a real route — a rotation that costs one advisor turn and one
+verification run may simply be worth doing on a weak signal — and it does not require
+claim 2 to be true.
+
+The measurement for claim 2 is pre-registered in
+`spikes/experiments/03-compaction-degradation.md`. It scores repository-grounded mistakes,
+repeated questions, contradiction rate, test regressions and useful progress — **not prose
+quality**, which is the thing that looks like degradation and is not it.
+
+#### Evidence ledger for §7a
+
+| level | what |
+|---|---|
+| **observed** (fakes) | the transaction; rollback; continuity verification; carried failures; participant identity preserved across replacement; single-reader hand-off |
+| **unverified live** | PTY quiescence over a long freeze; handoff delivery and the seven headings from a real advisor; `CHECK n: exit <code>` from a real replacement; promotion and rollback against real sessions |
+| **reasoned but unverified** | compaction is a useful proxy for degradation |
+
+The first row is mechanism and the fakes are the right instrument for it. The second row is
+a single live run away. The third is the one that cannot be settled by any number of
+successful rotations.
 
 ## 9. The panel
 

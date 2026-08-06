@@ -109,7 +109,7 @@ async function relayOf(
     lead: { id: 'advisor', agent: 'codex', role: 'advisor' },
     implementer: { id: 'implementer', agent: 'claude', role: 'implementer' },
     maxRounds: 2,
-    rotation: { checks: ['exit 0'], checkTimeoutMs: 30_000 },
+    rotation: { checks: ['exit 0'], checkTimeoutMs: 30_000, onDegradation: 'automatic' },
     ...over,
     // `exactOptionalPropertyTypes` treats `rotation: undefined` as an error rather than an
     // omission, and "no rotation configured" is a case these tests must be able to express.
@@ -253,7 +253,40 @@ test('rotation without configured checks is refused rather than done unverified'
   await assert.rejects(() => relay.rotateImplementer('context exhausted'), /transfer nobody demonstrated/)
 })
 
-test('a run rotates automatically when the implementer compacts, and carries on', async (t) => {
+test('compaction is a rotation CANDIDATE by default, and the human decides', async (t) => {
+  // Two claims, and only one of them has evidence. That Conclave can execute a
+  // transactional rotation is nearly answerable -- one live run does it. That compaction
+  // predicts degradation strongly enough to act on unattended needs a comparison across
+  // sessions, because a session may compact without degrading and may degrade before
+  // compacting. Until that exists, the default hands the decision to the human.
+  const dir = repo()
+  const advisor = new FakeRotationSession('advisor', 'codex', ['Do the first thing.', HANDOFF, 'DONE'])
+  const old = new FakeRotationSession('old', 'claude', ['ack', 'Did the first thing.'])
+  const fresh = new FakeRotationSession('fresh', 'claude', [ACCEPTED, 'Carried on.'])
+
+  const relay = await relayOf(dir, advisor, [old, fresh], {
+    maxRounds: 3,
+    rotation: { checks: ['exit 0'], checkTimeoutMs: 30_000 },
+  })
+  t.after(() => relay.stop())
+
+  old.compact()
+  const outcome = await relay.run('Keep the work moving.')
+
+  assert.equal(outcome.reason, 'escalated')
+  assert.ok(outcome.detail!.includes('rotation candidate'))
+  assert.ok(outcome.detail!.includes('rotateImplementer()'))
+  assert.equal(old.state, 'running', 'nothing is spent on a proxy that has never been checked')
+  assert.equal(fresh.state, 'running', 'and no replacement was started')
+  assert.equal(relay.participants.find((p) => p.rank === 'implementer')!.session, old)
+
+  // The escalation is a pause, not a refusal: the mechanism is right there.
+  const r = await relay.rotateImplementer('human accepted the candidate')
+  assert.equal(r.status, 'rotated')
+  assert.equal(old.state, 'terminated')
+})
+
+test('a run rotates automatically when the implementer compacts, if opted in', async (t) => {
   const dir = repo()
   // The advisor's first turn answers its briefing with the opening instruction; the
   // implementer's answers its own briefing with an acknowledgement.

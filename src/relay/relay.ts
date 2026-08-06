@@ -68,6 +68,25 @@ export interface RelayParticipant {
 export interface RotationConfig {
   /** Commands the replacement must run and reproduce. Without these, no rotation. */
   checks: string[]
+  /**
+   * What mechanical degradation entitles the orchestrator to do. Default `'candidate'`.
+   *
+   * Two claims ride on this and they are not the same claim:
+   *
+   *   1. Conclave can execute a transactional rotation.
+   *   2. Compaction predicts quality degradation strongly enough to act on unattended.
+   *
+   * The first is nearly answerable — one live run does it. The second needs a comparison
+   * across sessions, because a session may compact without degrading and may degrade
+   * before compacting. Until that comparison exists, compaction is a **rotation
+   * candidate**: the run pauses and hands the decision to the human, who can call
+   * `rotateImplementer()` and watch it happen.
+   *
+   * `'automatic'` is what the offline suite exercises and what a supervised operator may
+   * opt into. It is not the default, because defaulting to it would encode claim 2 as
+   * settled on the strength of evidence for claim 1.
+   */
+  onDegradation?: 'candidate' | 'automatic'
   /** Files whose exact content the transfer depends on, beyond those the advisor names. */
   files?: string[]
   checkTimeoutMs?: number
@@ -372,10 +391,21 @@ export class Relay {
 
     const detail = `${impl.id} is degraded: ${verdict.evidence.join('; ')}${verdict.complained ? ' (and said so)' : ' (and did not say so)'}`
     if (!this.#opts.rotation) {
-      // Detection does not depend on configuration; the automatic response does. Rotating
-      // with nothing to verify against would be a transfer nobody demonstrated, so this
-      // goes to the human instead of proceeding on an unverifiable handoff.
+      // Detection does not depend on configuration; the response does. Rotating with
+      // nothing to verify against would be a transfer nobody demonstrated, so this goes to
+      // the human instead of proceeding on an unverifiable handoff.
       return this.#end('escalated', `${detail}. No rotation checks are configured, so this needs a human.`)
+    }
+    if ((this.#opts.rotation.onDegradation ?? 'candidate') === 'candidate') {
+      // A candidate, not a verdict. The mechanism is built and the policy is not earned:
+      // nothing yet shows that compaction and degradation coincide, so acting on it
+      // unattended would be inferring quality from a proxy that has never been checked
+      // against quality.
+      return this.#end(
+        'escalated',
+        `${detail}. Recorded as a rotation candidate, not acted on: ` +
+          `call rotateImplementer() to proceed, or set rotation.onDegradation to 'automatic'.`,
+      )
     }
 
     const result = await this.rotateImplementer(detail)

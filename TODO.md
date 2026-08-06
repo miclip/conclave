@@ -151,18 +151,42 @@ the workspace discipline it enforces on its participants.
 
 ## Rotation: what is left to verify
 
-The transaction is built and covered offline. What it has never done is run against a real
-CLI, and four assumptions ride on that (DESIGN-BRIEF §7a, "What this is NOT evidence for").
-In rough order of cheapness:
+Two claims, deliberately separated (DESIGN-BRIEF §7a). A successful rotation settles the
+first and says nothing about the second.
 
-1. **Does compaction coincide with degradation?** Run one session to compaction and compare
-   output quality either side. This is the load-bearing assumption of §7a and the only one
-   whose failure would invalidate the design rather than the plumbing.
-2. **Does a real advisor produce the seven headings?** One live handoff request answers it.
-   Failure here is recoverable by construction — the parse fails before anything is
-   terminated — but a handoff that never parses makes rotation useless in practice.
-3. **Does a real replacement report `CHECK n: exit <code>`?** Same run.
-4. **Does a real session survive a long freeze?** Quiesce, wait, `unquiesce()`, send.
+### Claim 1 — can Conclave execute a real transactional rotation?
+
+**One live run under supervision.** `rotation.onDegradation` defaults to `'candidate'`, so
+the run pauses at compaction and the operator calls `rotateImplementer()` and watches:
+
+```
+implementer works → compaction observed → old session quiesced → advisor produces handoff
+→ replacement starts → independent checks reproduce the record → replacement continues
+→ old session terminates
+```
+
+Three sub-questions fall out of that one run, in order of how likely they are to bite:
+
+1. **Does a real advisor produce the seven headings?** Failure is recoverable by
+   construction — the parse fails before anything is terminated — but a handoff that never
+   parses makes rotation useless in practice.
+2. **Does a real replacement report `CHECK n: exit <code>`?** Same run.
+3. **Does a real session survive a long freeze?** Quiesce, wait, `unquiesce()`, send. This
+   is the only one the single run does not answer on its own.
+
+Gap this run will expose: **a run that escalates on a candidate cannot be resumed.** The
+human can rotate and then call `run()` again, which restarts from the goal. Deliberately
+not built ahead of knowing what the operator actually wants at that moment.
+
+### Claim 2 — does compaction predict degradation?
+
+**A comparison, not a success.** Pre-registered in
+`spikes/experiments/03-compaction-degradation.md`: the same bounded probe before
+compaction, after compaction, and after rotation, scored on repository-grounded mistakes,
+repeated questions, contradiction rate, test regressions and useful progress — not prose
+quality.
+
+Until it has evidence, `'automatic'` stays opt-in.
 
 ## Deferred, with reasons
 
