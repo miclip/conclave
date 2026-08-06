@@ -28,7 +28,7 @@ import { createWriteStream, existsSync, realpathSync } from 'node:fs'
 import { join } from 'node:path'
 import { Writable } from 'node:stream'
 import { clearLine, createInterface, cursorTo, type Interface } from 'node:readline'
-import { complete } from './complete.ts'
+import { suggest } from './complete.ts'
 import { Screen } from './screen.ts'
 import { banner, bold, colorFor, dim, elapsedSince, grey, markdown, Progress, rule, setColor, speakerColor, yellow } from './render.ts'
 import type { AgentEvent } from '../contract/session.ts'
@@ -90,8 +90,10 @@ const COMMANDS = [
 
 const HELP = `
   <text>                 send to everyone, at human rank
-  >advisor <text>        send to the advisor only — the implementer will not see it
-  >implementer <text>    send to the implementer only — the advisor will not see it
+  <text>                 to BOTH, at human rank — the default, no prefix needed
+  >advisor <text>        to the advisor only — the implementer will not see it
+  >implementer <text>    to the implementer only — the advisor will not see it
+  >both <text>           the same as no prefix; spelled out so the menu can offer it
   @src/relay/relay.ts    a path, anywhere in the line. Tab completes both sigils.
 
   They compose:  >advisor read @src/relay/relay.ts and tell me what it settles
@@ -472,15 +474,12 @@ export async function runSession(opts: SessionOptions): Promise<number> {
    * change with every keystroke and have nowhere else to go — anywhere in the transcript and
    * they would scroll away from the thing they describe.
    */
-  let suggestion = ''
   const hint = (): string => {
+    // Only the resting reminder. Whenever there is something to choose the screen draws the
+    // menu here instead, because a suggestion belongs against the keystroke that produced
+    // it and anywhere in the transcript it would scroll away from it.
     const line = screen?.line ?? ''
-    if (line.startsWith('/')) {
-      const matches = COMMANDS.filter((c) => c.startsWith(line.split(/\s/)[0] ?? ''))
-      if (matches.length > 0) return `  ${dim(matches.join('   '))}`
-    }
-    if (suggestion) return `  ${dim(suggestion)}`
-    return line ? '' : `  ${dim('/help for commands  ·  > to address  ·  @ for a path')}`
+    return line ? '' : `  ${dim('/ for commands  ·  > to address  ·  @ for a path  ·  no prefix goes to both')}`
   }
 
   if (interactive) {
@@ -493,19 +492,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
       status,
       hint,
       onLine: (raw) => submit(raw),
-      onEdit: () => {
-        suggestion = ''
-      },
-      complete: (line, cursor) => {
-        const done = complete(line, cursor, opts.cwd)
-        if (!done) return undefined
-        // Ambiguous completions are listed above the box rather than cycled through, so a
-        // wrong guess is visible instead of silently chosen.
-        // Below the input, not in the transcript: a suggestion that scrolls away from what
-        // it describes is worse than none.
-        suggestion = done.candidates && done.candidates.length > 1 ? done.candidates.slice(0, 10).join('   ') : ''
-        return { line: done.line, cursor: done.cursor }
-      },
+      suggest: (line, cursor) => suggest(line, cursor, opts.cwd, COMMANDS),
       onInterrupt: () => onInterrupt(),
     })
     screen.open()
@@ -675,6 +662,18 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     // Plain text. Addressed, at human rank, and NOT delivered mid-turn: it is queued as
     // context the next exchange carries. Saying so beats letting the operator believe the
     // participant is reading over their shoulder.
+    // `>both` is spelled out for discoverability and means exactly what plain text means.
+    if (word === '>both') {
+      if (!rest) return void write('  >both needs something to say')
+      if (!run) {
+        begin(rest)
+        return
+      }
+      run.injectConstraint(rest, 'all')
+      write('  queued for everyone at the next exchange')
+      return
+    }
+
     if (word === '>advisor' || word === '>implementer') {
       const who = word.slice(1)
       if (!rest) return void write(`  ${word} needs something to say`)

@@ -60,12 +60,18 @@ export interface ScreenOptions {
    * The screen owns the buffer, so completion has to come back through it rather than
    * being applied by the caller — otherwise two things would be editing the same string.
    */
-  complete?: (line: string, cursor: number) => { line: string; cursor: number } | undefined
-  /** Any edit that is not a completion. Lets the caller drop a now-stale suggestion. */
-  onEdit?: () => void
+  /**
+   * Candidates for what is being typed, recomputed on every edit.
+   *
+   * The screen owns selection and application: a menu that the caller applied would mean
+   * two things editing one buffer, which is the mistake that made the status line take
+   * three attempts.
+   */
+  suggest?: (line: string, cursor: number) => { items: string[]; start: number; end: number; suffix: string } | undefined
 }
 
 const ESC = '\x1b['
+const dimmed = (s: string) => `\x1b[2m${s}\x1b[0m`
 
 export class Screen {
   #o: ScreenOptions
@@ -75,6 +81,7 @@ export class Screen {
   #cursor = 0
   #history: string[] = []
   #historyAt = 0
+  #menu: { items: string[]; index: number; start: number; end: number; suffix: string } | undefined
   #open = false
   #onResize = () => this.#reserve()
 
@@ -184,7 +191,16 @@ export class Screen {
     const head = status
       ? `${'─'.repeat(2)} ${status} ${'─'.repeat(Math.max(0, w - visible(status) - 4))}`
       : rule
-    const rows = [head, `${prompt}${this.#line}`, rule, this.#o.hint()]
+    const menu = this.#menu
+    const below = menu
+      ? `  ${menu.items
+          .slice(0, 8)
+          .map((item, i) =>
+            i === menu.index ? `\x1b[7m ${item} \x1b[0m` : ` ${dimmed(item)} `,
+          )
+          .join('')}`
+      : this.#o.hint()
+    const rows = [head, `${prompt}${this.#line}`, rule, below]
     let out = `${ESC}s`
     rows.forEach((text, i) => {
       out += `${ESC}${top + i};1H${ESC}2K${text}`
@@ -205,14 +221,27 @@ export class Screen {
     const eot = str === '\x04' || key.sequence === '\x04'
     if ((eot || (key.ctrl && key.name === 'd')) && this.#line === '') return void this.#o.onInterrupt()
 
-    if (key.name !== 'tab') this.#o.onEdit?.()
-
-    if (key.name === 'tab') {
-      const done = this.#o.complete?.(this.#line, this.#cursor)
-      if (done) {
-        this.#line = done.line
-        this.#cursor = done.cursor
+    // A menu takes the keys that would otherwise move through history or submit. That is
+    // what makes it a picker rather than a list you have to type past.
+    if (this.#menu) {
+      if (key.name === 'escape') {
+        this.#menu = undefined
+        this.draw()
+        return
       }
+      if (key.name === 'up' || key.name === 'down') {
+        const n = this.#menu.items.length
+        this.#menu.index = (this.#menu.index + (key.name === 'down' ? 1 : n - 1)) % n
+        this.draw()
+        return
+      }
+      if (key.name === 'tab' || key.name === 'return' || key.name === 'enter') {
+        this.#accept()
+        return
+      }
+    } else if (key.name === 'tab') {
+      // No menu and nothing to suggest: tab does nothing rather than inserting a tab into
+      // a message bound for a participant.
       this.draw()
       return
     }
@@ -269,6 +298,35 @@ export class Screen {
           this.#cursor += str.length
         }
     }
+    this.#refreshMenu()
     this.draw()
+  }
+
+  /** Replace the suggested span with the highlighted item. */
+  #accept(): void {
+    const m = this.#menu
+    if (!m) return
+    const item = m.items[m.index] ?? ''
+    // A directory gets no suffix, so the next keystroke descends into it rather than
+    // starting a new word.
+    const insert = item.endsWith('/') ? item : `${item}${m.suffix}`
+    this.#line = this.#line.slice(0, m.start) + insert + this.#line.slice(m.end)
+    this.#cursor = m.start + insert.length
+    this.#menu = undefined
+    this.#refreshMenu()
+    this.draw()
+  }
+
+  #refreshMenu(): void {
+    const next = this.#o.suggest?.(this.#line, this.#cursor)
+    if (!next || next.items.length === 0) {
+      this.#menu = undefined
+      return
+    }
+    // Keep the selection on the same item while it is still offered, so narrowing a search
+    // does not silently move the choice under the cursor.
+    const previous = this.#menu ? this.#menu.items[this.#menu.index] : undefined
+    const index = previous ? Math.max(0, next.items.indexOf(previous)) : 0
+    this.#menu = { ...next, index }
   }
 }

@@ -21,23 +21,66 @@
 import { existsSync, readdirSync, statSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 
-export interface Completion {
-  line: string
-  cursor: number
-  /** More than one candidate: the caller may want to show them. */
-  candidates?: string[]
+/**
+ * The candidates for whatever is being typed, and the span they would replace.
+ *
+ * A menu needs the options BEFORE anything is chosen. An earlier tab-only completer forced
+ * the guess to be made blind; showing candidates as they narrow lets the choice be made by
+ * looking, which is how both Claude Code and Codex do it.
+ */
+export interface Suggestion {
+  items: string[]
+  /** Character range in the line that accepting an item replaces. */
+  start: number
+  end: number
+  /** Appended after the item unless it already ends with a separator. */
+  suffix: string
 }
 
-const PARTICIPANTS = ['advisor', 'implementer']
+export function suggest(
+  line: string,
+  cursor: number,
+  cwd: string,
+  commands: string[] = [],
+): Suggestion | undefined {
+  const upto = line.slice(0, cursor)
 
-function longestCommonPrefix(items: string[]): string {
-  if (items.length === 0) return ''
-  let prefix = items[0]!
-  for (const item of items) {
-    while (!item.startsWith(prefix)) prefix = prefix.slice(0, -1)
+  // A slash command, but only as the first token: `/help` leads a line, and a slash inside
+  // prose is a slash.
+  const slash = /^\/([^\s]*)$/.exec(upto)
+  if (slash) {
+    const partial = `/${slash[1] ?? ''}`
+    const items = commands.filter((c) => c.startsWith(partial))
+    return items.length > 0 ? { items, start: 0, end: cursor, suffix: ' ' } : undefined
   }
-  return prefix
+
+  const to = /^>([^\s]*)$/.exec(upto)
+  if (to) {
+    const partial = to[1] ?? ''
+    const items = PARTICIPANTS.filter((p) => p.startsWith(partial)).map((p) => `>${p}`)
+    return items.length > 0 ? { items, start: 0, end: cursor, suffix: ' ' } : undefined
+  }
+
+  const at = /(^|\s)@([^\s]*)$/.exec(upto)
+  if (at) {
+    const partial = at[2] ?? ''
+    const items = pathCandidates(cwd, partial).map((p) => `@${p}`)
+    // No suffix on a directory: the next keystroke should descend into it.
+    return items.length > 0
+      ? { items, start: cursor - partial.length - 1, end: cursor, suffix: '' }
+      : undefined
+  }
+  return undefined
 }
+
+/**
+ * `both` is an alias for typing nothing at all, and exists only so the menu can say so.
+ *
+ * The default — plain text reaches both participants — is the one piece of the addressing
+ * model that is invisible: you learn it by not doing something. Listing it beside the two
+ * narrowing options makes the whole choice legible at the moment it is being made.
+ */
+const PARTICIPANTS = ['advisor', 'implementer', 'both']
 
 /** Directory entries matching a partial path, with `/` appended to directories. */
 function pathCandidates(cwd: string, partial: string): string[] {
@@ -62,34 +105,3 @@ function pathCandidates(cwd: string, partial: string): string[] {
     .sort()
 }
 
-export function complete(line: string, cursor: number, cwd: string): Completion | undefined {
-  const upto = line.slice(0, cursor)
-  // Addressing only leads the line, because it is a property of the whole message. A path
-  // is a reference inside prose and may be anywhere.
-  const to = /^>([^\s]*)$/.exec(upto)
-  const at = /(^|\s)@([^\s]*)$/.exec(upto)
-  const partial = to ? (to[1] ?? '') : (at?.[2] ?? '')
-  if (!to && !at) return undefined
-
-  const start = cursor - partial.length
-  const candidates = to
-    ? PARTICIPANTS.filter((p) => p.startsWith(partial))
-    : pathCandidates(cwd, partial)
-  if (candidates.length === 0) return undefined
-
-  // One match completes; several complete as far as they agree, which is what makes
-  // repeated tabs converge rather than cycle.
-  // A single match is finished with a space — except a directory, where the next tab is
-  // meant to descend into it and a space would end the token instead.
-  const only = candidates.length === 1 ? candidates[0]! : undefined
-  const completed = only ? (only.endsWith('/') ? only : `${only} `) : longestCommonPrefix(candidates)
-  if (completed === partial && candidates.length > 1) {
-    return { line, cursor, candidates }
-  }
-  const next = line.slice(0, start) + completed + line.slice(cursor)
-  return {
-    line: next,
-    cursor: start + completed.length,
-    ...(candidates.length > 1 ? { candidates } : {}),
-  }
-}

@@ -10,7 +10,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { complete } from './complete.ts'
+import { suggest } from './complete.ts'
 
 function tree(): string {
   const dir = mkdtempSync(join(tmpdir(), 'conclave-complete-'))
@@ -22,56 +22,50 @@ function tree(): string {
   return dir
 }
 
-test('a leading > addresses a participant', () => {
+
+const CMDS = ['/pause', '/continue', '/abort', '/help']
+
+test('> offers both participants and the default, so the default is discoverable', () => {
+  // Plain text reaching both is the one part of addressing you learn by NOT doing
+  // something. Listing it beside the narrowing options makes the whole choice legible.
   const dir = tree()
-  const r = complete('>a', 2, dir)
-  assert.equal(r?.line, '>advisor ')
-  assert.equal(r?.cursor, 9)
+  const r = suggest('>', 1, dir, CMDS)
+  assert.deepEqual(r?.items, ['>advisor', '>implementer', '>both'])
+  assert.equal(r?.start, 0)
+  assert.equal(r?.end, 1)
 })
 
-test('ambiguous participants complete as far as they agree, and report the rest', () => {
-  // Repeated tabs converge rather than cycling, so a wrong guess is never silently chosen.
+test('> narrows as it is typed', () => {
   const dir = tree()
-  const r = complete('>', 1, dir)
-  assert.deepEqual(r?.candidates, ['advisor', 'implementer'])
-  assert.equal(r?.line, '>', 'nothing is agreed beyond the sigil')
+  assert.deepEqual(suggest('>i', 2, tree(), CMDS)?.items, ['>implementer'])
+  assert.equal(suggest('>zz', 3, dir, CMDS), undefined)
 })
 
-test('@ is always a path, wherever it appears', () => {
-  // It used to depend on position, because `@` carried both meanings. `>` took addressing,
-  // so `@` now means what it means in Claude Code and Codex — including once forwarded.
+test('a slash offers commands, but only as the first token', () => {
   const dir = tree()
-  const r = complete('look at @src/relay/rel', 22, dir)
-  assert.equal(r?.line, 'look at @src/relay/relay.ts ')
+  assert.deepEqual(suggest('/c', 2, dir, CMDS)?.items, ['/continue'])
+  assert.equal(suggest('say a/b', 7, dir, CMDS), undefined, 'a slash in prose is a slash')
 })
 
-test('a directory completes with its separator, so the next tab descends', () => {
+test('@ offers paths, and the span replaces the sigil too', () => {
   const dir = tree()
-  const r = complete('see @src', 8, dir)
-  assert.equal(r?.line, 'see @src/', 'no trailing space, or the next tab cannot descend')
-  const next = complete(r!.line, r!.cursor, dir)
-  assert.equal(next?.line, 'see @src/relay/', 'and it does descend')
+  const r = suggest('look @src/rel', 13, dir, CMDS)
+  assert.deepEqual(r?.items, ['@src/relay/'])
+  // start covers the `@`, so accepting replaces the whole token rather than doubling it.
+  assert.equal(r?.start, 5)
+  assert.equal(r?.end, 13)
+  assert.equal(r?.suffix, '', 'a directory gets no trailing space; the next key descends')
+})
+
+test('nothing to suggest returns nothing rather than an empty menu', () => {
+  const dir = tree()
+  assert.equal(suggest('ordinary prose', 14, dir, CMDS), undefined)
+  assert.equal(suggest('', 0, dir, CMDS), undefined)
 })
 
 test('dotfiles stay hidden unless asked for', () => {
   // `@` would otherwise offer `.git` ahead of anything useful.
   const dir = tree()
-  const shown = complete('see @', 5, dir)
-  assert.ok(!(shown?.candidates ?? []).some((c) => c.startsWith('.')))
-  const asked = complete('see @.g', 7, dir)
-  assert.ok((asked?.candidates ?? [asked?.line ?? '']).some((c) => c.includes('.git')))
-})
-
-test('a leading @ still completes a path, not a participant', () => {
-  // The old rule would have offered `advisor` here. There is no such rule now.
-  const dir = tree()
-  const r = complete('@RE', 3, dir)
-  assert.equal(r?.line, '@README.md ')
-})
-
-test('no sigil under the cursor completes nothing', () => {
-  const dir = tree()
-  assert.equal(complete('just typing', 11, dir), undefined)
-  assert.equal(complete('mail me at foo@bar', 18, dir), undefined, 'an email is not a path')
-  assert.equal(complete('a > b', 5, dir), undefined, 'a > mid-line is not addressing')
+  assert.ok(!(suggest('see @', 5, dir, CMDS)?.items ?? []).some((c) => c.startsWith('@.')))
+  assert.ok((suggest('see @.g', 7, dir, CMDS)?.items ?? []).some((c) => c.includes('.git')))
 })
