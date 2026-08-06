@@ -709,6 +709,61 @@ provenance — *what the human had seen when they wrote it* — and dropping tha
 makes the message ambiguous in exactly the way an unattributed instruction is. Streaming
 without anchoring trades one problem for another.
 
+### Passthrough: slash commands as a third input class [Added 2026-08-05 — not solved]
+
+`/compact`, `/model`, `/clear` and friends are neither context nor control. They are
+directives to the **child CLI itself** rather than messages to the model, so human input
+is really three-way:
+
+| class | destination | example |
+|---|---|---|
+| context | the model, at the next turn boundary | a constraint, an answer |
+| control | the orchestrator acts now | stop, not like that |
+| **passthrough** | the child CLI's own command surface | `/compact`, `/model` |
+
+Passthrough reuses the audience model unchanged — `/compact all`, or aimed at one
+participant. That much is easy. Four interactions are not.
+
+**`/compact` is a deliberate transcript rewrite**, which is the case the reconciliation
+path was built for: prefix-digest detection, `resetTranscript`, revision events withdrawing
+what compaction removed. A human-initiated compaction should flow through that machinery
+rather than around it. This is the one passthrough already supported by construction.
+
+**`/compact` belongs in the §7a ladder, below rotation.** Compaction is lossy but
+continuous; rotation is clean but discontinuous. An advisor that sees mechanical
+degradation currently has one move. It should have two, in order of cost:
+
+```
+compact  →  rotate  →  escalate
+```
+
+**`/clear` is destructive and should be human-only**, on the same reasoning as termination.
+It discards context irrecoverably, which is precisely what the advisor may not do
+autonomously.
+
+**`/model` interacts with capability grading, and this is the non-obvious one.** The
+conformance suite grades per *agent* — `observed` for codex 0.146.0 — but the fixtures were
+collected against a specific model. Switching mid-session is a change the grades do not
+currently describe. The likely truth is that lifecycle semantics (`Stop`, `turn_aborted`,
+`PermissionRequest`) are harness-level and survive a model change, while prose habits do
+not. That is an **assumption, not a finding**, and it should be stated in the capabilities
+rather than left implicit — the same discipline applied everywhere else here.
+
+### Configuration layering [extends §5b]
+
+Important switches default in YAML and are changeable at runtime, which makes three layers
+rather than two:
+
+```
+global YAML     available agents, models, personal defaults
+project YAML    which agents fill which roles for this repository
+REPL override   this session only
+```
+
+`AgentRegistry.resolve()` already validates a spec without launching anything, which is
+the seam a runtime override needs: change the spec, re-resolve, report the error before
+anything spawns.
+
 ### Open decisions
 
 1. ~~**Narration or final message?**~~ **Decided: all prose, in both directions.** Every
