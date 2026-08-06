@@ -129,6 +129,26 @@ a rewrite would add operational risk without meaningfully undoing publication. `
 stays as the audited experimental baseline; the paths come out in the next commits so the
 public tip is portable.
 
+## Errata: two commits contain work their messages do not describe
+
+`3c2c8b5` ("Record the intervention gap that streaming opens") and `74f5aee` ("Human
+input splits into context and control") are documentation commits that also contain
+~600 lines of watchdog implementation and tests — `src/outcomes/watchdog.ts`,
+`watchdog.test.ts`, and `src/adapters/watchdogWiring.test.ts`.
+
+Cause: `git add -A` run while a relay session was live and its implementer was editing the
+same tree. That is the shared-workspace hazard recorded in §5c of the brief, walked into by
+the orchestrator rather than by either agent — the advisor is read-only, the human was not.
+
+Not rewritten, on the same reasoning applied to `/Users/miclip` in `c46a1ea`: the commits
+are pushed, the problem is attribution rather than correctness or secrets, and a rewrite
+would add operational risk without meaningfully undoing publication. Recorded here instead
+so the history is explained rather than merely wrong.
+
+**The rule that follows: never stage with `-A` while a participant session is live.** Stage
+explicitly, or hold commits until participants are quiesced. The orchestrator has to obey
+the workspace discipline it enforces on its participants.
+
 ## Deferred, with reasons
 
 - `AgentSession.fork()` throws. Honest until session forking is actually needed.

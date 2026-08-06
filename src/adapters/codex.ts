@@ -236,6 +236,7 @@ export class CodexPtyHookAdapter implements AgentSession {
         }
         this.#turns.set(String(key), turn)
         this.#order.push(String(key))
+        this.#watchdog.arm(String(key), turn)
         this.#emit({
           type: 'turn_start',
           prompt: turn.prompt,

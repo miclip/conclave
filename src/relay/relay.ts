@@ -42,6 +42,8 @@ export interface RelayOptions {
   implementer: ParticipantSpec
   /** Exchanges before the relay stops and hands back to the human. */
   maxRounds?: number
+  /** Per-turn deadline, handed to each adapter's watchdog rather than kept here. */
+  turnWatchdogMs?: number
   onLog?: (m: RelayMessage) => void
 }
 
@@ -92,7 +94,10 @@ export class Relay {
   }
 
   async #join(spec: ParticipantSpec, rank: Rank): Promise<void> {
-    const session = await this.#opts.registry.createParticipant(spec, { cwd: this.#opts.cwd })
+    const session = await this.#opts.registry.createParticipant(spec, {
+      cwd: this.#opts.cwd,
+      watchdogMs: this.#opts.turnWatchdogMs,
+    })
     const p: RelayParticipant = { id: spec.id, rank, session, events: [] }
     this.#participants.set(spec.id, p)
     // One consumer per session: the event queue delivers each event to exactly one reader.
@@ -168,13 +173,19 @@ export class Relay {
     const before = p.events.length
     await p.session.send(text, { kind: 'peer_relay' })
 
-    const deadline = Date.now() + 600_000
+    // No timeout of its own. The adapter's watchdog guarantees a terminal verdict for a
+    // hung turn -- that is what it is for -- so a deadline here would be a second clock
+    // racing the first.
+    //
+    // An earlier version threw after ten minutes, which killed both sessions on a turn
+    // that was merely long. It discarded working sessions to report a timeout, and it did
+    // so with a hardcoded throw rather than the `timed_out` verdict the design already
+    // defines. Losing the session is worse than waiting for it.
     let end: TurnEndEvent | undefined
-    while (Date.now() < deadline && !end) {
+    while (!end) {
       end = p.events.slice(before).find((e) => e.type === 'turn_end') as TurnEndEvent | undefined
       if (!end) await new Promise((r) => setTimeout(r, 250))
     }
-    if (!end) throw new Error(`${p.id}: no terminal verdict within the budget`)
 
     const snap = await p.session.snapshot()
     const prose = snap.turns.at(-1)?.assistantText ?? ''
@@ -246,6 +257,16 @@ export class Relay {
       )
       this.#record({ from: impl.id, fromRank: 'implementer', to: [lead.id], kind: 'report', text: report.prose })
       this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text: `${impl.id} turn: ${formatVerdict(report.end.verdict)}` })
+
+      // A turn that did not complete is the human's call, not the advisor's. Escalating
+      // here rather than relaying the partial prose keeps the advisor from steering on a
+      // report that never finished being written.
+      if (report.end.verdict.outcome !== 'completed') {
+        return {
+          reason: 'escalated',
+          detail: `${impl.id} turn ended ${formatVerdict(report.end.verdict)}`,
+        }
+      }
 
       const leadAside = this.#drain(lead.id)
       next = await this.#exchange(
