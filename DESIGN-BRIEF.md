@@ -814,11 +814,36 @@ understood every design decision — nothing can — but it is far stronger than
 sentence claiming it did.
 
 Human constraints are replayed **separately** from the handoff, so they arrive at human
-privilege rather than as advisor prose (§6, and the rank rules above). The old session
-stays alive but frozen until the transfer is accepted, making rotation transactional
-rather than destructive. Freezing is cheap — an idle session costs nothing and keeps its
-context — but it is a third state the adapter contract does not yet name: neither
-`close('graceful')` nor `close('abandoned')` covers "alive, quiesced, not receiving".
+privilege rather than as advisor prose (§6, and the rank rules above).
+
+#### Session lifecycle states [contract change]
+
+Not a flag but an ownership model. `close()` alone cannot express this:
+
+```
+running     accepting work
+quiesced    alive, holds its context, cannot receive new work, still inspectable
+rotating    a replacement is proving it can continue
+terminated  gone
+```
+
+A quiesced session is the point: still alive, still holding everything it knows, unable to
+be given more, and available for inspection **if the handoff fails**. That last clause is
+what makes rotation a transaction rather than a hopeful sequence:
+
+1. Quiesce the old implementer.
+2. Produce the handoff.
+3. Start the replacement.
+4. Verify the replacement reproduces the recorded state.
+5. On success — terminate the old session.
+6. **On failure — unquiesce the original and escalate.**
+
+Step 6 is the part "freeze" left undefined. Without an explicit rollback, a failed
+transfer leaves the work stranded between two sessions, and the failure mode is silent:
+the replacement carries on from a state it could not actually reproduce.
+
+Freezing itself is cheap — an idle session costs nothing and keeps its context — so the
+cost of this protocol is protocol, not resources.
 
 #### Degradation and complaint are separate signals
 
@@ -851,13 +876,32 @@ The advisor's first proposal was coherent and smuggled in authority over complet
 the architecture reserves for the human. The implementer challenged four points; all four
 were conceded and the policy above is the result.
 
-That is the mechanism working, and worth recording as such. Two honest limits on what it
-demonstrates. The exchange was relayed by hand — none of the machinery here was involved,
-and the human was the transport. And an advisor conceding every point is not obviously
-distinguishable from an advisor being agreeable; the same accommodation that makes flat
-committees converge can point at a subordinate's objections just as easily. One exchange
-cannot tell those apart. What it does show is that an implementer holding context the
-advisor lacked produced objections the advisor could not have raised alone.## 8. Commercial risk (important, affects architecture)
+The result worth recording is not that either party was right. It is that **information
+unavailable to one role became available through the other**. The objections were not
+stylistic — each rested on a fact the advisor genuinely did not hold: that prose
+acknowledgements are unverifiable here, that compaction detection already exists, that
+§7a already defines the metric, and that the architecture separates evidence from
+judgement. Preserving that asymmetry is what the whole design is for.
+
+Two claims must stay separate, and the first must not become evidence for the second:
+
+- **Observed.** Role separation produced objections that materially improved the design.
+- **Unverified.** Conclave can reproduce that outcome automatically.
+
+The exchange was relayed by hand. None of the machinery was involved; the human was the
+transport.
+
+And one exchange cannot distinguish three explanations for the advisor conceding every
+point: that the objections were stronger, that it accommodated the implementer, or that it
+would have accommodated almost any coherent counterargument. That is an experiment, not a
+conclusion.
+
+**Selective concession** is the measure. Does the advisor reject weak objections while
+accepting strong ones? If every objection is accepted, the interaction is adding
+politeness rather than discipline — and the review is worth nothing precisely when it
+matters most. Worth instrumenting alongside the dissent-rate and unbacked-complaint
+metrics (§2, §7a): all three are ways of asking whether the second model is still doing
+work.## 8. Commercial risk (important, affects architecture)
 
 Subscription-backed programmatic access has been repeatedly targeted. Timeline as
 understood:
