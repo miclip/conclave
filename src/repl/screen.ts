@@ -41,6 +41,13 @@ export interface ScreenOptions {
   /** Rendered dim under the input. Recomputed on every draw, so it can show live state. */
   footer: () => string
   prompt: () => string
+  /**
+   * Tab completion. Returns the replacement line and cursor, or undefined to do nothing.
+   *
+   * The screen owns the buffer, so completion has to come back through it rather than
+   * being applied by the caller — otherwise two things would be editing the same string.
+   */
+  complete?: (line: string, cursor: number) => { line: string; cursor: number } | undefined
 }
 
 const ESC = '\x1b['
@@ -172,6 +179,16 @@ export class Screen {
     if (etx || (key.ctrl && key.name === 'c')) return void this.#o.onInterrupt()
     const eot = str === '\x04' || key.sequence === '\x04'
     if ((eot || (key.ctrl && key.name === 'd')) && this.#line === '') return void this.#o.onInterrupt()
+
+    if (key.name === 'tab') {
+      const done = this.#o.complete?.(this.#line, this.#cursor)
+      if (done) {
+        this.#line = done.line
+        this.#cursor = done.cursor
+      }
+      this.draw()
+      return
+    }
 
     switch (key.name) {
       case 'return':

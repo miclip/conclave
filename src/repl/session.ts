@@ -28,6 +28,7 @@ import { createWriteStream, existsSync, realpathSync } from 'node:fs'
 import { join } from 'node:path'
 import { Writable } from 'node:stream'
 import { clearLine, createInterface, cursorTo, type Interface } from 'node:readline'
+import { complete } from './complete.ts'
 import { Screen } from './screen.ts'
 import { banner, bold, colorFor, dim, elapsedSince, grey, markdown, Progress, rule, setColor, speakerColor, yellow } from './render.ts'
 import type { AgentEvent } from '../contract/session.ts'
@@ -76,8 +77,15 @@ export interface SessionOptions {
 
 const HELP = `
   <text>                 send to everyone, at human rank
-  @advisor <text>        send to the advisor only — the implementer will not see it
-  @implementer <text>    send to the implementer only — the advisor will not see it
+  >advisor <text>        send to the advisor only — the implementer will not see it
+  >implementer <text>    send to the implementer only — the advisor will not see it
+  @src/relay/relay.ts    a path, anywhere in the line. Tab completes both sigils.
+
+  They compose:  >advisor read @src/relay/relay.ts and tell me what it settles
+
+  Paths are references, not inlined. Both participants share this directory and
+  open the file themselves, and @path means the same to their own CLIs — so the
+  reference survives being forwarded, which inlined text would not.
 
   /pause                 pause at the next round boundary
   /continue              resume from a pause
@@ -454,6 +462,16 @@ export async function runSession(opts: SessionOptions): Promise<number> {
       prompt: promptText,
       footer,
       onLine: (raw) => submit(raw),
+      complete: (line, cursor) => {
+        const done = complete(line, cursor, opts.cwd)
+        if (!done) return undefined
+        // Ambiguous completions are listed above the box rather than cycled through, so a
+        // wrong guess is visible instead of silently chosen.
+        if (done.candidates && done.candidates.length > 1) {
+          write(dim(`  ${done.candidates.slice(0, 12).join('   ')}`))
+        }
+        return { line: done.line, cursor: done.cursor }
+      },
       onInterrupt: () => onInterrupt(),
     })
     screen.open()
@@ -623,7 +641,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     // Plain text. Addressed, at human rank, and NOT delivered mid-turn: it is queued as
     // context the next exchange carries. Saying so beats letting the operator believe the
     // participant is reading over their shoulder.
-    if (word === '@advisor' || word === '@implementer') {
+    if (word === '>advisor' || word === '>implementer') {
       const who = word.slice(1)
       if (!rest) return void write(`  ${word} needs something to say`)
       if (!run) return void write(dim('  nothing is running; type a goal to start'))

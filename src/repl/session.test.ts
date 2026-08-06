@@ -164,7 +164,7 @@ test('an addressed line is queued, restricted, and reported as such', async () =
       codex: [slow('advisor', 'codex', ['Do it.', 'More.', 'DONE'])],
       claude: [impl],
     }),
-    input: script(['@implementer touch nothing under src/adapters', '/audit'], 300),
+    input: script(['>implementer touch nothing under src/adapters', '/audit'], 300),
     output: out.stream,
   })
   assert.equal(code, 0)
@@ -279,7 +279,7 @@ test('typed instructions queue visibly and are listed on demand', async () => {
       codex: [slow('advisor', 'codex', ['Do it.', 'More.', 'DONE'])],
       claude: [impl],
     }),
-    input: script(['@implementer touch nothing under src/adapters', '/queue'], 200),
+    input: script(['>implementer touch nothing under src/adapters', '/queue'], 200),
     output: out.stream,
   })
   const text = out.text()
@@ -335,4 +335,33 @@ test('a flag in the goal position is flags, not a goal named --lead', async () =
     stderr = (err as { stderr?: string }).stderr ?? ''
   }
   assert.match(stderr, /unknown agent 'nope'/, `--lead was not parsed as a flag; stderr was:\n${stderr}`)
+})
+
+test('an address and a path compose: >advisor read @path', async () => {
+  // The address is consumed by the console; everything after it is forwarded verbatim, so
+  // the participant's own CLI resolves `@path` exactly as it would if typed there. That is
+  // the reason paths are references rather than inlined text — a reference survives the
+  // hop, and pasted contents would go stale the moment either participant edited the file.
+  const dir = repo()
+  const impl = slow('impl', 'claude', ['ack', 'Did it.', 'And again.'])
+  const out = collect()
+  await runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'claude',
+    rounds: 3,
+    checks: [],
+    registry: registryOf({
+      codex: [slow('advisor', 'codex', ['Do it.', 'More.', 'DONE'])],
+      claude: [impl],
+    }),
+    input: script(['>implementer read @src/relay/relay.ts and report'], 250),
+    output: out.stream,
+  })
+
+  const sent = impl.received.find((m) => m.includes('read @src/relay/relay.ts'))
+  assert.ok(sent, `the path should reach the participant intact:\n${impl.received.join('\n---\n')}`)
+  assert.ok(!sent.includes('>implementer'), 'the address is consumed, not forwarded')
+  assert.match(out.text(), /withheld from advisor/, 'and it stays restricted')
 })
