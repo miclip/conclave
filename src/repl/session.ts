@@ -417,8 +417,10 @@ export async function runSession(opts: SessionOptions): Promise<number> {
   function promptText(): string {
     // Distinct messages, not deliveries. One line addressed to everyone is one thing the
     // operator typed; counting recipients reported "(2 queued)" for a single "continue".
+    // Always the chevron. A `goal ›` prefix when idle made the prompt shift under the
+    // cursor as a run started and ended, and the hint belongs in the footer, which is
+    // where everything else that is not typed lives.
     const queued = new Set(relay.pending().flatMap((p) => p.texts)).size
-    if (!run) return `${dim('goal')} ${bold('›')} `
     return queued > 0 ? `${dim(`(${queued} queued)`)} ${bold('›')} ` : `${bold('›')} `
   }
 
@@ -438,7 +440,8 @@ export async function runSession(opts: SessionOptions): Promise<number> {
   const footer = (): string => {
     const active = progress.line((p) => speakerColor(p, 'implementer')(p))
     const queued = new Set(relay.pending().flatMap((p) => p.texts)).size
-    const bits = [active, queued > 0 ? dim(`${queued} queued`) : '', dim('/help')].filter(Boolean)
+    const idle = !run && !active ? dim('type a goal to start') : ''
+    const bits = [active, idle, queued > 0 ? dim(`${queued} queued`) : '', dim('/help')].filter(Boolean)
     return `  ${bits.join(dim('  ·  '))}`
   }
 
