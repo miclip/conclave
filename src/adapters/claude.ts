@@ -36,6 +36,7 @@ import type {
 import { guaranteesFor, turnKey } from '../contract/session.ts'
 import { emptyTranscriptState } from '../outcomes/classify.ts'
 import { TurnVerdictTracker, type VerdictUpdate } from '../outcomes/tracker.ts'
+import { TurnWatchdog } from '../outcomes/watchdog.ts'
 import { sanitizedCopy } from '../process/childenv.ts'
 import { PtyProcess } from '../process/pty.ts'
 import { InputQueue } from '../process/input.ts'
@@ -96,10 +97,17 @@ export class ClaudePtyHookAdapter implements AgentSession {
   #pendingPrompt: { resolve: (k: TurnKey) => void; reject: (e: Error) => void; prompt: string } | undefined
   #opts: ClaudeAdapterOptions
   #settingsDir: string | undefined
+  #watchdog: TurnWatchdog<TurnState>
 
   private constructor(opts: ClaudeAdapterOptions) {
     this.#opts = opts
     this.guarantees = guaranteesFor(opts.inputOwnership ?? 'mediated')
+    // A hung turn produces no hooks, no transcript records and no exit, so the deadline
+    // rule has to be driven by a clock rather than by an arrival like everything else.
+    // `synthesized: true` -- nothing from the child said this.
+    this.#watchdog = new TurnWatchdog<TurnState>(opts.watchdogMs ?? 600_000, (turn, update) =>
+      this.#apply(turn, update, true),
+    )
   }
 
   get sessionId(): string {
@@ -234,6 +242,7 @@ export class ClaudePtyHookAdapter implements AgentSession {
         }
         this.#turns.set(String(key), turn)
         this.#order.push(String(key))
+        this.#watchdog.arm(String(key), turn)
         this.#emit({
           type: 'turn_start',
           prompt: turn.prompt,
@@ -417,6 +426,10 @@ export class ClaudePtyHookAdapter implements AgentSession {
     this.#pendingPrompt?.reject(new Error(`claude exited (${reason}) before accepting the prompt`))
     this.#pendingPrompt = undefined
 
+    // The child is gone: whatever the turns are, they are not still running. The deadline
+    // has nothing left to say and must not fire against a dead session.
+    this.#watchdog.disarmAll()
+
     await this.#reconcileFromTranscript()
     for (const turn of this.#liveTurns()) {
       this.#apply(
@@ -538,6 +551,10 @@ export class ClaudePtyHookAdapter implements AgentSession {
     if (this.#closed) return
     this.#closed = true
     this.#closeMode = mode
+    // Before either branch: we are done observing, so the deadline stops applying. Left
+    // armed it could fire during the awaits below and race the verdict each branch is
+    // deliberately choosing.
+    this.#watchdog.disarmAll()
 
     if (mode === 'graceful' && this.#pty.alive) {
       await this.#input.drain()

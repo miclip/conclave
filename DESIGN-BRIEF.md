@@ -652,6 +652,45 @@ Verified against git on this machine, because three of these bite immediately:
   The registry preflight already refuses to construct a session whose hooks are registered
   but untrusted, so this surfaces as a clear error rather than a silent no-hooks session.
 
+### Streaming to the human, and the intervention gap [Added 2026-08-05]
+
+The relay currently delivers a participant's prose only once its turn completes, so a long
+turn shows the human nothing for minutes and then a wall of text. That is backwards for
+supervised use: the peer can wait for a complete turn, the human should not have to.
+
+But streaming is not simply an improvement, and the hazard is worth stating before
+building it.
+
+**Streaming improves observation latency. It does not improve intervention latency.**
+Neither CLI ingests input mid-turn — a message written at second 5 of a two-minute turn is
+queued and delivered when that turn ends. So streaming widens the window in which a human
+can react to something already done, without widening the window in which reacting helps.
+
+**The failure is not merely lateness, it is misapplication.** A late objection arrives
+unanchored: *"don't do that"* delivered at turn boundary reads as context for the **next**
+action, which may be something the human wanted. A correct objection can stop the right
+thing. Silence would have been better than a well-founded intervention applied to the
+wrong step.
+
+Three mitigations, none free:
+
+- **Anchor the intervention.** A human message carries the point it was written against —
+  which prose the human had seen. The recipient can then tell "this was about something
+  already finished", and the orchestrator can mark it in the log. Cheap, and it makes the
+  ambiguity visible rather than removing it.
+- **Cancel rather than queue.** If the human is objecting to work in flight, the correct
+  action is often to *cancel the turn* so the objection lands before more happens. The
+  machinery exists and is `proven` on both adapters; this is a genuine use for it. It
+  costs the partial work, which may be the right trade when the alternative is compounding
+  a mistake.
+- **Deliver with a staleness note.** "Written while you were doing X." Honest, but pushes
+  the disambiguation onto the model.
+
+The general shape is familiar from the rest of this design: an intervention has a
+provenance — *what the human had seen when they wrote it* — and dropping that provenance
+makes the message ambiguous in exactly the way an unattributed instruction is. Streaming
+without anchoring trades one problem for another.
+
 ### Open decisions
 
 1. ~~**Narration or final message?**~~ **Decided: all prose, in both directions.** Every

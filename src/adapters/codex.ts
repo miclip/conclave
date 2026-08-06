@@ -43,6 +43,7 @@ import type {
 import { guaranteesFor, turnKey } from '../contract/session.ts'
 import { emptyTranscriptState } from '../outcomes/classify.ts'
 import { TurnVerdictTracker, type VerdictUpdate } from '../outcomes/tracker.ts'
+import { TurnWatchdog } from '../outcomes/watchdog.ts'
 import { sanitizedCopy } from '../process/childenv.ts'
 import { PtyProcess } from '../process/pty.ts'
 import { CODEX_PERMISSION_ENCODING, InputQueue } from '../process/input.ts'
@@ -92,10 +93,17 @@ export class CodexPtyHookAdapter implements AgentSession {
     | { resolve: (k: TurnKey) => void; reject: (e: Error) => void; prompt: string }
     | undefined
   #opts: CodexAdapterOptions
+  #watchdog: TurnWatchdog<TurnState>
 
   private constructor(opts: CodexAdapterOptions) {
     this.#opts = opts
     this.guarantees = guaranteesFor(opts.inputOwnership ?? 'mediated')
+    // See the Claude adapter: a hang is defined by nothing arriving, so the deadline rule
+    // needs its own clock rather than a hook to react to. `synthesized: true` -- the child
+    // said nothing.
+    this.#watchdog = new TurnWatchdog<TurnState>(opts.watchdogMs ?? 600_000, (turn, update) =>
+      this.#apply(turn, update, true),
+    )
   }
 
   get sessionId(): string {
@@ -228,6 +236,7 @@ export class CodexPtyHookAdapter implements AgentSession {
         }
         this.#turns.set(String(key), turn)
         this.#order.push(String(key))
+        this.#watchdog.arm(String(key), turn)
         this.#emit({
           type: 'turn_start',
           prompt: turn.prompt,
@@ -384,6 +393,9 @@ export class CodexPtyHookAdapter implements AgentSession {
     this.#pendingPrompt?.reject(new Error(`codex exited (${reason}) before accepting the prompt`))
     this.#pendingPrompt = undefined
 
+    // The child is gone, so the deadline has nothing left to say about these turns.
+    this.#watchdog.disarmAll()
+
     await this.#reconcileFromTranscript()
     for (const turn of this.#liveTurns()) {
       this.#apply(
@@ -531,6 +543,9 @@ export class CodexPtyHookAdapter implements AgentSession {
     if (this.#closed) return
     this.#closed = true
     this.#closeMode = mode
+    // We are done observing, so the deadline stops applying. Left armed it could fire
+    // during the awaits below and race the verdict each branch is deliberately choosing.
+    this.#watchdog.disarmAll()
 
     if (mode === 'graceful' && this.#pty.alive) {
       await this.#input.drain()
