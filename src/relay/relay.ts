@@ -115,6 +115,11 @@ export interface RelayOptions {
   /** Per-turn deadline, handed to each adapter's watchdog rather than kept here. */
   turnWatchdogMs?: number
   /**
+   * How long to wait for the transcript to catch up with a turn the hook says has ended.
+   * NOT a turn deadline; see `#exchange`. Default 15s.
+   */
+  transcriptSettleMs?: number
+  /**
    * Routing-log entries as they are recorded. Kept for callers that only want the log and
    * only want it pushed at them; `observe()` is the fuller surface, and carries the
    * participant activity this does not.
@@ -326,7 +331,37 @@ export class Relay {
       if (!end) await new Promise((r) => setTimeout(r, 250))
     }
 
-    const snap = await p.session.snapshot()
+    // The transcript can lag the hook. `Stop` fires when the turn ends; the final assistant
+    // message may not have been flushed yet, so reading the snapshot the instant `turn_end`
+    // arrives can return a turn holding only its interstitial narration.
+    //
+    // Observed live and repeatedly: an advisor asked for the same trace three times because
+    // every report it received was a preamble -- "I'll do the deeper trace properly" and
+    // nothing else. The implementer had answered; the relay had read too early. Intermittent,
+    // which is what a flush race looks like.
+    //
+    // So settle on the TRANSCRIPT rather than on the hook's timing. This is not a second
+    // deadline on the turn -- the adapter's watchdog owns that -- it is a bounded wait for
+    // the record of a turn that has already ended. When the bound is hit the prose is used
+    // anyway and the shortfall is recorded, because a truncated report the log explains is
+    // recoverable and a silent one is not.
+    const settleBy = Date.now() + (this.#opts.transcriptSettleMs ?? 15_000)
+    let snap = await p.session.snapshot()
+    while (snap.turns.at(-1)?.state === 'in_progress' && Date.now() < settleBy) {
+      await new Promise((r) => setTimeout(r, 150))
+      snap = await p.session.snapshot()
+    }
+    if (snap.turns.at(-1)?.state === 'in_progress') {
+      this.#record({
+        from: 'orchestrator',
+        fromRank: 'human',
+        to: [],
+        kind: 'note',
+        text:
+          `${p.id}'s transcript still showed the turn in progress after the settle window; ` +
+          `the report below may be incomplete`,
+      })
+    }
     this.#collectEvidence(p, snap)
     const prose = snap.turns.at(-1)?.assistantText ?? ''
     return { prose, end }

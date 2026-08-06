@@ -128,18 +128,42 @@ async function main(argv: string[]): Promise<number> {
       console.error('session needs a goal: conclave session "<goal>"\n')
       return 1
     }
+    // A flag whose value went missing must not be silently ignored. `npm run x -- ...`
+    // mangles quoted arguments containing spaces, and a session once ran for half an hour
+    // with rotation disabled because `--checks "npm test"` arrived as a bare `--checks`.
+    let bad: string | undefined
     const flag = (name: string, fallback: string) => {
       const i = rest.indexOf(`--${name}`)
-      return i >= 0 ? (rest[i + 1] ?? fallback) : fallback
+      if (i < 0) return fallback
+      const value = rest[i + 1]
+      if (value === undefined || value.startsWith('--')) {
+        bad = name
+        return fallback
+      }
+      return value
     }
     const checks = flag('checks', '').split(',').map((c) => c.trim()).filter(Boolean)
+    const lead = flag('lead', 'codex')
+    const implementer = flag('implementer', 'claude')
+    const rounds = flag('rounds', '8')
+    const turnTimeout = flag('turn-timeout', '')
+    if (bad) {
+      console.error(
+        `--${bad} was given without a value.\n\n` +
+          `If you used \`npm run session -- ...\`, npm mangles quoted arguments containing\n` +
+          `spaces. Call the binary directly instead:\n\n` +
+          `  node bin/conclave.ts session "<goal>" --checks "npm test"\n`,
+      )
+      return 1
+    }
     return runSession({
       cwd: process.cwd(),
       goal,
-      lead: flag('lead', 'codex'),
-      implementer: flag('implementer', 'claude'),
-      rounds: Number(flag('rounds', '8')),
+      lead,
+      implementer,
+      rounds: Number(rounds),
       checks,
+      ...(turnTimeout ? { turnWatchdogMs: Number(turnTimeout) * 1000 } : {}),
     })
   }
 

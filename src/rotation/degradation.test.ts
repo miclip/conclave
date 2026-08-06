@@ -44,6 +44,27 @@ test('an undeclared rewrite still counts, and says so', () => {
   assert.ok(d.evidence.some((e) => e.includes('no compaction marker recognised')))
 })
 
+test('discussing compaction as a design topic is not a complaint about oneself', () => {
+  // Verbatim from a live session. The implementer was building compaction-aware code and
+  // listed this as a reliability gap in the feature; it was logged as an unbacked complaint
+  // against its own stall metric. First person is the discriminator.
+  assert.equal(
+    detectComplaint(
+      '2. **Compaction can erase evidence.** snapshot() rebuilds from a transcript that ' +
+        'compaction rewrites, and attribution is cumulative, so the exposure window is one turn wide.',
+    ),
+    false,
+  )
+  assert.equal(
+    detectComplaint('The design brief says a fresh session should be started when context is exhausted.'),
+    false,
+    'quoting the design is not reporting your own state',
+  )
+  // And the real thing still fires.
+  assert.equal(detectComplaint('I was just compacted and have lost the earlier detail.'), true)
+  assert.equal(detectComplaint('My context is nearly full; I would like a fresh session.'), true)
+})
+
 test('complaints are recognised without firing on any mention of context', () => {
   assert.equal(detectComplaint('My context is nearly full; I should hand over.'), true)
   assert.equal(detectComplaint('I would like a fresh session before continuing.'), true)

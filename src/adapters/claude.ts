@@ -37,7 +37,8 @@ import type {
 import { guaranteesFor, turnKey } from '../contract/session.ts'
 import { emptyTranscriptState } from '../outcomes/classify.ts'
 import { TurnVerdictTracker, type VerdictUpdate } from '../outcomes/tracker.ts'
-import { TurnWatchdog } from '../outcomes/watchdog.ts'
+
+import { DEFAULT_WATCHDOG_MS, TurnWatchdog } from '../outcomes/watchdog.ts'
 import { sanitizedCopy } from '../process/childenv.ts'
 import { PtyProcess } from '../process/pty.ts'
 import { InputQueue } from '../process/input.ts'
@@ -106,7 +107,7 @@ export class ClaudePtyHookAdapter implements AgentSession {
     // A hung turn produces no hooks, no transcript records and no exit, so the deadline
     // rule has to be driven by a clock rather than by an arrival like everything else.
     // `synthesized: true` -- nothing from the child said this.
-    this.#watchdog = new TurnWatchdog<TurnState>(opts.watchdogMs ?? 600_000, (turn, update) =>
+    this.#watchdog = new TurnWatchdog<TurnState>(opts.watchdogMs ?? DEFAULT_WATCHDOG_MS, (turn, update) =>
       this.#apply(turn, update, true),
     )
   }
@@ -230,7 +231,7 @@ export class ClaudePtyHookAdapter implements AgentSession {
             sentCancel: false,
             inputIsMediated: this.guarantees.inputOwnership === 'mediated',
           },
-          watchdogSeconds: (this.#opts.watchdogMs ?? 600_000) / 1000,
+          watchdogSeconds: (this.#opts.watchdogMs ?? DEFAULT_WATCHDOG_MS) / 1000,
         })
         tracker.observeHook('UserPromptSubmit', d.payload)
         const turn: TurnState = {

@@ -140,18 +140,32 @@ class FakeSession implements AgentSession {
     }
   }
 
+  /**
+   * Simulate the transcript lagging the `Stop` hook: the last turn reports `in_progress`
+   * carrying only its preamble until `afterMs`, then completes carrying the real report.
+   */
+  #lag: { text: string; until: number } | undefined
+  lagTranscript(finalText: string, afterMs: number): void {
+    this.#lag = { text: finalText, until: Date.now() + afterMs }
+  }
+
   async snapshot(): Promise<SessionSnapshot> {
+    const lagging = this.#lag !== undefined && Date.now() < this.#lag.until
     return {
       sessionId: this.sessionId,
       agent: this.agent,
       cwd: '/tmp',
-      turns: this.#turns.map((t) => ({
-        key: t.key,
-        prompt: '',
-        state: 'completed' as const,
-        assistantText: t.prose,
-        toolCalls: t.args.map((args) => ({ tool: 'Bash', failed: false, args })),
-      })),
+      turns: this.#turns.map((t, i) => {
+        const last = i === this.#turns.length - 1
+        const held = this.#lag !== undefined && last
+        return {
+          key: t.key,
+          prompt: '',
+          state: (held && lagging ? 'in_progress' : 'completed') as 'in_progress' | 'completed',
+          assistantText: held && !lagging ? this.#lag!.text : t.prose,
+          toolCalls: t.args.map((args) => ({ tool: 'Bash', failed: false, args })),
+        }
+      }),
       guarantees: this.guarantees,
       compactionGeneration: 0,
       builtAt: Date.now(),
@@ -665,4 +679,54 @@ test('tool calls made BEFORE the aside are not evidence for it', async (t) => {
     () => writeFileSync(join(dir, 'asked-for.txt'), 'x\n'),
   )
   assert.deepEqual(origin.artifacts, [])
+})
+
+test('a report is not read until the transcript has caught up with the turn', async () => {
+  // The failure this prevents: `Stop` fires when a turn ends, but the final assistant
+  // message may not be flushed yet, so reading immediately returns only the interstitial
+  // narration. Observed live -- an advisor asked for the same trace three times because
+  // every report it received was a preamble.
+  const lagging = new FakeSession('claude', 'impl', ['ack', 'PREAMBLE'])
+  // The transcript reports the turn still in progress, then completes it with the real
+  // report a moment later. Reading eagerly gets the preamble; settling gets the report.
+  lagging.lagTranscript('PREAMBLE — the full findings follow.', 400)
+
+  const relay = await Relay.start({
+    registry: registryWith({ codex: new FakeSession('codex', 'advisor', ['Do it.', 'DONE']), claude: lagging }),
+    cwd: process.cwd(),
+    lead: { id: 'advisor', agent: 'codex', role: 'advisor' },
+    implementer: { id: 'implementer', agent: 'claude', role: 'implementer' },
+    maxRounds: 2,
+  })
+  await relay.run('Keep the work moving.')
+  await relay.stop()
+
+  const report = relay.log.filter((m) => m.kind === 'report').at(-1)
+  assert.ok(report)
+  assert.match(report.text, /the full findings follow/, 'the settled report, not the preamble')
+  assert.ok(
+    !relay.log.some((m) => m.text.includes('may be incomplete')),
+    'and it settled within the window, so no shortfall was recorded',
+  )
+})
+
+test('a transcript that never settles is used anyway, and the shortfall is recorded', async () => {
+  // Silence is the failure mode being avoided. A truncated report the log explains can be
+  // recovered from; one it does not cannot.
+  const stuck = new FakeSession('claude', 'impl', ['ack', 'PREAMBLE'])
+  stuck.lagTranscript('never arrives', 60_000)
+
+  const relay = await Relay.start({
+    registry: registryWith({ codex: new FakeSession('codex', 'advisor', ['Do it.', 'DONE']), claude: stuck }),
+    cwd: process.cwd(),
+    lead: { id: 'advisor', agent: 'codex', role: 'advisor' },
+    implementer: { id: 'implementer', agent: 'claude', role: 'implementer' },
+    maxRounds: 2,
+    transcriptSettleMs: 300,
+  })
+  await relay.run('Keep the work moving.')
+  await relay.stop()
+
+  assert.ok(relay.log.some((m) => m.text.includes('may be incomplete')))
+  assert.match(relay.log.filter((m) => m.kind === 'report').at(-1)!.text, /PREAMBLE/)
 })

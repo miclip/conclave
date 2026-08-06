@@ -44,7 +44,7 @@ import type {
 import { guaranteesFor, turnKey } from '../contract/session.ts'
 import { emptyTranscriptState } from '../outcomes/classify.ts'
 import { TurnVerdictTracker, type VerdictUpdate } from '../outcomes/tracker.ts'
-import { TurnWatchdog } from '../outcomes/watchdog.ts'
+import { DEFAULT_WATCHDOG_MS, TurnWatchdog } from '../outcomes/watchdog.ts'
 import { sanitizedCopy } from '../process/childenv.ts'
 import { PtyProcess } from '../process/pty.ts'
 import { CODEX_PERMISSION_ENCODING, InputQueue } from '../process/input.ts'
@@ -102,7 +102,7 @@ export class CodexPtyHookAdapter implements AgentSession {
     // See the Claude adapter: a hang is defined by nothing arriving, so the deadline rule
     // needs its own clock rather than a hook to react to. `synthesized: true` -- the child
     // said nothing.
-    this.#watchdog = new TurnWatchdog<TurnState>(opts.watchdogMs ?? 600_000, (turn, update) =>
+    this.#watchdog = new TurnWatchdog<TurnState>(opts.watchdogMs ?? DEFAULT_WATCHDOG_MS, (turn, update) =>
       this.#apply(turn, update, true),
     )
   }
@@ -195,7 +195,7 @@ export class CodexPtyHookAdapter implements AgentSession {
         sentCancel: false,
         inputIsMediated: this.guarantees.inputOwnership === 'mediated',
       },
-      watchdogSeconds: (this.#opts.watchdogMs ?? 600_000) / 1000,
+      watchdogSeconds: (this.#opts.watchdogMs ?? DEFAULT_WATCHDOG_MS) / 1000,
     })
   }
 

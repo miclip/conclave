@@ -40,6 +40,21 @@ export interface WatchdogTarget {
   tracker: TurnVerdictTracker
 }
 
+/**
+ * Default per-turn deadline.
+ *
+ * Was ten minutes, which is a probe budget rather than a work budget. A live session's
+ * implementer edited two parsers, reconciliation, the detector and the relay, wrote two
+ * test files and ran the full suite in one turn; the watchdog fired at 600s and declared
+ * `timed_out (uncertain)` on a turn that then completed and was corrected by a
+ * `late_signal` revision. The evidence model recovered, but the run had already paused and
+ * asked a human to adjudicate a turn that was merely long.
+ *
+ * Forty-five minutes still bounds a genuinely hung turn -- which is all this is for -- and
+ * stops manufacturing pauses out of ordinary work. Override with `--turn-timeout <seconds>`.
+ */
+export const DEFAULT_WATCHDOG_MS = 45 * 60 * 1000
+
 export class TurnWatchdog<T extends WatchdogTarget> {
   readonly #ms: number
   readonly #onUpdate: (target: T, update: VerdictUpdate | undefined) => void
