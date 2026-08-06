@@ -31,7 +31,13 @@ import urllib.error
 import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_JOURNAL = os.path.join(HERE, "journal", "hook-journal.ndjson")
+# NOT the frozen corpus. spikes/hooks/journal/hook-journal.ndjson is labelled evidence
+# behind the parity test's exact 17/4 counts, and this hook runs for ANY agent session in
+# this checkout -- including an unrelated one a developer happens to be running. Pointing
+# the default here meant ordinary sessions silently appended to committed evidence.
+# A deliberate spike run sets SPIKE_HOOK_JOURNAL explicitly; everything else lands in an
+# ad-hoc, git-ignored file.
+DEFAULT_JOURNAL = os.path.join(HERE, "journal", "adhoc.ndjson")
 
 
 def journal(path, record):

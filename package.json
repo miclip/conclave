@@ -20,7 +20,8 @@
     "test:codex:real": "ORCH_CODEX_REAL=1 node --test src/deployment/codexHookTrust.test.ts",
     "config:check": "node bin/conclave.ts config check",
     "typecheck": "tsc --noEmit",
-    "test:unit": "node --test 'src/**/*.test.ts'"
+    "test:unit": "node --test 'src/**/*.test.ts'",
+    "test:live:codex": "ORCH_LIVE_CODEX=1 node --test src/adapters/codex.live.test.ts"
   },
   "dependencies": {
     "node-pty": "^1.0.0"

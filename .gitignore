@@ -27,6 +27,10 @@ spikes/hooks/receiver.out
 .claude/settings.json
 .codex/hooks.json
 
+# Ad-hoc hook journal: anything written by a session that did not set
+# SPIKE_HOOK_JOURNAL. Keeps incidental traffic out of the committed corpus.
+spikes/hooks/journal/adhoc.ndjson
+
 # NOTE: `spikes/**/journal/` is deliberately NOT ignored.
 #
 # spikes/hooks/journal/hook-journal.ndjson looks like a local runtime journal and is in
