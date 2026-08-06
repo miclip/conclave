@@ -246,9 +246,13 @@ export function rule(width: number): string {
  * handling. That is a different piece of work, not a tweak to this one.
  */
 export class Progress {
+  /** Braille frames: one cell wide in every terminal font, so the line never reflows. */
+  static readonly SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+
   #out: NodeJS.WritableStream
   #enabled: boolean
   #everyMs: number
+  #frame = 0
   #started = new Map<string, number>()
   #lastPrinted = new Map<string, number>()
   #detail = new Map<string, string>()
@@ -283,7 +287,22 @@ export class Progress {
     if (active.length === 0) return ''
     const [participant, startedAt] = active[active.length - 1]!
     const detail = this.#detail.get(participant)
-    return `${dim('⋯')} ${colour(participant)} ${dim(elapsedSince(startedAt))}${detail ? ` ${dim('·')} ${dim(detail)}` : ''}`
+    return `${dim(Progress.SPINNER[this.#frame]!)} ${colour(participant)} ${dim(elapsedSince(startedAt))}${detail ? ` ${dim('·')} ${dim(detail)}` : ''}`
+  }
+
+  /**
+   * Advance the animation one frame.
+   *
+   * Only a caller that OWNS the screen may drive this — see the note above on why an
+   * in-place spinner and readline cannot share the last line. Once the console owns the
+   * screen, the objection no longer applies and the absence of motion becomes the
+   * problem: the elapsed time is computed at draw time and draws are driven by events, so
+   * a participant in a long tool call froze the line at whatever the last event said.
+   * `implementer 42s · Bash` sitting motionless for minutes reads as a dead session, and
+   * a reader has no way to tell that from a live one.
+   */
+  tick(): void {
+    this.#frame = (this.#frame + 1) % Progress.SPINNER.length
   }
 
   /** Remember what a participant is doing, without printing anything. */

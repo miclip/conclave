@@ -37,7 +37,11 @@ import type { AgentRegistry } from '../registry/registry.ts'
 import { Relay } from '../relay/relay.ts'
 import type { RelayMessage } from '../relay/message.ts'
 import type { RunHandle, RunPause } from '../relay/run.ts'
-import { trustCodexHooks } from '../deployment/codexHookTrust.ts'
+import {
+  CONCLAVE_HOOK_MATCH,
+  trustCodexHooks,
+  waitForCodexHooksExecutable,
+} from '../deployment/codexHookTrust.ts'
 import { AGENT_KINDS, installConfig, type AgentKind } from '../config/install.ts'
 
 /**
@@ -48,6 +52,37 @@ import { AGENT_KINDS, installConfig, type AgentKind } from '../config/install.ts
  */
 function isAgentKind(id: string): id is AgentKind {
   return (AGENT_KINDS as string[]).includes(id)
+}
+
+/**
+ * Run something slow with the console's own "still working" line.
+ *
+ * Setup steps can outlast a turn — trusting Codex waits on a real TUI for the better part
+ * of a minute — and a console that prints nothing for that long is indistinguishable from
+ * one that has hung. `Progress` already owns how "still working" looks, so this borrows it
+ * rather than inventing a second dialect for the same idea.
+ *
+ * The interval is unref'd: a pending heartbeat must never be the reason the process stays
+ * alive, and it is cleared on the failure path as well as the success one.
+ */
+async function withHeartbeat<T>(
+  out: NodeJS.WritableStream,
+  label: string,
+  detail: string,
+  work: () => Promise<T>,
+  everyMs = 5_000,
+): Promise<T> {
+  const progress = new Progress(out, true, everyMs)
+  progress.start(label)
+  progress.note(label, detail)
+  const beat = setInterval(() => progress.activity(label, dim, detail), 1_000)
+  beat.unref()
+  try {
+    return await work()
+  } finally {
+    clearInterval(beat)
+    progress.done(label)
+  }
 }
 import { guard } from '../workspace/sessionLock.ts'
 
@@ -158,10 +193,12 @@ function renderMessage(m: RelayMessage, width: number): string {
   const colour = speakerColor(m.from, m.fromRank)
   // The name alone when it already carries the rank; both only when they differ.
   const who = m.from === m.fromRank ? (m.fromRank === 'human' ? 'you' : m.from) : m.from
+  // No `withheld from …` suffix. `→ implementer` already says who it went to, and on a
+  // two-participant run the exclusion is the arithmetic — naming it restates the header in
+  // longer words on every restricted line. It remains in `/audit`, which is where a
+  // question about who was excluded is actually asked, and in the relay's own record.
   const to = m.to.length ? dim(` → ${m.to.join(', ')}`) : dim(' → (recorded only)')
-  const restricted =
-    m.visibility === 'restricted' ? dim(`  ·  withheld from ${m.excluded.join(', ')}`) : ''
-  return `\n${colour('●')} ${bold(who)}${to}${restricted}\n${markdown(m.text, { width })}`
+  return `\n${colour('●')} ${bold(who)}${to}\n${markdown(m.text, { width })}`
 }
 
 function renderPause(p: RunPause, width: number): string {
@@ -201,6 +238,9 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     (opts.input ?? process.stdin) === process.stdin && process.stdin.isTTY === true
   let rl: Interface | undefined
   let screen: Screen | undefined
+  // Cleared by `leave`, alongside the screen it draws to: an interval still firing after
+  // the scrolling region is gone would write over whatever the operator ran next.
+  let stopAnimation: (() => void) | undefined
   /** Resolves when an interactive console closes. */
   let closed: (() => void) | undefined
 
@@ -294,19 +334,28 @@ export async function runSession(opts: SessionOptions): Promise<number> {
   // `registry` in the options), so there is no real CLI whose deployment state could
   // affect this run — and reaching for one would make a test of the console depend on
   // Codex being installed, responsive, and in a particular trust state.
-  if (changed.length > 0 && opts.registry === undefined) {
-    // Diagnose only on the run that actually wrote something: it costs a second or two,
-    // and it is only informative the first time. Registration alone is not enough — Codex
-    // will not load hooks from a directory it does not trust, and reports that the same
-    // way as a missing sidecar. `diagnoseHookTrust` tells the two apart now that the
-    // sidecar it just wrote is demonstrably present.
+  //
+  // NOT gated on having just written something. Trust is a decision in the operator's
+  // global config, entirely independent of whether these project files are current: a
+  // project registered yesterday, or by `config install`, is registered and untrusted
+  // today. Gating on `changed` meant the second run in a new project skipped the step
+  // that would have fixed it, and refused at the registry preflight instead — telling
+  // the operator to go and do by hand the exact thing this block exists to do.
+  //
+  // `installConfig` only reaches for Codex when Codex is among `agents`, so a Claude-only
+  // session still spawns nothing, and a ready project costs one silent app-server probe.
+  if (opts.registry === undefined) {
     const diagnosed = await installConfig({
       projectRoot: opts.cwd,
       agents,
       dryRun: true,
       diagnose: true,
     })
-    for (const m of diagnosed.codex?.messages ?? []) write(dim(`  ${m}`))
+    // The diagnosis messages are written for `config check`, where the operator is the one
+    // who has to act: five near-identical paragraphs, each naming a `hooks.state` key to
+    // paste into a TOML file. Here the tool is about to do that itself, so printing them
+    // is telling someone how to perform a job already in hand. They are held back and
+    // shown only if the fix does not work — the one case where the operator needs them.
     if (diagnosed.codex && !diagnosed.codex.ready) {
       // Registration is not enough: Codex never executes hooks in a directory it does not
       // trust, and does so silently — turns end on watchdog inference, every verdict is
@@ -320,17 +369,41 @@ export async function runSession(opts: SessionOptions): Promise<number> {
       // duplicated what this already does, and did it by editing their file directly
       // instead of going through the flow Codex supports.
       write(dim('  trusting this directory and its hooks with Codex — answers its own prompts once'))
-      const t = await trustCodexHooks(opts.cwd)
+      // This waits on a REAL Codex TUI to draw its prompts: up to 8s for the directory
+      // question, up to 45s for the hook review, plus settle time. Silence for that long
+      // reads as a hang, and the operator has no way to know it is not one — so it uses
+      // the same `⋯ name elapsed · detail` vocabulary a working participant does.
+      //
+      // Appended rather than animated, for the reason `Progress` documents at length: an
+      // in-place spinner and readline both write the last line of the terminal, and
+      // whichever writes last strands the other.
+      const t = await withHeartbeat(
+        out,
+        'configuring',
+        'waiting for Codex to show its trust prompts',
+        () => trustCodexHooks(opts.cwd),
+      )
+      // Codex records the decision when it EXITS, so confirm rather than assume. Without
+      // this the preflight a moment later reads the pre-trust state and refuses, which
+      // presents as the session being flaky rather than as Codex having been slow.
+      const ready = await withHeartbeat(
+        out,
+        'configuring',
+        'confirming Codex recorded the decision',
+        () => waitForCodexHooksExecutable(opts.cwd, CONCLAVE_HOOK_MATCH),
+      )
       const did = [t.askedAboutDirectory ? 'directory' : '', t.prompted ? 'hooks' : '']
         .filter(Boolean)
         .join(' and ')
-      write(
-        dim(
-          did
-            ? `  trusted: ${did}`
-            : '  Codex showed no prompt; if turns end on the watchdog, run `codex` here once',
-        ),
-      )
+      if (ready) {
+        write(dim(`  configured: trusted ${did || 'nothing left to trust'}`))
+      } else {
+        // Now the operator does have to act, so give them everything: what Codex reports
+        // for each handler, and the exact key to pre-seed.
+        write(dim('  Codex still will not run these hooks. Turn outcomes will be inferred:'))
+        const detail = await installConfig({ projectRoot: opts.cwd, agents, dryRun: true, diagnose: true })
+        for (const m of detail.codex?.messages ?? []) write(dim(`  ${m}`))
+      }
     }
   }
 
@@ -474,6 +547,15 @@ export async function runSession(opts: SessionOptions): Promise<number> {
    */
   const queuedFor = new Map<string, Set<string>>()
 
+  // This is a render callback that WRITES: a message leaving every queue is how the console
+  // learns it was delivered, and it emits the speaker block for it. Writing re-enters the
+  // screen, which calls this again. That was harmless while draws were event-driven and
+  // rare; the animation calls it ten times a second, so the re-entrant path is now taken
+  // routinely rather than never. `queuedFor.delete` already runs before the write, so the
+  // inner call cannot re-emit — this makes that a property of the code rather than of the
+  // order of two statements.
+  let emitting = false
+
   function pendingRows(): string[] {
     const live = new Map<string, Set<string>>()
     for (const { id, texts } of relay.pending()) {
@@ -492,14 +574,21 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     // grey `› hello — read by advisor` sat among the run's own logging and read as more
     // logging; the transition from dim-in-the-box to a full magenta `you → advisor` is what
     // makes "this was read" legible without a phrase claiming it.
-    for (const [text, recipients] of [...queuedFor]) {
-      if (live.has(text)) continue
-      queuedFor.delete(text)
-      const colour = speakerColor('you', 'human')
-      write(
-        `\n${colour('●')} ${bold('you')}${dim(` → ${[...recipients].join(', ')}`)}\n` +
-          markdown(text, { width }),
-      )
+    if (!emitting) {
+      emitting = true
+      try {
+        for (const [text, recipients] of [...queuedFor]) {
+          if (live.has(text)) continue
+          queuedFor.delete(text)
+          const colour = speakerColor('you', 'human')
+          write(
+            `\n${colour('●')} ${bold('you')}${dim(` → ${[...recipients].join(', ')}`)}\n` +
+              markdown(text, { width }),
+          )
+        }
+      } finally {
+        emitting = false
+      }
     }
     for (const [text, ids] of live) queuedFor.set(text, ids)
     return [...live].map(([text, ids]) => `→ ${[...ids].join(', ')}  ${text.split('\n')[0]}`)
@@ -575,6 +664,21 @@ export async function runSession(opts: SessionOptions): Promise<number> {
       onInterrupt: () => onInterrupt(),
     })
     screen.open()
+    // Motion is the liveness signal, and it cannot be event-driven: a participant deep in
+    // a single `Bash` call emits nothing for minutes, so an event-driven redraw left the
+    // status frozen — same spinner glyph, same elapsed time — which is indistinguishable
+    // from a hung session. It has to advance on its own clock or it means nothing.
+    //
+    // Redrawing costs a rewrite of the reserved rows, which `screen` already does on every
+    // keystroke, and it stops entirely when nobody is working so an idle console is
+    // perfectly still. Unref'd: an animation must never be why the process stays alive.
+    const animation = setInterval(() => {
+      if (!progress.line()) return
+      progress.tick()
+      screen!.draw()
+    }, 100)
+    animation.unref()
+    stopAnimation = () => clearInterval(animation)
   } else {
     rl = createInterface({
       input: opts.input ?? process.stdin,
@@ -620,6 +724,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
    */
   const leave = () => {
     done = true
+    stopAnimation?.()
     screen?.close()
     rl?.close()
     closed?.()
@@ -773,10 +878,11 @@ export async function runSession(opts: SessionOptions): Promise<number> {
       const who = word.slice(1)
       if (!rest) return void write(`  ${word} needs something to say`)
       if (!run) return void write(dim('  nothing is running; type a goal to start'))
-      const m = run.injectConstraint(rest, { only: who })
-      // The exclusion is worth a transcript line even with the box: who did NOT get it is
-      // the part the pinned row cannot show, and the part an audit later turns on.
-      write(dim(`  withheld from ${m.excluded.join(', ')}`))
+      run.injectConstraint(rest, { only: who })
+      // Nothing written about the exclusion. The pinned row says `→ implementer` while the
+      // message waits and the speaker block says it again when it lands, so a line stating
+      // who did NOT get it is a third telling of the same fact — and the one that reads
+      // like a warning. `/audit` still answers the question on demand.
       queued(who)
       return
     }

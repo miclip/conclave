@@ -23,6 +23,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
+import { Progress } from './render.ts'
 
 const REPO = join(import.meta.dirname, '..', '..')
 
@@ -152,38 +153,41 @@ test('typed-but-unsubmitted text survives asynchronous output', async (t) => {
     await c.until((s) => /→ implementer\s+keep the diff small/.test(s)),
     'the redrawn line must still be the line that gets sent',
   )
-  assert.ok(
-    await c.until((s) => s.includes('withheld from advisor')),
-    'and who was excluded still reaches the transcript, where an audit can find it',
-  )
+  // No `withheld from advisor` line is expected: `→ implementer` already carries where it
+  // went, and the exclusion is answered by `/audit` rather than narrated on every line.
+  assert.ok(!c.text().includes('withheld from'), 'the exclusion must not be narrated')
   c.proc.kill()
 })
 
-test('progress is append-only, so nothing is ever stranded or duplicated', async (t) => {
-  // An in-place status line and readline both owned the last line of the terminal, and
-  // readline redraws on its own schedule. Whichever wrote last won and the loser stayed in
-  // the transcript — three rounds of fixes to the erase logic each passed offline and each
-  // still duplicated live, because two subsystems cannot both own the cursor.
+test('the pinned status keeps moving, so a silent turn cannot read as a hung one', async (t) => {
+  // This test used to assert progress was APPEND-ONLY and never repeated a line. That was
+  // right while readline owned the last line of the terminal: an in-place status and
+  // readline both redrew there, whichever wrote last won, and the loser was stranded. The
+  // reasoning is preserved in `Progress`.
   //
-  // Append-only output cannot strand a line, because it never goes back.
+  // The console owns the screen now, so the status is pinned and redrawing it is no longer
+  // a contest. The property that matters moved with it: redraws driven by EVENTS leave the
+  // line frozen through a single long tool call — same glyph, same elapsed time, for
+  // minutes — and a motionless status is indistinguishable from a dead session. So what is
+  // asserted is motion, and specifically motion during a window with no events at all.
   const dir = repo()
   const c = await spawnConsole(dir, t)
   const plain = (s: string) => s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '')
+  const frames = new RegExp(`[${Progress.SPINNER.join('')}]`, 'g')
   assert.ok(await c.until((s) => s.includes('›')))
-  assert.ok(await c.until((s) => /⋯/.test(plain(s)), 15_000), 'a progress line should appear')
+  assert.ok(await c.until((s) => frames.test(plain(s)), 15_000), 'a status line should appear')
 
-  // Let several turns run, then assert every progress line is distinct: a duplicate is the
-  // exact symptom the in-place version produced.
-  await new Promise((r) => setTimeout(r, 4_000))
-  const lines = plain(c.text())
-    .split('\n')
-    .map((l) => l.trim())
-    // `includes`, not `startsWith`: readline's prompt shares the line, so a progress line
-    // reads as "›   ⋯ implementer 1s · Read".
-    .filter((l) => l.includes('⋯'))
-    .map((l) => l.slice(l.indexOf('⋯')))
-  assert.ok(lines.length > 0)
-  assert.equal(new Set(lines).size, lines.length, `duplicate progress lines:\n${lines.join('\n')}`)
+  const seen = new Set<string>()
+  const deadline = Date.now() + 3_000
+  while (Date.now() < deadline) {
+    for (const f of plain(c.text()).match(frames) ?? []) seen.add(f)
+    if (seen.size > 1) break
+    await new Promise((r) => setTimeout(r, 100))
+  }
+  assert.ok(
+    seen.size > 1,
+    `the spinner must advance on its own clock; only ever saw ${[...seen].join('') || 'nothing'}`,
+  )
   c.proc.kill()
 })
 

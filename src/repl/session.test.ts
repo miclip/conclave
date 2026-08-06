@@ -205,7 +205,10 @@ test('an addressed line is queued, restricted, and reported as such', async () =
   // Queued, not delivered mid-turn — the console says which, rather than implying the
   // participant is reading over the operator's shoulder.
   assert.match(text, /queued for implementer at the next exchange/)
-  assert.match(text, /withheld from advisor/)
+  // No `withheld from advisor` line: `→ implementer` already says where it went, and on a
+  // two-participant run the exclusion follows from that. The fact is not lost — `/audit`
+  // is where it is asked for, and still answers.
+  assert.ok(!/withheld from/.test(text), 'the exclusion must not be narrated on every line')
   assert.match(text, /excluded advisor/, '/audit shows the asymmetry')
   assert.ok(impl.received.some((m) => m.includes('src/adapters')), 'and it reaches the participant')
 })
@@ -377,6 +380,7 @@ test('an address and a path compose: >advisor read @path', async () => {
   // hop, and pasted contents would go stale the moment either participant edited the file.
   const dir = repo()
   const impl = slow('impl', 'claude', ['ack', 'Did it.', 'And again.'])
+  const advisor = slow('advisor', 'codex', ['Do it.', 'More.', 'DONE'])
   const out = collect()
   await runSession({
     cwd: dir,
@@ -385,10 +389,7 @@ test('an address and a path compose: >advisor read @path', async () => {
     implementer: 'claude',
     rounds: 3,
     checks: [],
-    registry: registryOf({
-      codex: [slow('advisor', 'codex', ['Do it.', 'More.', 'DONE'])],
-      claude: [impl],
-    }),
+    registry: registryOf({ codex: [advisor], claude: [impl] }),
     input: script(['>implementer read @src/relay/relay.ts and report'], 250),
     output: out.stream,
   })
@@ -396,7 +397,9 @@ test('an address and a path compose: >advisor read @path', async () => {
   const sent = impl.received.find((m) => m.includes('read @src/relay/relay.ts'))
   assert.ok(sent, `the path should reach the participant intact:\n${impl.received.join('\n---\n')}`)
   assert.ok(!sent.includes('>implementer'), 'the address is consumed, not forwarded')
-  assert.match(out.text(), /withheld from advisor/, 'and it stays restricted')
+  // Restricted where it counts: the advisor never received it. Asserted on the participant
+  // rather than on a sentence in the transcript, which is the stronger claim anyway.
+  assert.ok(!advisor.received.some((m) => m.includes('read @src/relay/relay.ts')))
 })
 
 test('/exit ends the session, stopping the participants with it', async () => {

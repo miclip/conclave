@@ -277,7 +277,7 @@ export async function assertCodexHooksExecutable(cwd: string, matchCommand: stri
  * `[hooks.state."<file>:<event>:<group>:<index>"] trusted_hash`, so this mutates global
  * state even though the hooks themselves are project-local.
  */
-export async function trustCodexHooks(
+async function trustCodexHooksOnce(
   cwd: string,
   opts: { timeoutMs?: number } = {},
 ): Promise<{ prompted: boolean; askedAboutDirectory: boolean }> {
@@ -321,6 +321,66 @@ export async function trustCodexHooks(
     return { prompted, askedAboutDirectory }
   } finally {
     await pty.terminate()
+  }
+}
+
+/**
+ * Trust a project's directory AND its hooks, which takes TWO launches, not one.
+ *
+ * Codex will not load project hooks from a directory it has not been told to trust. So
+ * the launch that answers the directory question cannot also answer the hook review: at
+ * the moment that launch is running, the hooks do not exist as far as Codex is concerned.
+ * The hook prompt string can still appear in that first launch's output, so `prompted`
+ * is not evidence the decision was recorded -- measured on a fresh project, launch one
+ * reported `prompted: true` and wrote ZERO `hooks.state` entries, and launch two wrote
+ * all five.
+ *
+ * Relaunching is therefore keyed on `askedAboutDirectory`: if this launch had to answer
+ * the directory question, the hooks were invisible to it and a second pass is required.
+ * A project whose directory was already trusted needs one launch, and a fully trusted one
+ * exits without prompting at all.
+ */
+export async function trustCodexHooks(
+  cwd: string,
+  opts: { timeoutMs?: number } = {},
+): Promise<{ prompted: boolean; askedAboutDirectory: boolean; launches: number }> {
+  let prompted = false
+  let askedAboutDirectory = false
+  let launches = 0
+
+  // Two at most: the directory can only be untrusted once.
+  for (let i = 0; i < 2; i++) {
+    launches++
+    const r = await trustCodexHooksOnce(cwd, opts)
+    prompted ||= r.prompted
+    askedAboutDirectory ||= r.askedAboutDirectory
+    if (!r.askedAboutDirectory) break
+  }
+
+  return { prompted, askedAboutDirectory, launches }
+}
+
+/**
+ * Wait until Codex reports our hooks as executable, because it records trust when it
+ * EXITS.
+ *
+ * The write lands after the pty is gone, so a diagnosis run immediately after trusting
+ * reads the old state and concludes the trust did not take. That is not a theoretical
+ * race: it is what made a freshly trusted project refuse at the registry preflight and
+ * then start fine on the next attempt, which is the worst possible presentation -- it
+ * looks like flakiness in the session rather than a settled fact about Codex.
+ */
+export async function waitForCodexHooksExecutable(
+  cwd: string,
+  matchCommand: string,
+  timeoutMs = 15_000,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    const diagnosis = diagnoseHookTrust(await readCodexHooks(cwd), matchCommand)
+    if (diagnosis.ready) return true
+    if (Date.now() >= deadline) return false
+    await new Promise((r) => setTimeout(r, 1_000))
   }
 }
 
