@@ -23,26 +23,18 @@ Requires **Node 24 or newer** — Conclave runs its TypeScript directly, with no
 curl -fsSL https://raw.githubusercontent.com/miclip/conclave/v0.1.1/scripts/install.sh | sh
 ```
 
-That installs the newest **tagged release** — not the tip of `main`, which is where work
-lands and is sometimes halfway through something. It clones into
-`~/.local/share/conclave`, compiles its one native dependency (`node-pty`), and symlinks
-`conclave` into `~/.local/bin`. Re-running it upgrades in place.
+That installs the newest tagged release. It clones into `~/.local/share/conclave`,
+compiles its one native dependency (`node-pty`), and symlinks `conclave` into
+`~/.local/bin`. Re-running it upgrades in place.
 
-To pin an exact version, or to track the branch deliberately:
-
-```sh
-CONCLAVE_REF=v0.1.0 sh install.sh     # exactly that release
-CONCLAVE_REF=main   sh install.sh     # the branch, knowingly
-```
-
+`CONCLAVE_REF` installs a specific ref instead — a tag, a branch, a sha.
 `CONCLAVE_PREFIX` and `CONCLAVE_BINDIR` move where it lands.
 
-There is no zip of prebuilt artefacts, deliberately. `node-pty` is native and has to be
-compiled against the Node that will run it, so an archive built on one machine would fail
-on the next — at the first pty spawn, long after install, which is the worst place to find
-out.
+```sh
+CONCLAVE_REF=v0.1.0 sh install.sh
+```
 
-If you would rather do it by hand, or want to work on Conclave itself:
+To install by hand, or to work on Conclave itself:
 
 ```sh
 git clone https://github.com/miclip/conclave.git && cd conclave
@@ -54,22 +46,21 @@ ln -sf "$PWD/bin/conclave.ts" ~/.local/bin/conclave
 
 ## Using it
 
-Run it in the project you want worked on. Conclave registers its hooks there, with the
-commands pointing back at Conclave, so the project needs nothing installed and gains no
-dependency on it.
+Run it in the project you want worked on. Conclave registers its own hooks there; the
+project needs nothing installed.
 
 ```sh
 cd ~/some/project
 conclave session "make the failing test pass" --checks "npm test"
 ```
 
-The goal goes to the **advisor only**. The implementer is told that the advisor holds it,
-and the advisor decides what the implementer needs to know for the next piece of work —
-sometimes the whole goal, sometimes deliberately less. Without `--checks`, a degraded
-implementer escalates to you rather than being replaced unverified.
+The goal goes to the **advisor only**. It decides what the implementer needs to know for
+each piece of work. The implementer is told that the advisor holds the goal.
 
-The goal is optional: start with none and the console waits, and the first thing you type
-becomes it.
+`--checks` enables rotation: a degraded implementer is replaced by one that reproduces the
+verification first. Without it, a degraded implementer escalates to you.
+
+The goal is optional — start with none and the first thing you type becomes it.
 
 ### At the console
 
@@ -83,21 +74,18 @@ becomes it.
 /state  /log [n]  /queue  /audit  /help  /exit
 ```
 
-**During a run**, an addressed line is queued and delivered at the next turn boundary —
-neither child ingests input mid-turn, so seeing sooner is not intervening sooner, and the
-console says *queued* rather than implying otherwise.
+**During a run**, an addressed line is queued and delivered at the next turn boundary.
+Neither CLI takes input mid-turn.
 
-**Between runs** the participants are still alive, and an addressed line is asked directly:
-you get the answer back. That is where the loose ends live — *start the server so I can try
-it*, *explain that change*. Both participants can be asked at once; the same one twice has
-to wait, because a session runs one turn at a time.
+**Between runs** the participants are still alive, and an addressed line is asked directly
+— you get the answer back. Useful for the things that are not a new goal: *start the server
+so I can try it*, *explain that change*. Both can be asked at once; the same one twice
+waits, since a session runs one turn at a time.
 
-**Permission prompts** surface as `! advisor needs a permission decision for Bash — /allow
-or /deny`, and you answer them from the console.
+**Permission prompts** appear as `! advisor needs a permission decision for Bash — /allow
+or /deny`, answered from the console.
 
-Participant activity is shown while a turn runs, with every working participant named. The
-console holds no lifecycle logic: every transition is a method on `RunHandle`, so it is a
-client of the state machine rather than the place it lives.
+Activity is shown while a turn runs, naming every participant that is working.
 
 ### Configuration
 
@@ -107,14 +95,13 @@ client of the state machine rather than the place it lives.
 { "permissions": "bypass" }
 ```
 
-That launches each CLI in its most permissive mode — `--dangerously-skip-permissions` for
-Claude Code, `--dangerously-bypass-approvals-and-sandbox` for Codex. Codex's own
-description of that flag is *"Skip all confirmation prompts and execute commands without
-sandboxing. EXTREMELY DANGEROUS. Intended solely for running in environments that are
-externally sandboxed."* Two models will then run commands in your working directory with
-nothing asking first; the console says so at the top of every session that has it enabled.
+That launches each CLI in its most permissive mode: `--dangerously-skip-permissions` for
+Claude Code, `--dangerously-bypass-approvals-and-sandbox` for Codex — which Codex
+documents as *"Skip all confirmation prompts and execute commands without sandboxing.
+EXTREMELY DANGEROUS."* Two models then run commands in your working directory with nothing
+asking first. The console says so at the top of every session that has it on.
 
-Per agent, if you want an implementer that acts freely and an advisor that still asks:
+Per agent, for an implementer that acts freely and an advisor that still asks:
 
 ```json
 { "permissions": "ask", "agents": { "claude": { "permissions": "bypass" } } }
@@ -146,17 +133,16 @@ Full reasoning, including the commercial risk that drove the transport choice, i
 - **Both CLIs, unmodified**, driven under a pty through one `AgentSession` contract, with
   eight live acceptance flows each.
 - **A two-party relay**: prose only in both directions, a ranked committee, and human
-  asides addressed to one participant with an audit trail saying who was excluded.
+  asides addressed to one participant, with an audit trail of who was excluded.
 - **Pauses as decision points** — rotation candidate, advisor escalation, authority
   conflict — resolved from the console or from `RunHandle`.
 - **Rotation as a transaction**: quiesce the old implementer, the advisor authors a
-  handoff, the replacement demonstrates it can reproduce the state, and the whole thing
-  rolls back if it cannot. Proven live.
-- **Subagents**, which both participants are told they have and left to use as they judge —
-  with one rule: a subagent that modifies anything works in its own git worktree, because
-  two writers in one checkout make the session's own attribution wrong.
-- **Outcomes graded by evidence.** A terminal event is never bare; `Stop` proves normal
-  completion and nothing else, and everything weaker is labelled as what it is.
+  handoff, the replacement reproduces the verification, and the whole thing rolls back if
+  it cannot. Proven live.
+- **Subagents**, which both participants may use as they judge. A subagent that modifies
+  anything works in its own git worktree.
+- **Outcomes graded by evidence.** `Stop` proves normal completion; everything weaker is
+  labelled as what it is.
 
 ```sh
 npm test                    # typecheck + the offline suite
@@ -170,21 +156,19 @@ Live suites spawn real sessions and consume real quota, so they are opt-in:
 ## What is not built
 
 No orchestrator model, no summariser, no third participant. The anti-spiral ladder is a
-round budget and stall metrics rather than the full escalation. `test:live:rollback` is
-written and has not been run.
+round budget and stall metrics, not the full escalation. `test:live:rollback` is written
+and has not been run.
 
-The brief said to stop after the relay and evaluate honestly whether two agents beat one.
 Two controlled experiments have run ([`spikes/experiments/`](spikes/experiments)) and the
 second **falsified its own hypothesis** — the advisor did not produce the repository-blind
-recommendation the trap was built for; it asked to inspect first. The honest claim is
-narrower than "one catches the other's blind spots": the participants contribute
-*different* information, and the roles were not redundant.
+recommendation the trap was built for; it asked to inspect first. So the claim is narrower
+than "one catches the other's blind spots": the participants contribute *different*
+information, and the roles were not redundant.
 
 ## As a library
 
-The console is a client of `RunHandle` and holds no lifecycle logic, so everything it does
-is available without it. `relay.run(goal)` is the unattended form, where every pause point
-is terminal; `relay.start(goal)` is the attended one, which suspends and hands back.
+Everything the console does is available without it. `relay.run(goal)` is the unattended
+form, where every pause point ends the run; `relay.start(goal)` suspends and hands back.
 
 ### Two participants
 
@@ -217,18 +201,18 @@ for (;;) {
 | `src/relay/` | the two-party relay, the audit trail, and the resumable run handle |
 | `src/repl/` | the console — a client of the run handle, holding no lifecycle logic |
 | `src/rotation/` | the rotation transaction: record, handoff, degradation, rollback |
-| `spikes/pty/` | step 1 — transport, and what it corrected about the brief |
+| `spikes/pty/` | step 1 — the pty transport |
 | `spikes/hooks/` | step 2 — hook lifecycle, delivery semantics, the evidence corpus |
 | `spikes/transcripts/` | step 3 — schemas and the outcome classifier's Python reference |
 | `spikes/codex/` | Codex 0.146.0 runtime-semantics fixtures |
 | `spikes/experiments/` | pre-registered experiments, including one that falsified its own hypothesis |
+| [`docs/DESIGN.md`](docs/DESIGN.md) | why it is shaped this way, and what was measured to find out |
 
 Each spike has its own `FINDINGS.md` recording what was measured, including the parts
 that contradicted expectations.
-| [`docs/DESIGN.md`](docs/DESIGN.md) | why it is shaped this way, and what was measured to find out |
 
 ## Requirements
 
-Node 24+ (executes TypeScript directly via native type stripping — no build step),
-Python 3 for the spike tooling, and the `claude` and `codex` CLIs installed and
-authenticated. One runtime dependency, `node-pty`.
+Node 24+ (runs TypeScript directly, no build step), the `claude` and `codex` CLIs
+installed and authenticated, and Python 3 for the spike tooling. One runtime dependency,
+`node-pty`.

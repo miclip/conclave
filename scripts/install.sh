@@ -17,16 +17,11 @@ REPO="${CONCLAVE_REPO:-https://github.com/miclip/conclave.git}"
 PREFIX="${CONCLAVE_PREFIX:-$HOME/.local/share/conclave}"
 BINDIR="${CONCLAVE_BINDIR:-$HOME/.local/bin}"
 
-# The newest RELEASE, not the tip of main.
+# The newest release tag, resolved at run time rather than baked in — so a release does not
+# have to re-release this script to point at the release after it. Baking it in produces a
+# script from v0.3.0 that installs v0.2.0, silently.
 #
-# `main` is where work lands, including work that is halfway through something. An install
-# script that tracks it hands whoever runs it whatever happened to be committed at that
-# moment, which is not a thing anyone asked for. Resolved at run time rather than baked in,
-# so this script does not have to be re-released to point at the release after it — the
-# mismatch that produces is a script from v0.3.0 installing v0.2.0, and it is silent.
-#
-# `CONCLAVE_REF` pins exactly: `CONCLAVE_REF=v0.1.0 sh install.sh`, or `main` to track the
-# branch deliberately.
+# `CONCLAVE_REF` overrides with any ref: a tag, a branch, a sha.
 latest_release() {
   # Sorted by numeric field rather than `sort -V`, which BSD and busybox sort do not
   # reliably have. Without it v0.10.0 sorts below v0.2.0 and the newest release is skipped
