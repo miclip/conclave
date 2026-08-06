@@ -32,7 +32,7 @@ function repo(): string {
   return dir
 }
 
-const HANDOFF = `## GOAL
+const HANDOFF = `## BRIEF
 Keep the work moving.
 
 ## STATE

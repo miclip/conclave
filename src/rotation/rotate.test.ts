@@ -27,7 +27,7 @@ function repo(): string {
   return dir
 }
 
-const HANDOFF = `## GOAL
+const HANDOFF = `## BRIEF
 Finish the rotation transaction.
 
 ## STATE
@@ -124,7 +124,7 @@ test('an unparseable handoff rolls back before any replacement is started', asyn
   assert.equal(r.status, 'rolled_back')
   if (r.status !== 'rolled_back') return
   assert.equal(r.reason, 'handoff_incomplete')
-  assert.ok(r.detail.includes('GOAL'))
+  assert.ok(r.detail.includes('BRIEF'))
   assert.equal(started, false, 'nothing should be started against a handoff that cannot be read')
   assert.equal(old.state, 'running', 'the original must be back in service')
   assert.deepEqual(old.transitions, ['quiesced', 'running'])
@@ -306,7 +306,7 @@ test('human constraints are replayed separately, at human rank, before the hando
   assert.equal(fresh.received.length, 2)
   assert.ok(fresh.received[0]!.includes('FROM THE HUMAN'))
   assert.ok(fresh.received[0]!.includes('git add -A'))
-  assert.ok(fresh.received[1]!.includes('## GOAL'), 'the handoff arrives after the constraints')
+  assert.ok(fresh.received[1]!.includes('## BRIEF'), 'the handoff arrives after the constraints')
 })
 
 test('rotating a session that is not running is a programming error, not a rollback', async () => {

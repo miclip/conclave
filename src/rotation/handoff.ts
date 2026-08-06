@@ -21,7 +21,17 @@ import type { RelayMessage } from '../relay/message.ts'
 import type { RepoRecord } from './record.ts'
 
 export interface HandoffNarrative {
-  goal: string
+  /**
+   * What the advisor chose to tell the replacement, which is NOT the session's goal.
+   *
+   * It was `## GOAL`, asking the advisor to restate what the human wanted in their terms.
+   * That made rotation the one place a goal reached an implementer verbatim -- the whole
+   * narrative is embedded in `acceptancePrompt` -- so a session that rotated silently
+   * abandoned the rule that the advisor decides what an implementer knows. Reframed rather
+   * than stripped: the replacement still needs something to work from, and the advisor is
+   * the one who should decide how much of the goal that is.
+   */
+  brief: string
   currentState: string
   decisions: string[]
   /** What the advisor believes about tests and evidence. A claim; `record` is the check. */
@@ -47,7 +57,7 @@ export interface Handoff {
   at: number
 }
 
-const SECTIONS = ['GOAL', 'STATE', 'DECISIONS', 'EVIDENCE', 'FILES', 'DISAGREEMENT', 'NEXT'] as const
+const SECTIONS = ['BRIEF', 'STATE', 'DECISIONS', 'EVIDENCE', 'FILES', 'DISAGREEMENT', 'NEXT'] as const
 type Section = (typeof SECTIONS)[number]
 
 /**
@@ -62,12 +72,16 @@ export function handoffPrompt(reason: string): string {
   return `The implementer session is being replaced. ${reason}
 
 Write the handoff that lets a fresh implementer continue this work. It has none of your
-history: it has not seen the goal, the instructions, or anything either of us said.
+history: it has not seen the instructions or anything either of us said. Like the
+implementer it replaces, it does not hold this session's goal — what it knows is what you
+write here.
 
 Use exactly these headings, in this order, and put nothing outside them:
 
-## GOAL
-What the human asked for, in their terms rather than yours.
+## BRIEF
+What the replacement needs in order to continue, in the human's terms rather than yours.
+You hold the goal; decide how much of it belongs here exactly as you decide what to put in
+an instruction. Enough to do the work — not necessarily where the work is heading.
 
 ## STATE
 Where the work actually is right now. Be specific about what is finished and what is not.
@@ -134,7 +148,7 @@ export interface ParseResult {
 }
 
 /** Sections without which a replacement cannot start. The rest may legitimately be empty. */
-const REQUIRED: Section[] = ['GOAL', 'STATE', 'NEXT']
+const REQUIRED: Section[] = ['BRIEF', 'STATE', 'NEXT']
 
 export function parseHandoff(text: string): ParseResult {
   const found = sections(text)
@@ -144,7 +158,7 @@ export function parseHandoff(text: string): ParseResult {
   return {
     missing: [],
     narrative: {
-      goal: got.GOAL,
+      brief: got.BRIEF,
       currentState: got.STATE,
       decisions: bullets(got.DECISIONS),
       evidence: got.EVIDENCE,
