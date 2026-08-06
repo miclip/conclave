@@ -200,6 +200,8 @@ export interface SendProvenance {
   attributedTo?: string | undefined
 }
 
+export type CloseMode = 'graceful' | 'abandoned'
+
 export interface AgentSession {
   readonly agent: string
   readonly sessionId: string
@@ -222,11 +224,23 @@ export interface AgentSession {
   fork(): Promise<AgentSession>
 
   /**
-   * Always SIGTERM and wait before escalating: SIGKILL leaves no transcript at all,
-   * while SIGTERM leaves a truncated but real one. Discarding the transcript discards
-   * the only durable record of the session.
+   * How a session ends. These are distinct INPUTS to classification, not styles of
+   * teardown -- see the brief, §7a.
+   *
+   *   graceful   we are finished with it; reconcile, then SIGTERM and wait
+   *   abandoned  we are walking away from the transport; asserts nothing about the child,
+   *              which may still be running
+   *
+   * Always SIGTERM and wait before escalating: SIGKILL leaves no transcript at all, while
+   * SIGTERM leaves a truncated but real one, and discarding the transcript discards the
+   * only durable record of the session.
+   *
+   * `quiesced` and `rotating` (§7a) are not here yet. They are lifecycle states rather
+   * than teardown modes -- a quiesced session is alive, holds its context, and can be
+   * unquiesced if a replacement fails to prove itself -- so they need a state machine
+   * rather than another argument to this.
    */
-  close(): Promise<void>
+  close(mode?: CloseMode): Promise<void>
 }
 
 /**

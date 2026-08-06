@@ -171,6 +171,18 @@ export function hasDrift(r: InstallResult): boolean {
   return r.written.some((w) => w.changed)
 }
 
+/**
+ * The same report as `formatInstallResult`, for consumers rather than readers.
+ *
+ * `drift` is emitted explicitly even though it is derivable from `written`, because it is
+ * the field the exit code is computed from. Leaving it out would oblige every consumer to
+ * reconstruct that rule, and a consumer that reconstructed it slightly differently would
+ * disagree with the process it was reading.
+ */
+export function formatInstallResultJson(r: InstallResult): string {
+  return JSON.stringify({ drift: hasDrift(r), ...r }, null, 2)
+}
+
 export function formatInstallResult(r: InstallResult): string {
   const lines = [`repository root: ${r.repoRoot}`]
   for (const w of r.written) {
