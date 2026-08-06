@@ -148,6 +148,20 @@ see its tool calls, its diffs, or its code. You see only the prose it writes bac
 as a human following along would. You share its working directory, so you can read files
 and run commands yourself to check any claim it makes; prefer doing that over believing it.
 
+YOU HOLD THE GOAL. The human gave it to you and not to the implementer, which has been
+told only that you are steering. What the implementer needs to know in order to do the
+next piece of work is your call, every time. Sometimes that is the whole goal; sometimes
+it is deliberately less, because knowing the destination changes how the work gets done —
+a reviewer told what verdict is wanted stops being a reviewer. Neither is the safe
+default, so decide rather than reaching for one.
+
+Withholding is not licence to mislead. Never state something false about the work, and
+never let the implementer believe it has finished something it has not.
+
+If the goal is ambiguous, ASK — reply exactly ESCALATE: followed by your question. The
+human sees it, answers, and the run continues with their reply in front of you. That is
+cheaper than spending the implementer's turn on a guess and unwinding it afterwards.
+
 Do investigative work YOURSELF rather than handing it over. Research, code review, reading
 the codebase, checking a claim, comparing options — you share the working directory and
 have the same tools, so a question you can answer is not an instruction. The implementer's
@@ -170,6 +184,25 @@ and anything you are unsure about.
 It outranks you on process, but you are not required to agree with it. If an instruction
 is wrong, say so plainly and say why, then proceed unless a human overrules. Silent
 compliance is worse than disagreement.`
+
+/**
+ * What the implementer is told INSTEAD of the goal.
+ *
+ * The human's goal now reaches the advisor alone. Two reasons, and the second is the one
+ * that made it unconditional: a session may deliberately need the implementer not to know
+ * where the work is heading — a reviewer told what verdict is wanted stops being a
+ * reviewer — and a goal that went to both by default made that impossible to arrange
+ * after the fact. The first is simply that the advisor is in charge, and an instruction
+ * that has to compete with the recipient's own reading of the goal is a weaker
+ * instruction.
+ *
+ * Said out loud rather than left as an absence. An implementer that noticed no goal would
+ * reasonably go looking for one, or ask, and spend a turn doing it.
+ */
+const WITHHELD_GOAL_NOTICE = `The advisor holds this session's goal. You have not been given
+it, and that is deliberate rather than an oversight — do not go looking for it or ask what
+it is. Work from the instruction in front of you, and say plainly when something about it
+does not make sense to you.`
 
 /**
  * Subagents, and the one hard rule about them.
@@ -365,6 +398,19 @@ export class Relay {
     let excluded: string[] = []
     if (m.kind === 'note') {
       visibility = 'internal'
+    } else if (m.kind === 'goal') {
+      // NOT restricted, even though it reaches the advisor alone.
+      //
+      // `restricted` means a human chose to hide THIS message from THIS participant, and
+      // everything downstream reads it that way: `audit()` lists what was withheld, and
+      // `asymmetryAt` answers whether a disagreement might be explained by it. The goal
+      // reaching the advisor alone is now how every session works — so marking it would
+      // make the audit permanently non-empty and asymmetry permanently true, which is the
+      // same as making both say nothing. A signal present in every run is not a signal.
+      //
+      // The implementer not holding the goal is still visible: it is in the briefing it
+      // was given, and in this message's `to`.
+      visibility = 'normal'
     } else if (m.fromRank === 'human') {
       const missing = [...this.#participants.keys()].filter((id) => !m.to.includes(id))
       if (missing.length > 0) {
@@ -831,11 +877,14 @@ export class Relay {
     const lead = this.participants.find((p) => p.rank === 'advisor')!
     const impl = this.participants.find((p) => p.rank === 'implementer')!
 
-    this.#record({ from: 'human', fromRank: 'human', to: [lead.id, impl.id], kind: 'goal', text: goal })
+    // `to` is the whole of it. `#record` derives `restricted` and `excluded` from the gap
+    // between recipients and participants, so a goal the implementer does not get is
+    // audited as a withheld human message without any special casing here.
+    this.#record({ from: 'human', fromRank: 'human', to: [lead.id], kind: 'goal', text: goal })
 
     await this.#exchange(
       impl,
-      `${IMPLEMENTER_BRIEFING}\n\n${SUBAGENT_BRIEFING}\n\nThe goal for this session:\n\n${goal}\n\nAcknowledge briefly; do not start work yet.`,
+      `${IMPLEMENTER_BRIEFING}\n\n${SUBAGENT_BRIEFING}\n\n${WITHHELD_GOAL_NOTICE}\n\nAcknowledge briefly; do not start work yet.`,
     )
     let next = await this.#exchange(
       lead,

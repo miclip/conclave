@@ -278,6 +278,45 @@ test('both participants are told about subagents, and about the worktree rule', 
   }
 })
 
+test('the goal reaches the advisor alone, and the implementer is told so', async () => {
+  // A session may need the implementer not to know where the work is heading — a reviewer
+  // told what verdict is wanted stops being a reviewer — and a goal delivered to both by
+  // default makes that impossible to arrange afterwards. The advisor holds it and decides
+  // what to pass on.
+  const { relay, lead, impl } = await twoParty(['DONE'], [])
+  await relay.run('ship the dark mode toggle')
+
+  const goal = relay.log.find((m) => m.kind === 'goal')!
+  assert.deepEqual(goal.to, ['advisor'], 'the goal is addressed to the advisor alone')
+
+  assert.match(lead.received[0]!, /ship the dark mode toggle/, 'the advisor is given the goal')
+  assert.ok(
+    !impl.received[0]!.includes('ship the dark mode toggle'),
+    'and the implementer is not, in the opening it actually receives',
+  )
+  // Stated, not merely absent: an implementer that noticed no goal would go looking for
+  // one, or ask, and spend a turn doing it.
+  assert.match(impl.received[0]!, /advisor holds this session's goal/i)
+  assert.match(impl.received[0]!, /deliberate/i)
+})
+
+test('an advisor-held goal is not an audited withholding', async () => {
+  // The distinction the audit depends on. `restricted` means a human chose to hide THIS
+  // message from THIS participant; `audit()` and `asymmetryAt` both read it that way. The
+  // goal reaching the advisor alone is how every session works now, so marking it would
+  // leave the audit permanently non-empty and asymmetry permanently true — a signal
+  // present in every run, which is no signal.
+  const { relay } = await twoParty(['instruction', 'DONE'], ['done it'])
+  await relay.run('a goal')
+
+  const goal = relay.log.find((m) => m.kind === 'goal')!
+  assert.equal(goal.visibility, 'normal')
+  assert.deepEqual(goal.excluded, [])
+  assert.deepEqual(relay.audit(), [], 'nothing was WITHHELD, so the audit stays empty')
+  const report = relay.log.find((m) => m.kind === 'report')!
+  assert.deepEqual(relay.asymmetryAt(report.seq).excluded, [], 'and no asymmetry is manufactured')
+})
+
 test('the advisor is told to investigate itself rather than delegate everything', async () => {
   // Observed live: asked to research free data sources, the advisor turned the request
   // into an instruction and handed it to an implementer already mid-build. That is the
@@ -288,6 +327,11 @@ test('the advisor is told to investigate itself rather than delegate everything'
   const opening = lead.received[0]!
   assert.match(opening, /YOURSELF/, 'the advisor must be told to do investigative work itself')
   assert.match(opening, /CHANGING the repository/, 'and what the implementer’s turn is for')
+  // Holding the goal is a responsibility, not just a privilege: it has to know it decides
+  // what to pass on, that withholding is not licence to mislead, and that it can ask.
+  assert.match(opening, /YOU HOLD THE GOAL/)
+  assert.match(opening, /never state something false/i)
+  assert.match(opening, /ESCALATE: followed by your question/)
   // Findings must survive the turn: the advisor's only channel onward is its next
   // instruction, so research it does not report is research nobody sees.
   assert.match(opening, /what you FOUND/)
