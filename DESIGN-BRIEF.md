@@ -665,8 +665,8 @@ Verified against git on this machine, because three of these bite immediately:
    primary. Delivery is at turn boundaries, since that is where the orchestrator has a
    complete record with a verdict attached; streaming mid-turn is possible later but the
    evidence machinery works on turns.
-2. **What ends the loop?** lead → instruct → implement → report → lead is unbounded and
-   both sides spend tokens. The arbiter is the natural stopping condition.
+2. ~~**What ends the loop?**~~ **Decided — see §7a.** The advisor can end the session, not
+   only steer it, and the human can override that.
 3. **Is the recipient told an aside was private?** Bears directly on the leak above.
 
 ### Roles
@@ -733,6 +733,56 @@ fix is structural, not prompt engineering.
 - **Spiral detection.** Track semantic similarity of successive turns. If positions stop
   moving, stop the loop. Do not wait for the round budget.
 - **Cost ceiling per topic.** Both usage meters are finite.
+
+## 7a. Ending a session [Added 2026-08-05]
+
+Ending is a **distinct capability** from steering, not the absence of a next instruction.
+The advisor can end the session; the human outranks that and can send them back to work.
+
+The reasons differ in kind, and so should the follow-up:
+
+| reason | signal | what should happen |
+|---|---|---|
+| work is done | the arbiter — tests pass | stop |
+| progress has halted | positions stop moving, no diff between rounds | escalate to the human |
+| mistakes compounding | advisor's judgement, on prose plus its own verification | escalate to the human |
+| the implementer is degraded | context exhaustion | **rotate**, do not stop |
+
+That last row is the one worth separating. If context is the problem, ending is not the
+goal — continuing the *work* in a fresh session is. So the verb is rotate: end this
+session, start a clean one, carry a handoff forward.
+
+The advisor is the natural author of that handoff, and precisely *because* it is on a thin
+context diet. It has followed the whole narrative and holds none of the working set, which
+is exactly the shape a handoff should be.
+
+### The complaint may be true
+
+An implementer saying it needs a clean session is sometimes an unhelpful reflex and
+sometimes an accurate report that its context is exhausted and quality is about to
+degrade. **Overriding a true signal produces worse work while looking like decisiveness.**
+
+We do not have to take the model's word for it. Compaction is mechanically observable and
+already parsed: Claude Code writes a `compact_file_reference` attachment, Codex writes a
+`compacted` line and a `context_compacted` event, and `transcript/reconcile.ts` detects a
+rewritten transcript by prefix digest whether or not a marker is recognised.
+
+So the rule is: treat the complaint as a **claim**, and check it against the mechanical
+signal — the same discipline applied to everything else here. A complaint with compaction
+behind it is a report and should be acted on. A complaint with nothing behind it is a
+reflex and can be overridden. Neither should be guessed at.
+
+This also gives the deference signal from §2 a counterpart. Dissent falling to zero means
+the implementer has stopped contributing; complaints *without* mechanical backing rising
+means it has started to stall instead. Both are measurable, and neither is visible from
+reading the prose alone.
+
+### Open
+
+Whether the advisor's decision to end takes effect immediately with the human able to
+restart, or is a proposal that waits. Waiting is safer and stalls an unattended session;
+acting is responsive and can discard work the human wanted. Probably acts, since a rotate
+loses nothing and the human outranks it either way.
 
 ## 8. Commercial risk (important, affects architecture)
 
