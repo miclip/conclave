@@ -166,6 +166,21 @@ export function classify(ev: Evidence): { state: TurnLiveness } & Partial<Verdic
       p.push({ source: 'process', detail: 'exited with no SessionEnd (unclean death)', caveat: true })
       confidence = 'inferred'
     }
+    // Observed on Codex 0.146.0: a SIGTERMed turn produces no Stop, no SessionEnd, and a
+    // transcript that simply stops -- no task_complete, no turn_aborted. State plainly
+    // that the child announced nothing, so this reads as a conclusion drawn from absence
+    // rather than as a terminal record someone forgot to name.
+    if (
+      !ev.transcript.taskComplete &&
+      !ev.transcript.turnAbortedReason &&
+      !ev.transcript.hasAssistantAfterPrompt
+    ) {
+      p.push({
+        source: 'transcript',
+        detail: 'the child emitted no terminal record; this is inferred from its death alone',
+        caveat: true,
+      })
+    }
     if (ev.process.howEnded) p.push({ source: 'process', detail: ev.process.howEnded })
     return { state: 'process_exited', ...verdict('process_exited', confidence, p) }
   }

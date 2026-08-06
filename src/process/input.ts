@@ -39,14 +39,59 @@ export interface InputAction {
  */
 const SUBMIT_SETTLE_MS = 400
 
+/**
+ * Permission-dialog key encodings, per agent.
+ *
+ * These differ, and one half is verified while the other is not, so a single blanket
+ * caveat would be wrong in both directions.
+ */
+export interface PermissionEncoding {
+  allow: string
+  deny: string
+  /** Whether the allow encoding has been exercised against a real dialog. */
+  allowVerified: boolean
+  describeAllow: string
+}
+
+/**
+ * Claude Code. ESC on the dialog is "No, and tell Claude what to do differently",
+ * observed in spike 3. Allow is presumed to be Enter taking the highlighted first
+ * option, but no fixture has exercised it.
+ */
+export const CLAUDE_PERMISSION_ENCODING: PermissionEncoding = {
+  allow: '\r',
+  deny: '\x1b',
+  allowVerified: false,
+  describeAllow: 'allow (unverified encoding)',
+}
+
+/**
+ * Codex 0.146.0. Both halves observed live, dialog captured verbatim:
+ *
+ *   1. Yes, proceed (y)
+ *   2. Yes, and don't ask again for these files (a)
+ *   3. No, and tell Codex what to do differently (esc)
+ *
+ * `y` was confirmed by the file being created and Stop firing; ESC by the file not
+ * being created and turn_aborted being recorded.
+ */
+export const CODEX_PERMISSION_ENCODING: PermissionEncoding = {
+  allow: 'y',
+  deny: '\x1b',
+  allowVerified: true,
+  describeAllow: 'allow',
+}
+
 export class InputQueue {
   readonly #pty: PtyProcess
   readonly #log: InputAction[] = []
+  readonly #keys: PermissionEncoding
   /** Tail of the serialization chain. Every action appends to it. */
   #chain: Promise<unknown> = Promise.resolve()
 
-  constructor(pty: PtyProcess) {
+  constructor(pty: PtyProcess, keys: PermissionEncoding = CLAUDE_PERMISSION_ENCODING) {
     this.#pty = pty
+    this.#keys = keys
   }
 
   get actions(): readonly InputAction[] {
@@ -112,23 +157,21 @@ export class InputQueue {
   }
 
   /**
-   * ESC on Claude Code's permission dialog is "No, and tell Claude what to do
-   * differently" -- observed in spike 3.
+   * Answer a pending permission dialog using this adapter's encoding.
    *
-   * `allow` is NOT verified: option 1 is the highlighted default and Enter should take
-   * it, but no spike has exercised it. Until a fixture exists, an allow is recorded with
-   * that caveat rather than presented as equivalent evidence to a deny.
+   * The recorded detail distinguishes a verified encoding from an assumed one, so later
+   * code cannot treat a presumed allow as equivalent evidence to an observed deny.
    */
   async decidePermission(decision: 'allow' | 'deny'): Promise<InputAction> {
     return this.#enqueue(async () => {
-      const bytes = decision === 'deny' ? '\x1b' : '\r'
+      const bytes = decision === 'deny' ? this.#keys.deny : this.#keys.allow
       this.#pty.write(bytes)
       const action: InputAction = {
         kind: 'permission_decision',
         at: Date.now(),
         origin: 'orchestrator',
-        detail: decision === 'allow' ? 'allow (unverified encoding)' : 'deny',
-        bytes: decision === 'deny' ? '\\x1b' : '\\r',
+        detail: decision === 'deny' ? 'deny' : this.#keys.describeAllow,
+        bytes: JSON.stringify(bytes),
       }
       this.#record(action)
       return action

@@ -238,11 +238,14 @@ test('hook trust is deployment state and must not touch outcome grading', () => 
   }
   assert.equal(diagnoseHookTrust(report, MATCH).ready, true)
 
-  // Codex's capability grades are unchanged by any of this, and stay below Claude's.
+  // Codex's capability grades come from live fixtures, and nothing about hook trust may
+  // move them. A green deployment check must never inflate confidence in a turn nobody
+  // observed.
   assert.equal(CODEX_CAPABILITIES.outcomes.completed, 'observed')
-  assert.equal(CODEX_CAPABILITIES.outcomes.cancelled, 'observed_historically')
-  assert.equal(CODEX_CAPABILITIES.outcomes.permission_refused, 'inferred_from_documented_event')
-  assert.equal(CODEX_CAPABILITIES.readinessSignal, 'unknown')
+  assert.equal(CODEX_CAPABILITIES.outcomes.cancelled, 'observed')
+  assert.equal(CODEX_CAPABILITIES.outcomes.permission_refused, 'observed')
+  assert.equal(CODEX_CAPABILITIES.outcomes.timed_out, 'reasoned_but_unverified')
+  assert.equal(CODEX_CAPABILITIES.readinessSignal, 'first_turn')
 })
 
 test('enabled is never treated as executable, in either direction', () => {

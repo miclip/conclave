@@ -354,8 +354,10 @@ opaque, because it is `prompt_id` on Claude Code and `turn_id` on Codex.
 - Hooks **journal locally before attempting delivery**, so a lost delivery is countable.
 - The receiver **deduplicates journal replays**, even though no duplicate has been
   observed — replay is the recovery mechanism, so duplicates are a matter of time.
-- **Readiness differs per adapter**: Claude Code may use `SessionStart`; Codex may not,
-  since it does not fire at boot.
+- **Readiness differs per adapter**: Claude Code uses `SessionStart`, which fires at boot
+  and blocks the first turn. Codex fires **no hook at all** before the first turn, so its
+  readiness is the TUI negotiating raw mode. Both observed; see
+  `spikes/codex/FINDINGS.md`.
 - **Hook configuration is validated against the loaded configuration**, not against the
   file we wrote. Unknown fields degrade silently into dangerous defaults.
 - **Codex hook trust is deployment state** and changes whenever hook content changes.
@@ -587,11 +589,14 @@ local web view; do not fight the child TUIs for the terminal.
    Registration, participant construction, role assignment and input policy are
    data-driven ahead of the configuration subsystem — see §5b.
 
-   **Next checkpoint: Codex, after the quota reset.** Needed as current-version
-   fixtures, not inference: `task_complete`; `turn_aborted`; permission deny *and*
-   allow; process exit; whether `Stop` fires on cancellation (the precedence rule and
-   both arrival orders are already specified and tested — §5); and readiness vs first
-   accepted input. ~~hook-trust invalidation~~ **done** — see §4, verified quota-free. Until those
+   ~~**Next checkpoint: Codex.**~~ **Done 2026-08-05** against codex 0.146.0 — see
+   `spikes/codex/FINDINGS.md`. All six questions answered from live fixtures:
+   `task_complete` + `Stop`; `turn_aborted reason=interrupted` with **no** `Stop`;
+   permission deny and allow (allow encoding is `y`, now verified); process exit leaving
+   no terminal record in either channel; and readiness firing no hook before the first
+   turn. `Stop` and `turn_aborted` proved mutually exclusive, so the precedence rule is a
+   guard rather than a live path. `SessionEnd` was never observed — registered, trusted,
+   and no run achieved a clean exit, so it stays *not observed* rather than unsupported. Until those
    exist, Codex staying visibly lower-confidence than Claude is correct behaviour rather
    than unfinished polish.
 5. **Two-party relay, no orchestrator model.** Hardcode roles, relay turns, print a raw

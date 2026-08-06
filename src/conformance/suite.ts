@@ -160,9 +160,71 @@ function claudeFixtureOutcomes(): Map<Outcome, FixtureEvidence> {
   return found
 }
 
-/** Codex has no adapter yet, so its evidence is whatever its transcripts already show. */
+/**
+ * Codex evidence comes from the live fixture run (spikes/codex/runs), falling back to
+ * historical rollouts for anything the run did not cover.
+ *
+ * The distinction is the point of the temporal grade: a 2026-02 rollout proves the record
+ * existed in 0.104.0, while a run recorded against the installed CLI proves current
+ * behaviour.
+ */
 function codexFixtureOutcomes(): Map<Outcome, FixtureEvidence> {
   const found = new Map<Outcome, FixtureEvidence>()
+  const current = currentVersion('codex')
+
+  // --- live fixtures, current version ---------------------------------------------
+  const runsDir = join(ROOT, 'spikes', 'codex', 'runs')
+  if (existsSync(runsDir)) {
+    for (const name of readdirSync(runsDir).filter((f) => f.endsWith('.json') && f !== 'summary.json')) {
+      let obs: any
+      try {
+        obs = JSON.parse(readFileSync(join(runsDir, name), 'utf8'))
+      } catch {
+        continue
+      }
+      const events: string[] = (obs.hooks ?? []).map((h: any) => h.event)
+      const aborts: string[] = obs.transcript?.abortReasons ?? []
+      const evidence = (where: string): FixtureEvidence => ({
+        found: true,
+        where,
+        cliVersion: current,
+        historical: false,
+      })
+
+      if (obs.scenario === 'completed' && events.includes('Stop') && !found.has('completed')) {
+        found.set('completed', evidence(`Stop + task_complete in ${name}`))
+      }
+      // A run only evidences cancellation if it actually aborted -- the first attempt
+      // finished before the interrupt landed and recorded task_complete instead.
+      if (obs.scenario === 'cancelled' && aborts.length > 0 && !found.has('cancelled')) {
+        found.set('cancelled', evidence(`turn_aborted=${aborts[0]} in ${name}`))
+      }
+      // Refusal needs BOTH the permission event and the abort: turn_aborted alone is
+      // indistinguishable from a user cancellation.
+      if (
+        obs.scenario === 'permission_deny' &&
+        events.includes('PermissionRequest') &&
+        aborts.length > 0 &&
+        !found.has('permission_refused')
+      ) {
+        found.set('permission_refused', evidence(`PermissionRequest + turn_aborted in ${name}`))
+      }
+      // Death is evidenced by the ABSENCE of any terminal record alongside a killed
+      // process, so this asserts what is missing rather than what is present.
+      if (
+        obs.scenario === 'process_exit' &&
+        !events.includes('Stop') &&
+        !events.includes('SessionEnd') &&
+        aborts.length === 0 &&
+        !(obs.transcript?.eventTypes ?? {})['task_complete'] &&
+        !found.has('process_exited')
+      ) {
+        found.set('process_exited', evidence(`no terminal record after SIGTERM in ${name}`))
+      }
+    }
+  }
+
+  // --- historical rollouts, for anything the live run did not cover -----------------
   const root = join(homedir(), '.codex', 'sessions')
   if (!existsSync(root)) return found
 
@@ -175,11 +237,10 @@ function codexFixtureOutcomes(): Map<Outcome, FixtureEvidence> {
     }
   }
   walk(root)
-  // Newest first: recent rollouts match the installed CLI version.
   files.sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs)
 
   for (const f of files) {
-    if (found.size >= 2) break
+    if (found.has('completed') && found.has('cancelled')) break
     const records = readFileSync(f, 'utf8')
       .split('\n')
       .filter((l) => l.trim())
@@ -190,11 +251,9 @@ function codexFixtureOutcomes(): Map<Outcome, FixtureEvidence> {
           return []
         }
       })
-    // session_meta records the CLI that wrote the rollout -- the whole point of the
-    // temporal grade is that an old rollout proves the old version's behaviour.
     const meta = records.find((r) => r.type === 'session_meta')
     const cliVersion = String(meta?.payload?.cli_version ?? 'unknown')
-    const historical = !sameVersion(cliVersion, currentVersion('codex'))
+    const historical = !sameVersion(cliVersion, current)
     for (const t of parseCodex(records).turns) {
       if (t.state === 'completed' && !found.has('completed')) {
         found.set('completed', {

@@ -147,9 +147,10 @@ test('the rendered output matches what this checkout currently has installed', a
 test('no tracked source file hardcodes an absolute home path', () => {
   // Guards the portability this task establishes. Deliberately exempt:
   //
-  //   - the evidence corpus (fixtures, journal, results): those are RECORDINGS of real
-  //     runs, and the paths in them are part of what was observed. Rewriting them would
-  //     falsify the evidence behind the conformance claims.
+  //   - the evidence corpora (spikes/hooks/{fixtures,journal,results}, spikes/codex/
+  //     {runs,journal}): those are RECORDINGS of real runs, and the paths in them are
+  //     part of what was observed -- transcript_path and cwd are payload fields.
+  //     Rewriting them would falsify the evidence behind the conformance claims.
   //   - prose (*.md): TODO.md and the FINDINGS documents discuss these paths by name,
   //     which is the point of documenting them.
   //   - rendered registrations: git-ignored, so they cannot be tracked anyway.
@@ -158,6 +159,8 @@ test('no tracked source file hardcodes an absolute home path', () => {
     .filter(Boolean)
     .filter((f) => !f.startsWith('spikes/hooks/fixtures/'))
     .filter((f) => !f.startsWith('spikes/hooks/journal/'))
+    .filter((f) => !f.startsWith('spikes/codex/runs/'))
+    .filter((f) => !f.startsWith('spikes/codex/journal/'))
     .filter((f) => f !== 'spikes/hooks/results.ndjson')
     .filter((f) => !f.endsWith('.md'))
 

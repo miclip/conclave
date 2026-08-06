@@ -17,11 +17,34 @@ currently harmless — nothing in Claude Code produces contradicting late eviden
 no abort record exists and the hook-loss path only ever *adds* a completion nothing
 contests.
 
-Codex is the first adapter that could need it: if 0.146.0 emits both `turn_aborted` and
-`Stop` on cancellation, and they arrive in that order, the adapter must withdraw the
-provisional `completed`. **Do not enable the Codex adapter until `#finalise` runs through
-the tracker.** Otherwise "Claude works without it" quietly becomes "all adapters bypass
-it", and the revision semantics stay proven in a unit test and absent in production.
+**This remains a hard gate. Do not enable `CodexPtyHookAdapter` until `#finalise` runs
+through the tracker.**
+
+The live fixtures changed the argument for it rather than weakening it. 0.146.0 turned
+out NOT to emit `turn_aborted` and `Stop` together, so the original motivation -- a
+provisional `completed` needing withdrawal -- is not currently reachable. But the run
+established something more important: on Codex a refused permission and a user
+cancellation produce the *identical* transcript record (`turn_aborted reason=interrupted`),
+so the only thing separating them is `PermissionRequest` having fired plus the
+orchestrator's own record of the mediated deny.
+
+That makes mediated input and permission events **classification evidence, not optional
+metadata**, on both adapters. An adapter that finalises a verdict once and never revisits
+it cannot incorporate evidence that arrives after the fact, and cannot express the
+degradation when input ownership is `external`. The tracker is where that lives.
+
+Otherwise "Claude works without it" quietly becomes "all adapters bypass it", and the
+revision semantics stay proven in a unit test and absent in production.
+
+## Codex abort/Stop precedence is synthetically verified, not live-observed
+
+`turn_aborted > Stop` is covered by `src/outcomes/precedence.test.ts` in both arrival
+orders. On 0.146.0 the two records are mutually exclusive, so the rule never fires in
+practice and the live fixtures could not exercise it.
+
+It stays because it is correct and costs nothing, and because a future version emitting
+both must not silently upgrade a cancellation into a completion. Grade it as a guard, not
+as validated behaviour, and do not cite the Codex fixtures as evidence for it.
 
 ## Non-resurrection rests on evidence monotonicity, not an explicit guard
 
@@ -52,9 +75,11 @@ corpus therefore requires an explicit review of:
 Do not replace the exact-count assertion with a loose lower bound merely to make casual
 spike reruns pass.
 
-## Portable project hook configuration
+## ~~Portable project hook configuration~~ — done
 
-**Next task, before collecting Codex fixtures.**
+Landed in `8df69d7` (templates + `conclave config install`), `83cd17f` (paths untracked,
+guard test), `bda5cad` (`config check`). Kept for the rationale, which is still live: the
+trust-hash consequence in particular explains why every checkout re-trusts once.
 
 The committed `.claude/settings.json` and `.codex/hooks.json` contain checkout-specific
 absolute paths. Replace them with portable source templates and generated machine-local
@@ -99,9 +124,13 @@ public tip is portable.
 ## Deferred, with reasons
 
 - `AgentSession.fork()` throws. Honest until session forking is actually needed.
-- Permission **allow** has an unverified byte encoding; only **deny** has a fixture.
-  Recorded in `src/process/input.ts` as `'allow (unverified encoding)'` so later code
-  cannot mistake it for established behaviour.
+- Permission **allow** is verified on Codex (`y`, dialog captured, file created, `Stop`
+  fired) and still unverified on **Claude**, where it is presumed to be Enter taking the
+  highlighted option. `src/process/input.ts` now carries per-agent encodings rather than
+  one blanket caveat, and only Claude's records `'allow (unverified encoding)'`.
+- `SessionEnd` has never fired on Codex. It is registered and trusted, but no run achieved
+  a clean exit — every teardown escalated to SIGTERM because Codex does not quit promptly
+  on Ctrl-C. Collect a `/quit` fixture before concluding anything about it.
 - The transparent keystroke proxy for the §5a `external` input-ownership escape hatch.
 - The layered configuration subsystem (§5b). Registration, participant construction,
   role assignment and input policy are already data-driven in anticipation.

@@ -54,20 +54,31 @@ export const CLAUDE_CAPABILITIES: AdapterCapabilities = {
  */
 export const CODEX_CAPABILITIES: AdapterCapabilities = {
   agent: 'codex',
-  // SessionStart did NOT fire at boot, nor on an app-server thread/start. Most likely
-  // turn-scoped; unverified.
-  readinessSignal: 'unknown',
+  // No hook fires before the first turn -- not even SessionStart. Observed directly on
+  // 0.146.0: a booted session that never took a turn produced no hooks at all, and the
+  // TUI accepted input ~3ms after negotiating raw mode. Readiness is therefore the
+  // terminal going interactive, not a lifecycle event.
+  readinessSignal: 'first_turn',
   turnKeySource: 'turn_id',
   outcomes: {
+    // Stop fires carrying turn_id and last_assistant_message, and the transcript
+    // independently records task_complete.
     completed: 'observed',
-    // The only turn_aborted fixtures on this machine are from February 2026 rollouts,
-    // written by a much older CLI. They prove the record and the parser shape existed;
-    // they do not prove 0.146.0 still emits it under the same circumstances.
-    cancelled: 'observed_historically',
-    // PermissionRequest is declared in the 0.146.0 binary's hook enum; never seen fire.
-    permission_refused: 'inferred_from_documented_event',
-    // SessionEnd is declared in the hook enum and in ManagedHooksRequirements.
-    process_exited: 'inferred_from_documented_event',
+    // turn_aborted reason=interrupted. Stop does NOT fire; the two are mutually
+    // exclusive on 0.146.0.
+    cancelled: 'observed',
+    // Observed, with a qualification that matters: the transcript record for a refused
+    // permission is `turn_aborted reason=interrupted` -- byte-identical to a user
+    // cancellation. What separates them is PermissionRequest having fired plus the
+    // orchestrator's own record of having sent the deny. Under `external` input
+    // ownership that second half is unavailable, and this outcome degrades to
+    // indistinguishable-from-cancelled.
+    permission_refused: 'observed',
+    // Observed, but from the ABSENCE of evidence plus process state. SIGTERM mid-turn
+    // produced no Stop, no SessionEnd, and a transcript ending after user_message with
+    // neither task_complete nor turn_aborted. Codex itself emits no terminal record for
+    // a killed turn; the classification comes entirely from knowing the process died.
+    process_exited: 'observed',
     timed_out: 'reasoned_but_unverified',
     transport_lost: 'reasoned_but_unverified',
     unknown_abnormal_end: 'reasoned_but_unverified',
