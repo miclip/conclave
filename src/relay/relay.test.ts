@@ -260,6 +260,39 @@ async function twoParty(
   return { relay, lead, impl }
 }
 
+// --- briefings ----------------------------------------------------------------------
+
+test('both participants are told about subagents, and about the worktree rule', async () => {
+  // Neither CLI was told it could spawn subagents, so the only parallelism available to a
+  // participant went unused. WHEN is left to the model; WHERE is not — a subagent writing
+  // into the shared checkout makes `sessionLock` and the dirty-path attribution wrong,
+  // silently, because its writes are indistinguishable from its parent's.
+  const { relay, lead, impl } = await twoParty(['DONE'], [])
+  await relay.run('a goal')
+
+  for (const [who, session] of [['advisor', lead], ['implementer', impl]] as const) {
+    const opening = session.received[0]!
+    assert.match(opening, /subagents/i, `${who} should be told it has subagents`)
+    assert.match(opening, /worktree/i, `${who} should be told where a writing subagent works`)
+    assert.match(opening, /only read/i, `${who} should be told read-only subagents are exempt`)
+  }
+})
+
+test('the advisor is told to investigate itself rather than delegate everything', async () => {
+  // Observed live: asked to research free data sources, the advisor turned the request
+  // into an instruction and handed it to an implementer already mid-build. That is the
+  // only behaviour its briefing described — "give it one concrete instruction at a time".
+  const { relay, lead } = await twoParty(['DONE'], [])
+  await relay.run('a goal')
+
+  const opening = lead.received[0]!
+  assert.match(opening, /YOURSELF/, 'the advisor must be told to do investigative work itself')
+  assert.match(opening, /CHANGING the repository/, 'and what the implementer’s turn is for')
+  // Findings must survive the turn: the advisor's only channel onward is its next
+  // instruction, so research it does not report is research nobody sees.
+  assert.match(opening, /what you FOUND/)
+})
+
 // --- visibility ---------------------------------------------------------------------
 
 test('ordinary point-to-point relay traffic is NOT restricted', async () => {

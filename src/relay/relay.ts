@@ -148,10 +148,18 @@ see its tool calls, its diffs, or its code. You see only the prose it writes bac
 as a human following along would. You share its working directory, so you can read files
 and run commands yourself to check any claim it makes; prefer doing that over believing it.
 
+Do investigative work YOURSELF rather than handing it over. Research, code review, reading
+the codebase, checking a claim, comparing options — you share the working directory and
+have the same tools, so a question you can answer is not an instruction. The implementer's
+turn is for CHANGING the repository; sending it a task that touches nothing spends its
+turn and delays the work it is actually doing.
+
 Your job is to give it one concrete instruction at a time and react to what comes back.
 Reply with the instruction itself and nothing else — no preamble, no restating the plan.
-Keep it short. If the work looks finished, reply exactly DONE. If it has gone wrong or
-stalled and needs a human, reply exactly ESCALATE: followed by why.`
+Keep it short. When you investigated something yourself, put what you FOUND in the next
+instruction, briefly — otherwise the finding dies with your turn. If the work looks
+finished, reply exactly DONE. If it has gone wrong or stalled and needs a human, reply
+exactly ESCALATE: followed by why.`
 
 const IMPLEMENTER_BRIEFING = `You are the IMPLEMENTER on a two-agent coding session.
 
@@ -162,6 +170,33 @@ and anything you are unsure about.
 It outranks you on process, but you are not required to agree with it. If an instruction
 is wrong, say so plainly and say why, then proceed unless a human overrules. Silent
 compliance is worse than disagreement.`
+
+/**
+ * Subagents, and the one hard rule about them.
+ *
+ * Both CLIs can spawn subagents and neither was told so, which left the only form of
+ * parallelism available to a participant unused. WHEN to use them is a judgement about
+ * the work, so it is left to the participant -- an orchestrator that mandated subagents
+ * would be making that call with less information than the model has.
+ *
+ * The worktree rule is not a preference. Two writers in one checkout is the exact failure
+ * this session is built to detect rather than cause: `sessionLock` refuses to stage while
+ * participants are live, and restricted-message attribution reads `git status` to decide
+ * which participant dirtied which path. A subagent editing the shared directory makes
+ * both of those lie -- its writes are indistinguishable from its parent's, so an aside
+ * gets attributed to work that did not come from it. Read-only subagents are exempt
+ * because they cannot dirty anything.
+ */
+const SUBAGENT_BRIEFING = `You can spawn subagents, and should when work genuinely splits —
+independent research, reviewing several files at once, exploring parts of the codebase that
+do not depend on each other. You decide when it is worth it; nobody is asking you to use
+them for their own sake.
+
+One rule, and it is not negotiable: a subagent that MODIFIES anything must work in its own
+git worktree, never in the shared working directory. Another model is working in that
+directory right now, and this session decides who changed what by reading git state — a
+second writer in the same checkout makes that attribution wrong, silently. Subagents that
+only read (research, review, search) can use the shared directory freely.`
 
 /**
  * The revision that withdrew a `turn_end`, and whatever replaced it.
@@ -798,8 +833,14 @@ export class Relay {
 
     this.#record({ from: 'human', fromRank: 'human', to: [lead.id, impl.id], kind: 'goal', text: goal })
 
-    await this.#exchange(impl, `${IMPLEMENTER_BRIEFING}\n\nThe goal for this session:\n\n${goal}\n\nAcknowledge briefly; do not start work yet.`)
-    let next = await this.#exchange(lead, `${LEAD_BRIEFING}\n\nThe goal for this session:\n\n${goal}\n\nGive the implementer its first instruction.`)
+    await this.#exchange(
+      impl,
+      `${IMPLEMENTER_BRIEFING}\n\n${SUBAGENT_BRIEFING}\n\nThe goal for this session:\n\n${goal}\n\nAcknowledge briefly; do not start work yet.`,
+    )
+    let next = await this.#exchange(
+      lead,
+      `${LEAD_BRIEFING}\n\n${SUBAGENT_BRIEFING}\n\nThe goal for this session:\n\n${goal}\n\nGive the implementer its first instruction.`,
+    )
 
     const maxRounds = this.#opts.maxRounds ?? 6
     for (let round = 1; round <= maxRounds; round++) {
