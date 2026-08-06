@@ -28,6 +28,7 @@ import {
   type Visibility,
 } from './message.ts'
 import { RelayEventStream, type ObserveOptions, type RelayEvent, type RunReason } from './observe.ts'
+import { RunHandle, type PauseReason, type RunOutcome, type RunPause } from './run.ts'
 import { assess, ComplaintLedger, topicOf } from '../rotation/degradation.ts'
 import { rotate, type RotationResult } from '../rotation/rotate.ts'
 
@@ -350,6 +351,60 @@ export class Relay {
    * rotation and termination authority is not implemented here.
    */
   /**
+   * A point where a human is meant to decide.
+   *
+   * Attended and unattended runs differ here and nowhere else. `start()` suspends the loop
+   * holding everything it had; `run()` has already committed to returning an outcome, so
+   * the same point escalates and ends. Both record the same note, because the evidence for
+   * the decision should not depend on who is watching.
+   */
+  async #halt(
+    handle: RunHandle | undefined,
+    p: { reason: PauseReason; detail: string; evidence: string[] },
+  ): Promise<RunOutcome | undefined> {
+    this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text: `paused (${p.reason}): ${p.detail}` })
+    if (!handle) {
+      return this.#end(
+        'escalated',
+        `${p.detail} Nobody is attending this run, so it ends here — use relay.start(goal) ` +
+          `to pause at this point and decide instead.`,
+      )
+    }
+    const decision = await handle.pauseAt({
+      reason: p.reason,
+      detail: p.detail,
+      evidence: p.evidence,
+      options: ['continue', 'rotate', 'constrain', 'abort'],
+      atSeq: this.#seq,
+    })
+    if (decision.kind === 'abort') return this.#end('stopped', decision.detail)
+    this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text: `resumed from ${p.reason}` })
+    return undefined
+  }
+
+  /**
+   * Start a run you can hold onto.
+   *
+   * The supervised form. Pauses suspend the loop rather than ending it, so a rotation
+   * candidate is a decision point rather than a dead end -- see `run.ts` for why restarting
+   * `run()` is not the same as resuming.
+   */
+  start(goal: string): RunHandle {
+    const handle = new RunHandle({
+      rotate: (reason) => this.rotateImplementer(reason),
+      constrain: (text, audience) => this.say(text, audience),
+      requestStop: () => {
+        this.#stopped = true
+      },
+    })
+    void this.#loop(goal, handle).then(
+      (outcome) => handle.settle(outcome),
+      (err: Error) => handle.settle(this.#end('escalated', `the run threw: ${err.message}`)),
+    )
+    return handle
+  }
+
+  /**
    * Should this implementer be replaced?
    *
    * Called every round, because a session may compact without saying so and a session
@@ -360,7 +415,8 @@ export class Relay {
   async #considerRotation(
     impl: RelayParticipant,
     prose: string,
-  ): Promise<{ reason: RunReason; detail?: string } | undefined> {
+    handle: RunHandle | undefined,
+  ): Promise<RunOutcome | undefined> {
     const snap = await impl.session.snapshot()
     const verdict = assess({
       participant: impl.id,
@@ -400,20 +456,61 @@ export class Relay {
       // A candidate, not a verdict. The mechanism is built and the policy is not earned:
       // nothing yet shows that compaction and degradation coincide, so acting on it
       // unattended would be inferring quality from a proxy that has never been checked
-      // against quality.
-      return this.#end(
-        'escalated',
-        `${detail}. Recorded as a rotation candidate, not acted on: ` +
-          `call rotateImplementer() to proceed, or set rotation.onDegradation to 'automatic'.`,
-      )
+      // against quality. An attended run stops here and asks; an unattended one ends.
+      const halted = await this.#halt(handle, {
+        reason: 'rotation_candidate',
+        detail: `${detail}. Recorded as a rotation candidate, not acted on.`,
+        evidence: verdict.evidence,
+      })
+      return halted ?? this.#acknowledge(impl, snap.compactionGeneration)
     }
 
     const result = await this.rotateImplementer(detail)
     if (result.status === 'rotated') return undefined
-    return this.#end('escalated', `rotation failed (${result.reason}): ${result.detail}`)
+    const halted = await this.#halt(handle, {
+      reason: 'rotation_candidate',
+      detail: `rotation failed (${result.reason}): ${result.detail}`,
+      evidence: [...verdict.evidence, 'the original implementer is back in service'],
+    })
+    return halted ?? this.#acknowledge(impl, (await impl.session.snapshot()).compactionGeneration)
   }
 
-  async run(goal: string): Promise<{ reason: RunReason; detail?: string }> {
+  /**
+   * The human saw this evidence and chose to carry on. Stop re-raising it.
+   *
+   * Without this, declining a candidate pauses again on the very next round, on the same
+   * compaction, forever -- the operator either abandons the feature or stops reading the
+   * pauses, and the second is worse. Moving the baseline means a *later* compaction is new
+   * evidence and does pause again, which is the distinction that makes the signal worth
+   * surfacing at all.
+   *
+   * Found by three tests hanging rather than by design.
+   */
+  #acknowledge(impl: RelayParticipant, generation: number): undefined {
+    impl.baselineGeneration = generation
+    impl.degradationCursor = impl.events.length
+    this.#record({
+      from: 'orchestrator',
+      fromRank: 'human',
+      to: [],
+      kind: 'note',
+      text: `rotation candidate declined at compaction generation ${generation}; a later compaction will raise it again`,
+    })
+    return undefined
+  }
+
+  /**
+   * Run to completion without a supervisor.
+   *
+   * Kept as it was: every pause point is terminal for this form, because a call that has
+   * already committed to returning an outcome has nowhere to suspend to. `start()` is the
+   * attended form, and the difference is deliberate rather than incidental.
+   */
+  async run(goal: string): Promise<RunOutcome> {
+    return this.#loop(goal, undefined)
+  }
+
+  async #loop(goal: string, handle: RunHandle | undefined): Promise<RunOutcome> {
     const lead = this.participants.find((p) => p.rank === 'advisor')!
     const impl = this.participants.find((p) => p.rank === 'implementer')!
 
@@ -433,7 +530,16 @@ export class Relay {
       }
       if (/^ESCALATE\b/i.test(instruction)) {
         this.#record({ from: lead.id, fromRank: 'advisor', to: [], kind: 'note', text: instruction })
-        return this.#end('escalated', instruction)
+        const halted = await this.#halt(handle, {
+          reason: 'advisor_escalated',
+          detail: instruction,
+          evidence: [`the advisor asked for a human rather than issuing an instruction`],
+        })
+        if (halted) return halted
+        // Resumed. The advisor said its piece and the human decided otherwise, so it is
+        // asked again rather than having its escalation replayed as an instruction.
+        next = await this.#exchange(lead, this.#drain(lead.id) || 'The human has seen your escalation and asked you to continue. Give the implementer its next instruction.')
+        continue
       }
 
       this.#record({ from: lead.id, fromRank: 'advisor', to: [impl.id], kind: 'instruction', text: instruction })
@@ -451,12 +557,17 @@ export class Relay {
       // here rather than relaying the partial prose keeps the advisor from steering on a
       // report that never finished being written.
       if (report.end.verdict.outcome !== 'completed') {
-        return this.#end('escalated', `${impl.id} turn ended ${formatVerdict(report.end.verdict)}`)
+        const halted = await this.#halt(handle, {
+          reason: 'turn_incomplete',
+          detail: `${impl.id} turn ended ${formatVerdict(report.end.verdict)}`,
+          evidence: report.end.verdict.provenance.map((p) => `${p.source}: ${p.detail}`),
+        })
+        if (halted) return halted
       }
 
       // §7a. Assessed before the advisor sees the report, so a degraded implementer is
       // replaced rather than issued another instruction it cannot act on well.
-      const rotated = await this.#considerRotation(impl, report.prose)
+      const rotated = await this.#considerRotation(impl, report.prose, handle)
       if (rotated) return rotated
 
       const leadAside = this.#drain(lead.id)

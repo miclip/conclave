@@ -174,9 +174,15 @@ Three sub-questions fall out of that one run, in order of how likely they are to
 3. **Does a real session survive a long freeze?** Quiesce, wait, `unquiesce()`, send. This
    is the only one the single run does not answer on its own.
 
-Gap this run will expose: **a run that escalates on a candidate cannot be resumed.** The
-human can rotate and then call `run()` again, which restarts from the goal. Deliberately
-not built ahead of knowing what the operator actually wants at that moment.
+Resumability is now built: `relay.start(goal)` returns a `RunHandle` whose pauses suspend
+the loop rather than ending it (`continue` / `rotate` / `constrain` / `abort`). What the
+live run still has to show is that a **real** session tolerates being paused for as long as
+a human takes to decide — the fakes cannot fail that way.
+
+Still unbuilt, and deliberately: **inspecting a handoff before choosing to rotate.**
+Producing one costs an advisor turn and changes the session, so it is not done
+speculatively; the pause carries the evidence that raised it instead. Build it once an
+operator has actually wanted it.
 
 ### Claim 2 — does compaction predict degradation?
 

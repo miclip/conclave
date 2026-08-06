@@ -1210,12 +1210,53 @@ The measurement for claim 2 is pre-registered in
 repeated questions, contradiction rate, test regressions and useful progress — **not prose
 quality**, which is the thing that looks like degradation and is not it.
 
+#### The run is a state machine, not a call [Added 2026-08-05]
+
+Candidate escalation is a *safe stop with state preserved*, and until now there was nothing
+to do from that stop. Calling `run()` again was the only recovery, and it is not resuming:
+it replays work, loses the topic boundary the session had reached, and hands
+already-consumed state to participants that have moved past it.
+
+That lifecycle does not belong inside `run()`, and it especially does not belong in the
+future REPL — a console that owned the transitions would be the only thing able to drive a
+session, and tests, scripts and any daemon would each reimplement them. So the transitions
+are a durable handle and the REPL becomes a client of it:
+
+```ts
+const run = relay.start(goal)
+const pause = await run.untilPause()   // { reason, detail, evidence, options, atSeq }
+await run.rotateImplementer()          // still paused afterwards: two decisions, not one
+run.injectConstraint(text, audience)
+await run.continue()                   // or run.abort()
+await run.result()
+```
+
+The loop suspends holding everything it had — round counter, the advisor's last
+instruction, the implementer's report. Rotation is safe at exactly that point and nowhere
+else: no turn is in flight, so replacing the implementer cannot race a send.
+
+`relay.run()` is unchanged and remains the **unattended** form: it has already committed to
+returning an outcome, so every pause point is terminal for it. That difference is
+deliberate, not incidental — the same evidence is recorded either way, and only the
+available response differs.
+
+Three pause points: `rotation_candidate`, `advisor_escalated`, `turn_incomplete`. Resuming
+past an advisor escalation asks the advisor again rather than replaying `ESCALATE:` as an
+instruction — replayed, it would reach the implementer as a message with no action in it,
+and the advisor would have no way to know the human had answered.
+
+**Declining a candidate is remembered, and is not standing consent.** Continuing past a
+compaction moves the baseline to it, so the same evidence stops re-raising every round; a
+*later* compaction is new evidence and pauses again. Found by three tests hanging, not by
+design — without it the operator either abandons the feature or stops reading the pauses,
+and the second is worse than never having built it.
+
 #### Evidence ledger for §7a
 
 | level | what |
 |---|---|
 | **observed** (fakes) | the transaction; rollback; continuity verification; carried failures; participant identity preserved across replacement; single-reader hand-off |
-| **unverified live** | PTY quiescence over a long freeze; handoff delivery and the seven headings from a real advisor; `CHECK n: exit <code>` from a real replacement; promotion and rollback against real sessions |
+| **unverified live** | PTY quiescence over a long freeze; handoff delivery and the seven headings from a real advisor; `CHECK n: exit <code>` from a real replacement; promotion and rollback against real sessions; whether a real session tolerates being paused for as long as a human takes to decide |
 | **reasoned but unverified** | compaction is a useful proxy for degradation |
 
 The first row is mechanism and the fakes are the right instrument for it. The second row is

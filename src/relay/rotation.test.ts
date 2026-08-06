@@ -275,7 +275,9 @@ test('compaction is a rotation CANDIDATE by default, and the human decides', asy
 
   assert.equal(outcome.reason, 'escalated')
   assert.ok(outcome.detail!.includes('rotation candidate'))
-  assert.ok(outcome.detail!.includes('rotateImplementer()'))
+  // `run()` is the unattended form and has nowhere to suspend to, so it says which call
+  // does. A pause the operator cannot reach is indistinguishable from a refusal.
+  assert.ok(outcome.detail!.includes('relay.start(goal)'))
   assert.equal(old.state, 'running', 'nothing is spent on a proxy that has never been checked')
   assert.equal(fresh.state, 'running', 'and no replacement was started')
   assert.equal(relay.participants.find((p) => p.rank === 'implementer')!.session, old)
