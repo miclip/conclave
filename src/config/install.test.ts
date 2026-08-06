@@ -15,6 +15,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   statSync,
   writeFileSync,
 } from 'node:fs'
@@ -25,6 +26,7 @@ import {
   hasDrift,
   installConfig,
   render,
+  resolveCodexProjectRoot,
   resolveRepoRoot,
   TARGETS,
   TEMPLATE_TOKEN,
@@ -43,6 +45,28 @@ function fixtureRepo(): string {
     writeFileSync(dst, readFileSync(src))
   }
   return dir
+}
+
+/** Templates only, no git -- enough to render, which is all most tests need. */
+function git(cwd: string, ...args: string[]): string {
+  return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+}
+
+/**
+ * A real main worktree plus a real linked worktree, because the distinction this
+ * exercises is one git makes on disk (`.git` as a file rather than a directory). A
+ * hand-built fake would test the mock.
+ */
+function fixtureWorktreePair(): { main: string; linked: string } {
+  const main = fixtureRepo()
+  git(main, 'init', '--quiet', '--initial-branch=main')
+  git(main, 'config', 'user.email', 'test@example.invalid')
+  git(main, 'config', 'user.name', 'Test')
+  git(main, 'add', '-A')
+  git(main, 'commit', '--quiet', '-m', 'templates')
+  const linked = join(main, '..', `linked-${Date.now().toString(36)}`)
+  git(main, 'worktree', 'add', '--quiet', '--detach', linked)
+  return { main, linked: realpathSync(linked) }
 }
 
 test('every template carries the substitution token', () => {
@@ -109,6 +133,49 @@ test('rendering is checkout-relative, so two checkouts differ', async () => {
   assert.ok(readA.includes(a) && readB.includes(b))
   // Which is why each checkout must trust its own hooks: the command string is part of
   // the handler Codex hashes.
+})
+
+test('a plain checkout is its own Codex project root', () => {
+  const repo = fixtureRepo()
+  // No `.git` at all, and a normal checkout with a `.git` directory: neither has
+  // anywhere else to redirect to, and neither should cost a git invocation.
+  assert.equal(resolveCodexProjectRoot(repo), repo)
+  git(repo, 'init', '--quiet')
+  assert.equal(resolveCodexProjectRoot(repo), repo)
+})
+
+test('a linked worktree resolves its Codex project root to the MAIN worktree', () => {
+  const { main, linked } = fixtureWorktreePair()
+  assert.equal(statSync(join(linked, '.git')).isFile(), true, 'a linked worktree has a .git file')
+  assert.equal(resolveCodexProjectRoot(linked), realpathSync(main))
+  assert.equal(resolveCodexProjectRoot(main), main, 'the main worktree still resolves to itself')
+})
+
+test('installing from a linked worktree puts the sidecar where Codex will read it', async () => {
+  // The regression this guards: rendering the sidecar into the linked worktree writes a
+  // file that looks installed, and that Codex never reads. `hooks/list` then reports the
+  // main worktree's registration -- or none -- and the hooks silently do not run.
+  const { main, linked } = fixtureWorktreePair()
+  const result = await installConfig({ repoRoot: linked, diagnose: false })
+
+  assert.equal(result.codexProjectRoot, realpathSync(main))
+  assert.equal(
+    result.written.find((w) => w.label === 'Codex sidecar')!.path,
+    join(realpathSync(main), '.codex/hooks.json'),
+  )
+  assert.equal(
+    existsSync(join(linked, '.codex/hooks.json')),
+    false,
+    'writing it into the linked worktree is the bug, not a harmless extra copy',
+  )
+
+  // Claude has no such indirection: it reads settings from the working directory.
+  assert.equal(existsSync(join(linked, '.claude/settings.json')), true)
+
+  // The command must still run the LINKED checkout's code -- only the file moved.
+  const sidecar = readFileSync(join(realpathSync(main), '.codex/hooks.json'), 'utf8')
+  assert.ok(sidecar.includes(`${linked}/src/hooks/client.ts`))
+  assert.ok(!sidecar.includes(`${realpathSync(main)}/src/hooks/client.ts`))
 })
 
 test('a missing template fails loudly rather than rendering nothing', async () => {

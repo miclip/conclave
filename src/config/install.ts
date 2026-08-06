@@ -14,17 +14,36 @@
  */
 
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync, unlinkSync } from 'node:fs'
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  writeFileSync,
+  unlinkSync,
+} from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { CONCLAVE_HOOK_MATCH, diagnoseHookTrust, readCodexHooks } from '../deployment/codexHookTrust.ts'
 
 export const TEMPLATE_TOKEN = '{{REPO_ROOT}}'
 
+/**
+ * Which directory a target's output path is relative to.
+ *
+ * `checkout` is this working tree. `codexProject` is the tree Codex resolves project
+ * configuration from, which is the repository's MAIN worktree -- not necessarily this
+ * one. The two differ in a linked worktree, and the difference is not cosmetic: a
+ * sidecar written to the linked worktree is never read, so hooks silently do not exist.
+ */
+export type OutputRoot = 'checkout' | 'codexProject'
+
 export interface RenderTarget {
-  /** Template path, relative to the repository root. */
+  /** Template path, relative to this checkout. */
   template: string
-  /** Rendered output path, relative to the repository root. */
+  /** Rendered output path, relative to whichever root `outputRoot` names. */
   output: string
+  outputRoot: OutputRoot
   label: string
 }
 
@@ -32,11 +51,15 @@ export const TARGETS: RenderTarget[] = [
   {
     template: 'config/templates/claude-settings.json',
     output: '.claude/settings.json',
+    // Claude reads project settings from the working directory, so a linked worktree
+    // gets its own registration and there is nothing to redirect.
+    outputRoot: 'checkout',
     label: 'Claude project hooks',
   },
   {
     template: 'config/templates/codex-hooks.json',
     output: '.codex/hooks.json',
+    outputRoot: 'codexProject',
     label: 'Codex sidecar',
   },
 ]
@@ -60,6 +83,46 @@ export function resolveRepoRoot(from: string = process.cwd()): string {
     if (parent === dir) throw new Error(`could not resolve a repository root from ${from}`)
     dir = parent
   }
+}
+
+/**
+ * Where Codex looks for `.codex/hooks.json`, which is not always this checkout.
+ *
+ * Codex resolves project configuration from the repository's main worktree. Render the
+ * sidecar into a LINKED worktree and Codex never reads it: `hooks/list` reports whatever
+ * the main worktree has -- possibly nothing, possibly another checkout's stale command
+ * path -- and the registration that was just written has no effect at all. That failure
+ * is invisible from the linked worktree, because the file is right there and looks
+ * installed.
+ *
+ * The command string still points at THIS checkout (see `render`); only the file's
+ * location follows the main worktree. So a linked worktree runs its own hook code from a
+ * sidecar its sibling owns, which is the honest description of what Codex supports.
+ */
+export function resolveCodexProjectRoot(checkoutRoot: string): string {
+  const dotGit = join(checkoutRoot, '.git')
+  // A linked worktree is exactly the case where `.git` is a FILE pointing into the main
+  // worktree's admin directory. A normal checkout has a directory, and a non-repository
+  // has neither -- both are already their own project root, so do not spawn git to ask.
+  if (!existsSync(dotGit) || statSync(dotGit).isDirectory()) return checkoutRoot
+
+  let commonDir: string
+  try {
+    commonDir = execFileSync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], {
+      cwd: checkoutRoot,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim()
+  } catch {
+    return checkoutRoot
+  }
+  if (!commonDir) return checkoutRoot
+
+  const mainRoot = dirname(commonDir)
+  // A submodule also has a `.git` file, and its common directory lives under the
+  // superproject's `.git/modules/<name>` -- whose parent is not a worktree at all.
+  // Requiring the result to look like a checkout keeps that case on the safe path.
+  return existsSync(join(mainRoot, '.git')) ? mainRoot : checkoutRoot
 }
 
 export function render(templateText: string, repoRoot: string): string {
@@ -97,6 +160,12 @@ export function writeAtomic(path: string, contents: string): void {
 
 export interface InstallResult {
   repoRoot: string
+  /**
+   * Where the Codex sidecar was written. Equal to `repoRoot` except in a linked
+   * worktree. Reported rather than derived, because "the file is not where you are" is
+   * the thing a reader needs told.
+   */
+  codexProjectRoot: string
   dryRun: boolean
   written: { label: string; path: string; changed: boolean }[]
   codex?: {
@@ -108,6 +177,8 @@ export interface InstallResult {
 
 export interface InstallOptions {
   repoRoot?: string
+  /** Overrides worktree detection; tests use it to render a linked layout on purpose. */
+  codexProjectRoot?: string
   /** Skip the Codex diagnosis (it spawns `codex app-server`, costing a second or two). */
   diagnose?: boolean
   /**
@@ -123,6 +194,8 @@ export interface InstallOptions {
 
 export async function installConfig(opts: InstallOptions = {}): Promise<InstallResult> {
   const repoRoot = opts.repoRoot ?? resolveRepoRoot()
+  const codexProjectRoot = opts.codexProjectRoot ?? resolveCodexProjectRoot(repoRoot)
+  const roots: Record<OutputRoot, string> = { checkout: repoRoot, codexProject: codexProjectRoot }
   const written: InstallResult['written'] = []
 
   for (const target of TARGETS) {
@@ -130,7 +203,9 @@ export async function installConfig(opts: InstallOptions = {}): Promise<InstallR
     if (!existsSync(templatePath)) {
       throw new Error(`missing template ${target.template}; the checkout is incomplete`)
     }
-    const outputPath = join(repoRoot, target.output)
+    const outputPath = join(roots[target.outputRoot], target.output)
+    // Rendered against `repoRoot`, never the output's root: the handler must run THIS
+    // checkout's code even when the file lives in the main worktree.
     const contents = render(readFileSync(templatePath, 'utf8'), repoRoot)
     const previous = existsSync(outputPath) ? readFileSync(outputPath, 'utf8') : undefined
     const changed = previous !== contents
@@ -140,7 +215,12 @@ export async function installConfig(opts: InstallOptions = {}): Promise<InstallR
     written.push({ label: target.label, path: outputPath, changed })
   }
 
-  const result: InstallResult = { repoRoot, dryRun: opts.dryRun === true, written }
+  const result: InstallResult = {
+    repoRoot,
+    codexProjectRoot,
+    dryRun: opts.dryRun === true,
+    written,
+  }
 
   if (opts.diagnose !== false) {
     try {
@@ -185,6 +265,14 @@ export function formatInstallResultJson(r: InstallResult): string {
 
 export function formatInstallResult(r: InstallResult): string {
   const lines = [`repository root: ${r.repoRoot}`]
+  if (r.codexProjectRoot !== r.repoRoot) {
+    // Say it before listing the paths, so the unexpected one reads as intended rather
+    // than as a bug in this command.
+    lines.push(
+      `  this is a linked worktree; Codex resolves project config from the main`,
+      `  worktree, so its sidecar goes to ${r.codexProjectRoot}`,
+    )
+  }
   for (const w of r.written) {
     const state = w.changed ? (r.dryRun ? 'DRIFT  ' : 'wrote  ') : 'current'
     lines.push(`  ${state} ${w.label}: ${w.path}`)

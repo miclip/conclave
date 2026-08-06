@@ -57,7 +57,11 @@ function readJsonl(path: string): Record<string, any>[] {
 // --- real fixtures -----------------------------------------------------------------
 
 function findRealClaudeTranscript(): string | undefined {
-  const dir = join(homedir(), '.claude', 'projects', '-Users-miclip-workspace-coding-repl')
+  // Claude keys its project directory by the checkout path, so a hardcoded name stops
+  // resolving the moment the directory is renamed -- and this test then silently skips
+  // rather than failing. Derive it instead: every non-alphanumeric character becomes `-`.
+  const slug = process.cwd().replace(/[^a-zA-Z0-9]/g, '-')
+  const dir = join(homedir(), '.claude', 'projects', slug)
   if (!existsSync(dir)) return undefined
   const files = readdirSync(dir)
     .filter((f) => f.endsWith('.jsonl'))
