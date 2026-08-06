@@ -244,15 +244,24 @@ test('the box is pinned below the transcript, and progress lives only in it', as
   }
   const line = (n: number) => grid[n - 1]!.join('').replace(/\s+$/, '')
 
-  assert.match(line(rows - 3), /─{20,}/, 'rule above the input')
+  // The status is inlaid into the top rule rather than given a row of its own: a permanent
+  // row for one short phrase is a row spent on nothing.
+  assert.match(line(rows - 3), /─{10,}/, 'rule above the input')
   assert.match(line(rows - 2), /›\s*typing here/, 'the input row holds what was typed')
   assert.match(line(rows - 1), /─{20,}/, 'rule below the input')
-  assert.match(line(rows), /⋯|\/help/, 'the footer holds the live line')
+  // The row below answers what is being typed. With an ordinary line typed and no
+  // completion pending it is empty, which is the point — it is not a status line.
+  assert.ok(!/⋯/.test(line(rows)), 'the row below is not a second status line')
 
-  // And progress appears nowhere in the transcript above the box.
-  const transcript = Array.from({ length: rows - 4 }, (_, i) => line(i + 1)).join('\n')
-  assert.ok(
-    !/⋯/.test(transcript),
-    `progress leaked into the transcript, which is what read as duplicates:\n${transcript}`,
+  // Wherever the status appears, it is on the top rule and nowhere else. Asserting that it
+  // IS present would be timing-dependent — it exists only while a turn runs — but asserting
+  // where it may appear holds whether or not one is running.
+  const statusRows = Array.from({ length: rows }, (_, i) => i + 1).filter((n) => /⋯/.test(line(n)))
+  assert.deepEqual(
+    statusRows.filter((n) => n !== rows - 3),
+    [],
+    `the status appeared off the top rule — in the transcript it reads as duplicates:\n${statusRows
+      .map((n) => `${n}| ${line(n)}`)
+      .join('\n')}`,
   )
 })

@@ -75,6 +75,19 @@ export interface SessionOptions {
   record?: string
 }
 
+/** Slash commands, for the suggestion row. Kept beside HELP so they cannot drift apart. */
+const COMMANDS = [
+  '/pause',
+  '/continue',
+  '/rotate',
+  '/abort',
+  '/state',
+  '/log',
+  '/queue',
+  '/audit',
+  '/help',
+]
+
 const HELP = `
   <text>                 send to everyone, at human rank
   >advisor <text>        send to the advisor only — the implementer will not see it
@@ -445,12 +458,29 @@ export async function runSession(opts: SessionOptions): Promise<number> {
    * as duplicates however correct each one was. Pinned, there is one line, always current,
    * and nothing repeats.
    */
-  const footer = (): string => {
+  const status = (): string => {
     const active = progress.line((p) => speakerColor(p, 'implementer')(p))
     const queued = new Set(relay.pending().flatMap((p) => p.texts)).size
     const idle = !run && !active ? dim('type a goal to start') : ''
-    const bits = [active, idle, queued > 0 ? dim(`${queued} queued`) : '', dim('/help')].filter(Boolean)
-    return `  ${bits.join(dim('  ·  '))}`
+    return [active, idle, queued > 0 ? dim(`${queued} queued`) : ''].filter(Boolean).join(dim('  ·  '))
+  }
+
+  /**
+   * The row under the input, answering whatever is being typed.
+   *
+   * A static status line there was a row spent on something that rarely changes. Suggestions
+   * change with every keystroke and have nowhere else to go — anywhere in the transcript and
+   * they would scroll away from the thing they describe.
+   */
+  let suggestion = ''
+  const hint = (): string => {
+    const line = screen?.line ?? ''
+    if (line.startsWith('/')) {
+      const matches = COMMANDS.filter((c) => c.startsWith(line.split(/\s/)[0] ?? ''))
+      if (matches.length > 0) return `  ${dim(matches.join('   '))}`
+    }
+    if (suggestion) return `  ${dim(suggestion)}`
+    return line ? '' : `  ${dim('/help for commands  ·  > to address  ·  @ for a path')}`
   }
 
   if (interactive) {
@@ -460,16 +490,20 @@ export async function runSession(opts: SessionOptions): Promise<number> {
       input: (opts.input ?? process.stdin) as NodeJS.ReadStream,
       output: target as NodeJS.WriteStream,
       prompt: promptText,
-      footer,
+      status,
+      hint,
       onLine: (raw) => submit(raw),
+      onEdit: () => {
+        suggestion = ''
+      },
       complete: (line, cursor) => {
         const done = complete(line, cursor, opts.cwd)
         if (!done) return undefined
         // Ambiguous completions are listed above the box rather than cycled through, so a
         // wrong guess is visible instead of silently chosen.
-        if (done.candidates && done.candidates.length > 1) {
-          write(dim(`  ${done.candidates.slice(0, 12).join('   ')}`))
-        }
+        // Below the input, not in the transcript: a suggestion that scrolls away from what
+        // it describes is worse than none.
+        suggestion = done.candidates && done.candidates.length > 1 ? done.candidates.slice(0, 10).join('   ') : ''
         return { line: done.line, cursor: done.cursor }
       },
       onInterrupt: () => onInterrupt(),

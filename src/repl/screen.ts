@@ -38,8 +38,21 @@ export interface ScreenOptions {
   height?: number
   onLine: (line: string) => void
   onInterrupt: () => void
-  /** Rendered dim under the input. Recomputed on every draw, so it can show live state. */
-  footer: () => string
+  /**
+   * Inlaid into the rule ABOVE the input: what is happening right now.
+   *
+   * On the rule rather than on a row of its own, because a permanent row for a line that is
+   * usually one short phrase is a row spent on nothing.
+   */
+  status: () => string
+  /**
+   * The row BELOW the input, which is contextual: slash commands while a command is being
+   * typed, completion candidates while completing, nothing otherwise.
+   *
+   * That row is the only place a suggestion can appear without pushing the transcript
+   * around, so it is worth more as an answer to what is being typed than as a status line.
+   */
+  hint: () => string
   prompt: () => string
   /**
    * Tab completion. Returns the replacement line and cursor, or undefined to do nothing.
@@ -48,6 +61,8 @@ export interface ScreenOptions {
    * being applied by the caller — otherwise two things would be editing the same string.
    */
   complete?: (line: string, cursor: number) => { line: string; cursor: number } | undefined
+  /** Any edit that is not a completion. Lets the caller drop a now-stale suggestion. */
+  onEdit?: () => void
 }
 
 const ESC = '\x1b['
@@ -67,6 +82,11 @@ export class Screen {
     this.#o = opts
     this.#out = opts.output
     this.#height = opts.height ?? 4
+  }
+
+  /** What is currently typed. The hint row answers it, so it has to be able to see it. */
+  get line(): string {
+    return this.#line
   }
 
   get rows(): number {
@@ -159,7 +179,12 @@ export class Screen {
     const prompt = this.#o.prompt()
     const visible = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '').length
 
-    const rows = [rule, `${prompt}${this.#line}`, rule, this.#o.footer()]
+    // The status is inlaid into the top rule: `──── ⋯ implementer 5s · Grep ─────`.
+    const status = this.#o.status()
+    const head = status
+      ? `${'─'.repeat(2)} ${status} ${'─'.repeat(Math.max(0, w - visible(status) - 4))}`
+      : rule
+    const rows = [head, `${prompt}${this.#line}`, rule, this.#o.hint()]
     let out = `${ESC}s`
     rows.forEach((text, i) => {
       out += `${ESC}${top + i};1H${ESC}2K${text}`
@@ -179,6 +204,8 @@ export class Screen {
     if (etx || (key.ctrl && key.name === 'c')) return void this.#o.onInterrupt()
     const eot = str === '\x04' || key.sequence === '\x04'
     if ((eot || (key.ctrl && key.name === 'd')) && this.#line === '') return void this.#o.onInterrupt()
+
+    if (key.name !== 'tab') this.#o.onEdit?.()
 
     if (key.name === 'tab') {
       const done = this.#o.complete?.(this.#line, this.#cursor)

@@ -18,7 +18,7 @@
  *   conclave demo --record /tmp/out.txt
  */
 
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { execFileSync } from 'node:child_process'
@@ -74,6 +74,13 @@ export async function runDemo(opts: { record?: string | undefined }): Promise<nu
   const work = mkdtempSync(join(tmpdir(), 'conclave-demo-'))
   execFileSync('git', ['init', '-q'], { cwd: work })
   writeFileSync(join(work, '.gitignore'), '.conclave/\n')
+  // A tree with something in it, so `@` completion has something to complete. A demo whose
+  // directory is empty demonstrates the console against conditions nobody works in.
+  mkdirSync(join(work, 'src', 'relay'), { recursive: true })
+  for (const f of ['relay.ts', 'run.ts', 'observe.ts']) writeFileSync(join(work, 'src', 'relay', f), '')
+  mkdirSync(join(work, 'src', 'rotation'), { recursive: true })
+  writeFileSync(join(work, 'src', 'rotation', 'rotate.ts'), '')
+  writeFileSync(join(work, 'README.md'), '')
   execFileSync('git', ['add', '.'], { cwd: work })
   execFileSync('git', ['-c', 'user.email=d@d', '-c', 'user.name=d', 'commit', '-qm', 'init'], { cwd: work })
 
