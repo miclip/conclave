@@ -125,7 +125,9 @@ test('typed-but-unsubmitted text survives asynchronous output', async (t) => {
   assert.ok(await c.until((s) => s.includes('›')), 'the prompt should appear')
 
   // Type a partial line and leave it uncommitted.
-  c.type('@implementer keep the diff small')
+  // `>` addresses; `@` is a path. The old sigil made this line a broadcast containing a
+  // nonexistent path, which still queued — but to everyone, so the assertion below missed.
+  c.type('>implementer keep the diff small')
   assert.ok(await c.until((s) => s.includes('keep the diff small')), 'the typed text should echo')
 
   const before = c.text().length
