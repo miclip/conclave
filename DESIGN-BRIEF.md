@@ -1379,6 +1379,32 @@ inspector loaded a second copy of the module graph, and reporter output invisibl
 survived: correlate process, filesystem and phase before diagnosing, and validate a probe
 against something that must be true before trusting what it says is absent.
 
+#### Check relevance is a contract question, not a boolean [Open, 2026-08-06]
+
+The first live rotation surfaced something the record cannot express. `npx tsc --noEmit`
+was reproduced faithfully — same exit code at capture and at acceptance, no divergence —
+and was **irrelevant to the transferred artifact**, which was plain `.js` in an ignored
+directory that tsc never reads. The replacement said so unprompted. `carriedFailures`
+covers "failed before and after"; `claimMismatches` covers "reported ≠ observed"; neither
+reaches "reproduced, and says nothing about the thing being handed over".
+
+Adding a boolean would be the wrong repair. The classification wanted is roughly:
+
+| class | meaning |
+|---|---|
+| `required` | must reproduce, and covers the transferred work |
+| `informational` | must reproduce, but is not evidence about the artifact |
+| `unrelated` | reproduced state of the wider repository; not part of the transfer claim |
+
+**The orchestrator declares this, not the replacement.** A model improvising which of its
+own checks matter is precisely the evidence-into-judgement collapse this design exists to
+prevent — and a replacement that wanted to be accepted would have every reason to
+reclassify an inconvenient check. That the replacement volunteered the observation is the
+acceptance step working; acting on it unilaterally would not be.
+
+Unresolved deliberately. The right shape depends on whether a rotation with no `required`
+check should be refused outright, which is a policy question and not yet answerable.
+
 #### Evidence ledger for §7a
 
 | level | what |

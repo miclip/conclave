@@ -169,18 +169,20 @@ two-minute hold and resumed without drift, with ingestion and audit live through
 Five defects came out of getting there; see DESIGN-BRIEF §7a, "First live runs". Four were
 product bugs invisible to the offline suite.
 
-**Still not covered live:**
+**Next, in order:**
 
-1. **Rollback against real sessions.** Both runs took the promotion path, so leak-free
+1. **Live rollback proof.** Both runs took the promotion path, so leak-free
    abandonment rests on the run-1 diagnosis plus offline tests. Needs a deliberately
-   failing acceptance — point `rotation.checks` at a command whose exit code differs
-   between capture and acceptance.
-2. **Pauses longer than a couple of minutes.** `ORCH_PAUSE_SECONDS` exists for this; the
-   longest run so far is 120s.
-3. **What a verification check does not cover.** The replacement observed, correctly and
-   unprompted, that `npx tsc --noEmit` says nothing about a plain `.js` file in an ignored
-   directory. Nothing in `Acceptance` can express "the check passed and was irrelevant".
-   `carriedFailures` and `claimMismatches` do not reach it.
+   failing acceptance. Assert the replacement terminates, the original unquiesces, the run
+   escalates, and no child process survives. `rotate.rollback.live.test.ts`.
+2. **Human-scale long pause.** A duration resembling actual operator behaviour, not
+   another two-minute probe. Confirm observation stays live while orchestration stays
+   suspended. `ORCH_PAUSE_SECONDS` exists for this; the longest run so far is 120s.
+3. **Acceptance relevance semantics.** A contract design question, not another boolean: a
+   check may reproduce faithfully and still be irrelevant to the transferred artifact.
+   Likely `required` / `informational` / `unrelated`, **declared by the orchestrator** —
+   a replacement classifying its own checks is the evidence-into-judgement collapse this
+   design exists to prevent. See DESIGN-BRIEF §7a.
 
 **Harness rules earned the hard way:**
 

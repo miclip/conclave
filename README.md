@@ -7,10 +7,11 @@ The children are the **real** Claude Code and Codex CLIs, unmodified, driven und
 pseudo-terminal exactly as a human would. Nothing about their harness, auth, or usage
 accounting differs from someone typing.
 
-> **Status: foundations only.** Both adapters work and can drive a real session
-> programmatically today — see [Try it](#try-it). What does not exist is the thing the
-> project is *for*: relaying between two children, summarising for the human, routing
-> constraints. That is build step 5. See [Where this actually is](#where-this-actually-is).
+> **Status: supervised use, not autonomous use.** Two children now hold a real session
+> between them, a human can steer or intervene mid-session, and a degraded implementer can
+> be replaced without losing the work — all of it verified against the real CLIs. What does
+> not exist is a REPL, a summariser, or a third participant. See
+> [Where this actually is](#where-this-actually-is).
 
 ---
 
@@ -41,21 +42,26 @@ Full reasoning, including the commercial risk that drove the transport choice, i
 | 2. Lifecycle hooks | done — turn boundaries, payload schemas, delivery semantics characterised |
 | 3. Transcripts | done — both formats parsed; terminal outcomes classified with provenance |
 | 4. `AgentSession` adapters | done — Claude and Codex, 8 live acceptance flows each |
-| **5. Two-party relay** | **not built** — this is what would make it usable |
-| 6. Round budgets / anti-spiral | not built |
-| 7. Orchestrator model | not built |
-| 8. Panel | not built |
-| 9. Third participant | not built |
+| 5. Two-party relay | done — prose-only exchange, ranked committee, restricted human asides |
+| 6. Round budgets / anti-spiral | partial — round budget and stall metrics; the spiral ladder is not built |
+| **7. Rotation** | **done — replace a degraded implementer transactionally, proven live** |
+| 8. Orchestrator model | not built |
+| 9. Panel / REPL | not built |
+| 10. Third participant | not built |
 
 The brief says to stop after step 5 and evaluate honestly whether two agents beat one.
-That evaluation has not happened, because step 5 does not exist.
+Two controlled experiments have run ([`spikes/experiments/`](spikes/experiments)) and the
+second **falsified its own hypothesis** — the advisor did not produce the repository-blind
+recommendation the trap was built for; it asked to inspect first. The honest claim so far
+is narrower than "one catches the other's blind spots": the participants contribute
+*different* information, and the roles were not redundant.
 
 ## What works today
 
 ```bash
 npm install
 npm run config:install     # render hook registrations for this checkout
-npm test                   # typecheck + 118 offline tests
+npm test                   # typecheck + 247 tests (225 offline, 22 live-gated)
 ```
 
 Both adapters implement the same contract and pass the same acceptance boundary, built
@@ -70,11 +76,18 @@ cancel → cancelled          abandon → transport_lost
 Live suites spawn real sessions and consume real quota, so they are opt-in:
 
 ```bash
-npm run test:live          # Claude, 8 flows
-npm run test:live:codex    # Codex, 8 flows
-npm run test:codex         # Codex hook-trust deployment invariants (no model tokens)
-npm run conformance        # what each adapter claims, graded by evidence
+npm run test:live           # Claude adapter, 8 flows
+npm run test:live:codex     # Codex adapter, 8 flows
+npm run test:live:relay     # a human aside reaches one participant and shapes the work
+npm run test:live:pause     # a real session survives a human-scale pause and resumes
+npm run test:live:rotate    # the rotation transaction, end to end
+npm run test:live:rollback  # the rollback branch, with acceptance rigged to fail
+npm run test:codex          # Codex hook-trust deployment invariants (no model tokens)
+npm run conformance         # what each adapter claims, graded by evidence
 ```
+
+`test:live:pause` and `test:live:rotate` both pass. `test:live:rollback` is written and
+has not been run.
 
 ## Try it
 
@@ -99,10 +112,95 @@ snapshot (authoritative, rebuilt from the transcript):
   completed            proven   "DEMO-42"
 ```
 
-That is the honest extent of it: **one participant at a time, as a library.** There is no
-command that runs a two-child session, no relay between them, and no REPL.
+### Two participants
+
+```ts
+const relay = await Relay.start({
+  registry: defaultRegistry(),
+  cwd: repo,
+  lead:        { id: 'advisor',     agent: 'codex',  role: 'advisor' },
+  implementer: { id: 'implementer', agent: 'claude', role: 'implementer' },
+  rotation: { checks: ['npm test'] },
+})
+
+const run = relay.start('Add a rate limiter to the request path.')
+
+for (;;) {
+  const s = await run.settled()
+  if (s.kind === 'ended') break
+  console.log(s.pause.reason, s.pause.detail)   // rotation_candidate, advisor_escalated, ...
+  await run.continue()                          // or rotateImplementer / injectConstraint / abort
+}
+```
+
+Still a library: **there is no REPL and no summariser.** Everything below exists and is
+driven from code.
 
 ## The ideas that shaped it
+
+**A ranked committee, not a panel of peers.** `human > advisor > implementer`. Rank breaks
+ties; it does not buy silence. The implementer is told plainly that the advisor outranks it
+on process and that silent compliance is worse than disagreement — and it uses that. Asked
+to put a test somewhere `package.json`'s own glob would never discover, it refused and said
+why.
+
+**Prose only, symmetrically.** Participants exchange full narration and never tool calls,
+diffs, or reasoning traces — exactly what a human following along would see. The advisor
+shares the working directory, so it can verify any claim rather than believing it.
+
+**A human message carries an audience.** Addressed to one participant or all, and the
+audience travels *on the message* rather than as orchestrator state: a mode can be left set
+by mistake, an addressed message cannot be mis-delivered by forgetting to change it back.
+Visibility is derived from provenance, not topology — an ordinary advisor-to-implementer
+instruction is normal traffic, not hidden influence, and only a deliberately withheld human
+message is `restricted`.
+
+Withholding is an instrument with a cost, and the cost showed up live. A constraint sent to
+the implementer alone produced work the advisor had not asked for, and the advisor
+escalated rather than overruling:
+
+> ESCALATE: The implementer refuses to remove `subtract`, citing a direct human instruction
+> that is not present in the advisor-visible history; human confirmation is needed.
+
+That is the mitigation working. Asides cannot be kept private — an aside that shapes an
+artifact leaks through the artifact — so the guarantee is that the asymmetry stays
+**attributable**: `audit()` and `asymmetryAt(seq)` say who was informed and who was not, so
+a later divergence can be checked against the record instead of guessed at.
+
+**A pause is a state, not a return value.** `relay.run()` is the unattended form and every
+pause point is terminal for it. `relay.start()` returns a handle whose pauses *suspend* the
+loop holding everything it had, because restarting a run from the goal is not resuming —
+it replays work and hands consumed state to participants that have moved past it.
+
+Rotation is safe at exactly that suspended point and nowhere else: no turn is in flight, so
+replacing the implementer cannot race a send.
+
+**Rotation is a transaction.** Quiesce the old implementer → the advisor authors the
+narrative handoff → the orchestrator captures the checkable record (HEAD, file digests,
+verification exit codes) → the replacement *demonstrates* it can reproduce that record →
+only then is the original terminated. On any failure the original is unquiesced and the
+work is not stranded between two sessions.
+
+Two things are deliberately not trusted. The advisor cannot see files or tests, so it
+writes the narrative and never the record. The replacement's report that the checks pass is
+a claim about facts the arbiter owns, so it is compared against an independent run — and a
+replacement reporting a *mismatch* has performed a successful transfer. The failure being
+caught is one that reports agreement it never observed.
+
+Rotation verifies **continuity, not health**: a check failing identically before and after
+is a reproduced state, and refusing over it would strand exactly the session that most
+needs replacing.
+
+**Degradation is mechanical; the complaint is a claim.** Compaction is observable and
+already parsed. An implementer asking for a fresh session may be reporting exhaustion or
+reflexing, so the complaint is checked against the signal rather than believed or
+overridden. Compaction alone is sufficient — a model may compact without noticing.
+
+And the response is not automatic. `compaction → rotation candidate` is the default: the run
+pauses and the human decides. Defaulting to automatic rotation would encode *"compaction
+predicts degradation"* as settled on the strength of evidence that only shows *"rotation
+works"* — two different claims, and only the second has evidence. See
+[`spikes/experiments/03-compaction-degradation.md`](spikes/experiments/03-compaction-degradation.md).
 
 **A terminal event is never bare.** `Stop` proves normal completion and nothing else.
 Every terminal statement carries an outcome, a confidence grade (`proven` / `inferred` /
@@ -149,10 +247,13 @@ produces a recommendation, never an automatic upgrade.
 | [`DESIGN-BRIEF.md`](DESIGN-BRIEF.md) | the design, with corrections folded in as they were found |
 | [`TODO.md`](TODO.md) | deferrals with reasons, and the invariants protecting them |
 | [`src/`](src/README.md) | the contract, adapters, classifier and registry |
+| `src/relay/` | the two-party relay, the audit trail, and the resumable run handle |
+| `src/rotation/` | the rotation transaction: record, handoff, degradation, rollback |
 | `spikes/pty/` | step 1 — transport, and what it corrected about the brief |
 | `spikes/hooks/` | step 2 — hook lifecycle, delivery semantics, the evidence corpus |
 | `spikes/transcripts/` | step 3 — schemas and the outcome classifier's Python reference |
 | `spikes/codex/` | Codex 0.146.0 runtime-semantics fixtures |
+| `spikes/experiments/` | pre-registered experiments, including one that falsified its own hypothesis |
 
 Each spike has its own `FINDINGS.md` recording what was measured, including the parts
 that contradicted expectations.
@@ -174,6 +275,35 @@ all documented in the FINDINGS files and commit messages:
   `Stop` yet" closed turns while the user was still being asked.
 - Abandonment emitted a verdict the tracker never held, so `events()` and `snapshot()`
   disagreed. Caught by the convergence assertion, on the adapter that had one.
+- The orchestrator ran `git add -A` during a live relay and swept ~600 lines of a
+  participant's work into an unrelated commit. The rule that followed is now *enforced*
+  rather than written down, because a rule that lives only in prose is one the person who
+  wrote it breaks.
+
+The first live runs of the relay found four more, none of which the offline suite could
+see. The pattern is worth stating: **every one was a case where the code did something
+defensible in isolation and wrong in context.**
+
+- The advisor's `DONE` returned immediately, discarding any queued human message — so the
+  advisor could end a session out from under a human instruction that had never been
+  delivered. The brief's own §7a says the human outranks that.
+- `close('abandoned')` recorded that observation was lost and walked away *without
+  terminating the child*. The epistemic caution was about the turns; the code applied it to
+  cleanup, and a rolled-back replacement outlived its test by 26 minutes.
+- A replacement reported `...before doing any work.CHECK 1: exit 0` and was told it had
+  reported nothing, because the parser required a line start. A newline the model does not
+  control decided that a correct answer was no answer.
+- A run that paused with nobody listening hung until a harness timeout filed an
+  orchestration deadlock as an agent turn overrunning — both agents idle, nothing
+  scheduled. `result()` now rejects when a pause arrives with no watcher: not a timeout,
+  but the observation that the promise provably cannot settle.
+
+Diagnosing that last one took three wrong readings first — a process table grepped with a
+pattern that could not match, an inspector probe that silently loaded a second copy of the
+module graph, and reporter output invisible because a buffered pipe cannot flush while the
+process it reads from cannot exit. Each made the system look broken in a way it was not.
+The rule that survived: correlate process, filesystem and phase before diagnosing, and
+validate a probe against something that must be true before trusting what it says is absent.
 
 Requirements and design direction throughout came from the human; the implementation and
 the empirical work were done by Claude (Opus 5) in Claude Code.
