@@ -777,73 +777,87 @@ the implementer has stopped contributing; complaints *without* mechanical backin
 means it has started to stall instead. Both are measurable, and neither is visible from
 reading the prose alone.
 
-### Authority to end [Decided 2026-08-05]
+### Authority to end [Settled 2026-08-05]
 
 **The advisor may preserve continuity autonomously, but it may not decide that the
-human's objective should be abandoned.** Mechanical evidence decides facts, the advisor
-manages perspective and continuity, the human retains control of intent.
+human's objective should be abandoned.**
 
-| situation | advisor may |
+| situation | what happens |
 |---|---|
-| arbiter proves the work complete | stop — but see the objection below |
-| verified context degradation | **rotate automatically** |
-| progress halted, or mistakes compounding | **pause and escalate** to the human |
-| complaint with no mechanical backing | **record and continue** |
+| arbiter proves the declared checks pass | **report completion evidence**; the human decides whether the objective is complete |
+| mechanical degradation detected | **rotate automatically**, with handoff |
+| progress halted, or errors compounding | **pause and escalate** |
+| complaint with no mechanical backing | **continue**; increment the stall metric |
 
-Rotation acts immediately because it is reversible and preserves the work. Termination
-does not, because it is not.
+The arbiter establishes acceptance criteria, never intent. Even with every configured test
+green, Conclave surfaces *"all declared checks pass"* rather than translating it into
+*"the work is done"* — automatic stopping would collapse evidence into judgement, which is
+the one move this whole design exists to prevent.
 
-#### Rotation is transactional
+**Recoverability, not stop-versus-rotate, is the meaningful boundary.** Any
+advisor-initiated interruption creates a handoff and freezes the old implementer rather
+than destroying it. A stop-with-handoff is a checkpoint awaiting human disposition; a
+rotation continues immediately into a replacement.
 
-The advisor produces a bounded, auditable handoff:
+#### Transfer acceptance is demonstrated, not asserted
 
-```
-goal · current state · decisions already made · evidence and test status
-files changed · open disagreement · next concrete action · constraints that must survive
-```
+A replacement does not acknowledge a handoff. It proves it can continue:
 
-The replacement implementer starts, authoritative human constraints are replayed
-**separately** rather than folded into the handoff — they must arrive at human privilege,
-not as advisor prose (§6, and the rank rules above) — and the old session is kept **alive
-but frozen** until the new one has accepted the transfer. Rotation is therefore
-transactional rather than destructive: if the replacement fails to start or fails to
-accept, nothing has been lost.
+1. Load the handoff and the authoritative constraints.
+2. Inspect the named repository state and changed files.
+3. Run the handoff's stated verification commands.
+4. Compare observed results against the recorded ones.
+5. Resume only if they agree; otherwise escalate the mismatch.
 
-Freezing is cheap and already expressible: an idle session costs nothing and holds its
-context. It is a third state the adapter contract does not yet name, though — neither
+This verifies continuity of the *executable* state. It cannot prove the replacement
+understood every design decision — nothing can — but it is far stronger than accepting a
+sentence claiming it did.
+
+Human constraints are replayed **separately** from the handoff, so they arrive at human
+privilege rather than as advisor prose (§6, and the rank rules above). The old session
+stays alive but frozen until the transfer is accepted, making rotation transactional
+rather than destructive. Freezing is cheap — an idle session costs nothing and keeps its
+context — but it is a third state the adapter contract does not yet name: neither
 `close('graceful')` nor `close('abandoned')` covers "alive, quiesced, not receiving".
 
-#### Objections recorded
+#### Degradation and complaint are separate signals
 
-Raised by the implementer against the advisor's proposal, and kept rather than resolved
-away — this is the dissent §2 says must be surfaced rather than absorbed.
+| | |
+|---|---|
+| mechanical degradation, no complaint | rotate |
+| complaint **and** degradation | rotate; complaint corroborated |
+| complaint without degradation | continue; increment unbacked-complaint metric |
 
-1. **"Tests prove done → stop" sits uneasily with the principle it is stated beside.** The
-   arbiter proves *a check passes*, not that the human's objective is met. Whether green
-   tests represent the goal is exactly the judgement reserved for the human, so an advisor
-   stopping on green is deciding the objective is complete.
+Degradation alone is sufficient: a model may compact without noticing, or notice and not
+say. The complaint is corroborating evidence, never a precondition.
 
-   The load-bearing axis is not stop-versus-rotate but **destructive versus recoverable**.
-   Rotation is safe because it carries a handoff; a stop that carries one is equally safe.
-   Requiring a handoff on *any* advisor-initiated end collapses the distinction to who
-   decides we are finished, which stays with the human.
+The unbacked-complaint metric is **scoped to participant and topic, and decays after
+productive progress**. Without that a single early complaint would poison a whole session,
+turning a stall detector into a grudge. It feeds spiral and stall detection (§7).
 
-2. **Acknowledgement is prose, and prose is the one thing established as unverifiable.** A
-   model will acknowledge almost anything, so "acknowledged" does not imply "understood".
-   Make acceptance mechanical: the handoff carries test status, and the replacement's
-   first action is to run the suite and confirm it observes the same state. A checkable
-   transfer rather than a verbal one.
+#### Authority model
 
-3. **Degradation should not require a complaint.** The table says "verified context
-   degradation", but the surrounding prose ties rotation to corroborating a complaint. A
-   model may compact without noticing, or notice and not say. The mechanical signal is
-   sufficient on its own; the complaint is optional evidence, not a precondition.
+| party | decides |
+|---|---|
+| **arbiter** | checkable facts |
+| **advisor** | may preserve continuity and pause unsafe progress |
+| **orchestrator** | enforces evidence, budgets, metrics, handoff protocol |
+| **human** | whether the objective is complete or abandoned |
+| **implementer** | retains the right to object; objections become structured evidence, not social friction |
 
-4. **"Record and continue" must count, not merely log.** §7a already treats unbacked
-   complaints rising as a stall indicator, so the record has to feed a metric rather than
-   a log line nobody reads.
+#### How this section was arrived at
 
-## 8. Commercial risk (important, affects architecture)
+The advisor's first proposal was coherent and smuggled in authority over completion that
+the architecture reserves for the human. The implementer challenged four points; all four
+were conceded and the policy above is the result.
+
+That is the mechanism working, and worth recording as such. Two honest limits on what it
+demonstrates. The exchange was relayed by hand — none of the machinery here was involved,
+and the human was the transport. And an advisor conceding every point is not obviously
+distinguishable from an advisor being agreeable; the same accommodation that makes flat
+committees converge can point at a subordinate's objections just as easily. One exchange
+cannot tell those apart. What it does show is that an implementer holding context the
+advisor lacked produced objections the advisor could not have raised alone.## 8. Commercial risk (important, affects architecture)
 
 Subscription-backed programmatic access has been repeatedly targeted. Timeline as
 understood:
