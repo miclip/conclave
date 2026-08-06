@@ -251,6 +251,7 @@ export class Progress {
   #everyMs: number
   #started = new Map<string, number>()
   #lastPrinted = new Map<string, number>()
+  #detail = new Map<string, string>()
 
   /**
    * `enabled` gates nothing about the cursor, because this writes no escape codes — it is
@@ -270,10 +271,32 @@ export class Progress {
   }
 
   /**
+   * The single live line for a pinned footer: who is working, for how long, doing what.
+   *
+   * Preferred over `activity()` wherever there is somewhere to pin it. Appending progress
+   * to the transcript produced lines that differ only in their elapsed time — `implementer
+   * 8s · Bash` then `implementer 20s · Bash` — which read as duplicates however correct
+   * they are. One line that updates says the same thing and repeats nothing.
+   */
+  line(colour: (s: string) => string = (x) => x): string {
+    const active = [...this.#started.entries()]
+    if (active.length === 0) return ''
+    const [participant, startedAt] = active[active.length - 1]!
+    const detail = this.#detail.get(participant)
+    return `${dim('⋯')} ${colour(participant)} ${dim(elapsedSince(startedAt))}${detail ? ` ${dim('·')} ${dim(detail)}` : ''}`
+  }
+
+  /** Remember what a participant is doing, without printing anything. */
+  note(participant: string, detail: string): void {
+    this.#detail.set(participant, detail)
+  }
+
+  /**
    * Report activity, at most once per interval per participant.
    *
    * Throttled rather than per-event because a busy turn emits a tool call every few hundred
-   * milliseconds, and a line each would bury the prose the console exists to show.
+   * milliseconds, and a line each would bury the prose the console exists to show. Used
+   * only where there is no pinned footer to hold a live line instead.
    */
   activity(participant: string, colour: Style, detail?: string): void {
     if (!this.#enabled) return
@@ -292,6 +315,7 @@ export class Progress {
   done(participant: string): void {
     this.#started.delete(participant)
     this.#lastPrinted.delete(participant)
+    this.#detail.delete(participant)
   }
 }
 

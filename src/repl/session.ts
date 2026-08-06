@@ -28,6 +28,7 @@ import { createWriteStream, existsSync, realpathSync } from 'node:fs'
 import { join } from 'node:path'
 import { Writable } from 'node:stream'
 import { clearLine, createInterface, cursorTo, type Interface } from 'node:readline'
+import { Screen } from './screen.ts'
 import { banner, bold, colorFor, dim, elapsedSince, grey, markdown, Progress, rule, setColor, speakerColor, yellow } from './render.ts'
 import type { AgentEvent } from '../contract/session.ts'
 import { defaultRegistry } from '../registry/builtin.ts'
@@ -160,6 +161,9 @@ export async function runSession(opts: SessionOptions): Promise<number> {
   const interactive =
     (opts.input ?? process.stdin) === process.stdin && process.stdin.isTTY === true
   let rl: Interface | undefined
+  let screen: Screen | undefined
+  /** Resolves when an interactive console closes. */
+  let closed: (() => void) | undefined
 
   /**
    * Write a line without eating what the operator is halfway through typing.
@@ -173,6 +177,11 @@ export async function runSession(opts: SessionOptions): Promise<number> {
   let dirtySincePrompt = false
 
   const write = (s: string) => {
+    if (screen) {
+      // Into the scrolling region; the box is redrawn around it and never disturbed.
+      screen.write(s)
+      return
+    }
     dirtySincePrompt = true
     if (!rl || !interactive) {
       out.write(`${s}\n`)
@@ -399,26 +408,56 @@ export async function runSession(opts: SessionOptions): Promise<number> {
    * means readline redraws it for free, with no second line competing for the one the
    * status already uses.
    */
-  const refreshPrompt = () => {
+  function promptText(): string {
     // Distinct messages, not deliveries. One line addressed to everyone is one thing the
     // operator typed; counting recipients reported "(2 queued)" for a single "continue".
     const queued = new Set(relay.pending().flatMap((p) => p.texts)).size
-    if (!run) {
-      rl?.setPrompt(`${dim('goal')} ${bold('›')} `)
-      return
-    }
-    rl?.setPrompt(queued > 0 ? `${dim(`(${queued} queued)`)} ${bold('›')} ` : `${bold('›')} `)
+    if (!run) return `${dim('goal')} ${bold('›')} `
+    return queued > 0 ? `${dim(`(${queued} queued)`)} ${bold('›')} ` : `${bold('›')} `
   }
 
-  rl = createInterface({
-    input: opts.input ?? process.stdin,
-    output: out,
-    prompt: `${bold('›')} `,
-    // Keyed off whether it IS a terminal, not whether a stream was injected. The first
-    // live run piped stdin and got `[1G[0J>` escape sequences in the log, because readline
-    // was drawing a prompt for a pipe.
-    terminal: interactive,
-  })
+  const refreshPrompt = () => {
+    if (screen) return void screen.draw()
+    rl?.setPrompt(promptText())
+  }
+
+  /**
+   * The pinned footer: one live line for whoever is working.
+   *
+   * Progress used to be appended to the transcript, which produced lines differing only in
+   * their elapsed time — `implementer 8s · Bash`, then `20s`, then `1m08s` — and they read
+   * as duplicates however correct each one was. Pinned, there is one line, always current,
+   * and nothing repeats.
+   */
+  const footer = (): string => {
+    const active = progress.line((p) => speakerColor(p, 'implementer')(p))
+    const queued = new Set(relay.pending().flatMap((p) => p.texts)).size
+    const bits = [active, queued > 0 ? dim(`${queued} queued`) : '', dim('/help')].filter(Boolean)
+    return `  ${bits.join(dim('  ·  '))}`
+  }
+
+  if (interactive) {
+    // The console owns the screen. readline can only draw at the cursor, which is why three
+    // attempts at a pinned status line failed; see screen.ts.
+    screen = new Screen({
+      input: (opts.input ?? process.stdin) as NodeJS.ReadStream,
+      output: target as NodeJS.WriteStream,
+      prompt: promptText,
+      footer,
+      onLine: (raw) => submit(raw),
+      onInterrupt: () => onInterrupt(),
+    })
+    screen.open()
+  } else {
+    rl = createInterface({
+      input: opts.input ?? process.stdin,
+      output: out,
+      prompt: `${bold('›')} `,
+      // A pipe gets no line editing and no redraws: the first live run piped stdin and got
+      // `[1G[0J>` escape sequences in its log because readline drew a prompt for it.
+      terminal: false,
+    })
+  }
   /**
    * Separate the input area from the transcript.
    *
@@ -429,6 +468,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
    */
   const prompt = () => {
     if (done) return
+    if (screen) return void screen.draw()
     if (dirtySincePrompt && interactive) {
       out.write(`\n${rule(width)}\n`)
       dirtySincePrompt = false
@@ -458,16 +498,18 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     // to leave, and aborting while staying at the prompt is not what Ctrl-C means.
     const leave = () => {
       done = true
+      screen?.close()
       rl?.close()
+      closed?.()
     }
     if (run) void run.abort('interrupted at the console').then(leave, leave)
     else leave()
   }
-  rl.on('SIGINT', onInterrupt)
+  rl?.on('SIGINT', onInterrupt)
   process.on('SIGINT', onInterrupt)
   process.on('SIGTERM', onInterrupt)
 
-  rl.on('line', (raw) => {
+  function submit(raw: string): void {
     const line = raw.trim()
     void (async () => {
       try {
@@ -478,7 +520,8 @@ export async function runSession(opts: SessionOptions): Promise<number> {
       refreshPrompt()
       prompt()
     })()
-  })
+  }
+  rl?.on('line', submit)
 
   async function handle(line: string): Promise<void> {
     const [word, ...restWords] = line.split(/\s+/)
@@ -602,7 +645,9 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     // closing its input, and a console that waits for that after the work is done is a
     // hang — which is exactly what it became, for every test, until this distinction.
     if (interactive) {
-      await new Promise<void>((resolve) => rl!.once('close', () => resolve()))
+      await new Promise<void>((resolve) => {
+        closed = resolve
+      })
     } else {
       await Promise.race([
         firstRunEnded,
@@ -615,7 +660,8 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     // to start on a lock it does not recognise.
     process.off('SIGINT', onInterrupt)
     process.off('SIGTERM', onInterrupt)
-    rl.close()
+    screen?.close()
+    rl?.close()
     await relay.stop()
     tee?.end()
   }
