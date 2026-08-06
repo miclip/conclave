@@ -339,9 +339,15 @@ export async function runSession(opts: SessionOptions): Promise<number> {
         if (startedAt) write(grey(`  ${e.participant} finished in ${elapsedSince(startedAt)}`))
         turnStartedAt.delete(e.participant)
       } else if (ev.type === 'tool_use') {
-        progress.activity(e.participant, colour, ev.tool)
+        // Pinned in the footer when there is one; appended only when there is nowhere to
+        // pin it. Doing both put the same information in two places, and the appended copy
+        // is the one that reads as a duplicate.
+        progress.note(e.participant, ev.tool)
+        if (screen) screen.draw()
+        else progress.activity(e.participant, colour, ev.tool)
       } else if (ev.type === 'message' && ev.role === 'assistant') {
-        progress.activity(e.participant, colour)
+        if (screen) screen.draw()
+        else progress.activity(e.participant, colour)
         const held = pendingNarration.get(e.participant)
         if (held !== undefined) narrate(e.participant, e.rank, held)
         pendingNarration.set(e.participant, ev.text)

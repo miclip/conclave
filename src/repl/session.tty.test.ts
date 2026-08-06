@@ -198,3 +198,59 @@ test('Ctrl-C tears the session down instead of orphaning it', async (t) => {
   ])
   assert.notEqual(code, -1, 'the console must exit rather than hang after an interrupt')
 })
+
+test('the box is pinned below the transcript, and progress lives only in it', async (t) => {
+  // Reconstructed from the byte stream rather than searched in it. A scrolling transcript
+  // plus an absolutely-addressed box cannot be judged by substring: the same text appears
+  // in the stream whether it landed in the box, above it, or was overwritten a frame later.
+  // Replaying the escapes into a grid answers where it actually IS.
+  const dir = repo()
+  const c = await spawnConsole(dir, t)
+  assert.ok(await c.until((s) => /─{20,}/.test(s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '')), 20_000))
+  c.type('typing here')
+  await new Promise((r) => setTimeout(r, 1500))
+
+  const rows = 30
+  const cols = 100
+  const grid = Array.from({ length: rows }, () => ' '.repeat(cols).split(''))
+  let r = 0
+  let col = 0
+  let top = 1
+  let bot = rows
+  const re = /\x1b\[([0-9;]*)([A-Za-z])|\n|\r|[^\x1b\n\r]+/g
+  let m: RegExpExecArray | null
+  const buf = c.text()
+  while ((m = re.exec(buf))) {
+    const tok = m[0]
+    if (tok === '\n') {
+      if (r === bot - 1) {
+        grid.splice(top - 1, 1)
+        grid.splice(bot - 1, 0, ' '.repeat(cols).split(''))
+      } else r = Math.min(rows - 1, r + 1)
+    } else if (tok === '\r') col = 0
+    else if (tok.startsWith('\x1b')) {
+      const a = (m[1] ?? '').split(';')
+      const k = m[2]
+      if (k === 'H') {
+        r = (parseInt(a[0] ?? '1') || 1) - 1
+        col = (parseInt(a[1] ?? '1') || 1) - 1
+      } else if (k === 'r') {
+        top = parseInt(a[0] ?? '1') || 1
+        bot = parseInt(a[1] ?? String(rows)) || rows
+      } else if (k === 'K') for (let i = col; i < cols; i++) grid[r]![i] = ' '
+    } else for (const ch of tok) if (col < cols) grid[r]![col++] = ch
+  }
+  const line = (n: number) => grid[n - 1]!.join('').replace(/\s+$/, '')
+
+  assert.match(line(rows - 3), /─{20,}/, 'rule above the input')
+  assert.match(line(rows - 2), /›\s*typing here/, 'the input row holds what was typed')
+  assert.match(line(rows - 1), /─{20,}/, 'rule below the input')
+  assert.match(line(rows), /⋯|\/help/, 'the footer holds the live line')
+
+  // And progress appears nowhere in the transcript above the box.
+  const transcript = Array.from({ length: rows - 4 }, (_, i) => line(i + 1)).join('\n')
+  assert.ok(
+    !/⋯/.test(transcript),
+    `progress leaked into the transcript, which is what read as duplicates:\n${transcript}`,
+  )
+})
