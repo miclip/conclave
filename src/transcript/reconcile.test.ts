@@ -319,3 +319,41 @@ test('OBSERVED: a transcript that does not exist yet is not an error', async () 
   const after = await v.poll()
   assert.equal(after.filter((e) => e.type === 'turn_start').length, 1)
 })
+
+test('an APPENDED compaction marker raises the generation (#10)', async () => {
+  // The instrument bug behind every null result in the degradation experiment.
+  //
+  // The generation used to increment only when the tail reported a rewritten prefix. Claude
+  // Code does not rewrite -- it appends `compact_file_reference` attachments and leaves the
+  // history in place, verified against a real 57,493-line transcript carrying 37 of them.
+  // So on Claude Code the counter could never move, and across four live runs and 34
+  // assessments it never did. A true null and an instrument that cannot fire are
+  // indistinguishable from outside, which made every negative unfalsifiable.
+  const dir = mkdtempSync(join(tmpdir(), 'conclave-compact-'))
+  const path = join(dir, 'transcript.jsonl')
+
+  const user = (text: string) =>
+    JSON.stringify({ type: 'user', message: { role: 'user', content: text } })
+  const marker = JSON.stringify({ type: 'attachment', attachment: { type: 'compact_file_reference' } })
+
+  writeFileSync(path, `${user('first')}\n`)
+  const session = view(path, 'claude')
+  await session.poll()
+  assert.equal(session.compactionGeneration, 0, 'nothing has compacted yet')
+
+  // Append only: every earlier byte is left exactly where it was.
+  writeFileSync(path, `${user('first')}\n${marker}\n${user('second')}\n`)
+  const events = await session.poll()
+
+  assert.equal(session.compactionGeneration, 1, 'a declared compaction counts, however it was written')
+  const revision = events.find((e) => e.type === 'revision')
+  assert.ok(revision, 'and it is announced')
+  assert.deepEqual(revision!.replaces, [], 'nothing is withdrawn: the history is still there')
+
+  // A second marker is a second generation; a re-poll with nothing new is not.
+  writeFileSync(path, `${user('first')}\n${marker}\n${user('second')}\n${marker}\n${user('third')}\n`)
+  await session.poll()
+  assert.equal(session.compactionGeneration, 2)
+  await session.poll()
+  assert.equal(session.compactionGeneration, 2, 'an append with no new marker changes nothing')
+})

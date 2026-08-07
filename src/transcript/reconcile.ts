@@ -49,10 +49,24 @@ export class TranscriptSessionView {
   readonly #opts: SessionViewOptions
 
   #records: Record<string, any>[] = []
-  #view: ParsedTranscript = { turns: [], declaredCompaction: false }
+  #view: ParsedTranscript = { turns: [], declaredCompaction: false, compactions: 0 }
   #emitted = new Map<string, EmittedTurn>()
   #seq = 0
   #compactionGeneration = 0
+  /**
+   * Compaction markers already counted, so an append is not re-counted every poll.
+   *
+   * The generation used to increment ONLY when the tail reported a rewritten prefix. Claude
+   * Code does not rewrite: it APPENDS `compact_file_reference` attachments and leaves the
+   * history in place -- verified against a real 57,493-line transcript with five markers at
+   * lines 2194 through 12184 and records intact either side.
+   *
+   * So on Claude Code the counter could never move, and it never did: 34 assessments across
+   * four live oath-lang runs, peak generation pinned at exactly 0. Every negative result from
+   * the degradation experiment was unfalsifiable, because a true null and an instrument that
+   * cannot fire are indistinguishable from outside.
+   */
+  #countedCompactions = 0
   #builtAt = 0
 
   constructor(opts: SessionViewOptions) {
@@ -115,8 +129,52 @@ export class TranscriptSessionView {
     this.#records.push(...res.appended)
     this.#view = this.#parse(this.#records)
     this.#builtAt = Date.now()
+    events.push(...this.#noteDeclaredCompactions())
     events.push(...this.#emitFor(this.#view.turns))
     return events
+  }
+
+  /**
+   * Raise the generation for compactions the transcript DECLARES, however they were recorded.
+   *
+   * A rewrite and an appended marker are the same event from the participant's point of view
+   * -- context was discarded -- and rotation is watching for that event, not for a particular
+   * way of writing it down. Counting only rewrites made the trigger a property of Codex's
+   * file format.
+   *
+   * No `replaces`: the history is still there, so nothing previously emitted is withdrawn.
+   * That is the honest difference from the rewrite path, and it is why this is a separate
+   * method rather than a flag on that one.
+   */
+  #noteDeclaredCompactions(): AgentEvent[] {
+    const declared = this.#view?.compactions ?? 0
+    if (declared <= this.#countedCompactions) return []
+    const fresh = declared - this.#countedCompactions
+    this.#countedCompactions = declared
+    this.#compactionGeneration += fresh
+
+    return [
+      {
+        type: 'revision',
+        reason: 'compaction',
+        replaces: [],
+        provenance: [
+          { source: 'transcript', detail: 'transcript declares a compaction' },
+          {
+            source: 'transcript',
+            detail: `compaction generation ${this.#compactionGeneration}`,
+          },
+          {
+            source: 'transcript',
+            detail: 'history was appended to rather than rewritten, so nothing is withdrawn',
+            caveat: true,
+          },
+        ],
+        seq: this.#next(),
+        at: this.#builtAt,
+        provisional: false,
+      },
+    ]
   }
 
   /** Diff the rebuilt view against what we have already told consumers. */

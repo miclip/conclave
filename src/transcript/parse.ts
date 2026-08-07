@@ -21,6 +21,16 @@ export interface ParsedTranscript {
   turns: TurnRecord[]
   /** The transcript declared a compaction. Distinct from a detected rewrite. */
   declaredCompaction: boolean
+  /**
+   * How many compactions the transcript declares.
+   *
+   * A COUNT, not a flag, because the flag could not distinguish one compaction from five and
+   * the generation counter needs the difference. Claude Code appends its markers -- verified
+   * against a real 57,493-line transcript carrying five of them at lines 2194 through 12184,
+   * with records intact on both sides -- so a transcript accumulates markers rather than
+   * being rewritten around them.
+   */
+  compactions: number
   sessionId?: string | undefined
 }
 
@@ -60,7 +70,7 @@ const CLAUDE_COMPACTION_ATTACHMENTS = new Set(['compact_file_reference'])
 
 export function parseClaude(records: Record<string, any>[]): ParsedTranscript {
   const turns: TurnRecord[] = []
-  let declaredCompaction = false
+  let compactions = 0
   let sessionId: string | undefined
   let current: TurnRecord | undefined
 
@@ -70,7 +80,7 @@ export function parseClaude(records: Record<string, any>[]): ParsedTranscript {
     switch (d.type) {
       case 'attachment': {
         const at = d.attachment?.type
-        if (at && CLAUDE_COMPACTION_ATTACHMENTS.has(at)) declaredCompaction = true
+        if (at && CLAUDE_COMPACTION_ATTACHMENTS.has(at)) compactions += 1
         break
       }
       case 'user': {
@@ -139,7 +149,7 @@ export function parseClaude(records: Record<string, any>[]): ParsedTranscript {
     }
   }
 
-  return { turns, declaredCompaction, sessionId }
+  return { turns, declaredCompaction: compactions > 0, compactions, sessionId }
 }
 
 // --- Codex -------------------------------------------------------------------------
@@ -147,7 +157,7 @@ export function parseClaude(records: Record<string, any>[]): ParsedTranscript {
 export function parseCodex(records: Record<string, any>[]): ParsedTranscript {
   const turns: TurnRecord[] = []
   const byId = new Map<string, TurnRecord>()
-  let declaredCompaction = false
+  let compactions = 0
   let sessionId: string | undefined
   let current: TurnRecord | undefined
 
@@ -169,7 +179,7 @@ export function parseCodex(records: Record<string, any>[]): ParsedTranscript {
 
   for (const d of records) {
     if (d.type === 'compacted') {
-      declaredCompaction = true
+      compactions += 1
       continue
     }
     if (d.type === 'session_meta') {
@@ -182,7 +192,7 @@ export function parseCodex(records: Record<string, any>[]): ParsedTranscript {
     if (d.type === 'event_msg') {
       switch (p.type) {
         case 'context_compacted':
-          declaredCompaction = true
+          compactions += 1
           break
         case 'user_message': {
           // Observed on 0.146.0: `task_started` is written BEFORE `user_message`, so by
@@ -313,7 +323,7 @@ export function parseCodex(records: Record<string, any>[]): ParsedTranscript {
     }
   }
 
-  return { turns, declaredCompaction, sessionId }
+  return { turns, declaredCompaction: compactions > 0, compactions, sessionId }
 }
 
 export function parserFor(agent: string): (r: Record<string, any>[]) => ParsedTranscript {
