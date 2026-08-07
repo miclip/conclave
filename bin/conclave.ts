@@ -21,6 +21,7 @@ import {
 import { formatConfigShow, formatConfigShowJson, showConfig } from '../src/config/show.ts'
 import type { CheckSpec } from '../src/rotation/record.ts'
 import { runReport } from '../src/relay/report.ts'
+import { RunLogWriter, readRunLog, runLogExists } from '../src/relay/resume.ts'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { seedCodexTrust } from '../src/deployment/codexHookTrust.ts'
@@ -63,13 +64,17 @@ Commands:
   relay "<goal>" [--lead codex] [--implementer claude] [--rounds N] [--settle SECONDS]
                  [--checks "npm test"] [--checks-informational "..."]
                  [--checks-unrelated "..."] [--lead-args "..."] [--implementer-args "..."]
-                 [--json]
+                 [--json] [--resume <log>] [--record <path>]
                                    Run a two-agent session unattended and print the
                                    routing log. --json prints a structured record of the
                                    run on stdout instead — outcome, per-turn verdicts with
                                    their confidence and provenance, rotation counters,
                                    carried flags — and every human-facing line goes to
                                    stderr, so stdout parses in full.
+                                   Every message is recorded to
+                                   .conclave/runs/ as it happens; --resume replays that
+                                   log into both seats so a run that ended with work in
+                                   flight is continued rather than re-described by hand.
                                    Every pause point ENDS the run, because a call that
                                    returns an outcome has nowhere to suspend to.
                                    Spawns real sessions and uses real quota.
@@ -282,6 +287,7 @@ async function main(argv: string[]): Promise<number> {
     // it. Reading it only in the console meant an unattended run ignored the permission
     // mode the operator had configured — and an unattended run is the one with nobody to
     // answer a prompt it then stops at.
+    const runStartedAt = Date.now()
     const projectConfig = readProjectConfig(process.cwd())
     // Config-derived args first, then per-invocation ones, so an explicit flag wins.
     const leadArgs = [...launchArgsFor(projectConfig, lead), ...extraArgs(flag('lead-args', ''))]
@@ -319,9 +325,27 @@ async function main(argv: string[]): Promise<number> {
         : '  rotation NOT armed — no --checks, so degradation escalates instead of rotating',
     )
 
+    // Recorded continuously into a gitignored directory, because a record written on exit
+    // is exactly the record a crash destroys -- and a crash is one of the endings a resume
+    // exists for. Named for when the run started, so a directory listing is chronological.
+    const recordPath =
+      flag('record', '') || join(process.cwd(), '.conclave', 'runs', `relay-${runStartedAt}.ndjson`)
+    const recorder = new RunLogWriter(recordPath)
+
+    const resumeFrom = flag('resume', '')
+    if (resumeFrom && !runLogExists(resumeFrom)) {
+      console.error(`conclave: no run log at ${resumeFrom}`)
+      return 1
+    }
+    const prior = resumeFrom ? readRunLog(resumeFrom) : []
+    if (prior.length > 0) {
+      say(`  resuming from ${resumeFrom} — ${prior.length} messages replayed into both seats`)
+    }
+
     const relay = await Relay.start({
       registry,
       cwd: process.cwd(),
+      ...(prior.length > 0 ? { resume: prior } : {}),
       lead: { id: 'advisor', agent: lead, role: 'advisor', ...(leadArgs.length > 0 ? { args: leadArgs } : {}) },
       implementer: {
         id: 'implementer',
@@ -340,6 +364,7 @@ async function main(argv: string[]): Promise<number> {
       // The routing log is the only complete account of the session, so it is printed as
       // it happens rather than assembled at the end.
       onLog: (m) => {
+        recorder.write(m)
         if (m.visibility === 'internal') {
           say(`  · ${m.text}`)
           return
@@ -356,13 +381,12 @@ async function main(argv: string[]): Promise<number> {
     let failed = false
     // Before the run, not after the relay is built: a report whose duration excluded startup
     // would understate how long the operator actually waited.
-    const startedAt = Date.now()
     try {
       const outcome = await relay.run(goal)
       if (asJson) {
         // stdout, alone, parseable in full. The prose lines below still go to stderr, so a
         // human watching a --json run is not left staring at nothing.
-        console.log(JSON.stringify(await runReport(relay, { goal, outcome, startedAt }), null, 2))
+        console.log(JSON.stringify(await runReport(relay, { goal, outcome, startedAt: runStartedAt }), null, 2))
       }
       say(`\n=== relay ended: ${outcome.reason}${outcome.detail ? ` — ${outcome.detail}` : ''}`)
       failed = outcome.reason === 'transport_failed'
@@ -378,6 +402,9 @@ async function main(argv: string[]): Promise<number> {
       // live, and the runs most worth diagnosing are the ones that used to report least.
       say(`=== ${relay.log.length} messages routed`)
       say(`=== ${relay.rotationSummary()}`)
+      // Last useful line for a human, and the one that makes an abnormal ending recoverable.
+      say(`=== run log: ${recordPath}`)
+      say(`===   resume with: conclave relay "<goal>" --resume ${recordPath}`)
       // Last, so it is the final thing on screen. A `done` that carries an unresolved
       // caveat must not read as an unqualified success to someone who only reads the tail.
       for (const line of relay.flagSummary()) say(`=== ${line}`)

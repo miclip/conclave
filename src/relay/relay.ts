@@ -54,6 +54,7 @@ import {
 import { assess, ComplaintLedger, topicOf } from '../rotation/degradation.ts'
 import { rotate, type RotationResult } from '../rotation/rotate.ts'
 import type { CheckSpec } from '../rotation/record.ts'
+import { resumeBriefing } from './resume.ts'
 
 export type {
   ObserveOptions,
@@ -127,6 +128,15 @@ export interface RotationConfig {
 export interface RelayOptions {
   registry: AgentRegistry
   cwd: string
+  /**
+   * A previous run's routing log, replayed into both participants before the first turn.
+   *
+   * `relay` ends at every pause point by design, so the normal way a long run stops is with
+   * work in flight, and the normal recovery was for a human to transcribe the established
+   * state into a new goal string. Anything not transcribed was silently re-derived or
+   * silently lost -- see issue #34.
+   */
+  resume?: RelayMessage[] | undefined
   /** The advisor. Steers, and cannot see the implementer's tools. */
   lead: ParticipantSpec
   implementer: ParticipantSpec
@@ -1211,13 +1221,18 @@ export class Relay {
     // audited as a withheld human message without any special casing here.
     this.#record({ from: 'human', fromRank: 'human', to: [lead.id], kind: 'goal', text: goal })
 
+    // A prior run's routing log, replayed. Both seats get it: the implementer needs the
+    // work already done, and the advisor needs to know what it already decided -- an advisor
+    // that re-issues an instruction the log shows as completed is the failure this prevents.
+    const prior = this.#opts.resume?.length ? `${resumeBriefing(this.#opts.resume)}\n\n` : ''
+
     await this.#exchange(
       impl,
-      `${IMPLEMENTER_BRIEFING}\n\n${SUBAGENT_BRIEFING}\n\n${WITHHELD_GOAL_NOTICE}\n\nAcknowledge briefly; do not start work yet.`,
+      `${IMPLEMENTER_BRIEFING}\n\n${SUBAGENT_BRIEFING}\n\n${WITHHELD_GOAL_NOTICE}\n\n${prior}Acknowledge briefly; do not start work yet.`,
     )
     let next = await this.#exchange(
       lead,
-      `${LEAD_BRIEFING}\n\n${SUBAGENT_BRIEFING}\n\nThe goal for this session:\n\n${goal}\n\nGive the implementer its first instruction.`,
+      `${LEAD_BRIEFING}\n\n${SUBAGENT_BRIEFING}\n\n${prior}The goal for this session:\n\n${goal}\n\nGive the implementer its first instruction.`,
     )
 
     const maxRounds = this.#opts.maxRounds ?? 6

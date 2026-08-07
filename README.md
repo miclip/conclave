@@ -179,6 +179,12 @@ The reasoning is in [`DESIGN-BRIEF.md`](DESIGN-BRIEF.md).
   `step_finish reason=stop` on OpenCode; anything weaker is labelled as what it is. A run
   exiting 0 is not evidence a turn finished, and is not treated as any.
 
+Every message is recorded to `.conclave/runs/` as it happens, and `--resume <log>` replays it
+into both seats. `relay` ends at every pause point by design, so the normal way a long run
+stops is with work still in flight — resuming continues it rather than having you transcribe
+what was established into a new goal, where anything you miss is silently re-derived or
+silently lost.
+
 `conclave relay --json` prints the run as a structured record rather than prose: the outcome,
 each turn's verdict with the confidence and provenance behind it, the rotation counters, and
 anything a participant flagged as unresolved. Every human-facing line moves to stderr, so

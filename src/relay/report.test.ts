@@ -181,3 +181,39 @@ test('under --json nothing but the report may reach stdout', () => {
   )
   assert.match(stdoutWrites[0]!, /runReport/, 'and the one write is the report')
 })
+
+test('a resumed relay tells both seats they are continuing (#34)', async () => {
+  const dir = repo()
+  const lead = new FakeRotationSession('advisor', 'codex', ['DONE'])
+  const impl = new FakeRotationSession('impl', 'claude', ['a report'])
+  const relay = await Relay.start({
+    registry: registryOf({ codex: [lead], claude: [impl] }),
+    cwd: dir,
+    lead: { id: 'advisor', agent: 'codex', role: 'advisor' },
+    implementer: { id: 'implementer', agent: 'claude', role: 'implementer' },
+    maxRounds: 2,
+    resume: [
+      {
+        seq: 1,
+        at: 1,
+        from: 'implementer',
+        fromRank: 'implementer',
+        to: ['advisor'],
+        kind: 'report',
+        text: 'The harness is at rung2_measure_test.go; 12 implications found.',
+        visibility: 'all',
+        excluded: [],
+      } as never,
+    ],
+  })
+  await relay.run('finish the measurement')
+  await relay.stop()
+
+  // BOTH seats. An advisor that does not know what it already decided re-issues an
+  // instruction the log shows as completed, which is the same waste from the other end.
+  for (const [who, session] of [['implementer', impl], ['advisor', lead]] as const) {
+    const first = session.received[0]!
+    assert.match(first, /THIS RUN IS A CONTINUATION/, `${who} must be told it is resuming`)
+    assert.match(first, /rung2_measure_test\.go/, `${who} must receive the prior log verbatim`)
+  }
+})
