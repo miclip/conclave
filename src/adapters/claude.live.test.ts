@@ -303,3 +303,29 @@ test('closing does not downgrade an already-completed turn', { skip }, async (t)
   assert.equal(snap.turns[0]?.state, 'completed')
   assert.equal(snap.turns[0]?.confidence, 'proven')
 })
+
+test('a boot failure says WHY, not just that SessionStart never came', () => {
+  // `claude session did not report SessionStart` named an internal fact and offered nothing.
+  // The commonest cause is the folder-trust dialog, which 2.1.224 shows on any directory it
+  // has not seen -- including under --dangerously-skip-permissions, which does NOT cover it.
+  // Nothing proceeds until it is answered, so no hook fires, and it looks identical from the
+  // outside to a broken hook registration.
+  //
+  // Matched against the pty buffer with escapes stripped, because the raw buffer carries
+  // cursor positioning BETWEEN words. The first version of this check matched the raw buffer
+  // and therefore never fired at all.
+  const ESC = '\u001b'
+  const raw =
+    `${ESC}[2GQuick${ESC}[8Gsafety${ESC}[15Gcheck:${ESC}[22GIs${ESC}[25Gthis${ESC}[30Ga` +
+    `${ESC}[32Gproject${ESC}[40Gyou${ESC}[44Gcreated${ESC}[2G${ESC}[38;2;177;185;249m` +
+    `${ESC}[4GYes,${ESC}[12GI${ESC}[14Gtrust${ESC}[20Gthis${ESC}[25Gfolder`
+
+  assert.doesNotMatch(raw, /trust this folder/i, 'not contiguous in the raw buffer')
+
+  const stripped = raw
+    .replace(/\u001b\[[0-9;?]*[a-zA-Z]|\u001b[()][A-Z0-9]|\u001b[\]][^\u0007]*\u0007/g, ' ')
+    .replace(/\s+/g, ' ')
+
+  assert.match(stripped, /trust this folder/i, 'contiguous only once the escapes are gone')
+  assert.match(stripped, /Is this a project you created/i)
+})

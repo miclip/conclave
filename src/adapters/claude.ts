@@ -192,10 +192,54 @@ export class ClaudePtyHookAdapter implements AgentSession {
     while (!this.#ready && Date.now() < deadline && this.#pty.alive) {
       await new Promise((r) => setTimeout(r, 100))
     }
-    if (!this.#ready) throw new Error('claude session did not report SessionStart')
+    if (!this.#ready) throw new Error(this.#whyNotReady())
     // Readiness is not the same as being able to type; wait for both.
     await this.#pty.waitForOutput(() => this.#pty.isInteractive, 30_000)
     await this.#pty.waitQuiet(700, 20_000)
+  }
+
+  /**
+   * Why the session never became ready, in terms the operator can act on.
+   *
+   * `claude session did not report SessionStart` named an internal fact and offered nothing.
+   * The commonest cause by far is the FOLDER TRUST dialog, which 2.1.224 shows on any
+   * directory it has not seen -- including under `--dangerously-skip-permissions`, which does
+   * not cover it. Nothing proceeds until it is answered, so no hook ever fires and the
+   * failure looks identical to a broken hook registration.
+   *
+   * That is a direct hit on what Conclave claims: run it in the project you want worked on,
+   * the project needs nothing installed. It needs one thing, once, and it is not obvious.
+   *
+   * Deliberately NOT answered automatically. The dialog asks whether the FOLDER's contents
+   * are safe to execute, and running Conclave in a directory is not the same as having vetted
+   * what is in it. Both remedies are named instead -- the interactive one, and the key Claude
+   * Code's own message points at.
+   */
+  #whyNotReady(): string {
+    // Escapes are stripped and whitespace collapsed before matching. The raw buffer carries
+    // cursor-positioning sequences BETWEEN words -- `trust\x1b[20Gthis\x1b[25Gfolder` -- so
+    // no phrase appears contiguously and a naive regex silently never matches.
+    const screen = (this.#pty?.output ?? '')
+      // eslint-disable-next-line no-control-regex
+      .replace(/\u001b\[[0-9;?]*[a-zA-Z]|\u001b[()][A-Z0-9]|\u001b[]][^\u0007]*\u0007/g, ' ')
+      .replace(/\s+/g, ' ')
+    if (/trust this folder|Is this a project you created/i.test(screen)) {
+      return (
+        `claude is waiting on its folder-trust dialog for ${this.#opts.cwd}, so no hook can ` +
+        'fire and the session never becomes ready. Run `claude` in that directory once and ' +
+        'accept, or set projects["' +
+        this.#opts.cwd +
+        '"].hasTrustDialogAccepted to true in ~/.claude.json. Note that ' +
+        '--dangerously-skip-permissions does NOT cover this dialog.'
+      )
+    }
+    if (!this.#pty?.alive) {
+      return 'claude exited before reporting SessionStart; run `conclave config check` to verify the hook registration'
+    }
+    return (
+      'claude did not report SessionStart within the readiness window. The hooks may not be ' +
+      'registered: run `conclave config check`. If it is merely slow, raise readyTimeoutMs.'
+    )
   }
 
   #hookSettings(): unknown {
