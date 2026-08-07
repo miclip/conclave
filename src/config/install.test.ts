@@ -336,7 +336,26 @@ test('resolveConclaveRoot survives being reached through a symlink', () => {
 test('the rendered output matches what this checkout currently has installed', async () => {
   // Guards against the templates drifting from the registrations actually in use --
   // which would silently invalidate Codex trust the next time anyone ran the installer.
-  const result = await installConfig({ projectRoot: REPO, conclaveRoot: REPO, diagnose: false })
+  //
+  // `dryRun`, and it is not optional. Without it this WROTE the registrations it was
+  // about to assert on: the first run repaired the drift and failed, and every run after
+  // passed because the repair had already happened. A test that heals what it detects
+  // reports a real problem exactly once and then hides it.
+  //
+  // Worse in this specific case. Rewriting the sidecar re-hashes the Codex handler and
+  // drops the trust decision — which is the hazard `dryRun` exists for, and which the
+  // "dry run reports drift without writing" test above asserts about `config check`. The
+  // suite enforced the rule on the command and broke it itself.
+  //
+  // Found on 2026-08-06 by a two-agent session in a clone whose registrations pointed at
+  // another Conclave. The implementer reported a failure it could not reproduce rather
+  // than dismissing it as noise, which is the only reason it was looked at.
+  const result = await installConfig({
+    projectRoot: REPO,
+    conclaveRoot: REPO,
+    diagnose: false,
+    dryRun: true,
+  })
   assert.ok(
     result.written.every((w) => !w.changed),
     'templates have drifted from the installed registrations; run `npm run config:install`',

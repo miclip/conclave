@@ -12,6 +12,12 @@ import {
   installConfig,
   type AgentKind,
 } from '../src/config/install.ts'
+import {
+  CONFIG_RELATIVE,
+  launchArgsFor,
+  permissionModeFor,
+  readProjectConfig,
+} from '../src/config/project.ts'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { defaultRegistry } from '../src/registry/builtin.ts'
@@ -147,11 +153,31 @@ async function main(argv: string[]): Promise<number> {
       return i >= 0 ? (rest[i + 1] ?? fallback) : fallback
     }
     const registry = defaultRegistry()
+    const lead = flag('lead', 'codex')
+    const implementer = flag('implementer', 'claude')
+
+    // `.conclave/config.json` is a property of the PROJECT, not of which front-end opened
+    // it. Reading it only in the console meant an unattended run ignored the permission
+    // mode the operator had configured — and an unattended run is the one with nobody to
+    // answer a prompt it then stops at.
+    const projectConfig = readProjectConfig(process.cwd())
+    const leadArgs = launchArgsFor(projectConfig, lead)
+    const implArgs = launchArgsFor(projectConfig, implementer)
+    const bypassing = [lead, implementer].filter((a) => permissionModeFor(projectConfig, a) === 'bypass')
+    if (bypassing.length > 0) {
+      console.log(`  permission prompts bypassed for ${[...new Set(bypassing)].join(', ')} — per ${CONFIG_RELATIVE}`)
+    }
+
     const relay = await Relay.start({
       registry,
       cwd: process.cwd(),
-      lead: { id: 'advisor', agent: flag('lead', 'codex'), role: 'advisor' },
-      implementer: { id: 'implementer', agent: flag('implementer', 'claude'), role: 'implementer' },
+      lead: { id: 'advisor', agent: lead, role: 'advisor', ...(leadArgs.length > 0 ? { args: leadArgs } : {}) },
+      implementer: {
+        id: 'implementer',
+        agent: implementer,
+        role: 'implementer',
+        ...(implArgs.length > 0 ? { args: implArgs } : {}),
+      },
       maxRounds: Number(flag('rounds', '4')),
       // The routing log is the only complete account of the session, so it is printed as
       // it happens rather than assembled at the end.
