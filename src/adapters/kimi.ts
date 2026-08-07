@@ -345,6 +345,25 @@ export class KimiPrintAdapter implements AgentSession {
         : process.env,
     })
     this.#child = child
+    // Created before the error handler, which closes it: a failed spawn must be able to
+    // end the read, and the handler cannot reference something declared below it.
+    const lines = createInterface({ input: child.stdout, crlfDelay: Infinity })
+
+    // A spawn that never starts emits an asynchronous 'error' event rather than throwing.
+    // Unhandled, it takes the whole process down with a stack trace: `spawn opencode ENOENT`
+    // killed a run outright, with no verdict, no summary and no routing log -- the exact
+    // failure #32 was filed about, reached by a path #32's fix does not cover because
+    // nothing was thrown for it to catch.
+    let spawnFailed: string | undefined
+    child.on('error', (err: NodeJS.ErrnoException) => {
+      spawnFailed =
+        err.code === 'ENOENT'
+          ? `${this.#opts.command ?? 'kimi'} is not on PATH (spawn ENOENT). Install it, or name a different agent.`
+          : err.message
+      // Close the READLINE INTERFACE, not the stream. Destroying `child.stdout` leaves the
+      // interface's async iterator waiting forever -- verified, and it hung every turn.
+      lines.close()
+    })
 
     let watchdog: NodeJS.Timeout | undefined
     if (this.#opts.watchdogMs !== undefined) {
@@ -362,17 +381,21 @@ export class KimiPrintAdapter implements AgentSession {
       if (stderr.length < 8192) stderr += c.toString('utf8')
     })
 
-    const lines = createInterface({ input: child.stdout, crlfDelay: Infinity })
     for await (const line of lines) {
       const record = parseRecord(line)
       if (record) this.#onRecord(turn, record)
     }
 
-    const [code, signal] = await new Promise<[number | null, NodeJS.Signals | null]>((r) =>
-      child.once('close', (c, s) => r([c, s])),
-    )
+    const [code, signal] = await new Promise<[number | null, NodeJS.Signals | null]>((r) => {
+      child.once('close', (c, s) => r([c, s]))
+      // A process that never spawned may never emit `close` at all -- its stdio pipes were
+      // never opened, so there is nothing to close. Waiting on `close` alone hung the turn
+      // forever, which is a worse failure than the crash it replaced.
+      child.once('error', () => r([null, null]))
+    })
     if (watchdog) clearTimeout(watchdog)
     this.#child = undefined
+    if (spawnFailed) turn.provenance.push({ source: 'transport', detail: spawnFailed })
 
     const learned = sessionIdFrom(stderr)
     if (learned && !this.#sessionId) this.#sessionId = learned
@@ -529,7 +552,17 @@ export class KimiPrintAdapter implements AgentSession {
         ],
       }
     } else {
-      verdict = {
+      // A transport that never started is not an ambiguous ending: we know exactly what
+      // happened and can say so, so it does not get graded `assumed` alongside the genuinely
+      // unknown cases.
+      const transport = turn.provenance.find((p) => p.source === 'transport')
+      verdict = transport
+        ? {
+            outcome: 'transport_lost',
+            confidence: 'proven',
+            provenance: [transport],
+          }
+        : {
         outcome: 'unknown_abnormal_end',
         confidence: 'assumed',
         provenance: [

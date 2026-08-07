@@ -229,3 +229,24 @@ test('unknown record types are ignored, not fatal', () => {
   assert.equal(parseRecord(''), undefined)
   assert.equal(parseRecord('{"no":"type field"}'), undefined)
 })
+
+test('a binary that is not on PATH is a verdict, not a crash', async () => {
+  // `spawn opencode ENOENT` emits an asynchronous 'error' event rather than throwing, so it
+  // is not caught by anything that catches throws. Unhandled, it took the whole process down
+  // with a stack trace: no verdict, no summary, no routing log -- the failure #32 was filed
+  // about, reached by a path #32's fix does not cover.
+  const session = await OpenCodeRunAdapter.start({
+    cwd: REPO,
+    role: 'implementer',
+    command: '/nonexistent/definitely-not-here',
+  })
+  await session.send('go', { kind: 'orchestrator' })
+  const end = (await nextTurn(session)).find((e) => e.type === 'turn_end') as TurnEndEvent
+
+  // Not `unknown_abnormal_end`: we know exactly what happened, so it is not graded alongside
+  // the genuinely ambiguous endings.
+  assert.equal(end.verdict.outcome, 'transport_lost')
+  assert.equal(end.verdict.confidence, 'proven')
+  assert.match(end.verdict.provenance[0]!.detail, /not on PATH/)
+  await session.close()
+})

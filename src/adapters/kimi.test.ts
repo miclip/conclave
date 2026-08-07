@@ -182,3 +182,16 @@ test('parsing helpers are defensive about an undocumented format', () => {
   assert.equal(textOf(undefined), '')
   assert.equal(sessionIdFrom('nothing here'), undefined)
 })
+
+test('a binary that is not on PATH is a verdict, not a crash', async () => {
+  const s = await KimiPrintAdapter.start({
+    cwd: REPO,
+    role: 'implementer',
+    command: '/nonexistent/definitely-not-here',
+  })
+  await s.send('go', { kind: 'orchestrator' })
+  const end = (await nextTurn(s)).find((e) => e.type === 'turn_end') as TurnEndEvent
+  assert.equal(end.verdict.outcome, 'transport_lost')
+  assert.match(end.verdict.provenance[0]!.detail, /not on PATH/)
+  await s.close()
+})
