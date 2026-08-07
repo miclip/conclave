@@ -213,6 +213,41 @@ export function extractFlags(prose: string): string[] {
   return out
 }
 
+/**
+ * How the advisor says something to the HUMAN without halting the run.
+ *
+ * Until now it had two options and neither is this. Fold the finding into the next
+ * instruction, which is what the briefing tells it to do and which pollutes an instruction
+ * with something the implementer does not need; or `ESCALATE`, which stops the run to say it.
+ * So a finding worth recording but not worth stopping for had nowhere to go and died with the
+ * turn.
+ *
+ * This is a ROUTING capability rather than only a convention. The advisor can already produce
+ * prose; what it could not do is direct part of that prose at the human alone. A `NOTE:` line
+ * is lifted out of the reply, recorded addressed to nobody, and the REMAINDER is still routed
+ * to the implementer as the instruction.
+ *
+ * On adoption, honestly: the `FLAG:` convention added for #30 was not used by the one real
+ * participant that had something to flag (#38), and there is no reason to assume this fares
+ * better. What is different is that the fallback is not silence -- a note that is never
+ * written simply leaves things as they are today, whereas an unwritten FLAG made an empty
+ * `flags` array read as "nothing outstanding". Worth shipping on those terms and worth
+ * measuring rather than assuming.
+ */
+export const NOTE_MARKER = /^[ \t]*NOTE:[ \t]*(.+)$/gim
+
+export function splitNotes(prose: string): { notes: string[]; rest: string } {
+  const notes: string[] = []
+  for (const m of prose.matchAll(NOTE_MARKER)) {
+    const text = m[1]?.trim()
+    if (text) notes.push(text)
+  }
+  // The remainder is what the implementer receives. A note left in would read as part of the
+  // instruction, which is the pollution this exists to remove.
+  const rest = prose.replace(NOTE_MARKER, '').replace(/\n{3,}/g, '\n\n').trim()
+  return { notes, rest }
+}
+
 const LEAD_BRIEFING = `You are the ADVISOR on a two-agent coding session, and you are in charge of it.
 
 Another AI model — the implementer — does the actual work in this repository. You cannot
@@ -245,7 +280,13 @@ Reply with the instruction itself and nothing else — no preamble, no restating
 Keep it short. When you investigated something yourself, put what you FOUND in the next
 instruction, briefly — otherwise the finding dies with your turn. If the work looks
 finished, reply exactly DONE. If it has gone wrong or stalled and needs a human, reply
-exactly ESCALATE: followed by why.`
+exactly ESCALATE: followed by why.
+
+If you have something the HUMAN should know that does NOT need to stop the run -- a finding, a
+risk you are proceeding despite, a decision you made and why -- put it on its own line
+beginning NOTE:. It is recorded for the operator and is not sent to the implementer, and the
+rest of your reply is still the instruction. Reserve ESCALATE for when you actually need an
+answer before you can continue.`
 
 /**
  * Added to the advisor's briefing when the operator is an AGENT rather than a human.
@@ -1428,7 +1469,38 @@ export class Relay {
         if (halted) return halted
       }
 
-      const instruction = next.prose.trim()
+      // Lifted before anything else looks at the reply: a NOTE line is addressed to the
+      // human, so it must not reach the implementer as part of the instruction, and it must
+      // not make an otherwise-empty reply look like a real instruction either.
+      const { notes, rest: withoutNotes } = splitNotes(next.prose)
+      for (const note of notes) {
+        this.#record({ from: lead.id, fromRank: 'advisor', to: [], kind: 'note', text: note })
+      }
+
+      let instruction = withoutNotes.trim()
+
+      // A reply that was ONLY notes is not a failure to instruct -- it is the advisor using
+      // the channel that was just given to it. Halting there would end a run because the
+      // advisor said something useful, so it is asked once for the instruction that goes with
+      // the note. Bounded: this happens inside the round, and the guard below still catches a
+      // second empty reply.
+      if (instruction === '' && notes.length > 0 && next.end.verdict.outcome === 'completed') {
+        next = await this.#exchange(
+          lead,
+          this.#drain(lead.id) ||
+            'Your note is recorded for the operator. Now give the implementer its next ' +
+              'instruction, or reply exactly DONE.',
+        )
+        const second = splitNotes(next.prose)
+        for (const note of second.notes) {
+          this.#record({ from: lead.id, fromRank: 'advisor', to: [], kind: 'note', text: note })
+        }
+        next = { ...next, prose: second.rest }
+        // Recomputed, not left stale: everything below -- the DONE check, the guard, the
+        // routing -- reads `instruction`, and after a re-ask the old value is a different
+        // turn's reply.
+        instruction = second.rest.trim()
+      }
 
       // An advisor turn that ended badly, or produced nothing at all, must not be forwarded.
       //

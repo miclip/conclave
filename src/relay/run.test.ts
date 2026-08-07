@@ -277,8 +277,8 @@ test('an advisor escalation is a pause, and continuing asks it again rather than
   await run.continue()
 
   assert.equal((await run.result()).reason, 'done')
-  assert.ok(!impl.received.some((m) => m.includes('ESCALATE')))
-  assert.ok(advisor.received.some((m) => m.includes('It is in scope.')))
+  assert.ok(!impl.received.some((m) => m.includes('ESCALATE')), 'escalation text must not reach the implementer')
+  assert.ok(advisor.received.some((m) => m.includes('It is in scope.')), 'the human answer must reach the advisor')
 })
 
 test('a declined candidate is remembered, and a LATER compaction raises it again', async (t) => {

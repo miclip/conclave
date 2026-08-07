@@ -403,3 +403,81 @@ test('NONE means nothing outstanding, and adds no noise', async () => {
   assert.deepEqual(report.flags, [])
   assert.deepEqual(relay.flagSummary(), [])
 })
+
+test('an advisor NOTE reaches the human without halting or reaching the implementer (#1)', async () => {
+  // The advisor had two options and neither was this: fold the finding into the next
+  // instruction, polluting it with something the implementer does not need, or ESCALATE,
+  // which stops the run to say it. A finding worth recording but not worth stopping for died
+  // with the turn.
+  const dir = repo()
+  const impl = new FakeRotationSession('impl', 'claude', ['did it', 'NONE'])
+  const relay = await Relay.start({
+    registry: registryOf({
+      codex: [
+        new FakeRotationSession('advisor', 'codex', [
+          'NOTE: the goal assumes a bug that may not exist; proceeding to check rather than fix.\nRead calc.py and report what add() does.',
+          'DONE',
+        ]),
+      ],
+      claude: [impl],
+    }),
+    cwd: dir,
+    lead: { id: 'advisor', agent: 'codex', role: 'advisor' },
+    implementer: { id: 'implementer', agent: 'claude', role: 'implementer' },
+    maxRounds: 3,
+  })
+  const outcome = await relay.run('a goal')
+  await relay.stop()
+
+  // Non-halting: the run carried on to its normal end.
+  assert.equal(outcome.reason, 'done')
+
+  // Recorded for the operator, addressed to nobody.
+  const note = relay.log.find((m) => m.from === 'advisor' && m.kind === 'note' && /may not exist/.test(m.text))
+  assert.ok(note, 'the note is in the routing log')
+  assert.deepEqual(note!.to, [], 'addressed to the operator, not to a participant')
+
+  // And stripped from what the implementer received, which is the whole point.
+  const sent = impl.received.join('\n')
+  assert.match(sent, /Read calc\.py/, 'the instruction still arrived')
+  assert.doesNotMatch(sent, /may not exist/, 'the note did not')
+})
+
+test('a reply that is ONLY a note is not treated as an instruction', async () => {
+  // Otherwise stripping the note leaves an empty instruction, which the #35 guard would
+  // correctly refuse -- ending a run because the advisor said something useful.
+  const { splitNotes } = await import('./relay.ts')
+  const { notes, rest } = splitNotes('NOTE: just so you know.')
+  assert.deepEqual(notes, ['just so you know.'])
+  assert.equal(rest, '', 'the caller sees an empty instruction and handles it as one')
+})
+
+test('a note-only reply is asked again rather than ending the run (#1)', async () => {
+  // Stripping a note can leave an empty instruction, which the #35 guard correctly refuses.
+  // Halting there would end a run BECAUSE the advisor said something useful, so it is asked
+  // once for the instruction that goes with the note.
+  const dir = repo()
+  const impl = new FakeRotationSession('impl', 'claude', ['did it', 'NONE'])
+  const relay = await Relay.start({
+    registry: registryOf({
+      codex: [
+        new FakeRotationSession('advisor', 'codex', [
+          'NOTE: the premise looks wrong to me.',
+          'Read calc.py and report what add() does.',
+          'DONE',
+        ]),
+      ],
+      claude: [impl],
+    }),
+    cwd: dir,
+    lead: { id: 'advisor', agent: 'codex', role: 'advisor' },
+    implementer: { id: 'implementer', agent: 'claude', role: 'implementer' },
+    maxRounds: 3,
+  })
+  const outcome = await relay.run('a goal')
+  await relay.stop()
+
+  assert.equal(outcome.reason, 'done', 'the run was not ended by a useful note')
+  assert.ok(relay.log.some((m) => m.kind === 'note' && /premise looks wrong/.test(m.text)))
+  assert.match(impl.received.join('\n'), /Read calc\.py/, 'and the instruction still arrived')
+})
