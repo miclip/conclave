@@ -118,7 +118,7 @@ export class ClaudePtyHookAdapter implements AgentSession {
     // rule has to be driven by a clock rather than by an arrival like everything else.
     // `synthesized: true` -- nothing from the child said this.
     this.#watchdog = new TurnWatchdog<TurnState>(opts.watchdogMs ?? DEFAULT_WATCHDOG_MS, (turn, update) =>
-      this.#apply(turn, update, true),
+      this.#apply(turn, this.#withScreenTail(update), true),
     )
   }
 
@@ -240,6 +240,45 @@ export class ClaudePtyHookAdapter implements AgentSession {
       'claude did not report SessionStart within the readiness window. The hooks may not be ' +
       'registered: run `conclave config check`. If it is merely slow, raise readyTimeoutMs.'
     )
+  }
+
+  /**
+   * Attach what the terminal was showing when a turn was declared hung.
+   *
+   * The adapter reads the TRANSCRIPT, so anything the CLI reports on screen and never writes
+   * to the transcript is invisible to it -- and a turn that died on an API error looks
+   * identical to one that simply went quiet. That is not hypothetical for this project: the
+   * Codex equivalent was `usage_limit_exceeded` arriving as a `task_complete` error and being
+   * read as a normal empty completion (#35).
+   *
+   * A stalled turn is exactly when that difference matters and exactly when nobody can go and
+   * look, because unattended runs are the ones that stall. So the last of the screen travels
+   * with the verdict, as a caveat: it is context for a human, never evidence for a decision.
+   *
+   * Bounded and escape-stripped. The raw buffer is megabytes of cursor positioning, and the
+   * useful part is the last few lines.
+   */
+  #withScreenTail(update: VerdictUpdate | undefined): VerdictUpdate | undefined {
+    if (!update?.verdict) return update
+    const screen = (this.#pty?.output ?? '')
+      .replace(/\u001b\[[0-9;?]*[a-zA-Z]|\u001b[()][A-Z0-9]|\u001b[\]][^\u0007]*\u0007/g, ' ')
+      .replace(/[^\S\n]+/g, ' ')
+      .split('\n')
+      .map((l) => l.trim())
+      .filter(Boolean)
+      .slice(-6)
+      .join(' / ')
+    if (!screen) return update
+    return {
+      ...update,
+      verdict: {
+        ...update.verdict,
+        provenance: [
+          ...update.verdict.provenance,
+          { source: 'transport', detail: `terminal showed: ${screen.slice(-400)}`, caveat: true },
+        ],
+      },
+    }
   }
 
   #hookSettings(): unknown {
