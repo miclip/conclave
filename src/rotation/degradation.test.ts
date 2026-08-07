@@ -5,6 +5,8 @@
  */
 
 import { strict as assert } from 'node:assert'
+import { existsSync, readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import test from 'node:test'
 import type { AgentEvent } from '../contract/session.ts'
 import { assess, ComplaintLedger, detectComplaint, detectDegradation } from './degradation.ts'
@@ -137,4 +139,32 @@ test('another participant’s progress does not clear this one’s record', () =
   l.record('implementer', 'context-exhausted', 1)
   l.progressed('advisor')
   assert.equal(l.count('implementer', 'context-exhausted'), 1)
+})
+
+test('the complaint detector does not fire on prose that discusses the topic', () => {
+  // The live failure this guards: an implementer building compaction-aware code had
+  // "Compaction can erase evidence" logged as a complaint against its own stall metric.
+  // The corpus is the project's own prose — a design brief, findings and pre-registrations
+  // that discuss compaction, context exhaustion and fresh sessions at length without any
+  // participant reporting any of it about itself.
+  //
+  // Measured 2026-08-06: 67 adversarial paragraphs of 567, zero fired. This pins that.
+  const roots = ['DESIGN-BRIEF.md', 'README.md', 'docs/NOTES.md', 'docs/DESIGN.md']
+  const repo = join(import.meta.dirname, '..', '..')
+  const paragraphs = roots
+    .filter((f) => existsSync(join(repo, f)))
+    .flatMap((f) => readFileSync(join(repo, f), 'utf8').split(/\n\s*\n/))
+    .filter((p) => p.trim().length > 80)
+
+  const adversarial = paragraphs.filter((p) =>
+    /compact|context|fresh session|clean session|losing track/i.test(p),
+  )
+  assert.ok(adversarial.length > 20, `corpus is not adversarial enough: ${adversarial.length}`)
+
+  const fired = adversarial.filter(detectComplaint)
+  assert.deepEqual(
+    fired.map((p) => p.replace(/\s+/g, ' ').slice(0, 120)),
+    [],
+    'discussion of compaction must not read as a report of it',
+  )
 })

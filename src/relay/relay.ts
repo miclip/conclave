@@ -949,9 +949,16 @@ export class Relay {
           fromRank: 'human',
           to: [],
           kind: 'note',
+          // Carries what a retrospective analysis needs, because this note IS the record:
+          // the topic it is scoped by, and the generation that proves no compaction sat
+          // behind it. See spikes/experiments/04-complaint-as-signal.md — an unbacked
+          // complaint is a prediction, and one nobody can score is one nobody can learn
+          // from. The seq this record gets is the index the scoring window starts at.
           text:
             `${impl.id} asked for a fresh session with no compaction behind it; continuing. ` +
-            `unbacked complaints on this topic: ${this.complaints.count(impl.id, topicOf(prose))}`,
+            `topic: ${topicOf(prose)}; unbacked complaints on this topic: ` +
+            `${this.complaints.count(impl.id, topicOf(prose))}; ` +
+            `compaction generation ${snap.compactionGeneration} (baseline ${impl.baselineGeneration})`,
         })
       }
       return undefined
