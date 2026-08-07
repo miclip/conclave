@@ -168,7 +168,7 @@ for (;;) {
 |---|---|
 | [`DESIGN-BRIEF.md`](DESIGN-BRIEF.md) | the design, with corrections folded in |
 | [`docs/DESIGN.md`](docs/DESIGN.md) | why it is shaped this way, and what was measured |
-| [`TODO.md`](TODO.md) | deferrals with reasons, and the invariants protecting them |
+| [`docs/NOTES.md`](docs/NOTES.md) | standing caveats and what was verified |
 | [`src/`](src/README.md) | the contract, adapters, classifier and registry |
 | `src/relay/` | the relay, the audit trail, and the run handle |
 | `src/repl/` | the console |
@@ -179,7 +179,8 @@ for (;;) {
 | `spikes/codex/` | Codex runtime-semantics fixtures |
 | `spikes/experiments/` | pre-registered experiments |
 
-Each spike has a `FINDINGS.md` recording what was measured.
+Each spike has a `FINDINGS.md` recording what was measured. Open work is in
+[issues](https://github.com/miclip/conclave/issues).
 
 ## Requirements
 

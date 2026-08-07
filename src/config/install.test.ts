@@ -350,7 +350,7 @@ test('no tracked source file hardcodes an absolute home path', () => {
   //     {runs,journal}): those are RECORDINGS of real runs, and the paths in them are
   //     part of what was observed -- transcript_path and cwd are payload fields.
   //     Rewriting them would falsify the evidence behind the conformance claims.
-  //   - prose (*.md): TODO.md and the FINDINGS documents discuss these paths by name,
+  //   - prose (*.md): the FINDINGS documents and docs/ discuss these paths by name,
   //     which is the point of documenting them.
   //   - rendered registrations: git-ignored, so they cannot be tracked anyway.
   const tracked = execFileSync('git', ['ls-files'], { cwd: REPO, encoding: 'utf8' })
