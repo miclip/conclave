@@ -1,6 +1,14 @@
 import { dirname, join } from 'node:path'
 import { homedir } from 'node:os'
-import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync } from 'node:fs'
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs'
 /**
  * Codex hook trust — a configuration/deployment invariant, not lifecycle evidence.
  *
@@ -267,6 +275,63 @@ export async function assertCodexHooksExecutable(cwd: string, matchCommand: stri
     `codex hooks are not executable in ${cwd}; refusing to start a session with no ` +
       `turn-completion signal.\n  ${diagnosis.messages.join('\n  ')}`,
   )
+}
+
+/**
+ * Record Codex's two trust decisions directly, instead of driving a TUI to make them.
+ *
+ * Codex gates on two separate things and both live in the user's global config:
+ *
+ *   [projects."<cwd>"]                     trust_level  — may hooks load here at all
+ *   [hooks.state."<key>"]                  trusted_hash — may THIS handler execute
+ *
+ * The second is unreachable until the first is granted: an untrusted directory reports an
+ * empty hook list, so there are no keys or hashes to record. That is why this seeds the
+ * directory, re-reads, and only then seeds the handlers — the same two passes the TUI
+ * needs, for the same reason.
+ *
+ * OPT-IN, and it stays that way. This writes a file Conclave does not own, granting
+ * command execution in a directory. `trustCodexHooks` remains the default because it goes
+ * through the prompts Codex itself shows; this exists because those prompts require a
+ * terminal, and every new project needing one is the largest obstacle to starting.
+ *
+ * Idempotent: an entry that already carries the right value is left alone, and the caller
+ * is told exactly which lines were added.
+ */
+export async function seedCodexTrust(cwd: string): Promise<{ added: string[]; ready: boolean }> {
+  const path = join(homedir(), '.codex', 'config.toml')
+  const added: string[] = []
+
+  const read = () => (existsSync(path) ? readFileSync(path, 'utf8') : '')
+  const upsert = (header: string, body: string): void => {
+    const text = read()
+    const escaped = header.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const existing = new RegExp(`${escaped}\\n${body.split(' = ')[0]} = "[^"]*"`)
+    if (existing.test(text)) {
+      const wanted = `${header}\n${body}`
+      if (text.includes(wanted)) return
+      writeFileSync(path, text.replace(existing, wanted))
+    } else {
+      mkdirSync(dirname(path), { recursive: true })
+      writeFileSync(path, `${text.replace(/\n*$/, '')}\n\n${header}\n${body}\n`)
+    }
+    added.push(header)
+  }
+
+  // The directory first. Realpath'd, because Codex records the resolved path and a symlink
+  // would produce an entry that never matches.
+  const real = existsSync(cwd) ? realpathSync(cwd) : cwd
+  upsert(`[projects."${real}"]`, 'trust_level = "trusted"')
+
+  // Now the handlers, which only appear once the directory is trusted.
+  const report = await readCodexHooks(cwd)
+  for (const h of report.hooks) {
+    if (!h.key || !h.currentHash) continue
+    upsert(`[hooks.state."${h.key}"]`, `trusted_hash = "${h.currentHash}"`)
+  }
+
+  const after = diagnoseHookTrust(await readCodexHooks(cwd), CONCLAVE_HOOK_MATCH)
+  return { added, ready: after.ready }
 }
 
 /**

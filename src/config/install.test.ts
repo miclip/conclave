@@ -439,3 +439,51 @@ test('an unchanged checkout is a true no-op, not a rewrite', async () => {
     'identical bytes must not be rewritten; mtime must not move',
   )
 })
+
+test('registrations a project does not ignore are reported, not fixed', async () => {
+  // Found by pointing Conclave at a fresh repository: these files carry absolute paths and
+  // are machine-local by construction, so writing them into a repo that does not ignore
+  // them leaves untracked files someone had no reason to expect. In a repo with a
+  // `git add -A` habit that is a real hazard, not untidiness.
+  const conclave = fixtureRepo()
+  const project = fixtureProject()
+  git(project, 'init', '--quiet')
+
+  const dirty = await installConfig({ projectRoot: project, conclaveRoot: conclave, diagnose: false })
+  assert.deepEqual(
+    dirty.unignored.map((p) => p.replace(`${project}/`, '')).sort(),
+    ['.claude/settings.json', '.codex/hooks.json'],
+    'an un-ignoring repo is told which paths it will see as untracked',
+  )
+  assert.match(formatInstallResult(dirty), /does not ignore them/)
+
+  // Ignored by any mechanism git honours, including ones no string match would find.
+  writeFileSync(join(project, '.gitignore'), '.claude/\n.codex/\n')
+  const clean = await installConfig({ projectRoot: project, conclaveRoot: conclave, diagnose: false })
+  assert.deepEqual(clean.unignored, [])
+  assert.ok(!formatInstallResult(clean).includes('does not ignore them'))
+
+  // Nothing was appended on the operator's behalf: a tracked .gitignore is theirs.
+  assert.equal(readFileSync(join(project, '.gitignore'), 'utf8'), '.claude/\n.codex/\n')
+})
+
+test('a project that is not a git repository reports nothing to ignore', async () => {
+  // `git check-ignore` cannot answer outside a repository, and a warning nobody can act on
+  // is worse than none.
+  const conclave = fixtureRepo()
+  const project = fixtureProject()
+  const result = await installConfig({ projectRoot: project, conclaveRoot: conclave, diagnose: false })
+  assert.deepEqual(result.unignored, [])
+})
+
+test('SessionEnd asks for the timeout Codex will actually honour', () => {
+  // Every other handler asks for 10; Codex clamps SessionEnd to 3 and warns about it on
+  // install and on every check. Asking for 10 bought a per-invocation warning and no extra
+  // budget, in the channel where real diagnostics appear.
+  const sidecar = JSON.parse(readFileSync(join(REPO, 'config/templates/codex-hooks.json'), 'utf8'))
+  const timeoutOf = (event: string) => sidecar.hooks[event][0].hooks[0].timeout
+  assert.equal(timeoutOf('SessionEnd'), 3)
+  for (const event of ['SessionStart', 'UserPromptSubmit', 'PermissionRequest', 'Stop']) {
+    assert.equal(timeoutOf(event), 10, `${event} is not clamped and keeps its budget`)
+  }
+})

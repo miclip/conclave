@@ -60,7 +60,7 @@
             "type": "command",
             "command": "node {{CONCLAVE_ROOT}}/src/hooks/client.ts codex",
             "async": false,
-            "timeout": 10,
+            "timeout": 3,
             "statusMessage": "conclave: recording SessionEnd"
           }
         ]

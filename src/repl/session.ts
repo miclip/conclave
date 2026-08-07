@@ -217,7 +217,10 @@ function renderMessage(m: RelayMessage, width: number): string {
   const to = m.to.length
     ? dim(` → ${m.to.join(', ')}`)
     : dim(m.fromRank === 'human' ? ' → (recorded only)' : ' → you')
-  return `\n${colour('●')} ${bold(who)}${to}\n${markdown(m.text, { width })}`
+  // On the message, because that is what the reader is about to believe. It was a dim line
+  // ABOVE the block, which reads as background next to a report that looks complete.
+  const unsettled = m.unsettled ? yellow('  ~ captured before the transcript settled') : ''
+  return `\n${colour('●')} ${bold(who)}${to}${unsettled}\n${markdown(m.text, { width })}`
 }
 
 function renderPause(p: RunPause, width: number): string {

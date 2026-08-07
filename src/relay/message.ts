@@ -68,6 +68,25 @@ export interface RelayMessage {
    * at right now, so a reader has to be able to pick it out without matching on its prose.
    */
   supersession?: boolean | undefined
+  /**
+   * Set when this body was read before its turn's transcript settled, so it may be
+   * truncated or empty.
+   *
+   * The relay KNOWS this at the moment it routes: `#exchange` waits for `turn_end` — the
+   * Stop hook, the strong signal — and then re-reads the transcript until the turn leaves
+   * `in_progress` or a bounded window expires. When the window wins, the body is whatever
+   * had been flushed by then.
+   *
+   * That was recorded as an orchestrator note beside the message and not on the message,
+   * so a reader saw an ordinary report next to a dim line, and anything consuming the
+   * routing log rather than watching the console saw an ordinary report and nothing else.
+   * Observed live: an implementer's review findings arrived as an EMPTY body carrying
+   * `completed (proven)`, and the advisor's next turn reasoned from the blank.
+   *
+   * The verdict is not wrong — the hook did fire, the turn did complete. The body is the
+   * part that is unverified, so the qualification belongs here rather than on the outcome.
+   */
+  unsettled?: boolean | undefined
 }
 
 /**

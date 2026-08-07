@@ -198,6 +198,38 @@ export function writeAtomic(path: string, contents: string): void {
   }
 }
 
+/**
+ * Registrations the project's git is not ignoring.
+ *
+ * These files are machine-local by construction — they carry absolute paths, which is the
+ * whole reason they are generated rather than committed. Writing them into a repository
+ * that does not ignore them leaves untracked files in someone's working tree, and the
+ * person who ran `config install` has no reason to expect new paths.
+ *
+ * Reported, never fixed. Appending to a tracked `.gitignore` edits a file the project owns
+ * and would show up in their next diff; the paths and the remedy are enough for them to
+ * decide. This is the same line drawn around Codex trust: say what is wrong, do not reach
+ * into configuration that is not ours.
+ */
+export function unignored(projectRoot: string, paths: string[]): string[] {
+  // `git check-ignore` is the only thing that knows the answer: `.gitignore` composes with
+  // `.git/info/exclude`, a global excludesfile, and negations. Matching by eye gets it
+  // wrong exactly when a project has done something deliberate.
+  return paths.filter((path) => {
+    try {
+      execFileSync('git', ['check-ignore', '-q', path], {
+        cwd: projectRoot,
+        stdio: ['ignore', 'ignore', 'ignore'],
+      })
+      return false
+    } catch (err) {
+      // Exit 1 means "not ignored". Anything else — not a repository, git absent — means
+      // the question does not apply, and a warning nobody can act on is worse than none.
+      return (err as { status?: number }).status === 1
+    }
+  })
+}
+
 export interface InstallResult {
   /** Where Conclave itself lives — what the rendered hook commands point at. */
   conclaveRoot: string
@@ -213,6 +245,8 @@ export interface InstallResult {
   agents: AgentKind[]
   /** True when the project being registered IS Conclave's own checkout. */
   selfHosted: boolean
+  /** Written paths this project's git will not ignore. Empty outside a git repository. */
+  unignored: string[]
   dryRun: boolean
   written: { label: string; path: string; changed: boolean }[]
   codex?: {
@@ -283,6 +317,7 @@ export async function installConfig(opts: InstallOptions = {}): Promise<InstallR
     projectRoot,
     codexProjectRoot,
     agents,
+    unignored: unignored(projectRoot, written.map((w) => w.path)),
     selfHosted: samePath(conclaveRoot, projectRoot),
     dryRun: opts.dryRun === true,
     written,
@@ -349,6 +384,12 @@ export function formatInstallResult(r: InstallResult): string {
   for (const w of r.written) {
     const state = w.changed ? (r.dryRun ? 'DRIFT  ' : 'wrote  ') : 'current'
     lines.push(`  ${state} ${w.label}: ${w.path}`)
+  }
+  if (r.unignored.length > 0) {
+    lines.push('')
+    lines.push('These are machine-local and this project does not ignore them:')
+    for (const p of r.unignored) lines.push(`  ${p.replace(`${r.projectRoot}/`, '')}`)
+    lines.push('Add them to .gitignore or .git/info/exclude, or they will show as untracked.')
   }
   if (r.dryRun && hasDrift(r)) {
     lines.push('')

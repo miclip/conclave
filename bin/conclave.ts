@@ -21,6 +21,7 @@ import {
 import { formatConfigShow, formatConfigShowJson, showConfig } from '../src/config/show.ts'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { seedCodexTrust } from '../src/deployment/codexHookTrust.ts'
 import { defaultRegistry } from '../src/registry/builtin.ts'
 import { runSession } from '../src/repl/session.ts'
 import { Relay } from '../src/relay/relay.ts'
@@ -29,7 +30,7 @@ import { formatGuardReportJson, guard } from '../src/workspace/sessionLock.ts'
 const USAGE = `conclave <command>
 
 Commands:
-  config install [--claude] [--codex] [--no-diagnose]
+  config install [--claude] [--codex] [--no-diagnose] [--trust]
                                    Register Conclave's hooks in the project you are in,
                                    then report whether Codex will run them. The commands
                                    written point back at this Conclave, so the project
@@ -57,7 +58,7 @@ Commands:
                                    live, so it can gate a commit helper. --json prints the
                                    report as JSON on stdout instead of prose; the exit
                                    code is unchanged.
-  relay "<goal>" [--lead codex] [--implementer claude] [--rounds N]
+  relay "<goal>" [--lead codex] [--implementer claude] [--rounds N] [--settle SECONDS]
                                    Run a two-agent session unattended and print the
                                    routing log. Every pause point ENDS the run, because a
                                    call that returns an outcome has nowhere to suspend to.
@@ -143,6 +144,20 @@ async function main(argv: string[]): Promise<number> {
       diagnose: !rest.includes('--no-diagnose'),
     })
     console.log(formatInstallResult(result))
+
+    // Opt-in, and announced line by line. This writes the operator's GLOBAL Codex config to
+    // grant command execution in a directory — heavier than anything else this command
+    // does, and not something to infer from their having run an installer.
+    if (rest.includes('--trust')) {
+      const seeded = await seedCodexTrust(result.projectRoot)
+      console.log('')
+      if (seeded.added.length === 0) console.log('Codex trust was already recorded; nothing added.')
+      else {
+        console.log('Recorded in ~/.codex/config.toml:')
+        for (const a of seeded.added) console.log(`  ${a}`)
+      }
+      console.log(seeded.ready ? 'Codex hooks are now executable.' : 'Codex still reports them as not executable.')
+    }
     // A checkout needing its first trust decision is not a failure, so this does not
     // exit non-zero on `retrustRequired` alone.
     return 0
@@ -192,6 +207,25 @@ async function main(argv: string[]): Promise<number> {
       console.log(`  permission prompts bypassed for ${[...new Set(bypassing)].join(', ')} — per ${CONFIG_RELATIVE}`)
     }
 
+    // Register before starting, as the console does. `relay` refused at the preflight in a
+    // project that had never run Conclave — correctly, but with an instruction where an
+    // action belonged, and inconsistently with the other front-end. Registration is a
+    // precondition for the tool to work at all, not a decision; what IS a decision is
+    // editing someone's .gitignore, which is why the un-ignored paths are reported instead.
+    const registered = await installConfig({
+      projectRoot: process.cwd(),
+      agents: [...new Set([lead, implementer])].filter((a): a is AgentKind =>
+        (AGENT_KINDS as string[]).includes(a),
+      ),
+      diagnose: false,
+    })
+    for (const w of registered.written.filter((w) => w.changed)) {
+      console.log(`  registered ${w.label}: ${w.path}`)
+    }
+    if (registered.unignored.length > 0) {
+      console.log(`  not ignored by this project: ${registered.unignored.join(', ')}`)
+    }
+
     const relay = await Relay.start({
       registry,
       cwd: process.cwd(),
@@ -203,6 +237,9 @@ async function main(argv: string[]): Promise<number> {
         ...(implArgs.length > 0 ? { args: implArgs } : {}),
       },
       maxRounds: Number(flag('rounds', '4')),
+      // A fixed window cannot serve both a chat-sized turn and one running a full test
+      // suite plus a review. It existed on RelayOptions and was reachable from nowhere.
+      ...(flag('settle', '') ? { transcriptSettleMs: Number(flag('settle', '')) * 1000 } : {}),
       // The routing log is the only complete account of the session, so it is printed as
       // it happens rather than assembled at the end.
       onLog: (m) => {

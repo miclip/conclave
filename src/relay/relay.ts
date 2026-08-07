@@ -640,7 +640,10 @@ export class Relay {
   /** Participants with an out-of-run question in flight. See `ask`. */
   #asking = new Set<string>()
 
-  async #exchange(p: RelayParticipant, text: string): Promise<{ prose: string; end: TurnEndEvent }> {
+  async #exchange(
+    p: RelayParticipant,
+    text: string,
+  ): Promise<{ prose: string; end: TurnEndEvent; unsettled: boolean }> {
     const before = p.events.length
     await p.session.send(text, { kind: 'peer_relay' })
 
@@ -678,7 +681,11 @@ export class Relay {
       await new Promise((r) => setTimeout(r, 150))
       snap = await p.session.snapshot()
     }
-    if (snap.turns.at(-1)?.state === 'in_progress') {
+    // Returned as well as noted. The note is for a human reading the console; the flag is
+    // for everything else, and it is the part that was missing — a caller consuming the
+    // routing log saw an ordinary report and had no way to know it was captured early.
+    const unsettled = snap.turns.at(-1)?.state === 'in_progress'
+    if (unsettled) {
       this.#record({
         from: 'orchestrator',
         fromRank: 'human',
@@ -696,7 +703,7 @@ export class Relay {
     // `message` events; see repl/session.ts.
     const turn = snap.turns.at(-1)
     const prose = turn?.report ?? turn?.assistantText ?? ''
-    return { prose, end }
+    return { prose, end, unsettled }
   }
 
   /**
@@ -1150,7 +1157,37 @@ export class Relay {
           .filter(Boolean)
           .join('\n\n'),
       )
-      this.#record({ from: impl.id, fromRank: 'implementer', to: [lead.id], kind: 'report', text: report.prose })
+      this.#record({
+        from: impl.id,
+        fromRank: 'implementer',
+        to: [lead.id],
+        kind: 'report',
+        text: report.prose,
+        ...(report.unsettled ? { unsettled: true } : {}),
+      })
+
+      // Empty AND unverified is not a report. The turn completed — the hook proved it —
+      // but the relay read the transcript before it settled and got nothing, so what would
+      // be routed is a blank the advisor then reasons from. Observed live: an implementer
+      // did the work, and its review findings reached the advisor as an empty message.
+      //
+      // Escalates rather than routes. A participant that says nothing has either failed or
+      // been truncated, and neither should advance the loop silently. An empty body that
+      // DID settle is left alone: that is a participant genuinely saying nothing, which is
+      // a different fault and not one this can diagnose.
+      if (report.unsettled && report.prose.trim() === '') {
+        const halted = await this.#halt(handle, {
+          reason: 'advisor_escalated',
+          detail:
+            `${impl.id} completed its turn but the transcript had not settled and the ` +
+            `report came back empty, so there is nothing to route`,
+          evidence: [
+            `turn_end was proven by the hook; the body was captured before the transcript settled`,
+            `raising the settle window may help — see transcriptSettleMs`,
+          ],
+        })
+        if (halted) return halted
+      }
       this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text: `${impl.id} turn: ${formatVerdict(report.end.verdict)}` })
       this.#attributeArtifacts()
 
