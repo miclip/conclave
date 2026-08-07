@@ -45,10 +45,13 @@ Commands:
   config show    [--json]          Print what this checkout resolves to: the project root,
                                    the Conclave whose hooks would run, the permission mode
                                    in force for each agent, and where each registration
-                                   goes. Reads only — it renders nothing, writes nothing,
-                                   creates no directories and does not diagnose Codex
-                                   trust, so it is safe to run at any time. Always exits
-                                   zero; config check is the one to gate on.
+                                   goes plus what is at that path now — missing, current,
+                                   drifted, or unknown when it could not be compared.
+                                   Reads only: it writes nothing, creates no directories
+                                   and does not diagnose Codex trust, so it is safe to run
+                                   at any time, and a broken target is reported rather
+                                   than sinking the report. Always exits zero even on
+                                   drift; config check is the one to gate on.
   guard          [--json]          Report whether participant sessions are live and which
                                    paths changed since they started. Exits non-zero while
                                    live, so it can gate a commit helper. --json prints the
@@ -109,13 +112,15 @@ async function main(argv: string[]): Promise<number> {
   const [command, sub, ...rest] = argv
 
   if (command === 'config' && sub === 'show') {
-    // Deliberately not routed through `installConfig`: `show` reports resolution, and a
-    // dry-run install would read templates and rendered files to answer a question nobody
-    // asked here — then fail on a missing template instead of printing the roots.
+    // Deliberately not routed through `installConfig`, even for the drift status they
+    // both compute: a dry-run install filters by agent and fails on the first missing
+    // template, so it would report a broken Conclave in place of the roots that were
+    // asked for. `showConfig` does the same comparison per target and keeps going.
     const report = showConfig()
     console.log(rest.includes('--json') ? formatConfigShowJson(report) : formatConfigShow(report))
-    // Always zero. There is no failing state to report: the roots resolve or the command
-    // throws, and a permission mode is a choice rather than drift.
+    // Always zero, drift included. `show` describes; `config check` is the gate, and
+    // having two commands exit non-zero on the same condition invites gating on this one
+    // by accident — which would then also fail for a permission mode somebody chose.
     return 0
   }
 
