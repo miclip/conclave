@@ -148,10 +148,26 @@ export function guard(repoRoot: string): GuardReport {
     )
   }
   if (changedSinceStart.length > 0) {
+    // Named as a SNAPSHOT, because that is the honest description and the thing a reader
+    // gets wrong. This is `git status --porcelain` at the instant guard ran, minus what was
+    // already dirty at session start — so it is a diff, not a record of writes.
+    //
+    // Reported live: guard listed a file that a `git status` moments later did not. The
+    // natural conclusion is that one of them is wrong. Neither is: the participant reverted
+    // or finished the file in between, and a tree with agents working in it moves between
+    // any two commands. Saying "when this ran" is what makes the two accounts reconcilable
+    // instead of contradictory.
     messages.push(
-      `${changedSinceStart.length} path(s) changed since the session started, and may be a ` +
-        `participant's work in progress:\n  ${changedSinceStart.join('\n  ')}`,
+      `${changedSinceStart.length} path(s) dirty when this ran, beyond what was already ` +
+        `dirty at session start, and may be a participant's work in progress:\n  ` +
+        `${changedSinceStart.join('\n  ')}`,
     )
+    if (!found.stale) {
+      messages.push(
+        `this is a snapshot — participants are live, so \`git status\` a moment later can ` +
+          `legitimately differ`,
+      )
+    }
   }
 
   return {
