@@ -327,10 +327,49 @@ function openCodeFixtureOutcomes(): Map<Outcome, FixtureEvidence> {
  */
 const OPENCODE_FIXTURE_VERSION = '1.18.15'
 
+/**
+ * Kimi evidence, from a recorded `--output-format stream-json` run.
+ *
+ * The witness for `completed` is an assistant message carrying no tool calls -- the model
+ * finishing rather than continuing. Weaker than OpenCode's announced `reason: "stop"`, which
+ * is why the capability records confidence `inferred`; the fixture proves the outcome is
+ * producible and parsed, not that the agent declared it.
+ */
+function kimiFixtureOutcomes(): Map<Outcome, FixtureEvidence> {
+  const found = new Map<Outcome, FixtureEvidence>()
+  const dir = join(ROOT, 'spikes', 'kimi', 'fixtures')
+  if (!existsSync(dir)) return found
+  for (const file of readdirSync(dir).filter((f) => f.endsWith('.ndjson'))) {
+    for (const line of readFileSync(join(dir, file), 'utf8').split('\n')) {
+      const trimmed = line.trim()
+      if (!trimmed.startsWith('{')) continue
+      let record: { role?: string; tool_calls?: unknown[] }
+      try {
+        record = JSON.parse(trimmed)
+      } catch {
+        continue
+      }
+      if (record.role === 'assistant' && (record.tool_calls ?? []).length === 0) {
+        found.set('completed', {
+          found: true,
+          where: `terminal assistant message in ${file}`,
+          cliVersion: KIMI_FIXTURE_VERSION,
+          historical: false,
+        })
+      }
+    }
+  }
+  return found
+}
+
+/** The Kimi the fixtures were recorded against. Hardcoded, for the reason above. */
+const KIMI_FIXTURE_VERSION = '1.49.0'
+
 export function fixtureOutcomesFor(agent: string): Map<Outcome, FixtureEvidence> {
   if (agent === 'claude') return claudeFixtureOutcomes()
   if (agent === 'codex') return codexFixtureOutcomes()
   if (agent === 'opencode') return openCodeFixtureOutcomes()
+  if (agent === 'kimi') return kimiFixtureOutcomes()
   return new Map()
 }
 

@@ -25,8 +25,8 @@ const spec = (over: Partial<ParticipantSpec> = {}): ParticipantSpec => ({
 
 test('the default registry lists every built-in agent, all constructible', () => {
   const r = defaultRegistry()
-  assert.deepEqual(r.list().map((a) => a.id).sort(), ['claude', 'codex', 'opencode'])
-  assert.deepEqual(r.listAvailable().map((a) => a.id).sort(), ['claude', 'codex', 'opencode'])
+  assert.deepEqual(r.list().map((a) => a.id).sort(), ['claude', 'codex', 'kimi', 'opencode'])
+  assert.deepEqual(r.listAvailable().map((a) => a.id).sort(), ['claude', 'codex', 'kimi', 'opencode'])
 })
 
 test('an agent without an adapter is described, not hidden', () => {
@@ -124,7 +124,7 @@ test('a new adapter arrives by registration alone', () => {
     },
   }
   const r = defaultRegistry().register(fake)
-  assert.equal(r.listAvailable().length, 4)
+  assert.equal(r.listAvailable().length, 5)
   assert.equal(r.resolve(spec({ agent: 'local-critic', role: 'advisor' })).agent.id, 'local-critic')
 })
 

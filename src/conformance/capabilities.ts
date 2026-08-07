@@ -129,4 +129,38 @@ export const OPENCODE_CAPABILITIES: AdapterCapabilities = {
   },
 }
 
-export const ALL_CAPABILITIES = [CLAUDE_CAPABILITIES, CODEX_CAPABILITIES, OPENCODE_CAPABILITIES]
+/**
+ * kimi 1.49.0, via `--print --output-format stream-json`.
+ *
+ * `completed` is `observed` -- a real run is captured in
+ * `spikes/kimi/fixtures/edit-turn.ndjson` -- but its CONFIDENCE is `inferred` rather than
+ * `proven`, and the two must not be confused. The fixture proves the outcome is producible
+ * and that the parser reads it. It does not make the claim announced: nothing in this output
+ * mode says the turn ended. Completion is the shape of the final message plus a zero exit.
+ *
+ * Kimi has a `Stop` hook, one of thirteen carrying Claude Code's payload shape. Using it
+ * would make this announced, and would additionally supply `PostToolUseFailure` -- which is
+ * why `permission_refused` is unsupported and tool failure is currently invisible here.
+ */
+export const KIMI_CAPABILITIES: AdapterCapabilities = {
+  agent: 'kimi',
+  readinessSignal: 'first_turn',
+  turnKeySource: 'run_invocation',
+  outcomes: {
+    completed: 'observed',
+    cancelled: 'reasoned_but_unverified',
+    // `--print` auto-approves for the invocation; there is no dialog to refuse.
+    permission_refused: 'unsupported',
+    process_exited: 'reasoned_but_unverified',
+    timed_out: 'reasoned_but_unverified',
+    transport_lost: 'reasoned_but_unverified',
+    unknown_abnormal_end: 'reasoned_but_unverified',
+  },
+}
+
+export const ALL_CAPABILITIES = [
+  CLAUDE_CAPABILITIES,
+  CODEX_CAPABILITIES,
+  OPENCODE_CAPABILITIES,
+  KIMI_CAPABILITIES,
+]

@@ -11,9 +11,11 @@ import type { AgentSession } from '../contract/session.ts'
 import { ClaudePtyHookAdapter } from '../adapters/claude.ts'
 import { CodexPtyHookAdapter } from '../adapters/codex.ts'
 import { OpenCodeRunAdapter } from '../adapters/opencode.ts'
+import { KimiPrintAdapter } from '../adapters/kimi.ts'
 import {
   CLAUDE_CAPABILITIES,
   CODEX_CAPABILITIES,
+  KIMI_CAPABILITIES,
   OPENCODE_CAPABILITIES,
 } from '../conformance/capabilities.ts'
 import { assertCodexHooksExecutable, CONCLAVE_HOOK_MATCH } from '../deployment/codexHookTrust.ts'
@@ -135,6 +137,33 @@ export const OPENCODE_AGENT: AgentDefinition = {
   },
 }
 
+/**
+ * Kimi CLI, via `--print --output-format stream-json`.
+ *
+ * Like OpenCode: nothing to install, register or trust. Unlike OpenCode, its headless mode
+ * emits the CONVERSATION rather than a lifecycle, so completion is inferred rather than
+ * announced -- see KIMI_CAPABILITIES.
+ *
+ * Model and provider come from participant `args`, normally `--config-file <path>` pointing
+ * at a generated TOML naming an OpenAI-compatible provider. Conclave holds no key: the file
+ * is the user's, and the REPL is the integration.
+ */
+export const KIMI_AGENT: AgentDefinition = {
+  id: 'kimi',
+  displayName: 'Kimi CLI',
+  capabilities: KIMI_CAPABILITIES,
+  launch: { command: 'kimi', baseArgs: [] },
+  async create(resolved: ResolvedParticipant, ctx: CreateParticipantContext): Promise<AgentSession> {
+    return KimiPrintAdapter.start({
+      cwd: ctx.cwd,
+      role: resolved.role.id,
+      inputOwnership: resolved.inputOwnership,
+      args: [...resolved.agent.launch.baseArgs, ...(resolved.spec.args ?? []), ...(ctx.args ?? [])],
+      watchdogMs: ctx.watchdogMs,
+    })
+  },
+}
+
 export function defaultRegistry(): AgentRegistry {
-  return new AgentRegistry().register(CLAUDE_AGENT).register(CODEX_AGENT).register(OPENCODE_AGENT)
+  return new AgentRegistry().register(CLAUDE_AGENT).register(CODEX_AGENT).register(OPENCODE_AGENT).register(KIMI_AGENT)
 }

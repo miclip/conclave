@@ -19,6 +19,7 @@ Supervised use. There is no orchestrator model, no summariser, and no third seat
 | `claude` | Claude Code | pty + hooks + transcript | generated `--settings`, written per session |
 | `codex` | Codex CLI | pty + hooks + transcript | project `.codex/hooks.json`, **and** those hooks trusted in your user-level config |
 | `opencode` | OpenCode | `run --format json` on stdout | none |
+| `kimi` | Kimi CLI | `--print --output-format stream-json` | none |
 
 Any of the three can take either seat. Assign them per participant:
 
@@ -35,10 +36,17 @@ conclave relay "<goal>" --lead codex --implementer opencode \
 ```
 
 That is a different MODEL in the same harness, which is not the same thing as a different
-REPL — the OpenCode system prompt, tool set and agent loop still apply. Kimi's own CLI and
-Maincode's Matilda are being added as REPLs in their own right
-([#24](https://github.com/miclip/conclave/issues/24),
-[#25](https://github.com/miclip/conclave/issues/25)).
+REPL — the OpenCode system prompt, tool set and agent loop still apply. `kimi` is the Kimi
+REPL itself, with its own prompt, tools and agent loop; point it at a provider with
+`--implementer-args "--config-file ~/.kimi-conclave.toml"`. Maincode's Matilda is
+[#25](https://github.com/miclip/conclave/issues/25).
+
+The four are not equally well understood, and `npm run conformance` prints the difference
+rather than hiding it. Claude Code and Codex announce turn completion through hooks; OpenCode
+announces it in its output stream; **Kimi's print mode announces nothing**, so its completions
+are inferred from the shape of the final message and graded accordingly. Kimi also cannot
+mediate permissions — `--print` auto-approves for the invocation, so
+`.conclave/config.json`'s `"permissions": "ask"` cannot be honoured for it.
 
 ## Install
 
@@ -226,6 +234,7 @@ for (;;) {
 | `spikes/transcripts/` | schemas and the outcome classifier |
 | `spikes/codex/` | Codex runtime-semantics fixtures |
 | `spikes/opencode/` | OpenCode `run --format json` fixtures |
+| `spikes/kimi/` | Kimi `stream-json` fixtures |
 | `spikes/experiments/` | pre-registered experiments |
 
 Each spike has a `FINDINGS.md` recording what was measured. Open work is in
@@ -236,7 +245,7 @@ Each spike has a `FINDINGS.md` recording what was measured. Open work is in
 Node 24+ and Python 3 for the spike tooling. One runtime dependency, `node-pty`.
 
 You need whichever CLIs you actually seat, installed and authenticated: `claude`, `codex`,
-`opencode`. Claude Code and Codex need Conclave's hook registration, which
+`opencode`, `kimi`. Claude Code and Codex need Conclave's hook registration, which
 `conclave config install` writes and a session installs for you; Codex additionally
 requires those hooks to be trusted. OpenCode needs neither — it reports its own lifecycle
 on stdout, so there is nothing to register and nothing to trust.
