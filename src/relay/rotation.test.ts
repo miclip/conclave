@@ -253,12 +253,18 @@ test('rotation without configured checks is refused rather than done unverified'
   await assert.rejects(() => relay.rotateImplementer('context exhausted'), /transfer nobody demonstrated/)
 })
 
-test('compaction is a rotation CANDIDATE by default, and the human decides', async (t) => {
+test('compaction is a rotation CANDIDATE by default, recorded and not acted on', async (t) => {
   // Two claims, and only one of them has evidence. That Conclave can execute a
-  // transactional rotation is nearly answerable -- one live run does it. That compaction
-  // predicts degradation strongly enough to act on unattended needs a comparison across
-  // sessions, because a session may compact without degrading and may degrade before
-  // compacting. Until that exists, the default hands the decision to the human.
+  // transactional rotation is answerable -- live runs do it. That compaction predicts
+  // degradation strongly enough to ACT on needs a comparison across sessions, because a
+  // session may compact without degrading and may degrade before compacting. Until that
+  // exists, nothing is spent on the proxy.
+  //
+  // An unattended run used to END here. That was invisible for as long as the counter could
+  // not move -- no unattended run had ever raised a candidate -- and the moment the counter
+  // was fixed every long run would have stopped at its first compaction. Ending a run is the
+  // most drastic action available, not a neutral one, so "recorded, not acted on" now means
+  // exactly that: the count reaches the operator through the summary and the work continues.
   const dir = repo()
   const advisor = new FakeRotationSession('advisor', 'codex', ['Do the first thing.', HANDOFF, 'DONE'])
   const old = new FakeRotationSession('old', 'claude', ['ack', 'Did the first thing.'])
@@ -273,19 +279,23 @@ test('compaction is a rotation CANDIDATE by default, and the human decides', asy
   old.compact()
   const outcome = await relay.run('Keep the work moving.')
 
-  assert.equal(outcome.reason, 'escalated')
-  assert.ok(outcome.detail!.includes('rotation candidate'))
-  // `run()` is the unattended form and has nowhere to suspend to, so it says which call
-  // does. A pause the operator cannot reach is indistinguishable from a refusal.
-  assert.ok(outcome.detail!.includes('relay.start(goal)'))
+  // The run finishes rather than stopping at the compaction.
+  assert.notEqual(outcome.reason, 'escalated', 'a candidate must not end an unattended run')
+  assert.equal(relay.rotationWatch.candidates, 1, 'but it is counted')
+  assert.ok(
+    relay.log.some((m) => m.kind === 'note' && /rotation candidate recorded, run continues/.test(m.text)),
+    'and recorded where an operator will read it',
+  )
+  assert.match(relay.rotationSummary(), /1 candidates/)
   assert.equal(old.state, 'running', 'nothing is spent on a proxy that has never been checked')
   assert.equal(fresh.state, 'running', 'and no replacement was started')
   assert.equal(relay.participants.find((p) => p.rank === 'implementer')!.session, old)
 
-  // The escalation is a pause, not a refusal: the mechanism is right there.
-  const r = await relay.rotateImplementer('human accepted the candidate')
-  assert.equal(r.status, 'rotated')
-  assert.equal(old.state, 'terminated')
+  // The trailing "and the human can still rotate" check has moved out of this test. It
+  // belonged to the old shape, where the run ENDED at the candidate and the replacement was
+  // therefore untouched. Now the run continues and consumes it, so rotating afterwards
+  // exercises a different scenario than the one this test is about. The mechanism is covered
+  // by the dedicated rotation tests above, and by the live rollback suite.
 })
 
 test('a run rotates automatically when the implementer compacts, if opted in', async (t) => {

@@ -90,6 +90,12 @@ piece of work. The implementer is told the advisor holds the goal.
 `--checks` enables rotation: a degraded implementer is replaced by one that reproduces the
 verification first. Without it, a degraded implementer escalates to you.
 
+By default degradation raises a *candidate* rather than acting: an attended session stops and
+asks, an unattended one records it and carries on, and the count appears in the summary.
+Rotating unattended requires `onDegradation: 'automatic'` as well as checks, because nothing
+yet shows that compaction predicts degradation — which is what
+[#10](https://github.com/miclip/conclave/issues/10) exists to establish.
+
 Those checks are *required* — a replacement that cannot reproduce one is rolled back. Use
 `--checks-informational` or `--checks-unrelated` for commands that should run and be
 reported without gating the transfer, because a check can reproduce faithfully and still say

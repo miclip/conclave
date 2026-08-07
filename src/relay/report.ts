@@ -84,6 +84,8 @@ export interface RunReport {
     assessments: number
     degradationsSeen: number
     complaintsSeen: number
+    /** Candidates raised. Distinct from `rotations`, which are candidates ACTED on. */
+    candidates: number
     rotations: number
     peakGeneration: number
   }
@@ -163,6 +165,7 @@ export async function runReport(relay: Relay, input: ReportInput): Promise<RunRe
       assessments: relay.rotationWatch.assessments,
       degradationsSeen: relay.rotationWatch.degradationsSeen,
       complaintsSeen: relay.rotationWatch.complaintsSeen,
+      candidates: relay.rotationWatch.candidates,
       rotations: relay.rotationWatch.rotations,
       peakGeneration: relay.rotationWatch.peakGeneration,
     },

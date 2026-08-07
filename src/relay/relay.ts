@@ -857,6 +857,8 @@ export class Relay {
     armed: false,
     assessments: 0,
     degradationsSeen: 0,
+    /** Candidates raised. Distinct from rotations, which are candidates ACTED on. */
+    candidates: 0,
     complaintsSeen: 0,
     peakGeneration: 0,
     rotations: 0,
@@ -1006,7 +1008,7 @@ export class Relay {
     }
     return (
       `rotation: armed — ${w.assessments} assessments, ${w.degradationsSeen} degraded, ` +
-      `${w.complaintsSeen} complaints, ${w.rotations} rotations, ` +
+      `${w.complaintsSeen} complaints, ${w.candidates} candidates, ${w.rotations} rotations, ` +
       `peak compaction generation ${w.peakGeneration}`
     )
   }
@@ -1367,15 +1369,37 @@ export class Relay {
     }
     if ((this.#opts.rotation.onDegradation ?? 'candidate') === 'candidate') {
       // A candidate, not a verdict. The mechanism is built and the policy is not earned:
-      // nothing yet shows that compaction and degradation coincide, so acting on it
-      // unattended would be inferring quality from a proxy that has never been checked
-      // against quality. An attended run stops here and asks; an unattended one ends.
-      const halted = await this.#halt(handle, {
-        reason: 'rotation_candidate',
-        detail: `${detail}. Recorded as a rotation candidate, not acted on.`,
-        evidence: verdict.evidence,
-      })
-      return halted ?? this.#acknowledge(impl, snap.compactionGeneration)
+      // nothing yet shows that compaction and degradation coincide, so acting on it would be
+      // inferring quality from a proxy that has never been checked against quality.
+      //
+      // An ATTENDED run stops and asks -- a human is there, and the pause costs a moment.
+      //
+      // An unattended one records it and CARRIES ON. It used to end, which was invisible
+      // while the counter could not move: no unattended run had ever raised a candidate. The
+      // moment the counter was fixed, every long unattended run would have stopped at the
+      // first compaction -- and ending a run is the most drastic action available, not a
+      // neutral one. "Recorded, not acted on" has to mean recorded and not acted on.
+      //
+      // The count reaches the operator through `rotationWatch` and the summary, which is the
+      // whole point of those counters existing.
+      this.rotationWatch.candidates += 1
+      if (handle) {
+        const halted = await this.#halt(handle, {
+          reason: 'rotation_candidate',
+          detail: `${detail}. Recorded as a rotation candidate, not acted on.`,
+          evidence: verdict.evidence,
+        })
+        if (halted) return halted
+      } else {
+        this.#record({
+          from: 'orchestrator',
+          fromRank: 'human',
+          to: [],
+          kind: 'note',
+          text: `rotation candidate recorded, run continues (unattended): ${detail}`,
+        })
+      }
+      return this.#acknowledge(impl, snap.compactionGeneration)
     }
 
     const result = await this.rotateImplementer(detail)
