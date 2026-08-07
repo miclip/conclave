@@ -248,3 +248,52 @@ test('a turn ceiling ends the run with its own reason (#28)', async () => {
   assert.equal(outcome.reason, 'ceiling')
   assert.match(outcome.detail ?? '', /turn ceiling reached/)
 })
+
+test('the default briefing is byte-identical when the operator is human (#27)', async () => {
+  // A live experiment runs against the unmodified briefing, and its pre-registration says not
+  // to change it mid-study (spikes/experiments/04-complaint-as-signal.md). The agent-operator
+  // guidance is APPENDED for one case rather than edited into LEAD_BRIEFING, so the default
+  // path stays exactly what the experiment measured.
+  const dir = repo()
+  const lead = new FakeRotationSession('advisor', 'codex', ['DONE'])
+  const relay = await Relay.start({
+    registry: registryOf({ codex: [lead], claude: [new FakeRotationSession('i', 'claude', ['r'])] }),
+    cwd: dir,
+    lead: { id: 'advisor', agent: 'codex', role: 'advisor' },
+    implementer: { id: 'implementer', agent: 'claude', role: 'implementer' },
+    maxRounds: 2,
+  })
+  await relay.run('a goal')
+  await relay.stop()
+
+  assert.doesNotMatch(lead.received[0]!, /operator of this session is an AGENT/)
+  assert.equal(relay.operator, 'human')
+})
+
+test('an agent operator is told what to escalate, and what not to', async () => {
+  const dir = repo()
+  const lead = new FakeRotationSession('advisor', 'codex', ['DONE'])
+  const relay = await Relay.start({
+    registry: registryOf({ codex: [lead], claude: [new FakeRotationSession('i', 'claude', ['r'])] }),
+    cwd: dir,
+    lead: { id: 'advisor', agent: 'codex', role: 'advisor' },
+    implementer: { id: 'implementer', agent: 'claude', role: 'implementer' },
+    maxRounds: 2,
+    operator: 'agent',
+  })
+  const outcome = await relay.run('a goal')
+  const first = lead.received[0]!
+
+  assert.match(first, /operator of this session is an AGENT/)
+  // Not merely "ask more". An operator of the same kind as the participants shares their
+  // blind spots, so permission questions add nothing and premise questions are the value.
+  assert.match(first, /premise in the goal you suspect is wrong/)
+  assert.match(first, /Do NOT escalate to ask permission/)
+  // And the advisor is told the answer is not independent evidence.
+  assert.match(first, /not independent confirmation/)
+
+  // Recorded, because it changes what an escalation MEANS and the routing log cannot show it.
+  const report = await runReport(relay, { goal: 'a goal', outcome, startedAt: Date.now() })
+  assert.equal(report.operator, 'agent')
+  await relay.stop()
+})

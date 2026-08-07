@@ -67,7 +67,7 @@ Commands:
                  [--checks "npm test"] [--checks-informational "..."]
                  [--checks-unrelated "..."] [--lead-args "..."] [--implementer-args "..."]
                  [--json] [--resume <log>] [--record <path>] [--dry-run] [--force]
-                 [--max-turns N] [--max-minutes N] [--strict-goal]
+                 [--max-turns N] [--max-minutes N] [--strict-goal] [--operator agent]
                                    Run a two-agent session unattended and print the
                                    routing log. --json prints a structured record of the
                                    run on stdout instead — outcome, per-turn verdicts with
@@ -78,6 +78,9 @@ Commands:
                                    .conclave/runs/ as it happens; --resume replays that
                                    log into both seats so a run that ended with work in
                                    flight is continued rather than re-described by hand.
+                                   --operator agent tells the advisor a machine is
+                                   answering: escalate readily, but about premises and
+                                   ambiguous criteria rather than permission.
                                    The goal is linted before anything starts: an ask with
                                    nothing observable in it cannot be graded better than
                                    reasoned_but_unverified however well the work goes.
@@ -415,6 +418,7 @@ async function main(argv: string[]): Promise<number> {
       registry,
       cwd: process.cwd(),
       ...(prior.length > 0 ? { resume: prior } : {}),
+      ...(flag('operator', '') === 'agent' ? { operator: 'agent' as const } : {}),
       lead: { id: 'advisor', agent: lead, role: 'advisor', ...(leadArgs.length > 0 ? { args: leadArgs } : {}) },
       implementer: {
         id: 'implementer',

@@ -179,6 +179,12 @@ The reasoning is in [`DESIGN-BRIEF.md`](DESIGN-BRIEF.md).
   `step_finish reason=stop` on OpenCode; anything weaker is labelled as what it is. A run
   exiting 0 is not evidence a turn finished, and is not treated as any.
 
+`--operator agent` tells the advisor a machine is answering escalations: ask readily, but
+about premises and unobservable criteria rather than permission — and treat the answer as an
+opinion with authority over the goal, not as independent confirmation. It is declared rather
+than detected, because an agent and a human at a terminal are indistinguishable from inside
+the relay.
+
 The goal is linted before anything starts — an ask with nothing observable in it cannot be
 graded better than `reasoned_but_unverified` however well the work goes, and a goal is the
 last artefact you can fix for free. Warnings by default; `--strict-goal` refuses.

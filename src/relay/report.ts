@@ -64,6 +64,15 @@ export interface RunReport {
   schema: number
   goal: string
   cwd: string
+  /**
+   * Who was answering escalations.
+   *
+   * Recorded because it changes what an escalation MEANS. An agent operator is the same kind
+   * of thing as the participants and may share their blind spots, so its answer is another
+   * opinion with authority rather than independent confirmation. A reader auditing a run
+   * cannot recover that from the routing log, where both look identical.
+   */
+  operator: 'human' | 'agent'
   outcome: RunOutcome
   startedAt: number
   endedAt: number
@@ -130,6 +139,7 @@ export async function runReport(relay: Relay, input: ReportInput): Promise<RunRe
     schema: REPORT_SCHEMA,
     goal: input.goal,
     cwd: relay.cwd,
+    operator: relay.operator,
     outcome: input.outcome,
     startedAt: input.startedAt,
     endedAt,

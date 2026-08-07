@@ -139,6 +139,14 @@ export interface RelayOptions {
    */
   resume?: RelayMessage[] | undefined
   /**
+   * Who is answering escalations. Default `'human'`.
+   *
+   * Declared rather than detected. Detection here would be guessing -- an agent operator and
+   * a human at a terminal are indistinguishable from inside the relay -- and guessing wrong
+   * either floods a human with questions or starves an agent of them.
+   */
+  operator?: 'human' | 'agent' | undefined
+  /**
    * Wall-clock and turn ceilings, checked at turn boundaries.
    *
    * Distinct from `maxRounds`, which bounds the ADVISOR/IMPLEMENTER exchange structure. A
@@ -237,6 +245,41 @@ Keep it short. When you investigated something yourself, put what you FOUND in t
 instruction, briefly — otherwise the finding dies with your turn. If the work looks
 finished, reply exactly DONE. If it has gone wrong or stalled and needs a human, reply
 exactly ESCALATE: followed by why.`
+
+/**
+ * Added to the advisor's briefing when the operator is an AGENT rather than a human.
+ *
+ * `LEAD_BRIEFING` tells the advisor that asking is cheaper than guessing, and then leaves the
+ * threshold to its judgement. That judgement is calibrated for a human: expensive to
+ * interrupt, possibly absent, and annoyed by a question they consider obvious.
+ *
+ * None of that holds for an agent operator, which answers in seconds and is not annoyed. So
+ * the plumbing in #1 would be necessary but not sufficient -- shipping a channel without
+ * retuning the threshold leaves it largely unused.
+ *
+ * What is added is deliberately about the KIND of question, not merely a lower bar. An
+ * operator that is the same kind of thing as the participants shares their blind spots, so
+ * escalating "may I run this command" adds nothing: the value is entirely in escalating the
+ * things an outside view would catch, and a wrong premise is the one that costs most.
+ *
+ * Appended rather than edited into LEAD_BRIEFING. A live experiment is running against the
+ * unmodified briefing and its pre-registration says not to change it mid-study
+ * (spikes/experiments/04-complaint-as-signal.md), so the default path stays byte-identical.
+ */
+const AGENT_OPERATOR_NOTICE = `The operator of this session is an AGENT, not a human.
+
+That changes what is worth asking. An answer costs seconds rather than an interruption, so
+escalate more readily than you otherwise would — but escalate the things an outside view
+catches, not permission. Specifically: a premise in the goal you suspect is wrong, acceptance
+criteria you cannot make observable, and a choice between two defensible designs where the
+operator's intent decides it.
+
+Do NOT escalate to ask permission to act, or to report progress. Nothing about an agent
+operator makes those useful, and they crowd out the questions that are.
+
+One caution about the answer you get back. An agent operator is the same kind of thing you
+are and may share your blind spots, so its reply is not independent confirmation the way a
+human's is. Treat it as another opinion with authority over the goal, not as evidence.`
 
 const IMPLEMENTER_BRIEFING = `You are the IMPLEMENTER on a two-agent coding session.
 
@@ -401,6 +444,11 @@ export class Relay {
   /** The repository the run works in. Read by the terminal record; see relay/report.ts. */
   get cwd(): string {
     return this.#opts.cwd
+  }
+
+  /** Who answers escalations. Default `'human'`; see RelayOptions.operator. */
+  get operator(): 'human' | 'agent' {
+    return this.#opts.operator ?? 'human'
   }
 
   get participants(): RelayParticipant[] {
@@ -1253,7 +1301,9 @@ export class Relay {
     )
     let next = await this.#exchange(
       lead,
-      `${LEAD_BRIEFING}\n\n${SUBAGENT_BRIEFING}\n\n${prior}The goal for this session:\n\n${goal}\n\nGive the implementer its first instruction.`,
+      `${LEAD_BRIEFING}\n\n${SUBAGENT_BRIEFING}\n\n` +
+        `${this.#opts.operator === 'agent' ? `${AGENT_OPERATOR_NOTICE}\n\n` : ''}` +
+        `${prior}The goal for this session:\n\n${goal}\n\nGive the implementer its first instruction.`,
     )
 
     const maxRounds = this.#opts.maxRounds ?? 6
