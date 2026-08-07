@@ -343,7 +343,7 @@ async function main(argv: string[]): Promise<number> {
     // answer a prompt it then stops at.
     const runStartedAt = Date.now()
     // Before the config is read, so this run sees what it just wrote.
-    if (!applyBypassFlag(rest, (l) => console.log(l))) return 1
+    if (!applyBypassFlag(rest, say)) return 1
 
     // Before anything is spawned, registered or written. The failure being guarded is an
     // operator who did not intend to start a run at all, and every line of setup below is
