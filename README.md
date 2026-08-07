@@ -2,13 +2,13 @@
 
 A REPL over coding-agent CLIs. One advises, one implements, a human steers.
 
-The children are the real Claude Code, Codex and OpenCode CLIs, unmodified. Their harness,
+The children are the real Claude Code, Codex, OpenCode and Kimi CLIs, unmodified. Their harness,
 auth and usage accounting are the same as when you type at them yourself. Conclave never
 speaks to a model API and never holds a model API key.
 
-Two seats, three agents to fill them with. OpenCode selects its model per invocation, so
-any model it can reach — including open-weight ones — can take a seat without Conclave
-learning anything about that model.
+Two seats, four agents to fill them with. OpenCode and Kimi both select their model per
+invocation, so any model they can reach — including open-weight ones — can take a seat
+without Conclave learning anything about that model.
 
 Supervised use. There is no orchestrator model, no summariser, and no third seat.
 
@@ -140,6 +140,11 @@ Note the asymmetry: two of those flags say what they are and one does not. OpenC
 wording is quoted in `src/config/project.ts` so the mildest-looking flag is not the one
 nobody reads.
 
+**Kimi has no entry, because there is nothing to switch.** `kimi --print` auto-approves tool
+calls for the invocation, so `"permissions": "ask"` cannot be honoured for it — it is
+permissive and cannot be made otherwise in the mode Conclave drives it in. Seat it knowing
+that, or seat something else.
+
 Per agent:
 
 ```json
@@ -153,7 +158,8 @@ spots. The advisor answers architectural questions while the implementer holds t
 implementation context, and never accumulates that context itself.
 
 It is not a coding agent, and not an API harness. The children are the real CLIs: Claude
-Code and Codex on subscription auth, OpenCode on whatever credential OpenCode itself wants.
+Code and Codex on subscription auth, OpenCode and Kimi on whatever credential each of them
+wants.
 That distinction is the line the project holds — a CLI may need an API key, Conclave may
 not have one. It is not consensus-by-committee either. Two models that cannot run the
 code converge on whoever sounds most confident, so the design resists agreement-seeking.
@@ -161,8 +167,8 @@ The reasoning is in [`DESIGN-BRIEF.md`](DESIGN-BRIEF.md).
 
 ## What works
 
-- Three CLIs under one `AgentSession` contract. Claude Code and Codex have eight live
-  acceptance flows each; OpenCode is graded against a recorded run.
+- Four CLIs under one `AgentSession` contract. Claude Code and Codex have eight live
+  acceptance flows each; OpenCode and Kimi are graded against recorded runs.
 - A two-party relay: prose only in both directions, a ranked committee, and human asides
   addressed to one participant with an audit trail of who was excluded.
 - Pauses as decision points — rotation candidate, advisor escalation, authority conflict —
@@ -175,9 +181,11 @@ The reasoning is in [`DESIGN-BRIEF.md`](DESIGN-BRIEF.md).
 - Unresolved items carried into the summary. A participant ending a report with a line
   beginning `FLAG:` has it lifted verbatim into the final lines, so a run that completed
   while something stayed unchecked does not read as unqualified success.
-- Outcomes graded by evidence. `Stop` proves normal completion on Claude Code,
-  `step_finish reason=stop` on OpenCode; anything weaker is labelled as what it is. A run
-  exiting 0 is not evidence a turn finished, and is not treated as any.
+- Outcomes graded by evidence, and the four agents do not offer the same evidence. `Stop`
+  proves normal completion on Claude Code and Kimi, `step_finish reason=stop` on OpenCode,
+  `task_complete` on Codex; anything weaker is labelled as what it is. A run exiting 0 is
+  not evidence a turn finished, and is not treated as any. `npm run conformance` prints
+  each agent's claims with what backs them.
 
 `--operator agent` tells the advisor a machine is answering escalations: ask readily, but
 about premises and unobservable criteria rather than permission — and treat the answer as an
