@@ -102,6 +102,20 @@ export interface ClaudeAdapterOptions {
 const SEND_HOOK_TIMEOUT =
   "no UserPromptSubmit hook after send. The child accepted the text but no hook fired, so this turn could not be observed. Most often the previous turn had not finished -- neither CLI accepts input mid-turn -- so try a longer --settle. If it recurs at the first turn, the hooks are probably not firing at all: run `conclave config check`."
 
+/**
+ * A pty buffer with escape sequences removed and whitespace collapsed.
+ *
+ * Shared, because there were two copies and they had already drifted: one wrote the OSC
+ * alternative as an EMPTY character class followed by a literal bracket, which matches
+ * nothing, so terminal-title writes survived into text that was then pattern-matched. A
+ * title containing "trust this folder" would have been read as the folder-trust dialog.
+ */
+function plainScreen(raw: string): string {
+  return raw
+    .replace(/\u001b\[[0-9;?]*[a-zA-Z]|\u001b[()][A-Z0-9]|\u001b[\]][^\u0007]*\u0007/g, ' ')
+    .replace(/[^\S\n]+/g, ' ')
+}
+
 export class ClaudePtyHookAdapter implements AgentSession {
   readonly agent = 'claude'
   readonly guarantees: Guarantees
@@ -232,10 +246,7 @@ export class ClaudePtyHookAdapter implements AgentSession {
     // Escapes are stripped and whitespace collapsed before matching. The raw buffer carries
     // cursor-positioning sequences BETWEEN words -- `trust\x1b[20Gthis\x1b[25Gfolder` -- so
     // no phrase appears contiguously and a naive regex silently never matches.
-    const screen = (this.#pty?.output ?? '')
-      // eslint-disable-next-line no-control-regex
-      .replace(/\u001b\[[0-9;?]*[a-zA-Z]|\u001b[()][A-Z0-9]|\u001b[]][^\u0007]*\u0007/g, ' ')
-      .replace(/\s+/g, ' ')
+    const screen = plainScreen(this.#pty?.output ?? '').replace(/\s+/g, ' ')
     if (/trust this folder|Is this a project you created/i.test(screen)) {
       return (
         `claude is waiting on its folder-trust dialog for ${this.#opts.cwd}, so no hook can ` +
@@ -273,9 +284,7 @@ export class ClaudePtyHookAdapter implements AgentSession {
    */
   #withScreenTail(update: VerdictUpdate | undefined): VerdictUpdate | undefined {
     if (!update?.verdict) return update
-    const screen = (this.#pty?.output ?? '')
-      .replace(/\u001b\[[0-9;?]*[a-zA-Z]|\u001b[()][A-Z0-9]|\u001b[\]][^\u0007]*\u0007/g, ' ')
-      .replace(/[^\S\n]+/g, ' ')
+    const screen = plainScreen(this.#pty?.output ?? '')
       .split('\n')
       .map((l) => l.trim())
       .filter(Boolean)
@@ -365,7 +374,9 @@ export class ClaudePtyHookAdapter implements AgentSession {
     // Any event is a sign of life for its turn, so the idle deadline moves with it. Without
     // this the only clock is the absolute one, and a turn that goes silent mid-work waits it
     // out in full -- issue #36, where a session sat idle ~44 minutes producing nothing.
-    if (e.turnKey !== undefined && e.type !== 'turn_end') this.#watchdog.touch(String(e.turnKey))
+    // `touchAll`, not `touch(e.turnKey)`: the key on an event depends on what produced it,
+    // and a transcript-sourced event does not carry the hook key the watchdog is armed under.
+    if (e.type !== 'turn_end') this.#watchdog.touchAll()
     this.#events.push(e)
   }
 
@@ -493,6 +504,12 @@ export class ClaudePtyHookAdapter implements AgentSession {
    */
   #apply(turn: TurnState, update: VerdictUpdate | undefined, synthesized: boolean): void {
     if (!update) return
+
+    // A settled turn releases its watchdog target. `disarm` keeps the target on purpose so
+    // `touch` can re-arm a live turn, so something has to let go or every TurnState ever
+    // armed -- with its tracker, provenance and assistant text -- is retained until the
+    // session ends. A long interactive session accumulates one per turn.
+    this.#watchdog.forget(String(turn.key))
 
     if (update.supersedes && turn.endSeq !== undefined) {
       this.#emit({

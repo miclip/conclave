@@ -77,3 +77,31 @@ test('delegation is detected from participant events, which carry the tool name'
   // directory. It is evidence to weigh, never a verdict.
   assert.deepEqual(use.worktreesCreated, [])
 })
+
+test('a worktree created and removed within the run still counts as compliance', async () => {
+  // A subagent that FOLLOWS the briefing creates a worktree, works in it, and removes it. An
+  // end-of-run diff sees nothing and is indistinguishable from never having made one, so the
+  // "no worktree was created" signal fired on the compliant case as readily as on the
+  // violation -- worse than not having it.
+  const { execFileSync } = await import('node:child_process')
+  const { mkdtempSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const { worktreePaths } = await import('./subagents.ts')
+
+  const dir = mkdtempSync(join(tmpdir(), 'conclave-wt-'))
+  execFileSync('git', ['init', '-q', '.'], { cwd: dir })
+  execFileSync('git', ['config', 'user.email', 't@t'], { cwd: dir })
+  execFileSync('git', ['config', 'user.name', 't'], { cwd: dir })
+  execFileSync('git', ['commit', '-q', '--allow-empty', '-m', 'init'], { cwd: dir })
+
+  const before = worktreePaths(dir)
+  const wt = join(dir, 'wt')
+  execFileSync('git', ['worktree', 'add', '-q', '-b', 'probe', wt], { cwd: dir })
+  const during = worktreePaths(dir)
+  execFileSync('git', ['worktree', 'remove', '--force', wt], { cwd: dir })
+  const after = worktreePaths(dir)
+
+  assert.equal(during.length, before.length + 1, 'visible while it exists')
+  assert.deepEqual(after, before, 'and gone afterwards — which is why one sample is not enough')
+})

@@ -481,3 +481,32 @@ test('a note-only reply is asked again rather than ending the run (#1)', async (
   assert.ok(relay.log.some((m) => m.kind === 'note' && /premise looks wrong/.test(m.text)))
   assert.match(impl.received.join('\n'), /Read calc\.py/, 'and the instruction still arrived')
 })
+
+test('a dead implementer does not turn a completed run into a transport failure (#5 review)', async () => {
+  // The closing question runs AFTER the advisor's DONE is recorded. If the implementer's
+  // session is gone, `send` throws, `#loop`'s catch converts an already-completed run into
+  // `transport_failed`, and the log contradicts itself -- `advisor reports the work complete`
+  // is already in it.
+  //
+  // A closing question is worth one turn, never a verdict.
+  const dir = repo()
+  const impl = new FakeRotationSession('impl', 'claude', ['did the work'])
+  const relay = await Relay.start({
+    registry: registryOf({
+      codex: [new FakeRotationSession('advisor', 'codex', ['DONE'])],
+      claude: [impl],
+    }),
+    cwd: dir,
+    lead: { id: 'advisor', agent: 'codex', role: 'advisor' },
+    implementer: { id: 'implementer', agent: 'claude', role: 'implementer' },
+    maxRounds: 3,
+  })
+  // Every send after the first throws, as a dead pty does.
+  impl.failSendOnTurn = 1
+
+  const outcome = await relay.run('a goal')
+  await relay.stop()
+
+  assert.equal(outcome.reason, 'done', 'the advisor said DONE and that stands')
+  assert.notEqual(outcome.reason, 'transport_failed')
+})

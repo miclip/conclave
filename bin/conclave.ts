@@ -14,6 +14,7 @@ import {
 } from '../src/config/install.ts'
 import {
   CONFIG_RELATIVE,
+  CONFIGURABLE_AGENTS,
   launchArgsFor,
   permissionModeFor,
   readProjectConfig,
@@ -21,6 +22,7 @@ import {
 } from '../src/config/project.ts'
 import { formatConfigShow, formatConfigShowJson, showConfig } from '../src/config/show.ts'
 import type { CheckSpec } from '../src/rotation/record.ts'
+import type { ProjectConfig } from '../src/config/project.ts'
 import { runReport } from '../src/relay/report.ts'
 import { RunLogWriter, readRunLog, runLogExists } from '../src/relay/resume.ts'
 import { preflightRefusals } from '../src/relay/guardrails.ts'
@@ -206,12 +208,40 @@ function parseChecks(
  * Which is exactly why it announces itself. `.conclave/` is gitignored, so the change is
  * machine-local and invisible to everyone else, including the same operator tomorrow.
  */
+function bypassRequest(args: string[]): { requested: boolean; agent?: string | undefined } {
+  const i = args.indexOf('--bypass')
+  if (i < 0) return { requested: false }
+  const next = args[i + 1]
+  const agent =
+    next && (CONFIGURABLE_AGENTS as readonly string[]).includes(next) ? next : undefined
+  return { requested: true, ...(agent ? { agent } : {}) }
+}
+
+/**
+ * The in-memory config this run should use, given `--bypass`.
+ *
+ * Applied separately from being PERSISTED, because the two belong at different points. The
+ * run must see its own flag immediately, or `--bypass` would not take effect until the next
+ * invocation. The write has to wait until the run is actually going to start, or a dry run
+ * and a refused preflight both leave a consequential setting behind.
+ */
+function withBypass(config: ProjectConfig, req: { requested: boolean; agent?: string | undefined }): ProjectConfig {
+  if (!req.requested) return config
+  return req.agent
+    ? { ...config, agents: { ...(config.agents ?? {}), [req.agent]: { permissions: 'bypass' } } }
+    : { ...config, permissions: 'bypass' }
+}
+
 function applyBypassFlag(args: string[], say: (line: string) => void): boolean {
   const i = args.indexOf('--bypass')
   if (i < 0) return true
-  // An agent name may follow. Anything flag-shaped is the next option, not an argument.
+  // An agent name may follow, and it must be a KNOWN agent rather than merely not
+  // flag-shaped. Accepting any non-flag token meant `conclave session --bypass "fix the login
+  // bug"` wrote `agents["fix the login bug"]` into the config AND silently dropped the goal,
+  // because the goal is args[0] and args[0] was `--bypass`.
   const next = args[i + 1]
-  const agent = next && !next.startsWith('--') ? next : undefined
+  const agent =
+    next && (CONFIGURABLE_AGENTS as readonly string[]).includes(next) ? next : undefined
 
   try {
     const { path, previous } = setPermissionMode(process.cwd(), 'bypass', agent)
@@ -346,8 +376,6 @@ async function main(argv: string[]): Promise<number> {
     // mode the operator had configured — and an unattended run is the one with nobody to
     // answer a prompt it then stops at.
     const runStartedAt = Date.now()
-    // Before the config is read, so this run sees what it just wrote.
-    if (!applyBypassFlag(rest, say)) return 1
 
     // Before anything is spawned, registered or written. The failure being guarded is an
     // operator who did not intend to start a run at all, and every line of setup below is
@@ -367,7 +395,9 @@ async function main(argv: string[]): Promise<number> {
       }
     }
 
-    const projectConfig = readProjectConfig(process.cwd())
+    // Parsed early so this run sees its own flag; written later, once it is going to start.
+    const bypass = bypassRequest(rest)
+    const projectConfig = withBypass(readProjectConfig(process.cwd()), bypass)
     // Config-derived args first, then per-invocation ones, so an explicit flag wins.
     const leadArgs = [...launchArgsFor(projectConfig, lead), ...extraArgs(flag('advisor-args', '') || flag('lead-args', ''))]
     const implArgs = [
@@ -420,6 +450,12 @@ async function main(argv: string[]): Promise<number> {
     if (prior.length > 0) {
       say(`  resuming from ${resumeFrom} — ${prior.length} messages replayed into both seats`)
     }
+
+    // AFTER the preflight refusals, the goal lint and the dry-run short-circuit, and before
+    // anything is spawned. Writing permissive mode into a project on a run that then refuses
+    // to start -- or that was only ever a dry run -- leaves a consequential setting behind
+    // from an invocation that reported doing nothing.
+    if (!rest.includes('--dry-run') && !applyBypassFlag(rest, say)) return 1
 
     if (rest.includes('--dry-run')) {
       // Everything above this line is resolution: config read, checks parsed, args composed.
@@ -554,6 +590,21 @@ async function main(argv: string[]): Promise<number> {
     // `--lead` — it is a session with no goal and some flags, which is legitimate.
     const args = [sub, ...rest].filter((a): a is string => a !== undefined)
     const goal = args[0] && !args[0].startsWith('--') ? args[0] : undefined
+    // A goal written AFTER a flag is not picked up -- the goal is args[0] by design, because
+    // `session` legitimately starts with no goal at all. Saying so is the fix: silently
+    // waiting at an empty prompt while the operator's sentence sits unused in argv reads as
+    // the console having ignored them.
+    if (!goal) {
+      const stray = args.find(
+        (a, i) => i > 0 && !a.startsWith('--') && (args[i - 1] ?? '').startsWith('--') === false,
+      )
+      if (stray) {
+        console.error(
+          `conclave: "${stray}" is not being used. A goal must come first: ` +
+            `conclave session "<goal>" [flags]. Starting without one; type it at the prompt.`,
+        )
+      }
+    }
     let bad: string | undefined
     const flag = (name: string, fallback: string) => {
       const i = args.indexOf(`--${name}`)
@@ -578,6 +629,8 @@ async function main(argv: string[]): Promise<number> {
     const implementerArgs = extraArgs(flag('implementer-args', ''))
     // Both front-ends, together. Wiring a capability into one and not the other is the
     // mistake this codebase has now made six times.
+    // The console applies and persists together: unlike `relay` there is no dry run and no
+    // preflight refusal, so the point of no return is here.
     if (!applyBypassFlag(args, (l) => console.log(l))) return 1
     if (bad) {
       console.error(

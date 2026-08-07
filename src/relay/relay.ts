@@ -448,6 +448,15 @@ export class Relay {
   #startedAt = Date.now()
   /** Worktrees present when the run began, so new ones can be told from pre-existing ones. */
   #worktreesAtStart: string[] | undefined
+  /**
+   * Every worktree seen at any point during the run.
+   *
+   * Sampled repeatedly rather than only at the end, because a subagent that FOLLOWS the
+   * briefing creates a worktree, works in it, and removes it -- leaving an end-of-run diff of
+   * nothing, indistinguishable from never having made one. The signal would then have fired
+   * on the compliant case as readily as on the violation, which is worse than not having it.
+   */
+  #worktreesSeen = new Set<string>()
   /** Turns taken across all participants, which is what a ceiling counts. */
   #turnsTaken = 0
   #participants = new Map<string, RelayParticipant>()
@@ -891,35 +900,58 @@ export class Relay {
     // turn has no last word to give it.
     if (impl.events.length === 0) return
 
-    const reply = await this.#exchange(
-      impl,
-      'The advisor considers this work complete and the session is about to end.\n\n' +
-        'Before it does: is anything unresolved, unverified, or unanswered? A test you did ' +
-        'not run, a belief you took from a comment rather than confirmed, a question you ' +
-        'asked that was not answered, or a disagreement with how this was closed.\n\n' +
-        'Reply with one FLAG: line per item, or exactly NONE if there is nothing. This is ' +
-        'carried into the run summary; it does not reopen the work.',
-    )
+    // And nothing to ask a session that cannot answer. If the implementer's last turn ended
+    // `process_exited` or `transport_lost`, `send` throws -- `write to a dead pty` -- and
+    // `#loop`'s catch would convert an already-completed run into `transport_failed`, with
+    // the log contradicting itself: `advisor reports the work complete` is already recorded.
+    //
+    // The advisor's DONE stands. A closing question is worth one turn, never a verdict.
+    const last = impl.events.filter((e) => e.type === 'turn_end').at(-1)
+    if (last && last.verdict.outcome !== 'completed') return
+    if (impl.session.state !== 'running') return
 
-    const prose = reply.prose.trim()
-    // A `note`, not a `report`. It is not relayed to the advisor and answers nobody's
-    // instruction -- it is the participant's closing statement to the RECORD. Filing it as a
-    // report made it the last thing `kind === 'report'` queries returned, which is how the
-    // relayed-report assertions started reading it instead of the actual last report.
-    this.#record({
-      from: impl.id,
-      fromRank: 'implementer',
-      to: [],
-      kind: 'note',
-      text: `closing statement: ${prose || '(no reply)'}`,
-    })
-    if (!prose || /^NONE\b/i.test(prose)) return
+    try {
+      const reply = await this.#exchange(
+        impl,
+        'The advisor considers this work complete and the session is about to end.\n\n' +
+          'Before it does: is anything unresolved, unverified, or unanswered? A test you did ' +
+          'not run, a belief you took from a comment rather than confirmed, a question you ' +
+          'asked that was not answered, or a disagreement with how this was closed.\n\n' +
+          'Reply with one FLAG: line per item, or exactly NONE if there is nothing. This is ' +
+          'carried into the run summary; it does not reopen the work.',
+      )
 
-    // `#exchange` already lifted any FLAG: lines. Anything else is carried whole rather than
-    // dropped for want of a prefix.
-    const already = this.flags.filter((f) => f.seq >= this.log.length - 1)
-    if (already.length === 0) {
-      this.flags.push({ participant: impl.id, text: prose, seq: this.log.length })
+      const prose = reply.prose.trim()
+      // A `note`, not a `report`. It is not relayed to the advisor and answers nobody's
+      // instruction -- it is the participant's closing statement to the RECORD. Filing it as a
+      // report made it the last thing `kind === 'report'` queries returned, which is how the
+      // relayed-report assertions started reading it instead of the actual last report.
+      this.#record({
+        from: impl.id,
+        fromRank: 'implementer',
+        to: [],
+        kind: 'note',
+        text: `closing statement: ${prose || '(no reply)'}`,
+      })
+      if (!prose || /^NONE\b/i.test(prose)) return
+
+      // `#exchange` already lifted any FLAG: lines. Anything else is carried whole rather than
+      // dropped for want of a prefix.
+      const already = this.flags.filter((f) => f.seq >= this.log.length - 1)
+      if (already.length === 0) {
+        this.flags.push({ participant: impl.id, text: prose, seq: this.log.length })
+      }
+    } catch (err) {
+      // A closing question is worth one turn, never a verdict. If the send fails anyway --
+      // a session that died between the advisor's DONE and this ask -- the run has already
+      // completed and must not be reclassified by an epilogue.
+      this.#record({
+        from: 'orchestrator',
+        fromRank: 'human',
+        to: [],
+        kind: 'note',
+        text: `closing question not asked: ${err instanceof Error ? err.message : String(err)}`,
+      })
     }
   }
 
@@ -942,9 +974,10 @@ export class Relay {
     const delegated = this.participants.some((p) =>
       p.events.some((e) => e.type === 'tool_use' && isSubagentTool(e.tool)),
     )
+    for (const w of worktreePaths(this.#opts.cwd)) this.#worktreesSeen.add(w)
     return {
       delegated,
-      worktreesCreated: worktreePaths(this.#opts.cwd).filter((p) => !before.has(p)),
+      worktreesCreated: [...this.#worktreesSeen].filter((p) => !before.has(p)),
     }
   }
 
@@ -985,6 +1018,9 @@ export class Relay {
     // Counted here, where a turn actually starts, so the ceiling measures work done rather
     // than rounds entered -- a round can contain one turn or several.
     this.#turnsTaken += 1
+    // Sampled per turn: a worktree created and removed inside one turn is still evidence the
+    // rule was followed, and only a repeated sample can see it.
+    if (this.#worktreesAtStart) for (const w of worktreePaths(this.#opts.cwd)) this.#worktreesSeen.add(w)
     const before = p.events.length
     await p.session.send(text, { kind: 'peer_relay' })
 
@@ -1437,6 +1473,7 @@ export class Relay {
     const maxRounds = this.#opts.maxRounds ?? 6
     this.#startedAt = Date.now()
     this.#worktreesAtStart = worktreePaths(this.#opts.cwd)
+    this.#worktreesSeen = new Set(this.#worktreesAtStart)
     for (let round = 1; round <= maxRounds; round++) {
       // At the boundary rather than on a timer. A run cannot be interrupted mid-turn without
       // discarding that turn's work -- the same reason #exchange has no timeout of its own.

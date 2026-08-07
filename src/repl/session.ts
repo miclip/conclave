@@ -190,11 +190,9 @@ const HELP = `
 /** One line per event. Verbose enough to see progress, quiet enough to read the prose. */
 function renderActivity(participant: string, e: AgentEvent): string | undefined {
   switch (e.type) {
-    case 'tool_use':
-      // `wait_agent` and a rising clock was the whole of what an operator saw while a
-      // participant delegated -- a raw tool name that does not say another model is doing the
-      // work. The name is kept in parentheses because it is still the true, checkable fact.
-      return `    · ${participant} ${describeTool(e.tool) ?? e.tool}`
+    // No `tool_use` arm: it is handled before `renderActivity` is reached, in both the
+    // pinned-footer and the fallback paths. An arm here would be dead code that looks like
+    // the place tool rendering lives.
     case 'permission_requested':
       // Naming the answer at the moment the question appears. It read as a status —
       // something being waited out — when it is the one event in a turn that cannot
@@ -551,9 +549,13 @@ export async function runSession(opts: SessionOptions): Promise<number> {
         // Pinned in the footer when there is one; appended only when there is nowhere to
         // pin it. Doing both put the same information in two places, and the appended copy
         // is the one that reads as a duplicate.
-        progress.note(e.participant, describeTool(ev.tool) ?? ev.tool)
+        // Named once, used in both paths. The fallback is the branch with NO pinned footer,
+        // which is precisely where the operator has nothing else to read -- so it was the one
+        // place the raw tool name still leaked through.
+        const label = describeTool(ev.tool) ?? ev.tool
+        progress.note(e.participant, label)
         if (screen) screen.draw()
-        else progress.activity(e.participant, colour, ev.tool)
+        else progress.activity(e.participant, colour, label)
       } else if (ev.type === 'message' && ev.role === 'assistant') {
         if (screen) screen.draw()
         else progress.activity(e.participant, colour)

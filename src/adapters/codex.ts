@@ -255,7 +255,9 @@ export class CodexPtyHookAdapter implements AgentSession {
     // Any event is a sign of life for its turn, so the idle deadline moves with it. Without
     // this the only clock is the absolute one, and a turn that goes silent mid-work waits it
     // out in full -- issue #36, where a session sat idle ~44 minutes producing nothing.
-    if (e.turnKey !== undefined && e.type !== 'turn_end') this.#watchdog.touch(String(e.turnKey))
+    // `touchAll`, not `touch(e.turnKey)`: the key on an event depends on what produced it,
+    // and a transcript-sourced event does not carry the hook key the watchdog is armed under.
+    if (e.type !== 'turn_end') this.#watchdog.touchAll()
     this.#events.push(e)
   }
 
@@ -386,6 +388,12 @@ export class CodexPtyHookAdapter implements AgentSession {
 
   #apply(turn: TurnState, update: VerdictUpdate | undefined, synthesized: boolean): void {
     if (!update) return
+
+    // A settled turn releases its watchdog target. `disarm` keeps the target on purpose so
+    // `touch` can re-arm a live turn, so something has to let go or every TurnState ever
+    // armed -- with its tracker, provenance and assistant text -- is retained until the
+    // session ends. A long interactive session accumulates one per turn.
+    this.#watchdog.forget(String(turn.key))
 
     if (update.supersedes && turn.endSeq !== undefined) {
       this.#emit({

@@ -56,6 +56,23 @@ export interface ProjectConfig {
  * externally sandboxed" -- which is the honest summary of what this option does and why
  * it is not a default.
  */
+/**
+ * Every agent that can hold a seat, which is NOT the same set as `AGENT_KINDS`.
+ *
+ * `AGENT_KINDS` is about REGISTRATION -- the agents that need hook files rendered into a
+ * project. OpenCode and Kimi need none, so they are absent from it, and validating this file
+ * against it rejected a configuration the CLI had just written itself:
+ *
+ *     $ conclave relay "..." --implementer opencode --bypass opencode
+ *       permission mode for opencode set to BYPASS and written to .conclave/config.json
+ *     conclave: .conclave/config.json: unknown agent 'opencode'. Known: claude, codex
+ *
+ * and every subsequent run in that project then failed at config read until someone
+ * hand-edited the file. Permissions are a property of a SEAT, so the seat list is what this
+ * has to be checked against.
+ */
+export const CONFIGURABLE_AGENTS = ['claude', 'codex', 'opencode', 'kimi'] as const
+
 export const BYPASS_ARGS: Record<string, string[]> = {
   claude: ['--dangerously-skip-permissions'],
   codex: ['--dangerously-bypass-approvals-and-sandbox'],
@@ -118,8 +135,10 @@ export function readProjectConfig(projectRoot: string): ProjectConfig {
   }
   check(config.permissions, 'permissions')
   for (const [agent, entry] of Object.entries(config.agents ?? {})) {
-    if (!(AGENT_KINDS as string[]).includes(agent)) {
-      throw new Error(`${path}: unknown agent '${agent}'. Known: ${AGENT_KINDS.join(', ')}`)
+    if (!(CONFIGURABLE_AGENTS as readonly string[]).includes(agent)) {
+      throw new Error(
+        `${path}: unknown agent '${agent}'. Known: ${CONFIGURABLE_AGENTS.join(', ')}`,
+      )
     }
     check(entry?.permissions, `agents.${agent}.permissions`)
   }
@@ -164,6 +183,14 @@ export function setPermissionMode(
   mode: PermissionMode,
   agent?: string,
 ): { path: string; previous: PermissionMode | undefined } {
+  // Validated BEFORE the write, not only on the next read. `--bypass claud` used to be
+  // written happily and then rejected by every subsequent run, which is a typo turned into a
+  // broken project.
+  if (agent !== undefined && !(CONFIGURABLE_AGENTS as readonly string[]).includes(agent)) {
+    throw new Error(
+      `unknown agent '${agent}'. Known: ${CONFIGURABLE_AGENTS.join(', ')}`,
+    )
+  }
   const path = configPath(projectRoot)
   // Read through the validating reader: a file that is already malformed must be reported
   // rather than silently replaced by this write.

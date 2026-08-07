@@ -131,6 +131,24 @@ export class TurnWatchdog<T extends WatchdogTarget> {
   }
 
   /**
+   * Refresh every armed turn.
+   *
+   * Adapters emit events keyed by whatever produced them, and those keys do NOT agree. On
+   * Claude Code the watchdog is armed under the hook's `prompt_id` while transcript-sourced
+   * events carry `claude-transcript-turn-N`, so a keyed `touch` silently matched nothing and
+   * every Claude turn was capped at the idle deadline however busy it was -- a tighter
+   * version of the false positive the absolute budget was raised from 10 to 45 minutes to
+   * stop.
+   *
+   * A session runs one turn at a time -- both adapters refuse a second send while one is in
+   * flight -- so "every armed turn" is "the live one", and this cannot refresh a turn that is
+   * not the one producing the activity.
+   */
+  touchAll(): void {
+    for (const key of [...this.#timers.keys()]) this.touch(key)
+  }
+
+  /**
    * Whichever deadline comes first: silence, or the absolute cap.
    *
    * Both are kept. The idle deadline is the useful one, and the absolute one still bounds a
@@ -160,8 +178,17 @@ export class TurnWatchdog<T extends WatchdogTarget> {
     this.#targets.delete(key)
   }
 
+  /**
+   * Teardown. Releases the retained targets as well as the timers.
+   *
+   * `disarm` deliberately keeps the target so `touch` can still re-arm a live turn, which
+   * means something has to release them or every TurnState ever armed -- with its tracker,
+   * provenance and assistant text -- is held for the whole session. A long interactive
+   * session accumulates one per turn.
+   */
   disarmAll(): void {
     for (const key of [...this.#timers.keys()]) this.disarm(key)
+    this.#targets.clear()
   }
 
   /** Test and diagnostic access. */

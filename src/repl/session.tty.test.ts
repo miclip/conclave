@@ -111,11 +111,14 @@ async function spawnConsole(dir: string, t?: { after: (fn: () => void) => void }
     /**
      * Wait for a predicate over the accumulated screen bytes.
      *
-     * The budget is generous on purpose. These spawn a real console in a real pty, and under
-     * a full `npm test` the machine is running every other suite at the same time -- this
-     * test timed out at 20s twice while passing in 3s on its own. A wait that returns the
-     * instant its predicate holds costs nothing when the suite is healthy, and a budget tight
-     * enough to flake turns a green suite into a coin toss.
+     * Raising this budget was the WRONG fix and is recorded as such: it turned a 20s red
+     * into a 60s red rather than a green, because under contention the console genuinely does
+     * not reach its prompt in time -- the wait is not the problem, the contention is.
+     *
+     * What addresses it is capping test concurrency (see the `test` script): these spawn real
+     * ptys and real node processes, and letting the runner start as many workers as it likes
+     * is what starves them. The budget stays generous because a starved-but-progressing
+     * console should still be allowed to finish rather than be called broken.
      */
     async until(pred: (s: string) => boolean, ms = 60_000): Promise<boolean> {
       const deadline = Date.now() + ms

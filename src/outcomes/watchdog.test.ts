@@ -310,3 +310,23 @@ test('an idle deadline that fires early re-arms on ITSELF, not on the absolute o
   assert.match(updates[0]!.verdict!.provenance[0]!.detail, /no output for/)
   w.disarmAll()
 })
+
+test('activity refreshes the live turn even when the event key differs', async () => {
+  // The regression this exists to catch. Adapters emit events keyed by whatever produced
+  // them: on Claude Code the watchdog is armed under the hook's prompt_id while transcript
+  // events carry `claude-transcript-turn-N`. A keyed touch matched nothing, so every Claude
+  // turn was capped at the idle deadline however busy it was.
+  const { updates, onUpdate } = collector()
+  const w = new TurnWatchdog<Turn>(10_000, onUpdate, MS * 2)
+  const turn = turnAt(Date.now())
+  turn.lastActivityAt = Date.now()
+  w.arm('hook-key-prompt_id', turn)
+
+  // Busy for well past the idle window, reported under a key the watchdog has never seen.
+  for (let i = 0; i < 5; i++) {
+    await sleep(MS)
+    w.touchAll()
+  }
+  assert.deepEqual(updates, [], 'a busy turn must not be called hung')
+  w.disarmAll()
+})
