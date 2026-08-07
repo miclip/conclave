@@ -47,17 +47,39 @@ export interface ProjectConfig {
  * place that knows them: a second copy would be a second thing to be wrong when either
  * tool renames a flag.
  *
- *   claude  --dangerously-skip-permissions
- *   codex   --dangerously-bypass-approvals-and-sandbox
+ *   claude    --dangerously-skip-permissions
+ *   codex     --dangerously-bypass-approvals-and-sandbox
+ *   opencode  --auto
  *
  * Codex's own description is "Skip all confirmation prompts and execute commands without
  * sandboxing. EXTREMELY DANGEROUS. Intended solely for running in environments that are
  * externally sandboxed" -- which is the honest summary of what this option does and why
  * it is not a default.
  */
-export const BYPASS_ARGS: Record<AgentKind, string[]> = {
+export const BYPASS_ARGS: Record<string, string[]> = {
   claude: ['--dangerously-skip-permissions'],
   codex: ['--dangerously-bypass-approvals-and-sandbox'],
+  opencode: ['--auto'],
+}
+
+/**
+ * How each CLI describes its own permissive flag, verbatim.
+ *
+ * Recorded because the flags are NOT equally self-describing, and that asymmetry is a
+ * hazard rather than a detail. Claude's and Codex's both begin `--dangerously`, so a
+ * reader scanning a command line cannot miss them. OpenCode's is `--auto`, which reads
+ * like a convenience and is not one -- its own help text is the only place the word
+ * "dangerous" appears.
+ *
+ * A test asserts every entry in BYPASS_ARGS has a note here, so a fourth agent whose flag
+ * is also blandly named cannot be added without someone reading what it does.
+ */
+export const BYPASS_NOTES: Record<string, string> = {
+  claude: 'Bypass all permission checks. Recommended only for sandboxes with no internet access.',
+  codex:
+    'Skip all confirmation prompts and execute commands without sandboxing. EXTREMELY ' +
+    'DANGEROUS. Intended solely for running in environments that are externally sandboxed.',
+  opencode: 'auto-approve permissions that are not explicitly denied (dangerous!)',
 }
 
 /** Where the config lives for a project, whether or not it exists. */
@@ -118,5 +140,5 @@ export function permissionModeFor(config: ProjectConfig, agent: string): Permiss
  */
 export function launchArgsFor(config: ProjectConfig, agent: string): string[] {
   if (permissionModeFor(config, agent) !== 'bypass') return []
-  return BYPASS_ARGS[agent as AgentKind] ?? []
+  return BYPASS_ARGS[agent] ?? []
 }

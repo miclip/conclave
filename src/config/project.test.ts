@@ -13,6 +13,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 import {
   BYPASS_ARGS,
+  BYPASS_NOTES,
   CONFIG_RELATIVE,
   launchArgsFor,
   permissionModeFor,
@@ -84,12 +85,27 @@ test('an agent with no known bypass flag gets none rather than a guess', () => {
   assert.deepEqual(launchArgsFor(config, 'some-other-cli'), [])
 })
 
-test('the flags are the ones the CLIs document, and are marked dangerous by both', () => {
+test('the flags are the ones the CLIs document, and none is undocumented', () => {
   // Pinned so a rename is caught here rather than by a session that silently starts
-  // asking again. Both were read from the installed CLIs' own --help.
+  // asking again. All three were read from the installed CLIs' own --help.
   assert.deepEqual(BYPASS_ARGS.claude, ['--dangerously-skip-permissions'])
   assert.deepEqual(BYPASS_ARGS.codex, ['--dangerously-bypass-approvals-and-sandbox'])
-  for (const args of Object.values(BYPASS_ARGS)) {
-    assert.ok(args.every((a) => a.startsWith('--dangerously')), 'nothing here should look routine')
+  assert.deepEqual(BYPASS_ARGS.opencode, ['--auto'])
+
+  // The original form of this test required every flag to start with `--dangerously`, on
+  // the reasoning that nothing here should look routine. OpenCode broke it -- `--auto`
+  // does the same job under a name that reads like a convenience.
+  //
+  // Weakening the assertion to let it through would have thrown away the guard. Instead
+  // the danger has to be recorded somewhere a reader will find it, and a flag that does
+  // not announce itself must be quoted from the CLI that owns it.
+  for (const [agent, args] of Object.entries(BYPASS_ARGS)) {
+    const selfLabelling = args.every((a) => a.startsWith('--dangerously'))
+    if (selfLabelling) continue
+    const note = BYPASS_NOTES[agent]
+    assert.ok(note, `${agent}'s flag does not announce itself, so its warning must be recorded`)
+    assert.match(note, /dangerous/i, `${agent}: quote the CLI's own warning, not a paraphrase`)
   }
+  // Every agent gets a note regardless, so the set cannot drift apart.
+  assert.deepEqual(Object.keys(BYPASS_NOTES).sort(), Object.keys(BYPASS_ARGS).sort())
 })

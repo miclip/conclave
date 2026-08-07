@@ -10,7 +10,12 @@
 import type { AgentSession } from '../contract/session.ts'
 import { ClaudePtyHookAdapter } from '../adapters/claude.ts'
 import { CodexPtyHookAdapter } from '../adapters/codex.ts'
-import { CLAUDE_CAPABILITIES, CODEX_CAPABILITIES } from '../conformance/capabilities.ts'
+import { OpenCodeRunAdapter } from '../adapters/opencode.ts'
+import {
+  CLAUDE_CAPABILITIES,
+  CODEX_CAPABILITIES,
+  OPENCODE_CAPABILITIES,
+} from '../conformance/capabilities.ts'
 import { assertCodexHooksExecutable, CONCLAVE_HOOK_MATCH } from '../deployment/codexHookTrust.ts'
 import { AgentRegistry } from './registry.ts'
 import type { AgentDefinition, CreateParticipantContext, ResolvedParticipant } from './types.ts'
@@ -96,6 +101,40 @@ export const CODEX_PROMPT_ON_APPROVAL_ARGS = [
   '-c', 'sandbox_mode="read-only"',
 ]
 
+/**
+ * OpenCode, via `run --format json`.
+ *
+ * Note what is absent: no `deploymentState`, no `preflight`, no `suppresses`. Nothing has
+ * to be installed, registered or trusted before a session can start, because the lifecycle
+ * arrives on stdout in a mode the CLI already supports. Both other agents needed a rendered
+ * hook registration in the project, and Codex additionally needs that registration trusted
+ * in a USER-level file before its hooks will run at all.
+ *
+ * `baseArgs` is empty on purpose. The adapter composes `run --format json [--session id]`
+ * itself, since those are not user-tunable without breaking it, and MODEL SELECTION comes
+ * from participant `args` -- `-m provider/model`. That is the whole reason OpenCode widens
+ * what Conclave can drive: any model OpenCode can reach is reachable through the same
+ * adapter, without Conclave ever holding a model API key or speaking to a provider.
+ */
+export const OPENCODE_AGENT: AgentDefinition = {
+  id: 'opencode',
+  displayName: 'OpenCode',
+  capabilities: OPENCODE_CAPABILITIES,
+  launch: {
+    command: 'opencode',
+    baseArgs: [],
+  },
+  async create(resolved: ResolvedParticipant, ctx: CreateParticipantContext): Promise<AgentSession> {
+    return OpenCodeRunAdapter.start({
+      cwd: ctx.cwd,
+      role: resolved.role.id,
+      inputOwnership: resolved.inputOwnership,
+      args: [...resolved.agent.launch.baseArgs, ...(resolved.spec.args ?? []), ...(ctx.args ?? [])],
+      watchdogMs: ctx.watchdogMs,
+    })
+  },
+}
+
 export function defaultRegistry(): AgentRegistry {
-  return new AgentRegistry().register(CLAUDE_AGENT).register(CODEX_AGENT)
+  return new AgentRegistry().register(CLAUDE_AGENT).register(CODEX_AGENT).register(OPENCODE_AGENT)
 }

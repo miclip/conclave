@@ -276,9 +276,61 @@ function codexFixtureOutcomes(): Map<Outcome, FixtureEvidence> {
   return found
 }
 
+/**
+ * OpenCode evidence, from the recorded stdout of `run --format json`.
+ *
+ * Simpler than the other two by a wide margin, and the simplicity is the finding rather
+ * than a gap: there is no journal to correlate and no transcript to reconcile, because the
+ * agent states its own terminal condition in the stream. A `step_finish` carrying
+ * `reason: "stop"` IS the completion record.
+ *
+ * Only `completed` can be witnessed this way today. The other outcomes need a run that was
+ * killed, timed out or lost, and none has been captured -- so they stay claimed at
+ * `reasoned_but_unverified` and this function reports nothing for them, which is what keeps
+ * the claim honest.
+ */
+function openCodeFixtureOutcomes(): Map<Outcome, FixtureEvidence> {
+  const found = new Map<Outcome, FixtureEvidence>()
+  const dir = join(ROOT, 'spikes', 'opencode', 'fixtures')
+  if (!existsSync(dir)) return found
+
+  for (const file of readdirSync(dir).filter((f) => f.endsWith('.ndjson'))) {
+    for (const line of readFileSync(join(dir, file), 'utf8').split('\n')) {
+      const trimmed = line.trim()
+      if (!trimmed.startsWith('{')) continue
+      let record: { type?: string; part?: { reason?: string } }
+      try {
+        record = JSON.parse(trimmed)
+      } catch {
+        continue
+      }
+      if (record.type === 'step_finish' && record.part?.reason === 'stop') {
+        found.set('completed', {
+          found: true,
+          where: `step_finish reason=stop in ${file}`,
+          cliVersion: OPENCODE_FIXTURE_VERSION,
+          historical: false,
+        })
+      }
+    }
+  }
+  return found
+}
+
+/**
+ * The OpenCode the fixtures were recorded against.
+ *
+ * Hardcoded rather than probed. `opencode --version` reports whatever is installed now,
+ * which says nothing about what produced a file on disk -- and a fixture silently
+ * re-attributed to a newer CLI is exactly the false reassurance `historical` exists to
+ * prevent.
+ */
+const OPENCODE_FIXTURE_VERSION = '1.18.15'
+
 export function fixtureOutcomesFor(agent: string): Map<Outcome, FixtureEvidence> {
   if (agent === 'claude') return claudeFixtureOutcomes()
   if (agent === 'codex') return codexFixtureOutcomes()
+  if (agent === 'opencode') return openCodeFixtureOutcomes()
   return new Map()
 }
 

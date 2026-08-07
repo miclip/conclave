@@ -85,4 +85,48 @@ export const CODEX_CAPABILITIES: AdapterCapabilities = {
   },
 }
 
-export const ALL_CAPABILITIES = [CLAUDE_CAPABILITIES, CODEX_CAPABILITIES]
+/**
+ * opencode 1.18.15, via `run --format json`.
+ *
+ * The first adapter whose terminal signal is announced by the child in a documented output
+ * mode rather than recovered from a hook we had to register or a transcript we had to
+ * parse. `step_finish` carries `reason: "stop"` on the final step and `reason: "tool-calls"`
+ * on every intermediate one; a real 3-step, 2-tool, file-writing turn is captured in
+ * `spikes/opencode/fixtures/edit-turn.ndjson`.
+ *
+ * `permission_refused` is `unsupported`, which is a stronger statement than the
+ * `reasoned_but_unverified` used elsewhere and is meant to be. `run` has no permission
+ * dialog at all: approval is settled by configuration before the process starts, so there
+ * is no request to refuse and `decidePermission` throws rather than pretending. This is a
+ * genuine capability gap rather than an untested claim, and grading it as merely unverified
+ * would imply a fixture could someday close it.
+ */
+export const OPENCODE_CAPABILITIES: AdapterCapabilities = {
+  agent: 'opencode',
+  // Literal rather than a concession. There is no resident process between turns, so
+  // there is nothing that could become ready before the first one.
+  readinessSignal: 'first_turn',
+  // Neither of the other two sources exists here. A turn is one `run` invocation, and the
+  // ids OpenCode does emit (messageID) change per STEP, so they identify something
+  // narrower than a turn and cannot stand in for one.
+  turnKeySource: 'run_invocation',
+  outcomes: {
+    // step_finish reason=stop, then process exit. Two independent signals, both observed.
+    completed: 'observed',
+    // We own the process; killing it IS the cancellation. Not yet captured as a fixture,
+    // so the mechanism is argued rather than demonstrated.
+    cancelled: 'reasoned_but_unverified',
+    // No dialog exists in `run` mode. See above.
+    permission_refused: 'unsupported',
+    process_exited: 'reasoned_but_unverified',
+    timed_out: 'reasoned_but_unverified',
+    transport_lost: 'reasoned_but_unverified',
+    // Reachable and deliberately distinct from `completed`: a run CAN exit 0 having
+    // silently failed an auxiliary model call, so exit status alone never proves a turn
+    // finished. Observed in the spike as a billing failure on an account with no payment
+    // method, where the run still exited 0.
+    unknown_abnormal_end: 'reasoned_but_unverified',
+  },
+}
+
+export const ALL_CAPABILITIES = [CLAUDE_CAPABILITIES, CODEX_CAPABILITIES, OPENCODE_CAPABILITIES]

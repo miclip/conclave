@@ -322,6 +322,7 @@ export interface AgentSession {
 export interface AdapterCapabilities {
   agent: string
   readinessSignal: 'session_start_hook' | 'first_turn' | 'unknown'
-  turnKeySource: 'prompt_id' | 'turn_id'
+  /** `run_invocation`: the agent has no per-turn id, so the adapter mints one. */
+  turnKeySource: 'prompt_id' | 'turn_id' | 'run_invocation'
   outcomes: Record<Outcome, import('./outcome.ts').EvidenceLevel>
 }
