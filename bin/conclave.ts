@@ -18,6 +18,7 @@ import {
   permissionModeFor,
   readProjectConfig,
 } from '../src/config/project.ts'
+import { formatConfigShow, formatConfigShowJson, showConfig } from '../src/config/show.ts'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { defaultRegistry } from '../src/registry/builtin.ts'
@@ -41,6 +42,13 @@ Commands:
                                    before anything that depends on stable Codex trust.
                                    --json prints the report as JSON on stdout instead of
                                    prose; the exit code is unchanged.
+  config show    [--json]          Print what this checkout resolves to: the project root,
+                                   the Conclave whose hooks would run, the permission mode
+                                   in force for each agent, and where each registration
+                                   goes. Reads only — it renders nothing, writes nothing,
+                                   creates no directories and does not diagnose Codex
+                                   trust, so it is safe to run at any time. Always exits
+                                   zero; config check is the one to gate on.
   guard          [--json]          Report whether participant sessions are live and which
                                    paths changed since they started. Exits non-zero while
                                    live, so it can gate a commit helper. --json prints the
@@ -99,6 +107,17 @@ function agentsFromFlags(flags: string[]): { agents?: AgentKind[] } {
 
 async function main(argv: string[]): Promise<number> {
   const [command, sub, ...rest] = argv
+
+  if (command === 'config' && sub === 'show') {
+    // Deliberately not routed through `installConfig`: `show` reports resolution, and a
+    // dry-run install would read templates and rendered files to answer a question nobody
+    // asked here — then fail on a missing template instead of printing the roots.
+    const report = showConfig()
+    console.log(rest.includes('--json') ? formatConfigShowJson(report) : formatConfigShow(report))
+    // Always zero. There is no failing state to report: the roots resolve or the command
+    // throws, and a permission mode is a choice rather than drift.
+    return 0
+  }
 
   if (command === 'config' && sub === 'check') {
     const result = await installConfig({
