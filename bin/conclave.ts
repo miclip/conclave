@@ -17,6 +17,7 @@ import {
   launchArgsFor,
   permissionModeFor,
   readProjectConfig,
+  setPermissionMode,
 } from '../src/config/project.ts'
 import { formatConfigShow, formatConfigShowJson, showConfig } from '../src/config/show.ts'
 import type { CheckSpec } from '../src/rotation/record.ts'
@@ -68,6 +69,7 @@ Commands:
                  [--checks-unrelated "..."] [--lead-args "..."] [--implementer-args "..."]
                  [--json] [--resume <log>] [--record <path>] [--dry-run] [--force]
                  [--max-turns N] [--max-minutes N] [--strict-goal] [--operator agent]
+                 [--bypass [agent]]
                                    Run a two-agent session unattended and print the
                                    routing log. --json prints a structured record of the
                                    run on stdout instead — outcome, per-turn verdicts with
@@ -85,6 +87,10 @@ Commands:
                                    nothing observable in it cannot be graded better than
                                    reasoned_but_unverified however well the work goes.
                                    Warnings by default, --strict-goal to refuse.
+                                   --bypass writes "permissions": "bypass" into
+                                   .conclave/config.json, for this run and future ones.
+                                   Name an agent to scope it. The models then run commands
+                                   without asking; it is as dangerous as it sounds.
                                    --dry-run resolves everything and starts nothing.
                                    --max-turns / --max-minutes stop a run that is still
                                    going, exit non-zero, and put the intended length into
@@ -103,6 +109,7 @@ Commands:
   session ["<goal>"] [--lead codex] [--implementer claude] [--rounds N]
                    [--checks "npm test"] [--checks-informational "..."]
                    [--checks-unrelated "..."] [--lead-args "..."] [--implementer-args "..."]
+                   [--bypass [agent]]
                                    The same session, interactively. The goal is optional:
                                    without one the console waits and the first thing you
                                    type starts the run. Pauses become decision
@@ -186,6 +193,38 @@ function parseChecks(
     ...split(informational).map((command): CheckSpec => ({ command, relevance: 'informational' })),
     ...split(unrelated).map((command): CheckSpec => ({ command, relevance: 'unrelated' })),
   ]
+}
+
+/**
+ * `--bypass [agent]`: put the project into permissive mode and RECORD it.
+ *
+ * Written to `.conclave/config.json` rather than applied for one run. An operator asking for
+ * this almost never means "just this once"; they mean "stop asking me in this project". A
+ * flag that applied only to the current invocation would be retyped every time and end up in
+ * a shell alias -- the same persistence with none of the visibility.
+ *
+ * Which is exactly why it announces itself. `.conclave/` is gitignored, so the change is
+ * machine-local and invisible to everyone else, including the same operator tomorrow.
+ */
+function applyBypassFlag(args: string[], say: (line: string) => void): boolean {
+  const i = args.indexOf('--bypass')
+  if (i < 0) return true
+  // An agent name may follow. Anything flag-shaped is the next option, not an argument.
+  const next = args[i + 1]
+  const agent = next && !next.startsWith('--') ? next : undefined
+
+  try {
+    const { path, previous } = setPermissionMode(process.cwd(), 'bypass', agent)
+    const scope = agent ? `${agent}` : 'every agent'
+    say(`  permission mode for ${scope} set to BYPASS and written to ${path}`)
+    if (previous !== 'bypass') {
+      say(`    it now applies to FUTURE runs in this project too — set "permissions": "ask" to undo`)
+    }
+    return true
+  } catch (err) {
+    console.error(`conclave: ${err instanceof Error ? err.message : String(err)}`)
+    return false
+  }
 }
 
 async function main(argv: string[]): Promise<number> {
@@ -303,6 +342,8 @@ async function main(argv: string[]): Promise<number> {
     // mode the operator had configured — and an unattended run is the one with nobody to
     // answer a prompt it then stops at.
     const runStartedAt = Date.now()
+    // Before the config is read, so this run sees what it just wrote.
+    if (!applyBypassFlag(rest, (l) => console.log(l))) return 1
 
     // Before anything is spawned, registered or written. The failure being guarded is an
     // operator who did not intend to start a run at all, and every line of setup below is
@@ -524,6 +565,9 @@ async function main(argv: string[]): Promise<number> {
     const turnTimeout = flag('turn-timeout', '')
     const leadArgs = extraArgs(flag('lead-args', ''))
     const implementerArgs = extraArgs(flag('implementer-args', ''))
+    // Both front-ends, together. Wiring a capability into one and not the other is the
+    // mistake this codebase has now made six times.
+    if (!applyBypassFlag(args, (l) => console.log(l))) return 1
     if (bad) {
       console.error(
         `--${bad} was given without a value.\n\n` +

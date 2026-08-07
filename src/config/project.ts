@@ -13,8 +13,8 @@
  * hand everyone who clones the repository a session that never asks permission.
  */
 
-import { existsSync, readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import type { AgentKind } from './install.ts'
 import { AGENT_KINDS } from './install.ts'
 
@@ -141,4 +141,42 @@ export function permissionModeFor(config: ProjectConfig, agent: string): Permiss
 export function launchArgsFor(config: ProjectConfig, agent: string): string[] {
   if (permissionModeFor(config, agent) !== 'bypass') return []
   return BYPASS_ARGS[agent] ?? []
+}
+
+/**
+ * Set the permission mode for a project, preserving everything else in the file.
+ *
+ * Written rather than held for one run, because the operator asking for it almost never
+ * means "just this once" -- they mean "stop asking me in this project". A flag that applied
+ * only to the current invocation would be re-typed every time and eventually put in a shell
+ * alias, which is the same persistence with none of the visibility.
+ *
+ * Merged, never replaced. A file already carrying per-agent entries keeps them; only the
+ * key being set changes. Overwriting would silently discard a narrower policy the operator
+ * had deliberately configured.
+ *
+ * The caller is expected to SAY what this did. `.conclave/` is gitignored, so the change is
+ * machine-local and invisible to everyone else -- including to the same operator tomorrow,
+ * who will not remember typing the flag.
+ */
+export function setPermissionMode(
+  projectRoot: string,
+  mode: PermissionMode,
+  agent?: string,
+): { path: string; previous: PermissionMode | undefined } {
+  const path = configPath(projectRoot)
+  // Read through the validating reader: a file that is already malformed must be reported
+  // rather than silently replaced by this write.
+  const config = readProjectConfig(projectRoot)
+  const previous = agent
+    ? ((config.agents ?? {})[agent as AgentKind]?.permissions ?? undefined)
+    : config.permissions
+
+  const next: ProjectConfig = agent
+    ? { ...config, agents: { ...(config.agents ?? {}), [agent]: { ...(config.agents ?? {})[agent as AgentKind], permissions: mode } } }
+    : { ...config, permissions: mode }
+
+  mkdirSync(dirname(path), { recursive: true })
+  writeFileSync(path, `${JSON.stringify(next, null, 2)}\n`)
+  return { path, previous }
 }

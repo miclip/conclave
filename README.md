@@ -151,6 +151,17 @@ Per agent:
 { "permissions": "ask", "agents": { "claude": { "permissions": "bypass" } } }
 ```
 
+You do not have to write it by hand. `--bypass` on `relay` or `session` sets it and records
+it, and `--bypass claude` scopes it to one agent:
+
+```sh
+conclave session "<goal>" --bypass
+```
+
+It merges rather than replaces, so a narrower per-agent policy already in the file survives.
+And it persists — the run says so, because `.conclave/` is gitignored and the change is
+invisible to everyone else, including you tomorrow. Set `"permissions": "ask"` to undo.
+
 ## The idea
 
 Two models with different training and different harness prompts have different blind

@@ -18,6 +18,7 @@ import {
   launchArgsFor,
   permissionModeFor,
   readProjectConfig,
+  setPermissionMode,
 } from './project.ts'
 
 function projectWith(config: string | undefined): string {
@@ -108,4 +109,46 @@ test('the flags are the ones the CLIs document, and none is undocumented', () =>
   }
   // Every agent gets a note regardless, so the set cannot drift apart.
   assert.deepEqual(Object.keys(BYPASS_NOTES).sort(), Object.keys(BYPASS_ARGS).sort())
+})
+
+test('--bypass writes the mode and preserves everything else', () => {
+  // Written rather than held for one run: an operator asking for this means "stop asking me
+  // in this project", not "just this once". A flag that applied only to the current
+  // invocation would be retyped every time and end up in a shell alias -- the same
+  // persistence with none of the visibility.
+  const root = projectWith('{"agents":{"codex":{"permissions":"ask"}}}')
+
+  const { previous } = setPermissionMode(root, 'bypass')
+  assert.equal(previous, undefined, 'nothing was set before')
+
+  const after = readProjectConfig(root)
+  assert.equal(after.permissions, 'bypass')
+  // Merged, never replaced. Overwriting would silently discard a narrower policy the
+  // operator had deliberately configured.
+  assert.equal(after.agents!.codex!.permissions, 'ask')
+})
+
+test('a per-agent bypass does not disturb the project-wide setting', () => {
+  const root = projectWith('{"permissions":"ask"}')
+  setPermissionMode(root, 'bypass', 'claude')
+
+  const after = readProjectConfig(root)
+  assert.equal(after.permissions, 'ask', 'the project default is untouched')
+  assert.equal(after.agents!.claude!.permissions, 'bypass')
+  // And the resolution rule still holds: the narrower entry wins for that agent only.
+  assert.equal(permissionModeFor(after, 'claude'), 'bypass')
+  assert.equal(permissionModeFor(after, 'codex'), 'ask')
+})
+
+test('writing over a malformed file reports it rather than replacing it', () => {
+  // A file that is already broken must be surfaced, not silently overwritten -- the operator
+  // has something in there they meant, and a typo is not permission to discard it.
+  const root = projectWith('{ not json')
+  assert.throws(() => setPermissionMode(root, 'bypass'), /not valid JSON/)
+})
+
+test('the config directory is created when it does not exist yet', () => {
+  const root = mkdtempSync(join(tmpdir(), 'conclave-bypass-'))
+  setPermissionMode(root, 'bypass')
+  assert.equal(readProjectConfig(root).permissions, 'bypass')
 })
