@@ -20,6 +20,7 @@ import {
 } from '../src/config/project.ts'
 import { formatConfigShow, formatConfigShowJson, showConfig } from '../src/config/show.ts'
 import type { CheckSpec } from '../src/rotation/record.ts'
+import { runReport } from '../src/relay/report.ts'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { seedCodexTrust } from '../src/deployment/codexHookTrust.ts'
@@ -62,9 +63,15 @@ Commands:
   relay "<goal>" [--lead codex] [--implementer claude] [--rounds N] [--settle SECONDS]
                  [--checks "npm test"] [--checks-informational "..."]
                  [--checks-unrelated "..."] [--lead-args "..."] [--implementer-args "..."]
+                 [--json]
                                    Run a two-agent session unattended and print the
-                                   routing log. Every pause point ENDS the run, because a
-                                   call that returns an outcome has nowhere to suspend to.
+                                   routing log. --json prints a structured record of the
+                                   run on stdout instead — outcome, per-turn verdicts with
+                                   their confidence and provenance, rotation counters,
+                                   carried flags — and every human-facing line goes to
+                                   stderr, so stdout parses in full.
+                                   Every pause point ENDS the run, because a call that
+                                   returns an outcome has nowhere to suspend to.
                                    Spawns real sessions and uses real quota.
   version                          Print the version of this build.
   demo [--record <file>]           Run the console against scripted participants: real
@@ -258,6 +265,11 @@ async function main(argv: string[]): Promise<number> {
       return i >= 0 ? (rest[i + 1] ?? fallback) : fallback
     }
     const registry = defaultRegistry()
+    // Everything a human would read goes to STDERR under --json, so stdout carries the
+    // report and nothing else. A consumer that had to strip log lines out of a JSON stream
+    // is a consumer that will eventually strip the wrong one.
+    const asJson = rest.includes('--json')
+    const say = (line: string) => (asJson ? console.error(line) : console.log(line))
     const lead = flag('lead', 'codex')
     const implementer = flag('implementer', 'claude')
     const checks = parseChecks(
@@ -279,7 +291,7 @@ async function main(argv: string[]): Promise<number> {
     ]
     const bypassing = [lead, implementer].filter((a) => permissionModeFor(projectConfig, a) === 'bypass')
     if (bypassing.length > 0) {
-      console.log(`  permission prompts bypassed for ${[...new Set(bypassing)].join(', ')} — per ${CONFIG_RELATIVE}`)
+      say(`  permission prompts bypassed for ${[...new Set(bypassing)].join(', ')} — per ${CONFIG_RELATIVE}`)
     }
 
     // Register before starting, as the console does. `relay` refused at the preflight in a
@@ -295,15 +307,15 @@ async function main(argv: string[]): Promise<number> {
       diagnose: false,
     })
     for (const w of registered.written.filter((w) => w.changed)) {
-      console.log(`  registered ${w.label}: ${w.path}`)
+      say(`  registered ${w.label}: ${w.path}`)
     }
     if (registered.unignored.length > 0) {
-      console.log(`  not ignored by this project: ${registered.unignored.join(', ')}`)
+      say(`  not ignored by this project: ${registered.unignored.join(', ')}`)
     }
 
-    console.log(
+    say(
       checks.length > 0
-        ? `  rotation armed — a degraded implementer will be replaced, verified by: ${checks.join(', ')}`
+        ? `  rotation armed — a degraded implementer will be replaced, verified by: ${checks.map((c) => (typeof c === 'string' ? c : `${c.command} [${c.relevance}]`)).join(', ')}`
         : '  rotation NOT armed — no --checks, so degradation escalates instead of rotating',
     )
 
@@ -329,7 +341,7 @@ async function main(argv: string[]): Promise<number> {
       // it happens rather than assembled at the end.
       onLog: (m) => {
         if (m.visibility === 'internal') {
-          console.log(`  · ${m.text}`)
+          say(`  · ${m.text}`)
           return
         }
         const arrow = m.to.length ? `-> ${m.to.join(', ')}` : '-> (recorded only)'
@@ -337,14 +349,22 @@ async function main(argv: string[]): Promise<number> {
         // hidden influence, and saying so on every line would make the label useless.
         const flag =
           m.visibility === 'restricted' ? `  RESTRICTED — withheld from ${m.excluded.join(', ')}` : ''
-        console.log(`\n[${m.seq}] ${m.from} (${m.fromRank}) ${arrow}${flag}`)
-        console.log(m.text.trim().split('\n').map((l) => `    ${l}`).join('\n'))
+        say(`\n[${m.seq}] ${m.from} (${m.fromRank}) ${arrow}${flag}`)
+        say(m.text.trim().split('\n').map((l) => `    ${l}`).join('\n'))
       },
     })
     let failed = false
+    // Before the run, not after the relay is built: a report whose duration excluded startup
+    // would understate how long the operator actually waited.
+    const startedAt = Date.now()
     try {
       const outcome = await relay.run(goal)
-      console.log(`\n=== relay ended: ${outcome.reason}${outcome.detail ? ` — ${outcome.detail}` : ''}`)
+      if (asJson) {
+        // stdout, alone, parseable in full. The prose lines below still go to stderr, so a
+        // human watching a --json run is not left staring at nothing.
+        console.log(JSON.stringify(await runReport(relay, { goal, outcome, startedAt }), null, 2))
+      }
+      say(`\n=== relay ended: ${outcome.reason}${outcome.detail ? ` — ${outcome.detail}` : ''}`)
       failed = outcome.reason === 'transport_failed'
     } catch (err) {
       // Belt and braces. The relay converts transport failures into outcomes now, so this
@@ -356,11 +376,11 @@ async function main(argv: string[]): Promise<number> {
       // Printed on every run, including — especially — the ones where nothing happened or
       // something broke. A null is only evidence if the instrument is known to have been
       // live, and the runs most worth diagnosing are the ones that used to report least.
-      console.log(`=== ${relay.log.length} messages routed`)
-      console.log(`=== ${relay.rotationSummary()}`)
+      say(`=== ${relay.log.length} messages routed`)
+      say(`=== ${relay.rotationSummary()}`)
       // Last, so it is the final thing on screen. A `done` that carries an unresolved
       // caveat must not read as an unqualified success to someone who only reads the tail.
-      for (const line of relay.flagSummary()) console.log(`=== ${line}`)
+      for (const line of relay.flagSummary()) say(`=== ${line}`)
       await relay.stop()
     }
     return failed ? 1 : 0

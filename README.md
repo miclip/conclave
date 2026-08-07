@@ -179,6 +179,12 @@ The reasoning is in [`DESIGN-BRIEF.md`](DESIGN-BRIEF.md).
   `step_finish reason=stop` on OpenCode; anything weaker is labelled as what it is. A run
   exiting 0 is not evidence a turn finished, and is not treated as any.
 
+`conclave relay --json` prints the run as a structured record rather than prose: the outcome,
+each turn's verdict with the confidence and provenance behind it, the rotation counters, and
+anything a participant flagged as unresolved. Every human-facing line moves to stderr, so
+stdout parses in full. That is the interface an agent driving Conclave needs — confirming a
+run should not mean grepping a transcript.
+
 ```sh
 npm test                    # typecheck and the offline suite
 npm run conformance         # what each adapter claims, graded by evidence

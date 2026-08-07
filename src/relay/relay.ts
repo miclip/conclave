@@ -370,6 +370,11 @@ export class Relay {
     return relay
   }
 
+  /** The repository the run works in. Read by the terminal record; see relay/report.ts. */
+  get cwd(): string {
+    return this.#opts.cwd
+  }
+
   get participants(): RelayParticipant[] {
     return [...this.#participants.values()]
   }
