@@ -59,7 +59,7 @@ Commands:
                                    report as JSON on stdout instead of prose; the exit
                                    code is unchanged.
   relay "<goal>" [--lead codex] [--implementer claude] [--rounds N] [--settle SECONDS]
-                 [--checks "npm test"]
+                 [--checks "npm test"] [--lead-args "..."] [--implementer-args "..."]
                                    Run a two-agent session unattended and print the
                                    routing log. Every pause point ENDS the run, because a
                                    call that returns an outcome has nowhere to suspend to.
@@ -72,13 +72,16 @@ Commands:
                                    included, so a rendering fault can be inspected rather
                                    than screenshotted.
   session ["<goal>"] [--lead codex] [--implementer claude] [--rounds N]
-                   [--checks "npm test"]
+                   [--checks "npm test"] [--lead-args "..."] [--implementer-args "..."]
                                    The same session, interactively. The goal is optional:
                                    without one the console waits and the first thing you
                                    type starts the run. Pauses become decision
                                    points you resolve: /continue, /rotate, /abort, or a
                                    line of text addressed with @advisor / @implementer.
                                    Shows participant activity while a turn is running.
+                                   --lead-args / --implementer-args pass extra launch
+                                   arguments, e.g. "-m opencode/kimi-k2.6". Required for
+                                   any agent that picks its model per invocation.
                                    --checks enables rotation; without it a degraded
                                    implementer escalates rather than rotating unverified.
 `
@@ -108,6 +111,21 @@ function version(): string {
 function agentsFromFlags(flags: string[]): { agents?: AgentKind[] } {
   const named = AGENT_KINDS.filter((a) => flags.includes(`--${a}`))
   return named.length > 0 ? { agents: named } : {}
+}
+
+/**
+ * Split a `--lead-args` / `--implementer-args` value into argv.
+ *
+ * Naive whitespace splitting, which is enough for `-m provider/model` and deliberately not
+ * a shell parser: anything needing quoting belongs in the library API rather than in a flag.
+ *
+ * This exists because OpenCode selects its MODEL per invocation. Without a way to pass one
+ * from the CLI, an `opencode` participant runs with no model pinned -- which is the failure
+ * that cost a day in #23: the process stays alive, emits nothing, and never exits. So this
+ * is a precondition for the third agent being usable at all, not a convenience.
+ */
+function extraArgs(raw: string): string[] {
+  return raw.split(/\s+/).map((a) => a.trim()).filter(Boolean)
 }
 
 async function main(argv: string[]): Promise<number> {
@@ -216,8 +234,12 @@ async function main(argv: string[]): Promise<number> {
     // mode the operator had configured — and an unattended run is the one with nobody to
     // answer a prompt it then stops at.
     const projectConfig = readProjectConfig(process.cwd())
-    const leadArgs = launchArgsFor(projectConfig, lead)
-    const implArgs = launchArgsFor(projectConfig, implementer)
+    // Config-derived args first, then per-invocation ones, so an explicit flag wins.
+    const leadArgs = [...launchArgsFor(projectConfig, lead), ...extraArgs(flag('lead-args', ''))]
+    const implArgs = [
+      ...launchArgsFor(projectConfig, implementer),
+      ...extraArgs(flag('implementer-args', '')),
+    ]
     const bypassing = [lead, implementer].filter((a) => permissionModeFor(projectConfig, a) === 'bypass')
     if (bypassing.length > 0) {
       console.log(`  permission prompts bypassed for ${[...new Set(bypassing)].join(', ')} — per ${CONFIG_RELATIVE}`)
@@ -317,6 +339,8 @@ async function main(argv: string[]): Promise<number> {
     const implementer = flag('implementer', 'claude')
     const rounds = flag('rounds', '8')
     const turnTimeout = flag('turn-timeout', '')
+    const leadArgs = extraArgs(flag('lead-args', ''))
+    const implementerArgs = extraArgs(flag('implementer-args', ''))
     if (bad) {
       console.error(
         `--${bad} was given without a value.\n\n` +
@@ -333,6 +357,8 @@ async function main(argv: string[]): Promise<number> {
       implementer,
       rounds: Number(rounds),
       checks,
+      ...(leadArgs.length > 0 ? { leadArgs } : {}),
+      ...(implementerArgs.length > 0 ? { implementerArgs } : {}),
       version: version(),
       ...(turnTimeout ? { turnWatchdogMs: Number(turnTimeout) * 1000 } : {}),
     })

@@ -99,6 +99,15 @@ export interface SessionOptions {
   goal?: string | undefined
   lead: string
   implementer: string
+  /**
+   * Extra launch arguments per seat, e.g. `['-m', 'opencode/kimi-k2.6']`.
+   *
+   * Required rather than cosmetic for any agent that selects its model per invocation: an
+   * `opencode` participant with no model pinned does not fail, it HANGS -- see issue #23.
+   * Wiring this into `relay` and not here is the mistake this codebase has made four times.
+   */
+  leadArgs?: string[] | undefined
+  implementerArgs?: string[] | undefined
   rounds: number
   /** Verification commands. Without them rotation is refused rather than done unverified. */
   checks: string[]
@@ -442,8 +451,12 @@ export async function runSession(opts: SessionOptions): Promise<number> {
   // Read before anything is launched, and loudly: a malformed config that silently meant
   // "ask" would present as a session that stops on every command for no stated reason.
   const projectConfig = readProjectConfig(opts.cwd)
-  const leadArgs = launchArgsFor(projectConfig, opts.lead)
-  const implArgs = launchArgsFor(projectConfig, opts.implementer)
+  // Config-derived first, then per-invocation, so an explicit flag wins.
+  const leadArgs = [...launchArgsFor(projectConfig, opts.lead), ...(opts.leadArgs ?? [])]
+  const implArgs = [
+    ...launchArgsFor(projectConfig, opts.implementer),
+    ...(opts.implementerArgs ?? []),
+  ]
 
   // Said once, at the top, naming who. A session that never asks permission is a thing
   // the operator should be reminded of while it runs, not something they configured weeks

@@ -305,6 +305,9 @@ export class Relay {
 
   private constructor(opts: RelayOptions) {
     this.#opts = opts
+    // Set here and nowhere else. Whether rotation was configured cannot depend on how far
+    // the run got -- see rotationWatch.armed and issue #31.
+    this.rotationWatch.armed = opts.rotation !== undefined
   }
 
   static async start(opts: RelayOptions): Promise<Relay> {
@@ -654,6 +657,24 @@ export class Relay {
    * hour of deliberate degradation testing unable to demonstrate its own null.
    */
   readonly rotationWatch = {
+    /**
+     * Whether rotation was CONFIGURED. A property of the options, not of anything that
+     * happened during the run.
+     *
+     * This was previously assigned inside `#considerRotation`, i.e. only once an assessment
+     * had actually been made. A run that ended before its first assessment -- an early
+     * escalation, an empty report, an abort -- therefore reported the initial `false` and
+     * claimed "no checks configured" when checks had been supplied and echoed back at
+     * startup. See issue #31: one invocation asserted ARMED on its first line and NOT ARMED
+     * on its last.
+     *
+     * That is worse than the ambiguity this whole structure exists to remove. An operator
+     * seeing only one of the two lines believes the wrong thing confidently, and the negative
+     * results these counters exist to support become unciteable.
+     *
+     * So it is set once, at construction, from the options. Nothing that happens during a run
+     * can change whether rotation was configured for it.
+     */
     armed: false,
     assessments: 0,
     degradationsSeen: 0,
@@ -667,6 +688,16 @@ export class Relay {
     const w = this.rotationWatch
     if (!w.armed) {
       return `rotation: NOT ARMED (no checks configured) — ${w.assessments} assessments, no rotation possible`
+    }
+    // Armed but never exercised. Distinct from both "armed and saw nothing" and "not
+    // configured", and previously indistinguishable from the latter -- which is the defect
+    // in #31. A reader must be able to tell that the instrument was live but the run ended
+    // before it was used, because that says the run is uninformative rather than negative.
+    if (w.assessments === 0) {
+      return (
+        `rotation: armed — 0 assessments, the run ended before any were made ` +
+        `(nothing was measured; this is not a negative result)`
+      )
     }
     return (
       `rotation: armed — ${w.assessments} assessments, ${w.degradationsSeen} degraded, ` +
@@ -968,7 +999,6 @@ export class Relay {
     // Counted before the decision, so the tally proves the detector RAN regardless of what
     // it concluded. That is the whole point: a zero here means "looked and saw nothing",
     // and its absence would mean "never looked".
-    this.rotationWatch.armed = this.#opts.rotation !== undefined
     this.rotationWatch.assessments += 1
     this.rotationWatch.peakGeneration = Math.max(
       this.rotationWatch.peakGeneration,

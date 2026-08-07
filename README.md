@@ -12,6 +12,34 @@ learning anything about that model.
 
 Supervised use. There is no orchestrator model, no summariser, and no third seat.
 
+## Supported REPLs
+
+| agent id | CLI | how it is driven | what registration it needs |
+|---|---|---|---|
+| `claude` | Claude Code | pty + hooks + transcript | generated `--settings`, written per session |
+| `codex` | Codex CLI | pty + hooks + transcript | project `.codex/hooks.json`, **and** those hooks trusted in your user-level config |
+| `opencode` | OpenCode | `run --format json` on stdout | none |
+
+Any of the three can take either seat. Assign them per participant:
+
+```sh
+conclave relay "<goal>" --lead codex --implementer claude
+```
+
+OpenCode additionally selects its model per invocation, so a participant can be seated on a
+model Conclave has never heard of:
+
+```sh
+conclave relay "<goal>" --lead codex --implementer opencode \
+  --implementer-args "-m opencode/kimi-k2.6"
+```
+
+That is a different MODEL in the same harness, which is not the same thing as a different
+REPL — the OpenCode system prompt, tool set and agent loop still apply. Kimi's own CLI and
+Maincode's Matilda are being added as REPLs in their own right
+([#24](https://github.com/miclip/conclave/issues/24),
+[#25](https://github.com/miclip/conclave/issues/25)).
+
 ## Install
 
 Node 24 or newer.

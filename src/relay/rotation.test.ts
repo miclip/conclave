@@ -367,3 +367,54 @@ test('the replacement is not judged degraded by the retired session’s compacti
     'exactly one rotation: the replacement must not inherit its predecessor’s degradation',
   )
 })
+
+test('arming reflects configuration, not how far the run got (#31)', async (t) => {
+  // A single live invocation asserted BOTH `rotation armed — ... verified by:
+  // make check-doc-numbers` on its first line and `rotation: NOT ARMED (no checks
+  // configured)` in its summary. `--checks` had been supplied and echoed back correctly at
+  // startup.
+  //
+  // The cause: `armed` was assigned inside #considerRotation, so it only became true once an
+  // assessment had been made. That run escalated on an empty report before its first
+  // assessment, so the flag kept its initial `false` and the summary claimed the checks were
+  // never configured.
+  //
+  // This is worse than the ambiguity rotationWatch exists to remove. Previously the arming
+  // state was unknown; contradictory is worse, because a reader who sees one line believes
+  // the wrong thing confidently -- and every negative result these counters support becomes
+  // unciteable.
+  const dir = repo()
+  const relay = await relayOf(dir, new FakeRotationSession('advisor', 'codex'), [
+    new FakeRotationSession('impl', 'claude'),
+  ])
+  t.after(() => relay.stop())
+
+  // Before any turn has been taken, and therefore before any assessment.
+  assert.equal(relay.rotationWatch.armed, true, 'configured is configured, from the start')
+  assert.equal(relay.rotationWatch.assessments, 0)
+
+  const summary = relay.rotationSummary()
+  assert.doesNotMatch(
+    summary,
+    /no checks configured/,
+    'checks WERE configured; saying otherwise is a false claim, not merely a vague one',
+  )
+  // A third state, distinct from both "armed and saw nothing" and "never configured": the
+  // instrument was live but never used, so the run is uninformative rather than negative.
+  assert.match(summary, /armed/)
+  assert.match(summary, /this is not a negative result/)
+})
+
+test('an unconfigured run still says so plainly', async (t) => {
+  const dir = repo()
+  const relay = await relayOf(
+    dir,
+    new FakeRotationSession('advisor', 'codex'),
+    [new FakeRotationSession('impl', 'claude')],
+    { rotation: undefined },
+  )
+  t.after(() => relay.stop())
+
+  assert.equal(relay.rotationWatch.armed, false)
+  assert.match(relay.rotationSummary(), /NOT ARMED \(no checks configured\)/)
+})
