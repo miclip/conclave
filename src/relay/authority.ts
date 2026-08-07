@@ -48,6 +48,43 @@
 import { execFileSync } from 'node:child_process'
 import type { RelayMessage } from './message.ts'
 
+/** How well an attributed path is evidenced. See `RestrictedOrigin.artifactSupport`. */
+export type AttributionSupport = 'named_path' | 'text_match'
+
+/**
+ * Whether a path was NAMED by a tool input or merely found inside one.
+ *
+ * A complete JSON string value equal to the path, or to a path ending in it, is the tool
+ * telling us which file it operated on. Anything else is a substring hit.
+ *
+ * Deliberately structural rather than a list of known-good tool names: an allowlist would
+ * need extending for every new adapter and would silently downgrade the ones it had not
+ * heard of, which is the failure mode this codebase keeps recording.
+ */
+export function supportFor(path: string, evidence: string[]): AttributionSupport {
+  const b = base(path)
+  for (const raw of evidence) {
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(raw)
+    } catch {
+      continue
+    }
+    for (const value of stringValues(parsed)) {
+      if (value === path || value.endsWith(`/${path}`) || base(value) === b) return 'named_path'
+    }
+  }
+  return 'text_match'
+}
+
+/** Every string leaf of a parsed tool input, however nested. */
+function stringValues(value: unknown): string[] {
+  if (typeof value === 'string') return [value]
+  if (Array.isArray(value)) return value.flatMap(stringValues)
+  if (value && typeof value === 'object') return Object.values(value).flatMap(stringValues)
+  return []
+}
+
 /** A restricted human message, and what can be traced to it. */
 export interface RestrictedOrigin {
   seq: number
@@ -61,6 +98,26 @@ export interface RestrictedOrigin {
   tokens: string[]
   /** Repository paths that appeared after it was delivered, attributed to it. */
   artifacts: string[]
+  /**
+   * How strongly each attributed path is supported.
+   *
+   *   named_path  a tool input contained the path as a COMPLETE value -- the participant's
+   *               own tooling named the file, so this is an exact match.
+   *   text_match  the path appeared only as a substring, typically inside a shell command
+   *               (`python3 - <<'PY' ... open('notes.md','w') ... PY`). Real evidence, and
+   *               weaker: `cat foo.ts` reads a file and matches identically.
+   *
+   * Recorded because attribution previously arrived as a bare list of paths, with an exact
+   * match from a structured tool input indistinguishable from a substring hit in a heredoc.
+   * The same grading discipline the outcomes use, applied to the other place this codebase
+   * makes claims from evidence.
+   *
+   * The mix is not a constant. It was measured at roughly two-thirds shell commands over
+   * Claude Code and Codex sessions; OpenCode and Kimi both emit absolute paths as structured
+   * tool inputs on every edit, so which agent holds the seat changes how well attribution is
+   * supported. That was invisible before this field existed.
+   */
+  artifactSupport: Record<string, AttributionSupport>
 }
 
 export interface AuthorityConflict {
@@ -226,6 +283,7 @@ export function originOf(m: RelayMessage): RestrictedOrigin {
     excluded: [...m.excluded],
     tokens: extractTokens(m.text),
     artifacts: [],
+    artifactSupport: {},
   }
 }
 
@@ -242,7 +300,13 @@ export function describeConflict(c: AuthorityConflict): string {
     `  withheld from: ${c.origin.excluded.join(', ') || 'nobody'}`,
   ]
   if (c.origin.artifacts.length > 0) {
-    lines.push(`  changes attributed to it: ${c.origin.artifacts.join(', ')}`)
+    // The support level travels with the path. A reader deciding whether to trust an
+    // attribution needs to know whether a tool named the file or a substring matched.
+    lines.push(
+      `  changes attributed to it: ${c.origin.artifacts
+        .map((a) => `${a} [${c.origin.artifactSupport[a] ?? 'text_match'}]`)
+        .join(', ')}`,
+    )
   }
   lines.push(
     ``,

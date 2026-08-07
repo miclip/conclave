@@ -11,7 +11,14 @@
 
 import { strict as assert } from 'node:assert'
 import test from 'node:test'
-import { attributable, describeConflict, detectConflict, extractTokens, originOf } from './authority.ts'
+import {
+  attributable,
+  describeConflict,
+  detectConflict,
+  extractTokens,
+  originOf,
+  supportFor,
+} from './authority.ts'
 import type { RelayMessage } from './message.ts'
 
 function restricted(text: string, seq = 4): RelayMessage {
@@ -183,4 +190,35 @@ test('a path too short to identify anything is never attributed, on either branc
   assert.deepEqual(attributable(['x.'], ['{"command":"echo x. > /dev/null"}']), [])
   // Three characters is enough, and is the boundary.
   assert.deepEqual(attributable(['abc'], ['{"command":"touch abc"}']), ['abc'])
+})
+
+test('an attribution says whether a tool named the path or a substring matched it (#8)', () => {
+  // Attribution used to arrive as a bare list of paths, with an exact match from a
+  // structured tool input indistinguishable from a substring hit inside a heredoc. A reader
+  // deciding whether to trust it needs the difference.
+
+  // OpenCode and Kimi both emit absolute paths as structured tool inputs on every edit.
+  assert.equal(
+    supportFor('src/relay/authority.ts', ['{"filePath":"/Users/me/repo/src/relay/authority.ts"}']),
+    'named_path',
+  )
+  assert.equal(supportFor('calc.py', ['{"path":"/tmp/w/calc.py","edit":{"old":"a","new":"b"}}']), 'named_path')
+
+  // A heredoc naming the file only inside a command string. Real evidence, and weaker --
+  // `cat notes.md` matches identically and only reads.
+  assert.equal(
+    supportFor('notes.md', [`{"command":"python3 - <<'PY'\\nopen('notes.md','w')\\nPY"}`]),
+    'text_match',
+  )
+
+  // Not JSON at all, so nothing can be named. Must not throw.
+  assert.equal(supportFor('a.ts', ['not json a.ts']), 'text_match')
+  assert.equal(supportFor('a.ts', []), 'text_match')
+})
+
+test('support grading looks at nested tool inputs, not just top-level fields', () => {
+  // Adapters nest differently -- Kimi puts the edit under `edit`, OpenCode keeps it flat --
+  // and an allowlist of field names would silently downgrade whichever shape it had not
+  // heard of, which is the failure this codebase keeps recording.
+  assert.equal(supportFor('deep.ts', ['{"a":{"b":[{"c":"/repo/deep.ts"}]}}']), 'named_path')
 })

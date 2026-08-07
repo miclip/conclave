@@ -43,6 +43,7 @@ import {
 } from './run.ts'
 import {
   attributable,
+  supportFor,
   describeConflict,
   detectConflict,
   dirtyPaths,
@@ -976,6 +977,7 @@ export class Relay {
       (this.#evidence.get(id) ?? []).slice(this.#evidenceAtOrigin.get(id) ?? 0),
     )
     for (const path of attributable(candidates, evidence)) {
+      origin.artifactSupport[path] = supportFor(path, evidence)
       if (!origin.artifacts.includes(path)) origin.artifacts.push(path)
     }
   }
