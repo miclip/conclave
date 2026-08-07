@@ -142,7 +142,7 @@ test('continuing resumes the loop where it was, rather than replaying the goal',
   // The whole point. Restarting run() was always available; continuing from the round the
   // session had actually reached was not.
   const dir = repo()
-  const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did the first thing.', 'Did the second thing.'])
+  const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did the first thing.', 'Did the second thing.', 'NONE'])
   const advisor = new FakeRotationSession('advisor', 'codex', ['Do the first thing.', 'Do the second thing.', 'DONE'])
   const relay = await relayOf(dir, advisor, [impl])
   t.after(() => relay.stop())
@@ -153,9 +153,11 @@ test('continuing resumes the loop where it was, rather than replaying the goal',
   await run.continue()
 
   assert.equal((await run.result()).reason, 'done')
-  // Three sends: the briefing, then one instruction per round. A replay would have sent
-  // the briefing and the first instruction twice.
-  assert.equal(impl.received.length, 3)
+  // Four sends: the briefing, one instruction per round, and the closing question the relay
+  // asks when the advisor says DONE. A replay would have sent the briefing and the first
+  // instruction twice.
+  assert.equal(impl.received.length, 4)
+  assert.match(impl.received[3]!, /is anything unresolved/)
   assert.ok(impl.received[1]!.includes('Do the first thing.'))
   assert.ok(impl.received[2]!.includes('Do the second thing.'))
   assert.equal(relay.log.filter((m) => m.kind === 'goal').length, 1)
@@ -164,7 +166,7 @@ test('continuing resumes the loop where it was, rather than replaying the goal',
 test('rotating from a pause replaces the implementer and the loop carries on with it', async (t) => {
   const dir = repo()
   const old = new FakeRotationSession('old', 'claude', ['ack', 'Did the first thing.'])
-  const fresh = new FakeRotationSession('fresh', 'claude', [ACCEPTED, 'Carried on.'])
+  const fresh = new FakeRotationSession('fresh', 'claude', [ACCEPTED, 'Carried on.', 'NONE'])
   const advisor = new FakeRotationSession('advisor', 'codex', ['Do the first thing.', HANDOFF, 'Do the second thing.', 'DONE'])
   const relay = await relayOf(dir, advisor, [old, fresh])
   t.after(() => relay.stop())
@@ -182,7 +184,13 @@ test('rotating from a pause replaces the implementer and the loop carries on wit
 
   await run.continue()
   assert.equal((await run.result()).reason, 'done')
-  assert.ok(fresh.received.at(-1)!.includes('Do the second thing.'), 'the replacement got the NEXT instruction')
+  // `some`, not `at(-1)`: the last thing it receives is the closing question asked when the
+  // advisor says DONE. What is being tested is that the REPLACEMENT, not the retired session,
+  // was given the next instruction.
+  assert.ok(
+    fresh.received.some((m) => m.includes('Do the second thing.')),
+    'the replacement got the NEXT instruction',
+  )
 })
 
 test('a failed rotation leaves the run paused with the original still in service', async (t) => {
@@ -208,7 +216,7 @@ test('a failed rotation leaves the run paused with the original still in service
 
 test('a constraint injected at a pause reaches the next turn at human rank', async (t) => {
   const dir = repo()
-  const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did the first thing.', 'Did the second.'])
+  const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did the first thing.', 'Did the second.', 'NONE'])
   const advisor = new FakeRotationSession('advisor', 'codex', ['Do the first thing.', 'Do the second thing.', 'DONE'])
   const relay = await relayOf(dir, advisor, [impl])
   t.after(() => relay.stop())
@@ -222,8 +230,11 @@ test('a constraint injected at a pause reaches the next turn at human rank', asy
   await run.continue()
   await run.result()
 
-  assert.ok(impl.received.at(-1)!.includes('FROM THE HUMAN'))
-  assert.ok(impl.received.at(-1)!.includes('src/adapters'))
+  // `some`, not `at(-1)`: the LAST thing the implementer receives is now the closing question
+  // the relay asks when the advisor says DONE. What matters is that the human's constraint
+  // reached it at all, and at human rank.
+  assert.ok(impl.received.some((m) => m.includes('FROM THE HUMAN')))
+  assert.ok(impl.received.some((m) => m.includes('src/adapters')))
 })
 
 test('aborting from a pause ends the run and does not take another turn', async (t) => {

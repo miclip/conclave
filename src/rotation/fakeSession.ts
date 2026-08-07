@@ -107,6 +107,10 @@ export class FakeRotationSession implements AgentSession {
     if (this.compactOnTurn === index) this.compact()
     if (this.#narration && index > 0) {
       const { blocks, report } = this.#narration
+      // One-shot. A real participant does not repeat the same narration verbatim on a later
+      // turn, and replaying it made the closing message appear twice once the relay started
+      // asking a closing question -- which read as the console double-printing it.
+      this.#narration = undefined
       const step = Math.max(1, Math.floor(this.delayMs / (blocks.length + 2)))
       blocks.forEach((text, n) => {
         setTimeout(

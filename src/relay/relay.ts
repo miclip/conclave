@@ -820,6 +820,65 @@ export class Relay {
    */
   readonly flags: RelayFlag[] = []
 
+  /**
+   * The implementer's guaranteed last word, asked once when the advisor says DONE.
+   *
+   * A run used to end on the advisor's verdict alone, with the implementer's final report
+   * never consulted. In the first live four-agent run the implementer ended its report with a
+   * direct question -- "if you intended something else, tell me what the expected behaviour
+   * should be" -- the advisor replied DONE, and the run reported unqualified success with the
+   * question unanswered and unrecorded (#37).
+   *
+   * `FLAG:` was supposed to cover that and did not: the implementer wrote prose rather than
+   * the marker, so `flags` was empty (#38). Asking directly does not depend on a participant
+   * having remembered a convention fifteen turns earlier, on the advisor choosing to answer,
+   * or on a heuristic trying to spot a question in prose -- "if you intended something else,
+   * tell me" contains no question mark, and a pattern list that missed it would make the miss
+   * doubly silent.
+   *
+   * Costs one turn per completed run. That is the price of a DONE that means something.
+   *
+   * Anything other than NONE is carried, structured or not. A participant that answers in
+   * prose is telling us something; discarding it for lacking a prefix would repeat the exact
+   * failure this exists to fix.
+   */
+  async #closingQuestion(impl: RelayParticipant): Promise<void> {
+    // Nothing to ask if it never worked. A relay that ended before the implementer's first
+    // turn has no last word to give it.
+    if (impl.events.length === 0) return
+
+    const reply = await this.#exchange(
+      impl,
+      'The advisor considers this work complete and the session is about to end.\n\n' +
+        'Before it does: is anything unresolved, unverified, or unanswered? A test you did ' +
+        'not run, a belief you took from a comment rather than confirmed, a question you ' +
+        'asked that was not answered, or a disagreement with how this was closed.\n\n' +
+        'Reply with one FLAG: line per item, or exactly NONE if there is nothing. This is ' +
+        'carried into the run summary; it does not reopen the work.',
+    )
+
+    const prose = reply.prose.trim()
+    // A `note`, not a `report`. It is not relayed to the advisor and answers nobody's
+    // instruction -- it is the participant's closing statement to the RECORD. Filing it as a
+    // report made it the last thing `kind === 'report'` queries returned, which is how the
+    // relayed-report assertions started reading it instead of the actual last report.
+    this.#record({
+      from: impl.id,
+      fromRank: 'implementer',
+      to: [],
+      kind: 'note',
+      text: `closing statement: ${prose || '(no reply)'}`,
+    })
+    if (!prose || /^NONE\b/i.test(prose)) return
+
+    // `#exchange` already lifted any FLAG: lines. Anything else is carried whole rather than
+    // dropped for want of a prefix.
+    const already = this.flags.filter((f) => f.seq >= this.log.length - 1)
+    if (already.length === 0) {
+      this.flags.push({ participant: impl.id, text: prose, seq: this.log.length })
+    }
+  }
+
   /** Lines naming everything left unresolved. Empty when there is nothing to carry. */
   flagSummary(): string[] {
     if (this.flags.length === 0) return []
@@ -1420,6 +1479,7 @@ export class Relay {
           continue
         }
         this.#record({ from: lead.id, fromRank: 'advisor', to: [], kind: 'note', text: `advisor reports the work complete: ${instruction}` })
+        await this.#closingQuestion(impl)
         return this.#end('done', instruction)
       }
       if (/^ESCALATE\b/i.test(instruction)) {

@@ -354,7 +354,7 @@ test('a participant can be asked directly once the run has ended', async () => {
   // built, explain that change. `say` cannot serve them, because it QUEUES and the queue
   // is drained by a run loop that is no longer running.
   // 'ack' is consumed by the briefing exchange; the second reply answers the question.
-  const { relay, lead, impl } = await twoParty(['DONE'], ['ack', 'server is up on :3000'])
+  const { relay, lead, impl } = await twoParty(['DONE'], ['ack', 'NONE', 'server is up on :3000'])
   await relay.run('a goal')
 
   const answer = await relay.ask('implementer', 'start the server so I can test it')
@@ -433,7 +433,7 @@ test('two participants can be asked at once; the same one, not twice', async () 
   // saw as "still waiting on implementer; one at a time".
   // 'DONE' ends the run at the advisor's first turn, so the second reply of each is left
   // for the questions rather than being eaten by the loop.
-  const { relay, lead, impl } = await twoParty(['DONE', 'looked at it'], ['ack', 'server is up'])
+  const { relay, lead, impl } = await twoParty(['DONE', 'looked at it'], ['ack', 'NONE', 'server is up'])
   await relay.run('a goal')
 
   const both = await Promise.all([
@@ -997,7 +997,8 @@ test('a report is not read until the transcript has caught up with the turn', as
 test('a transcript that never settles is used anyway, and the shortfall is recorded', async () => {
   // Silence is the failure mode being avoided. A truncated report the log explains can be
   // recovered from; one it does not cannot.
-  const stuck = new FakeSession('claude', 'impl', ['ack', 'PREAMBLE'])
+  // 'NONE' answers the closing question the relay asks when the advisor says DONE.
+  const stuck = new FakeSession('claude', 'impl', ['ack', 'PREAMBLE', 'NONE'])
   stuck.lagTranscript('never arrives', 60_000)
 
   const relay = await Relay.start({

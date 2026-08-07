@@ -331,3 +331,75 @@ test('an advisor that produces no instruction never relays an empty message (#35
     'no empty instruction may reach the implementer',
   )
 })
+
+test('the implementer gets a guaranteed last word when the advisor says DONE (#37)', async () => {
+  // A run used to end on the advisor's verdict alone. In the first live four-agent run the
+  // implementer ended its report with a direct question -- "if you intended something else,
+  // tell me what the expected behaviour should be" -- the advisor replied DONE, and the run
+  // reported unqualified success with the question unanswered and unrecorded.
+  const dir = repo()
+  const impl = new FakeRotationSession('impl', 'claude', [
+    'Done, but I did not change anything because nothing was wrong.',
+    'FLAG: the premise in the goal was false; add() already returned a + b.',
+  ])
+  const relay = await Relay.start({
+    registry: registryOf({ codex: [new FakeRotationSession('advisor', 'codex', ['DONE'])], claude: [impl] }),
+    cwd: dir,
+    lead: { id: 'advisor', agent: 'codex', role: 'advisor' },
+    implementer: { id: 'implementer', agent: 'claude', role: 'implementer' },
+    maxRounds: 3,
+  })
+  const outcome = await relay.run('a goal with a false premise')
+  const report = await runReport(relay, { goal: 'g', outcome, startedAt: Date.now() })
+  await relay.stop()
+
+  assert.match(impl.received.at(-1)!, /is anything unresolved, unverified, or unanswered/)
+  assert.equal(outcome.reason, 'done', 'it does not reopen the work')
+  assert.equal(report.flags.length, 1)
+  assert.match(report.flags[0]!.text, /premise in the goal was false/)
+})
+
+test('an unstructured closing answer is carried anyway (#38)', async () => {
+  // The FLAG: convention was not used by the one real participant that had something to
+  // flag -- it wrote prose. Discarding an answer for lacking a prefix would repeat exactly
+  // the failure this exists to fix.
+  const dir = repo()
+  const relay = await Relay.start({
+    registry: registryOf({
+      codex: [new FakeRotationSession('advisor', 'codex', ['DONE'])],
+      claude: [new FakeRotationSession('impl', 'claude', ['done', 'I never ran the conformance script.'])],
+    }),
+    cwd: dir,
+    lead: { id: 'advisor', agent: 'codex', role: 'advisor' },
+    implementer: { id: 'implementer', agent: 'claude', role: 'implementer' },
+    maxRounds: 3,
+  })
+  const outcome = await relay.run('a goal')
+  const report = await runReport(relay, { goal: 'g', outcome, startedAt: Date.now() })
+  await relay.stop()
+
+  assert.equal(report.flags.length, 1)
+  assert.match(report.flags[0]!.text, /never ran the conformance script/)
+})
+
+test('NONE means nothing outstanding, and adds no noise', async () => {
+  // The line must not appear on a clean run, or it trains the reader to skip the exact place
+  // a real flag shows up.
+  const dir = repo()
+  const relay = await Relay.start({
+    registry: registryOf({
+      codex: [new FakeRotationSession('advisor', 'codex', ['DONE'])],
+      claude: [new FakeRotationSession('impl', 'claude', ['done', 'NONE'])],
+    }),
+    cwd: dir,
+    lead: { id: 'advisor', agent: 'codex', role: 'advisor' },
+    implementer: { id: 'implementer', agent: 'claude', role: 'implementer' },
+    maxRounds: 3,
+  })
+  const outcome = await relay.run('a goal')
+  const report = await runReport(relay, { goal: 'g', outcome, startedAt: Date.now() })
+  await relay.stop()
+
+  assert.deepEqual(report.flags, [])
+  assert.deepEqual(relay.flagSummary(), [])
+})
