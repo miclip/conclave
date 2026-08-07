@@ -257,6 +257,32 @@ function applyBypassFlag(args: string[], say: (line: string) => void): boolean {
   }
 }
 
+/**
+ * Refuse an argument whose leading dash is not a dash.
+ *
+ * Em and en dashes reach a command line constantly -- autocorrect, a copied snippet, a chat
+ * client being helpful -- and `--bypass` typed as `\u2014-bypass` matches no flag, so it is
+ * silently ignored. That direction is the dangerous one: the operator believes permissions
+ * are bypassed, the run is unattended, and it stops at the first prompt with nobody to
+ * answer it.
+ *
+ * Refused rather than corrected. Guessing which flag someone meant is how a typo becomes a
+ * different command than the one they typed.
+ */
+const UNICODE_DASHES = /^[\u2010-\u2015\u2212]/
+
+function rejectUnicodeDashes(args: string[]): boolean {
+  const bad = args.filter((a) => UNICODE_DASHES.test(a))
+  if (bad.length === 0) return true
+  for (const a of bad) {
+    console.error(
+      `conclave: "${a}" starts with an ${a[0] === '\u2014' ? 'em dash' : 'en dash'}, not "--". ` +
+        `It matches no flag and would be ignored silently. Did you mean "--${a.replace(UNICODE_DASHES, '').replace(/^-+/, '')}"?`,
+    )
+  }
+  return false
+}
+
 async function main(argv: string[]): Promise<number> {
   const [command, sub, ...rest] = argv
 
@@ -376,6 +402,7 @@ async function main(argv: string[]): Promise<number> {
     // mode the operator had configured — and an unattended run is the one with nobody to
     // answer a prompt it then stops at.
     const runStartedAt = Date.now()
+    if (!rejectUnicodeDashes(rest)) return 1
 
     // Before anything is spawned, registered or written. The failure being guarded is an
     // operator who did not intend to start a run at all, and every line of setup below is
@@ -589,6 +616,7 @@ async function main(argv: string[]): Promise<number> {
     // thing typed starts the run. So a flag in the first position is not a goal named
     // `--lead` — it is a session with no goal and some flags, which is legitimate.
     const args = [sub, ...rest].filter((a): a is string => a !== undefined)
+    if (!rejectUnicodeDashes(args)) return 1
     const goal = args[0] && !args[0].startsWith('--') ? args[0] : undefined
     // A goal written AFTER a flag is not picked up -- the goal is args[0] by design, because
     // `session` legitimately starts with no goal at all. Saying so is the fix: silently

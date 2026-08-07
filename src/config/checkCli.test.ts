@@ -186,3 +186,20 @@ test('the advisor seat is named --advisor, and --lead still works', () => {
   assert.equal(plan('--advisor').advisor.agent, 'kimi')
   assert.equal(plan('--lead').advisor.agent, 'kimi', '--lead remains an alias')
 })
+
+test('a flag typed with a unicode dash is refused, not ignored', () => {
+  // Em and en dashes reach a command line constantly -- autocorrect, a copied snippet, a chat
+  // client being helpful. `--bypass` typed with an em dash matches no flag and was ignored
+  // SILENTLY, which is the dangerous direction: the operator believes permissions are
+  // bypassed, the run is unattended, and it stops at the first prompt with nobody to answer.
+  const EM = String.fromCharCode(0x2014)
+  const r = spawnSync(process.execPath, [CLI, 'relay', 'a goal', `${EM}-bypass`], {
+    cwd: REPO,
+    encoding: 'utf8',
+    timeout: 20_000,
+  })
+  assert.equal(r.status, 1, 'refused rather than run')
+  assert.match(r.stderr, /starts with an em dash/)
+  assert.match(r.stderr, /Did you mean "--bypass"/, 'and says what was probably meant')
+  assert.ok(!/joined as/.test(r.stdout), 'no participant may start')
+})
