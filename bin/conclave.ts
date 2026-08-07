@@ -22,6 +22,7 @@ import { formatConfigShow, formatConfigShowJson, showConfig } from '../src/confi
 import type { CheckSpec } from '../src/rotation/record.ts'
 import { runReport } from '../src/relay/report.ts'
 import { RunLogWriter, readRunLog, runLogExists } from '../src/relay/resume.ts'
+import { preflightRefusals } from '../src/relay/guardrails.ts'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { seedCodexTrust } from '../src/deployment/codexHookTrust.ts'
@@ -64,7 +65,8 @@ Commands:
   relay "<goal>" [--lead codex] [--implementer claude] [--rounds N] [--settle SECONDS]
                  [--checks "npm test"] [--checks-informational "..."]
                  [--checks-unrelated "..."] [--lead-args "..."] [--implementer-args "..."]
-                 [--json] [--resume <log>] [--record <path>]
+                 [--json] [--resume <log>] [--record <path>] [--dry-run] [--force]
+                 [--max-turns N] [--max-minutes N]
                                    Run a two-agent session unattended and print the
                                    routing log. --json prints a structured record of the
                                    run on stdout instead — outcome, per-turn verdicts with
@@ -75,6 +77,11 @@ Commands:
                                    .conclave/runs/ as it happens; --resume replays that
                                    log into both seats so a run that ended with work in
                                    flight is continued rather than re-described by hand.
+                                   --dry-run resolves everything and starts nothing.
+                                   --max-turns / --max-minutes stop a run that is still
+                                   going, exit non-zero, and put the intended length into
+                                   the record. Refuses to start outside a git repository
+                                   unless --force.
                                    Every pause point ENDS the run, because a call that
                                    returns an outcome has nowhere to suspend to.
                                    Spawns real sessions and uses real quota.
@@ -288,6 +295,14 @@ async function main(argv: string[]): Promise<number> {
     // mode the operator had configured — and an unattended run is the one with nobody to
     // answer a prompt it then stops at.
     const runStartedAt = Date.now()
+
+    // Before anything is spawned, registered or written. The failure being guarded is an
+    // operator who did not intend to start a run at all, and every line of setup below is
+    // work done on their behalf in a directory they did not mean to be in.
+    const refusals = preflightRefusals(process.cwd(), { force: rest.includes('--force') })
+    for (const r of refusals) console.error(`conclave: ${r.reason}\n  ${r.remedy}`)
+    if (refusals.length > 0) return 1
+
     const projectConfig = readProjectConfig(process.cwd())
     // Config-derived args first, then per-invocation ones, so an explicit flag wins.
     const leadArgs = [...launchArgsFor(projectConfig, lead), ...extraArgs(flag('lead-args', ''))]
@@ -342,6 +357,44 @@ async function main(argv: string[]): Promise<number> {
       say(`  resuming from ${resumeFrom} — ${prior.length} messages replayed into both seats`)
     }
 
+    if (rest.includes('--dry-run')) {
+      // Everything above this line is resolution: config read, checks parsed, args composed.
+      // Nothing below it is, so this is the last point at which nothing has been spawned.
+      //
+      // Respects --json for the same reason the report does: an agent operator checking what
+      // WOULD run is exactly the caller most likely to be parsing, and handing it prose
+      // because it also passed --dry-run would be the trap this mode exists to avoid.
+      const plan = {
+        dryRun: true,
+        cwd: process.cwd(),
+        goal,
+        advisor: { agent: lead, args: leadArgs },
+        implementer: { agent: implementer, args: implArgs },
+        checks: checks.map((c) =>
+          typeof c === 'string'
+            ? { command: c, relevance: 'required' }
+            : { command: c.command, relevance: c.relevance },
+        ),
+      }
+      if (asJson) {
+        console.log(JSON.stringify(plan, null, 2))
+      } else {
+        say('dry run — nothing was started')
+        say(`  cwd:         ${plan.cwd}`)
+        say(`  advisor:     ${lead}${leadArgs.length ? ` ${leadArgs.join(' ')}` : ''}`)
+        say(`  implementer: ${implementer}${implArgs.length ? ` ${implArgs.join(' ')}` : ''}`)
+        say(
+          `  checks:      ${
+            plan.checks.length
+              ? plan.checks.map((c) => `${c.command} [${c.relevance}]`).join(', ')
+              : 'none — rotation not armed'
+          }`,
+        )
+        say(`  goal:        ${goal}`)
+      }
+      return 0
+    }
+
     const relay = await Relay.start({
       registry,
       cwd: process.cwd(),
@@ -354,6 +407,16 @@ async function main(argv: string[]): Promise<number> {
         ...(implArgs.length > 0 ? { args: implArgs } : {}),
       },
       maxRounds: Number(flag('rounds', '4')),
+      ...(flag('max-turns', '') || flag('max-minutes', '')
+        ? {
+            ceilings: {
+              ...(flag('max-turns', '') ? { maxTurns: Number(flag('max-turns', '')) } : {}),
+              ...(flag('max-minutes', '')
+                ? { maxDurationMs: Number(flag('max-minutes', '')) * 60_000 }
+                : {}),
+            },
+          }
+        : {}),
       // Without these, degradation has nothing to verify a replacement against, so the run
       // ESCALATES and ends rather than rotating. An unattended form that cannot rotate
       // cannot exercise the mechanism it exists to run unattended.
@@ -389,7 +452,7 @@ async function main(argv: string[]): Promise<number> {
         console.log(JSON.stringify(await runReport(relay, { goal, outcome, startedAt: runStartedAt }), null, 2))
       }
       say(`\n=== relay ended: ${outcome.reason}${outcome.detail ? ` — ${outcome.detail}` : ''}`)
-      failed = outcome.reason === 'transport_failed'
+      failed = outcome.reason === 'transport_failed' || outcome.reason === 'ceiling'
     } catch (err) {
       // Belt and braces. The relay converts transport failures into outcomes now, so this
       // should be unreachable -- but the operator's record must not depend on that being

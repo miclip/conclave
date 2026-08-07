@@ -179,6 +179,12 @@ The reasoning is in [`DESIGN-BRIEF.md`](DESIGN-BRIEF.md).
   `step_finish reason=stop` on OpenCode; anything weaker is labelled as what it is. A run
   exiting 0 is not evidence a turn finished, and is not treated as any.
 
+`--dry-run` resolves configuration, checks and arguments and starts nothing, and `relay`
+refuses to run outside a git repository unless you pass `--force` — attribution and rotation
+both diff the tree, so neither means anything without one. `--max-turns` and `--max-minutes`
+stop a run that is still going and exit non-zero; a silent stop is indistinguishable from a
+run that simply finished.
+
 Every message is recorded to `.conclave/runs/` as it happens, and `--resume <log>` replays it
 into both seats. `relay` ends at every pause point by design, so the normal way a long run
 stops is with work still in flight — resuming continues it rather than having you transcribe

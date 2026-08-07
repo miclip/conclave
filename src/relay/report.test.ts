@@ -174,12 +174,20 @@ test('under --json nothing but the report may reach stdout', () => {
     .filter((l) => !l.startsWith('const say ='))
     .filter((l) => !l.includes('console.log(USAGE)'))
 
-  assert.equal(
-    stdoutWrites.length,
-    1,
-    `only the report may write to stdout; found:\n${stdoutWrites.join('\n')}`,
+  // The invariant is not "one write" -- `--dry-run --json` legitimately emits a plan instead
+  // of a report, and the two are mutually exclusive because dry-run returns before the run.
+  // It is that NOTHING reaches stdout except serialised JSON.
+  for (const line of stdoutWrites) {
+    assert.match(
+      line,
+      /console\.log\(JSON\.stringify\(/,
+      `stdout may carry only serialised JSON; found: ${line}`,
+    )
+  }
+  assert.ok(
+    stdoutWrites.some((l) => l.includes('runReport')),
+    'and the report is one of them',
   )
-  assert.match(stdoutWrites[0]!, /runReport/, 'and the one write is the report')
 })
 
 test('a resumed relay tells both seats they are continuing (#34)', async () => {
@@ -216,4 +224,27 @@ test('a resumed relay tells both seats they are continuing (#34)', async () => {
     assert.match(first, /THIS RUN IS A CONTINUATION/, `${who} must be told it is resuming`)
     assert.match(first, /rung2_measure_test\.go/, `${who} must receive the prior log verbatim`)
   }
+})
+
+test('a turn ceiling ends the run with its own reason (#28)', async () => {
+  const dir = repo()
+  const relay = await Relay.start({
+    registry: registryOf({
+      codex: [new FakeRotationSession('advisor', 'codex', ['keep going', 'keep going', 'keep going'])],
+      claude: [new FakeRotationSession('impl', 'claude', ['working', 'working', 'working'])],
+    }),
+    cwd: dir,
+    lead: { id: 'advisor', agent: 'codex', role: 'advisor' },
+    implementer: { id: 'implementer', agent: 'claude', role: 'implementer' },
+    maxRounds: 20,
+    ceilings: { maxTurns: 3 },
+  })
+  const outcome = await relay.run('a long goal')
+  await relay.stop()
+
+  // Its own reason, not `budget`. `budget` means the round structure ran its course; this
+  // means the run was still going and was stopped, and an operator deciding whether to
+  // resume needs to know which happened.
+  assert.equal(outcome.reason, 'ceiling')
+  assert.match(outcome.detail ?? '', /turn ceiling reached/)
 })

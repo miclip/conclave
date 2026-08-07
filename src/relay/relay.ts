@@ -55,6 +55,7 @@ import { assess, ComplaintLedger, topicOf } from '../rotation/degradation.ts'
 import { rotate, type RotationResult } from '../rotation/rotate.ts'
 import type { CheckSpec } from '../rotation/record.ts'
 import { resumeBriefing } from './resume.ts'
+import { breached, type Ceilings } from './guardrails.ts'
 
 export type {
   ObserveOptions,
@@ -137,6 +138,19 @@ export interface RelayOptions {
    * silently lost -- see issue #34.
    */
   resume?: RelayMessage[] | undefined
+  /**
+   * Wall-clock and turn ceilings, checked at turn boundaries.
+   *
+   * Distinct from `maxRounds`, which bounds the ADVISOR/IMPLEMENTER exchange structure. A
+   * ceiling bounds the run as a resource: it is what stops a run that is progressing but has
+   * been progressing for two hours, which `maxRounds` cannot express because a single round
+   * can contain an arbitrarily long turn.
+   *
+   * Also a recording device. The rotation experiments need "it ran for two hours" to be a
+   * deliberate setting rather than an accident, and a ceiling that must be raised on purpose
+   * puts the intended length into the record.
+   */
+  ceilings?: Ceilings | undefined
   /** The advisor. Steers, and cannot see the implementer's tools. */
   lead: ParticipantSpec
   implementer: ParticipantSpec
@@ -345,6 +359,10 @@ interface VerdictPause {
 
 export class Relay {
   readonly log: RelayMessage[] = []
+  /** When the run began, for the wall-clock ceiling. Set on the first turn taken. */
+  #startedAt = Date.now()
+  /** Turns taken across all participants, which is what a ceiling counts. */
+  #turnsTaken = 0
   #participants = new Map<string, RelayParticipant>()
   #seq = 0
   #opts: RelayOptions
@@ -788,6 +806,9 @@ export class Relay {
     p: RelayParticipant,
     text: string,
   ): Promise<{ prose: string; end: TurnEndEvent; unsettled: boolean }> {
+    // Counted here, where a turn actually starts, so the ceiling measures work done rather
+    // than rounds entered -- a round can contain one turn or several.
+    this.#turnsTaken += 1
     const before = p.events.length
     await p.session.send(text, { kind: 'peer_relay' })
 
@@ -1236,7 +1257,26 @@ export class Relay {
     )
 
     const maxRounds = this.#opts.maxRounds ?? 6
+    this.#startedAt = Date.now()
     for (let round = 1; round <= maxRounds; round++) {
+      // At the boundary rather than on a timer. A run cannot be interrupted mid-turn without
+      // discarding that turn's work -- the same reason #exchange has no timeout of its own.
+      const ceiling = this.#opts.ceilings
+        ? breached(this.#opts.ceilings, {
+            elapsedMs: Date.now() - this.#startedAt,
+            turns: this.#turnsTaken,
+          })
+        : undefined
+      if (ceiling) {
+        this.#record({
+          from: 'orchestrator',
+          fromRank: 'human',
+          to: [],
+          kind: 'note',
+          text: ceiling.detail,
+        })
+        return this.#end('ceiling', ceiling.detail)
+      }
       if (this.#stopped) return this.#end('stopped')
 
       if (this.#pauseRequested) {

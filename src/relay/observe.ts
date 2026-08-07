@@ -44,6 +44,15 @@ export type RunReason =
    * outcome.
    */
   | 'transport_failed'
+  /**
+   * A configured ceiling was reached: wall clock or total turns.
+   *
+   * Its own reason rather than `budget`, which means the ROUND structure was exhausted. The
+   * two answer different questions -- "the exchange ran its course" versus "this run was
+   * still going and was stopped" -- and an operator deciding whether to resume needs to know
+   * which happened.
+   */
+  | 'ceiling'
 
 export interface RelayEventBase {
   /**
