@@ -64,9 +64,9 @@ Commands:
                                    live, so it can gate a commit helper. --json prints the
                                    report as JSON on stdout instead of prose; the exit
                                    code is unchanged.
-  relay "<goal>" [--lead codex] [--implementer claude] [--rounds N] [--settle SECONDS]
+  relay "<goal>" [--advisor codex] [--implementer claude] [--rounds N] [--settle SECONDS]
                  [--checks "npm test"] [--checks-informational "..."]
-                 [--checks-unrelated "..."] [--lead-args "..."] [--implementer-args "..."]
+                 [--checks-unrelated "..."] [--advisor-args "..."] [--implementer-args "..."]
                  [--json] [--resume <log>] [--record <path>] [--dry-run] [--force]
                  [--max-turns N] [--max-minutes N] [--strict-goal] [--operator agent]
                  [--bypass [agent]]
@@ -106,9 +106,9 @@ Commands:
                                    minutes. --record tees every byte, escape codes
                                    included, so a rendering fault can be inspected rather
                                    than screenshotted.
-  session ["<goal>"] [--lead codex] [--implementer claude] [--rounds N]
+  session ["<goal>"] [--advisor codex] [--implementer claude] [--rounds N]
                    [--checks "npm test"] [--checks-informational "..."]
-                   [--checks-unrelated "..."] [--lead-args "..."] [--implementer-args "..."]
+                   [--checks-unrelated "..."] [--advisor-args "..."] [--implementer-args "..."]
                    [--bypass [agent]]
                                    The same session, interactively. The goal is optional:
                                    without one the console waits and the first thing you
@@ -116,7 +116,7 @@ Commands:
                                    points you resolve: /continue, /rotate, /abort, or a
                                    line of text addressed with @advisor / @implementer.
                                    Shows participant activity while a turn is running.
-                                   --lead-args / --implementer-args pass extra launch
+                                   --advisor-args / --implementer-args pass extra launch
                                    arguments, e.g. "-m opencode/kimi-k2.6". Required for
                                    any agent that picks its model per invocation.
                                    --checks are REQUIRED: a replacement that cannot
@@ -329,7 +329,11 @@ async function main(argv: string[]): Promise<number> {
     // is a consumer that will eventually strip the wrong one.
     const asJson = rest.includes('--json')
     const say = (line: string) => (asJson ? console.error(line) : console.log(line))
-    const lead = flag('lead', 'codex')
+    // `--advisor`, because that is the word every other surface uses: the seat id, the
+    // routing log, the console's `>advisor`, and the briefing itself. `--lead` was the
+    // RelayOptions FIELD name leaking into the CLI, and it is kept as an alias so existing
+    // scripts do not break.
+    const lead = flag('advisor', '') || flag('lead', 'codex')
     const implementer = flag('implementer', 'claude')
     const checks = parseChecks(
       flag('checks', ''),
@@ -365,7 +369,7 @@ async function main(argv: string[]): Promise<number> {
 
     const projectConfig = readProjectConfig(process.cwd())
     // Config-derived args first, then per-invocation ones, so an explicit flag wins.
-    const leadArgs = [...launchArgsFor(projectConfig, lead), ...extraArgs(flag('lead-args', ''))]
+    const leadArgs = [...launchArgsFor(projectConfig, lead), ...extraArgs(flag('advisor-args', '') || flag('lead-args', ''))]
     const implArgs = [
       ...launchArgsFor(projectConfig, implementer),
       ...extraArgs(flag('implementer-args', '')),
@@ -566,11 +570,11 @@ async function main(argv: string[]): Promise<number> {
       flag('checks-informational', ''),
       flag('checks-unrelated', ''),
     )
-    const lead = flag('lead', 'codex')
+    const lead = flag('advisor', '') || flag('lead', 'codex')
     const implementer = flag('implementer', 'claude')
     const rounds = flag('rounds', '8')
     const turnTimeout = flag('turn-timeout', '')
-    const leadArgs = extraArgs(flag('lead-args', ''))
+    const leadArgs = extraArgs(flag('advisor-args', '') || flag('lead-args', ''))
     const implementerArgs = extraArgs(flag('implementer-args', ''))
     // Both front-ends, together. Wiring a capability into one and not the other is the
     // mistake this codebase has now made six times.

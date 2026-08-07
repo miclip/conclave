@@ -166,3 +166,23 @@ test('relay refuses a flag in the goal position instead of billing for it', () =
   assert.equal(none.status, 1)
   assert.match(none.stderr, /relay needs a goal/)
 })
+
+test('the advisor seat is named --advisor, and --lead still works', () => {
+  // `--lead` was the RelayOptions FIELD name leaking into the CLI. Every other surface says
+  // advisor: the seat id, the routing log, the console's `>advisor`, the briefing header. A
+  // flag that alone says "lead" makes an operator wonder whether it is a different thing.
+  const help = spawnSync(process.execPath, [CLI, 'relay', '--help'], { encoding: 'utf8' })
+  assert.match(help.stdout, /--advisor codex/, 'usage names the seat as everything else does')
+
+  // The old spelling keeps working: v0.2.x scripts exist and a rename that breaks them buys
+  // consistency at someone else's expense.
+  const plan = (flag: string) => {
+    const r = spawnSync(process.execPath, [CLI, 'relay', 'a goal', flag, 'kimi', '--dry-run', '--json'], {
+      cwd: REPO,
+      encoding: 'utf8',
+    })
+    return JSON.parse(r.stdout) as { advisor: { agent: string } }
+  }
+  assert.equal(plan('--advisor').advisor.agent, 'kimi')
+  assert.equal(plan('--lead').advisor.agent, 'kimi', '--lead remains an alias')
+})

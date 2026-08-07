@@ -24,14 +24,14 @@ Supervised use. There is no orchestrator model, no summariser, and no third seat
 Any of the three can take either seat. Assign them per participant:
 
 ```sh
-conclave relay "<goal>" --lead codex --implementer claude
+conclave relay "<goal>" --advisor codex --implementer claude
 ```
 
 OpenCode additionally selects its model per invocation, so a participant can be seated on a
 model Conclave has never heard of:
 
 ```sh
-conclave relay "<goal>" --lead codex --implementer opencode \
+conclave relay "<goal>" --advisor codex --implementer opencode \
   --implementer-args "-m opencode/kimi-k2.6"
 ```
 
@@ -189,6 +189,13 @@ The reasoning is in [`DESIGN-BRIEF.md`](DESIGN-BRIEF.md).
   branches proven live, rollback included.
 - Subagents, which both participants may use as they judge. A subagent that modifies
   anything works in its own git worktree.
+- The advisor can tell you something without stopping the run. A line beginning `NOTE:` is
+  recorded for you and withheld from the implementer, while the rest of the reply is still
+  the instruction. `ESCALATE` remains for when it actually needs an answer before continuing.
+- Subagent work is named rather than shown as a raw tool call, and the run records whether
+  delegation happened without any worktree being created — the shape a violation of the
+  worktree rule takes. It is reported, never enforced: the repository cannot tell a
+  subagent's write from its parent's.
 - Unresolved items carried into the summary. A participant ending a report with a line
   beginning `FLAG:` has it lifted verbatim into the final lines, so a run that completed
   while something stayed unchecked does not read as unqualified success.

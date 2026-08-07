@@ -206,3 +206,33 @@ product bugs invisible to the offline suite.
 - Correlate process, filesystem and phase before diagnosing. Three separate wrong readings
   came from a grep pattern that could not match, an inspector probe that loaded a second
   module graph, and invisible buffered output.
+
+
+## Conventions the participants are asked to use, and whether they use them
+
+Three now depend on a participant choosing to write a marker. Their adoption is a fact about
+live runs, not about the code, and it is recorded here because the code cannot tell you.
+
+| marker | who | added for | observed adoption |
+|---|---|---|---|
+| `FLAG:` | implementer | #30 | **zero**. The one real participant with something to flag wrote prose (#38) |
+| `NOTE:` | advisor | #1 | unmeasured |
+| `NONE` | implementer | #37 | unmeasured; asked directly, so it does not depend on memory |
+
+The difference that matters is what an unwritten marker COSTS.
+
+An unwritten `FLAG:` made `flags: []` read as "nothing outstanding" when it meant "nobody told
+us" — worse than absent, which is why #37 added a closing question that asks directly rather
+than waiting to be told.
+
+An unwritten `NOTE:` leaves things exactly as they were before the channel existed. That is
+why it was shipped on weaker evidence than `FLAG:` had.
+
+`NONE` is different in kind: the participant is asked a direct question at the moment it
+matters, so nothing depends on it having remembered a convention from fifteen turns earlier.
+If adoption of that ALSO turns out to be poor, the conclusion is not "ask harder" — it is that
+prose from a participant cannot be relied on to carry structure, and anything that needs
+structure has to come from a hook or a tool call instead.
+
+**Do not report an empty `flags` array as a measurement** until one of these paths has been
+observed working in a live run. Today it means "nobody volunteered anything".
