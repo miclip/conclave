@@ -42,6 +42,7 @@ import {
   type CheckResult,
   type Divergence,
   type RepoRecord,
+  type CheckSpec,
 } from './record.ts'
 
 export interface RotationDeps {
@@ -50,8 +51,13 @@ export interface RotationDeps {
   exchange(session: AgentSession, text: string): Promise<string>
   /** Start a fresh implementer. Called only after the handoff parses. */
   startReplacement(): Promise<AgentSession>
-  /** Verification commands. The handoff is only as strong as what these actually check. */
-  checks: string[]
+  /**
+   * Verification commands. The handoff is only as strong as what these actually check.
+   *
+   * A bare string is `required`. Declare relevance explicitly to keep a check that does not
+   * exercise the transferred artifact from gating the transfer -- see `CheckRelevance`.
+   */
+  checks: CheckSpec[]
   checkTimeoutMs?: number
   /** Extra files whose exact content the transfer depends on, beyond those the advisor names. */
   files?: string[]
@@ -82,8 +88,22 @@ export interface Acceptance {
   /** Observed against the record taken at quiesce. */
   divergences: Divergence[]
   claimed: ClaimedCheck[]
-  /** Where the replacement's reported exit codes disagree with the arbiter's. */
+  /**
+   * Where the replacement's reported exit codes disagree with the arbiter's, on checks
+   * declared `required`. These block: the transfer is refused and rolled back.
+   */
   claimMismatches: string[]
+  /**
+   * The same disagreement on `informational` or `unrelated` checks.
+   *
+   * Reported and never blocking. A check can reproduce faithfully and still say nothing
+   * about the transferred artifact, and rolling a rotation back on one of those strands the
+   * session that most needed replacing for a reason unconnected to the work.
+   *
+   * Kept separate from `claimMismatches` rather than merged with a flag, because a caller
+   * that treated the two alike is the bug this split exists to prevent.
+   */
+  advisoryMismatches: string[]
   /**
    * Checks that were failing when the handoff was recorded and are failing still.
    *
@@ -242,13 +262,20 @@ export async function rotate(opts: {
     const divergences = compare(record, observed)
 
     const claimMismatches: string[] = []
+    const advisoryMismatches: string[] = []
     for (const [i, c] of observed.checks.entries()) {
+      // Relevance is what the ORCHESTRATOR declared, carried on the arbiter's own result.
+      // Reading it from anything the replacement produced would let the replacement decide
+      // which of its failures counted.
+      const into = c.relevance === 'required' ? claimMismatches : advisoryMismatches
+      const suffix = c.relevance === 'required' ? '' : ` [${c.relevance}]`
       const claim = claimed.find((k) => k.index === i + 1)
       if (!claim) {
-        claimMismatches.push(`no reported exit code for check ${i + 1} (\`${c.command}\`)`)
+        into.push(`no reported exit code for check ${i + 1} (\`${c.command}\`)${suffix}`)
       } else if (claim.exitCode !== c.exitCode) {
-        claimMismatches.push(
-          `check ${i + 1} (\`${c.command}\`) was reported as exit ${claim.exitCode}; the arbiter observed ${c.exitCode}`,
+        into.push(
+          `check ${i + 1} (\`${c.command}\`) was reported as exit ${claim.exitCode}; ` +
+            `the arbiter observed ${c.exitCode}${suffix}`,
         )
       }
     }
@@ -261,6 +288,7 @@ export async function rotate(opts: {
       divergences,
       claimed,
       claimMismatches,
+      advisoryMismatches,
       carriedFailures,
       prose,
     }
@@ -293,6 +321,7 @@ export async function rotate(opts: {
     await old.close('graceful')
     note(`rotation complete; ${old.sessionId} terminated`)
     for (const d of divergences) note(`advisory: ${d.detail}`)
+    for (const m of advisoryMismatches) note(`advisory: ${m}`)
     for (const c of carriedFailures) {
       note(`carried forward failing: \`${c.command}\` exits ${c.exitCode}, as it did at handoff`)
     }

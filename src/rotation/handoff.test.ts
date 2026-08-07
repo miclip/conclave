@@ -128,8 +128,8 @@ function handoff(): Handoff {
       dirty: [],
       files: [],
       checks: [
-        { command: 'npm test', exitCode: 0, outputDigest: 'x', durationMs: 1 },
-        { command: 'npx tsc --noEmit', exitCode: 0, outputDigest: 'y', durationMs: 1 },
+        { command: 'npm test', relevance: 'required', exitCode: 0, outputDigest: 'x', durationMs: 1 },
+        { command: 'npx tsc --noEmit', relevance: 'required', exitCode: 0, outputDigest: 'y', durationMs: 1 },
       ],
       at: 0,
     },

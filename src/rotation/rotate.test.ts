@@ -17,6 +17,7 @@ import test from 'node:test'
 import type { RelayMessage } from '../relay/message.ts'
 import { fakeExchange, FakeRotationSession } from './fakeSession.ts'
 import { rotate, type RotationDeps } from './rotate.ts'
+import { checkCommand, checkRelevance } from './record.ts'
 
 function repo(): string {
   const dir = mkdtempSync(join(tmpdir(), 'conclave-rotate-'))
@@ -327,4 +328,71 @@ test('rotating a session that is not running is a programming error, not a rollb
 test('a rotation cannot begin against a session that is still accepting work', async () => {
   const s = new FakeRotationSession('s', 'claude')
   await assert.rejects(() => s.beginRotation(), /quiesce the session first/)
+})
+
+test('an informational check that does not reproduce does not roll the rotation back (#9)', async () => {
+  // A check can reproduce faithfully and still say nothing about the transferred artifact.
+  // Refusing a transfer on one of those strands the session that most needed replacing, for
+  // a reason unconnected to the work.
+  //
+  // Relevance is declared HERE, by the orchestrator, in the deps the caller supplies. A
+  // replacement classifying its own checks would be grading its own transfer.
+  const dir = repo()
+  const old = new FakeRotationSession('old', 'claude')
+  const fresh = new FakeRotationSession(
+    'fresh',
+    'claude',
+    // Reports check 1 correctly and check 2 wrongly. Check 2 is informational.
+    ['CHECK 1: exit 0\nCHECK 2: exit 0\n\nRan both; the artifact matches the handoff.'],
+  )
+
+  const r = await rotate({
+    old,
+    advisor: new FakeRotationSession('advisor', 'codex', [HANDOFF]),
+    reason: 'context exhausted',
+    deps: deps(dir, fresh, {
+      checks: ['exit 0', { command: 'exit 3', relevance: 'informational' }],
+    }),
+  })
+
+  assert.equal(r.status, 'rotated', 'an informational disagreement must not block the transfer')
+  if (r.status !== 'rotated') return
+  // Reported, not discarded: the operator still learns the replacement got it wrong.
+  assert.equal(r.acceptance.claimMismatches.length, 0, 'nothing blocking')
+  assert.equal(r.acceptance.advisoryMismatches.length, 1)
+  assert.match(r.acceptance.advisoryMismatches[0]!, /exit 3/)
+  assert.match(r.acceptance.advisoryMismatches[0]!, /\[informational\]/, 'the reader is told why it did not block')
+  assert.equal(old.closedAs, 'graceful', 'the old session was actually given up')
+})
+
+test('the same disagreement on a required check still rolls back', async () => {
+  // The control. Without it the test above only proves that something did not happen, which
+  // is equally consistent with the comparison having stopped working altogether.
+  const dir = repo()
+  const old = new FakeRotationSession('old', 'claude')
+  const fresh = new FakeRotationSession('fresh', 'claude', [
+    'CHECK 1: exit 0\nCHECK 2: exit 0\n\nRan both; the artifact matches the handoff.',
+  ])
+
+  const r = await rotate({
+    old,
+    advisor: new FakeRotationSession('advisor', 'codex', [HANDOFF]),
+    reason: 'context exhausted',
+    // Identical, except that the second check is required.
+    deps: deps(dir, fresh, { checks: ['exit 0', 'exit 3'] }),
+  })
+
+  assert.equal(r.status, 'rolled_back')
+  if (r.status !== 'rolled_back') return
+  assert.equal(r.reason, 'replacement_could_not_reproduce')
+  assert.match(r.detail, /exit 3/)
+  assert.equal(old.state, 'running', 'the original is back in service')
+})
+
+test('a bare string check stays required, so an existing configuration is not weakened', () => {
+  // Relevance arrived after checks did. Defaulting a plain string to anything but `required`
+  // would silently downgrade a gate someone configured before the distinction existed.
+  assert.equal(checkRelevance('npm test'), 'required')
+  assert.equal(checkCommand('npm test'), 'npm test')
+  assert.equal(checkRelevance({ command: 'npm run lint', relevance: 'unrelated' }), 'unrelated')
 })

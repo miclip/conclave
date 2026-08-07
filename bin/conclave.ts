@@ -19,6 +19,7 @@ import {
   readProjectConfig,
 } from '../src/config/project.ts'
 import { formatConfigShow, formatConfigShowJson, showConfig } from '../src/config/show.ts'
+import type { CheckSpec } from '../src/rotation/record.ts'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { seedCodexTrust } from '../src/deployment/codexHookTrust.ts'
@@ -59,7 +60,8 @@ Commands:
                                    report as JSON on stdout instead of prose; the exit
                                    code is unchanged.
   relay "<goal>" [--lead codex] [--implementer claude] [--rounds N] [--settle SECONDS]
-                 [--checks "npm test"] [--lead-args "..."] [--implementer-args "..."]
+                 [--checks "npm test"] [--checks-informational "..."]
+                 [--checks-unrelated "..."] [--lead-args "..."] [--implementer-args "..."]
                                    Run a two-agent session unattended and print the
                                    routing log. Every pause point ENDS the run, because a
                                    call that returns an outcome has nowhere to suspend to.
@@ -72,7 +74,8 @@ Commands:
                                    included, so a rendering fault can be inspected rather
                                    than screenshotted.
   session ["<goal>"] [--lead codex] [--implementer claude] [--rounds N]
-                   [--checks "npm test"] [--lead-args "..."] [--implementer-args "..."]
+                   [--checks "npm test"] [--checks-informational "..."]
+                   [--checks-unrelated "..."] [--lead-args "..."] [--implementer-args "..."]
                                    The same session, interactively. The goal is optional:
                                    without one the console waits and the first thing you
                                    type starts the run. Pauses become decision
@@ -82,6 +85,11 @@ Commands:
                                    --lead-args / --implementer-args pass extra launch
                                    arguments, e.g. "-m opencode/kimi-k2.6". Required for
                                    any agent that picks its model per invocation.
+                                   --checks are REQUIRED: a replacement that cannot
+                                   reproduce one rolls the rotation back.
+                                   --checks-informational and --checks-unrelated run and
+                                   are reported, but never block a transfer -- for checks
+                                   that do not exercise the transferred work.
                                    --checks enables rotation; without it a degraded
                                    implementer escalates rather than rotating unverified.
 `
@@ -126,6 +134,31 @@ function agentsFromFlags(flags: string[]): { agents?: AgentKind[] } {
  */
 function extraArgs(raw: string): string[] {
   return raw.split(/\s+/).map((a) => a.trim()).filter(Boolean)
+}
+
+/**
+ * Verification commands with their declared relevance.
+ *
+ * Three flags rather than an inline syntax. A separator inside `--checks` would have to
+ * survive commands that already contain colons, equals signs and commas, and getting that
+ * wrong turns a required gate into an unrelated one silently. Separate flags also match
+ * what the design demands: relevance is DECLARED BY THE ORCHESTRATOR, so it belongs in the
+ * orchestrator's own vocabulary rather than smuggled into a command string.
+ */
+function parseChecks(
+  required: string,
+  informational: string,
+  unrelated: string,
+): CheckSpec[] {
+  const split = (raw: string) => raw.split(',').map((c) => c.trim()).filter(Boolean)
+  return [
+    // A bare --checks entry stays `required`, which is what every check was before
+    // relevance existed. Downgrading an existing configuration would weaken a gate
+    // someone is relying on without saying so.
+    ...split(required).map((command): CheckSpec => command),
+    ...split(informational).map((command): CheckSpec => ({ command, relevance: 'informational' })),
+    ...split(unrelated).map((command): CheckSpec => ({ command, relevance: 'unrelated' })),
+  ]
 }
 
 async function main(argv: string[]): Promise<number> {
@@ -227,7 +260,11 @@ async function main(argv: string[]): Promise<number> {
     const registry = defaultRegistry()
     const lead = flag('lead', 'codex')
     const implementer = flag('implementer', 'claude')
-    const checks = flag('checks', '').split(',').map((c) => c.trim()).filter(Boolean)
+    const checks = parseChecks(
+      flag('checks', ''),
+      flag('checks-informational', ''),
+      flag('checks-unrelated', ''),
+    )
 
     // `.conclave/config.json` is a property of the PROJECT, not of which front-end opened
     // it. Reading it only in the console meant an unattended run ignored the permission
@@ -346,7 +383,11 @@ async function main(argv: string[]): Promise<number> {
       }
       return value
     }
-    const checks = flag('checks', '').split(',').map((c) => c.trim()).filter(Boolean)
+    const checks = parseChecks(
+      flag('checks', ''),
+      flag('checks-informational', ''),
+      flag('checks-unrelated', ''),
+    )
     const lead = flag('lead', 'codex')
     const implementer = flag('implementer', 'claude')
     const rounds = flag('rounds', '8')

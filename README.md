@@ -90,6 +90,12 @@ piece of work. The implementer is told the advisor holds the goal.
 `--checks` enables rotation: a degraded implementer is replaced by one that reproduces the
 verification first. Without it, a degraded implementer escalates to you.
 
+Those checks are *required* — a replacement that cannot reproduce one is rolled back. Use
+`--checks-informational` or `--checks-unrelated` for commands that should run and be
+reported without gating the transfer, because a check can reproduce faithfully and still say
+nothing about the work being handed over. Relevance is declared by you, never by a
+participant: a replacement that classified its own checks would be grading its own transfer.
+
 The goal is optional. Start with none and the first thing you type becomes it.
 
 ### At the console

@@ -24,8 +24,47 @@ import { createHash } from 'node:crypto'
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
+/**
+ * How much a check's reproduction says about the transferred artifact.
+ *
+ * DECLARED BY THE ORCHESTRATOR, never by a participant. A replacement that classified its
+ * own checks would be grading its own transfer, which is the evidence-into-judgement
+ * collapse the whole rotation transaction exists to prevent: the point of the arbiter
+ * capture is that acceptance rests on something the replacement cannot author.
+ *
+ *   required       must reproduce. A mismatch rolls the rotation back.
+ *   informational  exercises the artifact, but not as a gate. A mismatch is reported and
+ *                  the rotation proceeds.
+ *   unrelated      does not exercise the transferred artifact at all. Run and recorded for
+ *                  the history, and a mismatch says nothing about the transfer.
+ *
+ * `informational` and `unrelated` behave identically in code and are deliberately still two
+ * words, because they license different conclusions. An informational mismatch is a fact
+ * about the work that a reader should weigh; an unrelated one is noise, and calling it
+ * informational would invite someone to read meaning into it.
+ */
+export type CheckRelevance = 'required' | 'informational' | 'unrelated'
+
+/**
+ * A check as configured: a command, and what its result is allowed to decide.
+ *
+ * A bare string is `required`, which is what every check was before relevance existed.
+ * Silently downgrading an existing configuration would weaken a gate someone was relying on.
+ */
+export type CheckSpec = string | { command: string; relevance: CheckRelevance }
+
+export function checkCommand(spec: CheckSpec): string {
+  return typeof spec === 'string' ? spec : spec.command
+}
+
+export function checkRelevance(spec: CheckSpec): CheckRelevance {
+  return typeof spec === 'string' ? 'required' : spec.relevance
+}
+
 export interface CheckResult {
   command: string
+  /** As declared when the check was configured. Carried so acceptance need not re-derive it. */
+  relevance: CheckRelevance
   /** `null` when the command could not be launched at all. */
   exitCode: number | null
   /** Digest of normalized output. A weak signal on purpose — see `normalize`. */
@@ -110,12 +149,13 @@ export interface CaptureOptions {
   /** Paths, repo-relative, whose exact content the handoff depends on. */
   files: string[]
   /** Verification commands, run through a shell from `root`. */
-  checks: string[]
+  checks: CheckSpec[]
   /** Per-check ceiling. A hung check must not hang the transaction. */
   checkTimeoutMs?: number
 }
 
-export function runCheck(root: string, command: string, timeoutMs: number): CheckResult {
+export function runCheck(root: string, spec: CheckSpec, timeoutMs: number): CheckResult {
+  const command = checkCommand(spec)
   const started = Date.now()
   const r = spawnSync(command, {
     cwd: root,
@@ -126,6 +166,7 @@ export function runCheck(root: string, command: string, timeoutMs: number): Chec
   })
   return {
     command,
+    relevance: checkRelevance(spec),
     // A signalled or un-launchable command has no exit code, and recording 0 or 1 for it
     // would make an unrunnable check compare equal to a passing or failing one.
     exitCode: r.status,

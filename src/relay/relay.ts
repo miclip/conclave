@@ -52,6 +52,7 @@ import {
 } from './authority.ts'
 import { assess, ComplaintLedger, topicOf } from '../rotation/degradation.ts'
 import { rotate, type RotationResult } from '../rotation/rotate.ts'
+import type { CheckSpec } from '../rotation/record.ts'
 
 export type {
   ObserveOptions,
@@ -88,8 +89,14 @@ export interface RelayParticipant {
  * with nothing to verify against escalates to the human instead.
  */
 export interface RotationConfig {
-  /** Commands the replacement must run and reproduce. Without these, no rotation. */
-  checks: string[]
+  /**
+   * Commands the replacement must run and reproduce. Without these, no rotation.
+   *
+   * A bare string is `required`: a mismatch rolls the rotation back. Pass
+   * `{command, relevance}` for a check that should be run and reported without gating the
+   * transfer. Relevance is declared HERE, by the orchestrator, and never by a participant.
+   */
+  checks: CheckSpec[]
   /**
    * What mechanical degradation entitles the orchestrator to do. Default `'candidate'`.
    *

@@ -33,6 +33,7 @@ import { Screen } from './screen.ts'
 import { banner, bold, colorFor, dim, elapsedSince, grey, markdown, Progress, rule, setColor, speakerColor, yellow } from './render.ts'
 import type { AgentEvent } from '../contract/session.ts'
 import { defaultRegistry } from '../registry/builtin.ts'
+import type { CheckSpec } from '../rotation/record.ts'
 import type { AgentRegistry } from '../registry/registry.ts'
 import { Relay } from '../relay/relay.ts'
 import type { RelayMessage } from '../relay/message.ts'
@@ -110,7 +111,11 @@ export interface SessionOptions {
   implementerArgs?: string[] | undefined
   rounds: number
   /** Verification commands. Without them rotation is refused rather than done unverified. */
-  checks: string[]
+  /**
+   * Verification commands. A bare string is `required`; pass `{command, relevance}` for a
+   * check that should run and be reported without gating a transfer.
+   */
+  checks: CheckSpec[]
   /** Streams for testing; defaults to the process's own. */
   input?: NodeJS.ReadableStream
   output?: NodeJS.WritableStream

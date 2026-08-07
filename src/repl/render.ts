@@ -11,6 +11,8 @@
  * a log because that check was missing.
  */
 
+import type { CheckSpec } from '../rotation/record.ts'
+
 export interface Style {
   (s: string): string
 }
@@ -207,10 +209,17 @@ export function banner(opts: {
   advisor: string
   implementer: string
   cwd: string
-  checks: string[]
+  checks: CheckSpec[]
 }): string {
   const legend = `${magenta('●')} ${cyan('●')} ${green('●')}`
-  const rotation = opts.checks.length > 0 ? opts.checks.join(', ') : dim('off — no checks configured')
+  // Relevance is shown, because a banner listing three checks when only one can block the
+  // transfer tells the operator something false about what is armed.
+  const rotation =
+    opts.checks.length > 0
+      ? opts.checks
+          .map((c) => (typeof c === 'string' ? c : `${c.command} [${c.relevance}]`))
+          .join(', ')
+      : dim('off — no checks configured')
   return [
     '',
     `  ${legend}  ${bold('conclave')} ${dim(opts.version)}`,
