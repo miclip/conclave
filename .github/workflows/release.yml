@@ -26,7 +26,11 @@ jobs:
         include:
           - os: macos-latest
             target: macos-arm64
-          - os: macos-13
+          # `macos-13` was retired by GitHub. A job requesting a label that no longer
+          # exists does not fail -- it QUEUES FOREVER, and because the publish job needs
+          # this one, three tagged releases sat unbuilt for a day looking merely slow.
+          # `ci.yml` never noticed because it only uses ubuntu-latest and macos-latest.
+          - os: macos-15-intel
             target: macos-x64
           - os: ubuntu-latest
             target: linux-x64
@@ -101,23 +105,10 @@ jobs:
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           files: dist/**/*
-          generate_release_notes: true
-          body: |
-            Ready-to-run archives. No build step: Node 24 executes the TypeScript directly,
-            and each archive carries the `node_modules` produced on its own platform, so
-            `node-pty` is already resolved.
-
-            ```sh
-            tar xzf conclave-<tag>-<platform>.tar.gz
-            cd conclave-<tag>-<platform>
-            ./conclave demo                 # the console, no agents, no quota
-            ./conclave config install       # register hooks for this checkout
-            ./conclave session "<goal>" --checks "npm test"
-            ```
-
-            **Archives are platform-specific.** Requires Node 24+, and the `claude` and
-            `codex` CLIs installed and authenticated for anything other than `demo`.
-
-            The live suites do not run in CI — they spawn real sessions against real
-            accounts. A green build proves the contract, the classifier and the console;
-            it proves nothing about the CLIs themselves.
+          # Neither generated notes nor a body. A release is usually published by hand with
+          # notes describing what actually changed, and this job running afterwards would
+          # overwrite them with a boilerplate paragraph. It uploads archives and nothing else.
+          #
+          # The install instructions this used to carry live in the README, which is where
+          # someone looks anyway.
+          append_body: false
