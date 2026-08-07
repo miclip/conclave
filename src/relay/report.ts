@@ -87,6 +87,16 @@ export interface RunReport {
     rotations: number
     peakGeneration: number
   }
+  /**
+   * Whether subagents were used, and whether any worktree appeared while they were.
+   *
+   * The briefing tells a subagent that MODIFIES anything to work in its own worktree. Nothing
+   * enforces that and nothing can -- the repository cannot tell a subagent's write from its
+   * parent's (#8) -- so what is recorded is the SHAPE a violation takes, for a reader who was
+   * not watching. `delegated: true` with no worktrees is worth a look and is not a verdict:
+   * a subagent that only reads is explicitly allowed the shared directory.
+   */
+  subagents: { delegated: boolean; worktreesCreated: string[] }
   /** What participants said was left unresolved. Empty is a claim, not a gap. */
   flags: { participant: string; text: string; seq: number }[]
   /** Restricted asides and what was traced to each, with how well it was supported. */
@@ -156,6 +166,7 @@ export async function runReport(relay: Relay, input: ReportInput): Promise<RunRe
       rotations: relay.rotationWatch.rotations,
       peakGeneration: relay.rotationWatch.peakGeneration,
     },
+    subagents: relay.subagentUse(),
     flags: relay.flags.map((f) => ({ participant: f.participant, text: f.text, seq: f.seq })),
     restricted: relay.restrictedOrigins.map((o) => ({
       seq: o.seq,

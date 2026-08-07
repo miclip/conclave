@@ -31,3 +31,49 @@ test('the description says what is happening and keeps the checkable fact', () =
   assert.equal(describeTool('wait_agent'), 'waiting on a subagent (wait_agent)')
   assert.match(describeTool('Task')!, /waiting on a subagent/)
 })
+
+test('delegation is detected from participant events, which carry the tool name', async () => {
+  // The first version of this read the relay's `#evidence`, which keeps tool ARGUMENTS and
+  // discards the tool name (#8). It would have reported `delegated: false` for every run
+  // while looking entirely correct.
+  const { Relay } = await import('./relay.ts')
+  const { FakeRotationSession } = await import('../rotation/fakeSession.ts')
+  const { AgentRegistry } = await import('../registry/registry.ts')
+  const { execFileSync } = await import('node:child_process')
+  const { mkdtempSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+
+  const dir = mkdtempSync(join(tmpdir(), 'conclave-sub-'))
+  execFileSync('git', ['init', '-q', '.'], { cwd: dir })
+
+  const impl = new FakeRotationSession('impl', 'claude', ['done', 'NONE'])
+  impl.toolsPerTurn = ['wait_agent']
+  const registry = new AgentRegistry()
+  for (const [agent, s] of [['codex', new FakeRotationSession('advisor', 'codex', ['DONE'])], ['claude', impl]] as const) {
+    registry.register({
+      id: agent,
+      displayName: agent,
+      capabilities: { agent, readinessSignal: 'first_turn', turnKeySource: 'run_invocation', outcomes: {
+        completed: 'observed', cancelled: 'reasoned_but_unverified', permission_refused: 'unsupported',
+        process_exited: 'reasoned_but_unverified', timed_out: 'reasoned_but_unverified',
+        transport_lost: 'reasoned_but_unverified', unknown_abnormal_end: 'reasoned_but_unverified' } },
+      launch: { command: agent, baseArgs: [] },
+      create: async () => s as never,
+    })
+  }
+  const relay = await Relay.start({
+    registry, cwd: dir,
+    lead: { id: 'advisor', agent: 'codex', role: 'advisor' },
+    implementer: { id: 'implementer', agent: 'claude', role: 'implementer' },
+    maxRounds: 2,
+  })
+  await relay.run('a goal')
+  const use = relay.subagentUse()
+  await relay.stop()
+
+  assert.equal(use.delegated, true, 'a wait_agent call is delegation')
+  // A zero here is frequently correct: a subagent that only reads may use the shared
+  // directory. It is evidence to weigh, never a verdict.
+  assert.deepEqual(use.worktreesCreated, [])
+})

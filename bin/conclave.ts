@@ -532,6 +532,13 @@ async function main(argv: string[]): Promise<number> {
       // Last, so it is the final thing on screen. A `done` that carries an unresolved
       // caveat must not read as an unqualified success to someone who only reads the tail.
       for (const line of relay.flagSummary()) say(`=== ${line}`)
+      // Only when it is worth a look. Printing "0 worktrees" on every run that never
+      // delegated would train the reader to skip the line that matters.
+      const sub = relay.subagentUse()
+      if (sub.delegated && sub.worktreesCreated.length === 0) {
+        say('=== subagents were used and no git worktree was created — worth a look if any of')
+        say('===   them modified the shared working directory')
+      }
       await relay.stop()
     }
     return failed ? 1 : 0

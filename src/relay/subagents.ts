@@ -1,3 +1,5 @@
+import { execFileSync } from 'node:child_process'
+
 /**
  * Naming subagent work, which is otherwise invisible while it happens.
  *
@@ -46,4 +48,36 @@ export function isSubagentTool(tool: string): boolean {
  */
 export function describeTool(tool: string): string | undefined {
   return isSubagentTool(tool) ? `waiting on a subagent (${tool})` : undefined
+}
+
+/**
+ * Worktrees attached to a repository, by path.
+ *
+ * The subagent rule -- "a subagent that MODIFIES anything must work in its own git worktree"
+ * -- is a sentence in a briefing and nothing checks it. It cannot be ENFORCED from here: the
+ * repository cannot distinguish a write by a subagent from a write by its parent, which is
+ * the same limit `authority.ts` documents for attribution generally (#8).
+ *
+ * It can be OBSERVED. A run in which subagents were used and no worktree was ever created is
+ * not proof of a violation, and it is the shape a violation takes -- which is worth putting
+ * in the record rather than leaving to a reader who was not watching.
+ *
+ * Reported, never blocking. A subagent that only reads is explicitly allowed to use the
+ * shared directory, so a zero here is often correct.
+ */
+export function worktreePaths(repoRoot: string): string[] {
+  try {
+    return execFileSync('git', ['worktree', 'list', '--porcelain'], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
+      .split('\n')
+      .filter((l) => l.startsWith('worktree '))
+      .map((l) => l.slice('worktree '.length).trim())
+      .filter(Boolean)
+  } catch {
+    // Not a repository, or git is unavailable. Neither is this module's problem to report.
+    return []
+  }
 }

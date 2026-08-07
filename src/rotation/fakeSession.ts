@@ -39,6 +39,14 @@ export class FakeRotationSession implements AgentSession {
    * (issue #32), so the relay must be able to be put in that state by a test.
    */
   failSendOnTurn: number | undefined
+  /**
+   * Tool names to emit as `tool_use` events on each turn.
+   *
+   * The fake emitted none, so anything keyed to what a participant DID with its turn -- as
+   * opposed to what it said -- could not be exercised at all. Subagent detection reads
+   * exactly that.
+   */
+  toolsPerTurn: string[] = []
 
   #state: SessionState = 'running'
   #replies: string[]
@@ -104,6 +112,17 @@ export class FakeRotationSession implements AgentSession {
       at: Date.now(),
       provisional: false,
     })
+    for (const tool of this.toolsPerTurn) {
+      this.emit({
+        type: 'tool_use',
+        tool,
+        input: undefined,
+        turnKey: key,
+        seq: ++this.#seq,
+        at: Date.now(),
+        provisional: false,
+      })
+    }
     if (this.compactOnTurn === index) this.compact()
     if (this.#narration && index > 0) {
       const { blocks, report } = this.#narration

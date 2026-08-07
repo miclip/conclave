@@ -56,6 +56,7 @@ import { rotate, type RotationResult } from '../rotation/rotate.ts'
 import type { CheckSpec } from '../rotation/record.ts'
 import { resumeBriefing } from './resume.ts'
 import { breached, type Ceilings } from './guardrails.ts'
+import { isSubagentTool, worktreePaths } from './subagents.ts'
 
 export type {
   ObserveOptions,
@@ -404,6 +405,8 @@ export class Relay {
   readonly log: RelayMessage[] = []
   /** When the run began, for the wall-clock ceiling. Set on the first turn taken. */
   #startedAt = Date.now()
+  /** Worktrees present when the run began, so new ones can be told from pre-existing ones. */
+  #worktreesAtStart: string[] | undefined
   /** Turns taken across all participants, which is what a ceiling counts. */
   #turnsTaken = 0
   #participants = new Map<string, RelayParticipant>()
@@ -876,6 +879,31 @@ export class Relay {
     const already = this.flags.filter((f) => f.seq >= this.log.length - 1)
     if (already.length === 0) {
       this.flags.push({ participant: impl.id, text: prose, seq: this.log.length })
+    }
+  }
+
+  /**
+   * Whether subagents were used, and whether any worktree appeared while they were.
+   *
+   * The briefing tells a subagent that MODIFIES anything to work in its own worktree. Nothing
+   * enforces that and nothing can: the repository cannot tell a subagent's write from its
+   * parent's (#8). What it can do is record the shape a violation takes -- delegation
+   * happened, no worktree was created -- and leave the reading to a human.
+   *
+   * A zero is frequently correct. A subagent that only reads is explicitly allowed the shared
+   * directory, so this is evidence to weigh and never a verdict.
+   */
+  subagentUse(): { delegated: boolean; worktreesCreated: string[] } {
+    const before = new Set(this.#worktreesAtStart ?? [])
+    // Participant EVENTS, not `#evidence`. Evidence keeps tool arguments and discards the
+    // tool name -- the gap recorded in #8 -- so reading it here would have made `delegated`
+    // permanently false while looking like it worked.
+    const delegated = this.participants.some((p) =>
+      p.events.some((e) => e.type === 'tool_use' && isSubagentTool(e.tool)),
+    )
+    return {
+      delegated,
+      worktreesCreated: worktreePaths(this.#opts.cwd).filter((p) => !before.has(p)),
     }
   }
 
@@ -1367,6 +1395,7 @@ export class Relay {
 
     const maxRounds = this.#opts.maxRounds ?? 6
     this.#startedAt = Date.now()
+    this.#worktreesAtStart = worktreePaths(this.#opts.cwd)
     for (let round = 1; round <= maxRounds; round++) {
       // At the boundary rather than on a timer. A run cannot be interrupted mid-turn without
       // discarding that turn's work -- the same reason #exchange has no timeout of its own.
