@@ -48,7 +48,20 @@ import { TranscriptSessionView } from '../transcript/reconcile.ts'
 import { AsyncQueue } from './asyncQueue.ts'
 
 const CLIENT = join(import.meta.dirname, '..', 'hooks', 'client.ts')
-const HOOK_EVENTS = ['SessionStart', 'UserPromptSubmit', 'PermissionRequest', 'Stop', 'SessionEnd']
+/**
+ * `SubagentStop` is registered and `SubagentStart` is not, because Claude Code has no such
+ * event -- verified against the 2.1.224 bundle. So a delegating turn can be seen to have
+ * FINISHED delegating and never to have started, which is why the console falls back to
+ * naming the tool call. Kimi has both; see `kimiConfig.ts`.
+ */
+const HOOK_EVENTS = [
+  'SessionStart',
+  'UserPromptSubmit',
+  'PermissionRequest',
+  'SubagentStop',
+  'Stop',
+  'SessionEnd',
+]
 
 interface TurnState {
   key: TurnKey

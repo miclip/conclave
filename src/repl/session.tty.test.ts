@@ -108,8 +108,16 @@ async function spawnConsole(dir: string, t?: { after: (fn: () => void) => void }
     proc: p,
     text: () => buf,
     type: (s: string) => p.write(s),
-    /** Wait for a predicate over the accumulated screen bytes. */
-    async until(pred: (s: string) => boolean, ms = 20_000): Promise<boolean> {
+    /**
+     * Wait for a predicate over the accumulated screen bytes.
+     *
+     * The budget is generous on purpose. These spawn a real console in a real pty, and under
+     * a full `npm test` the machine is running every other suite at the same time -- this
+     * test timed out at 20s twice while passing in 3s on its own. A wait that returns the
+     * instant its predicate holds costs nothing when the suite is healthy, and a budget tight
+     * enough to flake turns a green suite into a coin toss.
+     */
+    async until(pred: (s: string) => boolean, ms = 60_000): Promise<boolean> {
       const deadline = Date.now() + ms
       while (Date.now() < deadline) {
         if (pred(buf)) return true

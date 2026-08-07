@@ -86,6 +86,13 @@ export const KIMI_HOOK_EVENTS = [
   /** Compaction, announced on both sides. Claude Code has these; Codex does not. */
   'PreCompact',
   'PostCompact',
+  /**
+   * Both halves of subagent work. Claude Code has only `SubagentStop`, which is why
+   * delegation is visible there as an ending and not as a beginning (issue #5). Kimi is the
+   * only participant that can say a subagent STARTED.
+   */
+  'SubagentStart',
+  'SubagentStop',
   /** Session lifecycle, for readiness and teardown. */
   'SessionStart',
   'SessionEnd',

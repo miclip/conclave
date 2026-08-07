@@ -24,6 +24,7 @@
  * prompt says so rather than implying otherwise.
  */
 
+import { describeTool } from '../relay/subagents.ts'
 import { formatGoalFindings, lintGoal } from '../relay/goalLint.ts'
 import { createWriteStream, existsSync, realpathSync } from 'node:fs'
 import { join } from 'node:path'
@@ -190,7 +191,10 @@ const HELP = `
 function renderActivity(participant: string, e: AgentEvent): string | undefined {
   switch (e.type) {
     case 'tool_use':
-      return `    · ${participant} ${e.tool}`
+      // `wait_agent` and a rising clock was the whole of what an operator saw while a
+      // participant delegated -- a raw tool name that does not say another model is doing the
+      // work. The name is kept in parentheses because it is still the true, checkable fact.
+      return `    · ${participant} ${describeTool(e.tool) ?? e.tool}`
     case 'permission_requested':
       // Naming the answer at the moment the question appears. It read as a status —
       // something being waited out — when it is the one event in a turn that cannot
@@ -547,7 +551,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
         // Pinned in the footer when there is one; appended only when there is nowhere to
         // pin it. Doing both put the same information in two places, and the appended copy
         // is the one that reads as a duplicate.
-        progress.note(e.participant, ev.tool)
+        progress.note(e.participant, describeTool(ev.tool) ?? ev.tool)
         if (screen) screen.draw()
         else progress.activity(e.participant, colour, ev.tool)
       } else if (ev.type === 'message' && ev.role === 'assistant') {

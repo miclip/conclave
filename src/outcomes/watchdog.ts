@@ -179,20 +179,29 @@ export class TurnWatchdog<T extends WatchdogTarget> {
     this.#timers.delete(key)
     const now = Date.now()
 
-    // The idle deadline first. Without this branch every idle expiry looked like an EARLY
-    // fire of the absolute deadline and was re-armed, so the idle clock produced nothing at
-    // all -- the mechanism was inert, and a test firing on silence is what showed it.
-    const idleMs = target.lastActivityAt === undefined ? 0 : now - target.lastActivityAt
-    if (target.lastActivityAt !== undefined && idleMs >= this.#idleMs) {
-      this.#onUpdate(target, target.tracker.observeIdle(idleMs / 1000))
+    const elapsedMs = now - target.startedAt
+    const idleMs = target.lastActivityAt === undefined ? undefined : now - target.lastActivityAt
+
+    // Which deadline has ACTUALLY passed, checked before either is acted on.
+    //
+    // A timer may fire a hair before its delay. An earlier version tested the idle deadline
+    // first and, when it had not quite passed, fell through to the absolute branch -- which
+    // re-armed for the whole remaining absolute budget and therefore SKIPPED the idle
+    // deadline for the rest of the turn. That is the same silent-never-fires-again failure
+    // this module's header describes, reintroduced by the fix for it, and it reproduced only
+    // on Linux where timers ran early.
+    const idlePassed = idleMs !== undefined && idleMs >= this.#idleMs
+    const absolutePassed = elapsedMs > this.#ms
+
+    if (!idlePassed && !absolutePassed) {
+      // Fired early against BOTH. Wait out whichever remains nearer, rather than reporting a
+      // duration that has not yet passed or abandoning the nearer clock.
+      this.#armIn(key, target, Math.max(1, this.#nextDelay(target)))
       return
     }
 
-    const elapsedMs = now - target.startedAt
-    if (elapsedMs <= this.#ms) {
-      // Fired early. Wait out the remainder rather than report a duration that is not yet
-      // past the deadline; see the header.
-      this.#armIn(key, target, this.#ms - elapsedMs + 1)
+    if (idlePassed) {
+      this.#onUpdate(target, target.tracker.observeIdle(idleMs! / 1000))
       return
     }
 

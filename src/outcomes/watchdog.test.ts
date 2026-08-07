@@ -288,3 +288,25 @@ test('a target that never records activity keeps the absolute deadline', async (
   assert.equal(updates.length, 1)
   w.disarmAll()
 })
+
+test('an idle deadline that fires early re-arms on ITSELF, not on the absolute one', async () => {
+  // The regression this exists to prevent, caught by CI on Linux where timers ran early.
+  //
+  // `#fire` tested the idle deadline, found it a hair short, and fell through to the absolute
+  // branch -- which re-armed for the whole remaining absolute budget and therefore skipped
+  // the idle deadline for the rest of the turn. Silently: nothing errors, the turn simply
+  // waits out 45 minutes again, which is the exact behaviour the idle clock was added to fix.
+  const { updates, onUpdate } = collector()
+  // A very short idle window against a very long absolute one, so an early fire that fell
+  // through would park for effectively forever and this test would see nothing.
+  const w = new TurnWatchdog<Turn>(600_000, onUpdate, 5)
+  const turn = turnAt(Date.now())
+  turn.lastActivityAt = Date.now()
+
+  w.arm(turn.key, turn)
+  await sleep(200)
+
+  assert.equal(updates.length, 1, 'the idle deadline must still fire after an early wake')
+  assert.match(updates[0]!.verdict!.provenance[0]!.detail, /no output for/)
+  w.disarmAll()
+})
