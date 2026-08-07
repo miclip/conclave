@@ -591,6 +591,12 @@ export async function runSession(opts: SessionOptions): Promise<number> {
       if (s.kind === 'ended') {
         write(`\n=== run ended: ${s.outcome.reason}${s.outcome.detail ? ` — ${s.outcome.detail}` : ''}`)
         write(`=== ${relay.log.length} messages routed`)
+        // The rotation summary and any carried flags, on BOTH front-ends. The console had
+        // neither: a `done` carrying an unresolved caveat read as unqualified success here
+        // too, and an operator who was present for the turn is not thereby guaranteed to
+        // have registered a single sentence 300 lines ago.
+        write(`=== ${relay.rotationSummary()}`)
+        for (const line of relay.flagSummary()) write(`=== ${line}`)
         // The session does not end with the run. There are participants alive and a human
         // at the prompt; ending here would throw away a working session at the exact moment
         // the next instruction was about to arrive.

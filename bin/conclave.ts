@@ -304,17 +304,29 @@ async function main(argv: string[]): Promise<number> {
         console.log(m.text.trim().split('\n').map((l) => `    ${l}`).join('\n'))
       },
     })
+    let failed = false
     try {
       const outcome = await relay.run(goal)
       console.log(`\n=== relay ended: ${outcome.reason}${outcome.detail ? ` — ${outcome.detail}` : ''}`)
-      console.log(`=== ${relay.log.length} messages routed`)
-      // Printed on every run, including — especially — the ones where nothing happened.
-      // A null is only evidence if the instrument is known to have been live.
-      console.log(`=== ${relay.rotationSummary()}`)
+      failed = outcome.reason === 'transport_failed'
+    } catch (err) {
+      // Belt and braces. The relay converts transport failures into outcomes now, so this
+      // should be unreachable -- but the operator's record must not depend on that being
+      // true. The summary lines below used to sit after a throw and were simply lost.
+      console.error(`\n=== relay ended: transport_failed — ${err instanceof Error ? err.message : String(err)}`)
+      failed = true
     } finally {
+      // Printed on every run, including — especially — the ones where nothing happened or
+      // something broke. A null is only evidence if the instrument is known to have been
+      // live, and the runs most worth diagnosing are the ones that used to report least.
+      console.log(`=== ${relay.log.length} messages routed`)
+      console.log(`=== ${relay.rotationSummary()}`)
+      // Last, so it is the final thing on screen. A `done` that carries an unresolved
+      // caveat must not read as an unqualified success to someone who only reads the tail.
+      for (const line of relay.flagSummary()) console.log(`=== ${line}`)
       await relay.stop()
     }
-    return 0
+    return failed ? 1 : 0
   }
 
   if (command === 'session') {

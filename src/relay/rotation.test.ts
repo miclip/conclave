@@ -22,7 +22,7 @@ import test from 'node:test'
 import type { AgentSession } from '../contract/session.ts'
 import { AgentRegistry } from '../registry/registry.ts'
 import { FakeRotationSession } from '../rotation/fakeSession.ts'
-import { Relay, type RelayOptions } from './relay.ts'
+import { Relay, extractFlags, type RelayOptions } from './relay.ts'
 import type { RelayEvent } from './observe.ts'
 
 function repo(): string {
@@ -417,4 +417,67 @@ test('an unconfigured run still says so plainly', async (t) => {
 
   assert.equal(relay.rotationWatch.armed, false)
   assert.match(relay.rotationSummary(), /NOT ARMED \(no checks configured\)/)
+})
+
+test('a transport failure ends the run with a verdict, it does not escape it (#32)', async (t) => {
+  // A 12-turn run died on `no UserPromptSubmit hook after send`. The process exited with no
+  // `=== relay ended:` line, no message count and no rotation summary, because all three sit
+  // after `relay.run(goal)` returns. The runs most worth diagnosing reported the least.
+  //
+  // `start()` already caught throws and settled the handle; `run()` -- the unattended form
+  // the CLI uses -- did not. Fixed where both share a path.
+  const dir = repo()
+  const impl = new FakeRotationSession('impl', 'claude')
+  impl.failSendOnTurn = 1 // succeed once, then lose the transport mid-run
+  const relay = await relayOf(dir, new FakeRotationSession('advisor', 'codex'), [impl])
+  t.after(() => relay.stop())
+
+  const outcome = await relay.run('do the thing')
+
+  // Its own reason. `escalated` would mean the agents wanted a human; this means Conclave
+  // lost the ability to observe a turn, and hiding a defect inside a normal outcome is how
+  // it goes unnoticed.
+  assert.equal(outcome.reason, 'transport_failed')
+  assert.match(outcome.detail ?? '', /UserPromptSubmit/)
+
+  // The operator's record must survive the abnormal path -- that is the whole fix.
+  assert.ok(relay.log.length > 0, 'the routing log is intact')
+  assert.match(relay.rotationSummary(), /armed/, 'the rotation summary is still reachable')
+})
+
+test('a flagged caveat is carried into the summary of an otherwise DONE run (#30)', async (t) => {
+  // A run ended `done` while the implementer had explicitly flagged that a conformance
+  // script remained unrun, and that its belief about it was inherited from a comment rather
+  // than confirmed. The caveat survived only in the middle of a 350-line routing log, and
+  // the last three lines -- which is what a DONE invites you to read -- showed unqualified
+  // success.
+  //
+  // The verdict was not wrong. The defect was that a terminal verdict could carry nothing
+  // but its own binary value.
+  const dir = repo()
+  const impl = new FakeRotationSession('impl', 'claude', [
+    'Rewrote the normaliser and the goldens pass.\n' +
+      'FLAG: oathrs/conformance.sh remains unrun; inherited reasoning, not confirmed.',
+  ])
+  const relay = await relayOf(dir, new FakeRotationSession('advisor', 'codex', [ACCEPTED]), [impl])
+  t.after(() => relay.stop())
+
+  await relay.run('rewrite the normaliser')
+
+  assert.equal(relay.flags.length, 1)
+  assert.equal(relay.flags[0]!.participant, 'implementer')
+  assert.match(relay.flags[0]!.text, /conformance\.sh remains unrun/)
+
+  const summary = relay.flagSummary()
+  assert.match(summary[0]!, /1 flagged item carried:/)
+  assert.match(summary[1]!, /implementer .*conformance\.sh/)
+})
+
+test('a run with nothing outstanding says nothing', () => {
+  // The line must not appear on a clean run, or it becomes noise that trains the reader to
+  // skip the exact place a real flag would show up.
+  assert.deepEqual(extractFlags('All done. Everything passes.'), [])
+  // Prose ABOUT flagging is not a flag: the marker is line-initial.
+  assert.deepEqual(extractFlags('I could FLAG: something here mid-sentence'), [])
+  assert.deepEqual(extractFlags('done\nFLAG: one thing\nFLAG: another'), ['one thing', 'another'])
 })

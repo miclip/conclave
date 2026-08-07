@@ -31,6 +31,14 @@ export class FakeRotationSession implements AgentSession {
   readonly transitions: SessionState[] = []
   closedAs: CloseMode | undefined
   compactionGeneration = 0
+  /**
+   * Make the Nth `send` throw, simulating a transport failure.
+   *
+   * Real adapters do this when a send is never acknowledged by a hook: the child took the
+   * text and nothing came back. It ended a 12-turn run with no verdict and no summary
+   * (issue #32), so the relay must be able to be put in that state by a test.
+   */
+  failSendOnTurn: number | undefined
 
   #state: SessionState = 'running'
   #replies: string[]
@@ -78,6 +86,9 @@ export class FakeRotationSession implements AgentSession {
   async send(message: string): Promise<TurnKey> {
     if (this.#state !== 'running') {
       throw new Error(`cannot send to a session in state '${this.#state}'`)
+    }
+    if (this.failSendOnTurn !== undefined && this.#turns.length === this.failSendOnTurn) {
+      throw new Error('no UserPromptSubmit hook after send')
     }
     this.received.push(message)
     const index = this.#turns.length

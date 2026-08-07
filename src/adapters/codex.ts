@@ -73,6 +73,16 @@ export interface CodexAdapterOptions {
   watchdogMs?: number | undefined
 }
 
+/**
+ * What to tell an operator when a send is never acknowledged by a hook.
+ *
+ * The bare condition named an internal fact with no action attached, and it was the
+ * last line a 12-turn run ever printed (issue #32). A diagnostic that ends a run
+ * should say what to do about it.
+ */
+const SEND_HOOK_TIMEOUT =
+  "no UserPromptSubmit hook after send. The child accepted the text but no hook fired, so this turn could not be observed. Most often the previous turn had not finished -- neither CLI accepts input mid-turn -- so try a longer --settle. If it recurs at the first turn, the hooks are probably not firing at all: run `conclave config check`."
+
 export class CodexPtyHookAdapter implements AgentSession {
   readonly agent = 'codex'
   readonly guarantees: Guarantees
@@ -531,7 +541,7 @@ export class CodexPtyHookAdapter implements AgentSession {
     // pending keeps the event loop alive long after the send resolved.
     let timer: NodeJS.Timeout | undefined
     const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new Error('no UserPromptSubmit hook after send')), 60_000)
+      timer = setTimeout(() => reject(new Error(SEND_HOOK_TIMEOUT)), 60_000)
     })
     try {
       return await Promise.race([keyed, timeout])

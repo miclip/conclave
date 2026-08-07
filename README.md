@@ -166,6 +166,9 @@ The reasoning is in [`DESIGN-BRIEF.md`](DESIGN-BRIEF.md).
   branches proven live, rollback included.
 - Subagents, which both participants may use as they judge. A subagent that modifies
   anything works in its own git worktree.
+- Unresolved items carried into the summary. A participant ending a report with a line
+  beginning `FLAG:` has it lifted verbatim into the final lines, so a run that completed
+  while something stayed unchecked does not read as unqualified success.
 - Outcomes graded by evidence. `Stop` proves normal completion on Claude Code,
   `step_finish reason=stop` on OpenCode; anything weaker is labelled as what it is. A run
   exiting 0 is not evidence a turn finished, and is not treated as any.

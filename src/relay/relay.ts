@@ -141,6 +141,37 @@ export interface RelayOptions {
   rotation?: RotationConfig
 }
 
+/**
+ * A participant's own statement that something is unresolved.
+ *
+ * Lifted verbatim from a turn's report rather than detected. Detection was considered and
+ * rejected: "I haven't run X", "that is inherited reasoning" and "I believe but did not
+ * verify" are all real phrasings, and any pattern list would be incomplete in a way that is
+ * WORSE than nothing -- a missed flag would then be doubly silent, absent from the summary
+ * and presumed covered by a mechanism that claims to catch it.
+ *
+ * So it is a convention the participants are told about, which also makes flagging a
+ * first-class act rather than a paragraph that happens to be well written.
+ */
+export interface RelayFlag {
+  participant: string
+  text: string
+  /** Routing-log position of the turn that raised it, so it can be found in context. */
+  seq: number
+}
+
+/** The marker participants are told to use. Line-initial, so prose about it does not match. */
+export const FLAG_MARKER = /^\s*FLAG:\s*(.+)$/gim
+
+export function extractFlags(prose: string): string[] {
+  const out: string[] = []
+  for (const m of prose.matchAll(FLAG_MARKER)) {
+    const text = m[1]?.trim()
+    if (text) out.push(text)
+  }
+  return out
+}
+
 const LEAD_BRIEFING = `You are the ADVISOR on a two-agent coding session, and you are in charge of it.
 
 Another AI model — the implementer — does the actual work in this repository. You cannot
@@ -183,7 +214,13 @@ and anything you are unsure about.
 
 It outranks you on process, but you are not required to agree with it. If an instruction
 is wrong, say so plainly and say why, then proceed unless a human overrules. Silent
-compliance is worse than disagreement.`
+compliance is worse than disagreement.
+
+If you finish work while something remains unchecked -- a test you did not run, a belief you
+took from a comment rather than confirmed, an assumption you could not close -- end your
+report with a line beginning FLAG: and say it in one sentence. A flag does NOT stop the run.
+It is carried into the final summary so the operator sees it, because the summary is the part
+anyone actually reads.`
 
 /**
  * What the implementer is told INSTEAD of the goal.
@@ -683,6 +720,24 @@ export class Relay {
     rotations: 0,
   }
 
+  /**
+   * Unresolved items participants flagged, in the order raised.
+   *
+   * A run can legitimately end `done` while carrying one: the caveat that prompted this was
+   * about a gate the goal had assigned to the operator, not to the participants, so DONE was
+   * the right verdict. The defect was that a terminal verdict had no way to carry anything
+   * but its own binary value, and the flag survived only in the middle of a 350-line routing
+   * log (issue #30).
+   */
+  readonly flags: RelayFlag[] = []
+
+  /** Lines naming everything left unresolved. Empty when there is nothing to carry. */
+  flagSummary(): string[] {
+    if (this.flags.length === 0) return []
+    const head = `${this.flags.length} flagged item${this.flags.length === 1 ? '' : 's'} carried:`
+    return [head, ...this.flags.map((f) => `  ${f.participant} [msg ${f.seq}] — ${f.text}`)]
+  }
+
   /** One line an operator can read to know whether the detector was live and what it saw. */
   rotationSummary(): string {
     const w = this.rotationWatch
@@ -769,6 +824,9 @@ export class Relay {
     // `message` events; see repl/session.ts.
     const turn = snap.turns.at(-1)
     const prose = turn?.report ?? turn?.assistantText ?? ''
+    for (const text of extractFlags(prose)) {
+      this.flags.push({ participant: p.id, text, seq: this.log.length })
+    }
     return { prose, end, unsettled }
   }
 
@@ -977,7 +1035,9 @@ export class Relay {
     })
     void this.#loop(goal, handle).then(
       (outcome) => handle.settle(outcome),
-      (err: Error) => handle.settle(this.#end('escalated', `the run threw: ${err.message}`)),
+      // Retained as a backstop only. #loop now converts a throw into a `transport_failed`
+      // outcome, so this fires only for something #loop itself could not handle.
+      (err: Error) => handle.settle(this.#end('transport_failed', `the run threw: ${err.message}`)),
     )
     return handle
   }
@@ -1110,6 +1170,19 @@ export class Relay {
     this.#looping = true
     try {
       return await this.#runLoop(goal, handle)
+    } catch (err) {
+      // A transport failure ENDS the run; it does not escape it.
+      //
+      // `start()` already caught throws and settled the handle, but `run()` -- the
+      // unattended form the CLI uses -- let them propagate. A 12-turn run died on
+      // `no UserPromptSubmit hook after send` and printed no verdict, no message count and
+      // no rotation summary, because those lines all sit after `relay.run(goal)` returned.
+      // The runs most worth diagnosing were the ones that reported least (issue #32).
+      //
+      // Ending here means the caller gets an outcome, the run-end event fires, and every
+      // summary line is reachable on the abnormal path as well as the normal one.
+      const detail = err instanceof Error ? err.message : String(err)
+      return this.#end('transport_failed', detail)
     } finally {
       this.#looping = false
     }

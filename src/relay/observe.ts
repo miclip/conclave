@@ -30,7 +30,20 @@ import { AsyncQueue } from '../adapters/asyncQueue.ts'
 import type { Rank, RelayMessage } from './message.ts'
 
 /** Why a run stopped. The relay decides none of these beyond `budget`. */
-export type RunReason = 'done' | 'escalated' | 'budget' | 'stopped'
+export type RunReason =
+  | 'done'
+  | 'escalated'
+  | 'budget'
+  | 'stopped'
+  /**
+   * The transport under a participant failed, so the run could not continue.
+   *
+   * A distinct reason rather than `escalated` because the two ask different things of a
+   * reader: an escalation means the agents wanted a human, while this means Conclave lost
+   * the ability to observe a turn at all. Conflating them hides a defect inside a normal
+   * outcome.
+   */
+  | 'transport_failed'
 
 export interface RelayEventBase {
   /**
