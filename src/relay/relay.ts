@@ -640,6 +640,41 @@ export class Relay {
   /** Participants with an out-of-run question in flight. See `ask`. */
   #asking = new Set<string>()
 
+  /**
+   * What the rotation detector has actually observed.
+   *
+   * Rotation is the one subsystem that is silent until it acts. Everything else in a run
+   * announces itself — participants joining, each turn routed, settle warnings, the final
+   * verdict — so after an hour of work these were indistinguishable from outside: the
+   * detector ran and saw nothing; the detector never ran; `--checks` was rejected and
+   * rotation was never configured; rotation fired and rolled back quietly.
+   *
+   * A negative result is only evidence if the instrument was known to be live. Without
+   * this, "no rotation" and "no rotation mechanism" produce identical logs — which made an
+   * hour of deliberate degradation testing unable to demonstrate its own null.
+   */
+  readonly rotationWatch = {
+    armed: false,
+    assessments: 0,
+    degradationsSeen: 0,
+    complaintsSeen: 0,
+    peakGeneration: 0,
+    rotations: 0,
+  }
+
+  /** One line an operator can read to know whether the detector was live and what it saw. */
+  rotationSummary(): string {
+    const w = this.rotationWatch
+    if (!w.armed) {
+      return `rotation: NOT ARMED (no checks configured) — ${w.assessments} assessments, no rotation possible`
+    }
+    return (
+      `rotation: armed — ${w.assessments} assessments, ${w.degradationsSeen} degraded, ` +
+      `${w.complaintsSeen} complaints, ${w.rotations} rotations, ` +
+      `peak compaction generation ${w.peakGeneration}`
+    )
+  }
+
   async #exchange(
     p: RelayParticipant,
     text: string,
@@ -930,6 +965,15 @@ export class Relay {
     handle: RunHandle | undefined,
   ): Promise<RunOutcome | undefined> {
     const snap = await impl.session.snapshot()
+    // Counted before the decision, so the tally proves the detector RAN regardless of what
+    // it concluded. That is the whole point: a zero here means "looked and saw nothing",
+    // and its absence would mean "never looked".
+    this.rotationWatch.armed = this.#opts.rotation !== undefined
+    this.rotationWatch.assessments += 1
+    this.rotationWatch.peakGeneration = Math.max(
+      this.rotationWatch.peakGeneration,
+      snap.compactionGeneration,
+    )
     const verdict = assess({
       participant: impl.id,
       prose,
@@ -939,6 +983,9 @@ export class Relay {
       ledger: this.complaints,
       at: Date.now(),
     })
+
+    if (verdict.degraded) this.rotationWatch.degradationsSeen += 1
+    if (verdict.complained) this.rotationWatch.complaintsSeen += 1
 
     if (verdict.decision === 'continue') {
       if (verdict.reason === 'unbacked') {

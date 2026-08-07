@@ -130,3 +130,39 @@ test('--json does not rewrite the registrations it reports on', () => {
   assert.equal(status, 1)
   assert.equal(readFileSync(codexOut, 'utf8'), perturbed, 'a check must not write')
 })
+
+test('relay refuses a flag in the goal position instead of billing for it', () => {
+  // `conclave relay --help` parsed `--help` as the GOAL: two real agent sessions launched,
+  // an advisor asked what `--help` means, the run escalated, and it billed for the answer.
+  // The one invocation someone types when they do not know what a command does was the one
+  // that spent their quota. `session` has guarded this since it was written.
+  //
+  // Spawned rather than unit-tested, because what must be proven is that NO SESSION STARTS
+  // — a return value cannot show that, and this is the one test whose failure costs money.
+  const run = (...args: string[]) =>
+    spawnSync(process.execPath, [CLI, 'relay', ...args], {
+      cwd: REPO,
+      encoding: 'utf8',
+      timeout: 20_000,
+    })
+
+  // Asking for help gets help, and nothing else happens.
+  for (const flag of ['--help', '-h']) {
+    const help = run(flag)
+    assert.equal(help.status, 0, `relay ${flag} prints usage`)
+    assert.match(help.stdout, /conclave <command>/)
+    assert.ok(!/joined as (advisor|implementer)/.test(help.stdout), 'no participant may start')
+  }
+
+  // Anything else flag-shaped is a mistake, and is refused rather than interpreted.
+  for (const bad of ['--rounds', '--lead', '-x']) {
+    const r = run(bad)
+    assert.equal(r.status, 1, `${bad} must be refused`)
+    assert.match(r.stderr, /looks like a flag, not a goal/)
+    assert.ok(!/joined as/.test(r.stdout), `${bad} must not start a session`)
+  }
+
+  const none = run()
+  assert.equal(none.status, 1)
+  assert.match(none.stderr, /relay needs a goal/)
+})

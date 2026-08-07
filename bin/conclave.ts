@@ -184,8 +184,22 @@ async function main(argv: string[]): Promise<number> {
 
   if (command === 'relay') {
     const goal = sub
-    if (!goal) {
-      console.error('relay needs a goal: conclave relay "<goal>"\n')
+    // A flag in the goal position is FLAGS, not a goal named `--help`. `session` has
+    // guarded this since it was written; `relay` never did, so `conclave relay --help`
+    // launched two real agent sessions, asked an advisor what `--help` means, and billed
+    // for it. The one invocation someone types when they do not know what a command does
+    // was the one that spent their quota.
+    if (!goal || goal.startsWith('-')) {
+      if (goal === '--help' || goal === '-h') {
+        console.log(USAGE)
+        return 0
+      }
+      console.error(
+        goal
+          ? `relay: "${goal}" looks like a flag, not a goal. The goal comes first:\n\n` +
+              `  conclave relay "<goal>" [--lead codex] [--implementer claude]\n`
+          : 'relay needs a goal: conclave relay "<goal>"\n',
+      )
       return 1
     }
     const flag = (name: string, fallback: string) => {
@@ -228,6 +242,12 @@ async function main(argv: string[]): Promise<number> {
       console.log(`  not ignored by this project: ${registered.unignored.join(', ')}`)
     }
 
+    console.log(
+      checks.length > 0
+        ? `  rotation armed — a degraded implementer will be replaced, verified by: ${checks.join(', ')}`
+        : '  rotation NOT armed — no --checks, so degradation escalates instead of rotating',
+    )
+
     const relay = await Relay.start({
       registry,
       cwd: process.cwd(),
@@ -266,6 +286,9 @@ async function main(argv: string[]): Promise<number> {
       const outcome = await relay.run(goal)
       console.log(`\n=== relay ended: ${outcome.reason}${outcome.detail ? ` — ${outcome.detail}` : ''}`)
       console.log(`=== ${relay.log.length} messages routed`)
+      // Printed on every run, including — especially — the ones where nothing happened.
+      // A null is only evidence if the instrument is known to have been live.
+      console.log(`=== ${relay.rotationSummary()}`)
     } finally {
       await relay.stop()
     }
