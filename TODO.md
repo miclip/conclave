@@ -171,10 +171,10 @@ product bugs invisible to the offline suite.
 
 **Next, in order:**
 
-1. ~~**Live rollback proof.**~~ **DONE 2026-08-06** — Both runs took the promotion path, so leak-free
-   abandonment rests on the run-1 diagnosis plus offline tests. Needs a deliberately
-   `npm run test:live:rollback` passes. Divergence injected through the test-only
-   `hooks.afterCapture` barrier. See DESIGN-BRIEF §7a, "The rollback branch, live".
+1. ~~**Live rollback proof.**~~ **DONE 2026-08-06** — `npm run test:live:rollback` passes.
+   Divergence injected through the test-only `hooks.afterCapture` barrier, because the
+   trigger has to be causal rather than timed. See DESIGN-BRIEF §7a, "The rollback branch,
+   live".
 2. ~~**Human-scale long pause.**~~ **DONE 2026-08-06** — 30 minutes, no degradation. A duration resembling actual operator behaviour, not
    another two-minute probe. Confirm observation stays live while orchestration stays
    suspended. `ORCH_PAUSE_SECONDS` exists for this; the longest run so far is 120s.

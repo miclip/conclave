@@ -113,7 +113,8 @@ The reasoning is in [`DESIGN-BRIEF.md`](DESIGN-BRIEF.md).
 - Pauses as decision points — rotation candidate, advisor escalation, authority conflict —
   resolved from the console or from `RunHandle`.
 - Rotation as a transaction: quiesce the old implementer, the advisor authors a handoff,
-  the replacement reproduces the verification, and it rolls back if it cannot.
+  the replacement reproduces the verification, and it rolls back if it cannot. Both
+  branches proven live, rollback included.
 - Subagents, which both participants may use as they judge. A subagent that modifies
   anything works in its own git worktree.
 - Outcomes graded by evidence. `Stop` proves normal completion; anything weaker is labelled
@@ -131,8 +132,7 @@ Live suites spawn real sessions and consume quota, so they are opt-in: `test:liv
 ## Not built
 
 No orchestrator model, no summariser, no third participant. The anti-spiral ladder is a
-round budget and stall metrics, not the full escalation. `test:live:rollback` is written
-and has not been run.
+round budget and stall metrics, not the full escalation.
 
 Two controlled experiments have run, in [`spikes/experiments/`](spikes/experiments). The
 second falsified its own hypothesis. What they support is that the participants contribute
