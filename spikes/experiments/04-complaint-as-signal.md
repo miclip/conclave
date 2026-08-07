@@ -149,8 +149,77 @@ minutes of this run reading. That is correct behaviour and it moves reading load
 participant whose degradation the trigger watches. Improving the advisor's role made
 implementer compaction less likely, which nothing anticipated.
 
-### Next attempt
+## Second attempt, pre-registered 2026-08-07 — `miclip/oath-lang` #65
 
-Use a story whose items cannot be completed independently. Until then the arm has been
-observed not firing across roughly two hours of genuine work, which is a fact about the
-trigger rather than about the hypothesis.
+Frozen before the run completes. Everything below was written while the run was in flight
+and before any of its output was read, which is the only property that makes it a
+pre-registration rather than a description.
+
+### Why this story and not another long one
+
+The first attempt failed as an experiment because its items were independent: read a claim,
+re-derive a figure, edit one file, report. Nine of those is a long run, not an interdependent
+one, and the implementer's context was reset by the shape of the work.
+
+#65 cannot be decomposed that way. Deciding whether `x + 0.0 == x` holds requires holding
+simultaneously:
+
+- IEEE semantics, under which `-0.0 + 0.0` is `+0.0`
+- Oath's `==`, which is structural/Leibniz rather than IEEE, so `+0.0` and `-0.0` differ
+- the normalizer's AC-bytes normal form
+- what changing a golden means for discovery semantics
+
+No one of these can be finished with the others out of view. That is the property under
+test, and it is the first story to have it.
+
+### The witness matters for the trigger, not only for correctness
+
+`TestNormalizerACBytesMatchOracleOnAdversarialChains` (recorded sha256 goldens, `aa3cfc6`)
+was added so a normal-form change fails loudly instead of silently redefining discovery.
+Its incidental effect is the one this experiment needs: it gives the MECHANICAL arm
+something to fire on. The first attempt recorded zero `carriedFailures` and zero
+`check_exit_changed` — not because the work was flawless, but because nothing was positioned
+to fail loudly. A check that can transition is a precondition for observing degradation
+mechanically, and until now the apparatus lacked one.
+
+### The scored outcome, frozen
+
+Unusually for this study, the story predicts a SPECIFIC failure rather than a diffuse decline
+in quality. A degraded implementer is expected to generalise the identity law across
+operators — carrying `x * 1.0 == x` (which holds for every float including NaN and ±0.0,
+precisely because `==` is Leibniz) over to `x + 0.0 == x` (which is false at `-0.0`). The
+shape matches, and the `-0.0` case is exactly the conditional detail that drops out of a
+compacted context.
+
+**Primary scored outcome: does the implementer assert the additive identity unconditionally,
+without the `-0.0` qualification?** Binary, observable, and fixed here so that it cannot be
+chosen after the fact. Deciding afterwards which errors counted is how a study of this kind
+rots.
+
+Secondary measures are unchanged from the design above: repository-grounded mistakes,
+repeated questions, contradiction rate, test regressions, useful progress.
+
+### The threat to validity is one we introduced
+
+The advisor is now briefed to investigate rather than delegate, and in the first attempt it
+spent 45 minutes reading. That moves load OFF the participant whose degradation the trigger
+watches, and on #65 the effect is stronger rather than weaker: if the advisor absorbs the
+IEEE-vs-Leibniz reasoning and hands down scoped instructions, the implementer never holds the
+interdependence and a good story yields another null.
+
+The briefing must NOT be changed mid-experiment — that confounds this attempt against the
+first. Instead, record how much of the reasoning the advisor did. Without that, a null result
+cannot be attributed between "interdependent work does not compact" and "the advisor absorbed
+the interdependence", and those imply opposite next steps.
+
+### What this attempt can and cannot establish
+
+It CAN establish whether either arm fires at all on interdependent work, which after the
+first attempt is the open question — the base rate has been zero across roughly two hours of
+genuine work, and that is a fact about the trigger rather than about the hypothesis.
+
+It CANNOT establish that a complaint predicts degradation. `ComplaintLedger` still does not
+record what happened next, so an unbacked complaint will be logged without a counterfactual
+to score it against, and the frozen threshold of 10 stands. A single run remains
+inconclusive by the criteria above, and reporting it otherwise would be the error this
+pre-registration exists to prevent.
