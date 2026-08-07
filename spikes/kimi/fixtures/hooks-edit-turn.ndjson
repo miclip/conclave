@@ -1,0 +1,4 @@
+{"hook_event_name": "SessionStart", "session_id": "86660e13-a4ed-486d-ab21-a65a52144ce7", "cwd": "/private/tmp/claude-501/-Users-miclip-workspace-conclave/0a01bae1-fb31-4ffd-a0e9-10e9e23f6f77/scratchpad/kh2", "source": "startup"}
+{"hook_event_name": "UserPromptSubmit", "session_id": "86660e13-a4ed-486d-ab21-a65a52144ce7", "cwd": "/private/tmp/claude-501/-Users-miclip-workspace-conclave/0a01bae1-fb31-4ffd-a0e9-10e9e23f6f77/scratchpad/kh2", "prompt": "Edit calc.py so add() returns a + b. Then stop."}
+{"hook_event_name": "Stop", "session_id": "86660e13-a4ed-486d-ab21-a65a52144ce7", "cwd": "/private/tmp/claude-501/-Users-miclip-workspace-conclave/0a01bae1-fb31-4ffd-a0e9-10e9e23f6f77/scratchpad/kh2", "stop_hook_active": false}
+{"hook_event_name": "SessionEnd", "session_id": "86660e13-a4ed-486d-ab21-a65a52144ce7", "cwd": "/private/tmp/claude-501/-Users-miclip-workspace-conclave/0a01bae1-fb31-4ffd-a0e9-10e9e23f6f77/scratchpad/kh2", "reason": "exit"}

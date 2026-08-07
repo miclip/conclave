@@ -9,19 +9,27 @@
  *   {role: "tool", content: ..., tool_call_id: "..."}
  *   {role: "assistant", content: [...]}            <- no tool_calls: the turn is over
  *
- * ## Where the evidence is weaker than OpenCode's, and why that is recorded rather than hidden
+ ## Content from the stream, lifecycle from hooks
  *
- * OpenCode announces its own turn end (`step_finish reason=stop`). Kimi, in this output mode,
- * does not. Completion is inferred from the shape of the last message plus the process
- * exiting, which is a genuinely weaker claim, and the capabilities grade says so.
+ * The stream carries what was said and done. It carries no terminal signal at all, so on its
+ * own a completion is only ever the shape of the last message plus a zero exit.
  *
- * Kimi DOES have an announced terminal signal -- a `Stop` hook, one of thirteen it supports,
- * all carrying `{hook_event_name, session_id, cwd, ...}` exactly as Claude Code's do. It is
- * not used here yet. Wiring it would upgrade `completed` from inferred to announced and would
- * additionally give `PostToolUseFailure` (a failed tool distinguished at the source, which
- * this adapter currently cannot do) and `PreCompact`/`PostCompact`. That is issue #24's
- * follow-up, and it is cheap because hooks are declared in the same generated config file
- * this adapter already writes -- no mutation of the user's own configuration.
+ * Kimi does announce one -- a `Stop` hook, one of thirteen, all carrying
+ * `{hook_event_name, session_id, cwd, ...}` exactly as Claude Code's do. The adapter
+ * registers them in a config it generates, so `completed` is `proven` with
+ * `provenance: hook:Stop` and `synthesized: false`. Two other events earn their place:
+ * `PostToolUseFailure`, without which every tool is reported `failed: false` whether it
+ * failed or not, and `StopFailure`, which announces a badly-ended turn that both pty adapters
+ * have to infer from absence.
+ *
+ * `session_id` rides on every hook payload, which replaces scraping it out of the stderr
+ * resume line -- that only appeared after the process had exited, so the first turn could
+ * never use it.
+ *
+ * Hook mode is BEST-EFFORT. If the operator's config cannot be read, the adapter falls back
+ * to inferring from the stream and says so through a non-fatal error event. A participant
+ * that refuses to start is worse than one whose completions are graded `inferred`, and the
+ * grade then describes that session rather than the agent.
  *
  * ## Two things this mode gives up
  *
@@ -38,6 +46,19 @@
 import { spawn, type ChildProcessByStdio } from 'node:child_process'
 import type { Readable } from 'node:stream'
 import { createInterface } from 'node:readline'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { HookReceiver } from '../hooks/receiver.ts'
+import type { HookDelivery } from '../hooks/journal.ts'
+import { sanitizedCopy } from '../process/childenv.ts'
+import {
+  defaultKimiConfigPath,
+  readKimiConfig,
+  withConclaveHooks,
+  writeKimiConfig,
+} from './kimiConfig.ts'
+
 import type {
   AgentEvent,
   AgentSession,
@@ -54,6 +75,9 @@ import type {
 import { guaranteesFor, turnKey } from '../contract/session.ts'
 import type { Confidence, Provenance, TurnLiveness, Verdict } from '../contract/outcome.ts'
 import { AsyncQueue } from './asyncQueue.ts'
+
+/** The hook handler each event runs. Shared with the Claude adapter; it posts to loopback. */
+const CLIENT = join(import.meta.dirname, '..', 'hooks', 'client.ts')
 
 /** One line of `--output-format stream-json`. Partial and defensive, as OpenCode's is. */
 export interface KimiRecord {
@@ -113,6 +137,16 @@ interface TurnState {
   toolCalls: { tool: string; failed: boolean; args?: string | undefined }[]
   /** True once an assistant message arrives carrying no tool calls. */
   sawFinalAssistant: boolean
+  /**
+   * A `Stop` hook fired for this turn.
+   *
+   * The difference between an inferred completion and an announced one, and the entire
+   * reason hook mode exists. Without it, `completed` rests on the shape of the last message
+   * plus a zero exit; with it, the child said so.
+   */
+  announcedStop: boolean
+  /** Tools the child reported as having FAILED. `stream-json` cannot distinguish these. */
+  failedTools: Set<string>
   startedAt: number
   endedAt?: number | undefined
 }
@@ -142,15 +176,72 @@ export class KimiPrintAdapter implements AgentSession {
   #closed = false
   #closeMode: CloseMode | undefined
   #cancelling = false
+  #runDir: string | undefined
+  #receiver: HookReceiver | undefined
+  #configPath: string | undefined
+  #hookUrl = ''
 
   private constructor(opts: KimiAdapterOptions) {
     this.#opts = opts
     this.guarantees = guaranteesFor(opts.inputOwnership ?? 'mediated')
   }
 
-  /** No boot: there is no resident process until there is something to say. */
+  /**
+   * No child is started here -- there is none until there is something to say -- but the
+   * hook receiver and the generated config are, because both must exist before the first
+   * turn and neither depends on a process.
+   */
   static async start(opts: KimiAdapterOptions): Promise<KimiPrintAdapter> {
-    return new KimiPrintAdapter(opts)
+    const self = new KimiPrintAdapter(opts)
+    await self.#prepare()
+    return self
+  }
+
+  /**
+   * Stand up the hook receiver and write the config that points at it.
+   *
+   * The base config is whatever the operator already uses: a `--config-file` in the
+   * participant's args if they gave one, otherwise `~/.kimi/config.toml`. It is READ and
+   * copied, never modified -- the same guarantee `--settings` buys on Claude Code.
+   *
+   * Hook mode is best-effort. If the config cannot be read -- no python3, malformed TOML --
+   * the adapter falls back to the message-stream inference it had before, because a
+   * participant that refuses to start is worse than one whose completions are graded
+   * `inferred`. The reason is emitted as a non-fatal error so the degradation is visible
+   * rather than silent.
+   */
+  async #prepare(): Promise<void> {
+    this.#runDir = mkdtempSync(join(tmpdir(), 'orch-kimi-'))
+    try {
+      this.#receiver = new HookReceiver(join(this.#runDir, 'hooks.ndjson'))
+      this.#hookUrl = await this.#receiver.start()
+      this.#receiver.on('delivery', (d) => this.#onHook(d))
+
+      const base = readKimiConfig(this.#baseConfigPath())
+      this.#configPath = writeKimiConfig(
+        this.#runDir,
+        withConclaveHooks(base, `node ${CLIENT} kimi`),
+      )
+    } catch (err) {
+      this.#configPath = undefined
+      this.#emit({
+        type: 'error',
+        message:
+          `kimi: hook mode unavailable (${err instanceof Error ? err.message : String(err)}); ` +
+          'turn completion will be inferred from the message stream rather than announced',
+        fatal: false,
+        seq: this.#next(),
+        at: Date.now(),
+        provisional: false,
+      })
+    }
+  }
+
+  /** The operator's own config, which the generated one is a copy of. */
+  #baseConfigPath(): string {
+    const args = this.#opts.args ?? []
+    const i = args.indexOf('--config-file')
+    return i >= 0 && args[i + 1] ? args[i + 1]! : defaultKimiConfigPath()
   }
 
   get sessionId(): string {
@@ -192,6 +283,8 @@ export class KimiPrintAdapter implements AgentSession {
       textBlocks: [],
       toolCalls: [],
       sawFinalAssistant: false,
+      announcedStop: false,
+      failedTools: new Set(),
       startedAt: Date.now(),
     }
     this.#turns.push(turn)
@@ -221,7 +314,14 @@ export class KimiPrintAdapter implements AgentSession {
     // Resume, so the participant remembers the conversation it is having. Kimi prints the
     // id to stderr at the end of the previous turn; see sessionIdFrom.
     if (this.#sessionId) args.push('-r', this.#sessionId)
-    args.push(...(this.#opts.args ?? []))
+    // The operator's `--config-file` is the SOURCE for the generated one, not an argument to
+    // pass through: `kimi` loads exactly one config and refuses `--config` alongside it, so
+    // forwarding both would either drop our hooks or fail outright.
+    const passthrough = [...(this.#opts.args ?? [])]
+    const i = passthrough.indexOf('--config-file')
+    if (i >= 0) passthrough.splice(i, 2)
+    args.push(...passthrough)
+    if (this.#configPath) args.push('--config-file', this.#configPath)
     // `--prompt` takes a value, so a prompt starting with `-` is safe here in a way a bare
     // positional would not be.
     args.push('--prompt', prompt)
@@ -232,6 +332,17 @@ export class KimiPrintAdapter implements AgentSession {
     const child = spawn(this.#opts.command ?? 'kimi', this.#args(prompt), {
       cwd: this.#opts.cwd,
       stdio: ['ignore', 'pipe', 'pipe'],
+      // The hook handler reads these. Absent when hook mode could not be set up, in which
+      // case no hooks are registered either and nothing looks for them.
+      env: this.#hookUrl
+        ? sanitizedCopy(process.env as Record<string, string>, {
+            extra: {
+              ORCH_HOOK_URL: this.#hookUrl,
+              ORCH_HOOK_ATTEMPT_JOURNAL: join(this.#runDir!, 'attempts.ndjson'),
+              ORCH_HOOK_TIMEOUT_MS: '5000',
+            },
+          })
+        : process.env,
     })
     this.#child = child
 
@@ -293,9 +404,10 @@ export class KimiPrintAdapter implements AgentSession {
         // agents share no structured path field to normalise into.
         turn.toolCalls.push({
           tool,
-          // Failure is not distinguishable in this output mode; see PostToolUseFailure in
-          // the module comment. Claiming otherwise would be worse than not knowing.
-          failed: false,
+          // From `PostToolUseFailure` when hook mode is live. Without it the stream cannot
+          // distinguish a failed tool from a successful one and everything reads as fine,
+          // which is a falsehood rather than an absence.
+          failed: turn.failedTools.has(tool),
           ...(call.function?.arguments ? { args: call.function.arguments } : {}),
         })
         this.#emit({
@@ -316,6 +428,48 @@ export class KimiPrintAdapter implements AgentSession {
     // has already been recorded, and re-emitting would double-count it.
   }
 
+  /**
+   * A hook delivery from the child.
+   *
+   * `session_id` rides on every payload, which is strictly better than the stderr scrape it
+   * replaces -- that only appeared after the process had already exited, so the first turn
+   * could never use it.
+   */
+  #onHook(d: HookDelivery): void {
+    const payload = (d.payload ?? {}) as Record<string, unknown>
+    const sid = typeof payload.session_id === 'string' ? payload.session_id : ''
+    if (sid && !this.#sessionId) this.#sessionId = sid
+
+    const live = this.#turns.find((t) => t.state === 'in_progress')
+    switch (d.event) {
+      case 'Stop':
+        // The announced terminal signal. Recorded on the turn rather than settled here: the
+        // process is still running, and the stream may still carry the closing message.
+        if (live) live.announcedStop = true
+        break
+      case 'StopFailure':
+        if (live) {
+          live.provenance.push({
+            source: 'hook',
+            detail: `StopFailure: ${String(payload.error_type ?? 'unknown')} ${String(payload.error_message ?? '')}`.trim(),
+          })
+        }
+        break
+      case 'PostToolUseFailure': {
+        // The one thing `stream-json` genuinely cannot express. Without this every tool is
+        // reported `failed: false`, which is a falsehood the adapter was forced into.
+        const tool = typeof payload.tool_name === 'string' ? payload.tool_name : ''
+        if (live && tool) live.failedTools.add(tool)
+        break
+      }
+      default:
+        // SessionStart, UserPromptSubmit, SessionEnd, Pre/PostCompact: journalled by the
+        // receiver, not acted on here. Registering them costs one subprocess each and buys
+        // a durable record of the lifecycle, which is what the fixtures are made of.
+        break
+    }
+  }
+
   #settle(
     turn: TurnState,
     code: number | null,
@@ -327,19 +481,30 @@ export class KimiPrintAdapter implements AgentSession {
     const killed = signal !== null
     let verdict: Verdict
 
-    if (turn.sawFinalAssistant && code === 0) {
+    if (turn.announcedStop) {
+      // The child said the turn ended. Same standing as OpenCode's `step_finish reason=stop`
+      // and Claude Code's `Stop`, and the reason hook mode exists at all.
+      verdict = {
+        outcome: 'completed',
+        confidence: 'proven',
+        provenance: [
+          { source: 'hook', detail: 'Stop' },
+          { source: 'process', detail: `exit code ${code}` },
+        ],
+      }
+    } else if (turn.sawFinalAssistant && code === 0) {
       verdict = {
         outcome: 'completed',
         // NOT `proven`. Nothing announced this: it is the shape of the last message plus a
-        // zero exit. OpenCode's `completed` is proven because the child said so; Kimi's is
-        // not, and the difference is exactly what a Stop hook would close.
+        // zero exit. Reached when hook mode could not be set up -- see #prepare -- so the
+        // weaker grade is a live statement about THIS session, not a property of the agent.
         confidence: 'inferred',
         provenance: [
           { source: 'transcript', detail: 'final assistant message carried no tool calls' },
           { source: 'process', detail: `exit code ${code}` },
           {
             source: 'transport',
-            detail: 'no announced terminal event in stream-json; a Stop hook would upgrade this',
+            detail: 'no Stop hook fired; completion inferred from the message stream',
             caveat: true,
           },
         ],
@@ -389,8 +554,8 @@ export class KimiPrintAdapter implements AgentSession {
       at: turn.endedAt,
       provisional: false,
       verdict,
-      // True even on the happy path: we concluded it, nothing announced it.
-      synthesized: true,
+      // False when a Stop hook fired: the child announced it and we merely recorded it.
+      synthesized: !turn.announcedStop,
     })
     this.#cancelling = false
   }
@@ -470,6 +635,10 @@ export class KimiPrintAdapter implements AgentSession {
     this.#closed = true
     this.#closeMode = mode
     if (this.#child && mode === 'graceful') this.#child.kill('SIGTERM')
+    await this.#receiver?.stop()
+    // The generated config holds a copy of whatever credential the operator's own config
+    // holds, so it does not outlive the session.
+    if (this.#runDir) rmSync(this.#runDir, { recursive: true, force: true })
     this.#state = 'terminated'
     this.#events.close()
   }

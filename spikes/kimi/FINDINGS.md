@@ -41,7 +41,36 @@ experimental — the thing two null results have been asking for.
 
 Neither is available through `stream-json`. Getting both means the hook path below.
 
-## Hooks: thirteen events, Claude Code's payload shape, unused so far
+## Hooks: wired, and what it took
+
+`kimi` loads exactly ONE config file. `--config-file` REPLACES `~/.kimi/config.toml` rather
+than layering over it, and `--config` cannot be combined with `--config-file` at all — the CLI
+refuses with `Cannot combine --config, --config-file`. So there is no way to add a hook
+without also supplying every provider and model the run needs.
+
+The adapter therefore READS the operator's config, injects its hooks, and writes the result to
+a private 0600 temp file, passing that. The operator's file is never modified — the same
+guarantee `--settings` buys on Claude Code. Reading the TOML shells out to `python3 tomllib`,
+which is standard library from 3.11 and `kimi-cli` requires Python >= 3.12, so a machine that
+can run Kimi can always parse Kimi's config.
+
+Live result on a two-tool edit turn: `outcome: completed`, `confidence: proven`,
+`synthesized: false`, `provenance: hook:Stop | process:exit code 0`. Deliveries observed:
+
+```
+SessionStart      {session_id, cwd, source}
+UserPromptSubmit  {session_id, cwd, prompt}
+Stop              {session_id, cwd, stop_hook_active}
+SessionEnd        {session_id, cwd, reason}
+```
+
+**`SessionEnd` fires.** It never has on Codex (issue #12), so Kimi is the first participant
+where the teardown signal is observed rather than assumed.
+
+`session_id` rides on every payload, which retires the stderr scrape — that only appeared
+after the process had exited, so the first turn could never use it.
+
+## The thirteen events, and which are registered
 
 `kimi_cli/hooks/config.py`:
 

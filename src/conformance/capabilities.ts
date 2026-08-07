@@ -132,15 +132,16 @@ export const OPENCODE_CAPABILITIES: AdapterCapabilities = {
 /**
  * kimi 1.49.0, via `--print --output-format stream-json`.
  *
- * `completed` is `observed` -- a real run is captured in
- * `spikes/kimi/fixtures/edit-turn.ndjson` -- but its CONFIDENCE is `inferred` rather than
- * `proven`, and the two must not be confused. The fixture proves the outcome is producible
- * and that the parser reads it. It does not make the claim announced: nothing in this output
- * mode says the turn ended. Completion is the shape of the final message plus a zero exit.
+ * `completed` is `observed`, and since the adapter registers hooks its CONFIDENCE is now
+ * `proven`: a live run reports `provenance: hook:Stop` with `synthesized: false`. The
+ * message-stream fixture in `spikes/kimi/fixtures/` still backs the outcome; the hook is what
+ * makes it announced rather than inferred.
  *
- * Kimi has a `Stop` hook, one of thirteen carrying Claude Code's payload shape. Using it
- * would make this announced, and would additionally supply `PostToolUseFailure` -- which is
- * why `permission_refused` is unsupported and tool failure is currently invisible here.
+ * The `inferred` grading has not gone away -- it is the documented fallback when hook mode
+ * cannot be set up, and it then describes that SESSION rather than this agent.
+ *
+ * `permission_refused` stays `unsupported`: `--print` auto-approves for the invocation, so
+ * there is no dialog to refuse and no hook can create one.
  */
 export const KIMI_CAPABILITIES: AdapterCapabilities = {
   agent: 'kimi',
