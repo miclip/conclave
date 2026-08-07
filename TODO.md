@@ -212,6 +212,135 @@ quality.
 
 Until it has evidence, `'automatic'` stays opt-in.
 
+## Roadmap
+
+Written 2026-08-06, after a day of live driving. Ordered by what the driving actually hit,
+not by what is interesting to build. The recurring shape: **the run is the only unit of
+work, and an operator keeps needing something smaller than one.** "Start the server so I
+can test it", "get the implementer to fix those", "test it with playwright" — none are
+goals, and all needed a session.
+
+### What was not missed
+
+A day of driving did not want the **orchestrator model** (§8) or the **summariser** (§10).
+Neither absence was noticed in use, and nothing the operator reached for would have been
+answered by either. The friction was all about reaching the two participants already there
+and seeing what they were doing.
+
+That is one operator, one project, one day, and mostly short sessions — not evidence that
+either is unnecessary. It is evidence about *order*: both were positioned before the
+console work in the build plan, and the console work turned out to be what use demanded.
+Treat them as unscheduled rather than next, and let a real need surface before building
+either. A summariser in particular is a context remedy, and context isolation plus rotation
+may already be doing that job — which is a claim worth testing before it is engineered
+around.
+
+The same goes for a third participant (§11). Everything hit on 2026-08-06 was about the two
+that exist being reachable and legible. Personas (§2 below) are the shape the need actually
+took, and they are consulted rather than seated.
+
+### 1. The advisor's channels
+
+It can instruct the implementer during a run, and answer the human between runs. It cannot
+report to the human *during* a run except by `ESCALATE`, which halts, and cannot reach the
+implementer *outside* one. Asked out of run to get the implementer to fix something, it
+spawned a subagent and called it an implementer — the only move it had.
+
+- **Advisor → human, non-halting.** Findings currently die with the turn unless folded into
+  the next instruction, which is where the briefing now tells it to put them. That is a
+  workaround for a missing channel.
+- **Advisor → implementer, out of run.** A one-shot relayed exchange with no round budget.
+  The hazard is rebuilding the run loop one verb at a time; decide the shape first.
+- **Adding to a live run.** A run's goal is fixed at `start()`, so loose ends become new
+  runs that re-brief everyone from scratch.
+
+### 2. Personas the advisor can delegate to
+
+Security review, code review, and other specialists, delegated to by the advisor rather
+than standing in the rotation. Distinct from the §11 third participant: a persona is
+consulted and returns a finding, it does not hold a seat in the committee or the round
+budget.
+
+Open questions, in the order they bite:
+
+- **A persona and a subagent are the same mechanism from the model's side.** The
+  distinction that matters is whether Conclave routes and records it. A reviewer whose
+  finding never enters the routing log is invisible to `/audit` and to attribution.
+- **Who pays for the turn.** A consulted persona is another real session on real quota.
+- **Whether a persona may write.** A security reviewer that only reads needs no worktree
+  and cannot perturb attribution. One that patches is a second writer, with everything
+  that follows.
+
+### 3. Custom roles, names and instructions
+
+Configurable participants: display name, extra instructions appended to the briefing, and
+role definitions beyond the three built in. `registry/types.ts` and `roles.ts` were built
+as data in anticipation of exactly this, and `.conclave/config.json` now exists as the
+project-local layer — the §5b layered configuration subsystem is the remaining piece.
+
+The constraint worth keeping: a role is not just a prompt. `RoleDefinition` carries
+`contextPolicy`, `mutatesWorkspace` and `defaultInputOwnership`, and the last two are read
+by the lock and the attribution. A custom role that declares itself read-only and then
+writes breaks a guarantee rather than a preference.
+
+### 4. Remote control
+
+Observe and steer a session from somewhere other than the terminal that started it.
+
+The case is stronger than convenience: the things that block a session while nobody is
+watching are exactly the things a remote operator could clear. A permission prompt holds a
+turn until the 45-minute watchdog. A pause waits indefinitely. Both are single decisions —
+`/allow`, `/continue` — and neither needs the transcript to be readable on a phone to be
+answerable.
+
+Design questions before any transport is chosen:
+
+- **What a remote operator may do.** Answering a permission prompt and resuming a pause are
+  a much smaller surface than the full console, and a much easier one to get right.
+- **Where the session lives.** The console currently owns the pty and the screen. A remote
+  client is a second observer, not a second owner.
+- **Auth, and the fact that this grants command execution in a working directory.**
+  Especially with `permissions: bypass` configured.
+
+### 5. Subagent observability
+
+`wait_agent` and a rising clock is the whole of what an operator sees while a participant
+delegates. Both participants were told to use subagents and a class of work became
+invisible in the same change.
+
+Surface subagent events if the adapters expose them. If they do not, say "waiting on a
+subagent" rather than printing a raw tool name. And decide whether the worktree rule is
+checkable rather than only asked for — today it is a sentence in a briefing.
+
+### 6. Console features are tested one layer below where they break
+
+`relay.ask` and `decidePermission` are covered at the relay and not at the console. Both
+passed their tests and then failed in a real terminal — one because a session at a
+permission dialog keeps emitting the tool call it is blocked on, which no relay test can
+see.
+
+The missing harness is a pty driver whose console outlives its run. Deferred twice on
+2026-08-06. The permission staleness rule is still unverified against a real Codex dialog;
+the timing was read from the adapter source, not observed.
+
+### 7. Unattended operation, if that is the destination
+
+Permissive mode, a 45-minute watchdog and a rotation proven in both branches are most of
+what leaving a session alone requires. The stated position is supervised use. Decide
+deliberately rather than arriving there: the anti-spiral ladder is still a round budget and
+stall metrics rather than the escalation §6 describes, and remote control (§4) changes the
+question by making "unattended" mean "attended from elsewhere".
+
+### Already flagged, now more pressing
+
+- **Artifact attribution is perturbable** (see the rotation section). It diffs `git status`,
+  so a second writer in the interval is attributed to the aside. Subagents make a second
+  writer a design feature rather than an accident.
+- **Acceptance relevance semantics** — a check may reproduce faithfully and be irrelevant to
+  the transferred artifact.
+- **Claude permission `allow` is an unverified encoding.** Now reachable from `/allow`,
+  which makes it operator-facing rather than internal.
+
 ## Deferred, with reasons
 
 - `AgentSession.fork()` throws. Honest until session forking is actually needed.
