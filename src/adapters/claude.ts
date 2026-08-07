@@ -90,6 +90,15 @@ export interface ClaudeAdapterOptions {
   readyTimeoutMs?: number | undefined
   /** How long an unmatched turn may run before the watchdog calls it uncertain. */
   watchdogMs?: number | undefined
+  /**
+   * How long a turn may produce nothing before it is called hung. Defaults to
+   * `DEFAULT_IDLE_MS`.
+   *
+   * Configurable for the same reason `watchdogMs` is: the right value depends on the work.
+   * It was also the only way to TEST the idle deadline against a real session -- a live proof
+   * otherwise needs a turn that genuinely stalls for twelve minutes.
+   */
+  idleMs?: number | undefined
 }
 
 /**
@@ -144,8 +153,10 @@ export class ClaudePtyHookAdapter implements AgentSession {
     // A hung turn produces no hooks, no transcript records and no exit, so the deadline
     // rule has to be driven by a clock rather than by an arrival like everything else.
     // `synthesized: true` -- nothing from the child said this.
-    this.#watchdog = new TurnWatchdog<TurnState>(opts.watchdogMs ?? DEFAULT_WATCHDOG_MS, (turn, update) =>
-      this.#apply(turn, this.#withScreenTail(update), true),
+    this.#watchdog = new TurnWatchdog<TurnState>(
+      opts.watchdogMs ?? DEFAULT_WATCHDOG_MS,
+      (turn, update) => this.#apply(turn, this.#withScreenTail(update), true),
+      opts.idleMs,
     )
   }
 

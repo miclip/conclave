@@ -71,6 +71,15 @@ export interface CodexAdapterOptions {
   args?: string[] | undefined
   readyTimeoutMs?: number | undefined
   watchdogMs?: number | undefined
+  /**
+   * How long a turn may produce nothing before it is called hung. Defaults to
+   * `DEFAULT_IDLE_MS`.
+   *
+   * Configurable for the same reason `watchdogMs` is: the right value depends on the work.
+   * It was also the only way to TEST the idle deadline against a real session -- a live proof
+   * otherwise needs a turn that genuinely stalls for twelve minutes.
+   */
+  idleMs?: number | undefined
 }
 
 /**
@@ -112,8 +121,10 @@ export class CodexPtyHookAdapter implements AgentSession {
     // See the Claude adapter: a hang is defined by nothing arriving, so the deadline rule
     // needs its own clock rather than a hook to react to. `synthesized: true` -- the child
     // said nothing.
-    this.#watchdog = new TurnWatchdog<TurnState>(opts.watchdogMs ?? DEFAULT_WATCHDOG_MS, (turn, update) =>
-      this.#apply(turn, update, true),
+    this.#watchdog = new TurnWatchdog<TurnState>(
+      opts.watchdogMs ?? DEFAULT_WATCHDOG_MS,
+      (turn, update) => this.#apply(turn, update, true),
+      opts.idleMs,
     )
   }
 
