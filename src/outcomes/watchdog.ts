@@ -37,6 +37,13 @@ import type { TurnVerdictTracker, VerdictUpdate } from './tracker.ts'
 export interface WatchdogTarget {
   /** When the turn began, by the same clock the deadline is measured against. */
   startedAt: number
+  /**
+   * When this turn last showed any sign of life, by the same clock.
+   *
+   * Maintained by the adapter through `touch()`. Absent on a target that predates the idle
+   * deadline, in which case only the absolute one applies.
+   */
+  lastActivityAt?: number
   tracker: TurnVerdictTracker
 }
 
@@ -64,20 +71,79 @@ export const TAIL_INTERVAL_MS = 400
 
 export const DEFAULT_WATCHDOG_MS = 45 * 60 * 1000
 
+/**
+ * How long a turn may produce NOTHING before it is called hung.
+ *
+ * The absolute deadline answers "has this run too long", which is the wrong question. A turn
+ * that edits five files and runs a suite is legitimately long and busy; a turn that received
+ * a tool result and then said nothing is hung after a minute, and waiting another forty-four
+ * tells you nothing you did not know at minute two.
+ *
+ * That is not hypothetical. On claude 2.1.224 an implementer took a tool result, produced no
+ * further output and no `Stop`, and the session sat idle for ~44 minutes until the absolute
+ * deadline fired (issue #36). Every second of that wait was information-free.
+ *
+ * Twelve minutes, because the thing being bounded is silence rather than work, and a
+ * participant CAN be silent legitimately -- a long build, a slow test suite, a model
+ * thinking. Twelve is comfortably past those and far short of forty-five.
+ */
+export const DEFAULT_IDLE_MS = 12 * 60 * 1000
+
 export class TurnWatchdog<T extends WatchdogTarget> {
   readonly #ms: number
+  readonly #idleMs: number
   readonly #onUpdate: (target: T, update: VerdictUpdate | undefined) => void
   readonly #timers = new Map<string, NodeJS.Timeout>()
+  /** Retained so `touch()` can re-arm without the caller passing the target again. */
+  readonly #targets = new Map<string, T>()
 
-  constructor(ms: number, onUpdate: (target: T, update: VerdictUpdate | undefined) => void) {
+  constructor(
+    ms: number,
+    onUpdate: (target: T, update: VerdictUpdate | undefined) => void,
+    idleMs: number = DEFAULT_IDLE_MS,
+  ) {
     this.#ms = ms
+    this.#idleMs = idleMs
     this.#onUpdate = onUpdate
   }
 
   /** Start the deadline for a turn. Re-arming a key replaces its pending timer. */
   arm(key: string, target: T): void {
     this.disarm(key)
-    this.#armIn(key, target, Math.max(0, this.#ms - (Date.now() - target.startedAt)))
+    this.#targets.set(key, target)
+    this.#armIn(key, target, this.#nextDelay(target))
+  }
+
+  /**
+   * Record that the turn showed a sign of life, and push the idle deadline out.
+   *
+   * Cheap on purpose: adapters call this from their event path, which is hot. It does no
+   * work beyond a timestamp and a timer reset, and it never extends the ABSOLUTE deadline --
+   * a turn that keeps talking forever is still bounded.
+   */
+  touch(key: string): void {
+    const target = this.#targets.get(key)
+    if (!target || !this.#timers.has(key)) return
+    target.lastActivityAt = Date.now()
+    this.disarm(key)
+    this.#targets.set(key, target)
+    this.#armIn(key, target, this.#nextDelay(target))
+  }
+
+  /**
+   * Whichever deadline comes first: silence, or the absolute cap.
+   *
+   * Both are kept. The idle deadline is the useful one, and the absolute one still bounds a
+   * turn that emits a heartbeat forever without ever finishing.
+   */
+  #nextDelay(target: T): number {
+    const now = Date.now()
+    const absolute = this.#ms - (now - target.startedAt)
+    const idle =
+      target.lastActivityAt === undefined
+        ? Number.POSITIVE_INFINITY
+        : this.#idleMs - (now - target.lastActivityAt)
+    return Math.max(0, Math.min(absolute, idle))
   }
 
   disarm(key: string): void {
@@ -86,6 +152,12 @@ export class TurnWatchdog<T extends WatchdogTarget> {
       clearTimeout(t)
       this.#timers.delete(key)
     }
+  }
+
+  /** Forget a turn entirely. `disarm` alone leaves the target retained for `touch`. */
+  forget(key: string): void {
+    this.disarm(key)
+    this.#targets.delete(key)
   }
 
   disarmAll(): void {
@@ -105,8 +177,18 @@ export class TurnWatchdog<T extends WatchdogTarget> {
 
   #fire(key: string, target: T): void {
     this.#timers.delete(key)
+    const now = Date.now()
 
-    const elapsedMs = Date.now() - target.startedAt
+    // The idle deadline first. Without this branch every idle expiry looked like an EARLY
+    // fire of the absolute deadline and was re-armed, so the idle clock produced nothing at
+    // all -- the mechanism was inert, and a test firing on silence is what showed it.
+    const idleMs = target.lastActivityAt === undefined ? 0 : now - target.lastActivityAt
+    if (target.lastActivityAt !== undefined && idleMs >= this.#idleMs) {
+      this.#onUpdate(target, target.tracker.observeIdle(idleMs / 1000))
+      return
+    }
+
+    const elapsedMs = now - target.startedAt
     if (elapsedMs <= this.#ms) {
       // Fired early. Wait out the remainder rather than report a duration that is not yet
       // past the deadline; see the header.

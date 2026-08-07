@@ -219,3 +219,72 @@ test('re-arming a key replaces its timer rather than stacking a second one', asy
 
   assert.equal(updates.length, 1, 'and must produce one update, not two')
 })
+
+test('silence is what fires the deadline, not elapsed time (#36)', async () => {
+  // On claude 2.1.224 an implementer took a tool result, then produced no further output and
+  // no Stop. The absolute deadline was 45 minutes, so the session sat idle ~44 of them --
+  // every second of that wait information-free, because the turn was knowably hung by
+  // minute two.
+  const { updates, onUpdate } = collector()
+  // Absolute deadline far away; idle deadline short.
+  const w = new TurnWatchdog<Turn>(10_000, onUpdate, MS)
+  const turn = turnAt(Date.now())
+  turn.lastActivityAt = Date.now()
+
+  w.arm(turn.key, turn)
+  await sleep(MS * 3)
+
+  assert.equal(updates.length, 1, 'silence fires it well before the absolute deadline')
+  const v = updates[0]!.verdict!
+  assert.equal(v.outcome, 'timed_out')
+  assert.match(v.provenance[0]!.detail, /no output for/)
+  w.disarmAll()
+})
+
+test('a turn that keeps producing events is not called hung', async () => {
+  // The failure the idle deadline must not introduce. A turn editing five files and running
+  // a suite is legitimately long, and firing on it manufactures a pause out of ordinary work
+  // -- which is exactly why the absolute deadline was raised from 10 minutes to 45.
+  const { updates, onUpdate } = collector()
+  const w = new TurnWatchdog<Turn>(10_000, onUpdate, MS * 2)
+  const turn = turnAt(Date.now())
+  turn.lastActivityAt = Date.now()
+  w.arm(turn.key, turn)
+
+  // Busy for well past the idle window, in steps shorter than it.
+  for (let i = 0; i < 5; i++) {
+    await sleep(MS)
+    w.touch(turn.key)
+  }
+  assert.deepEqual(updates, [], 'activity keeps it alive')
+  w.disarmAll()
+})
+
+test('the absolute deadline still bounds a turn that never stops talking', async () => {
+  // Both clocks are kept. A participant emitting a heartbeat forever without finishing would
+  // otherwise never be bounded at all -- a worse failure, because it looks like progress.
+  const { updates, onUpdate } = collector()
+  const w = new TurnWatchdog<Turn>(MS * 2, onUpdate, 10_000)
+  const turn = turnAt(Date.now())
+  turn.lastActivityAt = Date.now()
+  w.arm(turn.key, turn)
+
+  for (let i = 0; i < 4; i++) {
+    await sleep(MS)
+    w.touch(turn.key)
+  }
+  assert.ok(updates.length >= 1, 'the absolute cap fires despite continuous activity')
+  w.disarmAll()
+})
+
+test('a target that never records activity keeps the absolute deadline', async () => {
+  // Targets predating `lastActivityAt` must keep working rather than becoming immortal.
+  const { updates, onUpdate } = collector()
+  const w = new TurnWatchdog<Turn>(MS, onUpdate, 10_000)
+  const turn = turnAt(Date.now()) // no lastActivityAt
+  w.arm(turn.key, turn)
+  await sleep(MS * 3)
+
+  assert.equal(updates.length, 1)
+  w.disarmAll()
+})

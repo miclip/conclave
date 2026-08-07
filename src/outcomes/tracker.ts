@@ -137,6 +137,18 @@ export class TurnVerdictTracker {
     return this.#reclassify()
   }
 
+  /**
+   * The turn has produced nothing for `seconds`, and that is now considered too long.
+   *
+   * Separate from `observeElapsed` because the deadline that expired is different, and the
+   * provenance a reader gets must say which -- "2700s with no Stop" reads as a turn working
+   * hard, "no output for 720s" says it stopped.
+   */
+  observeIdle(seconds: number): VerdictUpdate | undefined {
+    this.#evidence.idleSeconds = seconds
+    return this.#reclassify()
+  }
+
   #reclassify(): VerdictUpdate | undefined {
     const got = classify(this.#evidence)
     if (got.state === 'in_progress') return undefined

@@ -48,6 +48,15 @@ export interface Evidence {
   process: ProcessState
   orchestrator: OrchestratorActions
   elapsedSeconds: number
+  /**
+   * Seconds since the turn last produced ANYTHING, when an idle deadline has expired.
+   *
+   * Zero means no idle deadline has fired. Kept separate from `elapsedSeconds` because the
+   * two answer different questions -- "has this run too long" versus "has it stopped
+   * speaking" -- and a turn can be hung at two minutes while its elapsed budget has forty
+   * left.
+   */
+  idleSeconds: number
   watchdogSeconds: number
   /** A channel we depend on went away. Says nothing about the turn itself. */
   observationGap: boolean
@@ -65,6 +74,7 @@ export function evidence(partial: Partial<Evidence> & { agent: string }): Eviden
     process: { alive: true },
     orchestrator: { sentCancel: false, inputIsMediated: true },
     elapsedSeconds: 0,
+    idleSeconds: 0,
     watchdogSeconds: 300,
     observationGap: false,
     ...partial,
@@ -236,11 +246,21 @@ export function classify(ev: Evidence): { state: TurnLiveness } & Partial<Verdic
 
   // 7. Deadline, deliberately last and deliberately never `cancelled`. Silence does not
   //    distinguish a long turn from an abandoned one.
-  if (ev.elapsedSeconds > ev.watchdogSeconds) {
-    p.push({
-      source: 'watchdog',
-      detail: `${ev.elapsedSeconds.toFixed(0)}s > ${ev.watchdogSeconds.toFixed(0)}s with no Stop`,
-    })
+  if (ev.elapsedSeconds > ev.watchdogSeconds || ev.idleSeconds > 0) {
+    p.push(
+      ev.idleSeconds > 0
+        ? {
+            source: 'watchdog',
+            // Says SILENCE, not duration. A reader seeing "2700s with no Stop" concludes the
+            // turn was working hard; "no output for 720s" says it stopped, which is the
+            // actual finding and the one that tells them where to look.
+            detail: `no output for ${ev.idleSeconds.toFixed(0)}s, and no Stop`,
+          }
+        : {
+            source: 'watchdog',
+            detail: `${ev.elapsedSeconds.toFixed(0)}s > ${ev.watchdogSeconds.toFixed(0)}s with no Stop`,
+          },
+    )
     p.push({
       source: 'watchdog',
       detail: 'completion is uncertain; this is not evidence of cancellation',

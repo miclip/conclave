@@ -252,6 +252,10 @@ export class CodexPtyHookAdapter implements AgentSession {
   }
 
   #emit(e: AgentEvent): void {
+    // Any event is a sign of life for its turn, so the idle deadline moves with it. Without
+    // this the only clock is the absolute one, and a turn that goes silent mid-work waits it
+    // out in full -- issue #36, where a session sat idle ~44 minutes producing nothing.
+    if (e.turnKey !== undefined && e.type !== 'turn_end') this.#watchdog.touch(String(e.turnKey))
     this.#events.push(e)
   }
 
