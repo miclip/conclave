@@ -23,6 +23,7 @@ import type { CheckSpec } from '../src/rotation/record.ts'
 import { runReport } from '../src/relay/report.ts'
 import { RunLogWriter, readRunLog, runLogExists } from '../src/relay/resume.ts'
 import { preflightRefusals } from '../src/relay/guardrails.ts'
+import { formatGoalFindings, lintGoal } from '../src/relay/goalLint.ts'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { seedCodexTrust } from '../src/deployment/codexHookTrust.ts'
@@ -66,7 +67,7 @@ Commands:
                  [--checks "npm test"] [--checks-informational "..."]
                  [--checks-unrelated "..."] [--lead-args "..."] [--implementer-args "..."]
                  [--json] [--resume <log>] [--record <path>] [--dry-run] [--force]
-                 [--max-turns N] [--max-minutes N]
+                 [--max-turns N] [--max-minutes N] [--strict-goal]
                                    Run a two-agent session unattended and print the
                                    routing log. --json prints a structured record of the
                                    run on stdout instead — outcome, per-turn verdicts with
@@ -77,6 +78,10 @@ Commands:
                                    .conclave/runs/ as it happens; --resume replays that
                                    log into both seats so a run that ended with work in
                                    flight is continued rather than re-described by hand.
+                                   The goal is linted before anything starts: an ask with
+                                   nothing observable in it cannot be graded better than
+                                   reasoned_but_unverified however well the work goes.
+                                   Warnings by default, --strict-goal to refuse.
                                    --dry-run resolves everything and starts nothing.
                                    --max-turns / --max-minutes stop a run that is still
                                    going, exit non-zero, and put the intended length into
@@ -302,6 +307,17 @@ async function main(argv: string[]): Promise<number> {
     const refusals = preflightRefusals(process.cwd(), { force: rest.includes('--force') })
     for (const r of refusals) console.error(`conclave: ${r.reason}\n  ${r.remedy}`)
     if (refusals.length > 0) return 1
+
+    // Warned about before anything starts, refused only if asked. A bad goal is sometimes a
+    // deliberate probe, and a check that blocks work becomes a check people route around.
+    const goalFindings = lintGoal(goal)
+    if (goalFindings.length > 0) {
+      for (const line of formatGoalFindings(goalFindings)) console.error(line)
+      if (rest.includes('--strict-goal')) {
+        console.error('conclave: refusing to start (--strict-goal)')
+        return 1
+      }
+    }
 
     const projectConfig = readProjectConfig(process.cwd())
     // Config-derived args first, then per-invocation ones, so an explicit flag wins.

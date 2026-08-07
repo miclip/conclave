@@ -179,6 +179,10 @@ The reasoning is in [`DESIGN-BRIEF.md`](DESIGN-BRIEF.md).
   `step_finish reason=stop` on OpenCode; anything weaker is labelled as what it is. A run
   exiting 0 is not evidence a turn finished, and is not treated as any.
 
+The goal is linted before anything starts — an ask with nothing observable in it cannot be
+graded better than `reasoned_but_unverified` however well the work goes, and a goal is the
+last artefact you can fix for free. Warnings by default; `--strict-goal` refuses.
+
 `--dry-run` resolves configuration, checks and arguments and starts nothing, and `relay`
 refuses to run outside a git repository unless you pass `--force` — attribution and rotation
 both diff the tree, so neither means anything without one. `--max-turns` and `--max-minutes`

@@ -24,6 +24,7 @@
  * prompt says so rather than implying otherwise.
  */
 
+import { formatGoalFindings, lintGoal } from '../relay/goalLint.ts'
 import { createWriteStream, existsSync, realpathSync } from 'node:fs'
 import { join } from 'node:path'
 import { Writable } from 'node:stream'
@@ -570,6 +571,10 @@ export async function runSession(opts: SessionOptions): Promise<number> {
   })
   /** Start a run. Declared here because the line handler may call it before it is read. */
   const begin = (goal: string): void => {
+    // Shown, never blocking. In the console the operator is present and can retype in a
+    // second, so refusing would cost more than it saves -- and unlike `relay`, a goal typed
+    // here was written by the person reading the warning.
+    for (const line of formatGoalFindings(lintGoal(goal))) write(dim(line))
     run = relay.start(goal)
     void supervise(run)
     refreshPrompt()
