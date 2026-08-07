@@ -190,3 +190,49 @@ test('codex turns do not leave a phantom, and reports align with their prompts',
     'each report belongs to its own prompt',
   )
 })
+
+test('a task_complete carrying an error is not a completion (#35)', () => {
+  // Observed live: Codex returned `usage_limit_exceeded` -- the workspace was out of credits
+  // -- and the record still said `task_complete`, because the turn's machinery completed.
+  // What it produced was a failure.
+  //
+  // Grading that `completed` made it indistinguishable from a turn that legitimately said
+  // nothing, so the relay forwarded an empty instruction, the implementer asked for a resend,
+  // and the run churned rounds toward its budget instead of failing with the real reason.
+  const { turns } = parseCodex([
+    { type: 'event_msg', payload: { type: 'task_started', turn_id: 'T1' } },
+    { type: 'event_msg', payload: { type: 'user_message', message: 'do the thing' } },
+    {
+      type: 'event_msg',
+      payload: {
+        type: 'task_complete',
+        turn_id: 'T1',
+        last_agent_message: null,
+        error: {
+          message: 'Your workspace is out of credits. Ask your workspace owner to refill in order to continue.',
+          codex_error_info: 'usage_limit_exceeded',
+        },
+      },
+    },
+  ])
+
+  assert.equal(turns.length, 1)
+  assert.equal(turns[0]!.state, 'unknown_abnormal_end')
+  assert.equal(turns[0]!.confidence, 'proven', 'the record states it plainly; nothing is inferred')
+  assert.match(turns[0]!.provenance![0]!.detail, /usage_limit_exceeded/)
+  assert.match(turns[0]!.provenance![0]!.detail, /out of credits/, 'the vendor message is carried')
+  // No report. Inventing one from the error text would put the vendor's words in the
+  // participant's mouth and route them onward as though the advisor had said them.
+  assert.equal(turns[0]!.report, undefined)
+})
+
+test('an ordinary task_complete with no message is still a completion', () => {
+  // The control. An errored turn and a turn that simply said nothing must not be conflated
+  // in EITHER direction -- a run that legitimately produces no closing message is normal.
+  const { turns } = parseCodex([
+    { type: 'event_msg', payload: { type: 'task_started', turn_id: 'T1' } },
+    { type: 'event_msg', payload: { type: 'user_message', message: 'do the thing' } },
+    { type: 'event_msg', payload: { type: 'task_complete', turn_id: 'T1', last_agent_message: null } },
+  ])
+  assert.equal(turns[0]!.state, 'completed')
+})

@@ -229,6 +229,31 @@ export function parseCodex(records: Record<string, any>[]): ParsedTranscript {
         case 'task_complete': {
           const rec = ensure(p.turn_id) ?? current
           if (rec) {
+            // `task_complete` can carry an ERROR. Observed live as
+            // `usage_limit_exceeded` -- the workspace was out of credits -- with
+            // `last_agent_message: null`. The record says the turn completed because the
+            // turn's machinery did; what it produced was a failure.
+            //
+            // Grading that `completed` made an errored turn indistinguishable from one that
+            // legitimately said nothing, so the relay forwarded an empty message, the
+            // implementer asked for a resend, and the run churned rounds toward its budget
+            // instead of failing with the real reason. See issue #35.
+            const err = p.error as { message?: string; codex_error_info?: string } | null | undefined
+            if (err) {
+              rec.state = 'unknown_abnormal_end'
+              rec.confidence = 'proven'
+              const info = err.codex_error_info ? `${err.codex_error_info}: ` : ''
+              rec.provenance = [
+                {
+                  source: 'transcript',
+                  detail: `task_complete carried an error -- ${info}${err.message ?? 'no message'}`,
+                },
+              ]
+              // Deliberately no `report`. There is no assistant message, and inventing one
+              // from the error text would put the vendor's words into the participant's
+              // mouth and route them onward as though the advisor had said them.
+              break
+            }
             rec.state = 'completed'
             rec.confidence = 'proven'
             rec.provenance = [{ source: 'transcript', detail: 'task_complete' }]

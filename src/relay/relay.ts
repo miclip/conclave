@@ -1341,6 +1341,47 @@ export class Relay {
       }
 
       const instruction = next.prose.trim()
+
+      // An advisor turn that ended badly, or produced nothing at all, must not be forwarded.
+      //
+      // The `turn_incomplete` guard below covers the IMPLEMENTER only, so an advisor whose
+      // turn errored was relayed as an empty instruction: the implementer received a routing
+      // header with no body, asked for a resend, and the run churned rounds toward its budget
+      // instead of failing with the real reason. Observed live when Codex returned
+      // `usage_limit_exceeded` -- the workspace was out of credits (issue #35).
+      //
+      // Two conditions, because they fail differently. A bad verdict carries a reason worth
+      // reporting; an empty body on a clean verdict does not, and is the minimum bar either
+      // way -- there is no circumstance in which relaying nothing is the right move.
+      if (next.end.verdict.outcome !== 'completed' || instruction === '') {
+        const why =
+          next.end.verdict.outcome !== 'completed'
+            ? `${lead.id} turn ended ${formatVerdict(next.end.verdict)}`
+            : `${lead.id} produced no instruction`
+        const evidence = next.end.verdict.provenance.map((v) => `${v.source}: ${v.detail}`)
+        this.#record({
+          from: 'orchestrator',
+          fromRank: 'human',
+          to: [],
+          kind: 'note',
+          text: [why, ...evidence].join(' — '),
+        })
+        const halted = await this.#halt(handle, {
+          reason: 'turn_incomplete',
+          detail: why,
+          evidence,
+        })
+        if (halted) return halted
+        // Unattended, `#halt` ends the run. Reaching here means an operator resumed, so the
+        // advisor is asked again rather than the empty instruction being sent anyway.
+        next = await this.#exchange(
+          lead,
+          this.#drain(lead.id) ||
+            'Your previous turn produced no instruction. Give the implementer its next one.',
+        )
+        continue
+      }
+
       if (/^DONE\b/i.test(instruction)) {
         // §7a, first paragraph: "The advisor can end the session; the human outranks that
         // and can send them back to work." Returning here regardless let the advisor

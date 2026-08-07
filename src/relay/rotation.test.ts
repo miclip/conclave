@@ -429,7 +429,14 @@ test('a transport failure ends the run with a verdict, it does not escape it (#3
   const dir = repo()
   const impl = new FakeRotationSession('impl', 'claude')
   impl.failSendOnTurn = 1 // succeed once, then lose the transport mid-run
-  const relay = await relayOf(dir, new FakeRotationSession('advisor', 'codex'), [impl])
+  // The advisor is given instructions to issue. Without them it produces an empty turn, and
+  // since #35 an advisor that produces no instruction halts the run on its own -- which would
+  // end this test before the transport failure it is actually about.
+  const relay = await relayOf(
+    dir,
+    new FakeRotationSession('advisor', 'codex', ['do the first thing', 'do the second thing']),
+    [impl],
+  )
   t.after(() => relay.stop())
 
   const outcome = await relay.run('do the thing')

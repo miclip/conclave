@@ -297,3 +297,37 @@ test('an agent operator is told what to escalate, and what not to', async () => 
   assert.equal(report.operator, 'agent')
   await relay.stop()
 })
+
+test('an advisor that produces no instruction never relays an empty message (#35)', async () => {
+  // The minimum bar from the issue: there is no circumstance in which relaying nothing is
+  // right. The implementer received a routing header with no body, asked for a resend, and
+  // the run churned rounds toward its budget instead of failing with the real reason.
+  //
+  // The existing `turn_incomplete` guard covers the IMPLEMENTER only, which is why an
+  // advisor whose turn errored went straight through it.
+  const dir = repo()
+  const impl = new FakeRotationSession('impl', 'claude', ['a report'])
+  const relay = await Relay.start({
+    registry: registryOf({
+      // No scripted replies: every advisor turn comes back empty, as an errored one does.
+      codex: [new FakeRotationSession('advisor', 'codex', [])],
+      claude: [impl],
+    }),
+    cwd: dir,
+    lead: { id: 'advisor', agent: 'codex', role: 'advisor' },
+    implementer: { id: 'implementer', agent: 'claude', role: 'implementer' },
+    maxRounds: 4,
+  })
+  const outcome = await relay.run('a goal')
+  await relay.stop()
+
+  // Ends rather than churning rounds.
+  assert.equal(outcome.reason, 'escalated')
+  assert.match(outcome.detail ?? '', /produced no instruction/)
+  // And the implementer was never handed an empty body.
+  const relayed = relay.log.filter((m) => m.from === 'advisor' && m.to.includes('implementer'))
+  assert.ok(
+    relayed.every((m) => m.text.trim() !== ''),
+    'no empty instruction may reach the implementer',
+  )
+})
