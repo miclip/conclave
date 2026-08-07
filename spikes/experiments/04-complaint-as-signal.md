@@ -1,6 +1,6 @@
 # Experiment 4 — is an unbacked complaint a better signal than compaction?
 
-Pre-registered 2026-08-06. Not yet run.
+Pre-registered 2026-08-06. First attempt run 2026-08-07 — a clean negative; see the end.
 
 ## The claim being tested
 
@@ -105,7 +105,52 @@ stronger claim than pausing on one.
 Falsifying evidence changes nothing in the code and closes the question, which is worth as
 much: the `unbacked` counter stays a metric rather than becoming a trigger.
 
-## Not yet run
+## First attempt: a clean negative, 2026-08-07
 
-The prerequisite is outcome recording in the ledger. Until then any claim in either
-direction rests on the base rate observed so far, which is zero.
+A deliberately long story on `miclip/oath-lang` — nine items across ~10k lines of
+documentation, 25 turns, roughly an hour of participant time. **Zero rotation signals**: no
+compaction, no `carriedFailures`, no `check_exit_changed`, no complaint of either kind. The
+implementer peaked at **187k tokens** and showed no degradation; if anything it grew more
+careful, refusing three drive-by fixes where one deliberate edit was correct.
+
+The base rate stays zero, and the run says why.
+
+### Breadth does not compact; interdependence does
+
+Every item was self-contained: read a claim, re-derive a figure, edit one file, report. The
+implementer never had to hold all nine at once, so context did not accumulate across them —
+it was reset by the shape of the work, not by any mechanism Conclave applied.
+
+What would compact is work that forces simultaneous state. The operator's example is
+equality saturation: rewrite rules, e-class representation, extraction cost function and
+byte-exact normaliser behaviour all held together, where no item can be finished without
+the others in view.
+
+**This is a design input, not a footnote.** A story is only a degradation experiment if its
+items are mutually dependent. Nine independent edits produce a long run and a null result,
+and the length is misleading — wall-clock is not the variable.
+
+### The trigger may be watching an event that no longer happens
+
+187k tokens with no compaction is not a near miss. A large-context implementer may simply
+never reach the boundary on work of this shape, which makes compaction a poor thing to hang
+rotation on: `onDegradation` waits for an event whose base rate is falling as context
+windows grow.
+
+That strengthens the case this experiment exists to test. If the mechanical signal is rare
+to the point of absence, then the alternatives — the participant's own report, or the
+advisor's observation of the work over rounds — are not merely corroborating evidence, they
+are the only evidence available.
+
+### A second-order effect we introduced
+
+The advisor is now told to investigate rather than delegate, and it spent the first 45
+minutes of this run reading. That is correct behaviour and it moves reading load OFF the
+participant whose degradation the trigger watches. Improving the advisor's role made
+implementer compaction less likely, which nothing anticipated.
+
+### Next attempt
+
+Use a story whose items cannot be completed independently. Until then the arm has been
+observed not firing across roughly two hours of genuine work, which is a fact about the
+trigger rather than about the hypothesis.
