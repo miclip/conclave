@@ -59,6 +59,7 @@ Commands:
                                    report as JSON on stdout instead of prose; the exit
                                    code is unchanged.
   relay "<goal>" [--lead codex] [--implementer claude] [--rounds N] [--settle SECONDS]
+                 [--checks "npm test"]
                                    Run a two-agent session unattended and print the
                                    routing log. Every pause point ENDS the run, because a
                                    call that returns an outcome has nowhere to suspend to.
@@ -194,6 +195,7 @@ async function main(argv: string[]): Promise<number> {
     const registry = defaultRegistry()
     const lead = flag('lead', 'codex')
     const implementer = flag('implementer', 'claude')
+    const checks = flag('checks', '').split(',').map((c) => c.trim()).filter(Boolean)
 
     // `.conclave/config.json` is a property of the PROJECT, not of which front-end opened
     // it. Reading it only in the console meant an unattended run ignored the permission
@@ -237,6 +239,10 @@ async function main(argv: string[]): Promise<number> {
         ...(implArgs.length > 0 ? { args: implArgs } : {}),
       },
       maxRounds: Number(flag('rounds', '4')),
+      // Without these, degradation has nothing to verify a replacement against, so the run
+      // ESCALATES and ends rather than rotating. An unattended form that cannot rotate
+      // cannot exercise the mechanism it exists to run unattended.
+      ...(checks.length > 0 ? { rotation: { checks } } : {}),
       // A fixed window cannot serve both a chat-sized turn and one running a full test
       // suite plus a review. It existed on RelayOptions and was reachable from nowhere.
       ...(flag('settle', '') ? { transcriptSettleMs: Number(flag('settle', '')) * 1000 } : {}),
