@@ -318,13 +318,29 @@ export class OpenCodeRunAdapter implements AgentSession {
       if (stderr.length < 8192) stderr += c.toString('utf8')
     })
 
+    // A killed child does not guarantee the stream ends. Its own children inherit stdout, so
+    // an orphaned grandchild -- a bash tool, a sleep, anything the CLI spawned -- holds the
+    // pipe open after the parent is gone. Measured: SIGTERM produced `exit` immediately and
+    // `close` never, so the read loop never ended and `#settle` was never reached. A cancelled
+    // turn then produced no `turn_end` at all, and `#exchange` waits without a timeout by
+    // design, trusting the adapter to settle.
+    //
+    // So `exit` is the signal, and the stream gets a short grace to flush before it is closed
+    // out from under whatever is still holding it.
+    let exited: [number | null, NodeJS.Signals | null] | undefined
+    child.once('exit', (c, s) => {
+      exited = [c, s]
+      setTimeout(() => lines.close(), 250).unref()
+    })
+
     for await (const line of lines) {
       const record = parseRecord(line)
       if (record) this.#onRecord(turn, record)
     }
 
-    const [code, signal] = await new Promise<[number | null, NodeJS.Signals | null]>((r) => {
+    const [code, signal] = exited ?? await new Promise<[number | null, NodeJS.Signals | null]>((r) => {
       child.once('close', (c, s) => r([c, s]))
+      child.once('exit', (c, s) => r([c, s]))
       // A process that never spawned may never emit `close` at all -- its stdio pipes were
       // never opened, so there is nothing to close. Waiting on `close` alone hung the turn
       // forever, which is a worse failure than the crash it replaced.

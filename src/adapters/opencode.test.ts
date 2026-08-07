@@ -250,3 +250,38 @@ test('a binary that is not on PATH is a verdict, not a crash', async () => {
   assert.match(end.verdict.provenance[0]!.detail, /not on PATH/)
   await session.close()
 })
+
+
+test('a cancelled turn settles even when a grandchild holds the stream open', async () => {
+  // A killed child does not guarantee its stream ends. Its own children inherit stdout, so an
+  // orphaned grandchild -- a bash tool, anything the CLI spawned -- keeps the pipe open after
+  // the parent is gone. Measured directly: SIGTERM produced `exit` immediately and `close`
+  // never, so the read loop never ended and the turn never settled.
+  //
+  // That is not a stub artefact. These agents spawn bash tools constantly, and `#exchange`
+  // waits without a timeout by design, trusting the adapter to settle -- so a cancel that
+  // never settles hangs the run with no ceiling to stop it.
+  const dir = mkdtempSync(join(tmpdir(), 'orphan-'))
+  const command = join(dir, 'stub')
+  // `sh` dies on SIGTERM; the sleep it started does not, and it holds stdout.
+  writeFileSync(command, '#!/bin/sh\nsleep 30\nexit 0\n')
+  chmodSync(command, 0o755)
+
+  const session = await OpenCodeRunAdapter.start({ cwd: REPO, role: 'implementer', command })
+  await session.send('go', { kind: 'orchestrator' })
+  await new Promise((r) => setTimeout(r, 300))
+
+  const cancelledAt = Date.now()
+  await session.cancel()
+  const end = (await nextTurn(session)).find((e) => e.type === 'turn_end') as TurnEndEvent
+  const settledIn = Date.now() - cancelledAt
+
+  assert.equal(end.verdict.outcome, 'cancelled')
+  assert.equal(end.verdict.confidence, 'proven', 'we own the process; killing it IS the cancel')
+  // The DURATION is the assertion that discriminates. Before the fix this still reached
+  // `cancelled` -- after 30 seconds, when the orphaned sleep finally exited. Asserting only
+  // the outcome passes on the broken code and proves nothing; a cancel that waits out the
+  // longest-lived grandchild is the defect, and in a real session that is a bash tool.
+  assert.ok(settledIn < 5_000, `cancel must settle promptly, took ${settledIn}ms`)
+  await session.close()
+})
