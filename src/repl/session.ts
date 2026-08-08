@@ -204,7 +204,7 @@ export interface SessionOptions {
 }
 
 /** Slash commands, for the suggestion row. Kept beside HELP so they cannot drift apart. */
-const COMMANDS = [
+export const COMMANDS = [
   '/pause',
   '/continue',
   '/rotate',

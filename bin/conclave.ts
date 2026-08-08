@@ -54,6 +54,42 @@ import { formatGuardReportJson, guard } from '../src/workspace/sessionLock.ts'
 
 const USAGE = `conclave <command>
 
+Driving conclave from an agent
+  Use "session", not "relay". relay returns an outcome, so a pause has nowhere to
+  suspend to and every pause point ENDS the run; session holds a pause open as a
+  decision point you answer. Both take --operator agent, which tells the advisor a
+  machine is answering: escalate about premises and ambiguous criteria, not permission.
+
+  Keep stdin OPEN and write commands as lines. Closing it ends the session once its
+  current run finishes.
+    /continue /rotate /abort        answer a pause
+    /allow /deny                    answer a permission prompt
+    /pause /state /log /exit        drive and inspect
+    @advisor ... / @implementer ... send a message to one seat
+    anything else                   the goal, if none has been given yet
+
+  Observe from another process, without scraping the console:
+    conclave status [<id>] --json   what it is doing now: seats, what each is working
+                                    on, whether one is stopped at a permission prompt,
+                                    the current pause with its evidence and options,
+                                    and per-turn verdicts with confidence and provenance
+    conclave events [<id>] --follow the same run as NDJSON, including pause and resume,
+                                    so you are woken at a decision point rather than
+                                    polling. Stops when the session does.
+    conclave sessions --json        every run recorded in this project, newest first
+
+  Liveness is never read from the file. "state" is what the session last said and
+  "alive" is whether its process exists, reported separately: state "running" with
+  alive false is a crashed run, not a busy one. "abandoned" is that pair named.
+
+  A goal is linted before anything starts. Name something that can be run, compared
+  or observed -- otherwise the participants cannot know when they are done, and the
+  outcome cannot be graded above reasoned_but_unverified however well the work goes.
+
+  Exit codes: status is non-zero only for an abandoned run, because a run that ended
+  badly still ended and its outcome is in the record. relay is non-zero on
+  transport_failed or a ceiling. guard is non-zero while participants are live.
+
 Commands:
   config install [--claude] [--codex] [--no-diagnose] [--trust]
                                    Register Conclave's hooks in the project you are in,

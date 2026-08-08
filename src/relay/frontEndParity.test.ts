@@ -28,6 +28,7 @@ import { strict as assert } from 'node:assert'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
+import { COMMANDS } from '../repl/session.ts'
 
 const CLI = readFileSync(join(import.meta.dirname, '..', '..', 'bin', 'conclave.ts'), 'utf8')
 
@@ -140,4 +141,44 @@ test('both front-ends record a readable session', () => {
   const consoleSrc = readFileSync(join(import.meta.dirname, '..', 'repl', 'session.ts'), 'utf8')
   assert.match(relay, /recordSession\(/, 'relay must record its session')
   assert.match(consoleSrc, /recordSession\(/, 'and so must the console')
+})
+
+/**
+ * The agent-facing section of `--help`, checked against the code it describes.
+ *
+ * An agent arriving cold reads `--help` and gets a command reference written for someone
+ * who already knows the shape of the thing. It then GUESSES: it picks `relay` because the
+ * name sounds unattended, discovers that every pause ends the run, and hand-reconstructs
+ * state on each retry. That happened, four times, to a real caller.
+ *
+ * So the instructions exist — and a set of instructions that drifts from the code is worse
+ * than none, because it is believed. Every command the section names is asserted to exist:
+ * the slash commands against the console's own list, the subcommands against the dispatch.
+ */
+test('the agent instructions name only things that exist', () => {
+  const cli = readFileSync(join(import.meta.dirname, '..', '..', 'bin', 'conclave.ts'), 'utf8')
+  const start = cli.indexOf('Driving conclave from an agent')
+  const end = cli.indexOf('\nCommands:', start)
+  assert.ok(start > 0 && end > start, 'the agent section must be present in USAGE')
+  const section = cli.slice(start, end)
+
+  // The one thing it exists to say. An agent that picks `relay` for an attended run loses
+  // its state at the first pause.
+  assert.match(section, /Use "session", not "relay"/)
+
+  // Every slash command it lists must be one the console actually accepts.
+  const documented = [...section.matchAll(/\/[a-z]+/g)].map((m) => m[0])
+  assert.ok(documented.length >= 6, 'the section must list the slash commands')
+  for (const cmd of new Set(documented)) {
+    assert.ok(COMMANDS.includes(cmd), `--help documents ${cmd}, which the console does not accept`)
+  }
+
+  // ...and every subcommand it points at must be dispatched.
+  for (const sub of ['status', 'events', 'sessions']) {
+    assert.match(section, new RegExp(`conclave ${sub}`), `the section must point at ${sub}`)
+    assert.match(cli, new RegExp(`command === '${sub}'`), `${sub} must actually be a command`)
+  }
+
+  // The distinction a poller gets wrong, and the reason `abandoned` exists at all.
+  assert.match(section, /alive false is a crashed run/)
 })
