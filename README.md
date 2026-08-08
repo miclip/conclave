@@ -239,6 +239,31 @@ anything a participant flagged as unresolved. Every human-facing line moves to s
 stdout parses in full. That is the interface an agent driving Conclave needs — confirming a
 run should not mean grepping a transcript.
 
+## Driving a session as an agent
+
+Use `conclave session`, not `conclave relay`.
+
+`relay` returns an outcome, and a call that returns an outcome has nowhere to suspend to —
+so every pause point ENDS the run. `--operator agent` does not change that; it only changes
+what the advisor is told about who is answering. An agent that picks `relay --operator agent`
+gets a run that dies at the first escalation and a hand-reconstruction of state on every
+resume. Both commands take the flag; only one of them can hold a pause open.
+
+```sh
+conclave session "<goal>" --operator agent   # stdin stays open; the driver writes to it
+conclave status --json                       # state: paused, with reason, evidence, options
+```
+
+A pause suspends the run with everything it had — the round counter, the last instruction,
+the report — and the process stays alive. Commands arrive on stdin as lines: `/continue`,
+`/rotate`, `/abort`, `/allow`, `/deny`, or a message addressed with `@advisor` /
+`@implementer`. Nothing needs to be scraped off the console; `status` carries the pause as
+data, including the options you may answer with.
+
+One limit worth knowing: piped, the session ends when its run does — a script has no way to
+say "I am finished thinking" other than closing stdin. That is one run per process. At a
+terminal the session outlives the run and waits for the next goal.
+
 ## Watching a session from somewhere else
 
 Every session — console or relay — writes what it is doing to `.conclave/sessions/<id>/`,

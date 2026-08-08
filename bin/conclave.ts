@@ -156,7 +156,7 @@ Commands:
   session ["<goal>"] [--advisor codex] [--implementer claude] [--rounds N]
                    [--checks "npm test"] [--checks-informational "..."]
                    [--checks-unrelated "..."] [--advisor-args "..."] [--implementer-args "..."]
-                   [--bypass [agent]]
+                   [--bypass [agent]] [--operator agent]
                                    The same session, interactively. The goal is optional:
                                    without one the console waits and the first thing you
                                    type starts the run. Pauses become decision
@@ -173,6 +173,12 @@ Commands:
                                    that do not exercise the transferred work.
                                    --checks enables rotation; without it a degraded
                                    implementer escalates rather than rotating unverified.
+                                   --operator agent as in relay. Prefer THIS command for an
+                                   agent driver: a pause here is held open as a decision
+                                   point, where relay ends the run at every one of them.
+                                   Commands arrive on stdin as lines, and conclave status
+                                   reports the pause with its evidence and options as data,
+                                   so nothing has to be scraped off the console.
 `
 
 /**
@@ -925,6 +931,9 @@ async function main(argv: string[]): Promise<number> {
     const lead = flag('advisor', '') || flag('lead', 'codex')
     const implementer = flag('implementer', 'claude')
     const rounds = flag('rounds', '8')
+    // The same flag `relay` has. Its absence here is what made an agent pick the front-end
+    // that cannot hold a pause -- see SessionOptions.operator.
+    const operator = flag('operator', '') === 'agent' ? ('agent' as const) : undefined
     const turnTimeout = flag('turn-timeout', '')
     const leadArgs = extraArgs(flag('advisor-args', '') || flag('lead-args', ''))
     const implementerArgs = extraArgs(flag('implementer-args', ''))
@@ -944,6 +953,7 @@ async function main(argv: string[]): Promise<number> {
     }
     return runSession({
       cwd: process.cwd(),
+      ...(operator ? { operator } : {}),
       ...(goal === undefined ? {} : { goal }),
       lead,
       implementer,

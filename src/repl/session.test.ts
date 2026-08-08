@@ -887,3 +887,90 @@ test('a session killed mid-run still records how it ended', async () => {
   // `stopped`, not `done`: the run was cut short and the record says which.
   assert.equal(last?.reason, 'stopped')
 })
+
+/**
+ * An agent driving the console.
+ *
+ * `--operator agent` existed on `relay` and on nothing else, and the pair was actively
+ * misleading: the only front-end that advertised an agent operator is the one that ENDS the
+ * run at every pause, and the only one that holds a pause open had no way to say a machine
+ * was driving. An agent reading the flags picked exactly wrong, and the run told it so four
+ * times — "Nobody is attending this run, so it ends here" — while the flag it had passed
+ * claimed somebody was.
+ */
+test('the console takes --operator agent, and reports it', async () => {
+  const dir = repo()
+  const out = collect()
+  await runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'claude',
+    rounds: 3,
+    checks: [],
+    operator: 'agent',
+    registry: registryOf({
+      codex: [new FakeRotationSession('advisor', 'codex', ['Do it.', 'DONE'])],
+      claude: [new FakeRotationSession('impl', 'claude', ['ack', 'Did it.'])],
+    }),
+    input: script([]),
+    output: out.stream,
+  })
+  const found = resolveSession(dir)
+  assert.ok('session' in found)
+  // Recorded, because it changes what an escalation MEANS: an agent operator may share the
+  // participants' blind spots, so its answer is another opinion with authority rather than
+  // independent confirmation. A reader auditing the run cannot recover that from the log.
+  assert.equal(found.session.status.operator, 'agent')
+})
+
+test('a pause is held open for a piped driver, and resolvable from stdin', async () => {
+  // The property `relay` does not have and cannot have: a call that returns an outcome has
+  // nowhere to suspend to. Here the run suspends, the process stays alive, and the pause is
+  // readable as DATA — reason, evidence, options — so an agent never scrapes the console.
+  const dir = repo()
+  const out = collect()
+  const input = new PassThrough() // held open, as a driver would hold it
+  const running = runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'claude',
+    rounds: 6,
+    checks: [],
+    operator: 'agent',
+    registry: registryOf({
+      codex: [slow('advisor', 'codex', ['Do it.', 'More.', 'DONE'], 300)],
+      claude: [slow('impl', 'claude', ['ack', 'Did it.', 'Again.'], 300)],
+    }),
+    input,
+    output: out.stream,
+  })
+
+  const until = async (pred: (s: ReturnType<typeof resolveSession>) => boolean, ms = 10_000) => {
+    const t = Date.now()
+    while (Date.now() - t < ms) {
+      const f = resolveSession(dir)
+      if (pred(f)) return f
+      await new Promise((r) => setTimeout(r, 50))
+    }
+    throw new Error(`timed out; console said:\n${out.text().slice(-800)}`)
+  }
+
+  await new Promise((r) => setTimeout(r, 500))
+  input.write('/pause\n')
+  const paused = await until((f) => 'session' in f && f.session.status.state === 'paused')
+  assert.ok('session' in paused)
+  assert.equal(paused.session.status.pause?.reason, 'operator_requested')
+  // The options are what an agent picks its next stdin line from.
+  assert.deepEqual(paused.session.status.pause?.options, ['continue', 'rotate', 'constrain', 'abort'])
+  // And nobody died to produce the pause, which is the whole difference from relay.
+  assert.equal(paused.session.alive, true)
+
+  input.write('/continue\n')
+  const resumed = await until((f) => 'session' in f && f.session.status.state === 'running')
+  assert.ok('session' in resumed && resumed.session.status.pause === undefined)
+
+  input.end()
+  await running
+})

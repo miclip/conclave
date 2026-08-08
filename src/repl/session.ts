@@ -135,12 +135,25 @@ export interface SessionOptions {
   leadArgs?: string[] | undefined
   implementerArgs?: string[] | undefined
   rounds: number
-  /** Verification commands. Without them rotation is refused rather than done unverified. */
   /**
    * Verification commands. A bare string is `required`; pass `{command, relevance}` for a
    * check that should run and be reported without gating a transfer.
    */
   checks: CheckSpec[]
+  /**
+   * Who is answering escalations.
+   *
+   * Existed on `relay` and on nothing else, which made the pair actively misleading: the
+   * ONLY front-end that advertised an agent operator was the one that ends the run at every
+   * pause, and the only front-end that holds a pause open had no way to say a machine was
+   * driving. An agent that read the flags and picked `relay --operator agent` chose exactly
+   * wrong, and the run told it so four times -- "Nobody is attending this run, so it ends
+   * here" -- while the flag it had passed claimed somebody was.
+   *
+   * Wiring a capability into one front-end and not the other is the mistake this codebase
+   * has now made seven times.
+   */
+  operator?: 'human' | 'agent' | undefined
   /** Streams for testing; defaults to the process's own. */
   input?: NodeJS.ReadableStream
   output?: NodeJS.WritableStream
@@ -520,6 +533,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
   const relay = await Relay.start({
     registry: opts.registry ?? defaultRegistry(),
     cwd: opts.cwd,
+    ...(opts.operator ? { operator: opts.operator } : {}),
     lead: { id: 'advisor', agent: opts.lead, role: 'advisor', ...(leadArgs.length > 0 ? { args: leadArgs } : {}) },
     implementer: {
       id: 'implementer',
