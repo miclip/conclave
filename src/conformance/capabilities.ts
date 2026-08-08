@@ -85,8 +85,11 @@ export const CODEX_CAPABILITIES: AdapterCapabilities = {
     // neither task_complete nor turn_aborted. Codex itself emits no terminal record for
     // a killed turn; the classification comes entirely from knowing the process died.
     process_exited: 'observed',
-    timed_out: 'reasoned_but_unverified',
-    transport_lost: 'reasoned_but_unverified',
+    // Driven past an 8s watchdog on 0.146.0 with hooks trusted. `uncertain`, like Claude
+    // Code's: on a pty adapter a timeout means only that nothing arrived.
+    timed_out: 'observed',
+    // `close('abandoned')` with a turn in flight, on 0.146.0.
+    transport_lost: 'observed',
     unknown_abnormal_end: 'reasoned_but_unverified',
   },
 }

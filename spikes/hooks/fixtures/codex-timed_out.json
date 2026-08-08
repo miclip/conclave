@@ -1,0 +1,23 @@
+{
+  "agent": "codex",
+  "cliVersion": "0.146.0",
+  "capturedAt": "2026-08-07",
+  "scenario": "a turn driven past its watchdog with work in flight",
+  "how": "watchdogMs 8000, sent a turn that shells out to `sleep 40`, hooks trusted",
+  "turn": {
+    "state": "timed_out",
+    "confidence": "uncertain",
+    "provenance": [
+      {
+        "source": "watchdog",
+        "detail": "8s > 8s with no Stop"
+      },
+      {
+        "source": "watchdog",
+        "detail": "completion is uncertain; this is not evidence of cancellation",
+        "caveat": true
+      }
+    ]
+  },
+  "note": "`uncertain`, like Claude Code's and unlike the headless adapters'. On a pty adapter a timeout means only that nothing arrived; OpenCode and Kimi grade theirs `proven` because the watchdog kills the process and the signal is therefore ours."
+}

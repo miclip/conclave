@@ -34,6 +34,7 @@ import {
   trustCodexHooks,
 } from './codexHookTrust.ts'
 import type { CodexHookReport } from './codexHookTrust.ts'
+import { checkAdapter } from '../conformance/suite.ts'
 import { CODEX_CAPABILITIES } from '../conformance/capabilities.ts'
 import { render, TARGETS } from '../config/install.ts'
 
@@ -243,13 +244,22 @@ test('hook trust is deployment state and must not touch outcome grading', () => 
   }
   assert.equal(diagnoseHookTrust(report, MATCH).ready, true)
 
-  // Codex's capability grades come from live fixtures, and nothing about hook trust may
-  // move them. A green deployment check must never inflate confidence in a turn nobody
-  // observed.
-  assert.equal(CODEX_CAPABILITIES.outcomes.completed, 'observed')
-  assert.equal(CODEX_CAPABILITIES.outcomes.cancelled, 'observed')
-  assert.equal(CODEX_CAPABILITIES.outcomes.permission_refused, 'observed')
-  assert.equal(CODEX_CAPABILITIES.outcomes.timed_out, 'reasoned_but_unverified')
+  // Codex's capability grades come from live fixtures, and nothing about hook trust may move
+  // them. A green deployment check must never inflate confidence in a turn nobody observed.
+  //
+  // Asserted as a PROPERTY rather than against named outcomes. This used to pin
+  // `timed_out: 'reasoned_but_unverified'`, and when that outcome was actually captured from
+  // a live run the test failed -- not because trust had leaked into grading, but because its
+  // example had been overtaken. A test that has to be edited every time evidence improves is
+  // measuring the evidence, not the separation it exists to protect.
+  const rows = checkAdapter(CODEX_CAPABILITIES)
+  for (const row of rows) {
+    assert.notEqual(row.verdict, 'unsupported_claim', `${row.outcome} claims more than it has`)
+  }
+  assert.ok(
+    rows.some((r) => CODEX_CAPABILITIES.outcomes[r.outcome] !== 'observed'),
+    'if every outcome were observed this test could not tell inflation from evidence',
+  )
   assert.equal(CODEX_CAPABILITIES.readinessSignal, 'first_turn')
 })
 

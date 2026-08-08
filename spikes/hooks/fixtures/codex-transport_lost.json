@@ -1,0 +1,23 @@
+{
+  "agent": "codex",
+  "cliVersion": "0.146.0",
+  "capturedAt": "2026-08-07",
+  "scenario": "close('abandoned') with a turn genuinely in flight",
+  "how": "sent a turn shelling out to `sleep 40`, waited 9s, closed as abandoned",
+  "turn": {
+    "state": "transport_lost",
+    "confidence": "uncertain",
+    "provenance": [
+      {
+        "source": "transport",
+        "detail": "observation channel lost; turn state unobservable"
+      },
+      {
+        "source": "transport",
+        "detail": "the child may still be running; this asserts nothing about the turn",
+        "caveat": true
+      }
+    ]
+  },
+  "note": "Codex hook trust had to be seeded first, in a plain repository: in a linked worktree Codex resolves its project config from the MAIN worktree, so the sidecar landed in one directory while trust was recorded for another."
+}
