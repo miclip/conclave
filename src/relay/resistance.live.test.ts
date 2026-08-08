@@ -37,6 +37,7 @@ import { guaranteesFor, turnKey } from '../contract/session.ts'
 import { CLAUDE_AGENT } from '../registry/builtin.ts'
 import { AgentRegistry } from '../registry/registry.ts'
 import { Relay } from './relay.ts'
+import { NO_DEADLINE_CLOCKS } from '../registry/types.ts'
 
 const skip =
   process.env.ORCH_LIVE_RESIST === '1'
@@ -181,6 +182,8 @@ test('the implementer challenges a plausible instruction the repository contradi
     id: 'scripted-advisor',
     displayName: 'Scripted advisor',
     capabilities: { ...CLAUDE_AGENT.capabilities, agent: 'scripted-advisor' },
+    // An in-memory double: no child process, so no clock of either kind.
+    deadlines: NO_DEADLINE_CLOCKS,
     launch: { command: 'none', baseArgs: [] },
     async create() {
       return new ScriptedAdvisor([BAD_INSTRUCTION, 'DONE'])

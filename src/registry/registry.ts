@@ -26,6 +26,17 @@ export class AgentRegistry {
 
   register(def: AgentDefinition): this {
     if (this.#agents.has(def.id)) throw new Error(`agent '${def.id}' is already registered`)
+    // Refused here rather than defaulted at read time. TypeScript already stops the typed
+    // callers; the ones this is for are the untyped -- a registration assembled in a
+    // generated script or, later, from a config file -- where the alternatives are a report
+    // that invents a deadline nobody enforces, or a TypeError thrown while assembling the
+    // record of a run that had otherwise finished.
+    if (!def.deadlines) {
+      throw new Error(
+        `agent '${def.id}' must declare its deadline clocks. There is no default: one would ` +
+          `report a deadline the adapter does not run. Use NO_DEADLINE_CLOCKS if it runs none.`,
+      )
+    }
     this.#agents.set(def.id, def)
     return this
   }

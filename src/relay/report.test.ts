@@ -15,6 +15,7 @@ import test from 'node:test'
 const REPO = fileURLToPath(new URL('../..', import.meta.url))
 import { FakeRotationSession } from '../rotation/fakeSession.ts'
 import { AgentRegistry } from '../registry/registry.ts'
+import type { DeadlineSupport } from '../registry/types.ts'
 import { Relay } from './relay.ts'
 import { runReport, REPORT_SCHEMA } from './report.ts'
 
@@ -24,13 +25,34 @@ function repo(): string {
   return dir
 }
 
-function registryOf(sessions: Record<string, FakeRotationSession[]>): AgentRegistry {
+/** A pty+hook adapter's declaration: both clocks, both defaulted. Claude and Codex. */
+const BOTH_CLOCKS: DeadlineSupport = {
+  absolute: { supported: true, defaultMs: 2_700_000 },
+  silence: { supported: true, defaultMs: 720_000 },
+}
+
+/**
+ * A run-per-turn adapter's declaration: an absolute clock that runs only when asked, and no
+ * silence clock in the adapter at all. Kimi and OpenCode.
+ */
+const NO_SILENCE_CLOCK: DeadlineSupport = {
+  absolute: { supported: true },
+  silence: { supported: false },
+}
+
+function registryOf(
+  sessions: Record<string, FakeRotationSession[]>,
+  deadlines: Record<string, DeadlineSupport> = {},
+): AgentRegistry {
   const r = new AgentRegistry()
   for (const [agent, queue] of Object.entries(sessions)) {
     const remaining = [...queue]
     r.register({
       id: agent,
       displayName: agent,
+      // Defaulted to the pty+hook shape, which is what every test here but the deadline one
+      // is implicitly assuming when it names its fakes `claude` and `codex`.
+      deadlines: deadlines[agent] ?? BOTH_CLOCKS,
       capabilities: {
         agent,
         readinessSignal: 'first_turn',
@@ -84,6 +106,96 @@ test('the report carries the same claims the prose lines make', async () => {
     report.participants.map((p) => p.id).sort(),
     ['advisor', 'implementer'],
   )
+})
+
+/**
+ * Two seats whose adapters disagree about what a deadline even is: a pty+hook advisor with
+ * both clocks defaulted, and a run-per-turn implementer with an absolute clock that is off
+ * unless asked and no silence clock at all.
+ *
+ * The mixed pairing is the point. A run-wide number would have to describe both, and there
+ * is no number that does.
+ */
+async function mixedDeadlines(turnWatchdogMs?: number) {
+  const dir = repo()
+  const relay = await Relay.start({
+    registry: registryOf(
+      {
+        codex: [new FakeRotationSession('advisor', 'codex', ['DONE'])],
+        kimi: [new FakeRotationSession('impl', 'kimi', ['a report'])],
+      },
+      { codex: BOTH_CLOCKS, kimi: NO_SILENCE_CLOCK },
+    ),
+    cwd: dir,
+    lead: { id: 'advisor', agent: 'codex', role: 'advisor' },
+    implementer: { id: 'implementer', agent: 'kimi', role: 'implementer' },
+    maxRounds: 2,
+    ...(turnWatchdogMs === undefined ? {} : { turnWatchdogMs }),
+  })
+  const startedAt = Date.now()
+  const outcome = await relay.run('a goal')
+  const report = await runReport(relay, { goal: 'a goal', outcome, startedAt })
+  await relay.stop()
+  return report
+}
+
+test('each seat reports the clocks it will actually run, unasked', async () => {
+  // Nothing configured, so each seat falls to what its own adapter does. The implementer is
+  // on NO clock in either direction, and that is the state a run-wide report described
+  // worst: it would have claimed 45 minutes and 12 minutes for a seat that enforces neither.
+  const report = await mixedDeadlines()
+  assert.deepEqual(report.deadlines, {
+    configuredAbsoluteMs: null,
+    participants: [
+      {
+        id: 'advisor',
+        agent: 'codex',
+        absolute: { status: 'enforced', ms: 2_700_000 },
+        silence: { status: 'enforced', ms: 720_000 },
+      },
+      {
+        id: 'implementer',
+        agent: 'kimi',
+        // Off, and could be switched on. Distinct from the line below it, which cannot.
+        absolute: { status: 'disabled' },
+        // The one that has to be said out loud. This seat can go quiet forever and produce
+        // no `timed_out` at all, so a reader who assumed a silence deadline applied would be
+        // waiting on a verdict that is never coming.
+        silence: { status: 'unsupported' },
+      },
+    ],
+  })
+})
+
+test('--turn-timeout moves the absolute clock on both seats, and invents neither', async () => {
+  // 90s asked for. Both seats support the absolute clock, so both are now enforced at 90s --
+  // including the one that was running no deadline a moment ago.
+  const report = await mixedDeadlines(90_000)
+  assert.deepEqual(report.deadlines, {
+    // What was ASKED for, kept beside what each seat did with it. The gap is the point: this
+    // request reached the absolute clock on both seats and the silence clock on neither.
+    configuredAbsoluteMs: 90_000,
+    participants: [
+      {
+        id: 'advisor',
+        agent: 'codex',
+        absolute: { status: 'enforced', ms: 90_000 },
+        // Untouched at its adapter's default. `--turn-timeout` is the absolute clock, and a
+        // request that silently retuned the silence budget would be a second setting nobody
+        // typed. Written as a number rather than compared to DEFAULT_IDLE_MS, which would
+        // agree with itself however the constant moved: 720s is what #36 settled on.
+        silence: { status: 'enforced', ms: 720_000 },
+      },
+      {
+        id: 'implementer',
+        agent: 'kimi',
+        absolute: { status: 'enforced', ms: 90_000 },
+        // Still unsupported. No configuration reaches a clock the adapter does not have,
+        // which is exactly why this is a separate status from `disabled`.
+        silence: { status: 'unsupported' },
+      },
+    ],
+  })
 })
 
 test('rotation state is reported even when nothing happened', async () => {

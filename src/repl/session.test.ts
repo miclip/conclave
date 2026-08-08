@@ -19,6 +19,7 @@ import { join } from 'node:path'
 import { PassThrough, Readable, Writable } from 'node:stream'
 import test from 'node:test'
 import type { Verdict } from '../contract/outcome.ts'
+import { NO_DEADLINE_CLOCKS } from '../registry/types.ts'
 import type { AgentSession } from '../contract/session.ts'
 import { AgentRegistry } from '../registry/registry.ts'
 import { FakeRotationSession } from '../rotation/fakeSession.ts'
@@ -59,6 +60,8 @@ function registryOf(
           unknown_abnormal_end: 'reasoned_but_unverified',
         },
       },
+      // An in-memory double: no child process, so no clock of either kind.
+      deadlines: NO_DEADLINE_CLOCKS,
       launch: { command: agent, baseArgs: [] },
       async create(resolved) {
         onLaunch?.(agent, resolved.spec.args)
@@ -774,6 +777,7 @@ import { Readable } from 'node:stream'
 import { runSession } from ${JSON.stringify(join(root, 'src/repl/session.ts'))}
 import { AgentRegistry } from ${JSON.stringify(join(root, 'src/registry/registry.ts'))}
 import { FakeRotationSession } from ${JSON.stringify(join(root, 'src/rotation/fakeSession.ts'))}
+import { NO_DEADLINE_CLOCKS } from ${JSON.stringify(join(root, 'src/registry/types.ts'))}
 const caps = { readinessSignal: 'unknown', turnKeySource: 'prompt_id',
   outcomes: { completed: 'observed', cancelled: 'reasoned_but_unverified',
     permission_refused: 'reasoned_but_unverified', process_exited: 'reasoned_but_unverified',
@@ -783,6 +787,7 @@ const registry = new AgentRegistry()
 for (const [agent, session] of [['codex', new FakeRotationSession('advisor', 'codex', ['Do it.', 'DONE'])],
                                 ['claude', new FakeRotationSession('impl', 'claude', ['ack', 'Did it.'])]]) {
   registry.register({ id: agent, displayName: agent, capabilities: { ...caps, agent },
+    deadlines: NO_DEADLINE_CLOCKS,
     launch: { command: agent, baseArgs: [] }, async create() { return session } })
 }
 process.exit(await runSession({ cwd: ${JSON.stringify(dir)}, goal: 'Keep the work moving.',

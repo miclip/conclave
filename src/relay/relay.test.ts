@@ -32,6 +32,7 @@ import { AgentRegistry } from '../registry/registry.ts'
 import { Relay } from './relay.ts'
 import { outranks, type RelayMessage } from './message.ts'
 import type { RelayEvent } from './observe.ts'
+import { NO_DEADLINE_CLOCKS } from '../registry/types.ts'
 
 /** Records everything it was sent and replies with scripted prose. */
 class FakeSession implements AgentSession {
@@ -255,6 +256,8 @@ function registryWith(sessions: Record<string, FakeSession>): AgentRegistry {
           unknown_abnormal_end: 'reasoned_but_unverified',
         },
       },
+      // An in-memory double: no child process, so no clock of either kind.
+      deadlines: NO_DEADLINE_CLOCKS,
       launch: { command: agent, baseArgs: [] },
       async create() {
         return session

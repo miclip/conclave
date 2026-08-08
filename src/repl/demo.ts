@@ -26,6 +26,7 @@ import type { AgentSession } from '../contract/session.ts'
 import { AgentRegistry } from '../registry/registry.ts'
 import { FakeRotationSession } from '../rotation/fakeSession.ts'
 import { runSession } from './session.ts'
+import { NO_DEADLINE_CLOCKS } from '../registry/types.ts'
 
 const CAPS = {
   readinessSignal: 'unknown' as const,
@@ -110,6 +111,8 @@ export async function runDemo(opts: { record?: string | undefined }): Promise<nu
       id: agent,
       displayName: agent,
       capabilities: { ...CAPS, agent },
+      // An in-memory double: no child process, so no clock of either kind.
+      deadlines: NO_DEADLINE_CLOCKS,
       launch: { command: agent, baseArgs: [] },
       async create() {
         return session

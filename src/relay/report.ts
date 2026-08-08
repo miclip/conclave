@@ -29,7 +29,7 @@
 
 import type { Confidence, Provenance } from '../contract/outcome.ts'
 import type { RunOutcome } from './run.ts'
-import type { Relay } from './relay.ts'
+import type { Relay, RunDeadlines } from './relay.ts'
 
 /**
  * Bumped when a consumer would break. Present from the first version, because adding it
@@ -74,6 +74,21 @@ export interface RunReport {
    */
   operator: 'human' | 'agent'
   outcome: RunOutcome
+  /**
+   * The clocks each seat's turns were judged against.
+   *
+   * Beside `outcome` because it is only meaningful there. `timed_out` says a clock ran out
+   * and not which one, how long it was, or whether the seat that timed out was even the one
+   * the invocation configured -- so a reader deciding "overran its budget" from "cut short
+   * by a tight setting" had to supply the build's defaults from memory.
+   *
+   * Per participant rather than per run, because the verdict is. Two seats can be on
+   * different clocks or on none, and the configured policy may not have applied to the one
+   * that actually timed out. `unsupported` is the case worth the shape: a seat with no
+   * silence clock that goes quiet forever produces NO verdict, so a reader who took the
+   * run-wide number for an answer would sit waiting for a timeout that cannot arrive.
+   */
+  deadlines: RunDeadlines
   startedAt: number
   endedAt: number
   durationMs: number
@@ -153,6 +168,10 @@ export async function runReport(relay: Relay, input: ReportInput): Promise<RunRe
     cwd: relay.cwd,
     operator: relay.operator,
     outcome: input.outcome,
+    // Read whole. Resolving a declared clock against this run's configuration is the relay's
+    // job -- it holds both halves -- and the rule at the top of this file is that nothing
+    // here is re-derived. A second copy of that precedence would be a second answer.
+    deadlines: relay.deadlines,
     startedAt: input.startedAt,
     endedAt,
     durationMs: endedAt - input.startedAt,

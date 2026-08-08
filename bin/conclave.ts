@@ -132,7 +132,7 @@ Commands:
                  [--salvage SECONDS] [--json] [--resume <log>] [--record <path>] [--dry-run]
                  [--force]
                  [--max-turns N] [--max-minutes N] [--strict-goal] [--operator agent]
-                 [--bypass [agent]] [--detach]
+                 [--bypass [agent]] [--detach] [--turn-timeout SECONDS]
                                    Run a two-agent session unattended and print the
                                    routing log. --json prints a structured record of the
                                    run on stdout instead — outcome, per-turn verdicts with
@@ -165,6 +165,14 @@ Commands:
                                    much longer the run waits before treating the report as
                                    lost -- because the alternative is ending the run holding
                                    no account of work already on disk.
+                                   --turn-timeout SECONDS bounds one turn, and what that
+                                   buys depends on the seat. Claude and Codex already stop a
+                                   turn at 45min, and call one that has gone QUIET hung after
+                                   12min; this replaces the 45 and leaves the 12 alone. Kimi
+                                   and OpenCode run no deadline unless you set one and have
+                                   no silence clock at all, so there it is the only thing
+                                   that ever ends a hung turn. What each seat ended up on is
+                                   in the --json report under deadlines, per participant.
                                    Every pause point ENDS the run, because a call that
                                    returns an outcome has nowhere to suspend to.
                                    --detach hands the run to a background process and
@@ -216,6 +224,7 @@ Commands:
                    [--checks-unrelated "..."] [--advisor-args "..."] [--implementer-args "..."]
                    [--bypass [agent]] [--operator agent] [--settle SECONDS]
                    [--salvage SECONDS] [--record <path>] [--resume <log>] [--force]
+                   [--turn-timeout SECONDS]
                                    The same session, interactively. The goal is optional:
                                    without one the console waits and the first thing you
                                    type starts the run. Pauses become decision
@@ -246,10 +255,10 @@ Commands:
                                    Prefer resuming HERE rather than into relay: a resumed
                                    run that hits a pause is held open for you, where relay
                                    would end again at the first one.
-                                   --settle / --salvage as in relay. --record tees every
-                                   byte written to the terminal, escape codes included, so
-                                   a rendering fault can be inspected rather than
-                                   screenshotted.
+                                   --settle / --salvage / --turn-timeout as in relay.
+                                   --record tees every byte written to the terminal,
+                                   escape codes included, so a rendering fault can be
+                                   inspected rather than screenshotted.
 `
 
 /**
@@ -1041,6 +1050,13 @@ async function main(argv: string[]): Promise<number> {
       // different costs: --settle is paid on every turn and must stay small, this is paid
       // only when the alternative is discarding a turn's whole report (#39).
       ...(flag('salvage', '') ? { transcriptSalvageMs: Number(flag('salvage', '')) * 1000 } : {}),
+      // Seconds in, milliseconds out, as the console does it. The deadline for a turn that
+      // has gone SILENT (#36) was adjustable only from the front-end with a human sitting
+      // in front of it -- and the unattended one is where forty-five minutes of silence
+      // costs the most, because nobody is there to notice it and stop the run by hand.
+      ...(flag('turn-timeout', '')
+        ? { turnWatchdogMs: Number(flag('turn-timeout', '')) * 1000 }
+        : {}),
       // The routing log is the only complete account of the session, so it is printed as
       // it happens rather than assembled at the end.
       onLog: (m) => {
