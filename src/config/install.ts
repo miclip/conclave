@@ -288,8 +288,28 @@ export async function installConfig(opts: InstallOptions = {}): Promise<InstallR
   const projectRoot = opts.projectRoot ?? resolveRepoRoot()
   const codexProjectRoot = opts.codexProjectRoot ?? resolveCodexProjectRoot(projectRoot)
   const roots: Record<OutputRoot, string> = { project: projectRoot, codexProject: codexProjectRoot }
+
   // Deduplicated, because a session with the same CLI in both roles names it twice.
   const agents = [...new Set(opts.agents ?? AGENT_KINDS)]
+
+  // A linked worktree needs an EMPTY `.codex/` of its own, or Codex never looks for the
+  // sidecar at all.
+  //
+  // Measured on 0.146.0, from a linked worktree whose main worktree had a valid sidecar:
+  //
+  //   linked has no .codex directory   -> 0 hooks loaded
+  //   linked has an EMPTY .codex dir   -> 5 hooks, sourced from the MAIN worktree
+  //   linked has its own hooks.json    -> 5 hooks, still sourced from the main worktree
+  //   main sidecar deleted             -> 0 hooks
+  //
+  // So the directory is a TRIGGER and its contents are ignored. `resolveCodexProjectRoot` is
+  // right that the file belongs in the main worktree; what was missing is the thing that
+  // makes Codex go and read it. Without this, `codex` in any linked worktree loads no hooks,
+  // has no turn-completion signal, and the preflight correctly refuses to start a session --
+  // with a diagnostic that names neither cause.
+  if (codexProjectRoot !== projectRoot && agents.includes('codex' as AgentKind)) {
+    mkdirSync(join(projectRoot, '.codex'), { recursive: true })
+  }
   const written: InstallResult['written'] = []
 
   for (const target of TARGETS.filter((t) => agents.includes(t.agent))) {

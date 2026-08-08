@@ -487,3 +487,49 @@ test('SessionEnd asks for the timeout Codex will actually honour', () => {
     assert.equal(timeoutOf(event), 10, `${event} is not clamped and keeps its budget`)
   }
 })
+
+test('a linked worktree gets an empty .codex/ so Codex looks for the sidecar at all', async () => {
+  // Measured on codex 0.146.0, from a linked worktree whose MAIN worktree had a valid
+  // sidecar:
+  //
+  //   linked has no .codex directory  -> 0 hooks loaded
+  //   linked has an EMPTY .codex dir  -> 5 hooks, sourced from the MAIN worktree
+  //   linked has its own hooks.json   -> 5 hooks, still sourced from the main worktree
+  //   main sidecar deleted            -> 0 hooks
+  //
+  // The directory is a TRIGGER and its contents are ignored. `resolveCodexProjectRoot` was
+  // right that the file belongs in the main worktree; what was missing was the thing that
+  // makes Codex go and read it. Without this, `codex` in ANY linked worktree loads no hooks,
+  // has no turn-completion signal, and the preflight refuses to start a session -- with a
+  // diagnostic that names neither cause.
+  const main = mkdtempSync(join(tmpdir(), 'wt-main-'))
+  execFileSync('git', ['init', '-q', '.'], { cwd: main })
+  execFileSync('git', ['config', 'user.email', 't@t'], { cwd: main })
+  execFileSync('git', ['config', 'user.name', 't'], { cwd: main })
+  execFileSync('git', ['commit', '-q', '--allow-empty', '-m', 'init'], { cwd: main })
+  const linked = join(main, '..', `wt-linked-${process.pid}`)
+  execFileSync('git', ['worktree', 'add', '-q', '-b', 'probe', linked], { cwd: main })
+
+  await installConfig({
+    projectRoot: linked,
+    conclaveRoot: REPO,
+    agents: ['codex'],
+    diagnose: false,
+  })
+
+  // The sidecar itself belongs to the main worktree...
+  assert.ok(existsSync(join(realpathSync(main), '.codex', 'hooks.json')), 'sidecar in the main worktree')
+  // ...and the linked worktree needs the directory, without which Codex never looks.
+  assert.ok(existsSync(join(linked, '.codex')), 'trigger directory in the linked worktree')
+
+  execFileSync('git', ['worktree', 'remove', '--force', linked], { cwd: main })
+})
+
+test('a plain checkout gets no stray .codex directory', async () => {
+  // The trigger is only needed when the roots diverge. Creating it unconditionally would
+  // leave an empty directory in every project Conclave has ever registered.
+  const plain = mkdtempSync(join(tmpdir(), 'wt-plain-'))
+  execFileSync('git', ['init', '-q', '.'], { cwd: plain })
+  await installConfig({ projectRoot: plain, conclaveRoot: REPO, agents: ['claude'], diagnose: false })
+  assert.equal(existsSync(join(plain, '.codex')), false, 'no codex agent, no codex directory')
+})
