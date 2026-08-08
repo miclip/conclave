@@ -86,7 +86,8 @@ Commands:
   relay "<goal>" [--advisor codex] [--implementer claude] [--rounds N] [--settle SECONDS]
                  [--checks "npm test"] [--checks-informational "..."]
                  [--checks-unrelated "..."] [--advisor-args "..."] [--implementer-args "..."]
-                 [--json] [--resume <log>] [--record <path>] [--dry-run] [--force]
+                 [--salvage SECONDS] [--json] [--resume <log>] [--record <path>] [--dry-run]
+                 [--force]
                  [--max-turns N] [--max-minutes N] [--strict-goal] [--operator agent]
                  [--bypass [agent]] [--detach]
                                    Run a two-agent session unattended and print the
@@ -115,6 +116,12 @@ Commands:
                                    going, exit non-zero, and put the intended length into
                                    the record. Refuses to start outside a git repository
                                    unless --force.
+                                   --settle bounds how long a turn's transcript is given to
+                                   catch up with the hook that says the turn ended. If it
+                                   catches up with NOTHING, --salvage (default 90s) is how
+                                   much longer the run waits before treating the report as
+                                   lost -- because the alternative is ending the run holding
+                                   no account of work already on disk.
                                    Every pause point ENDS the run, because a call that
                                    returns an outcome has nowhere to suspend to.
                                    --detach hands the run to a background process and
@@ -785,6 +792,10 @@ async function main(argv: string[]): Promise<number> {
       // A fixed window cannot serve both a chat-sized turn and one running a full test
       // suite plus a review. It existed on RelayOptions and was reachable from nowhere.
       ...(flag('settle', '') ? { transcriptSettleMs: Number(flag('settle', '')) * 1000 } : {}),
+      // Its own flag rather than a multiple of --settle. The two are budgets against
+      // different costs: --settle is paid on every turn and must stay small, this is paid
+      // only when the alternative is discarding a turn's whole report (#39).
+      ...(flag('salvage', '') ? { transcriptSalvageMs: Number(flag('salvage', '')) * 1000 } : {}),
       // The routing log is the only complete account of the session, so it is printed as
       // it happens rather than assembled at the end.
       onLog: (m) => {

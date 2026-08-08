@@ -37,6 +37,7 @@ import type {
 import { guaranteesFor, turnKey } from '../contract/session.ts'
 import { emptyTranscriptState } from '../outcomes/classify.ts'
 import { TurnVerdictTracker, type VerdictUpdate } from '../outcomes/tracker.ts'
+import type { Verdict } from '../contract/outcome.ts'
 
 import { DEFAULT_WATCHDOG_MS, TAIL_INTERVAL_MS, TurnWatchdog } from '../outcomes/watchdog.ts'
 import { sanitizedCopy } from '../process/childenv.ts'
@@ -79,6 +80,64 @@ interface TurnState {
   /** Seq of the last `turn_end` emitted, so a revision can withdraw it by number. */
   endSeq: number | undefined
   assistantText: string | undefined
+}
+
+/**
+ * What the adapter knows about a turn, independently of the transcript.
+ *
+ * Named so the merge below can be tested without booting a pty. The merge is where a
+ * hook-derived fallback was being silently discarded, and a defect in a private method of a
+ * class that only constructs by spawning a real CLI is a defect with nowhere to put a test.
+ */
+export interface KnownTurn {
+  key: TurnKey
+  prompt: string
+  /** From `Stop`'s `last_assistant_message`. The fallback when the transcript has nothing. */
+  assistantText: string | undefined
+  verdict: Verdict | undefined
+}
+
+/**
+ * Fold what the adapter knows into what the transcript says.
+ *
+ * Claude Code writes no per-turn id into its transcript, so correspondence is positional.
+ * Hook-derived verdicts outrank transcript inference -- `Stop` PROVES completion, the
+ * transcript only suggests it -- and a turn the adapter knows about beyond what the
+ * transcript has recorded is appended rather than dropped, or a consumer folding `events()`
+ * would disagree with `snapshot()`.
+ *
+ * ## The prose fallback, which used to reach nobody
+ *
+ * `Stop` carries `last_assistant_message`, and the adapter stores it precisely so a turn
+ * whose transcript cannot be read still has SOMETHING to say. That store was never read
+ * back out here, so the fallback existed and no consumer could see it: a completed turn
+ * whose transcript had not flushed produced an empty report, the relay had nothing to route,
+ * and the run ended on an escalation while the work sat on disk (#39).
+ *
+ * The transcript wins where it has text -- it concatenates every block, which is the full
+ * narration the peer is entitled to, and `last_assistant_message` is only the closing
+ * paragraph. The fallback applies exactly when there is nothing to lose by applying it.
+ */
+export function mergeKnownTurns(
+  transcriptTurns: readonly TurnRecord[],
+  known: readonly (KnownTurn | undefined)[],
+): TurnRecord[] {
+  const turns = [...transcriptTurns]
+  known.forEach((k, i) => {
+    if (!k) return
+    const base = turns[i] ?? { key: k.key, prompt: k.prompt, state: 'in_progress' as const, toolCalls: [] }
+    const merged: TurnRecord = { ...base, key: k.key }
+    if (k.verdict) {
+      merged.state = k.verdict.outcome
+      merged.confidence = k.verdict.confidence
+      merged.provenance = k.verdict.provenance
+    }
+    // Only when the transcript gave nothing. A partial narration is still the fuller
+    // account, and replacing it with the closing paragraph would lose the rest of the turn.
+    if (!merged.assistantText && k.assistantText) merged.assistantText = k.assistantText
+    turns[i] = merged
+  })
+  return turns
 }
 
 export interface ClaudeAdapterOptions {
@@ -763,25 +822,19 @@ export class ClaudePtyHookAdapter implements AgentSession {
     }
     const snap = await this.#view.snapshot()
 
-    // Claude Code writes no per-turn id into its transcript, so correspondence is
-    // positional. Hook-derived verdicts outrank transcript inference -- Stop proves
-    // completion, the transcript only suggests it -- and any turn the adapter knows about
-    // beyond what the transcript has yet recorded is appended rather than dropped.
-    // Omitting it would make a consumer folding events() disagree with snapshot().
-    const turns = [...snap.turns]
-    this.#order.forEach((key, i) => {
-      const known = this.#turns.get(key)
-      if (!known) return
-      const verdict = known.tracker.verdict
-      const base = turns[i] ?? { key: known.key, prompt: known.prompt, state: 'in_progress' as const, toolCalls: [] }
-      const merged: TurnRecord = { ...base, key: known.key }
-      if (verdict) {
-        merged.state = verdict.outcome
-        merged.confidence = verdict.confidence
-        merged.provenance = verdict.provenance
-      }
-      turns[i] = merged
-    })
+    const turns = mergeKnownTurns(
+      snap.turns,
+      this.#order.map((key) => {
+        const known = this.#turns.get(key)
+        if (!known) return undefined
+        return {
+          key: known.key,
+          prompt: known.prompt,
+          assistantText: known.assistantText,
+          verdict: known.tracker.verdict,
+        }
+      }),
+    )
     return { ...snap, turns, role: this.#opts.role }
   }
 

@@ -127,6 +127,15 @@ export interface RotationConfig {
   hooks?: { afterCapture?: () => Promise<void> }
 }
 
+/**
+ * How long to keep re-reading a completed turn whose report came back empty.
+ *
+ * Generous on purpose: reaching it means the choice is between waiting and discarding a
+ * turn's entire account of work already done. It is bounded rather than unbounded because
+ * an unrecoverable transcript must still end in a decision rather than a hang.
+ */
+const DEFAULT_SALVAGE_MS = 90_000
+
 export interface RelayOptions {
   registry: AgentRegistry
   cwd: string
@@ -172,6 +181,15 @@ export interface RelayOptions {
    * NOT a turn deadline; see `#exchange`. Default 15s.
    */
   transcriptSettleMs?: number
+  /**
+   * How much LONGER to wait when a completed turn's report came back empty.
+   *
+   * Separate from `transcriptSettleMs` because the two are budgets against different costs.
+   * The settle window is paid on every turn, so it must stay small. This is paid only when
+   * the alternative is routing a blank or ending the run, so it can be generous -- and it
+   * stops the instant prose appears, which is almost always at once. Default 90s.
+   */
+  transcriptSalvageMs?: number
   /**
    * Routing-log entries as they are recorded. Kept for callers that only want the log and
    * only want it pushed at them; `observe()` is the fuller surface, and carries the
@@ -1016,7 +1034,7 @@ export class Relay {
   async #exchange(
     p: RelayParticipant,
     text: string,
-  ): Promise<{ prose: string; end: TurnEndEvent; unsettled: boolean }> {
+  ): Promise<{ prose: string; end: TurnEndEvent; unsettled: boolean; changedDuringTurn: string[] }> {
     // Counted here, where a turn actually starts, so the ceiling measures work done rather
     // than rounds entered -- a round can contain one turn or several.
     this.#turnsTaken += 1
@@ -1024,6 +1042,11 @@ export class Relay {
     // rule was followed, and only a repeated sample can see it.
     if (this.#worktreesAtStart) for (const w of worktreePaths(this.#opts.cwd)) this.#worktreesSeen.add(w)
     const before = p.events.length
+    // What the tree looked like before this turn. Only ever used to say what a LOST report
+    // would have described: an escalation that says "the report came back empty" and one
+    // that says "the report came back empty; 3 files changed on disk" ask very different
+    // things of whoever reads it (#39).
+    const treeBeforeTurn = new Set(dirtyPaths(this.#opts.cwd))
     await p.session.send(text, { kind: 'peer_relay' })
 
     // No timeout of its own. The adapter's watchdog guarantees a terminal verdict for a
@@ -1075,17 +1098,52 @@ export class Relay {
           `the report below may be incomplete`,
       })
     }
-    this.#collectEvidence(p, snap)
     // The report, not the narration. A participant that receives "I'll start by finding the
     // relevant code" answers the intention rather than the result, which is how an advisor
     // ends up re-asking for work already done. The narration reaches the human live, as
     // `message` events; see repl/session.ts.
-    const turn = snap.turns.at(-1)
-    const prose = turn?.report ?? turn?.assistantText ?? ''
+    const proseOf = (s: SessionSnapshot) => {
+      const t = s.turns.at(-1)
+      return t?.report ?? t?.assistantText ?? ''
+    }
+
+    // A completed turn with NOTHING to show for it is worth waiting much longer for.
+    //
+    // The settle window above is a budget spent on every turn, so it is deliberately small.
+    // This is not that: reaching here means the alternative is routing a blank the advisor
+    // reasons from, or ending the run outright -- and against that cost another minute of
+    // polling is nothing. Observed live on a turn that rewrote 200 lines of a record file:
+    // 25s was not enough, the report came back empty, and the run ended holding no account
+    // of work that was sitting on disk (#39).
+    //
+    // Only for the unsettled case. A turn whose transcript DID settle and still said
+    // nothing is a participant genuinely saying nothing -- a different fault, and one no
+    // amount of waiting fixes.
+    if (unsettled && proseOf(snap).trim() === '') {
+      const salvageMs = this.#opts.transcriptSalvageMs ?? DEFAULT_SALVAGE_MS
+      const salvageBy = Date.now() + salvageMs
+      while (proseOf(snap).trim() === '' && Date.now() < salvageBy) {
+        await new Promise((r) => setTimeout(r, 250))
+        snap = await p.session.snapshot()
+      }
+      this.#record({
+        from: 'orchestrator',
+        fromRank: 'human',
+        to: [],
+        kind: 'note',
+        text:
+          proseOf(snap).trim() === ''
+            ? `${p.id}'s report was still empty after waiting a further ` +
+              `${Math.round(salvageMs / 1000)}s for the transcript`
+            : `${p.id}'s report arrived after the settle window; the run continues with it`,
+      })
+    }
+    this.#collectEvidence(p, snap)
+    const prose = proseOf(snap)
     for (const text of extractFlags(prose)) {
       this.flags.push({ participant: p.id, text, seq: this.log.length })
     }
-    return { prose, end, unsettled }
+    return { prose, end, unsettled, changedDuringTurn: dirtyPaths(this.#opts.cwd).filter((f) => !treeBeforeTurn.has(f)) }
   }
 
   /**
@@ -1715,14 +1773,33 @@ export class Relay {
       // DID settle is left alone: that is a participant genuinely saying nothing, which is
       // a different fault and not one this can diagnose.
       if (report.unsettled && report.prose.trim() === '') {
+        // Stated as what was LOST, not as what the transcript did. The first version read
+        // as a routing detail -- "the transcript had not settled" -- when what it means is
+        // that a completed turn's entire account of its work was discarded. Those are
+        // different things to someone deciding whether to resume or restart, and the files
+        // are the part that says which (#39).
+        const changed = report.changedDuringTurn
+        // Two phrasings, because the diff can only see paths that BECAME dirty. A file this
+        // turn edited again, having been edited in an earlier one, is indistinguishable from
+        // a file left alone -- so an empty diff must not be reported as "nothing happened".
+        // A reader who trusts a false negative here restarts work that was already done.
+        const dirtyNow = dirtyPaths(this.#opts.cwd).length
+        const lost =
+          changed.length > 0
+            ? `${changed.length} path(s) changed on disk during it: ${changed.slice(0, 8).join(', ')}` +
+              `${changed.length > 8 ? `, and ${changed.length - 8} more` : ''}`
+            : `no new paths appeared during it, though ${dirtyNow} are dirty in the tree — ` +
+              `a file this turn edited again looks the same as one it never touched`
         const halted = await this.#halt(handle, {
           reason: 'advisor_escalated',
           detail:
-            `${impl.id} completed its turn but the transcript had not settled and the ` +
-            `report came back empty, so there is nothing to route`,
+            `${impl.id}'s turn completed and its report could not be read, so there is ` +
+            `nothing to route — ${lost}. The work is on disk; what is missing is the ` +
+            `account of it, and a resume from this log starts with that turn saying nothing.`,
           evidence: [
-            `turn_end was proven by the hook; the body was captured before the transcript settled`,
-            `raising the settle window may help — see transcriptSettleMs`,
+            `turn_end was proven by the hook; the transcript never produced a body`,
+            `waited the settle window, then a further salvage window, and it stayed empty`,
+            `raising --settle may help — see transcriptSettleMs and transcriptSalvageMs`,
           ],
         })
         if (halted) return halted

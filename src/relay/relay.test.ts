@@ -77,6 +77,7 @@ class FakeSession implements AgentSession {
 
   async send(message: string): Promise<TurnKey> {
     this.received.push(message)
+    this.onSend?.(message)
     const key = turnKey(`${this.sessionId}-turn-${this.#turns.length}`)
     const prose = this.#replies.shift() ?? '(no further scripted reply)'
     this.#turns.push({ key, prose, args: this.#toolArgsFor(message) })
@@ -149,10 +150,21 @@ class FakeSession implements AgentSession {
    * Simulate the transcript lagging the `Stop` hook: the last turn reports `in_progress`
    * carrying only its preamble until `afterMs`, then completes carrying the real report.
    */
-  #lag: { text: string; until: number } | undefined
-  lagTranscript(finalText: string, afterMs: number): void {
-    this.#lag = { text: finalText, until: Date.now() + afterMs }
+  #lag: { text: string; until: number; silent: boolean } | undefined
+  /**
+   * `silent` withholds the preamble too, so the lagging turn has NO prose at all.
+   *
+   * That is the shape #39 was reported in: a completed turn whose transcript produced
+   * nothing, not merely less. The two behave differently on purpose -- a partial report is
+   * used and its shortfall noted, an empty one is worth waiting much longer for, because the
+   * alternative is routing a blank or ending the run.
+   */
+  lagTranscript(finalText: string, afterMs: number, opts: { silent?: boolean } = {}): void {
+    this.#lag = { text: finalText, until: Date.now() + afterMs, silent: opts.silent === true }
   }
+
+  /** Called on every send, so a fake can change the working tree the way a real turn does. */
+  onSend: ((message: string) => void) | undefined
 
   /** Narration and closing message as the parsers now distinguish them. */
   #split: { narration: string; report: string } | undefined
@@ -174,7 +186,9 @@ class FakeSession implements AgentSession {
           prompt: '',
           state: (held && lagging ? 'in_progress' : 'completed') as 'in_progress' | 'completed',
           assistantText:
-            held && !lagging
+            held && lagging && this.#lag!.silent
+              ? undefined
+              : held && !lagging
               ? this.#lag!.text
               : this.#split && last
                 ? `${this.#split.narration}\n\n${this.#split.report}`
@@ -1036,4 +1050,83 @@ test('the other participant receives the report, not the narration', async () =>
   const report = relay.log.filter((m) => m.kind === 'report').at(-1)!
   assert.equal(report.text, 'Done. guard --json is in.')
   assert.ok(!report.text.includes("I'll start by"), 'the narration must not be routed')
+})
+
+/**
+ * A completed turn whose transcript produced nothing at all (#39).
+ *
+ * Reported live: an implementer completed a turn, grew a record file from 517 to 724 lines,
+ * and the relay read an empty report, escalated, and ended the run. The work survived; the
+ * run's knowledge of it did not, so the next `--resume` starts from a log whose last
+ * implementer turn says nothing — which is exactly the re-derivation `--resume` exists to
+ * prevent.
+ *
+ * Distinct from the lag test above, where the transcript held a preamble. Nothing versus
+ * less is the whole distinction: a partial report is routed with its shortfall noted, and an
+ * empty one is worth waiting far longer for.
+ */
+test('an empty report from a completed turn is waited for, not discarded', async () => {
+  const impl = new FakeSession('claude', 'impl', ['ack', 'PREAMBLE', 'NONE'])
+  // Nothing in the transcript for 700ms, then the real report. The settle window expires
+  // first; the salvage window is what recovers it.
+  impl.lagTranscript('Rewrote the record: seven new sections.', 700, { silent: true })
+
+  const relay = await Relay.start({
+    registry: registryWith({ codex: new FakeSession('codex', 'advisor', ['Do it.', 'DONE']), claude: impl }),
+    cwd: process.cwd(),
+    lead: { id: 'advisor', agent: 'codex', role: 'advisor' },
+    implementer: { id: 'implementer', agent: 'claude', role: 'implementer' },
+    maxRounds: 2,
+    transcriptSettleMs: 150,
+    transcriptSalvageMs: 5_000,
+  })
+  const outcome = await relay.run('Keep the work moving.')
+  await relay.stop()
+
+  assert.notEqual(outcome.reason, 'escalated', 'the run must not end over a transcript that was merely slow')
+  const report = relay.log.filter((m) => m.kind === 'report').at(-1)
+  assert.match(report?.text ?? '', /seven new sections/, 'the report that arrived late is the one routed')
+  assert.ok(
+    relay.log.some((m) => m.text.includes('arrived after the settle window')),
+    'and the log says it was recovered rather than pretending it was never late',
+  )
+})
+
+test('a report that never arrives escalates in terms of what was lost', async () => {
+  // When it genuinely cannot be recovered the run still stops -- but the message has to say
+  // what that costs. The first version read as a routing detail ("the transcript had not
+  // settled"), when what it means is that a completed turn's entire account was discarded.
+  const dir = mkdtempSync(join(tmpdir(), 'conclave-lost-'))
+  execFileSync('git', ['init', '-q'], { cwd: dir })
+  writeFileSync(join(dir, '.gitignore'), '.conclave/\n')
+  execFileSync('git', ['add', '.'], { cwd: dir })
+  execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'init'], { cwd: dir })
+
+  const impl = new FakeSession('claude', 'impl', ['ack', 'PREAMBLE', 'NONE'])
+  impl.lagTranscript('never arrives', 60_000, { silent: true })
+  // The turn does real work on disk, as the reported one did. This is the part the
+  // escalation has to mention: the files are the evidence that something was lost.
+  // A NEW file per turn. The diff can only see paths that became dirty, so a turn that only
+  // re-edits an already-dirty file is the case the message has to stay honest about — and
+  // it is asserted separately below rather than conflated with this one.
+  let n = 0
+  impl.onSend = () => writeFileSync(join(dir, `record-${n++}.md`), 'seven new sections\n')
+
+  const relay = await Relay.start({
+    registry: registryWith({ codex: new FakeSession('codex', 'advisor', ['Do it.', 'DONE']), claude: impl }),
+    cwd: dir,
+    lead: { id: 'advisor', agent: 'codex', role: 'advisor' },
+    implementer: { id: 'implementer', agent: 'claude', role: 'implementer' },
+    maxRounds: 2,
+    transcriptSettleMs: 100,
+    transcriptSalvageMs: 200,
+  })
+  await relay.run('Keep the work moving.')
+  await relay.stop()
+
+  const escalation = relay.log.find((m) => m.text.includes('could not be read'))
+  assert.ok(escalation, `the escalation must name the failure:\n${relay.log.map((m) => m.text).join('\n---\n')}`)
+  assert.match(escalation.text, /record-\d\.md/, 'and name the file that changed, so the loss is legible')
+  assert.match(escalation.text, /resume/, 'and warn that a resume starts from a turn saying nothing')
+  rmSync(dir, { recursive: true, force: true })
 })
