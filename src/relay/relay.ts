@@ -59,6 +59,7 @@ import type { CheckSpec } from '../rotation/record.ts'
 import { resumeBriefing } from './resume.ts'
 import { breached, type Ceilings } from './guardrails.ts'
 import { isSubagentTool, worktreePaths } from './subagents.ts'
+import type { ClockSupport } from '../registry/types.ts'
 
 export type {
   ObserveOptions,
@@ -73,6 +74,13 @@ export type {
 
 export interface RelayParticipant {
   id: string
+  /**
+   * The agent id this seat was filled from, kept so its declared capabilities can be looked
+   * up without awaiting a snapshot. Rotation replaces the SESSION and reuses the spec, so
+   * this survives a rotation unchanged -- as it must, or a seat's reported deadlines would
+   * change when nothing about its adapter did.
+   */
+  agent: string
   rank: Rank
   session: AgentSession
   events: AgentEvent[]
@@ -178,7 +186,11 @@ export interface RelayOptions {
   implementer: ParticipantSpec
   /** Exchanges before the relay stops and hands back to the human. */
   maxRounds?: number
-  /** Per-turn deadline, handed to each adapter's watchdog rather than kept here. */
+  /**
+   * Per-turn deadline, handed to each adapter's watchdog rather than kept here.
+   *
+   * Optional, so the run's actual budget is not readable off this field. Ask `deadlines`.
+   */
   turnWatchdogMs?: number
   /**
    * How long to wait for the transcript to catch up with a turn the hook says has ended.
@@ -202,6 +214,63 @@ export interface RelayOptions {
   onLog?: (m: RelayMessage) => void
   /** Enables automatic rotation on mechanical degradation. See `RotationConfig`. */
   rotation?: RotationConfig
+}
+
+/**
+ * One clock, as one seat will actually run it.
+ *
+ * Tagged rather than `number | undefined`, because the two ways of having no number are not
+ * the same fact and a reader acts differently on each. `disabled` means nothing is watching
+ * and a deadline COULD be set; `unsupported` means the adapter has no such clock, so a turn
+ * that trips it produces no verdict and no configuration will change that. Collapsing them
+ * -- or omitting the field, which reads as neither -- leaves a reader waiting for a
+ * `timed_out` that cannot arrive.
+ */
+export type DeadlineClock =
+  | { status: 'enforced'; ms: number }
+  | { status: 'disabled' }
+  | { status: 'unsupported' }
+
+/** What one seat is measured against. Both clocks, always both present. */
+export interface ParticipantDeadlines {
+  /** The seat, not the agent: ids are what the turns in the report are keyed by. */
+  id: string
+  agent: string
+  /** The whole turn, however busy. */
+  absolute: DeadlineClock
+  /** How long the turn may say NOTHING. A different question, not a tighter version. */
+  silence: DeadlineClock
+}
+
+/**
+ * The deadlines a run was measured against — per seat, because the verdict is.
+ *
+ * There is no run-wide answer, and reporting one was wrong: a `timed_out` belongs to a
+ * participant, and two seats in the same run can be on different clocks or on none. The
+ * adapters differ in what they can KNOW rather than only in how they were wired, so a
+ * single pair of numbers here would be an average that neither seat honours.
+ */
+export interface RunDeadlines {
+  /**
+   * What the invocation ASKED for, and nothing more. Kept because the gap between this and
+   * `participants` is itself worth seeing -- `--turn-timeout 60` against a seat whose
+   * adapter has no silence clock is a request half of which went nowhere.
+   */
+  configuredAbsoluteMs: number | null
+  participants: ParticipantDeadlines[]
+}
+
+/**
+ * Resolve one declared clock against what this run asked for.
+ *
+ * The only place the precedence lives: an unsupported clock stays unsupported however hard
+ * it is configured, a request beats the adapter's default, and an absent default with no
+ * request is off rather than infinite.
+ */
+function resolveClock(support: ClockSupport, requestedMs: number | undefined): DeadlineClock {
+  if (!support.supported) return { status: 'unsupported' }
+  const ms = requestedMs ?? support.defaultMs
+  return ms === undefined ? { status: 'disabled' } : { status: 'enforced', ms }
 }
 
 /**
@@ -530,12 +599,44 @@ export class Relay {
     return [...this.#participants.values()]
   }
 
+  /**
+   * What each seat's turns are actually measured against.
+   *
+   * The single place a declared clock meets this run's configuration, and it goes through
+   * the REGISTRY: the support table belongs to the adapter, so reading it from the agent
+   * definition is the only version of this answer that a new adapter updates by existing.
+   * An `agent === 'kimi'` check here would be a copy of that table, in a module that has no
+   * business holding one, silently wrong the day a fifth adapter lands.
+   *
+   * Nothing here is per-turn. It is the policy each seat is under for the whole run, which
+   * is what a reader interpreting `timed_out` after the fact needs; the turn's own elapsed
+   * time is in its provenance.
+   */
+  get deadlines(): RunDeadlines {
+    const requested = this.#opts.turnWatchdogMs
+    return {
+      configuredAbsoluteMs: requested ?? null,
+      participants: this.participants.map((p) => {
+        const declared = this.#opts.registry.get(p.agent).deadlines
+        return {
+          id: p.id,
+          agent: p.agent,
+          absolute: resolveClock(declared.absolute, requested),
+          // No `requested`: `--turn-timeout` is the absolute clock, and passing it here
+          // would silently retune a budget nobody asked to change -- and would report a
+          // silence deadline for adapters that run none.
+          silence: resolveClock(declared.silence, undefined),
+        }
+      }),
+    }
+  }
+
   async #join(spec: ParticipantSpec, rank: Rank): Promise<void> {
     const session = await this.#opts.registry.createParticipant(spec, {
       cwd: this.#opts.cwd,
       watchdogMs: this.#opts.turnWatchdogMs,
     })
-    const p: RelayParticipant = { id: spec.id, rank, session, events: [], baselineGeneration: 0, degradationCursor: 0 }
+    const p: RelayParticipant = { id: spec.id, agent: spec.agent, rank, session, events: [], baselineGeneration: 0, degradationCursor: 0 }
     this.#participants.set(spec.id, p)
     this.#attach(p)
     this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text: `${spec.id} joined as ${rank} (${spec.agent})` })
@@ -2020,7 +2121,7 @@ export class Relay {
             cwd: this.#opts.cwd,
             watchdogMs: this.#opts.turnWatchdogMs,
           })
-          audition = { id: `${spec.id}~replacement`, rank: 'implementer', session, events: [], baselineGeneration: 0, degradationCursor: 0 }
+          audition = { id: `${spec.id}~replacement`, agent: spec.agent, rank: 'implementer', session, events: [], baselineGeneration: 0, degradationCursor: 0 }
           this.#attach(audition)
           return session
         },

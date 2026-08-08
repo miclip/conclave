@@ -22,6 +22,7 @@ import { AgentRegistry } from '../registry/registry.ts'
 import { FakeRotationSession } from '../rotation/fakeSession.ts'
 import type { RelayEvent } from './observe.ts'
 import { Relay, type RelayOptions } from './relay.ts'
+import { NO_DEADLINE_CLOCKS } from '../registry/types.ts'
 
 function repo(): string {
   const dir = mkdtempSync(join(tmpdir(), 'conclave-run-'))
@@ -77,6 +78,8 @@ function registryOf(queues: Record<string, AgentSession[]>): AgentRegistry {
           unknown_abnormal_end: 'reasoned_but_unverified',
         },
       },
+      // An in-memory double: no child process, so no clock of either kind.
+      deadlines: NO_DEADLINE_CLOCKS,
       launch: { command: agent, baseArgs: [] },
       async create() {
         const next = remaining.shift()

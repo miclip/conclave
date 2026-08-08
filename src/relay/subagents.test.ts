@@ -7,6 +7,7 @@
 import { strict as assert } from 'node:assert'
 import test from 'node:test'
 import { describeTool, isSubagentTool } from './subagents.ts'
+import { NO_DEADLINE_CLOCKS } from '../registry/types.ts'
 
 test('the tools each agent delegates through are recognised', () => {
   // Four agents, four names, none of which announces "this is delegation" in any structured
@@ -58,6 +59,8 @@ test('delegation is detected from participant events, which carry the tool name'
         completed: 'observed', cancelled: 'reasoned_but_unverified', permission_refused: 'unsupported',
         process_exited: 'reasoned_but_unverified', timed_out: 'reasoned_but_unverified',
         transport_lost: 'reasoned_but_unverified', unknown_abnormal_end: 'reasoned_but_unverified' } },
+      // An in-memory double: no child process, so no clock of either kind.
+      deadlines: NO_DEADLINE_CLOCKS,
       launch: { command: agent, baseArgs: [] },
       create: async () => s as never,
     })

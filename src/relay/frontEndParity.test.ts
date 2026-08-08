@@ -80,11 +80,6 @@ const DECLARED: Record<string, string> = {
     'nobody watching. Declared rather than fixed because a ceiling that ENDS a console is ' +
     'not obviously what it should do -- pausing may be right, and that is a design call.',
   'max-minutes': 'as --max-turns.',
-  // --- session only ---------------------------------------------------------------------
-  'turn-timeout':
-    'UNRESOLVED in the other direction: `turnWatchdogMs` exists on RelayOptions and only the ' +
-    'console passes it, so an unattended run cannot shorten the watchdog that decides when a ' +
-    'silent turn is dead. #36 is about exactly that deadline.',
 }
 
 test('every flag one front-end takes and the other does not is declared', () => {
@@ -109,6 +104,37 @@ test('every flag one front-end takes and the other does not is declared', () => 
   const live = new Set(only.map(([f]) => f))
   const stale = Object.keys(DECLARED).filter((f) => !live.has(f))
   assert.deepEqual(stale, [], 'these flags no longer diverge; remove them from DECLARED')
+})
+
+test('both front-ends can shorten the deadline a hung turn is measured against', () => {
+  // Tenth instance, and the one #36 is about: `turnWatchdogMs` sat on RelayOptions and only
+  // the console filled it in, so the run with nobody watching was the run that could not
+  // shorten forty-five minutes of silence.
+  //
+  // The test above would pass on a flag that is merely READ, which is the failure worth
+  // guarding against here -- a value parsed and then dropped looks the same at every other
+  // point in the file. So this asserts where it LANDS, and in what units: seconds at the
+  // CLI, milliseconds on the option, and a missing factor of a thousand is a watchdog that
+  // effectively never fires.
+  const relay = commandBlock('relay', "if (command === 'session')")
+  const session = commandBlock('session', "if (command === 'demo')")
+
+  const relayAt = relay.indexOf('Relay.start({')
+  const sessionAt = session.indexOf('return runSession({')
+  assert.ok(relayAt > 0 && sessionAt > 0, 'both blocks must build their options object here')
+
+  // The session front-end reads the flag into a local first; relay reads it in place. Both
+  // spellings are named rather than pattern-matched, so a rename has to come through here.
+  assert.match(session, /const turnTimeout = flag\('turn-timeout', ''\)/)
+  for (const [name, opts, seconds] of [
+    ['relay', relay.slice(relayAt), "flag('turn-timeout', '')"],
+    ['session', session.slice(sessionAt), 'turnTimeout'],
+  ] as const) {
+    assert.ok(
+      opts.includes(`turnWatchdogMs: Number(${seconds}) * 1000`),
+      `${name} must pass --turn-timeout into turnWatchdogMs, converted from seconds`,
+    )
+  }
 })
 
 test('both front-ends read the project config, and both can write the bypass', () => {

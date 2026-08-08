@@ -36,6 +36,7 @@ function driver(dir: string): string {
 import { runSession } from ${JSON.stringify(join(REPO, 'src/repl/session.ts'))}
 import { AgentRegistry } from ${JSON.stringify(join(REPO, 'src/registry/registry.ts'))}
 import { FakeRotationSession } from ${JSON.stringify(join(REPO, 'src/rotation/fakeSession.ts'))}
+import { NO_DEADLINE_CLOCKS } from ${JSON.stringify(join(REPO, 'src/registry/types.ts'))}
 
 const caps = {
   readinessSignal: 'unknown', turnKeySource: 'prompt_id',
@@ -54,6 +55,7 @@ const registry = new AgentRegistry()
 for (const [agent, session] of [['codex', slow('advisor', 'codex', ['Do it.', 'More.', 'DONE'])], ['claude', impl]]) {
   registry.register({
     id: agent, displayName: agent, capabilities: { ...caps, agent },
+    deadlines: NO_DEADLINE_CLOCKS,
     launch: { command: agent, baseArgs: [] }, async create() { return session },
   })
 }

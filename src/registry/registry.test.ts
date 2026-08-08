@@ -15,6 +15,7 @@ import { AgentRegistry } from './registry.ts'
 import { defaultRegistry, CLAUDE_AGENT, CODEX_AGENT } from './builtin.ts'
 import { BUILTIN_ROLES, resolveRole } from './roles.ts'
 import type { AgentDefinition, ParticipantSpec } from './types.ts'
+import { NO_DEADLINE_CLOCKS } from './types.ts'
 
 const spec = (over: Partial<ParticipantSpec> = {}): ParticipantSpec => ({
   id: 'impl',
@@ -38,6 +39,8 @@ test('an agent without an adapter is described, not hidden', () => {
     id: 'future-agent',
     displayName: 'Not built yet',
     capabilities: { ...CODEX_AGENT.capabilities, agent: 'future-agent' },
+    // An in-memory double: no child process, so no clock of either kind.
+    deadlines: NO_DEADLINE_CLOCKS,
     launch: { command: 'future', baseArgs: [], deploymentState: ['needs an adapter'] },
     unavailableReason: 'adapter not written',
   })
@@ -60,6 +63,8 @@ test('constructing an unavailable agent explains why rather than failing obscure
     id: 'future-agent',
     displayName: 'Not built yet',
     capabilities: { ...CODEX_AGENT.capabilities, agent: 'future-agent' },
+    // An in-memory double: no child process, so no clock of either kind.
+    deadlines: NO_DEADLINE_CLOCKS,
     launch: { command: 'future', baseArgs: [] },
     unavailableReason: 'adapter not written',
   })
@@ -118,6 +123,8 @@ test('a new adapter arrives by registration alone', () => {
     id: 'local-critic',
     displayName: 'Local open-weights critic',
     capabilities: { ...CODEX_AGENT.capabilities, agent: 'local-critic' },
+    // An in-memory double: no child process, so no clock of either kind.
+    deadlines: NO_DEADLINE_CLOCKS,
     launch: { command: 'llama', baseArgs: [] },
     async create() {
       return { agent: 'local-critic' } as any
@@ -126,6 +133,32 @@ test('a new adapter arrives by registration alone', () => {
   const r = defaultRegistry().register(fake)
   assert.equal(r.listAvailable().length, 5)
   assert.equal(r.resolve(spec({ agent: 'local-critic', role: 'advisor' })).agent.id, 'local-critic')
+})
+
+test('an agent that does not declare its deadline clocks is refused at registration', () => {
+  // The four built-ins disagree about what a deadline is -- two run both clocks with
+  // defaults, two run an absolute clock only when asked and no silence clock at all -- so
+  // there is nothing to fall back TO. A definition that stayed quiet would be reported as
+  // enforcing whichever answer the fallback picked, to a reader interpreting a timeout they
+  // did not watch happen.
+  //
+  // Typed callers are already stopped by the compiler. This is for the untyped ones: the
+  // driver scripts these tests generate, and the configuration layer that will eventually
+  // build definitions from a file.
+  const undeclared = {
+    id: 'silent',
+    displayName: 'Declares nothing',
+    capabilities: { ...CODEX_AGENT.capabilities, agent: 'silent' },
+    launch: { command: 'silent', baseArgs: [] },
+  } as unknown as AgentDefinition
+  assert.throws(
+    () => new AgentRegistry().register(undeclared),
+    /must declare its deadline clocks/,
+  )
+  // ...and declaring that it runs none is a valid answer, distinct from not answering.
+  assert.doesNotThrow(() =>
+    new AgentRegistry().register({ ...undeclared, deadlines: NO_DEADLINE_CLOCKS }),
+  )
 })
 
 test('roles are extensible too', () => {

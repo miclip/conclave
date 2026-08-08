@@ -37,6 +37,7 @@ import type { CodexHookReport } from './codexHookTrust.ts'
 import { checkAdapter } from '../conformance/suite.ts'
 import { CODEX_CAPABILITIES } from '../conformance/capabilities.ts'
 import { render, TARGETS } from '../config/install.ts'
+import { NO_DEADLINE_CLOCKS } from '../registry/types.ts'
 
 const ROOT = join(import.meta.dirname, '..', '..')
 const CODEX_CONFIG = join(homedir(), '.codex', 'config.toml')
@@ -304,6 +305,8 @@ test('the registry runs preflight before create, and refuses on failure', async 
     id: 'ok-agent',
     displayName: 'ok',
     capabilities: { ...CODEX_CAPABILITIES, agent: 'ok-agent' },
+    // An in-memory double: no child process, so no clock of either kind.
+    deadlines: NO_DEADLINE_CLOCKS,
     launch: { command: 'x', baseArgs: [] },
     preflight: async () => void order.push('preflight'),
     create: async () => {
@@ -319,6 +322,8 @@ test('the registry runs preflight before create, and refuses on failure', async 
     id: 'blocked-agent',
     displayName: 'blocked',
     capabilities: { ...CODEX_CAPABILITIES, agent: 'blocked-agent' },
+    // An in-memory double: no child process, so no clock of either kind.
+    deadlines: NO_DEADLINE_CLOCKS,
     launch: { command: 'x', baseArgs: [] },
     preflight: async () => {
       throw new Error('hooks are not executable; no turn-completion signal')

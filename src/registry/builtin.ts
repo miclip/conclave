@@ -19,13 +19,41 @@ import {
   OPENCODE_CAPABILITIES,
 } from '../conformance/capabilities.ts'
 import { assertCodexHooksExecutable, CONCLAVE_HOOK_MATCH } from '../deployment/codexHookTrust.ts'
+import { DEFAULT_IDLE_MS, DEFAULT_WATCHDOG_MS } from '../outcomes/watchdog.ts'
 import { AgentRegistry } from './registry.ts'
-import type { AgentDefinition, CreateParticipantContext, ResolvedParticipant } from './types.ts'
+import type {
+  AgentDefinition,
+  CreateParticipantContext,
+  DeadlineSupport,
+  ResolvedParticipant,
+} from './types.ts'
+
+/**
+ * The pty+hook adapters. Both drive `TurnWatchdog`, which owns a timer per armed turn and
+ * runs the silence clock alongside the absolute one, defaulting both when unasked.
+ */
+const PTY_HOOK_DEADLINES: DeadlineSupport = {
+  absolute: { supported: true, defaultMs: DEFAULT_WATCHDOG_MS },
+  silence: { supported: true, defaultMs: DEFAULT_IDLE_MS },
+}
+
+/**
+ * The headless run-per-turn adapters. Both hold a bare `setTimeout` armed only when a
+ * `watchdogMs` is passed, so an unconfigured run has no deadline whatsoever -- and neither
+ * tracks activity within a turn, so there is nothing a silence clock could be measured
+ * against. `unsupported` rather than a default nobody enforces: a turn that goes quiet on
+ * these seats produces no verdict at all, and that is what a reader needs told.
+ */
+const RUN_PER_TURN_DEADLINES: DeadlineSupport = {
+  absolute: { supported: true },
+  silence: { supported: false },
+}
 
 export const CLAUDE_AGENT: AgentDefinition = {
   id: 'claude',
   displayName: 'Claude Code',
   capabilities: CLAUDE_CAPABILITIES,
+  deadlines: PTY_HOOK_DEADLINES,
   launch: {
     command: 'claude',
     // The adapter supplies --settings itself, pointing at a generated hook registration
@@ -48,6 +76,7 @@ export const CODEX_AGENT: AgentDefinition = {
   id: 'codex',
   displayName: 'Codex CLI',
   capabilities: CODEX_CAPABILITIES,
+  deadlines: PTY_HOOK_DEADLINES,
   launch: {
     command: 'codex',
     baseArgs: [
@@ -122,6 +151,7 @@ export const OPENCODE_AGENT: AgentDefinition = {
   id: 'opencode',
   displayName: 'OpenCode',
   capabilities: OPENCODE_CAPABILITIES,
+  deadlines: RUN_PER_TURN_DEADLINES,
   launch: {
     command: 'opencode',
     baseArgs: [],
@@ -152,6 +182,7 @@ export const KIMI_AGENT: AgentDefinition = {
   id: 'kimi',
   displayName: 'Kimi CLI',
   capabilities: KIMI_CAPABILITIES,
+  deadlines: RUN_PER_TURN_DEADLINES,
   launch: { command: 'kimi', baseArgs: [] },
   async create(resolved: ResolvedParticipant, ctx: CreateParticipantContext): Promise<AgentSession> {
     return KimiPrintAdapter.start({

@@ -31,6 +31,7 @@ import { AgentRegistry } from '../registry/registry.ts'
 import { FakeRotationSession } from '../rotation/fakeSession.ts'
 import type { RelayMessage } from './message.ts'
 import { Relay } from './relay.ts'
+import { NO_DEADLINE_CLOCKS } from '../registry/types.ts'
 
 const skip =
   process.env.ORCH_LIVE_AUTHORITY === '1'
@@ -56,6 +57,8 @@ test('an advisor reversal of an aside pauses before the implementer ever sees it
     id: 'scripted-advisor',
     displayName: 'Scripted advisor',
     capabilities: { ...CLAUDE_AGENT.capabilities, agent: 'scripted-advisor' },
+    // An in-memory double: no child process, so no clock of either kind.
+    deadlines: NO_DEADLINE_CLOCKS,
     launch: { command: 'none', baseArgs: [] },
     async create() {
       return advisor

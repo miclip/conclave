@@ -59,10 +59,68 @@ export type Preflight = (
   ctx: CreateParticipantContext,
 ) => Promise<void>
 
+/**
+ * What one deadline clock does for one adapter.
+ *
+ * `supported: false` is a statement about the ADAPTER, not a setting: there is no such
+ * clock in it, so no configuration turns it on. Stating that is the point. A reader who
+ * assumed otherwise is waiting for a `timed_out` that can never arrive, and waiting for a
+ * verdict that is not coming is a worse position than knowing there is none.
+ *
+ * `supported: true` with no `defaultMs` is a third state and not a rounding of either
+ * neighbour: the clock exists and is OFF unless the caller sets one. Two of the four
+ * built-in adapters are in exactly that state, so collapsing it would misdescribe half of
+ * them.
+ */
+export interface ClockSupport {
+  supported: boolean
+  /** What the adapter runs when nobody asks. Absent means it runs nothing. */
+  defaultMs?: number | undefined
+}
+
+/**
+ * Both clocks a turn can die on, as this adapter implements them.
+ *
+ * Declared here rather than worked out from the agent's id at the call site. An id check is
+ * a copy of this table that no one updates, and it lands in whichever module happened to
+ * need the answer first; `Relay.deadlines` resolves it through the registry instead.
+ */
+export interface DeadlineSupport {
+  /** The whole turn, however busy it is. */
+  absolute: ClockSupport
+  /**
+   * How long a turn may produce NOTHING before it is called hung.
+   *
+   * Not a shorter absolute deadline. It answers a different question -- "has this stopped"
+   * rather than "has this run long" -- and an adapter can implement one without the other.
+   */
+  silence: ClockSupport
+}
+
+/**
+ * For a definition that runs no deadline at all, which is every in-memory test double and
+ * any agent registered without a working adapter.
+ *
+ * Spelled out at each use rather than defaulted in the type, because "declared to have no
+ * clocks" and "nobody said" must not produce the same report.
+ */
+export const NO_DEADLINE_CLOCKS: DeadlineSupport = {
+  absolute: { supported: false },
+  silence: { supported: false },
+}
+
 export interface AgentDefinition {
   id: string
   displayName: string
   capabilities: AdapterCapabilities
+  /**
+   * Which deadline clocks this adapter runs. Required, and defaulted nowhere.
+   *
+   * A fallback here would be the whole bug: an adapter that never declared would be
+   * reported as enforcing a deadline it does not have, and the report exists to be
+   * believed by someone interpreting a `timed_out` they did not watch happen.
+   */
+  deadlines: DeadlineSupport
   launch: LaunchSpec
   /** Runs before `create`. Throwing here prevents the session from starting. */
   preflight?: Preflight
