@@ -25,6 +25,7 @@
  */
 
 import { strict as assert } from 'node:assert'
+import { execFileSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -193,4 +194,18 @@ test('both front-ends get Codex to trust the hooks they register', () => {
   const consoleSrc = readFileSync(join(import.meta.dirname, '..', 'repl', 'session.ts'), 'utf8')
   assert.match(relay, /ensureCodexHooksTrusted\(/, 'relay must ensure Codex trust')
   assert.match(consoleSrc, /ensureCodexHooksTrusted\(/, 'and so must the console')
+})
+
+test('version reports the commit when run from a checkout', () => {
+  // `package.json` is bumped once per release, so a checkout thirteen commits past a tag
+  // reported the tag. Two projects filed bugs against builds described as `0.2.7`; one
+  // supplied the commit by hand because the tool would not. A symlink on PATH pointing into
+  // a working tree is the normal way to run this while developing it, so that state is not
+  // exotic — it is how its own authors use it.
+  const out = execFileSync(
+    process.execPath,
+    [join(import.meta.dirname, '..', '..', 'bin', 'conclave.ts'), 'version'],
+    { encoding: 'utf8' },
+  ).trim()
+  assert.match(out, /^\d+\.\d+\.\d+ \([0-9a-f]{7,}(-dirty)?\)$/, `saw: ${out}`)
 })
