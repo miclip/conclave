@@ -13,6 +13,7 @@ import { strict as assert } from 'node:assert'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { resolveSession } from '../workspace/sessionRecord.ts'
+import { formatSessionJson } from '../workspace/sessionView.ts'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PassThrough, Readable, Writable } from 'node:stream'
@@ -846,6 +847,69 @@ test('a console session records a status and an event stream a stranger can read
   const events = readFileSync(st.eventsPath, 'utf8').trim().split('\n').map((l) => JSON.parse(l))
   assert.ok(events.length > 0, 'the event stream must not be empty')
   assert.equal(events.at(-1)?.type, 'run_end', `the stream must end with run_end:\n${events.slice(-3).map((e) => e.type).join(', ')}`)
+})
+
+/**
+ * What a finished console run leaves behind for someone who was not watching it.
+ *
+ * The console never writes a run report — `runReport` is wired into the relay front-end
+ * alone — so until the status file carried graded turns, a console session that had ended
+ * left NO machine-readable account of what its participants actually did. An operator
+ * confirming the run was back to reading prose, or grepping a transcript, which is the
+ * workaround #26 exists to remove.
+ *
+ * The turns must be there AFTER `state: ended`. The console reports `ended` on teardown and
+ * the last turn is graded moments before it, so a recorder that stopped re-reading when the
+ * state was reported would lose exactly the verdicts worth keeping.
+ */
+test('a finished console run leaves graded turns in its status, and in its JSON', async () => {
+  const dir = repo()
+  const out = collect()
+  const code = await runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'claude',
+    rounds: 3,
+    checks: [],
+    registry: registryOf({
+      codex: [new FakeRotationSession('advisor', 'codex', ['Do it.', 'DONE'])],
+      claude: [new FakeRotationSession('impl', 'claude', ['ack', 'Did it.'])],
+    }),
+    input: script([]),
+    output: out.stream,
+  })
+  assert.equal(code, 0)
+
+  const found = resolveSession(dir)
+  assert.ok('session' in found, `a session must have been recorded:\n${out.text().slice(-600)}`)
+  const st = found.session.status
+  assert.equal(st.state, 'ended')
+
+  for (const p of st.participants) {
+    assert.ok(p.turns.length > 0, `${p.id} ran turns and the record must say what came of them`)
+    const turn = p.turns.at(-1)!
+    assert.equal(typeof turn.key, 'string')
+    assert.equal(turn.state, 'completed')
+    // `completed/proven` and `completed/assumed` are not the same claim. A record that gave
+    // the state without the grade would be the prose summary again, in JSON — which is the
+    // thing this file exists instead of.
+    assert.equal(turn.confidence, 'proven')
+    assert.ok(
+      (turn.provenance ?? []).length > 0,
+      `${p.id}'s verdict must say what it is believed on the strength of`,
+    )
+    assert.equal(turn.provenance?.[0]?.source, 'hook')
+  }
+
+  // Through the rendering an agent operator actually reads: `conclave status <id> --json`.
+  // The JSON is the whole record, not a hand-picked subset — a caller that had to fall back
+  // to parsing the prose for one field will parse the prose for all of them.
+  const asJson = JSON.parse(formatSessionJson(found.session))
+  const impl = asJson.participants.find((p: { id: string }) => p.id === 'implementer')
+  assert.ok(impl.turns.length > 0, 'the turns must survive serialisation, not just the object')
+  assert.equal(impl.turns.at(-1).confidence, 'proven')
+  assert.equal(impl.turns.at(-1).provenance[0].detail, 'Stop')
 })
 
 /**
