@@ -8,12 +8,44 @@
  * Acknowledgement order is the contract: journal durably, THEN respond. A 200 that
  * outruns the fsync converts a crash into silent loss, because the hook client treats a
  * 200 as "delivered" and will never replay it.
+ *
+ * A delivery is what produces `completed (proven) [hook:Stop]`, so what the receiver
+ * accepts is what the evidence model is worth. A POST that looks authentic can
+ * manufacture a completion that never happened, which is a cheap forgery of exactly the
+ * claim conclave exists to be trusted about -- so it is worth writing down what is
+ * trusted (issue #46).
+ *
+ * Binding loopback excludes remote callers, and nothing more: any other local process can
+ * discover an ephemeral port with `lsof -i`. The port is therefore not the credential.
+ * The credential is a random token in the URL path, which reaches the child through
+ * ORCH_HOOK_URL and never touches disk, so what is trusted is the child and the secrecy
+ * of its environment. Anyone who can read that environment holds the credential and can
+ * forge a delivery; that is outside this defence's boundary.
+ *
+ * The token is per receiver instance and lives only in memory, which is why this cannot
+ * fail open: there is no secret file whose absence could be read as "auth disabled".
+ *
+ * `x-orch-hook-pid` remains self-reported. The token proves the sender held the URL, not
+ * that it is the process it names.
  */
 
 import { createServer, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { EventEmitter } from 'node:events'
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import { HookJournal, mintDeliveryId, type HookDelivery } from './journal.ts'
+
+/**
+ * Digests rather than the strings themselves, so unequal lengths can still be compared in
+ * constant time. Timing is not the attack the token defends against; this is the cheap
+ * version of not having to argue about it.
+ */
+function secretEqual(a: string, b: string): boolean {
+  return timingSafeEqual(
+    createHash('sha256').update(a).digest(),
+    createHash('sha256').update(b).digest(),
+  )
+}
 
 export interface ReceiverEvents {
   delivery: [HookDelivery]
@@ -25,6 +57,9 @@ export class HookReceiver extends EventEmitter<ReceiverEvents> {
   readonly journal: HookJournal
   #server: Server | undefined
   #url: string | undefined
+  /** Per instance, so one session's URL is not authority over another's evidence. */
+  readonly #token = randomBytes(32).toString('base64url')
+  #path: string | undefined
 
   constructor(journalPath: string) {
     super()
@@ -37,9 +72,20 @@ export class HookReceiver extends EventEmitter<ReceiverEvents> {
   }
 
   async start(host = '127.0.0.1'): Promise<string> {
+    this.#path = `/hook/${this.#token}`
+
     this.#server = createServer((req, res) => {
       if (req.method !== 'POST') {
+        req.resume()
         res.writeHead(405).end()
+        return
+      }
+      // Ahead of the body, the parse and the journal: a rejected delivery must leave no
+      // trace, or a forger still gets to write to the evidence by being refused.
+      if (!secretEqual(req.url ?? '', this.#path!)) {
+        req.resume() // drain, so the sender reads the status instead of a reset socket
+        res.writeHead(403, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ ok: false, error: 'unauthenticated' }))
         return
       }
       const chunks: Buffer[] = []
@@ -94,7 +140,7 @@ export class HookReceiver extends EventEmitter<ReceiverEvents> {
 
     await new Promise<void>((resolve) => this.#server!.listen(0, host, resolve))
     const addr = this.#server!.address() as AddressInfo
-    this.#url = `http://${host}:${addr.port}/hook`
+    this.#url = `http://${host}:${addr.port}${this.#path}`
     return this.#url
   }
 
