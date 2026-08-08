@@ -360,3 +360,44 @@ export function elapsedSince(startedAt: number): string {
   const s = Math.round((Date.now() - startedAt) / 1000)
   return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m${String(s % 60).padStart(2, '0')}s`
 }
+
+/**
+ * What the terminal's tab and window say while a session runs.
+ *
+ * By default the tab shows the command line — `conclave session "build a website t…"` —
+ * which is the least useful thing available: it is the same for every tab running Conclave
+ * until the goal, it is truncated exactly where the goal starts, and it never changes, so a
+ * backgrounded session that is now WAITING for the operator looks identical to one still
+ * working. The single question a tab has to answer is "does this one need me", and the
+ * command line cannot answer it.
+ *
+ * So state comes first and the goal second: tabs truncate from the right, and losing the
+ * end of a goal costs less than losing the word `paused`.
+ *
+ * OSC 0 sets the icon and window titles together, which is what the tab reads in Terminal
+ * .app, iTerm2, WezTerm, Ghostty and the VS Code terminal. BEL rather than ST as the
+ * terminator, because it is the form every one of them accepts.
+ */
+export function titleSequence(state: string, subject?: string): string {
+  // Control characters would be interpreted by the terminal rather than shown, and a
+  // newline inside an OSC string ends it early — leaving the rest to print as text.
+  const clean = (s: string) => s.replace(/[\x00-\x1f\x7f]/g, ' ').trim()
+  const head = clean(state)
+  const tail = subject ? clean(subject) : ''
+  // 48 rather than a tab's visible width: a window title is wider than a tab, both are
+  // truncated by the terminal rather than here, and the ellipsis is theirs to add.
+  const text = [head, tail].filter(Boolean).join(' — ').slice(0, 48)
+  return `\x1b]0;${text}\x07`
+}
+
+/**
+ * Hand the title back on the way out.
+ *
+ * An empty title is the convention for releasing it: the shell's own prompt hook sets one
+ * on the next prompt, so a tab is not left claiming to be a session that has exited. There
+ * is no way to read the previous title back — no terminal reports it — so restoring the
+ * exact one is not available.
+ */
+export function releaseTitleSequence(): string {
+  return '\x1b]0;\x07'
+}

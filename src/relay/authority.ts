@@ -223,7 +223,13 @@ export function detectConflict(
 /** `git status --porcelain` paths, minus Conclave's own bookkeeping. */
 export function dirtyPaths(repoRoot: string): string[] {
   try {
-    return execFileSync('git', ['status', '--porcelain'], { cwd: repoRoot, encoding: 'utf8' })
+    // stderr discarded, for the reason `sessionLock.porcelain` gives: the `catch` handles
+    // "not a repository", so letting git announce it as well only frightens the operator.
+    return execFileSync('git', ['status', '--porcelain'], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
       .split('\n')
       .filter((l) => l.trim())
       .map((l) => l.slice(3))

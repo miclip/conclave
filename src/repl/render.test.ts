@@ -11,7 +11,7 @@
 
 import { strict as assert } from 'node:assert'
 import test from 'node:test'
-import { markdown, setColor } from './render.ts'
+import { markdown, setColor, titleSequence } from './render.ts'
 
 test('colour is off when asked, so piped output stays clean', () => {
   setColor(false)
@@ -71,4 +71,19 @@ test('a table too wide for the terminal truncates rather than wrapping', () => {
   )
   for (const l of out.split('\n')) assert.ok(l.length <= 50, `line over width: ${l.length}`)
   assert.match(out, /…/)
+})
+
+test('a title puts the state first and cannot escape its own sequence', () => {
+  // Tabs truncate from the right, so losing the end of a goal costs less than losing the
+  // word that says the session is waiting for you.
+  assert.match(titleSequence('paused', 'rewrite the parser'), /^\x1b\]0;paused — rewrite the parser\x07$/)
+  // A newline inside an OSC string ENDS it, leaving the remainder to print as text on the
+  // terminal — a goal is operator input and can contain anything.
+  const injected = titleSequence('working', 'do a thing\x07\x1b]0;something else')
+  assert.equal(injected.match(/\x07/g)?.length, 1, 'exactly one terminator')
+  assert.equal(injected.match(/\x1b\]0;/g)?.length, 1, 'exactly one sequence')
+  // Long goals are cut here rather than handed to the terminal whole.
+  assert.ok(titleSequence('working', 'x'.repeat(200)).length < 60)
+  // No subject yet is legitimate: a session with no goal typed is still worth naming.
+  assert.equal(titleSequence('waiting'), '\x1b]0;waiting\x07')
 })

@@ -27,12 +27,12 @@
 import { describeTool } from '../relay/subagents.ts'
 import { formatGoalFindings, lintGoal } from '../relay/goalLint.ts'
 import { createWriteStream, existsSync, realpathSync } from 'node:fs'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { Writable } from 'node:stream'
 import { clearLine, createInterface, cursorTo, type Interface } from 'node:readline'
 import { suggest } from './complete.ts'
 import { Screen } from './screen.ts'
-import { banner, bold, colorFor, dim, elapsedSince, grey, markdown, Progress, rule, setColor, speakerColor, yellow } from './render.ts'
+import { banner, bold, colorFor, dim, elapsedSince, grey, markdown, Progress, releaseTitleSequence, rule, setColor, speakerColor, titleSequence, yellow } from './render.ts'
 import type { AgentEvent } from '../contract/session.ts'
 import { defaultRegistry } from '../registry/builtin.ts'
 import type { CheckSpec } from '../rotation/record.ts'
@@ -66,25 +66,47 @@ function isAgentKind(id: string): id is AgentKind {
  * one that has hung. `Progress` already owns how "still working" looks, so this borrows it
  * rather than inventing a second dialect for the same idea.
  *
+ * `inPlace` redraws one line instead of appending five. The objection `Progress` documents
+ * at length — that an in-place line and readline both own the last row of the terminal, and
+ * whichever writes last strands the other — does not apply HERE: this runs during setup,
+ * before readline is constructed, so nothing else is writing. Five near-identical lines
+ * differing only in their elapsed time read as a stuck loop, which is the opposite of what
+ * a heartbeat is for.
+ *
+ * It is gated on the terminal because the escape codes need one. A piped or recorded run
+ * keeps the appended lines rather than losing progress altogether — the mistake `Progress`
+ * calls out about `enabled`.
+ *
  * The interval is unref'd: a pending heartbeat must never be the reason the process stays
  * alive, and it is cleared on the failure path as well as the success one.
  */
-async function withHeartbeat<T>(
+export async function withHeartbeat<T>(
   out: NodeJS.WritableStream,
   label: string,
   detail: string,
   work: () => Promise<T>,
-  everyMs = 5_000,
+  { inPlace = false, everyMs = 5_000 }: { inPlace?: boolean; everyMs?: number } = {},
 ): Promise<T> {
   const progress = new Progress(out, true, everyMs)
   progress.start(label)
   progress.note(label, detail)
-  const beat = setInterval(() => progress.activity(label, dim, detail), 1_000)
+  // Faster than the appended cadence, and it can be: a redraw costs one line however often
+  // it happens, so the spinner is free to actually move. A motionless line is the thing an
+  // operator reads as a hang.
+  const beat = inPlace
+    ? setInterval(() => {
+        progress.tick()
+        out.write(`\r\x1b[2K  ${progress.line(dim)}`)
+      }, 120)
+    : setInterval(() => progress.activity(label, dim, detail), 1_000)
   beat.unref()
   try {
     return await work()
   } finally {
     clearInterval(beat)
+    // Erased, so the result that follows starts on a clean row rather than overwriting a
+    // half-drawn spinner. The appended path has nothing to erase: it never goes back.
+    if (inPlace) out.write('\r\x1b[2K')
     progress.done(label)
   }
 }
@@ -273,6 +295,24 @@ export async function runSession(opts: SessionOptions): Promise<number> {
   // Colour follows the real terminal, not the tee: a recording of a colourless session
   // would show none of the rendering it was made to inspect.
   setColor(colorFor(target as NodeJS.WriteStream))
+  // Whether a line can be redrawn in place. The real terminal decides, not the tee: a
+  // recorded run still shows the redraws the operator saw, and a run piped to a file gets
+  // the appended form because there is no cursor to move. Distinct from `colorFor`, which
+  // NO_COLOR can switch off while the cursor still works, and from `interactive` below,
+  // which is about stdin.
+  const liveTerminal = (target as NodeJS.WriteStream).isTTY === true
+  /**
+   * The tab and window title, tracking what the session wants from the operator.
+   *
+   * Written to the real terminal rather than through the tee: a title is a property of the
+   * window, so a recording that replayed one would retitle whatever window was watching it.
+   * That is the opposite of the heartbeat, which IS the transcript and belongs in a
+   * recording.
+   */
+  let currentGoal: string | undefined = opts.goal
+  const title = (state: string) => {
+    if (liveTerminal) target.write(titleSequence(state, currentGoal ?? basename(opts.cwd)))
+  }
   const interactive =
     (opts.input ?? process.stdin) === process.stdin && process.stdin.isTTY === true
   let rl: Interface | undefined
@@ -423,14 +463,12 @@ export async function runSession(opts: SessionOptions): Promise<number> {
       // reads as a hang, and the operator has no way to know it is not one — so it uses
       // the same `⋯ name elapsed · detail` vocabulary a working participant does.
       //
-      // Appended rather than animated, for the reason `Progress` documents at length: an
-      // in-place spinner and readline both write the last line of the terminal, and
-      // whichever writes last strands the other.
       const t = await withHeartbeat(
         out,
         'configuring',
         'waiting for Codex to show its trust prompts',
         () => trustCodexHooks(opts.cwd),
+        { inPlace: liveTerminal },
       )
       // Codex records the decision when it EXITS, so confirm rather than assume. Without
       // this the preflight a moment later reads the pre-trust state and refuses, which
@@ -440,6 +478,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
         'configuring',
         'confirming Codex recorded the decision',
         () => waitForCodexHooksExecutable(opts.cwd, CONCLAVE_HOOK_MATCH),
+        { inPlace: liveTerminal },
       )
       const did = [t.askedAboutDirectory ? 'directory' : '', t.prompted ? 'hooks' : '']
         .filter(Boolean)
@@ -581,6 +620,8 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     // second, so refusing would cost more than it saves -- and unlike `relay`, a goal typed
     // here was written by the person reading the warning.
     for (const line of formatGoalFindings(lintGoal(goal))) write(dim(line))
+    currentGoal = goal
+    title('working')
     run = relay.start(goal)
     void supervise(run)
     refreshPrompt()
@@ -617,13 +658,20 @@ export async function runSession(opts: SessionOptions): Promise<number> {
         // at the prompt; ending here would throw away a working session at the exact moment
         // the next instruction was about to arrive.
         run = undefined
+        // The outcome by name, not just "done": a tab saying `aborted` and a tab saying
+        // `completed` are the difference between glancing and going back.
+        title(s.outcome.reason)
         runEnded?.()
         refreshPrompt()
         prompt()
         return
       }
+      // The one transition the title exists for. A paused session is waiting on a decision
+      // and looks, from a backgrounded tab, exactly like one still working.
+      title('paused')
       write(renderPause(s.pause, width))
       await new Promise<void>((resolve) => resumed.push(resolve))
+      title('working')
     }
   }
 
@@ -878,6 +926,9 @@ export async function runSession(opts: SessionOptions): Promise<number> {
    */
   const leave = () => {
     done = true
+    // Given back before the screen is restored, so a tab never outlives the session still
+    // claiming to be one.
+    if (liveTerminal) target.write(releaseTitleSequence())
     stopAnimation?.()
     screen?.close()
     rl?.close()
@@ -1075,7 +1126,12 @@ export async function runSession(opts: SessionOptions): Promise<number> {
 
   try {
     if (opts.goal) begin(opts.goal)
-    else write(dim('  no goal given — type one to start, or /help'))
+    else {
+      // Named by the directory until a goal exists, because that is what distinguishes one
+      // waiting session from another and the goal has not been typed yet.
+      title('waiting')
+      write(dim('  no goal given — type one to start, or /help'))
+    }
 
     // At a terminal, the session outlives a run: participants stay alive between tasks so
     // the next instruction does not pay for a fresh pair of sessions, and the console
@@ -1100,6 +1156,9 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     // to start on a lock it does not recognise.
     process.off('SIGINT', onInterrupt)
     process.off('SIGTERM', onInterrupt)
+    // `leave()` releases it too, and this is the path a throw or a piped run takes — which
+    // is exactly the case where a stale title would survive with nothing left to explain it.
+    if (liveTerminal) target.write(releaseTitleSequence())
     screen?.close()
     rl?.close()
     await relay.stop()

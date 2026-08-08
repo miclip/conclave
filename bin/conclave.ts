@@ -286,6 +286,20 @@ function rejectUnicodeDashes(args: string[]): boolean {
 async function main(argv: string[]): Promise<number> {
   const [command, sub, ...rest] = argv
 
+  // Before dispatch, for every command rather than per-command. `relay` grew its own help
+  // guard after `conclave relay --help` launched two real agent sessions and billed for
+  // asking an advisor what `--help` means; `session` never had one, so `conclave session
+  // --help` read the flag as "no goal, some flags" and opened a live console instead. Any
+  // command asked what it does must answer, and a guard each command has to remember is a
+  // guard some command will not.
+  //
+  // Exact matches only: a goal is one argv entry, so a goal MENTIONING `--help` never
+  // equals it.
+  if (argv.includes('--help') || argv.includes('-h')) {
+    console.log(USAGE)
+    return 0
+  }
+
   if (command === 'config' && sub === 'show') {
     // Deliberately not routed through `installConfig`, even for the drift status they
     // both compute: a dry-run install filters by agent and fails on the first missing
@@ -357,16 +371,10 @@ async function main(argv: string[]): Promise<number> {
 
   if (command === 'relay') {
     const goal = sub
-    // A flag in the goal position is FLAGS, not a goal named `--help`. `session` has
-    // guarded this since it was written; `relay` never did, so `conclave relay --help`
-    // launched two real agent sessions, asked an advisor what `--help` means, and billed
-    // for it. The one invocation someone types when they do not know what a command does
-    // was the one that spent their quota.
+    // A flag in the goal position is FLAGS, not a goal. `--help` and `-h` are already
+    // answered before dispatch; what is left here is every OTHER flag typed where the goal
+    // belongs, which is a mistake worth naming rather than starting a run over.
     if (!goal || goal.startsWith('-')) {
-      if (goal === '--help' || goal === '-h') {
-        console.log(USAGE)
-        return 0
-      }
       console.error(
         goal
           ? `relay: "${goal}" looks like a flag, not a goal. The goal comes first:\n\n` +

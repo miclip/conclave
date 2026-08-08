@@ -10,7 +10,7 @@
  */
 
 import { strict as assert } from 'node:assert'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -20,7 +20,7 @@ import type { Verdict } from '../contract/outcome.ts'
 import type { AgentSession } from '../contract/session.ts'
 import { AgentRegistry } from '../registry/registry.ts'
 import { FakeRotationSession } from '../rotation/fakeSession.ts'
-import { runSession } from './session.ts'
+import { runSession, withHeartbeat } from './session.ts'
 
 function repo(): string {
   const dir = mkdtempSync(join(tmpdir(), 'conclave-repl-'))
@@ -588,4 +588,200 @@ test('a verdict withdrawn while the operator reads the pause is surfaced in the 
 
   input.write('/continue\n')
   assert.equal(await running, 0)
+})
+
+/**
+ * The setup heartbeat.
+ *
+ * Trusting Codex waits on a real TUI for the better part of a minute, and what the operator
+ * saw for it was five stacked lines differing only in an elapsed count — which reads as a
+ * stuck loop rather than as progress. It updates in place at a terminal now, and still
+ * appends where there is no cursor to move, because a piped run losing progress entirely is
+ * the worse failure.
+ */
+test('the setup heartbeat redraws one line at a terminal', async () => {
+  const out = collect()
+  await withHeartbeat(
+    out.stream,
+    'configuring',
+    'waiting for Codex to show its trust prompts',
+    () => new Promise((r) => setTimeout(r, 600)),
+    { inPlace: true },
+  )
+  const text = out.text()
+  assert.ok(text.includes('\r'), 'an in-place line must return the cursor')
+  // The point of the change: however many times it drew, it occupied no rows.
+  assert.equal(text.split('\n').length - 1, 0, `no rows may be appended:\n${JSON.stringify(text)}`)
+  assert.match(text, /configuring/)
+  assert.match(text, /waiting for Codex/)
+  // Erased on the way out, so the result printed next starts on a clean row.
+  assert.ok(text.endsWith('\r\x1b[2K'), 'the live line must be erased when the work ends')
+})
+
+test('the setup heartbeat appends when there is no cursor to move', async () => {
+  const out = collect()
+  await withHeartbeat(
+    out.stream,
+    'configuring',
+    'waiting for Codex to show its trust prompts',
+    // Long enough to outlast two beats: the appended path reports on a one-second
+    // interval, so a shorter run would prove only that nothing printed in under a second.
+    () => new Promise((r) => setTimeout(r, 2_400)),
+    { everyMs: 100 },
+  )
+  const text = out.text()
+  assert.ok(!text.includes('\r'), 'a piped run must write no cursor motion')
+  assert.ok(
+    text.split('\n').filter((l) => l.includes('configuring')).length >= 2,
+    `progress must still be reported when appended:\n${JSON.stringify(text)}`,
+  )
+})
+
+/**
+ * Help, from every command.
+ *
+ * `conclave relay --help` once launched two real agent sessions and asked an advisor what
+ * `--help` means; that was fixed in `relay` alone, so `conclave session --help` still read
+ * the flag as "no goal, some flags" and opened a live console against real CLIs. The guard
+ * lives before dispatch now, because a guard each command has to remember is a guard some
+ * command will not.
+ *
+ * Asserted across the commands that SPAWN something, since those are the ones where being
+ * wrong costs quota rather than a confusing message.
+ */
+test('--help is answered by every command, and starts nothing', () => {
+  const root = join(import.meta.dirname, '..', '..')
+  for (const argv of [
+    ['session', '--help'],
+    ['session', '-h'],
+    ['relay', '--help'],
+    ['demo', '--help'],
+    ['guard', '--help'],
+    ['config', 'check', '--help'],
+    ['--help'],
+  ]) {
+    const stdout = execFileSync(process.execPath, [join(root, 'bin/conclave.ts'), ...argv], {
+      cwd: root,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: 30_000,
+    })
+    assert.match(stdout, /^conclave <command>/, `${argv.join(' ')} must print usage`)
+    // The console prints its banner before it waits, so its absence is what proves nothing
+    // was spawned -- exiting zero alone would not.
+    assert.doesNotMatch(stdout, /joined as/, `${argv.join(' ')} must not start a session`)
+  }
+})
+
+/**
+ * The terminal tab.
+ *
+ * By default it shows the command line — `conclave session "build a website t…"` — which is
+ * identical across tabs until the goal, truncated exactly where the goal starts, and never
+ * changes. So a backgrounded session WAITING on a decision looks the same as one still
+ * working, which is the only question a tab has to answer.
+ *
+ * Driven through `runSession` rather than against `titleSequence` alone, because the string
+ * being right and the console never emitting it is the failure this codebase keeps finding.
+ */
+test('the terminal title tracks what the session wants from the operator', async () => {
+  const dir = repo()
+  const out = collect()
+  // A title is only written to a real terminal; nothing else about this run is a TTY.
+  ;(out.stream as unknown as { isTTY: boolean }).isTTY = true
+  const code = await runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'claude',
+    rounds: 3,
+    checks: [],
+    registry: registryOf({
+      codex: [new FakeRotationSession('advisor', 'codex', ['Do it.', 'DONE'])],
+      claude: [new FakeRotationSession('impl', 'claude', ['ack', 'Did it.'])],
+    }),
+    input: script([]),
+    output: out.stream,
+  })
+  assert.equal(code, 0)
+  const titles = [...out.text().matchAll(/\x1b\]0;([^\x07]*)\x07/g)].map((m) => m[1] ?? '')
+  assert.ok(titles.length > 0, 'the console must set a title at a terminal')
+  assert.ok(
+    titles.some((t) => t.startsWith('working — Keep the work moving')),
+    `state first, then the goal: ${JSON.stringify(titles)}`,
+  )
+  assert.ok(
+    titles.some((t) => t.startsWith('done')),
+    `the outcome must reach the tab: ${JSON.stringify(titles)}`,
+  )
+  // Handed back on the way out, so a tab does not keep claiming to be a session that exited.
+  assert.equal(titles.at(-1), '', `the title must be released last: ${JSON.stringify(titles)}`)
+})
+
+test('no title escape reaches a stream that is not a terminal', async () => {
+  const dir = repo()
+  const out = collect()
+  await runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'claude',
+    rounds: 3,
+    checks: [],
+    registry: registryOf({
+      codex: [new FakeRotationSession('advisor', 'codex', ['Do it.', 'DONE'])],
+      claude: [new FakeRotationSession('impl', 'claude', ['ack', 'Did it.'])],
+    }),
+    input: script([]),
+    output: out.stream,
+  })
+  assert.ok(!out.text().includes('\x1b]0;'), 'a piped run must not leak an OSC title sequence')
+})
+
+/**
+ * A session outside a git repository.
+ *
+ * Two `git status --porcelain` calls inherited stderr, so in a plain directory git printed
+ * `fatal: not a git repository` straight into the banner — unattributed, alarming, and for a
+ * condition both call sites already handle by returning no paths. What the operator saw was
+ * a session that looked broken while working exactly as designed.
+ *
+ * Run in a CHILD process, and the first version of this test was not: git writes to the
+ * stderr the parent inherited, which the `output` stream never sees, so asserting on
+ * collected output passed against the unfixed code. The stream under test is the process's,
+ * and observing it means owning the process.
+ */
+test('a plain directory produces no raw git error', () => {
+  const root = join(import.meta.dirname, '..', '..')
+  const dir = mkdtempSync(join(tmpdir(), 'conclave-nogit-'))
+  const driver = join(dir, 'driver.mjs')
+  writeFileSync(
+    driver,
+    `
+import { Readable } from 'node:stream'
+import { runSession } from ${JSON.stringify(join(root, 'src/repl/session.ts'))}
+import { AgentRegistry } from ${JSON.stringify(join(root, 'src/registry/registry.ts'))}
+import { FakeRotationSession } from ${JSON.stringify(join(root, 'src/rotation/fakeSession.ts'))}
+const caps = { readinessSignal: 'unknown', turnKeySource: 'prompt_id',
+  outcomes: { completed: 'observed', cancelled: 'reasoned_but_unverified',
+    permission_refused: 'reasoned_but_unverified', process_exited: 'reasoned_but_unverified',
+    timed_out: 'reasoned_but_unverified', transport_lost: 'reasoned_but_unverified',
+    unknown_abnormal_end: 'reasoned_but_unverified' } }
+const registry = new AgentRegistry()
+for (const [agent, session] of [['codex', new FakeRotationSession('advisor', 'codex', ['Do it.', 'DONE'])],
+                                ['claude', new FakeRotationSession('impl', 'claude', ['ack', 'Did it.'])]]) {
+  registry.register({ id: agent, displayName: agent, capabilities: { ...caps, agent },
+    launch: { command: agent, baseArgs: [] }, async create() { return session } })
+}
+process.exit(await runSession({ cwd: ${JSON.stringify(dir)}, goal: 'Keep the work moving.',
+  lead: 'codex', implementer: 'claude', rounds: 3, checks: [], registry, input: Readable.from([]) }))
+`,
+  )
+  // spawnSync rather than execFileSync, which returns stdout alone and surfaces stderr
+  // only when the command FAILS -- and this one succeeds. The whole defect is a successful
+  // run that printed something alarming.
+  const r = spawnSync(process.execPath, [driver], { cwd: dir, encoding: 'utf8', timeout: 60_000 })
+  assert.equal(r.status, 0, `a session outside a repository still runs:\n${r.stderr}`)
+  assert.doesNotMatch(r.stderr, /not a git repository/i)
+  assert.doesNotMatch(r.stdout, /not a git repository/i)
 })

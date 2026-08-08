@@ -47,7 +47,15 @@ const OWN_STATE = '.conclave/'
 
 function porcelain(repoRoot: string): string[] {
   try {
-    return execFileSync('git', ['status', '--porcelain'], { cwd: repoRoot, encoding: 'utf8' })
+    // stderr discarded, not inherited. Outside a repository git writes `fatal: not a git
+    // repository` straight to the operator's terminal, and the `catch` below has already
+    // decided that case is fine — so the only thing the message did was print an alarming
+    // line, unattributed and mid-banner, for a condition being handled.
+    return execFileSync('git', ['status', '--porcelain'], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
       .split('\n')
       .filter((l) => l.trim())
       // The lock lives inside the repository, so acquiring one dirties the tree. Without
