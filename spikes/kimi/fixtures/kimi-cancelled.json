@@ -1,0 +1,22 @@
+{
+  "agent": "kimi",
+  "cliVersion": "1.49.0",
+  "capturedAt": "2026-08-07",
+  "scenario": "cancel() while a real turn was running",
+  "how": "live run against a Moonshot provider, cancelled 3.5s in",
+  "turn": {
+    "state": "cancelled",
+    "confidence": "proven",
+    "provenance": [
+      {
+        "source": "orchestrator",
+        "detail": "cancel() killed the run"
+      },
+      {
+        "source": "process",
+        "detail": "signal SIGTERM"
+      }
+    ]
+  },
+  "note": "Captured after fixing a cancel that waited out orphaned grandchildren: the child's own children inherit stdout and hold the stream open, so the turn used to settle only when the last of them exited."
+}

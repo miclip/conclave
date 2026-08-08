@@ -1,0 +1,25 @@
+{
+  "agent": "claude",
+  "cliVersion": "2.1.224",
+  "capturedAt": "2026-08-07",
+  "scenario": "a turn driven past its watchdog with work still in flight",
+  "how": "watchdogMs 6000, sent a turn that shells out to `sleep 40`",
+  "turn": {
+    "state": "timed_out",
+    "confidence": "uncertain",
+    "provenance": [
+      { "source": "watchdog", "detail": "6s > 6s with no Stop" },
+      {
+        "source": "watchdog",
+        "detail": "completion is uncertain; this is not evidence of cancellation",
+        "caveat": true
+      },
+      {
+        "source": "transport",
+        "detail": "terminal showed: thinking",
+        "caveat": true
+      }
+    ]
+  },
+  "note": "The screen tail distinguishes the two things a timeout can mean. Here the terminal was still animating a thinking indicator, so the turn was alive and merely slow. A timeout on a dead session shows something else, which is the whole reason that caveat carries the screen."
+}

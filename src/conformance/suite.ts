@@ -374,8 +374,11 @@ const KIMI_FIXTURE_VERSION = '1.49.0'
  */
 function recordedFixtures(agent: string): Map<Outcome, FixtureEvidence> {
   const found = new Map<Outcome, FixtureEvidence>()
-  const dir = join(ROOT, 'spikes', 'hooks', 'fixtures')
-  if (!existsSync(dir)) return found
+  // Each agent's evidence lives beside the rest of its evidence. `spikes/hooks/fixtures` is
+  // the pty adapters' corpus; the headless ones have their own directories.
+  const dirs = [join(ROOT, 'spikes', 'hooks', 'fixtures'), join(ROOT, 'spikes', agent, 'fixtures')]
+  for (const dir of dirs) {
+  if (!existsSync(dir)) continue
   for (const file of readdirSync(dir).filter((f) => f.startsWith(`${agent}-`) && f.endsWith('.json'))) {
     try {
       const rec = JSON.parse(readFileSync(join(dir, file), 'utf8')) as {
@@ -395,14 +398,17 @@ function recordedFixtures(agent: string): Map<Outcome, FixtureEvidence> {
       // report what IS supported, and an unreadable file supports nothing.
     }
   }
+  }
   return found
 }
 
 export function fixtureOutcomesFor(agent: string): Map<Outcome, FixtureEvidence> {
   if (agent === 'claude') return new Map([...claudeFixtureOutcomes(), ...recordedFixtures('claude')])
   if (agent === 'codex') return new Map([...codexFixtureOutcomes(), ...recordedFixtures('codex')])
-  if (agent === 'opencode') return openCodeFixtureOutcomes()
-  if (agent === 'kimi') return kimiFixtureOutcomes()
+  if (agent === 'opencode') {
+    return new Map([...openCodeFixtureOutcomes(), ...recordedFixtures('opencode')])
+  }
+  if (agent === 'kimi') return new Map([...kimiFixtureOutcomes(), ...recordedFixtures('kimi')])
   return new Map()
 }
 

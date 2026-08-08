@@ -1,0 +1,22 @@
+{
+  "agent": "opencode",
+  "cliVersion": "1.18.15",
+  "capturedAt": "2026-08-07",
+  "scenario": "a real turn driven past a 5s watchdog",
+  "how": "live run against opencode/deepseek-v4-flash-free, watchdogMs 5000",
+  "turn": {
+    "state": "timed_out",
+    "confidence": "proven",
+    "provenance": [
+      {
+        "source": "watchdog",
+        "detail": "no terminal record within 5000ms"
+      },
+      {
+        "source": "process",
+        "detail": "signal SIGTERM"
+      }
+    ]
+  },
+  "note": "The watchdog kills, so the signal is ours and the outcome is proven rather than uncertain. Distinct from the pty adapters, where a timeout means only that nothing arrived."
+}

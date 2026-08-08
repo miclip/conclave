@@ -1,0 +1,22 @@
+{
+  "agent": "kimi",
+  "cliVersion": "1.49.0",
+  "capturedAt": "2026-08-07",
+  "scenario": "a real turn driven past a 5s watchdog",
+  "how": "live run against a Moonshot provider, watchdogMs 5000",
+  "turn": {
+    "state": "timed_out",
+    "confidence": "proven",
+    "provenance": [
+      {
+        "source": "watchdog",
+        "detail": "no terminal message within 5000ms"
+      },
+      {
+        "source": "process",
+        "detail": "signal SIGTERM"
+      }
+    ]
+  },
+  "note": "Same shape as OpenCode's: the watchdog kills, so the outcome is proven."
+}

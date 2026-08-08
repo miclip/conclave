@@ -37,7 +37,10 @@ export const CLAUDE_CAPABILITIES: AdapterCapabilities = {
     process_exited: 'observed',
     // No fixture. A watchdog firing is trivially producible but says nothing we have
     // validated, so it stays unverified until a scenario exercises it.
-    timed_out: 'reasoned_but_unverified',
+    // Driven past a 6s watchdog with a turn shelling out to `sleep 40`, on 2.1.224. The
+    // recorded verdict carries the screen tail, which is what separates "alive and slow"
+    // from "dead": the terminal was still animating a thinking indicator.
+    timed_out: 'observed',
     // `close('abandoned')` with a turn genuinely in flight, on 2.1.224. Captured as a
     // recorded fixture rather than found in a transcript, because an adapter that stopped
     // observing leaves nothing in the file it stopped reading -- the verdict IS the evidence.
@@ -116,13 +119,14 @@ export const OPENCODE_CAPABILITIES: AdapterCapabilities = {
   outcomes: {
     // step_finish reason=stop, then process exit. Two independent signals, both observed.
     completed: 'observed',
-    // We own the process; killing it IS the cancellation. Not yet captured as a fixture,
-    // so the mechanism is argued rather than demonstrated.
-    cancelled: 'reasoned_but_unverified',
+    // We own the process; killing it IS the cancellation, which is why this is `proven`
+    // rather than the `assumed` the pty adapters have to settle for. Captured live.
+    cancelled: 'observed',
     // No dialog exists in `run` mode. See above.
     permission_refused: 'unsupported',
     process_exited: 'reasoned_but_unverified',
-    timed_out: 'reasoned_but_unverified',
+    // Driven past a 5s watchdog on a real run.
+    timed_out: 'observed',
     transport_lost: 'reasoned_but_unverified',
     // Reachable and deliberately distinct from `completed`: a run CAN exit 0 having
     // silently failed an auxiliary model call, so exit status alone never proves a turn
@@ -152,11 +156,12 @@ export const KIMI_CAPABILITIES: AdapterCapabilities = {
   turnKeySource: 'run_invocation',
   outcomes: {
     completed: 'observed',
-    cancelled: 'reasoned_but_unverified',
+    // Captured live, after fixing a cancel that waited out orphaned grandchildren.
+    cancelled: 'observed',
     // `--print` auto-approves for the invocation; there is no dialog to refuse.
     permission_refused: 'unsupported',
     process_exited: 'reasoned_but_unverified',
-    timed_out: 'reasoned_but_unverified',
+    timed_out: 'observed',
     transport_lost: 'reasoned_but_unverified',
     unknown_abnormal_end: 'reasoned_but_unverified',
   },
