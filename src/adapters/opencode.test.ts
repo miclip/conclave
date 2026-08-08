@@ -285,3 +285,37 @@ test('a cancelled turn settles even when a grandchild holds the stream open', as
   assert.ok(settledIn < 5_000, `cancel must settle promptly, took ${settledIn}ms`)
   await session.close()
 })
+
+test("close('graceful') lets an in-flight turn settle before the stream closes", async () => {
+  // The contract for `graceful` is "we are finished with it; reconcile, THEN SIGTERM and
+  // wait". The waiting half was missing: the child was killed and the event queue closed in
+  // the same breath, so a turn still in flight settled into a CLOSED stream and its verdict
+  // was dropped.
+  //
+  // `snapshot()` still had it, and the seam explicitly permits that divergence -- but a
+  // consumer following events() never learned how the LAST turn ended, which is the one it
+  // most needs. Found by trying to capture `process_exited` from a live session and getting
+  // nothing on the stream.
+  const dir = mkdtempSync(join(tmpdir(), 'graceful-'))
+  const command = join(dir, 'stub')
+  writeFileSync(command, '#!/bin/sh\nsleep 30\nexit 0\n')
+  chmodSync(command, 0o755)
+
+  const session = await OpenCodeRunAdapter.start({ cwd: REPO, role: 'implementer', command })
+  await session.send('go', { kind: 'orchestrator' })
+
+  const seen: AgentEvent[] = []
+  const collecting = (async () => {
+    for await (const e of session.events()) seen.push(e)
+  })()
+
+  await new Promise((r) => setTimeout(r, 300))
+  await session.close('graceful')
+  await collecting
+
+  const end = seen.find((e) => e.type === 'turn_end') as TurnEndEvent | undefined
+  assert.ok(end, 'the verdict must reach a consumer following events()')
+  assert.equal(end!.verdict.outcome, 'process_exited')
+  // And it agrees with the canonical side, which is the property the seam promises.
+  assert.equal((await session.snapshot()).turns.at(-1)!.state, 'process_exited')
+})

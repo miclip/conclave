@@ -1,0 +1,23 @@
+{
+  "agent": "kimi",
+  "cliVersion": "1.49.0",
+  "capturedAt": "2026-08-07",
+  "scenario": "the CLI exits non-zero with no terminal record",
+  "how": "live run naming a model the provider does not have",
+  "turn": {
+    "state": "unknown_abnormal_end",
+    "confidence": "assumed",
+    "provenance": [
+      {
+        "source": "process",
+        "detail": "exit code 1, no final assistant message"
+      },
+      {
+        "source": "process",
+        "detail": "To resume this session: kimi -r 9281849d-...",
+        "caveat": true
+      }
+    ]
+  },
+  "note": "The stderr tail rides along as a caveat, which is how an operator learns the session is resumable even though the turn failed."
+}

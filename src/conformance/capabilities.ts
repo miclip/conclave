@@ -124,15 +124,16 @@ export const OPENCODE_CAPABILITIES: AdapterCapabilities = {
     cancelled: 'observed',
     // No dialog exists in `run` mode. See above.
     permission_refused: 'unsupported',
-    process_exited: 'reasoned_but_unverified',
+    // `close('graceful')` with a turn in flight. Distinct from `cancelled`, which is the
+    // same signal with our own bookkeeping saying we asked for it.
+    process_exited: 'observed',
     // Driven past a 5s watchdog on a real run.
     timed_out: 'observed',
     transport_lost: 'reasoned_but_unverified',
-    // Reachable and deliberately distinct from `completed`: a run CAN exit 0 having
+    // Deliberately distinct from `completed`: a run CAN exit non-zero, or exit 0 having
     // silently failed an auxiliary model call, so exit status alone never proves a turn
-    // finished. Observed in the spike as a billing failure on an account with no payment
-    // method, where the run still exited 0.
-    unknown_abnormal_end: 'reasoned_but_unverified',
+    // finished. Captured from a paid model on an account with no payment method.
+    unknown_abnormal_end: 'observed',
   },
 }
 
@@ -163,7 +164,8 @@ export const KIMI_CAPABILITIES: AdapterCapabilities = {
     process_exited: 'reasoned_but_unverified',
     timed_out: 'observed',
     transport_lost: 'reasoned_but_unverified',
-    unknown_abnormal_end: 'reasoned_but_unverified',
+    // Captured live from a model name the provider does not have.
+    unknown_abnormal_end: 'observed',
   },
 }
 

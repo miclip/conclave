@@ -683,7 +683,36 @@ export class KimiPrintAdapter implements AgentSession {
     if (this.#closed) return
     this.#closed = true
     this.#closeMode = mode
-    if (this.#child && mode === 'graceful') this.#child.kill('SIGTERM')
+    // `graceful` means "we are finished with it; reconcile, THEN SIGTERM and wait". The
+    // waiting half was missing: the child was killed and the event queue closed in the same
+    // breath, so a turn still in flight settled into a CLOSED stream and its `turn_end` was
+    // dropped. `snapshot()` still had it -- the seam permits exactly that divergence and
+    // tells consumers to reconcile -- but a consumer following events() never learned how the
+    // last turn ended, which is the one it most needs to know about.
+    if (this.#child && mode === 'graceful') {
+      const settled = new Promise<void>((resolve) => {
+        const live = this.#turns.find((t) => t.state === 'in_progress')
+        if (!live) return resolve()
+        const poll = setInterval(() => {
+          if (live.state !== 'in_progress') {
+            clearInterval(poll)
+            resolve()
+          }
+        }, 50)
+        // NOT unref'd, unlike the watchdog timers. An unref'd pair here let the event loop
+        // drain with this promise still pending, so `close()` never resolved -- Node reports
+        // it as an unsettled top-level await. Both are bounded at 3s, so keeping them ref'd
+        // cannot hold a process open for long.
+        // Bounded. A child that will not die must not hold the console open, and this
+        // divergence is a nicety next to a session that cannot be shut down.
+        const cap = setTimeout(() => {
+          clearInterval(poll)
+          resolve()
+        }, 3_000)
+      })
+      this.#child.kill('SIGTERM')
+      await settled
+    }
     await this.#receiver?.stop()
     // The generated config holds a copy of whatever credential the operator's own config
     // holds, so it does not outlive the session.

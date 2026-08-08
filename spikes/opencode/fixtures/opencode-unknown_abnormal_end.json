@@ -1,0 +1,18 @@
+{
+  "agent": "opencode",
+  "cliVersion": "1.18.15",
+  "capturedAt": "2026-08-07",
+  "scenario": "the CLI exits non-zero with no terminal record",
+  "how": "live run against a paid model on an account with no payment method",
+  "turn": {
+    "state": "unknown_abnormal_end",
+    "confidence": "assumed",
+    "provenance": [
+      {
+        "source": "process",
+        "detail": "exit code 1, no step_finish reason=stop"
+      }
+    ]
+  },
+  "note": "The outcome that keeps exit status from being read as success. A run CAN exit 0 having silently failed an auxiliary model call, so the absence of an announced stop is what decides this, not the code."
+}
