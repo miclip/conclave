@@ -62,7 +62,18 @@ export type PauseReason =
    */
   | 'operator_requested'
 
-/** What the operator can do from here. Descriptive: the methods exist regardless. */
+/**
+ * What the operator can do from here — filtered to what would actually change something.
+ *
+ * It used to be "descriptive: the methods exist regardless", and that cost a real run. An
+ * operator whose ADVISOR had gone silent was offered `rotate`, chose it, and nothing
+ * happened: rotation replaces the implementer, always. They found out by reading `rotations`
+ * in the status JSON afterwards, having spent a turn on it.
+ *
+ * A menu is a claim about what will help. Listing an option that cannot apply here is the
+ * same fault as a diagnostic that recommends the wrong remedy — see the pause options built
+ * in `Relay.#halt`.
+ */
 export type PauseOption = 'continue' | 'rotate' | 'constrain' | 'abort'
 
 /**

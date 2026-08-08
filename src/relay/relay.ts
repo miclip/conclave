@@ -36,6 +36,7 @@ import {
 import { RelayEventStream, type ObserveOptions, type RelayEvent, type RunReason } from './observe.ts'
 import {
   RunHandle,
+  type PauseOption,
   type PauseReason,
   type PauseSupersession,
   type RunOutcome,
@@ -1324,11 +1325,29 @@ export class Relay {
     // `handle.pause` here gets the very object the operator will be handed, before anything
     // can act on it. Emitting from the argument object instead would announce a pause that
     // is equal to the operator's and not the same as it, and `supersede()` mutates in place.
+    // Only the options that would actually DO something.
+    //
+    // The list used to be four constants, documented as "descriptive: the methods exist
+    // regardless" -- so it described the API rather than the situation. An operator whose
+    // ADVISOR had gone silent was offered `rotate`, chose it, and got nothing: rotation
+    // replaces the implementer, always, and their implementer was fine. Reported from
+    // another project, which discovered the no-op only by reading `rotations` in the status
+    // JSON afterwards. A menu that lists an inert choice is worse than a short menu, because
+    // picking it costs a turn and teaches nothing.
+    //
+    // Everything needed was already on the pause: `verdictOf` names the seat whose verdict
+    // this rests on, and the relay knows whether rotation is armed.
+    const implId = this.participants.find((x) => x.rank === 'implementer')?.id
+    const armed = (this.#opts.rotation?.checks.length ?? 0) > 0
+    const aboutImplementer = p.verdictOf === undefined || p.verdictOf.participant === implId
+    const options: PauseOption[] = ['continue', 'constrain', 'abort']
+    if (armed && aboutImplementer) options.splice(1, 0, 'rotate')
+
     const deciding = handle.pauseAt({
       reason: p.reason,
       detail: p.detail,
       evidence: p.evidence,
-      options: ['continue', 'rotate', 'constrain', 'abort'],
+      options,
       ...(p.conflict === undefined ? {} : { conflict: p.conflict }),
       ...(p.verdictOf === undefined ? {} : { verdictOf: p.verdictOf }),
       ...(p.superseded === undefined ? {} : { superseded: p.superseded }),

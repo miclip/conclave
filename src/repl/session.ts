@@ -662,6 +662,19 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     const r = resumed.shift()
     if (r) r()
   }
+  /**
+   * The single way out of a pause.
+   *
+   * `/continue` and a typed reply both land here, so the two cannot drift: the reply path was
+   * added later, and duplicating `continue()` + `wake()` is exactly how one of them ends up
+   * resuming the handle without releasing the loop -- which presents as a console that
+   * accepted the command and then did nothing.
+   */
+  const resumeRun = async (): Promise<void> => {
+    if (!run || run.state !== 'paused') return
+    await run.continue()
+    wake()
+  }
 
   // The pause loop. `settled()` covers both a pause and the end, which is what a supervising
   // caller wants and why holding `result()` here would be wrong.
@@ -1083,15 +1096,25 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     if (word === '/continue') {
       if (!run) return void write(dim('  nothing is running; type a goal to start'))
       if (run.state !== 'paused') return void write(`  not paused (${run.state})`)
-      await run.continue()
-      wake()
+      await resumeRun()
       return
     }
 
     if (word === '/rotate') {
       if (!run) return void write(dim('  nothing is running; type a goal to start'))
       if (run.state !== 'paused') return void write('  pause first: /pause, then /rotate')
-      write('  rotating — the advisor writes a handoff, then a replacement must reproduce the record')
+      // Refused rather than attempted, naming the seat it would have replaced. Rotation
+      // ALWAYS targets the implementer; offered at a pause caused by the ADVISOR it is inert,
+      // and an operator who picked it from the menu got silence and a spent turn.
+      if (!run.pause?.options.includes('rotate')) {
+        write('  rotation is not available at this pause. It replaces the IMPLEMENTER, and')
+        write('  needs --checks so a replacement can be verified against what the original did.')
+        if (run.pause?.verdictOf) {
+          write(`  this pause rests on ${run.pause.verdictOf.participant}'s turn.`)
+        }
+        return
+      }
+      write('  rotating the implementer — the advisor writes a handoff, then a replacement must reproduce the record')
       const result = await run.rotateImplementer(rest || undefined)
       if (result.status === 'rotated') {
         write(`  rotated into ${result.replacement.sessionId}; still paused — /continue when ready`)
@@ -1166,6 +1189,18 @@ export async function runSession(opts: SessionOptions): Promise<number> {
       return
     }
     inject(line, 'all')
+    // Answering a pause IS the decision, so it resumes. A reply typed at a pause used to sit
+    // queued with the run still stopped, needing a separate `/continue` to count -- the same
+    // failure as a menu option that no-ops: the operator acted, something was recorded, and
+    // nothing moved.
+    //
+    // Only at a pause. Mid-run there is nothing to resume and the line is genuinely held for
+    // the next turn boundary, which `queued()` says.
+    if (run.state === 'paused') {
+      write(dim('  delivered, and resuming — the run was paused'))
+      await resumeRun()
+      return
+    }
     queued('everyone')
   }
 

@@ -1037,7 +1037,10 @@ test('a pause is held open for a piped driver, and resolvable from stdin', async
   assert.ok('session' in paused)
   assert.equal(paused.session.status.pause?.reason, 'operator_requested')
   // The options are what an agent picks its next stdin line from.
-  assert.deepEqual(paused.session.status.pause?.options, ['continue', 'rotate', 'constrain', 'abort'])
+  // No `rotate`: this run has no --checks, so rotation could not verify a replacement and
+  // choosing it would do nothing. The options are what would actually change something now,
+  // not a list of the methods that exist.
+  assert.deepEqual(paused.session.status.pause?.options, ['continue', 'constrain', 'abort'])
   // And nobody died to produce the pause, which is the whole difference from relay.
   assert.equal(paused.session.alive, true)
 
@@ -1140,9 +1143,12 @@ test('an operator-requested pause reaches the event stream with its reason and i
   // asked for from one the orchestrator raised.
   assert.equal(paused.pause.reason, 'operator_requested')
   assert.ok(typeof paused.pause.detail === 'string' && paused.pause.detail.length > 0)
-  // The full set, and in the order the console offers them. A truncated `options` would have
-  // an agent operator believe a move it has is unavailable.
-  assert.deepEqual(paused.pause.options, ['continue', 'rotate', 'constrain', 'abort'])
+  // What would actually change something, in the order the console offers them. `rotate` is
+  // absent because this run has no --checks: rotation could not verify a replacement, so
+  // offering it would spend the operator a turn to achieve nothing. The list used to be four
+  // constants documented as "the methods exist regardless", and an operator elsewhere picked
+  // `rotate` at an ADVISOR pause on that basis and got silence.
+  assert.deepEqual(paused.pause.options, ['continue', 'constrain', 'abort'])
   assert.match(paused.pause.evidence.join('\n'), /no turn is in flight/)
   assert.equal(typeof paused.pause.atSeq, 'number', 'the point in the routing log the pause lines up with')
   assert.equal(typeof paused.seq, 'number')
@@ -1382,4 +1388,55 @@ test('a console refuses to start on a resume log that is not there', async () =>
   })
   assert.equal(code, 1)
   assert.match(out.text(), /no run log at/)
+})
+
+test('a reply typed at a pause is delivered and resumes the run', async () => {
+  // Reported after it happened: a reply typed at a pause sat queued with the run still
+  // stopped, and a separate `/continue` was needed to make it count. That is the same
+  // failure as a menu option that no-ops — the operator acted, something was recorded, and
+  // nothing moved. Answering a pause IS the decision.
+  const dir = repo()
+  const out = collect()
+  const input = new PassThrough()
+  const running = runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'claude',
+    rounds: 6,
+    checks: [],
+    operator: 'agent',
+    registry: registryOf({
+      codex: [slow('advisor', 'codex', ['Do it.', 'More.', 'DONE'], 300)],
+      claude: [slow('impl', 'claude', ['ack', 'Did it.', 'Again.'], 300)],
+    }),
+    input,
+    output: out.stream,
+  })
+
+  const until = async (pred: (f: ReturnType<typeof resolveSession>) => boolean, ms = 10_000) => {
+    const t = Date.now()
+    while (Date.now() - t < ms) {
+      const f = resolveSession(dir)
+      if (pred(f)) return f
+      await new Promise((r) => setTimeout(r, 50))
+    }
+    throw new Error(`timed out; console said:\n${out.text().slice(-700)}`)
+  }
+
+  await new Promise((r) => setTimeout(r, 500))
+  input.write('/pause\n')
+  await until((f) => 'session' in f && f.session.status.state === 'paused')
+
+  // A reply, not a command. No `/continue` follows it.
+  input.write('prefer the smaller change\n')
+  const resumed = await until((f) => 'session' in f && f.session.status.state === 'running')
+  assert.ok('session' in resumed && resumed.session.status.pause === undefined)
+  assert.match(out.text(), /delivered, and resuming/)
+  // ...and the reply actually reached the participants rather than being swallowed by the
+  // resume, which is the failure the fix could easily have introduced.
+  assert.match(out.text(), /prefer the smaller change/)
+
+  input.end()
+  await running
 })
