@@ -164,6 +164,20 @@ export interface SessionOptions {
    */
   force?: boolean | undefined
   /**
+   * The absolute per-turn deadline handed to each adapter's watchdog.
+   *
+   * The CLI has parsed `--turn-timeout` into this since it was written and the console never
+   * had a field to receive it: `bin/conclave.ts` built `{ turnWatchdogMs }` inside a
+   * conditional spread, which slips past TypeScript's excess-property check, so it was
+   * constructed and dropped. The flag has never once worked.
+   *
+   * Found by a conclave session reading further than I did. This morning I declared it a
+   * session-only capability that `relay` lacked -- having read the CLI, seen the flag, and
+   * believed it. The parity guard compares which flags EXIST, not whether they arrive
+   * anywhere, so it agreed with me.
+   */
+  turnWatchdogMs?: number | undefined
+  /**
    * How long a turn's transcript is given to catch up with the hook that ended it, and how
    * much longer an EMPTY report buys before it is treated as lost. See `Relay#exchange`.
    *
@@ -548,6 +562,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     ...(opts.operator ? { operator: opts.operator } : {}),
     ...(opts.transcriptSettleMs ? { transcriptSettleMs: opts.transcriptSettleMs } : {}),
     ...(opts.transcriptSalvageMs ? { transcriptSalvageMs: opts.transcriptSalvageMs } : {}),
+    ...(opts.turnWatchdogMs ? { turnWatchdogMs: opts.turnWatchdogMs } : {}),
     lead: { id: 'advisor', agent: opts.lead, role: 'advisor', ...(leadArgs.length > 0 ? { args: leadArgs } : {}) },
     implementer: {
       id: 'implementer',

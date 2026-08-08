@@ -37,8 +37,14 @@ function repo(): string {
 
 function registryOf(
   sessions: Record<string, AgentSession[]>,
-  /** Observes the args a participant was launched with, which is otherwise invisible. */
-  onLaunch?: (agent: string, args: string[] | undefined) => void,
+  /**
+   * Observes what a participant was launched with, which is otherwise invisible.
+   *
+   * The whole context rather than just `args`: the turn deadline travels the same path and
+   * had never been checked, which is how `--turn-timeout` reached the console's option
+   * object and was dropped before any adapter saw it.
+   */
+  onLaunch?: (agent: string, args: string[] | undefined, ctx?: { watchdogMs?: number | undefined }) => void,
 ): AgentRegistry {
   const r = new AgentRegistry()
   for (const [agent, queue] of Object.entries(sessions)) {
@@ -63,8 +69,8 @@ function registryOf(
       // An in-memory double: no child process, so no clock of either kind.
       deadlines: NO_DEADLINE_CLOCKS,
       launch: { command: agent, baseArgs: [] },
-      async create(resolved) {
-        onLaunch?.(agent, resolved.spec.args)
+      async create(resolved, ctx) {
+        onLaunch?.(agent, resolved.spec.args, ctx)
         const next = remaining.shift()
         if (!next) throw new Error(`no session left for ${agent}`)
         return next
@@ -1522,4 +1528,43 @@ test('waiting at a pause is recorded, sends nothing, and leaves the run paused',
   await until((f) => 'session' in f && f.session.status.state === 'running')
   input.end()
   await running
+})
+
+test('--turn-timeout reaches the relay from the console, not just the argv parser', async () => {
+  // It never did. `bin/conclave.ts` has parsed `--turn-timeout` into `{ turnWatchdogMs }`
+  // since it was written, inside a conditional spread — which slips past TypeScript's
+  // excess-property check — and `SessionOptions` had no field to receive it. Constructed,
+  // passed, dropped.
+  //
+  // Found by a conclave session reading further than I had. The morning's parity guard
+  // declared this a session-only capability that `relay` lacked, on my reading of the CLI;
+  // the guard compares which flags EXIST, not whether they arrive anywhere, so it agreed.
+  //
+  // So this asserts on ARRIVAL rather than on the source text. A test that grepped either
+  // file would have passed against the broken version, which is how it survived.
+  const dir = repo()
+  const out = collect()
+  let seen: number | undefined
+  await runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'claude',
+    rounds: 3,
+    checks: [],
+    turnWatchdogMs: 4242,
+    registry: registryOf(
+      {
+        codex: [new FakeRotationSession('advisor', 'codex', ['Do it.', 'DONE'])],
+        claude: [new FakeRotationSession('impl', 'claude', ['ack', 'Did it.'])],
+      },
+      // The registry sees what each participant was actually launched with.
+      (_agent, _args, ctx) => {
+        if (typeof ctx?.watchdogMs === 'number') seen = ctx.watchdogMs
+      },
+    ),
+    input: script([]),
+    output: out.stream,
+  })
+  assert.equal(seen, 4242, 'the console must hand the configured deadline to the adapters')
 })
