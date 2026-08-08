@@ -63,6 +63,8 @@ export type {
   RelayActivityEvent,
   RelayEvent,
   RelayMessageEvent,
+  RelayPauseEvent,
+  RelayResumeEvent,
   RelayRunEndEvent,
   RunReason,
 } from './observe.ts'
@@ -1317,7 +1319,12 @@ export class Relay {
           `to pause at this point and decide instead.`,
       )
     }
-    const decision = await handle.pauseAt({
+    // Not awaited yet. `pauseAt` installs the pause and flips the handle to `paused`
+    // synchronously, and only the promise it returns is the suspension -- so reading
+    // `handle.pause` here gets the very object the operator will be handed, before anything
+    // can act on it. Emitting from the argument object instead would announce a pause that
+    // is equal to the operator's and not the same as it, and `supersede()` mutates in place.
+    const deciding = handle.pauseAt({
       reason: p.reason,
       detail: p.detail,
       evidence: p.evidence,
@@ -1327,7 +1334,17 @@ export class Relay {
       ...(p.superseded === undefined ? {} : { superseded: p.superseded }),
       atSeq: this.#seq,
     })
+    // Set by the line above; nothing runs between the two that could clear it.
+    const pause = handle.pause!
+    this.#stream.emit({ type: 'pause', pause })
+
+    const decision = await deciding
+    // No `resume` on an abort. The run does not continue, and `run_end` is what says so --
+    // a resume followed immediately by the end would read as a session that carried on.
     if (decision.kind === 'abort') return this.#end('stopped', decision.detail)
+    // Before the note, so the two events bracket the suspension itself as tightly as the
+    // loop can see it; the note is the log's account of the same moment.
+    this.#stream.emit({ type: 'resume', pause })
     this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text: `resumed from ${p.reason}` })
     return undefined
   }
