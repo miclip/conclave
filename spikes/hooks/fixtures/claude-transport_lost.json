@@ -1,0 +1,20 @@
+{
+  "agent": "claude",
+  "cliVersion": "2.1.224",
+  "capturedAt": "2026-08-07",
+  "scenario": "close('abandoned') with a turn genuinely in flight",
+  "how": "sent a turn that shells out to `sleep 40`, waited 9s, then closed as abandoned",
+  "turn": {
+    "state": "transport_lost",
+    "confidence": "uncertain",
+    "provenance": [
+      { "source": "transport", "detail": "observation channel lost; turn state unobservable" },
+      {
+        "source": "transport",
+        "detail": "the child may still be running; this asserts nothing about the turn",
+        "caveat": true
+      }
+    ]
+  },
+  "note": "A first attempt abandoned a turn that had already completed and produced `completed (proven)` instead, which is correct and proves nothing: the abandon has to land while the turn is genuinely live. `#liveTurns()` is empty otherwise."
+}

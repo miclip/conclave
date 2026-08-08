@@ -365,9 +365,42 @@ function kimiFixtureOutcomes(): Map<Outcome, FixtureEvidence> {
 /** The Kimi the fixtures were recorded against. Hardcoded, for the reason above. */
 const KIMI_FIXTURE_VERSION = '1.49.0'
 
+/**
+ * Outcomes captured as a hand-recorded fixture rather than derived from a transcript corpus.
+ *
+ * Some outcomes leave nothing in a transcript to find. `transport_lost` means the adapter
+ * stopped observing, so by construction there is no record of it in the file it stopped
+ * reading -- the evidence is the VERDICT the adapter produced, which is what these hold.
+ */
+function recordedFixtures(agent: string): Map<Outcome, FixtureEvidence> {
+  const found = new Map<Outcome, FixtureEvidence>()
+  const dir = join(ROOT, 'spikes', 'hooks', 'fixtures')
+  if (!existsSync(dir)) return found
+  for (const file of readdirSync(dir).filter((f) => f.startsWith(`${agent}-`) && f.endsWith('.json'))) {
+    try {
+      const rec = JSON.parse(readFileSync(join(dir, file), 'utf8')) as {
+        cliVersion?: string
+        turn?: { state?: string }
+      }
+      const state = rec.turn?.state
+      if (!state) continue
+      found.set(state as Outcome, {
+        found: true,
+        where: `${state} captured in ${file}`,
+        cliVersion: rec.cliVersion,
+        historical: false,
+      })
+    } catch {
+      // A malformed fixture is not evidence. Silence here is right: the suite's job is to
+      // report what IS supported, and an unreadable file supports nothing.
+    }
+  }
+  return found
+}
+
 export function fixtureOutcomesFor(agent: string): Map<Outcome, FixtureEvidence> {
-  if (agent === 'claude') return claudeFixtureOutcomes()
-  if (agent === 'codex') return codexFixtureOutcomes()
+  if (agent === 'claude') return new Map([...claudeFixtureOutcomes(), ...recordedFixtures('claude')])
+  if (agent === 'codex') return new Map([...codexFixtureOutcomes(), ...recordedFixtures('codex')])
   if (agent === 'opencode') return openCodeFixtureOutcomes()
   if (agent === 'kimi') return kimiFixtureOutcomes()
   return new Map()

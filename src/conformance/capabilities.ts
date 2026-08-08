@@ -38,7 +38,10 @@ export const CLAUDE_CAPABILITIES: AdapterCapabilities = {
     // No fixture. A watchdog firing is trivially producible but says nothing we have
     // validated, so it stays unverified until a scenario exercises it.
     timed_out: 'reasoned_but_unverified',
-    transport_lost: 'reasoned_but_unverified',
+    // `close('abandoned')` with a turn genuinely in flight, on 2.1.224. Captured as a
+    // recorded fixture rather than found in a transcript, because an adapter that stopped
+    // observing leaves nothing in the file it stopped reading -- the verdict IS the evidence.
+    transport_lost: 'observed',
     unknown_abnormal_end: 'reasoned_but_unverified',
   },
 }

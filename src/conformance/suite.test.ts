@@ -9,7 +9,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
 import { ALL_CAPABILITIES, CLAUDE_CAPABILITIES, CODEX_CAPABILITIES } from './capabilities.ts'
-import { checkAdapter, currentVersion, runConformance } from './suite.ts'
+import { checkAdapter, currentVersion, fixtureOutcomesFor, runConformance } from './suite.ts'
 import { OUTCOMES } from '../contract/outcome.ts'
 
 test('every adapter grades every outcome', () => {
@@ -53,12 +53,17 @@ test('no adapter claims evidence it does not have', { skip: gradable }, () => {
 
 test('an inflated claim is caught', () => {
   // Claiming an outcome nothing has ever produced must fail, not pass quietly.
+  //
+  // This used `transport_lost` as its example until that outcome was actually captured from a
+  // live abandoned turn. The example had to move rather than the assertion: a test whose
+  // stand-in for "unbacked" quietly becomes backed stops testing anything, and would then
+  // pass for the wrong reason.
   const inflated = {
     ...CLAUDE_CAPABILITIES,
-    outcomes: { ...CLAUDE_CAPABILITIES.outcomes, transport_lost: 'observed' as const },
+    outcomes: { ...CLAUDE_CAPABILITIES.outcomes, timed_out: 'observed' as const },
   }
   const rows = checkAdapter(inflated)
-  const row = rows.find((r) => r.outcome === 'transport_lost')!
+  const row = rows.find((r) => r.outcome === 'timed_out')!
   assert.equal(row.verdict, 'unsupported_claim')
 })
 
@@ -147,4 +152,25 @@ test('SessionEnd stays unobserved on codex rather than being called unsupported'
     codexHooksTemplate.includes('SessionEnd'),
     'SessionEnd must stay registered so a clean-exit fixture can still be collected',
   )
+})
+
+test('a recorded fixture backs an outcome a transcript cannot contain', () => {
+  // `transport_lost` means the adapter stopped observing, so by construction there is nothing
+  // in the file it stopped reading. The evidence has to be the VERDICT the adapter produced,
+  // captured by hand from a live run.
+  //
+  // Without this the outcome could only ever be `reasoned_but_unverified`, not because it is
+  // unverified but because the suite had no way to look at the right thing.
+  const claude = fixtureOutcomesFor('claude')
+  const found = claude.get('transport_lost')
+  assert.ok(found?.found, 'the recorded fixture is read')
+  assert.match(found!.where!, /claude-transport_lost\.json/)
+  assert.equal(found!.historical, false, 'captured against the installed CLI')
+})
+
+test('an outcome with no fixture of either kind stays unbacked', () => {
+  // The direction that matters. A recorded-fixture mechanism that quietly satisfied every
+  // claim would turn the whole suite into a rubber stamp.
+  assert.equal(fixtureOutcomesFor('claude').get('timed_out')?.found, undefined)
+  assert.equal(fixtureOutcomesFor('codex').get('transport_lost')?.found, undefined)
 })
