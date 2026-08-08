@@ -178,6 +178,36 @@ export function render(templateText: string, conclaveRoot: string): string {
 }
 
 /**
+ * Which Conclave a rendered registration points at, recovered from the file itself.
+ *
+ * The discrimination this exists for: a registration that differs from what we would write
+ * has either DRIFTED (the template changed, and rewriting is the fix) or is OWNED BY ANOTHER
+ * CHECKOUT (the template is identical, rendered against a different Conclave). Those look
+ * the same to a byte comparison and want opposite responses -- rewriting the second one
+ * hijacks a sidecar another worktree is relying on, and re-hashes a handler whose trust
+ * decision then silently dies.
+ *
+ * Exact rather than a regex over the contents: the template is split on its token, and the
+ * candidate must reconstruct the file byte for byte. A near-match is a drifted template and
+ * must be reported as one.
+ */
+export function renderedRootOf(templateText: string, rendered: string): string | undefined {
+  const parts = templateText.split(TEMPLATE_TOKEN)
+  if (parts.length < 2) return undefined
+  const head = parts[0]!
+  if (!rendered.startsWith(head)) return undefined
+  // The first gap is between the first and second literal parts, so the candidate ends
+  // where the second part begins.
+  const rest = rendered.slice(head.length)
+  const tail = parts[1]!
+  const end = tail === '' ? rest.length : rest.indexOf(tail)
+  if (end < 0) return undefined
+  const candidate = rest.slice(0, end)
+  if (!candidate) return undefined
+  return parts.join(candidate) === rendered ? candidate : undefined
+}
+
+/**
  * Write via a temporary sibling plus rename. A half-written hooks.json is not merely
  * inconvenient: Codex would fail to parse it and load no hooks at all, which presents as
  * a lifecycle problem rather than a config one.
@@ -248,7 +278,15 @@ export interface InstallResult {
   /** Written paths this project's git will not ignore. Empty outside a git repository. */
   unignored: string[]
   dryRun: boolean
-  written: { label: string; path: string; changed: boolean }[]
+  /**
+   * `sharedWith` names another Conclave checkout that already owns this registration.
+   *
+   * Only ever set for a file two checkouts share -- in practice the Codex sidecar, which
+   * lives in the MAIN worktree and is therefore one file for every linked worktree of the
+   * project. `changed: true, sharedWith: <path>` is not drift and must not be treated as
+   * it: the templates agree, and what differs is whose hooks would run (#40).
+   */
+  written: { label: string; path: string; changed: boolean; sharedWith?: string | undefined }[]
   codex?: {
     ready: boolean
     retrustRequired: boolean
@@ -326,10 +364,17 @@ export async function installConfig(opts: InstallOptions = {}): Promise<InstallR
     const contents = render(readFileSync(templatePath, 'utf8'), conclaveRoot)
     const previous = existsSync(outputPath) ? readFileSync(outputPath, 'utf8') : undefined
     const changed = previous !== contents
+    // Whose hooks are currently registered here, when they are not ours. See
+    // `renderedRootOf`: same template, different Conclave.
+    const owner =
+      changed && previous !== undefined
+        ? renderedRootOf(readFileSync(templatePath, 'utf8'), previous)
+        : undefined
+    const sharedWith = owner && !samePath(owner, conclaveRoot) ? owner : undefined
     // Never rewrite identical bytes. Harmless for Claude; for Codex a rewritten handler
     // would re-hash and invalidate an existing trust decision for no reason.
     if (changed && !opts.dryRun) writeAtomic(outputPath, contents)
-    written.push({ label: target.label, path: outputPath, changed })
+    written.push({ label: target.label, path: outputPath, changed, ...(sharedWith ? { sharedWith } : {}) })
   }
 
   const result: InstallResult = {
@@ -402,8 +447,28 @@ export function formatInstallResult(r: InstallResult): string {
     )
   }
   for (const w of r.written) {
-    const state = w.changed ? (r.dryRun ? 'DRIFT  ' : 'wrote  ') : 'current'
+    // `SHARED` rather than `DRIFT`: the templates agree and the owner differs, which is a
+    // different problem with a different fix. Calling it drift sent a reader to
+    // `config install`, and running it is precisely the thing that hijacks the file.
+    const state = w.sharedWith ? 'SHARED ' : w.changed ? (r.dryRun ? 'DRIFT  ' : 'wrote  ') : 'current'
     lines.push(`  ${state} ${w.label}: ${w.path}`)
+  }
+  const shared = r.written.filter((w) => w.sharedWith)
+  if (shared.length > 0) {
+    lines.push('')
+    lines.push('Another Conclave checkout already owns these registrations:')
+    for (const w of shared) lines.push(`  ${w.label} runs ${w.sharedWith}`)
+    lines.push('')
+    // Every consequence, because each one presents as something else entirely.
+    lines.push('The Codex sidecar is ONE file shared by every worktree of a project — Codex')
+    lines.push('resolves it from the main worktree wherever you are. So while this stands:')
+    lines.push('  - hooks here execute that checkout\'s code, not this one\'s;')
+    lines.push('  - re-installing here invalidates that checkout\'s Codex trust, because the')
+    lines.push('    trust hash includes the absolute command path;')
+    lines.push('  - and the two will keep re-trusting each other for as long as both are used.')
+    lines.push('Run `config install` here only if this checkout should own them. To develop')
+    lines.push('hook changes, use a separate clone rather than a worktree — a worktree cannot')
+    lines.push('hold its own sidecar. See issue #40.')
   }
   if (r.unignored.length > 0) {
     lines.push('')
@@ -411,7 +476,9 @@ export function formatInstallResult(r: InstallResult): string {
     for (const p of r.unignored) lines.push(`  ${p.replace(`${r.projectRoot}/`, '')}`)
     lines.push('Add them to .gitignore or .git/info/exclude, or they will show as untracked.')
   }
-  if (r.dryRun && hasDrift(r)) {
+  // Only for genuine drift. A shared registration has its own paragraph above, and telling
+  // a reader to rewrite it would be advice that causes the damage.
+  if (r.dryRun && r.written.some((w) => w.changed && !w.sharedWith)) {
     lines.push('')
     lines.push('Registrations differ from the templates. Running `config install` would')
     lines.push('rewrite them, which re-hashes the Codex handlers and requires re-trusting.')

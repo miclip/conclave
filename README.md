@@ -269,6 +269,20 @@ One limit worth knowing: piped, the session ends when its run does — a script 
 say "I am finished thinking" other than closing stdin. That is one run per process. At a
 terminal the session outlives the run and waits for the next goal.
 
+### Worktrees
+
+Claude's registration is per-checkout, so linked worktrees are independent. Codex's is not:
+it resolves project configuration from the **main** worktree, so one sidecar serves every
+worktree of a project. A linked worktree still needs an empty `.codex/` directory of its own
+as a trigger — `config install` creates it — but the file it reads lives in the main
+worktree.
+
+That means the sidecar has one owner. If a second checkout of *Conclave itself* registers the
+same project, `config check` reports the registration as `SHARED` rather than drifted, names
+the checkout whose hooks would actually run, and says what re-installing would cost: Codex's
+trust hash includes the absolute command path, so rewriting it drops the other checkout's
+trust. To develop hook changes, use a separate clone rather than a worktree.
+
 ## Watching a session from somewhere else
 
 Every session — console or relay — writes what it is doing to `.conclave/sessions/<id>/`,

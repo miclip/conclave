@@ -16,17 +16,19 @@ import {
   readdirSync,
   readFileSync,
   realpathSync,
+  rmSync,
   statSync,
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import test from 'node:test'
 import {
   formatInstallResult,
   hasDrift,
   installConfig,
   render,
+  renderedRootOf,
   resolveCodexProjectRoot,
   resolveConclaveRoot,
   resolveRepoRoot,
@@ -356,10 +358,71 @@ test('the rendered output matches what this checkout currently has installed', a
     diagnose: false,
     dryRun: true,
   })
+  // `sharedWith` is exempt and is NOT a loosening. It means the file holds this same
+  // template rendered against a DIFFERENT Conclave -- which is the normal state of the
+  // Codex sidecar while a linked worktree of this project has registered itself, since one
+  // sidecar is shared by every worktree (#40). The templates have not drifted; the owner
+  // differs. A genuinely drifted template cannot reconstruct as `render(template, X)` for
+  // any X, so it still fails here.
   assert.ok(
-    result.written.every((w) => !w.changed),
+    result.written.every((w) => !w.changed || w.sharedWith),
     'templates have drifted from the installed registrations; run `npm run config:install`',
   )
+})
+
+test('a registration owned by another Conclave is not reported as drift', () => {
+  // Two different conditions that a byte comparison cannot tell apart, wanting opposite
+  // responses. Drift means "rewrite this"; shared means "rewriting this hijacks a file
+  // another worktree depends on, and kills its Codex trust on the way past".
+  const template = readFileSync(join(REPO, 'config/templates/codex-hooks.json'), 'utf8')
+
+  const mine = render(template, '/opt/conclave')
+  assert.equal(renderedRootOf(template, mine), '/opt/conclave')
+
+  const theirs = render(template, '/opt/elsewhere/conclave-dogfood')
+  assert.equal(
+    renderedRootOf(template, theirs),
+    '/opt/elsewhere/conclave-dogfood',
+    'the owning checkout must be recoverable from the file itself',
+  )
+
+  // A template that genuinely changed cannot reconstruct against any root, so it stays
+  // drift. This is the half that stops the exemption swallowing real drift.
+  const drifted = `${theirs.slice(0, -2)}, "extra": 1}`
+  assert.equal(renderedRootOf(template, drifted), undefined)
+})
+
+test('a shared registration says what running the installer would cost', async () => {
+  // The first version called this DRIFT, which sent the reader to `config install` -- and
+  // running it is exactly what hijacks the sidecar and drops the other checkout's trust.
+  // A diagnostic that recommends the damage is worse than one that says nothing.
+  const dir = mkdtempSync(join(tmpdir(), 'conclave-shared-'))
+  execFileSync('git', ['init', '-q'], { cwd: dir })
+  const sidecar = join(dir, '.codex', 'hooks.json')
+  mkdirSync(dirname(sidecar), { recursive: true })
+  const template = readFileSync(join(REPO, 'config/templates/codex-hooks.json'), 'utf8')
+  writeFileSync(sidecar, render(template, '/somewhere/else/conclave'))
+
+  const result = await installConfig({
+    projectRoot: dir,
+    conclaveRoot: REPO,
+    agents: ['codex'],
+    diagnose: false,
+    dryRun: true,
+  })
+  const codex = result.written.find((w) => w.label === 'Codex sidecar')
+  assert.equal(codex?.sharedWith, '/somewhere/else/conclave')
+
+  const text = formatInstallResult(result)
+  assert.match(text, /SHARED/, 'shown as its own state, not as drift')
+  assert.match(text, /\/somewhere\/else\/conclave/, 'and names who owns it')
+  assert.match(text, /invalidates that checkout's Codex trust/, 'and what re-installing costs')
+  assert.doesNotMatch(
+    text,
+    /Registrations differ from the templates/,
+    'the drift advice must not also appear; it is the advice that causes the damage',
+  )
+  rmSync(dir, { recursive: true, force: true })
 })
 
 test('no tracked source file hardcodes an absolute home path', () => {
