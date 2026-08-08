@@ -111,6 +111,7 @@ export async function withHeartbeat<T>(
   }
 }
 import { guard } from '../workspace/sessionLock.ts'
+import { newSessionId, projectRootFor, recordSession } from '../workspace/sessionRecord.ts'
 
 export interface SessionOptions {
   cwd: string
@@ -541,6 +542,26 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     },
   })
 
+  /**
+   * The console's session, readable from outside it.
+   *
+   * Both front-ends, together — wiring a capability into one and not the other is the
+   * mistake this codebase has now made six times, and the console is the one an operator is
+   * most likely to have left running in another window. The id is printed with the banner
+   * so it can be copied without going looking for it.
+   */
+  const sessionStartedAt = Date.now()
+  const recording = recordSession(relay, {
+    repoRoot: projectRootFor(opts.cwd),
+    id: newSessionId(sessionStartedAt, process.pid),
+    // A console may have no goal yet; it is filled in by `begin`. Empty rather than a
+    // placeholder, so a reader can tell "not started" from "started with a vague goal".
+    goal: opts.goal ?? '',
+    front: 'session',
+    startedAt: sessionStartedAt,
+  })
+  write(dim(`  session ${recording.id} — inspect from elsewhere with: conclave status ${recording.id}`))
+
   // Activity as a status line that updates in place, not a scrolling list of dots. The
   // wait between an instruction and its report is the whole duration of the work, and a
   // spinner carrying the current tool says "working" without burying the prose above it.
@@ -622,6 +643,8 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     for (const line of formatGoalFindings(lintGoal(goal))) write(dim(line))
     currentGoal = goal
     title('working')
+    recording.recorder.update({ goal })
+    recording.set('running')
     run = relay.start(goal)
     void supervise(run)
     refreshPrompt()
@@ -661,6 +684,10 @@ export async function runSession(opts: SessionOptions): Promise<number> {
         // The outcome by name, not just "done": a tab saying `aborted` and a tab saying
         // `completed` are the difference between glancing and going back.
         title(s.outcome.reason)
+        // `starting`, not `ended`: the console outlives its run and the next instruction
+        // starts another one. A status saying `ended` while a live console sits at the
+        // prompt would tell a poller nobody is there.
+        recording.set('starting', { outcome: s.outcome })
         runEnded?.()
         refreshPrompt()
         prompt()
@@ -669,9 +696,11 @@ export async function runSession(opts: SessionOptions): Promise<number> {
       // The one transition the title exists for. A paused session is waiting on a decision
       // and looks, from a backgrounded tab, exactly like one still working.
       title('paused')
+      recording.set('paused', { pause: s.pause })
       write(renderPause(s.pause, width))
       await new Promise<void>((resolve) => resumed.push(resolve))
       title('working')
+      recording.set('running')
     }
   }
 
@@ -809,6 +838,12 @@ export async function runSession(opts: SessionOptions): Promise<number> {
   }
 
   const refreshPrompt = () => {
+    // Guarded like `prompt()`, and for a failure only the piped form shows: a run torn down
+    // mid-turn leaves participants still resolving, and their events keep arriving after
+    // readline has closed. Interactively the process is exiting so nothing notices;
+    // in-process it threw ERR_USE_AFTER_CLOSE as an unhandled rejection, from teardown that
+    // stopped reading without stopping being called.
+    if (done) return
     if (screen) return void screen.draw()
     rl?.setPrompt(promptText())
   }
@@ -1154,6 +1189,10 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     // Every exit path tears down. A console that leaks participants on an unexpected throw
     // is worse than no console, because the leak is invisible until the next run refuses
     // to start on a lock it does not recognise.
+    // Set on EVERY exit path, not just `leave()`. The non-interactive form returns without
+    // ever calling it, so `done` stayed false while readline was closed underneath the
+    // callbacks that check it.
+    done = true
     process.off('SIGINT', onInterrupt)
     process.off('SIGTERM', onInterrupt)
     // `leave()` releases it too, and this is the path a throw or a piped run takes — which
@@ -1161,7 +1200,11 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     if (liveTerminal) target.write(releaseTitleSequence())
     screen?.close()
     rl?.close()
+    recording.set('ended')
+    // AFTER the relay: stopping it is what closes the event stream, and closing the
+    // recorder first would cut the terminal `run_end` off before it was read.
     await relay.stop()
+    await recording.close()
     tee?.end()
   }
   return 0

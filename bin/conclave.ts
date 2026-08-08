@@ -26,8 +26,25 @@ import type { ProjectConfig } from '../src/config/project.ts'
 import { runReport } from '../src/relay/report.ts'
 import { RunLogWriter, readRunLog, runLogExists } from '../src/relay/resume.ts'
 import { preflightRefusals } from '../src/relay/guardrails.ts'
+import type { ReadSession } from '../src/workspace/sessionRecord.ts'
+import { spawn } from 'node:child_process'
+import {
+  listSessions,
+  newSessionId,
+  readSession,
+  sessionDir,
+  projectRootFor,
+  recordSession,
+  resolveSession,
+  SessionRecorder,
+} from '../src/workspace/sessionRecord.ts'
+import {
+  formatSession,
+  formatSessionJson,
+  formatSessionLine,
+} from '../src/workspace/sessionView.ts'
 import { formatGoalFindings, lintGoal } from '../src/relay/goalLint.ts'
-import { readFileSync } from 'node:fs'
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { seedCodexTrust } from '../src/deployment/codexHookTrust.ts'
 import { defaultRegistry } from '../src/registry/builtin.ts'
@@ -71,7 +88,7 @@ Commands:
                  [--checks-unrelated "..."] [--advisor-args "..."] [--implementer-args "..."]
                  [--json] [--resume <log>] [--record <path>] [--dry-run] [--force]
                  [--max-turns N] [--max-minutes N] [--strict-goal] [--operator agent]
-                 [--bypass [agent]]
+                 [--bypass [agent]] [--detach]
                                    Run a two-agent session unattended and print the
                                    routing log. --json prints a structured record of the
                                    run on stdout instead — outcome, per-turn verdicts with
@@ -100,7 +117,28 @@ Commands:
                                    unless --force.
                                    Every pause point ENDS the run, because a call that
                                    returns an outcome has nowhere to suspend to.
+                                   --detach hands the run to a background process and
+                                   prints its session id, so the terminal is free. Follow
+                                   it with conclave status and conclave events; its
+                                   stdout and stderr go to stdio.log beside them, because
+                                   a crash before the relay starts appears nowhere else.
+                                   Every run is recorded either way -- detaching changes
+                                   who waits for it, not what is written down.
                                    Spawns real sessions and uses real quota.
+  sessions       [--json]          List every session recorded in this project, newest
+                                   first: id, state, how long since it last updated, and
+                                   the goal. A run whose process is gone is shown as
+                                   abandoned rather than as whatever it last claimed.
+  status [<id>]  [--json]          What one session is doing: participants, what each is
+                                   working on, whether either is stopped at a permission
+                                   prompt, the current pause with its evidence and options,
+                                   and the outcome once there is one. The id is optional
+                                   and means the most recent; a unique prefix is enough.
+                                   Exits non-zero only for an abandoned run -- a session
+                                   that ended badly ended, and its outcome is in the record.
+  events [<id>]  [--follow]        The session's event stream as NDJSON: every routed
+                                   message and every adapter event, in relay order.
+                                   --follow tails it and stops when the session does.
   version                          Print the version of this build.
   demo [--record <file>]           Run the console against scripted participants: real
                                    terminal, real readline, no agents and no quota. For
@@ -283,6 +321,59 @@ function rejectUnicodeDashes(args: string[]): boolean {
   return false
 }
 
+/**
+ * Print a session's event stream, optionally following it.
+ *
+ * Reads the file rather than attaching to the process, for the reason `sessionRecord`
+ * gives at length: the stream is on disk precisely so a reader needs nothing from a run
+ * that may already be gone. Following is a poll on file size — the events file is
+ * append-only, so a growing file has only ever gained whole lines behind the last newline.
+ *
+ * `fs.watch` was the obvious alternative and is not portable enough to rely on: it misses
+ * changes on some network filesystems and coalesces others, and a follower that silently
+ * stops is worse than one that polls.
+ */
+async function streamEvents(found: ReadSession, follow: boolean): Promise<number> {
+  const path = found.status.eventsPath
+  if (!existsSync(path)) {
+    console.error(`conclave: no events recorded for ${found.status.id}`)
+    return 1
+  }
+  let offset = 0
+  const drain = () => {
+    const size = statSync(path).size
+    if (size <= offset) return
+    const fd = openSync(path, 'r')
+    try {
+      const buf = Buffer.alloc(size - offset)
+      readSync(fd, buf, 0, buf.length, offset)
+      const text = buf.toString('utf8')
+      // A trailing partial line is expected: the writer appends whole lines but a reader
+      // can arrive between the write and its newline. Everything up to the last newline is
+      // complete; the remainder waits for the next pass.
+      const cut = text.lastIndexOf('\n')
+      if (cut < 0) return
+      offset += Buffer.byteLength(text.slice(0, cut + 1))
+      for (const line of text.slice(0, cut).split('\n')) if (line) console.log(line)
+    } finally {
+      closeSync(fd)
+    }
+  }
+  drain()
+  if (!follow) return 0
+  // Stops when the session does, so `--follow` terminates on its own rather than requiring
+  // a Ctrl-C -- which a script driving this cannot send.
+  for (;;) {
+    await new Promise((r) => setTimeout(r, 250))
+    drain()
+    const now = readSession(projectRootFor(process.cwd()), found.status.id)
+    if (!now || now.status.state === 'ended' || now.abandoned) {
+      drain()
+      return 0
+    }
+  }
+}
+
 async function main(argv: string[]): Promise<number> {
   const [command, sub, ...rest] = argv
 
@@ -369,6 +460,68 @@ async function main(argv: string[]): Promise<number> {
     return report.live ? 1 : 0
   }
 
+  if (command === 'sessions') {
+    const root = projectRootFor(process.cwd())
+    const all = listSessions(root)
+    if (rest.includes('--json') || sub === '--json') {
+      console.log(JSON.stringify(all.map((s) => ({ ...s.status, alive: s.alive, abandoned: s.abandoned })), null, 2))
+      return 0
+    }
+    if (all.length === 0) {
+      console.log('no sessions have been recorded in this project')
+      return 0
+    }
+    const now = Date.now()
+    for (const s of all) console.log(formatSessionLine(s, now))
+    return 0
+  }
+
+  if (command === 'status') {
+    const root = projectRootFor(process.cwd())
+    // The id is optional and means the most recent, which is what an operator running one
+    // session at a time always means. An ambiguous prefix is refused rather than resolved.
+    const wanted = sub && !sub.startsWith('--') ? sub : undefined
+    const found = resolveSession(root, wanted)
+    if ('error' in found) {
+      // A directory with no status.json is its own condition, and a different one from "no
+      // such session": it means the id WAS issued and the process never got far enough to
+      // describe itself. Saying "no sessions recorded" there sends the operator looking for
+      // a typo instead of at the one file that holds the answer.
+      const dir = wanted ? sessionDir(root, wanted) : undefined
+      if (dir && existsSync(dir)) {
+        console.error(
+          `conclave: session ${wanted} was started but never recorded its state — ` +
+            `it most likely died during startup. What it printed is in ${join(dir, 'stdio.log')}`,
+        )
+        return 1
+      }
+      console.error(`conclave: ${found.error}`)
+      return 1
+    }
+    const flags = [sub, ...rest]
+    if (flags.includes('--json')) {
+      console.log(formatSessionJson(found.session))
+    } else {
+      console.log(formatSession(found.session, Date.now()))
+    }
+    // Non-zero for a run that claimed to be going and is not, so a script polling this can
+    // gate on it. A finished run is a success however it finished -- the OUTCOME is in the
+    // record, and conflating "did not survive" with "ended badly" would make both unusable.
+    return found.session.abandoned ? 1 : 0
+  }
+
+  if (command === 'events') {
+    const root = projectRootFor(process.cwd())
+    const wanted = sub && !sub.startsWith('--') ? sub : undefined
+    const found = resolveSession(root, wanted)
+    if ('error' in found) {
+      console.error(`conclave: ${found.error}`)
+      return 1
+    }
+    const flags = [sub, ...rest]
+    return await streamEvents(found.session, flags.includes('--follow') || flags.includes('-f'))
+  }
+
   if (command === 'relay') {
     const goal = sub
     // A flag in the goal position is FLAGS, not a goal. `--help` and `-h` are already
@@ -410,6 +563,7 @@ async function main(argv: string[]): Promise<number> {
     // mode the operator had configured — and an unattended run is the one with nobody to
     // answer a prompt it then stops at.
     const runStartedAt = Date.now()
+
     if (!rejectUnicodeDashes(rest)) return 1
 
     // Before anything is spawned, registered or written. The failure being guarded is an
@@ -428,6 +582,77 @@ async function main(argv: string[]): Promise<number> {
         console.error('conclave: refusing to start (--strict-goal)')
         return 1
       }
+    }
+
+    /**
+     * Hand the run to a background process and return its id.
+     *
+     * Re-executes this same binary with `--detach` stripped and `--detached-id` in its
+     * place, rather than forking a worker: the child is then an ordinary `conclave relay`
+     * in every respect, including how it records, how it fails, and how it is resumed. A
+     * second code path for detached runs would be a second thing to keep correct, and the
+     * one that runs unattended is the one nobody is watching when it drifts.
+     *
+     * stdio goes to a file rather than being discarded. `events.ndjson` is the structured
+     * account, and it is not the whole account: a crash before the relay starts, a Node
+     * stack trace, an adapter writing to stderr -- all of that lands here and nowhere else.
+     * A detached run whose failure left no trace would reproduce the problem this is for.
+     */
+    if (rest.includes('--detach') && rest.includes('--dry-run')) {
+      console.error(
+        'conclave: --detach and --dry-run contradict each other. A dry run resolves ' +
+          'everything and starts nothing, so there is no run to hand to a background ' +
+          'process. Drop one.',
+      )
+      return 1
+    }
+    if (rest.includes('--detach')) {
+      const id = newSessionId(runStartedAt, process.pid)
+      const root = projectRootFor(process.cwd())
+      const dir = sessionDir(root, id)
+      mkdirSync(dir, { recursive: true })
+      const logFile = join(dir, 'stdio.log')
+      const fd = openSync(logFile, 'a')
+      const argvOut = ['relay', goal, ...rest.filter((a) => a !== '--detach'), '--detached-id', id]
+      const child = spawn(process.execPath, [process.argv[1]!, ...argvOut], {
+        cwd: process.cwd(),
+        detached: true,
+        stdio: ['ignore', fd, fd],
+      })
+      // Unreferenced AND detached: without both, this process waits for a child it has
+      // deliberately stopped owning, which is the opposite of detaching.
+      child.unref()
+      closeSync(fd)
+      // The parent writes the first status, carrying the CHILD's pid.
+      //
+      // Without this there is a window -- launching two CLIs, seconds long -- in which the
+      // operator holds an id that `conclave status` reports as no such session. Worse, a
+      // child that dies before the relay starts leaves that state permanently, so the id
+      // they were handed never resolves and the failure has to be found in stdio.log by
+      // someone who does not yet know to look. With it, the same failure reads as
+      // `abandoned` the moment the pid is gone, which is exactly what happened.
+      new SessionRecorder(root, {
+        id,
+        pid: child.pid ?? process.pid,
+        cwd: process.cwd(),
+        goal,
+        front: 'relay',
+        operator: flag('operator', '') === 'agent' ? 'agent' : 'human',
+        state: 'starting',
+        startedAt: runStartedAt,
+        messages: 0,
+        participants: [],
+      })
+      if (asJson) {
+        console.log(JSON.stringify({ detached: true, id, pid: child.pid, dir, stdio: logFile }, null, 2))
+      } else {
+        console.log(id)
+        console.error(`  detached as pid ${child.pid}`)
+        console.error(`  conclave status ${id}`)
+        console.error(`  conclave events ${id} --follow`)
+        console.error(`  stdio: ${logFile}`)
+      }
+      return 0
     }
 
     // Parsed early so this run sees its own flag; written later, once it is going to start.
@@ -577,11 +802,31 @@ async function main(argv: string[]): Promise<number> {
         say(m.text.trim().split('\n').map((l) => `    ${l}`).join('\n'))
       },
     })
+    // Readable from outside the process for as long as it runs, and after it stops. Written
+    // for every run, not only detached ones: a foreground run is the one an agent operator
+    // launches into a background file and reads with `tail`, which is the workaround #26
+    // exists to remove.
+    const recording = recordSession(relay, {
+      repoRoot: projectRootFor(process.cwd()),
+      // The id the parent PRINTED when detaching, not a fresh one. A detached run that
+      // recorded itself under a different id than the operator was handed is a session
+      // they cannot find -- and `conclave status <id>` would report no such session while
+      // the run was going perfectly.
+      id: flag('detached-id', '') || newSessionId(runStartedAt, process.pid),
+      goal,
+      front: 'relay',
+      startedAt: runStartedAt,
+      logPath: recordPath,
+    })
+    say(`  session: ${recording.id} — conclave status ${recording.id}`)
+    recording.set('running')
+
     let failed = false
     // Before the run, not after the relay is built: a report whose duration excluded startup
     // would understate how long the operator actually waited.
     try {
       const outcome = await relay.run(goal)
+      recording.set('ended', { outcome })
       if (asJson) {
         // stdout, alone, parseable in full. The prose lines below still go to stderr, so a
         // human watching a --json run is not left staring at nothing.
@@ -594,6 +839,12 @@ async function main(argv: string[]): Promise<number> {
       // should be unreachable -- but the operator's record must not depend on that being
       // true. The summary lines below used to sit after a throw and were simply lost.
       console.error(`\n=== relay ended: transport_failed — ${err instanceof Error ? err.message : String(err)}`)
+      // Recorded on this path too. A status left at `running` by a run that threw is the
+      // exact abandoned-looking record `readSession` has to reconcile against a pid, and
+      // there is no reason to make it guess when we know.
+      recording.set('ended', {
+        outcome: { reason: 'transport_failed', detail: err instanceof Error ? err.message : String(err) },
+      })
       failed = true
     } finally {
       // Printed on every run, including — especially — the ones where nothing happened or
@@ -615,6 +866,9 @@ async function main(argv: string[]): Promise<number> {
         say('===   them modified the shared working directory')
       }
       await relay.stop()
+      // AFTER the relay, never before: stopping the relay is what closes the event stream,
+      // and closing the recorder first would cut the terminal `run_end` off mid-flight.
+      await recording.close()
     }
     return failed ? 1 : 0
   }

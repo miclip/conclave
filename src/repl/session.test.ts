@@ -12,9 +12,10 @@
 import { strict as assert } from 'node:assert'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { resolveSession } from '../workspace/sessionRecord.ts'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { PassThrough, Writable } from 'node:stream'
+import { PassThrough, Readable, Writable } from 'node:stream'
 import test from 'node:test'
 import type { Verdict } from '../contract/outcome.ts'
 import type { AgentSession } from '../contract/session.ts'
@@ -784,4 +785,105 @@ process.exit(await runSession({ cwd: ${JSON.stringify(dir)}, goal: 'Keep the wor
   assert.equal(r.status, 0, `a session outside a repository still runs:\n${r.stderr}`)
   assert.doesNotMatch(r.stderr, /not a git repository/i)
   assert.doesNotMatch(r.stdout, /not a git repository/i)
+})
+
+/**
+ * The console's session, readable from outside the process.
+ *
+ * An agent driving Conclave launched runs into a background file and read them with `tail`,
+ * grepped transcripts to reconstruct what a participant had done, and watched a rising clock
+ * to guess whether a session was alive — because the console is a rendering with no
+ * interface underneath it (#26). This is the interface.
+ *
+ * The ORDER matters and is the part that broke: `Relay.#end` emits the terminal `run_end`,
+ * and `relay.stop()` is what calls it, so closing the recorder first detached before the
+ * event existed and the recorded stream just stopped — with no line saying the run had
+ * finished, which is the exact ambiguity these files exist to remove.
+ */
+test('a console session records a status and an event stream a stranger can read', async () => {
+  const dir = repo()
+  const out = collect()
+  const code = await runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'claude',
+    rounds: 3,
+    checks: [],
+    registry: registryOf({
+      codex: [new FakeRotationSession('advisor', 'codex', ['Do it.', 'DONE'])],
+      claude: [new FakeRotationSession('impl', 'claude', ['ack', 'Did it.'])],
+    }),
+    input: script([]),
+    output: out.stream,
+  })
+  assert.equal(code, 0)
+
+  const found = resolveSession(dir)
+  assert.ok('session' in found, `a session must have been recorded:\n${out.text().slice(-600)}`)
+  const st = found.session.status
+  assert.equal(st.front, 'session')
+  assert.equal(st.state, 'ended')
+  assert.equal(st.goal, 'Keep the work moving.')
+  // The seats, by name and agent — what an operator had to grep a transcript for.
+  assert.deepEqual(
+    st.participants.map((p) => `${p.id}:${p.agent}`).sort(),
+    ['advisor:codex', 'implementer:claude'],
+  )
+  // The id is printed where it can be copied, or it may as well not exist.
+  assert.match(out.text(), new RegExp(`conclave status ${st.id}`))
+
+  const events = readFileSync(st.eventsPath, 'utf8').trim().split('\n').map((l) => JSON.parse(l))
+  assert.ok(events.length > 0, 'the event stream must not be empty')
+  assert.equal(events.at(-1)?.type, 'run_end', `the stream must end with run_end:\n${events.slice(-3).map((e) => e.type).join(', ')}`)
+})
+
+/**
+ * The record of a session torn down while a run was still going.
+ *
+ * The path that matters most and the one that broke. When a run reaches its own end the
+ * relay has already emitted `run_end` before teardown, so any ordering works and a test
+ * built on a completed run proves nothing — the first version of this proved nothing.
+ *
+ * Tearing down MID-RUN is different: `Relay.#end` is what emits the terminal event, and
+ * `relay.stop()` is what calls it. Closing the recorder first detached before the event
+ * existed, and the recorded stream stopped on an ordinary `activity` line with nothing
+ * saying the session was over. A reader then cannot tell a session that was killed from one
+ * still running whose writer is merely quiet — the exact ambiguity these files remove.
+ */
+test('a session killed mid-run still records how it ended', async () => {
+  const dir = repo()
+  const out = collect()
+  // Input closed immediately, participants slow enough that the run is unquestionably in
+  // flight when the console tears down.
+  await runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'claude',
+    rounds: 4,
+    checks: [],
+    registry: registryOf({
+      codex: [slow('advisor', 'codex', ['Do it.', 'More.', 'DONE'], 800)],
+      claude: [slow('impl', 'claude', ['ack', 'Did it.', 'Again.'], 800)],
+    }),
+    input: Readable.from([]),
+    output: out.stream,
+  })
+
+  const found = resolveSession(dir)
+  assert.ok('session' in found)
+  const events = readFileSync(found.session.status.eventsPath, 'utf8')
+    .trim()
+    .split('\n')
+    .map((l) => JSON.parse(l))
+  const last = events.at(-1)
+  assert.equal(
+    last?.type,
+    'run_end',
+    `the stream must end with run_end even when the run did not finish; ended with ` +
+      `${events.slice(-3).map((e) => e.type).join(', ')}`,
+  )
+  // `stopped`, not `done`: the run was cut short and the record says which.
+  assert.equal(last?.reason, 'stopped')
 })

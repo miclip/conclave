@@ -173,6 +173,12 @@ test('under --json nothing but the report may reach stdout', () => {
     //   - `--help`, which returns before a run starts and has no report to conflict with
     .filter((l) => !l.startsWith('const say ='))
     .filter((l) => !l.includes('console.log(USAGE)'))
+    //   - `--detach`, whose entire product IS the session id on stdout, for
+    //     `ID=$(conclave relay ... --detach)`. It returns before a run starts, so it can
+    //     never collide with a report, and under --json it emits JSON like everything else.
+    //     Named rather than allowed by pattern: "a bare value is fine" is how the next
+    //     stray log line gets in.
+    .filter((l) => l !== 'console.log(id)')
 
   // The invariant is not "one write" -- `--dry-run --json` legitimately emits a plan instead
   // of a report, and the two are mutually exclusive because dry-run returns before the run.
@@ -187,6 +193,22 @@ test('under --json nothing but the report may reach stdout', () => {
   assert.ok(
     stdoutWrites.some((l) => l.includes('runReport')),
     'and the report is one of them',
+  )
+
+  // The exception above is only safe while both halves hold: the id goes to stdout ALONE,
+  // and --json takes the JSON path instead. Asserted here so the exemption cannot outlive
+  // the reasoning for it.
+  const detach = block.slice(block.indexOf("if (rest.includes('--detach')) {"))
+  const detachEnd = detach.indexOf('\n    }\n')
+  const detachBlock = detach.slice(0, detachEnd)
+  assert.ok(detachBlock.includes('console.log(id)'), 'the detach block must be locatable')
+  assert.ok(
+    detachBlock.includes('console.log(JSON.stringify('),
+    '--detach --json must emit JSON on stdout, not the bare id',
+  )
+  assert.ok(
+    detachBlock.includes('console.error(`  detached as pid'),
+    'everything a human reads about a detached run must go to stderr',
   )
 })
 

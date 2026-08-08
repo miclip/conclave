@@ -239,6 +239,33 @@ anything a participant flagged as unresolved. Every human-facing line moves to s
 stdout parses in full. That is the interface an agent driving Conclave needs — confirming a
 run should not mean grepping a transcript.
 
+## Watching a session from somewhere else
+
+Every session — console or relay — writes what it is doing to `.conclave/sessions/<id>/`,
+continuously, so it can be read from another terminal, over ssh, or after the process is
+gone. Which is when you most want it.
+
+```sh
+conclave relay "<goal>" --detach   # prints a session id and gives you your terminal back
+conclave sessions                  # every session in this project, newest first
+conclave status                    # what the most recent one is doing; a prefix picks another
+conclave events <id> --follow      # its NDJSON stream: routed messages and adapter events
+```
+
+`status` reports who is in each seat, what each is working on, whether either is stopped at a
+permission prompt, the current pause with its evidence and options, and the outcome once
+there is one. `--json` gives the same record as data.
+
+Liveness is never read from the file. A status saying `running` proves only that the process
+was running when it last wrote, so every read checks the pid and reports both — a run whose
+process is gone shows as **abandoned**, not as whatever it last claimed. That distinction is
+the point: a session that looks busy because nothing has updated it is otherwise
+indistinguishable from one that is busy, and telling a retry from a double start depends on
+it.
+
+A detached run's stdout and stderr go to `stdio.log` in the same directory. A crash before
+the relay starts appears nowhere else.
+
 ```sh
 npm test                    # typecheck and the offline suite
 npm run conformance         # what each adapter claims, graded by evidence
