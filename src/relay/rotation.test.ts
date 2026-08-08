@@ -136,6 +136,21 @@ test('a rotation swaps the session and keeps the participant identity', async (t
   assert.equal(impl.session, fresh)
   assert.equal(old.state, 'terminated')
   assert.equal(fresh.state, 'running')
+
+  // The counter every run report and summary line quotes.
+  //
+  // It was initialised to 0 and incremented nowhere, so every run reported `0 rotations`
+  // whatever happened -- including the first successful rotation this project performed,
+  // which the routing log recorded as `rotated into <id>` on the very same line. That zero
+  // was then read, repeatedly, as evidence that rotation had never fired. An instrument
+  // that cannot report the thing it watches for makes every reading worthless, including
+  // the ones that happen to be right.
+  assert.equal(relay.rotationWatch.rotations, 1, 'an accepted rotation must be counted')
+  // And the summary says so. It short-circuits on zero assessments with "nothing was
+  // measured", which is right for a run that ended before the instrument was used and a
+  // falsehood over the top of a completed transfer -- an operator can force a rotation at a
+  // pause before any assessment exists, which is exactly what this test does.
+  assert.match(relay.rotationSummary(), /1 rotations/)
 })
 
 test('the retired session’s reader retires with it, so the queue is not double-read', async (t) => {

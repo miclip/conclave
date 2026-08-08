@@ -1022,7 +1022,11 @@ export class Relay {
     // configured", and previously indistinguishable from the latter -- which is the defect
     // in #31. A reader must be able to tell that the instrument was live but the run ended
     // before it was used, because that says the run is uninformative rather than negative.
-    if (w.assessments === 0) {
+    // ...unless a rotation actually happened, which an operator can force at a pause before
+    // any assessment has been made. Saying "nothing was measured" over the top of a
+    // completed transfer would be a stronger falsehood than the ambiguity #31 was about:
+    // one hides an absence of evidence, the other hides an event.
+    if (w.assessments === 0 && w.rotations === 0) {
       return (
         `rotation: armed — 0 assessments, the run ended before any were made ` +
         `(nothing was measured; this is not a negative result)`
@@ -2027,6 +2031,18 @@ export class Relay {
       impl.baselineGeneration = 0
       impl.degradationCursor = impl.events.length
       this.complaints.progressed(impl.id)
+      // Counted HERE, where a replacement has been accepted -- not where one was proposed.
+      //
+      // The field was initialised to 0 and incremented nowhere, so every run ever reported
+      // `0 rotations` whatever happened, including the first successful rotation this
+      // project ever performed. Its own comment claims the distinction the code never made:
+      // "Candidates raised. Distinct from rotations, which are candidates ACTED on."
+      //
+      // Worse than a wrong number. That zero was read as evidence that rotation had never
+      // fired -- by me, repeatedly, across a day of runs -- and an instrument that cannot
+      // report the thing it is watching for makes every reading of it worthless, including
+      // the readings that happened to be right.
+      this.rotationWatch.rotations += 1
       this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text: `${impl.id} rotated into ${result.replacement.sessionId}` })
     } else if (result.status === 'rolled_back') {
       this.#record({
