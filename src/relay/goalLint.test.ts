@@ -62,3 +62,33 @@ test('an empty goal produces nothing rather than everything', () => {
   assert.deepEqual(lintGoal(''), [])
   assert.deepEqual(lintGoal('   '), [])
 })
+
+test('acceptance criteria are a list of tests, not a list of asks', () => {
+  // The two rules were pulling against each other. `no_acceptance_criteria` asks an author to
+  // say what would count as done; the natural way to write that is a semicolon-separated
+  // list; and `multiple_goals` then flagged the list as two asks. So a goal was penalised
+  // for taking the trouble to be checkable.
+  //
+  // Found by linting a real goal for a real run, which is the only reason it was found: the
+  // warning is non-blocking, so it had been mild enough to ignore.
+  const goal =
+    'Make `conclave status --json` report graded turn verdicts, so a caller confirming a ' +
+    'run reads the evidence rather than inferring it. Done means: npm test passes; new ' +
+    'tests cover the graded turns; and a finished session prints a non-empty turns array.'
+  assert.deepEqual(lintGoal(goal).map((f) => f.code), [])
+})
+
+test('a genuinely conjoined ask is still caught', () => {
+  // The tightening must not have bought its quiet by going blind. Both forms, and both
+  // before any criteria marker, where a conjunction really does join two asks.
+  for (const goal of [
+    'Add the caching layer and then rewrite the installation docs. The suite must pass.',
+    'Add caching; also rewrite the docs. The suite must pass.',
+    'Wire up the retry as well as the exponential backoff. The suite must pass.',
+  ]) {
+    assert.ok(
+      lintGoal(goal).some((f) => f.code === 'multiple_goals'),
+      `two asks must still be flagged: ${goal}`,
+    )
+  }
+})

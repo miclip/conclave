@@ -54,8 +54,29 @@ const ASSERTED_PREMISE =
  * The word forms need a boundary; the semicolon form IS its own boundary, and an earlier
  * version applied `(^|\W)` to both -- which meant `Add caching; also rewrite the docs`
  * never matched, because the character before the semicolon is a word character.
+ *
+ * `then` or `also` after the semicolon is REQUIRED rather than optional. Optional, it matched
+ * any semicolon at all -- so `Done means: the suite passes; new tests cover the change` was
+ * flagged as two asks. That is not a near miss: it is the exact shape
+ * `no_acceptance_criteria` asks an author to write, so the two rules were pulling against
+ * each other and the one that fired second won. Caught by linting a real goal for a real run.
  */
-const CONJOINED = /\b(?:and then|and also|as well as)\b|;\s*(?:then\s+)?(?:also\s+)?[a-z]+\s+\w/i
+const CONJOINED = /\b(?:and then|and also|as well as)\b|;\s*(?:then|also)\s+\w/i
+
+/**
+ * Acceptance criteria, which are a LIST by nature and must not be read as a list of asks.
+ *
+ * Everything from the first "done means" onwards is the author saying how the single ask
+ * above will be judged. Conjunctions there join criteria, not goals -- and a rule that
+ * cannot tell the difference punishes the goals that took the trouble to be checkable.
+ */
+const CRITERIA_MARKER = /\b(?:done means|acceptance(?: criteria)?|definition of done|success (?:means|is))\b/i
+
+/** The ask alone: everything before the criteria, or the whole goal when there are none. */
+function askPortion(text: string): string {
+  const m = CRITERIA_MARKER.exec(text)
+  return m ? text.slice(0, m.index) : text
+}
 
 /**
  * Lint a goal. Empty means nothing to say, which is the common case for a well-formed goal.
@@ -92,7 +113,8 @@ export function lintGoal(goal: string): GoalFinding[] {
     })
   }
 
-  if (CONJOINED.test(text)) {
+  // The ASK, not the criteria. See `askPortion`.
+  if (CONJOINED.test(askPortion(text))) {
     out.push({
       code: 'multiple_goals',
       message: 'reads as more than one ask joined together',
