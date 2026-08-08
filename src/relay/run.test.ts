@@ -20,6 +20,7 @@ import type { Verdict } from '../contract/outcome.ts'
 import type { AgentSession } from '../contract/session.ts'
 import { AgentRegistry } from '../registry/registry.ts'
 import { FakeRotationSession } from '../rotation/fakeSession.ts'
+import type { RelayEvent } from './observe.ts'
 import { Relay, type RelayOptions } from './relay.ts'
 
 function repo(): string {
@@ -760,5 +761,136 @@ test('a late signal does not amend a pause that was never about a verdict', asyn
   impl.lateSignal(COMPLETED)
   await new Promise((r) => setTimeout(r, 100))
   assert.ok(!run.pause?.superseded, 'nothing about a rotation candidate rests on a turn verdict')
+  await run.abort()
+})
+
+// ---------------------------------------------------------------------------------------
+// A pause as something you can WATCH, not only something you can await.
+//
+// `untilPause()` serves the one caller driving the run. Everything else looking at the
+// session -- the status recorder, a console, anything attaching mid-run -- reads the
+// observation stream, and there a pause was previously visible only as a `note` whose text
+// began "paused (". That is prose: a viewer had to match a string to learn the loop had
+// stopped, and got nothing structured to render the reason or the evidence from.
+//
+// These are about the two properties that make the events worth having: the payload is the
+// operator's own pause OBJECT, and the pair brackets the suspension in the right order.
+// ---------------------------------------------------------------------------------------
+
+/** Narrowing find. `events.find(e => e.type === 'pause')` keeps the whole union. */
+function firstOfType<T extends RelayEvent['type']>(
+  events: RelayEvent[],
+  type: T,
+): Extract<RelayEvent, { type: T }> | undefined {
+  return events.find((e): e is Extract<RelayEvent, { type: T }> => e.type === type)
+}
+
+/** Reads a subscription in the background. Detach, or an abandoned reader outlives the test. */
+function collect(relay: Relay): { events: RelayEvent[]; detach: () => void } {
+  const events: RelayEvent[] = []
+  const it = relay.observe()[Symbol.asyncIterator]()
+  void (async () => {
+    for (;;) {
+      const next = await it.next()
+      if (next.done) return
+      events.push(next.value)
+    }
+  })()
+  return { events, detach: () => void it.return?.() }
+}
+
+test('a pause and its resume reach an observer, bracketing the suspension', async (t) => {
+  const dir = repo()
+  const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it.'])
+  const relay = await relayOf(dir, new FakeRotationSession('advisor', 'codex', ['Do it.', 'DONE']), [impl])
+  t.after(() => relay.stop())
+  const seen = collect(relay)
+  t.after(seen.detach)
+
+  const run = relay.start('Keep the work moving.')
+  impl.compact()
+  const pause = await run.untilPause()
+  assert.ok(pause)
+
+  const emitted = await until('the pause to reach the stream', () => firstOfType(seen.events, 'pause'))
+  // Identity, not equality. A subscriber holding a copy could never learn the pause had been
+  // superseded, because `supersede()` amends in place.
+  assert.equal(emitted.pause, pause, 'the stream carries the operator’s own pause object')
+  assert.equal(
+    firstOfType(seen.events, 'resume'),
+    undefined,
+    'nothing has resumed: the loop is still suspended at this point',
+  )
+
+  await run.continue()
+  const resumed = await until('the resume to reach the stream', () => firstOfType(seen.events, 'resume'))
+  assert.equal(resumed.pause, pause, 'the pair is matchable by identity rather than by adjacency')
+  assert.ok(resumed.seq > emitted.seq)
+
+  assert.equal((await run.result()).reason, 'done')
+
+  // And in the right place relative to the log the notes go to: the raised note, then the
+  // suspension, then the withdrawal of it, then the run ending.
+  const noteAt = (prefix: string) =>
+    seen.events.findIndex((e) => e.type === 'message' && e.message.kind === 'note' && e.message.text.startsWith(prefix))
+  const at = (type: RelayEvent['type']) => seen.events.findIndex((e) => e.type === type)
+  const order = [noteAt('paused (rotation_candidate)'), at('pause'), at('resume'), noteAt('resumed from')]
+  assert.ok(
+    order.every((i, n) => i >= 0 && (n === 0 || i > order[n - 1]!)),
+    `expected paused-note < pause < resume < resumed-note, got ${order.join(', ')}`,
+  )
+  assert.equal(seen.events.at(-1)?.type, 'run_end')
+})
+
+test('an aborted pause is never resumed', async (t) => {
+  // The end of the run is what says the operator declined, and `run_end` already says it. A
+  // resume followed immediately by the end would read as a session that carried on.
+  const dir = repo()
+  const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it.'])
+  const relay = await relayOf(dir, new FakeRotationSession('advisor', 'codex', ['Do it.', 'DONE']), [impl])
+  t.after(() => relay.stop())
+  const seen = collect(relay)
+  t.after(seen.detach)
+
+  const run = relay.start('Keep the work moving.')
+  impl.compact()
+  assert.ok(await run.untilPause())
+  await run.abort('the operator stopped here')
+
+  const end = await until('the run to end', () => firstOfType(seen.events, 'run_end'))
+  assert.ok(firstOfType(seen.events, 'pause'), 'the pause itself was still announced')
+  assert.equal(firstOfType(seen.events, 'resume'), undefined, 'an abort is not a resume')
+  assert.equal(end.reason, 'stopped')
+})
+
+test('the pause on the stream is the one that gets amended, not a snapshot of it', async (t) => {
+  // The reason the payload is the object and not a copy. A viewer rendering a pause it was
+  // handed here must be able to show that the verdict underneath it has been withdrawn --
+  // there is no second event to tell it, because `supersede()` mutates in place precisely
+  // because everyone who will hear about the pause already holds it.
+  const dir = repo()
+  const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it, slowly.'])
+  impl.endTurn = { index: 1, verdict: TIMED_OUT }
+  const relay = await relayOf(dir, new FakeRotationSession('advisor', 'codex', ['Do it.', 'DONE']), [impl])
+  t.after(() => relay.stop())
+  const seen = collect(relay)
+  t.after(seen.detach)
+
+  const run = relay.start('Keep the work moving.')
+  const pause = await run.untilPause()
+  assert.equal(pause?.reason, 'turn_incomplete')
+
+  const emitted = await until('the pause to reach the stream', () => firstOfType(seen.events, 'pause'))
+  // Via a local, as above: asserting on the field itself narrows it to `undefined` for good.
+  const before = emitted.pause.superseded
+  assert.equal(before, undefined, 'nothing has contradicted it yet')
+
+  impl.lateSignal(COMPLETED)
+  await until('the pause to be marked superseded', () => run.pause?.superseded?.verdict)
+  assert.equal(
+    emitted.pause.superseded?.verdict?.outcome,
+    'completed',
+    'a copy would have frozen at the moment of emission',
+  )
   await run.abort()
 })

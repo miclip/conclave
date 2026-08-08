@@ -10,7 +10,7 @@
  */
 
 import { strict as assert } from 'node:assert'
-import { execFileSync, spawnSync } from 'node:child_process'
+import { execFileSync, spawn, spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { resolveSession } from '../workspace/sessionRecord.ts'
 import { formatSessionJson } from '../workspace/sessionView.ts'
@@ -1047,6 +1047,255 @@ test('a pause is held open for a piped driver, and resolvable from stdin', async
 
   input.end()
   await running
+})
+
+/**
+ * A pause on the event STREAM, not only in the status file.
+ *
+ * `status.json` says what is true now; a reader that arrives after the operator decided sees
+ * a running session and no trace that it ever stopped. The stream is the account over time,
+ * and until it carried these records a pause appeared there only as a `note` whose text began
+ * "paused (" -- prose a consumer had to pattern-match, carrying none of the structure the
+ * status file has always had. These are the acceptance for the pair being on the wire.
+ */
+
+/**
+ * Complete, newline-terminated records only; any partial suffix is left for the next read.
+ *
+ * Both readers below need this and for the same reason from two directions: a file reader can
+ * arrive between an append and its newline, and a pipe hands over whatever fitted in the chunk,
+ * which is free to end mid-record. Parsing the fragment would throw inside a poll and fail the
+ * test on a buffer boundary rather than on the behaviour under test.
+ */
+function ndjson(text: string): Record<string, any>[] {
+  const cut = text.lastIndexOf('\n')
+  if (cut < 0) return []
+  return text
+    .slice(0, cut)
+    .split('\n')
+    .filter(Boolean)
+    .map((l) => JSON.parse(l))
+}
+
+function eventRecords(path: string): Record<string, any>[] {
+  if (!existsSync(path)) return []
+  return ndjson(readFileSync(path, 'utf8'))
+}
+
+/** Poll for something produced asynchronously. Bounded, so a failure is a failure. */
+async function untilValue<T>(what: string, f: () => T | undefined, detail: () => string, ms = 15_000): Promise<T> {
+  const deadline = Date.now() + ms
+  for (;;) {
+    const v = f()
+    if (v !== undefined) return v
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}:\n${detail()}`)
+    await new Promise((r) => setTimeout(r, 25))
+  }
+}
+
+/** The session's own record, once the console has written one. Says nothing about its state. */
+async function untilRecorded(dir: string, detail: () => string): Promise<{ id: string; eventsPath: string }> {
+  return untilValue(
+    'the console to record a session',
+    () => {
+      const f = resolveSession(dir)
+      if (!('session' in f) || !existsSync(f.session.status.eventsPath)) return undefined
+      return { id: f.session.status.id, eventsPath: f.session.status.eventsPath }
+    },
+    detail,
+  )
+}
+
+test('an operator-requested pause reaches the event stream with its reason and its options', async () => {
+  const dir = repo()
+  const out = collect()
+  const input = new PassThrough() // held open, as a driver would hold it
+  const running = runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'claude',
+    rounds: 6,
+    checks: [],
+    operator: 'agent',
+    registry: registryOf({
+      codex: [slow('advisor', 'codex', ['Do it.', 'More.', 'DONE'], 300)],
+      claude: [slow('impl', 'claude', ['ack', 'Did it.', 'Again.'], 300)],
+    }),
+    input,
+    output: out.stream,
+  })
+
+  const { eventsPath } = await untilRecorded(dir, () => out.text().slice(-800))
+  input.write('/pause\n')
+
+  const paused = await untilValue(
+    'a pause record in the event stream',
+    () => eventRecords(eventsPath).find((e) => e.type === 'pause'),
+    () => out.text().slice(-800),
+  )
+
+  // The real reason, not a placeholder: a consumer picking its next move off this record has
+  // nothing else to read, and `operator_requested` is what distinguishes a pause somebody
+  // asked for from one the orchestrator raised.
+  assert.equal(paused.pause.reason, 'operator_requested')
+  assert.ok(typeof paused.pause.detail === 'string' && paused.pause.detail.length > 0)
+  // The full set, and in the order the console offers them. A truncated `options` would have
+  // an agent operator believe a move it has is unavailable.
+  assert.deepEqual(paused.pause.options, ['continue', 'rotate', 'constrain', 'abort'])
+  assert.match(paused.pause.evidence.join('\n'), /no turn is in flight/)
+  assert.equal(typeof paused.pause.atSeq, 'number', 'the point in the routing log the pause lines up with')
+  assert.equal(typeof paused.seq, 'number')
+
+  // Still suspended, so the record was written DURING the pause rather than reconstructed
+  // from the log after the fact.
+  const found = resolveSession(dir)
+  assert.ok('session' in found && found.session.status.state === 'paused')
+  assert.equal(
+    eventRecords(eventsPath).some((e) => e.type === 'resume'),
+    false,
+    'nothing has resumed while the operator is still deciding',
+  )
+
+  input.write('/abort\n')
+  input.end()
+  await running
+})
+
+test('continuing that run puts the matching resume after the pause in the stream', async () => {
+  const dir = repo()
+  const out = collect()
+  const input = new PassThrough()
+  const running = runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'claude',
+    rounds: 6,
+    checks: [],
+    operator: 'agent',
+    registry: registryOf({
+      codex: [slow('advisor', 'codex', ['Do it.', 'More.', 'DONE'], 300)],
+      claude: [slow('impl', 'claude', ['ack', 'Did it.', 'Again.'], 300)],
+    }),
+    input,
+    output: out.stream,
+  })
+
+  const { eventsPath } = await untilRecorded(dir, () => out.text().slice(-800))
+  input.write('/pause\n')
+  await untilValue(
+    'a pause record in the event stream',
+    () => eventRecords(eventsPath).find((e) => e.type === 'pause'),
+    () => out.text().slice(-800),
+  )
+
+  input.write('/continue\n')
+  await untilValue(
+    'a resume record in the event stream',
+    () => eventRecords(eventsPath).find((e) => e.type === 'resume'),
+    () => out.text().slice(-800),
+  )
+
+  input.end()
+  await running
+
+  const records = eventRecords(eventsPath)
+  const pauses = records.filter((e) => e.type === 'pause')
+  const resumes = records.filter((e) => e.type === 'resume')
+  assert.equal(pauses.length, 1, 'one pause was asked for, so one was recorded')
+  assert.equal(resumes.length, 1)
+  assert.ok(
+    records.indexOf(resumes[0]!) > records.indexOf(pauses[0]!),
+    'the resume follows the pause it ends, rather than standing alone',
+  )
+  // On disk the pair is two snapshots rather than one object, so identity is not available
+  // here -- matching them means the payloads agree. In process they ARE the same object; that
+  // is asserted in `src/relay/run.test.ts`.
+  assert.deepEqual(resumes[0]!.pause, pauses[0]!.pause, 'the resume names the pause it is leaving')
+  assert.equal(records.at(-1)?.type, 'run_end', 'and the stream still ends where it always did')
+})
+
+/**
+ * The same pair, across the process boundary an agent operator actually uses.
+ *
+ * In-process assertions prove the events exist; they do not prove they are READABLE from
+ * outside while the run is stopped, and that is the only property that matters to a driver
+ * whose session is another process. The failure this rules out is a pause that reaches the
+ * file only when the run moves again -- which would be invisible in every test above, and
+ * would leave `--follow` silent for exactly as long as the operator was needed.
+ */
+test('conclave events --follow delivers the pause line while the session is still paused', async () => {
+  const root = join(import.meta.dirname, '..', '..')
+  const dir = repo()
+  const out = collect()
+  const input = new PassThrough()
+  const running = runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'claude',
+    rounds: 6,
+    checks: [],
+    operator: 'agent',
+    registry: registryOf({
+      codex: [slow('advisor', 'codex', ['Do it.', 'More.', 'DONE'], 300)],
+      claude: [slow('impl', 'claude', ['ack', 'Did it.', 'Again.'], 300)],
+    }),
+    input,
+    output: out.stream,
+  })
+
+  // Waited on for STARTUP only -- that the session exists and has a stream file to open.
+  // Nothing here looks at whether the run is paused; doing so before spawning the follower
+  // would be the test asserting the order it is meant to be proving.
+  const { id, eventsPath } = await untilRecorded(dir, () => out.text().slice(-800))
+
+  const cli = spawn(process.execPath, [join(root, 'bin/conclave.ts'), 'events', id, '--follow'], { cwd: dir })
+  let stdout = ''
+  let stderr = ''
+  cli.stdout.setEncoding('utf8')
+  cli.stderr.setEncoding('utf8')
+  cli.stdout.on('data', (c: string) => (stdout += c))
+  cli.stderr.on('data', (c: string) => (stderr += c))
+
+  try {
+    input.write('/pause\n')
+    // The assertion: the follower's own stdout, not the file it reads.
+    await untilValue(
+      'the pause line to reach `conclave events --follow`',
+      () => ndjson(stdout).find((e) => e.type === 'pause'),
+      () => `stderr:\n${stderr}\nconsole:\n${out.text().slice(-800)}`,
+    )
+
+    // Only NOW is the run's state consulted. Reading it first and then waiting on stdout
+    // would prove the line arrives after a pause is observable elsewhere, which is the
+    // weaker claim and not the one being made.
+    const found = resolveSession(dir)
+    assert.ok('session' in found && found.session.status.state === 'paused', 'the line arrived mid-suspension')
+
+    input.write('/continue\n')
+    input.end()
+    await running
+
+    // `--follow` stops when the session does, rather than needing a Ctrl-C a script cannot
+    // send -- so a driver can wait on it.
+    const code = await untilValue('the follower to exit', () => cli.exitCode ?? undefined, () => stderr)
+    assert.equal(code, 0)
+    // Still whole records only. The follower has exited, so every record it wrote is
+    // terminated by now -- but reading it the other way would work until the day a chunk
+    // lands badly, and a test that is right by luck is not right.
+    const streamed = ndjson(stdout)
+    assert.ok(streamed.some((e) => e.type === 'resume'), 'the resume is followed through too')
+    assert.equal(streamed.at(-1)?.type, 'run_end')
+    assert.deepEqual(
+      streamed.map((e) => e.seq),
+      eventRecords(eventsPath).map((e) => e.seq),
+      'the follower delivered the whole stream, not a subset of it',
+    )
+  } finally {
+    if (cli.exitCode === null) cli.kill('SIGKILL')
+  }
 })
 
 /**

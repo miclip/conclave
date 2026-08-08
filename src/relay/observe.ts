@@ -28,6 +28,7 @@
 import type { AgentEvent } from '../contract/session.ts'
 import { AsyncQueue } from '../adapters/asyncQueue.ts'
 import type { Rank, RelayMessage } from './message.ts'
+import type { RunPause } from './run.ts'
 
 /** Why a run stopped. The relay decides none of these beyond `budget`. */
 export type RunReason =
@@ -78,6 +79,38 @@ export interface RelayActivityEvent extends RelayEventBase {
   event: AgentEvent
 }
 
+/**
+ * The loop suspended at a decision point, and is not going to advance until a human acts.
+ *
+ * The routing log already records a `paused (...)` note, but a note is prose: a viewer
+ * reading it has to match a string to know the run stopped, and gets nothing structured to
+ * render the reason, the evidence, or the options with. This says it as state.
+ *
+ * The payload is the SAME OBJECT `RunHandle.pause` returns, not a copy. `supersede()`
+ * mutates a pause in place — deliberately, because everyone who will ever hear about that
+ * pause already holds the object — so a subscriber given a copy would be holding a pause
+ * that can never learn its verdict was withdrawn. Serialising consumers (the session
+ * recorder) snapshot it at emit time and are unaffected either way; in-process consumers
+ * are the ones that need the identity.
+ */
+export interface RelayPauseEvent extends RelayEventBase {
+  type: 'pause'
+  pause: RunPause
+}
+
+/**
+ * The operator decided, and the loop is moving again.
+ *
+ * Carries the pause it is leaving — the same object the matching `pause` event carried — so
+ * a subscriber can pair the two by identity rather than by guessing from adjacency. Emitted
+ * only when the run actually continues: an abort ends the run instead, and `run_end` is the
+ * event that says so.
+ */
+export interface RelayResumeEvent extends RelayEventBase {
+  type: 'resume'
+  pause: RunPause
+}
+
 /** Terminal. Nothing follows it, and every subscriber's iteration completes. */
 export interface RelayRunEndEvent extends RelayEventBase {
   type: 'run_end'
@@ -85,7 +118,12 @@ export interface RelayRunEndEvent extends RelayEventBase {
   detail?: string | undefined
 }
 
-export type RelayEvent = RelayMessageEvent | RelayActivityEvent | RelayRunEndEvent
+export type RelayEvent =
+  | RelayMessageEvent
+  | RelayActivityEvent
+  | RelayPauseEvent
+  | RelayResumeEvent
+  | RelayRunEndEvent
 
 /** Distributes over the union; a plain Omit would collapse it to the common keys. */
 type WithoutEnvelope<T> = T extends unknown ? Omit<T, 'seq' | 'at'> : never
@@ -140,12 +178,12 @@ export class RelayEventStream {
       this.#droppedAfterClose++
       return
     }
-    // The cast is the price of building the envelope once for a union of three shapes.
+    // The cast is the price of building the envelope once for a union of several shapes.
     const event = { ...input, seq: ++this.#seq, at: Date.now() } as RelayEvent
     // Retained even with no subscribers, so one attaching later still gets the history.
-    // These hold references to the same RelayMessage and AgentEvent objects the log and
-    // the participants already keep, so it is an envelope per event and not a second copy
-    // of the prose.
+    // These hold references to the same RelayMessage, AgentEvent and RunPause objects the
+    // log, the participants and the handle already keep, so it is an envelope per event and
+    // not a second copy of the prose.
     this.#history.push(event)
     for (const q of this.#subscribers) q.push(event)
   }
