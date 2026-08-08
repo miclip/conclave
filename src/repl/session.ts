@@ -26,6 +26,7 @@
 
 import { describeTool } from '../relay/subagents.ts'
 import { formatGoalFindings, lintGoal } from '../relay/goalLint.ts'
+import { preflightRefusals } from '../relay/guardrails.ts'
 import { createWriteStream, existsSync, realpathSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import { Writable } from 'node:stream'
@@ -151,6 +152,17 @@ export interface SessionOptions {
    * has now made seven times.
    */
   operator?: 'human' | 'agent' | undefined
+  /**
+   * Start even outside a git repository.
+   *
+   * `relay` has refused this since it was written; the console never checked, and the
+   * divergence was declared UNRESOLVED on the grounds that the console does not diff the
+   * tree at start-up. It runs the SAME participants, which is what matters: a session in
+   * `~/workspace/earthquakes` -- no `.git` at all -- had its implementer rewrite `app.js`
+   * wholesale, and the flag it carried says nothing but its own context held the prior
+   * version. Attribution and rotation are meaningless there, and so is undo.
+   */
+  force?: boolean | undefined
   /**
    * How long a turn's transcript is given to catch up with the hook that ended it, and how
    * much longer an EMPTY report buys before it is treated as lost. See `Relay#exchange`.
@@ -404,6 +416,17 @@ export async function runSession(opts: SessionOptions): Promise<number> {
   // A live lock means someone else's participants are working in this tree. Starting anyway
   // would overwrite their record of what was dirty before they began, which is the thing
   // that makes `conclave guard` able to tell their work from the operator's.
+  // Before anything is spawned, registered or written -- the same point `relay` checks. The
+  // failure being guarded is an operator who did not mean to start a run here at all, and
+  // every line of setup below is work done on their behalf in a directory they may not have
+  // meant to be in.
+  const refusals = preflightRefusals(opts.cwd, { force: opts.force === true })
+  for (const r of refusals) {
+    write(`refusing to start: ${r.reason}`)
+    write(`  ${r.remedy}`)
+  }
+  if (refusals.length > 0) return 1
+
   const existing = guard(opts.cwd)
   if (existing.live) {
     write(`refusing to start: ${existing.messages.join('\n')}`)

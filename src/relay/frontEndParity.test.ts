@@ -80,10 +80,6 @@ const DECLARED: Record<string, string> = {
     'nobody watching. Declared rather than fixed because a ceiling that ENDS a console is ' +
     'not obviously what it should do -- pausing may be right, and that is a design call.',
   'max-minutes': 'as --max-turns.',
-  force:
-    'UNRESOLVED. relay refuses to start outside a git repository because attribution and ' +
-    'rotation both diff the tree; the console does neither of those things at start-up but ' +
-    'does run the same participants. Left declared rather than silently different.',
   // --- session only ---------------------------------------------------------------------
   'turn-timeout':
     'UNRESOLVED in the other direction: `turnWatchdogMs` exists on RelayOptions and only the ' +

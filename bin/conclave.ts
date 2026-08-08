@@ -215,7 +215,7 @@ Commands:
                    [--checks "npm test"] [--checks-informational "..."]
                    [--checks-unrelated "..."] [--advisor-args "..."] [--implementer-args "..."]
                    [--bypass [agent]] [--operator agent] [--settle SECONDS]
-                   [--salvage SECONDS] [--record <path>] [--resume <log>]
+                   [--salvage SECONDS] [--record <path>] [--resume <log>] [--force]
                                    The same session, interactively. The goal is optional:
                                    without one the console waits and the first thing you
                                    type starts the run. Pauses become decision
@@ -238,6 +238,9 @@ Commands:
                                    Commands arrive on stdin as lines, and conclave status
                                    reports the pause with its evidence and options as data,
                                    so nothing has to be scraped off the console.
+                                   Refuses to start outside a git repository unless --force,
+                                   as relay does: attribution and rotation both diff the
+                                   tree, and so does undo.
                                    Every message is recorded to .conclave/runs/ as it
                                    happens, and --resume replays that log into both seats.
                                    Prefer resuming HERE rather than into relay: a resumed
@@ -1170,6 +1173,7 @@ async function main(argv: string[]): Promise<number> {
     // The same flag `relay` has. Its absence here is what made an agent pick the front-end
     // that cannot hold a pause -- see SessionOptions.operator.
     const operator = flag('operator', '') === 'agent' ? ('agent' as const) : undefined
+    const force = args.includes('--force')
     // All three existed on `relay` and were unreachable here. `--record` is the starkest:
     // `SessionOptions.record` is documented as the way to inspect a rendering fault in the
     // bytes rather than from a screenshot, and no invocation could switch it on.
@@ -1197,6 +1201,7 @@ async function main(argv: string[]): Promise<number> {
     return runSession({
       cwd: process.cwd(),
       ...(operator ? { operator } : {}),
+      ...(force ? { force } : {}),
       ...(settle ? { transcriptSettleMs: Number(settle) * 1000 } : {}),
       ...(salvage ? { transcriptSalvageMs: Number(salvage) * 1000 } : {}),
       ...(record ? { record } : {}),

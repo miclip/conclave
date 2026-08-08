@@ -786,7 +786,12 @@ for (const [agent, session] of [['codex', new FakeRotationSession('advisor', 'co
     launch: { command: agent, baseArgs: [] }, async create() { return session } })
 }
 process.exit(await runSession({ cwd: ${JSON.stringify(dir)}, goal: 'Keep the work moving.',
-  lead: 'codex', implementer: 'claude', rounds: 3, checks: [], registry, input: Readable.from([]) }))
+  lead: 'codex', implementer: 'claude', rounds: 3, checks: [], registry, input: Readable.from([]),
+  // force: true, because the console REFUSES a plain directory now -- attribution, rotation
+  // and undo are all meaningless without a repository. The property under test survives
+  // that: when an operator overrides the refusal, git's own complaint must still not leak
+  // into the banner.
+  force: true }))
 `,
   )
   // spawnSync rather than execFileSync, which returns stdout alone and surfaces stderr
