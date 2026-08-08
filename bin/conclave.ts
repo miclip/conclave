@@ -157,7 +157,7 @@ Commands:
                    [--checks "npm test"] [--checks-informational "..."]
                    [--checks-unrelated "..."] [--advisor-args "..."] [--implementer-args "..."]
                    [--bypass [agent]] [--operator agent] [--settle SECONDS]
-                   [--salvage SECONDS] [--record <path>]
+                   [--salvage SECONDS] [--record <path>] [--resume <log>]
                                    The same session, interactively. The goal is optional:
                                    without one the console waits and the first thing you
                                    type starts the run. Pauses become decision
@@ -180,6 +180,11 @@ Commands:
                                    Commands arrive on stdin as lines, and conclave status
                                    reports the pause with its evidence and options as data,
                                    so nothing has to be scraped off the console.
+                                   Every message is recorded to .conclave/runs/ as it
+                                   happens, and --resume replays that log into both seats.
+                                   Prefer resuming HERE rather than into relay: a resumed
+                                   run that hits a pause is held open for you, where relay
+                                   would end again at the first one.
                                    --settle / --salvage as in relay. --record tees every
                                    byte written to the terminal, escape codes included, so
                                    a rendering fault can be inspected rather than
@@ -945,6 +950,7 @@ async function main(argv: string[]): Promise<number> {
     const settle = flag('settle', '')
     const salvage = flag('salvage', '')
     const record = flag('record', '')
+    const resume = flag('resume', '')
     const turnTimeout = flag('turn-timeout', '')
     const leadArgs = extraArgs(flag('advisor-args', '') || flag('lead-args', ''))
     const implementerArgs = extraArgs(flag('implementer-args', ''))
@@ -968,6 +974,7 @@ async function main(argv: string[]): Promise<number> {
       ...(settle ? { transcriptSettleMs: Number(settle) * 1000 } : {}),
       ...(salvage ? { transcriptSalvageMs: Number(salvage) * 1000 } : {}),
       ...(record ? { record } : {}),
+      ...(resume ? { resume } : {}),
       ...(goal === undefined ? {} : { goal }),
       lead,
       implementer,

@@ -82,10 +82,6 @@ const DECLARED: Record<string, string> = {
     'UNRESOLVED. relay refuses to start outside a git repository because attribution and ' +
     'rotation both diff the tree; the console does neither of those things at start-up but ' +
     'does run the same participants. Left declared rather than silently different.',
-  resume:
-    'UNRESOLVED, and the most valuable of these. Replaying a routing log into console seats ' +
-    'is exactly as sensible as into relay seats, and more useful -- a resumed run that hits ' +
-    'a pause would be held rather than ended. Nothing blocks it but the wiring.',
   // --- session only ---------------------------------------------------------------------
   'turn-timeout':
     'UNRESOLVED in the other direction: `turnWatchdogMs` exists on RelayOptions and only the ' +

@@ -112,6 +112,7 @@ export async function withHeartbeat<T>(
 }
 import { guard } from '../workspace/sessionLock.ts'
 import { newSessionId, projectRootFor, recordSession } from '../workspace/sessionRecord.ts'
+import { RunLogWriter, readRunLog, runLogExists } from '../relay/resume.ts'
 
 export interface SessionOptions {
   cwd: string
@@ -165,6 +166,24 @@ export interface SessionOptions {
    */
   transcriptSettleMs?: number | undefined
   transcriptSalvageMs?: number | undefined
+  /**
+   * A routing log to replay into both seats, continuing a run rather than restarting it.
+   *
+   * The console had neither half of this: it replayed nothing, and it RECORDED nothing, so a
+   * console run that crashed after three hours left no resumable account of itself while an
+   * unattended one did. The console is the front-end you leave running.
+   *
+   * And it is the better place to resume into. `relay` ends at every pause point, so a
+   * resumed run that hits one immediately ends again; here it is held open and you answer it.
+   */
+  resume?: string | undefined
+  /**
+   * Where to write the routing log. Defaults to `.conclave/runs/session-<started>.ndjson`.
+   *
+   * Distinct from `record`, which tees the RENDERED bytes for inspecting a display fault.
+   * This is the messages, which is what a resume needs.
+   */
+  runLog?: string | undefined
   /** Streams for testing; defaults to the process's own. */
   input?: NodeJS.ReadableStream
   output?: NodeJS.WritableStream
@@ -541,9 +560,24 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     write(yellow(`  permission prompts bypassed for ${bypassing.join(' and ')} — per ${CONFIG_RELATIVE}`))
   }
 
+  if (opts.resume && !runLogExists(opts.resume)) {
+    write(`refusing to start: no run log at ${opts.resume}`)
+    return 1
+  }
+  const prior = opts.resume ? readRunLog(opts.resume) : []
+  if (prior.length > 0) {
+    write(dim(`  resuming from ${opts.resume} — ${prior.length} messages replayed into both seats`))
+  }
+  // Recorded continuously, because a record written on exit is exactly the record a crash
+  // destroys -- and a crash is one of the endings a resume exists for.
+  const runLogPath =
+    opts.runLog ?? join(opts.cwd, '.conclave', 'runs', `session-${Date.now()}.ndjson`)
+  const runLog = new RunLogWriter(runLogPath)
+
   const relay = await Relay.start({
     registry: opts.registry ?? defaultRegistry(),
     cwd: opts.cwd,
+    ...(prior.length > 0 ? { resume: prior } : {}),
     ...(opts.operator ? { operator: opts.operator } : {}),
     ...(opts.transcriptSettleMs ? { transcriptSettleMs: opts.transcriptSettleMs } : {}),
     ...(opts.transcriptSalvageMs ? { transcriptSalvageMs: opts.transcriptSalvageMs } : {}),
@@ -564,6 +598,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
       // nothing to say which was which.
       //
       // Piped input has no box, so there this is the only copy and it must still print.
+      runLog.write(m)
       if (screen && injectedHere.delete(m.text)) return
       write(renderMessage(m, width))
     },
@@ -586,6 +621,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     goal: opts.goal ?? '',
     front: 'session',
     startedAt: sessionStartedAt,
+    logPath: runLogPath,
   })
   write(dim(`  session ${recording.id} — inspect from elsewhere with: conclave status ${recording.id}`))
 
@@ -703,6 +739,10 @@ export async function runSession(opts: SessionOptions): Promise<number> {
         // too, and an operator who was present for the turn is not thereby guaranteed to
         // have registered a single sentence 300 lines ago.
         write(`=== ${relay.rotationSummary()}`)
+        // The line that makes an abnormal ending recoverable, as `relay` prints. A console
+        // run ends with work in flight for the same reasons an unattended one does.
+        write(`=== run log: ${runLogPath}`)
+        write(`===   resume with: conclave session "<goal>" --resume ${runLogPath}`)
         for (const line of relay.flagSummary()) write(`=== ${line}`)
         // The session does not end with the run. There are participants alive and a human
         // at the prompt; ending here would throw away a working session at the exact moment

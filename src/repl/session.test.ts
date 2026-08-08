@@ -984,3 +984,89 @@ test('a pause is held open for a piped driver, and resolvable from stdin', async
   input.end()
   await running
 })
+
+/**
+ * A console run continued rather than re-described.
+ *
+ * The console had NEITHER half: it replayed nothing and it recorded nothing, so a console
+ * run that crashed after three hours left no resumable account of itself while an unattended
+ * one did — and the console is the front-end you leave running.
+ *
+ * It is also the better place to resume INTO. `relay` ends at every pause point, so a
+ * resumed run that hits one immediately ends again; the four hand-resumes an agent operator
+ * reported were each a manual reconstruction of state a held-open pause would have kept.
+ */
+test('a console run records a routing log it can be resumed from', async () => {
+  const dir = repo()
+  const log = join(dir, 'first.ndjson')
+  const first = collect()
+  await runSession({
+    cwd: dir,
+    goal: 'Make the parser handle inline tables.',
+    lead: 'codex',
+    implementer: 'claude',
+    rounds: 3,
+    checks: [],
+    runLog: log,
+    registry: registryOf({
+      codex: [new FakeRotationSession('advisor', 'codex', ['Do it.', 'DONE'])],
+      claude: [new FakeRotationSession('impl', 'claude', ['ack', 'Did it.'])],
+    }),
+    input: script([]),
+    output: first.stream,
+  })
+
+  // Written as it happened, not assembled at the end -- a record written on exit is exactly
+  // the record a crash destroys, and a crash is one of the endings a resume exists for.
+  assert.ok(existsSync(log), 'the console must record a routing log')
+  const lines = readFileSync(log, 'utf8').trim().split('\n').map((l) => JSON.parse(l))
+  assert.ok(lines.length > 0)
+  assert.ok(lines.some((m) => m.kind === 'goal'), 'including the goal')
+  // And the operator is told where it is, or it may as well not exist.
+  assert.match(first.text(), /resume with: conclave session/)
+
+  const second = collect()
+  await runSession({
+    cwd: dir,
+    goal: 'Make the parser handle inline tables.',
+    lead: 'codex',
+    implementer: 'claude',
+    rounds: 3,
+    checks: [],
+    resume: log,
+    runLog: join(dir, 'second.ndjson'),
+    registry: registryOf({
+      codex: [new FakeRotationSession('advisor2', 'codex', ['Carry on.', 'DONE'])],
+      claude: [new FakeRotationSession('impl2', 'claude', ['ack', 'Continued.'])],
+    }),
+    input: script([]),
+    output: second.stream,
+  })
+  assert.match(second.text(), new RegExp(`resuming from ${log.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`))
+  assert.match(second.text(), /messages replayed into both seats/)
+})
+
+test('a console refuses to start on a resume log that is not there', async () => {
+  // Rather than starting fresh and looking like it resumed. A run that silently discards the
+  // state it was asked to continue from is the failure `--resume` exists to prevent, dressed
+  // as success.
+  const dir = repo()
+  const out = collect()
+  const code = await runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'claude',
+    rounds: 3,
+    checks: [],
+    resume: join(dir, 'nope.ndjson'),
+    registry: registryOf({
+      codex: [new FakeRotationSession('advisor', 'codex', ['DONE'])],
+      claude: [new FakeRotationSession('impl', 'claude', ['ack'])],
+    }),
+    input: script([]),
+    output: out.stream,
+  })
+  assert.equal(code, 1)
+  assert.match(out.text(), /no run log at/)
+})

@@ -260,6 +260,11 @@ the report — and the process stays alive. Commands arrive on stdin as lines: `
 `@implementer`. Nothing needs to be scraped off the console; `status` carries the pause as
 data, including the options you may answer with.
 
+Every message is recorded to `.conclave/runs/` as it happens, and `--resume <log>` replays
+it into both seats — so a run that ended with work in flight is continued rather than
+re-described by hand. Resume **here** rather than into `relay`: a resumed run that hits a
+pause is held open for you, where `relay` would end again at the first one.
+
 One limit worth knowing: piped, the session ends when its run does — a script has no way to
 say "I am finished thinking" other than closing stdin. That is one run per process. At a
 terminal the session outlives the run and waits for the next goal.
