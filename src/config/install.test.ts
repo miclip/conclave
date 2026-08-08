@@ -415,6 +415,12 @@ test('a shared registration says what running the installer would cost', async (
 
   const text = formatInstallResult(result)
   assert.match(text, /SHARED/, 'shown as its own state, not as drift')
+  // ...and under a REAL install the state must still say what happened to the file. It
+  // used to say only `SHARED`, so an operator taking a registration over from another
+  // checkout could not tell whether anything had been written without reading it.
+  const wrote = formatInstallResult({ ...result, dryRun: false })
+  assert.match(wrote, /wrote /, 'a real install must report the write')
+  assert.match(wrote, /taken over from \/somewhere\/else\/conclave/, 'and who it took it from')
   assert.match(text, /\/somewhere\/else\/conclave/, 'and names who owns it')
   assert.match(text, /invalidates that checkout's Codex trust/, 'and what re-installing costs')
   assert.doesNotMatch(

@@ -447,11 +447,18 @@ export function formatInstallResult(r: InstallResult): string {
     )
   }
   for (const w of r.written) {
-    // `SHARED` rather than `DRIFT`: the templates agree and the owner differs, which is a
-    // different problem with a different fix. Calling it drift sent a reader to
-    // `config install`, and running it is precisely the thing that hijacks the file.
-    const state = w.sharedWith ? 'SHARED ' : w.changed ? (r.dryRun ? 'DRIFT  ' : 'wrote  ') : 'current'
-    lines.push(`  ${state} ${w.label}: ${w.path}`)
+    // The state says what happened to the FILE; shared ownership is an annotation on top of
+    // it, not a replacement for it. Replacing it hid the write: a real `config install` that
+    // took a registration over from another checkout reported only `SHARED`, and the
+    // operator had to read the file to learn whether anything had changed. Found doing
+    // exactly that during a migration.
+    //
+    // `SHARED` still displaces `DRIFT`, which is a different case and stands: under
+    // --dry-run the templates agree and only the owner differs, so calling it drift sends a
+    // reader to `config install` -- and running it is precisely what hijacks the file.
+    const state = w.sharedWith && r.dryRun ? 'SHARED ' : w.changed ? (r.dryRun ? 'DRIFT  ' : 'wrote  ') : 'current'
+    const from = w.sharedWith && !r.dryRun ? `  [taken over from ${w.sharedWith}]` : ''
+    lines.push(`  ${state} ${w.label}: ${w.path}${from}`)
   }
   const shared = r.written.filter((w) => w.sharedWith)
   if (shared.length > 0) {
