@@ -40,11 +40,7 @@ import type { AgentRegistry } from '../registry/registry.ts'
 import { Relay } from '../relay/relay.ts'
 import type { RelayMessage } from '../relay/message.ts'
 import type { RunHandle, RunPause } from '../relay/run.ts'
-import {
-  CONCLAVE_HOOK_MATCH,
-  trustCodexHooks,
-  waitForCodexHooksExecutable,
-} from '../deployment/codexHookTrust.ts'
+import { ensureCodexHooksTrusted } from '../deployment/ensureTrust.ts'
 import { AGENT_KINDS, installConfig, type AgentKind } from '../config/install.ts'
 import { CONFIG_RELATIVE, launchArgsFor, permissionModeFor, readProjectConfig } from '../config/project.ts'
 
@@ -478,65 +474,12 @@ export async function runSession(opts: SessionOptions): Promise<number> {
   // `installConfig` only reaches for Codex when Codex is among `agents`, so a Claude-only
   // session still spawns nothing, and a ready project costs one silent app-server probe.
   if (opts.registry === undefined) {
-    const diagnosed = await installConfig({
+    await ensureCodexHooksTrusted({
       projectRoot: opts.cwd,
       agents,
-      dryRun: true,
-      diagnose: true,
+      say: (l) => write(dim(l)),
+      slow: (label, detail, work) => withHeartbeat(out, label, detail, work, { inPlace: liveTerminal }),
     })
-    // The diagnosis messages are written for `config check`, where the operator is the one
-    // who has to act: five near-identical paragraphs, each naming a `hooks.state` key to
-    // paste into a TOML file. Here the tool is about to do that itself, so printing them
-    // is telling someone how to perform a job already in hand. They are held back and
-    // shown only if the fix does not work — the one case where the operator needs them.
-    if (diagnosed.codex && !diagnosed.codex.ready) {
-      // Registration is not enough: Codex never executes hooks in a directory it does not
-      // trust, and does so silently — turns end on watchdog inference, every verdict is
-      // `uncertain`, and nothing says why.
-      //
-      // This writes to the operator's GLOBAL config, which is heavier than anything else
-      // here, so it is append-only, idempotent, and announced with the exact lines added.
-      // Both halves of Codex's trust — the directory and the hooks — are answered by the
-      // prompts Codex itself shows. An earlier version hand-appended a
-      // `[projects."<cwd>"] trust_level` stanza to the operator's global config; that
-      // duplicated what this already does, and did it by editing their file directly
-      // instead of going through the flow Codex supports.
-      write(dim('  trusting this directory and its hooks with Codex — answers its own prompts once'))
-      // This waits on a REAL Codex TUI to draw its prompts: up to 8s for the directory
-      // question, up to 45s for the hook review, plus settle time. Silence for that long
-      // reads as a hang, and the operator has no way to know it is not one — so it uses
-      // the same `⋯ name elapsed · detail` vocabulary a working participant does.
-      //
-      const t = await withHeartbeat(
-        out,
-        'configuring',
-        'waiting for Codex to show its trust prompts',
-        () => trustCodexHooks(opts.cwd),
-        { inPlace: liveTerminal },
-      )
-      // Codex records the decision when it EXITS, so confirm rather than assume. Without
-      // this the preflight a moment later reads the pre-trust state and refuses, which
-      // presents as the session being flaky rather than as Codex having been slow.
-      const ready = await withHeartbeat(
-        out,
-        'configuring',
-        'confirming Codex recorded the decision',
-        () => waitForCodexHooksExecutable(opts.cwd, CONCLAVE_HOOK_MATCH),
-        { inPlace: liveTerminal },
-      )
-      const did = [t.askedAboutDirectory ? 'directory' : '', t.prompted ? 'hooks' : '']
-        .filter(Boolean)
-        .join(' and ')
-      if (ready) {
-        write(dim(`  configured: trusted ${did || 'nothing left to trust'}`))
-      } else {
-        // Now the operator does have to act, so give them everything: what Codex reports
-        // for each handler, and the exact key to pre-seed.
-        write(dim('  Codex still will not run these hooks. Turn outcomes will be inferred:'))
-        const detail = await installConfig({ projectRoot: opts.cwd, agents, dryRun: true, diagnose: true })
-        for (const m of detail.codex?.messages ?? []) write(dim(`  ${m}`))
-      }
-    }
   }
 
   // Read before anything is launched, and loudly: a malformed config that silently meant

@@ -26,6 +26,7 @@ import type { ProjectConfig } from '../src/config/project.ts'
 import { runReport } from '../src/relay/report.ts'
 import { RunLogWriter, readRunLog, runLogExists } from '../src/relay/resume.ts'
 import { preflightRefusals } from '../src/relay/guardrails.ts'
+import { ensureCodexHooksTrusted } from '../src/deployment/ensureTrust.ts'
 import type { ReadSession } from '../src/workspace/sessionRecord.ts'
 import { spawn } from 'node:child_process'
 import {
@@ -59,6 +60,11 @@ Driving conclave from an agent
   suspend to and every pause point ENDS the run; session holds a pause open as a
   decision point you answer. Both take --operator agent, which tells the advisor a
   machine is answering: escalate about premises and ambiguous criteria, not permission.
+
+  Both register hooks and get Codex to trust them for you -- there is no separate setup
+  step. A first run in a fresh project answers Codex's own prompts, verifies what got
+  recorded, and writes the entries directly if the prompts did not take. Only if all of
+  that fails do you need "config install --trust", which records them with no TUI at all.
 
   Keep stdin OPEN and write commands as lines. Closing it ends the session once its
   current run finishes.
@@ -751,6 +757,25 @@ async function main(argv: string[]): Promise<number> {
     if (registered.unignored.length > 0) {
       say(`  not ignored by this project: ${registered.unignored.join(', ')}`)
     }
+
+    // Registration is not enough, and this front-end never did the second half. An
+    // unattended run in a fresh project wrote a sidecar Codex would not execute, with
+    // nobody present to answer the prompt that would have fixed it -- and the failure
+    // surfaces as `transport_failed` at the first turn, whose message sends the operator
+    // to `config check`, which reports the hooks as registered. The command designed to
+    // run without a human was the one missing the step that removes the need for one.
+    await ensureCodexHooksTrusted({
+      projectRoot: process.cwd(),
+      agents: [lead, implementer].filter((a): a is AgentKind => (AGENT_KINDS as string[]).includes(a)),
+      say,
+      // Appended rather than redrawn: this is the unattended form, its output is usually a
+      // file, and a spinner in a log is noise. It still says something, because a silent
+      // minute waiting on a Codex TUI is indistinguishable from a hang.
+      slow: async (label, detail, work) => {
+        say(`  ${label} · ${detail}`)
+        return work()
+      },
+    })
 
     say(
       checks.length > 0

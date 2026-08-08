@@ -182,3 +182,15 @@ test('the agent instructions name only things that exist', () => {
   // The distinction a poller gets wrong, and the reason `abandoned` exists at all.
   assert.match(section, /alive false is a crashed run/)
 })
+
+test('both front-ends get Codex to trust the hooks they register', () => {
+  // Registration is not enough -- Codex silently executes nothing in a directory it does not
+  // trust -- and `relay` registered the sidecar, never trusted it, and never even checked.
+  // The front-end designed to run WITHOUT a human was the one missing the step that removes
+  // the need for one, so an unattended first run in a fresh project ended `transport_failed`
+  // at turn one. Ninth instance.
+  const relay = commandBlock('relay', "if (command === 'session')")
+  const consoleSrc = readFileSync(join(import.meta.dirname, '..', 'repl', 'session.ts'), 'utf8')
+  assert.match(relay, /ensureCodexHooksTrusted\(/, 'relay must ensure Codex trust')
+  assert.match(consoleSrc, /ensureCodexHooksTrusted\(/, 'and so must the console')
+})

@@ -298,6 +298,36 @@ export async function assertCodexHooksExecutable(cwd: string, matchCommand: stri
  * Idempotent: an entry that already carries the right value is left alone, and the caller
  * is told exactly which lines were added.
  */
+/**
+ * What Codex has recorded about a directory, or undefined if it has never been asked.
+ *
+ * The check that was missing. `trustCodexHooks` returns `{prompted, askedAboutDirectory}`,
+ * which says a prompt APPEARED and never what was DECIDED -- so a keystroke that lands on
+ * the wrong option is indistinguishable from one that lands on the right one, until hook
+ * trust fails a minute later and the message blames a directory that is now recorded as
+ * decided. The docstring on `trustCodexHooks` already establishes that `prompted` is not
+ * evidence a decision was recorded; the same scepticism was never applied to the directory.
+ *
+ * Reported from another project on 0.147.0, where a run left `trust_level = "untrusted"`
+ * behind and then refused to start. Reading the file is cheap and settles it.
+ */
+export function recordedTrustLevel(cwd: string): string | undefined {
+  const path = join(homedir(), '.codex', 'config.toml')
+  if (!existsSync(path)) return undefined
+  const real = (() => {
+    try {
+      return realpathSync(cwd)
+    } catch {
+      return cwd
+    }
+  })()
+  const escaped = real.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const m = new RegExp(`\\[projects\\."${escaped}"\\]\\s*\\n\\s*trust_level\\s*=\\s*"([^"]*)"`).exec(
+    readFileSync(path, 'utf8'),
+  )
+  return m?.[1]
+}
+
 export async function seedCodexTrust(cwd: string): Promise<{ added: string[]; ready: boolean }> {
   const path = join(homedir(), '.codex', 'config.toml')
   const added: string[] = []
