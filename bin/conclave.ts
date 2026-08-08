@@ -146,6 +146,11 @@ Commands:
   events [<id>]  [--follow]        The session's event stream as NDJSON: every routed
                                    message and every adapter event, in relay order.
                                    --follow tails it and stops when the session does.
+                                   Includes pause and resume, so a driver is woken at a
+                                   decision point rather than polling status for it.
+                                   New event types are added over time: ignore any
+                                   type you do not recognise rather than treating the
+                                   set as closed.
   version                          Print the version of this build.
   demo [--record <file>]           Run the console against scripted participants: real
                                    terminal, real readline, no agents and no quota. For

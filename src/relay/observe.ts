@@ -118,6 +118,23 @@ export interface RelayRunEndEvent extends RelayEventBase {
   detail?: string | undefined
 }
 
+/**
+ * ## The compatibility rule for consumers
+ *
+ * **A reader of this stream must ignore event types it does not recognise.** New members
+ * are added to this union as the orchestrator learns to say more -- `pause` and `resume`
+ * were added after `events.ndjson` already had readers -- and a consumer that treats `type`
+ * as a closed set breaks on every such addition.
+ *
+ * Stated here rather than versioned, deliberately. Bumping a schema for an additive change
+ * would oblige every consumer to react to something that cannot affect them, which teaches
+ * them to bump blindly; the version would then say nothing on the day a field really does
+ * change meaning. What IS breaking -- a field removed, or its meaning altered -- gets a
+ * version, and there is nothing of that kind here yet.
+ *
+ * Raised by the session that added `pause` and `resume`, which noticed it had no way to
+ * know whether an out-of-repo consumer existed and flagged it rather than assuming.
+ */
 export type RelayEvent =
   | RelayMessageEvent
   | RelayActivityEvent
