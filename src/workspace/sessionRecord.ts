@@ -50,9 +50,10 @@ import {
   readFileSync,
   readdirSync,
   renameSync,
+  rmSync,
   writeFileSync,
 } from 'node:fs'
-import { join } from 'node:path'
+import { join, resolve, sep } from 'node:path'
 import type { Confidence, Provenance } from '../contract/outcome.ts'
 import type { RelayEvent } from '../relay/observe.ts'
 import type { RunOutcome, RunPause } from '../relay/run.ts'
@@ -309,16 +310,29 @@ export function readSession(repoRoot: string, id: string): ReadSession | undefin
   return { status, alive: there, abandoned: running && !there }
 }
 
-/** Every session this project has a record of, newest first. */
-export function listSessions(repoRoot: string): ReadSession[] {
+/**
+ * Every readable record, paired with the directory it was read from.
+ *
+ * The pairing is kept because the two are not the same fact: the id inside a status file is
+ * whatever the file says, and the directory NAME is the only thing that locates the record on
+ * disk. Every record conclave writes agrees on both, but a caller that deletes reads the name
+ * and a caller that reports reads the id, and quietly using one for the other is how the
+ * wrong directory gets removed.
+ */
+function scanSessions(repoRoot: string): { name: string; session: ReadSession }[] {
   const dir = sessionsDir(repoRoot)
   if (!existsSync(dir)) return []
-  const out: ReadSession[] = []
+  const out: { name: string; session: ReadSession }[] = []
   for (const name of readdirSync(dir)) {
     const found = readSession(repoRoot, name)
-    if (found) out.push(found)
+    if (found) out.push({ name, session: found })
   }
-  return out.sort((a, b) => b.status.startedAt - a.status.startedAt)
+  return out.sort((a, b) => b.session.status.startedAt - a.session.status.startedAt)
+}
+
+/** Every session this project has a record of, newest first. */
+export function listSessions(repoRoot: string): ReadSession[] {
+  return scanSessions(repoRoot).map((s) => s.session)
 }
 
 /**
@@ -349,6 +363,131 @@ export function resolveSession(
     }
   }
   return { error: `no session "${id}" in this project` }
+}
+
+/**
+ * The sessions old enough to delete, chosen but not yet touched.
+ *
+ * Three conditions, all of them required, and the reason is the same one the module opens
+ * with: `state` is what the session SAID and `alive` is whether anyone is still there, so
+ * neither alone is grounds for deleting anything. A record saying `ended` whose pid is still
+ * running is a run that reported its finish and has not exited; a live process whose files
+ * vanish underneath it loses the only account of itself that survives a crash.
+ *
+ * An ABANDONED session -- `running` and nobody home -- is deliberately not a candidate,
+ * however old. That is the exact condition #26 was filed about, and it is the one an operator
+ * comes looking for days later to find out what happened. Sweeping it up would delete the
+ * evidence and leave the tidy runs behind.
+ *
+ * Directories with no readable `status.json` are also left alone. `readSession` cannot say
+ * whether one belongs to a run that is still starting, and the CLI already treats "started
+ * but never recorded its state" as its own condition rather than as absence.
+ */
+export function prunableSessions(repoRoot: string, olderThan: number): ReadSession[] {
+  return scanSessions(repoRoot)
+    .map((s) => s.session)
+    .filter((s) => prunable(s, olderThan))
+}
+
+function prunable(s: ReadSession, olderThan: number): boolean {
+  return s.status.state === 'ended' && !s.alive && s.status.updatedAt < olderThan
+}
+
+/** What a prune chose, and what it managed to do about it. */
+export interface SessionPruning {
+  /**
+   * Every id that met the conditions, whatever then became of it.
+   *
+   * The sum of the three lists below, and reported separately from all of them so a partial
+   * result reads as a partial result rather than as a shorter candidate list than there
+   * really was.
+   */
+  candidates: string[]
+  removed: string[]
+  /**
+   * A candidate that stopped qualifying between the scan and its own removal.
+   *
+   * Not a failure -- the prune did the right thing -- but not silence either: an operator
+   * told "3 candidates" and shown two removals is owed the third line.
+   */
+  skipped: { id: string; reason: string }[]
+  /** One entry per candidate whose directory would not go. The rest are still removed. */
+  failed: { id: string; error: string }[]
+}
+
+/**
+ * Delete the records `prunableSessions` chose.
+ *
+ * `announce` is called ONCE with the whole candidate list before the first directory is
+ * touched, and it is the only way to make good on "here is what I am about to delete". The
+ * returned `candidates` cannot do it: by the time a synchronous return is in the caller's
+ * hands every removal has already happened, so a CLI printing from it would be describing
+ * the past in the future tense -- and if the process died mid-prune the operator would have
+ * been shown nothing at all about the records that did go.
+ *
+ * Re-reading the candidate list instead would not work either, because the two scans need
+ * not agree: a session can end, or a pid can exit, between them.
+ *
+ * Every candidate is re-read through `readSession` immediately before its own removal, and
+ * one that no longer qualifies is spared. The scan and the delete are separated by an
+ * announcement, an operator reading it, and however long the earlier removals took -- and a
+ * pid that came back in that window belongs to a process whose only durable account of
+ * itself is the directory about to be deleted. The check is cheap and the loss is not
+ * recoverable.
+ *
+ * Every path removed is rebuilt from an id via `sessionDir` and then checked to be inside the
+ * sessions directory, rather than trusted. The ids come from a directory listing today, but
+ * this function's whole job is recursive deletion, and a containment check costs nothing
+ * against the one mistake here that cannot be undone.
+ */
+export function pruneSessions(
+  repoRoot: string,
+  olderThan: number,
+  opts?: { announce?: (candidates: readonly string[]) => void },
+): SessionPruning {
+  const root = resolve(sessionsDir(repoRoot))
+  // The directory name, not the id each file claims. They agree in every record conclave
+  // writes; where they do not, the name is the one that says what is being deleted.
+  const candidates = scanSessions(repoRoot)
+    .filter((s) => prunable(s.session, olderThan))
+    .map((s) => s.name)
+  const out: SessionPruning = { candidates, removed: [], skipped: [], failed: [] }
+
+  // Before the loop, deliberately. Everything after this line is destructive.
+  opts?.announce?.(candidates)
+
+  for (const id of candidates) {
+    const dir = resolve(sessionDir(repoRoot, id))
+    if (dir === root || !dir.startsWith(root + sep)) {
+      out.failed.push({ id, error: `${dir} is not inside ${root}` })
+      continue
+    }
+    const now = readSession(repoRoot, id)
+    if (!now) {
+      // Gone or unreadable since the scan. Nothing here is worth deleting a directory over
+      // that we can no longer confirm the contents of.
+      out.skipped.push({ id, reason: 'its record could no longer be read' })
+      continue
+    }
+    if (!prunable(now, olderThan)) {
+      out.skipped.push({
+        id,
+        reason: now.alive ? 'its process is alive' : 'it no longer meets the conditions',
+      })
+      continue
+    }
+    try {
+      // `force` so a record another prune already removed is not an error: two operators
+      // tidying the same project should not produce a failure report between them.
+      rmSync(dir, { recursive: true, force: true })
+      out.removed.push(id)
+    } catch (err) {
+      // One unremovable directory must not abandon the rest. A prune that stopped at the
+      // first permission error would leave the operator to run it again and hit the same one.
+      out.failed.push({ id, error: err instanceof Error ? err.message : String(err) })
+    }
+  }
+  return out
 }
 
 /**

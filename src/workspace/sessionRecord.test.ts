@@ -5,7 +5,7 @@
  */
 
 import { strict as assert } from 'node:assert'
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -14,12 +14,16 @@ import { RelayEventStream } from '../relay/observe.ts'
 import {
   listSessions,
   newSessionId,
+  prunableSessions,
+  pruneSessions,
   readSession,
   recordSession,
   resolveSession,
   SessionRecorder,
   sessionDir,
   type RecordableRelay,
+  type SessionRunState,
+  type SessionStatus,
 } from './sessionRecord.ts'
 
 function dir(): string {
@@ -455,6 +459,215 @@ test('a snapshot that fails keeps the turns already recorded, rather than blanki
 
   const seat = readSession(root, 'gone')?.status.participants.find((p) => p.id === 'implementer')
   assert.equal(seat?.turns.length, 1, 'the last snapshot that could be read is kept')
+})
+
+/**
+ * A record written by hand, so a test can say what `updatedAt` and the pid are.
+ *
+ * `SessionRecorder` stamps `updatedAt` from the clock, which is exactly the field pruning
+ * decides on -- a test that could only write "now" could not distinguish old from recent
+ * without sleeping. The pid is the other half: `alive` is reconciled against it on every
+ * read, so a dead session is one whose pid cannot exist.
+ */
+const DEAD_PID = 2 ** 30
+
+function stale(
+  root: string,
+  id: string,
+  s: { state: SessionRunState; pid: number; updatedAt: number },
+): string {
+  const dir = sessionDir(root, id)
+  mkdirSync(dir, { recursive: true })
+  const status: SessionStatus = {
+    schema: 1,
+    id,
+    pid: s.pid,
+    cwd: root,
+    goal: id,
+    front: 'relay',
+    operator: 'human',
+    state: s.state,
+    startedAt: s.updatedAt,
+    updatedAt: s.updatedAt,
+    messages: 0,
+    participants: [],
+    eventsPath: join(dir, 'events.ndjson'),
+  }
+  writeFileSync(join(dir, 'status.json'), `${JSON.stringify(status, null, 2)}\n`)
+  writeFileSync(status.eventsPath, '{"type":"run_end","reason":"done"}\n')
+  return dir
+}
+
+/**
+ * The three conditions are a conjunction, and each one is load-bearing on its own.
+ *
+ * `ended` alone would delete a finished run whose process is still exiting; `!alive` alone
+ * would delete the abandoned run that #26 is about, which is the record an operator comes
+ * looking for precisely because nobody was home; age alone would delete a session that is
+ * running right now and has simply not changed state in a while.
+ */
+test('pruning removes only records that ended, died, and are past the cutoff', () => {
+  const root = dir()
+  const cutoff = 1_000_000
+  const old = stale(root, 'ended-old', { state: 'ended', pid: DEAD_PID, updatedAt: cutoff - 1 })
+  const recent = stale(root, 'ended-recent', { state: 'ended', pid: DEAD_PID, updatedAt: cutoff })
+  const live = stale(root, 'ended-live', { state: 'ended', pid: process.pid, updatedAt: 1 })
+  const gone = stale(root, 'abandoned', { state: 'running', pid: DEAD_PID, updatedAt: 1 })
+  const busy = stale(root, 'running', { state: 'running', pid: process.pid, updatedAt: 1 })
+
+  const result = pruneSessions(root, cutoff)
+  assert.deepEqual(result.candidates, ['ended-old'])
+  assert.deepEqual(result.removed, ['ended-old'])
+  assert.deepEqual(result.skipped, [])
+  assert.deepEqual(result.failed, [])
+
+  // The whole directory, events stream included -- a status file removed on its own would
+  // leave a record `listSessions` cannot see and an operator cannot delete.
+  assert.equal(existsSync(old), false)
+  assert.equal(existsSync(join(old, 'events.ndjson')), false)
+
+  // At the cutoff, not past it. An operator who says "older than an hour" means it.
+  assert.equal(existsSync(recent), true, 'a record exactly at the cutoff is inside it')
+  assert.equal(existsSync(live), true, 'a pid that still answers means the run has not gone')
+  assert.equal(existsSync(gone), true, 'an abandoned run is the evidence, not the litter')
+  assert.equal(existsSync(busy), true)
+  assert.deepEqual(listSessions(root).length, 4)
+})
+
+test('the candidates can be read without deleting anything, and match what a prune then removes', () => {
+  const root = dir()
+  const cutoff = 1_000_000
+  stale(root, 'old-a', { state: 'ended', pid: DEAD_PID, updatedAt: 10 })
+  stale(root, 'old-b', { state: 'ended', pid: DEAD_PID, updatedAt: 20 })
+  stale(root, 'keep', { state: 'ended', pid: process.pid, updatedAt: 10 })
+
+  // Selection has no side effects, which is what lets a CLI announce a plan and then be told
+  // no. Asserted rather than assumed: this is the read half of a delete.
+  const candidates = prunableSessions(root, cutoff).map((s) => s.status.id)
+  assert.deepEqual(candidates.sort(), ['old-a', 'old-b'])
+  assert.equal(listSessions(root).length, 3, 'reading the candidates must not remove them')
+
+  const result = pruneSessions(root, cutoff)
+  // Reported before the removals are attempted, so a partial failure reads as a partial
+  // failure rather than as a shorter candidate list than there really was.
+  assert.deepEqual([...result.candidates].sort(), candidates)
+  assert.deepEqual([...result.removed].sort(), candidates)
+  assert.deepEqual(listSessions(root).map((s) => s.status.id), ['keep'])
+})
+
+test('a directory with no readable status is left alone, however old the rest are', () => {
+  const root = dir()
+  stale(root, 'ended-old', { state: 'ended', pid: DEAD_PID, updatedAt: 1 })
+  // Started and never described itself, which the CLI already treats as its own condition.
+  // `readSession` cannot tell that from a run still launching, and a prune that guessed
+  // would delete the record of a session two seconds before it wrote its first status.
+  const bare = sessionDir(root, 'never-recorded')
+  mkdirSync(bare, { recursive: true })
+  const corrupt = sessionDir(root, 'corrupt')
+  mkdirSync(corrupt, { recursive: true })
+  writeFileSync(join(corrupt, 'status.json'), '{ not json')
+
+  const result = pruneSessions(root, 2)
+  assert.deepEqual(result.candidates, ['ended-old'])
+  assert.equal(existsSync(bare), true)
+  assert.equal(existsSync(corrupt), true)
+})
+
+test('pruning a project with no sessions directory is not an error', () => {
+  const result = pruneSessions(dir(), Date.now())
+  assert.deepEqual(result, { candidates: [], removed: [], skipped: [], failed: [] })
+})
+
+/**
+ * The announcement is the only honest way to say "about to delete".
+ *
+ * The returned `candidates` cannot make that claim: by the time a synchronous return is in
+ * the caller's hands every removal has already happened, so a CLI printing from it describes
+ * the past in the future tense -- and a process that died partway would have shown the
+ * operator nothing at all about the records that did go.
+ */
+test('every candidate is announced while all of them are still on disk', () => {
+  const root = dir()
+  for (const id of ['a', 'b', 'c']) {
+    stale(root, id, { state: 'ended', pid: DEAD_PID, updatedAt: 1 })
+  }
+  stale(root, 'live', { state: 'ended', pid: process.pid, updatedAt: 1 })
+
+  let announced: readonly string[] | undefined
+  let presentAtAnnouncement: string[] = []
+  const result = pruneSessions(root, 2, {
+    announce: (ids) => {
+      announced = [...ids]
+      // The assertion that matters: nothing has been deleted yet. Checked INSIDE the
+      // callback, because that is the only moment at which the claim can be false.
+      presentAtAnnouncement = ids.filter((id) => existsSync(sessionDir(root, id)))
+    },
+  })
+
+  assert.deepEqual([...(announced ?? [])].sort(), ['a', 'b', 'c'])
+  assert.deepEqual(presentAtAnnouncement.sort(), ['a', 'b', 'c'], 'announced before any removal')
+  assert.deepEqual([...result.removed].sort(), ['a', 'b', 'c'])
+  assert.equal(existsSync(sessionDir(root, 'live')), true)
+})
+
+/**
+ * A pid can come back between the scan and the delete, and the window is not small: an
+ * announcement, an operator reading it, and however long the earlier removals took all sit
+ * inside it. The directory about to be deleted is that process's only durable account of
+ * itself.
+ */
+test('a session that is alive again by the time its turn comes is spared', () => {
+  const root = dir()
+  stale(root, 'goes', { state: 'ended', pid: DEAD_PID, updatedAt: 1 })
+  stale(root, 'revived', { state: 'ended', pid: DEAD_PID, updatedAt: 1 })
+
+  // Rewritten during the announcement -- after the scan chose it, before its removal. A
+  // check done only at scan time passes this test's setup and deletes the directory anyway.
+  const result = pruneSessions(root, 2, {
+    announce: () => {
+      const p = join(sessionDir(root, 'revived'), 'status.json')
+      const status = JSON.parse(readFileSync(p, 'utf8'))
+      writeFileSync(p, JSON.stringify({ ...status, pid: process.pid }))
+    },
+  })
+
+  assert.deepEqual([...result.candidates].sort(), ['goes', 'revived'], 'both were chosen')
+  assert.deepEqual(result.removed, ['goes'])
+  assert.deepEqual(result.skipped, [{ id: 'revived', reason: 'its process is alive' }])
+  assert.deepEqual(result.failed, [], 'a spared session is not a failure')
+  assert.equal(existsSync(sessionDir(root, 'revived')), true, 'a live process keeps its record')
+  assert.equal(existsSync(sessionDir(root, 'goes')), false)
+})
+
+test('a record that vanishes between the scan and its removal is reported, not invented', () => {
+  const root = dir()
+  stale(root, 'vanishes', { state: 'ended', pid: DEAD_PID, updatedAt: 1 })
+  const result = pruneSessions(root, 2, {
+    announce: () => rmSync(sessionDir(root, 'vanishes'), { recursive: true, force: true }),
+  })
+  assert.deepEqual(result.candidates, ['vanishes'])
+  assert.deepEqual(result.removed, [], 'it was not this prune that removed it')
+  assert.deepEqual(result.skipped, [{ id: 'vanishes', reason: 'its record could no longer be read' }])
+})
+
+/**
+ * The id inside a status file is whatever the file says; the directory NAME is what locates
+ * the record on disk. They agree in everything conclave writes, and a function whose job is
+ * recursive deletion must not be the place that assumes it.
+ */
+test('a record whose file claims a different id still deletes its own directory', () => {
+  const root = dir()
+  const held = sessionDir(root, 'on-disk')
+  stale(root, 'on-disk', { state: 'ended', pid: DEAD_PID, updatedAt: 1 })
+  const p = join(held, 'status.json')
+  const status = JSON.parse(readFileSync(p, 'utf8'))
+  writeFileSync(p, JSON.stringify({ ...status, id: 'somewhere-else' }))
+  const other = stale(root, 'somewhere-else', { state: 'running', pid: process.pid, updatedAt: 1 })
+
+  const result = pruneSessions(root, 2)
+  assert.deepEqual(result.candidates, ['on-disk'], 'reported by the name that was removed')
+  assert.equal(existsSync(held), false)
+  assert.equal(existsSync(other), true, 'the live session the file pointed at is untouched')
 })
 
 test('an id is chronological and survives two sessions in the same second', () => {

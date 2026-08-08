@@ -31,6 +31,7 @@ import { spawn } from 'node:child_process'
 import {
   listSessions,
   newSessionId,
+  pruneSessions,
   readSession,
   sessionDir,
   projectRootFor,
@@ -136,6 +137,16 @@ Commands:
                                    first: id, state, how long since it last updated, and
                                    the goal. A run whose process is gone is shown as
                                    abandoned rather than as whatever it last claimed.
+                 --prune [--days N]
+                                   Delete the records of sessions that ENDED, whose process
+                                   is gone, and that last updated more than N days ago —
+                                   7 by default, and 0 means every one that qualifies. Live
+                                   sessions are never touched however old, and neither is an
+                                   abandoned run: that record is the evidence of the crash.
+                                   Every id is printed before the first deletion, and again
+                                   as an outcome; under --json that announcement is on
+                                   stderr so stdout carries the result alone. An argument
+                                   this does not recognise is refused rather than ignored.
   status [<id>]  [--json]          What one session is doing: participants, what each is
                                    working on, whether either is stopped at a permission
                                    prompt, the current pause with its evidence and options,
@@ -344,6 +355,118 @@ function rejectUnicodeDashes(args: string[]): boolean {
   return false
 }
 
+/** A week. Long enough that a run an operator might still want to read is not swept up. */
+const PRUNE_DEFAULT_DAYS = 7
+
+/**
+ * `--days N`, or the default.
+ *
+ * Validated strictly and BEFORE anything is deleted, because there is no way to be sorry
+ * afterwards. `--days` with nothing after it is the case that matters most: read loosely, a
+ * missing value becomes `NaN`, `NaN` comparisons are all false, and a cutoff of `NaN` deletes
+ * nothing -- which looks exactly like success and would teach an operator that their records
+ * were already clean.
+ *
+ * Zero is accepted and means "everything that qualifies", which is a real request after a
+ * day of failed starts. Negative is refused rather than clamped: a cutoff in the future is
+ * not a thing anyone meant to ask for, and guessing which end they meant is how a prune
+ * deletes a session that finished ten minutes ago.
+ */
+function pruneArgs(flags: string[]): { days: number; json: boolean } | { error: string } {
+  const accepted = 'sessions --prune accepts --days <n> and --json'
+  let days: number | undefined
+  let json = false
+  let prune = false
+  for (let i = 0; i < flags.length; i++) {
+    const f = flags[i]!
+    if (f === '--prune') {
+      if (prune) return { error: `--prune given twice` }
+      prune = true
+    } else if (f === '--json') {
+      if (json) return { error: `--json given twice` }
+      json = true
+    } else if (f === '--days') {
+      // Repeated rather than last-wins. `--days 30 --days 0` has two readings and only one
+      // of them is recoverable, so it is refused instead of guessed at.
+      if (days !== undefined) return { error: `--days given twice` }
+      const raw = flags[++i]
+      // Digits, not `Number()`: it reads '' as 0, and `parseFloat` reads '3 weeks' as 3.
+      if (raw === undefined || !/^\d+(\.\d+)?$/.test(raw)) {
+        return {
+          error:
+            `--days needs a number of days that is zero or more` +
+            `${raw === undefined ? ' and there is nothing after it' : `, not "${raw}"`}`,
+        }
+      }
+      days = Number(raw)
+    } else {
+      // Everything else, flag-shaped or not. This is the whole reason the parser is a loop
+      // rather than three `includes` calls: `--dasy 0` has no `--days` in it, so a lenient
+      // parser drops the typo AND the `0`, silently falls back to seven days, and deletes a
+      // week of records the operator was trying to spare. An unrecognised token near a
+      // destructive command is a mistake, not a preference.
+      return { error: `unexpected argument "${f}" — ${accepted}` }
+    }
+  }
+  return { days: days ?? PRUNE_DEFAULT_DAYS, json }
+}
+
+/**
+ * Delete the records of sessions that are over and gone.
+ *
+ * The ids are printed BEFORE the first deletion, from `pruneSessions`'s announcement rather
+ * than from its return value — a list printed after the fact would describe files that are
+ * already gone, and would tell the operator nothing at all if the process died partway.
+ *
+ * Then every id is printed AGAIN as an outcome. The two lists are not the same claim: the
+ * first says what was chosen, the second says what actually went, and between them sit a
+ * liveness re-check and a filesystem that can refuse. An operator who saw only the first
+ * would have to assume the rest.
+ *
+ * Under `--json` the announcement goes to stderr rather than being dropped. The combination
+ * is refused nowhere because it is a reasonable thing to want — `sessions --json` already
+ * exists — and stdout has to carry the result object ALONE or the mode is useless. Announcing
+ * on stderr keeps both: the promise that nothing is deleted unannounced, and a parseable
+ * stdout. A consumer redirecting stderr to a log is exactly who wants that record.
+ *
+ * Failures exit non-zero. A prune is usually run to reclaim a directory or to unstick
+ * something, and one that reported a permission error and exited 0 would be discovered by
+ * whatever ran next.
+ */
+function prune(root: string, flags: string[]): number {
+  const wanted = pruneArgs(flags)
+  if ('error' in wanted) {
+    console.error(`conclave: ${wanted.error}`)
+    return 1
+  }
+  const { days, json } = wanted
+  // Nothing above this line has touched the filesystem: an argument list that does not parse
+  // is refused before a cutoff is even computed, let alone a record chosen.
+  const cutoff = Date.now() - days * 24 * 60 * 60 * 1000
+  const say = json ? (line: string) => console.error(line) : (line: string) => console.log(line)
+  const result = pruneSessions(root, cutoff, {
+    announce: (ids) => {
+      if (ids.length === 0) {
+        say(`no session records are older than ${days}d and finished`)
+        return
+      }
+      say(`pruning ${ids.length} session record${ids.length === 1 ? '' : 's'}:`)
+      for (const id of ids) say(`  ${id}`)
+    },
+  })
+  if (json) {
+    console.log(JSON.stringify(result, null, 2))
+  } else {
+    // One line per candidate, naming it. An operator shown three candidates and a count of
+    // two is left to work out which one survived, and "its process is alive" is a fact about
+    // their machine rather than noise.
+    for (const id of result.removed) console.log(`removed ${id}`)
+    for (const s of result.skipped) console.log(`kept ${s.id}: ${s.reason}`)
+  }
+  for (const f of result.failed) console.error(`conclave: could not remove ${f.id}: ${f.error}`)
+  return result.failed.length > 0 ? 1 : 0
+}
+
 /**
  * Print a session's event stream, optionally following it.
  *
@@ -485,6 +608,15 @@ async function main(argv: string[]): Promise<number> {
 
   if (command === 'sessions') {
     const root = projectRootFor(process.cwd())
+    const flags = [sub, ...rest].filter((f): f is string => f !== undefined)
+    if (flags.includes('--prune')) return prune(root, flags)
+    if (flags.includes('--days')) {
+      // Named rather than ignored. `--days 3` alone reads like it does something, and a
+      // listing that quietly printed everything would look like the prune had found nothing
+      // to delete -- which is the one wrong answer an operator would act on.
+      console.error('conclave: --days only means something with --prune')
+      return 1
+    }
     const all = listSessions(root)
     if (rest.includes('--json') || sub === '--json') {
       console.log(JSON.stringify(all.map((s) => ({ ...s.status, alive: s.alive, abandoned: s.abandoned })), null, 2))
