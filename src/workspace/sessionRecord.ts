@@ -53,6 +53,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { join } from 'node:path'
+import type { Confidence, Provenance } from '../contract/outcome.ts'
 import type { RelayEvent } from '../relay/observe.ts'
 import type { RunOutcome, RunPause } from '../relay/run.ts'
 
@@ -74,10 +75,45 @@ export const SESSIONS_RELATIVE = '.conclave/sessions'
  */
 export type SessionRunState = 'starting' | 'running' | 'paused' | 'ended'
 
+/**
+ * One turn as the status file reports it: the verdict AND how strongly it is evidenced.
+ *
+ * The same four fields `report.ts` puts in `ReportedTurn`, deliberately named and typed the
+ * same way. A run report and a status file that disagreed about what a turn was would give
+ * an operator two answers and no way to tell which was wrong -- and the two are read by the
+ * same kind of consumer, often minutes apart.
+ *
+ * The tools and timings `ReportedTurn` also carries are left out. A status file is polled,
+ * sometimes every second, and it is rewritten whole on every change; the per-turn tool list
+ * is the part that grows without bound. It is in the report, and the arguments are in the
+ * events stream.
+ */
+export interface SessionTurnStatus {
+  /** Opaque; the adapter's own key. Never parse it. */
+  key: string
+  state: string
+  confidence?: Confidence | undefined
+  /** Ordered, most decisive first. The reason a verdict is believed, not just the verdict. */
+  provenance?: Provenance[] | undefined
+}
+
 export interface SessionParticipantStatus {
   id: string
   agent: string
   rank: string
+  /**
+   * This seat's turns, from `snapshot()` -- the canonical side of the adapter seam.
+   *
+   * Required and empty rather than absent before anything has run, for the reason
+   * `report.ts` gives about `flags`: a field that vanishes when it has nothing to say
+   * forces a reader to distinguish "no turns yet" from "this build does not report turns",
+   * and only one of those is a fact about the run.
+   *
+   * This is the one part of the participant block that is NOT provisional. `activity`
+   * below is the last adapter event and is revisable; these are graded verdicts, and an
+   * operator confirming a finished run reads them rather than the prose.
+   */
+  turns: SessionTurnStatus[]
   /**
    * What this seat is doing, from its most recent adapter event.
    *
@@ -344,7 +380,26 @@ export function projectRootFor(dir: string): string {
 export interface RecordableRelay {
   readonly cwd: string
   readonly operator: 'human' | 'agent'
-  readonly participants: readonly { id: string; rank: string; session: { readonly agent: string } }[]
+  readonly participants: readonly {
+    id: string
+    rank: string
+    session: {
+      readonly agent: string
+      /**
+       * Just enough of `SessionSnapshot` to grade the turns, structurally. An adapter
+       * satisfies this by satisfying `AgentSession`; a test satisfies it with an object
+       * literal, which is the point of not importing the interface.
+       */
+      snapshot(): Promise<{
+        turns: readonly {
+          key: string
+          state: string
+          confidence?: Confidence | undefined
+          provenance?: Provenance[] | undefined
+        }[]
+      }>
+    }
+  }[]
   readonly log: readonly unknown[]
   permissionsPending(): { id: string; tool: string }[]
   observe(opts?: { replay?: boolean }): AsyncIterable<RelayEvent>
@@ -356,6 +411,14 @@ export interface SessionRecording {
   readonly recorder: SessionRecorder
   /** Report a lifecycle change. Participants and counters are refreshed on every call. */
   set(state: SessionRunState, extra?: { pause?: RunPause | undefined; outcome?: RunOutcome | undefined }): void
+  /**
+   * Re-read every participant's snapshot and rewrite the status.
+   *
+   * Exposed because the caller sometimes knows something the event stream does not -- and
+   * because a test asserting on graded turns should be able to say WHEN they were read
+   * rather than sleep and hope. `close()` awaits one of these last.
+   */
+  refresh(): Promise<void>
   /** Stop following the stream. The files stay; only the subscription ends. */
   close(): Promise<void>
 }
@@ -384,8 +447,17 @@ export function recordSession(
 ): SessionRecording {
   /** The last adapter event per seat, which is what "what is it doing" means live. */
   const activity = new Map<string, { kind: string; tool?: string | undefined; since: number }>()
+  /**
+   * The last snapshot's turns per seat.
+   *
+   * Cached rather than read at write time because `seats()` is synchronous and `snapshot()`
+   * is not -- and it is not for a real reason: it rebuilds from the transcript on disk. A
+   * status file that awaited one on every event would make recording a slow step on a path
+   * that is deliberately detached from the run.
+   */
+  const turns = new Map<string, SessionTurnStatus[]>()
 
-  const seats = () =>
+  const seats = (): SessionParticipantStatus[] =>
     relay.participants.map((p) => {
       const pending = relay.permissionsPending().find((x) => x.id === p.id)
       const seen = activity.get(p.id)
@@ -393,6 +465,7 @@ export function recordSession(
         id: p.id,
         agent: p.session.agent,
         rank: p.rank,
+        turns: turns.get(p.id) ?? [],
         ...(seen ? { activity: seen } : {}),
         ...(pending ? { awaitingPermission: { tool: pending.tool } } : {}),
       }
@@ -424,6 +497,56 @@ export function recordSession(
    */
   let lastOutcome: RunOutcome | undefined
 
+  /**
+   * Which refresh a result belongs to, and which one has already landed.
+   *
+   * A snapshot is a read of a file that is still being written, so two of them do not
+   * necessarily come back in the order they were asked for. Without this counter a slow
+   * read of an early transcript could return AFTER a fast read of a later one and overwrite
+   * the newer turns with older ones -- and the status file would go backwards while the run
+   * went forwards, which is the one thing a polled file must never do.
+   */
+  let issued = 0
+  let applied = 0
+
+  const refreshOnce = async (): Promise<void> => {
+    const gen = ++issued
+    const fresh: [string, SessionTurnStatus[]][] = []
+    for (const p of relay.participants) {
+      try {
+        const snap = await p.session.snapshot()
+        fresh.push([
+          p.id,
+          snap.turns.map((t) => ({
+            key: String(t.key),
+            state: t.state,
+            confidence: t.confidence,
+            provenance: t.provenance,
+          })),
+        ])
+      } catch {
+        // A snapshot that cannot be rebuilt right now keeps the last one that could. The
+        // final refresh runs AFTER `relay.stop()`, when a session may already be gone, and
+        // dropping the turns there would lose them at exactly the moment they matter most.
+      }
+    }
+    if (gen < applied) return
+    applied = gen
+    for (const [id, ts] of fresh) turns.set(id, ts)
+    recorder.update({ messages: relay.log.length, participants: seats() })
+  }
+
+  /**
+   * Refreshes run one at a time. Two concurrent reads of the same transcript are waste
+   * rather than safety, and serialising them means the counter above is a backstop instead
+   * of the only thing standing between a poller and a status file that moves backwards.
+   */
+  let queue: Promise<void> = Promise.resolve()
+  const refresh = (): Promise<void> => {
+    queue = queue.then(refreshOnce).catch(() => {})
+    return queue
+  }
+
   const set: SessionRecording['set'] = (state, extra) => {
     if (extra?.outcome) lastOutcome = extra.outcome
     recorder.update({
@@ -433,6 +556,9 @@ export function recordSession(
       pause: extra?.pause,
       outcome: lastOutcome,
     })
+    // Detached: `set` is called from the run loop and a lifecycle change must not wait on a
+    // transcript read. The state above is written immediately; the turns catch up.
+    void refresh()
   }
 
   let stop: (() => void) | undefined
@@ -454,6 +580,12 @@ export function recordSession(
           ...('tool' in e.event ? { tool: e.event.tool } : {}),
           since: e.at,
         })
+        // The two events that change a VERDICT, as opposed to what a seat is doing. A turn
+        // ending produces the grade; a revision withdraws or replaces one. Snapshotting on
+        // every event would re-read the transcript for every tool call the child makes, and
+        // snapshotting only at the end would leave a long run with nothing to read until it
+        // was over -- which for the runs most worth watching is the whole point.
+        if (e.event.type === 'turn_end' || e.event.type === 'revision') void refresh()
       }
       // Every event refreshes the participant block, so a permission prompt appears in the
       // status file at the moment it appears in the stream rather than at the next
@@ -466,6 +598,7 @@ export function recordSession(
     id: opts.id,
     recorder,
     set,
+    refresh,
     /**
      * Wait for the stream to end on its own, then detach.
      *
@@ -477,11 +610,19 @@ export function recordSession(
      *
      * The race is a backstop for a caller that never stops the relay at all: teardown that
      * hangs is worse than teardown that gives up.
+     *
+     * Then one last snapshot, AWAITED and taken after the stream is done. Both front-ends
+     * report `ended` before closing the recorder, and the last turn of a run is graded at
+     * the very end -- so a recorder that detached without re-reading would leave the final
+     * verdicts out of the only file anyone can read once the process is gone. Last, rather
+     * than first, because the follow loop can still queue refreshes while it drains and the
+     * final one has to be the one that wins.
      */
     close: async () => {
       await Promise.race([following, new Promise((r) => setTimeout(r, 2_000).unref())])
       stop?.()
       await following
+      await refresh()
     },
   }
 }

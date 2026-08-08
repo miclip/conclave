@@ -50,7 +50,14 @@ export class FakeRotationSession implements AgentSession {
 
   #state: SessionState = 'running'
   #replies: string[]
-  #turns: { key: TurnKey; prose: string }[] = []
+  /**
+   * `verdict` is set when the turn ends and cleared by a withdrawal, so `snapshot()` can
+   * report the GRADE and not just the state. The fake reported neither confidence nor
+   * provenance, which meant nothing keyed to how strongly a verdict was evidenced could be
+   * exercised at all -- the status file and the run report both carry those fields, and a
+   * test built on this session could only ever assert that the key existed.
+   */
+  #turns: { key: TurnKey; prose: string; verdict?: Verdict | undefined }[] = []
   #queue: AgentEvent[] = []
   #waiters: ((e: IteratorResult<AgentEvent>) => void)[] = []
   #seq = 0
@@ -172,9 +179,15 @@ export class FakeRotationSession implements AgentSession {
     const scripted = this.endTurn?.index === index ? this.endTurn : undefined
     this.#lastKey = key
     this.#lastEndSeq = ++this.#seq
+    const verdict = scripted?.verdict ?? COMPLETED
+    // The same verdict the event carries, kept where `snapshot()` can find it. The two
+    // sides of the seam must agree: `events()` is revisable and `snapshot()` is canonical,
+    // but they are not allowed to describe different turns.
+    const turn = this.#turns[index]
+    if (turn) turn.verdict = verdict
     this.emit({
       type: 'turn_end',
-      verdict: scripted?.verdict ?? COMPLETED,
+      verdict,
       synthesized: false,
       turnKey: key,
       seq: this.#lastEndSeq,
@@ -207,6 +220,10 @@ export class FakeRotationSession implements AgentSession {
       provisional: false,
     })
     this.#lastEndSeq = undefined
+    // Withdrawn in the snapshot too, and not only in the stream: `'none'` is the
+    // `resetTranscript` case, where the verdict is gone and the turn is open again.
+    const withdrawn = this.#turns.find((t) => t.key === this.#lastKey)
+    if (withdrawn) withdrawn.verdict = replacement === 'none' ? undefined : replacement
     if (replacement === 'none') return
     this.#lastEndSeq = ++this.#seq
     this.emit({
@@ -294,7 +311,13 @@ export class FakeRotationSession implements AgentSession {
       turns: this.#turns.map((t) => ({
         key: t.key,
         prompt: '',
-        state: 'completed' as const,
+        // A turn with no verdict yet still reads `completed`, as it always has. Reporting
+        // `in_progress` would be more faithful, and it would also put every test using a
+        // delayed fake through the relay's transcript settle loop -- a real behaviour
+        // change to unrelated suites, made as a side effect of teaching the fake to grade.
+        state: t.verdict?.outcome ?? ('completed' as const),
+        confidence: t.verdict?.confidence,
+        provenance: t.verdict?.provenance,
         assistantText: t.prose,
         toolCalls: [],
       })),
