@@ -310,6 +310,43 @@ it.
 A detached run's stdout and stderr go to `stdio.log` in the same directory. A crash before
 the relay starts appears nowhere else.
 
+### Pruning old records
+
+Records accumulate, and `events.ndjson` is the part that grows without bound.
+
+```sh
+conclave sessions --prune              # ended, dead, and last updated over 7 days ago
+conclave sessions --prune --days 30    # a longer horizon
+conclave sessions --prune --days 0     # everything that qualifies, however recent
+```
+
+Pruning removes the whole session directory — `status.json`, `events.ndjson`, `stdio.log`,
+all of it — and only for records meeting all three conditions: the session **ended**, its
+process is **no longer live**, and it last updated **before** the cutoff. Every id is printed
+before the first deletion and again as an outcome, and each record is re-checked against its
+pid immediately before its own removal, so a process that came back in the meantime keeps its
+files.
+
+What does not age out, however old:
+
+| kept | why |
+|---|---|
+| a live session | its files are the only account of itself that survives a crash |
+| a run that never said `ended` | an **abandoned** record is the evidence of the crash, not litter |
+| anything at or inside the cutoff | `--days 7` means seven, not about seven |
+| a record that cannot be read | a corrupt `status.json` is a thing to look at, not to delete |
+| a directory with no `status.json` | indistinguishable from a session two seconds into launching |
+
+`--days 0` is the after-a-bad-afternoon case — a dozen failed starts, all ended, all dead,
+none of them worth reading. It still takes nothing that is running and nothing that crashed.
+
+The argument list is read strictly, because the cost of a loose reading here is measured in
+deleted records: `--days` must be zero or more, and anything unrecognised, repeated, or
+positional is refused before a single record is chosen. `conclave sessions --prune --dasy 0`
+is an error rather than a silent fall back to seven days. A removal that fails is named on
+stderr and exits non-zero. Under `--json` the result object is alone on stdout and the
+pre-delete announcement goes to stderr, so nothing is ever deleted unannounced.
+
 ```sh
 npm test                    # typecheck and the offline suite
 npm run conformance         # what each adapter claims, graded by evidence
