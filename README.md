@@ -345,3 +345,20 @@ You need whichever CLIs you actually seat, installed and authenticated: `claude`
 `conclave config install` writes and a session installs for you; Codex additionally
 requires those hooks to be trusted. OpenCode needs neither — it reports its own lifecycle
 on stdout, so there is nothing to register and nothing to trust.
+
+## License
+
+[Functional Source License 1.1, Apache 2.0 Future License](LICENSE) (`FSL-1.1-ALv2`).
+
+Use it, read it, change it, redistribute it. Run it at work, on client projects, in
+research — those are all explicitly permitted. The one thing it withholds is a **Competing
+Use**: taking Conclave and offering it to others as a commercial product or service that
+substitutes for it.
+
+Two years after each version is released, that version becomes available under the
+**Apache License 2.0**, unconditionally. The restriction has an expiry date; it is not a
+permanent enclosure of the code.
+
+So it is source-available rather than OSI open source, and calling it "open source" would
+be inaccurate while the current terms apply. That is the honest description, and the reason
+for the Apache grant above.
