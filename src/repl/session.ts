@@ -215,6 +215,7 @@ export interface SessionOptions {
 export const COMMANDS = [
   '/pause',
   '/continue',
+  '/wait',
   '/rotate',
   '/abort',
   '/allow',
@@ -1136,6 +1137,41 @@ export async function runSession(opts: SessionOptions): Promise<number> {
       if (!run) return void write(dim('  nothing is running; type a goal to start'))
       if (run.state !== 'paused') return void write(`  not paused (${run.state})`)
       await resumeRun({ force: rest.trim() === 'force' })
+      return
+    }
+
+    if (word === '/wait') {
+      if (!run) return void write(dim('  nothing is running; type a goal to start'))
+      if (run.state !== 'paused') return void write(`  not paused (${run.state})`)
+      // Recorded rather than silent, which is the whole point. Declining to answer and
+      // choosing to wait were indistinguishable: the status file said `paused` either way,
+      // and so did a monitor polling it. Reported by an operator who correctly declined
+      // every destructive option and had no way to say so.
+      const mins = Number(rest.trim()) || 15
+      const until = Date.now() + mins * 60_000
+      if (!run.wait({ at: Date.now(), until })) {
+        return void write('  nothing to wait on')
+      }
+      // Rewritten explicitly. The recorder re-serialises the live pause object on any event,
+      // so an in-place change like `superseded` reaches the file on the next one -- but a
+      // pause is precisely when nothing is flowing, so a decision made here would sit
+      // invisible until something else happened. The one reader who needs it most is the
+      // one polling from outside.
+      recording.set('paused', { pause: run.pause })
+      write(dim(`  waiting ${mins}m — the run stays paused and nothing is sent`))
+      write(dim('  the turn may still finish; its verdict would be withdrawn and you would decide then'))
+      // A deadline, so a turn that really has died is caught rather than waited on forever.
+      const timer = setTimeout(() => {
+        if (!run || run.state !== 'paused') return
+        const p = run.pause
+        write(
+          p?.superseded
+            ? yellow(`\n  the wait is over and the verdict was withdrawn — ${p.superseded.note}`)
+            : yellow(`\n  ${mins}m elapsed and the verdict still stands. Decide, or /wait again.`),
+        )
+        refreshPrompt()
+      }, mins * 60_000)
+      timer.unref()
       return
     }
 

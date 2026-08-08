@@ -598,6 +598,20 @@ test('a verdict withdrawn while the operator reads the pause is surfaced in the 
   assert.match(replacement, /completed/, 'and the verdict that replaced it')
   assert.match(replacement, /still paused/, 'surfaced, not decided')
 
+  // ...and it reaches the STATUS FILE, which is where an operator outside the process reads
+  // it. This is load-bearing operational advice: the run stays paused across a supersession
+  // by design, so `state` is unchanged before and after and a watcher polling it is silent
+  // through the one event a waiting operator is waiting for. `pause.superseded` is the
+  // signal, and it only lands because the recorder re-serialises the LIVE pause object --
+  // which `supersede()` mutates in place -- on the next event, and the supersession note is
+  // itself an event. Asserted rather than reasoned, because someone is relying on it.
+  const outside = resolveSession(dir)
+  assert.ok('session' in outside, 'the session must be readable from outside')
+  assert.ok(
+    outside.session.status.pause?.superseded,
+    `pause.superseded must reach the status file:\n${JSON.stringify(outside.session.status.pause, null, 2)}`,
+  )
+
   input.write('/continue\n')
   assert.equal(await running, 0)
 })
@@ -1442,6 +1456,65 @@ test('a reply typed at a pause is delivered and resumes the run', async () => {
   // resume, which is the failure the fix could easily have introduced.
   assert.match(out.text(), /prefer the smaller change/)
 
+  input.end()
+  await running
+})
+
+test('waiting at a pause is recorded, sends nothing, and leaves the run paused', async () => {
+  // Reported by an operator who read the liveness evidence, judged the child healthy, and
+  // correctly declined every option — then had no way to say so. Declining to answer and
+  // choosing to wait were indistinguishable: the status file said `paused` either way, and
+  // so did a monitor polling it. Worse, `state` never changes across the whole episode,
+  // because the run stays paused through the supersession too — so a watcher observing
+  // state alone is silent through exactly the event it is waiting for.
+  const dir = repo()
+  const out = collect()
+  const input = new PassThrough()
+  const running = runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'claude',
+    rounds: 6,
+    checks: [],
+    operator: 'agent',
+    registry: registryOf({
+      codex: [slow('advisor', 'codex', ['Do it.', 'More.', 'DONE'], 300)],
+      claude: [slow('impl', 'claude', ['ack', 'Did it.', 'Again.'], 300)],
+    }),
+    input,
+    output: out.stream,
+  })
+  const until = async (pred: (f: ReturnType<typeof resolveSession>) => boolean, ms = 10_000) => {
+    const t = Date.now()
+    while (Date.now() - t < ms) {
+      const f = resolveSession(dir)
+      if (pred(f)) return f
+      await new Promise((r) => setTimeout(r, 50))
+    }
+    throw new Error(`timed out; console said:\n${out.text().slice(-700)}`)
+  }
+
+  await new Promise((r) => setTimeout(r, 500))
+  input.write('/pause\n')
+  await until((f) => 'session' in f && f.session.status.state === 'paused')
+
+  const before = resolveSession(dir)
+  assert.ok('session' in before && before.session.status.pause?.waiting === undefined)
+
+  input.write('/wait 30\n')
+  const waiting = await until((f) => 'session' in f && f.session.status.pause?.waiting !== undefined)
+  assert.ok('session' in waiting)
+  const w = waiting.session.status.pause!.waiting!
+  // A decision an outside reader can see, which is the entire difference from silence.
+  assert.equal(typeof w.at, 'number')
+  assert.ok(w.until > w.at, 'a wait carries a deadline, so a dead turn is eventually caught')
+  // ...and the run is STILL paused. Waiting is a decision to defer, not a decision.
+  assert.equal(waiting.session.status.state, 'paused')
+  assert.match(out.text(), /waiting 30m/)
+
+  input.write('/continue\n')
+  await until((f) => 'session' in f && f.session.status.state === 'running')
   input.end()
   await running
 })

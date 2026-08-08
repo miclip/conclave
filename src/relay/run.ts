@@ -74,7 +74,7 @@ export type PauseReason =
  * same fault as a diagnostic that recommends the wrong remedy — see the pause options built
  * in `Relay.#halt`.
  */
-export type PauseOption = 'continue' | 'rotate' | 'constrain' | 'abort'
+export type PauseOption = 'continue' | 'wait' | 'rotate' | 'constrain' | 'abort'
 
 /**
  * The claim a pause was raised on, withdrawn by the system after the fact.
@@ -97,6 +97,27 @@ export interface PauseSupersession {
   verdict?: Verdict | undefined
 }
 
+/**
+ * The operator looked, judged the child healthy, and chose to keep waiting.
+ *
+ * Distinct from an unanswered pause, which is what it was indistinguishable from. A status
+ * file saying `paused` could not tell "waiting on someone who has not looked" from "someone
+ * looked and decided", and neither could a monitor polling `state` -- which never changes
+ * across the whole episode, because the run stays paused through the supersession too.
+ *
+ * It is NOT a watchdog re-arm. By the time a pause exists the turn has already settled: the
+ * adapter fired, issued a verdict, and `#exchange` returned. There is no clock left to
+ * extend. What this extends is the PAUSE -- how long the operator is prepared to sit here
+ * before being told again -- which is the thing they were actually deciding.
+ */
+export interface PauseWait {
+  at: number
+  /** When to say something if the verdict has still not been superseded. */
+  until: number
+  /** The operator's stated reason, when they gave one. */
+  detail?: string | undefined
+}
+
 export interface RunPause {
   reason: PauseReason
   detail: string
@@ -116,6 +137,8 @@ export interface RunPause {
   verdictOf?: { participant: string; endSeq: number } | undefined
   /** Set once the verdict named above has been withdrawn. See `PauseSupersession`. */
   superseded?: PauseSupersession | undefined
+  /** Set when the operator chose to keep waiting rather than answer. See `PauseWait`. */
+  waiting?: PauseWait | undefined
   /** Position in the routing log when the run paused, for lining up against `audit()`. */
   atSeq: number
   at: number
@@ -328,6 +351,19 @@ export class RunHandle {
    * Returns false when there is nothing to amend, which is the ordinary race and not an
    * error: the operator decided while the revision was in flight.
    */
+  /**
+   * Keep waiting, without deciding and without sending anything.
+   *
+   * Returns false when there is no pause to wait on, so a caller cannot record a decision
+   * about nothing. Deliberately does NOT resolve `#decide`: the run stays paused, which is
+   * the whole point -- this is a decision to defer, not a decision.
+   */
+  wait(info: PauseWait): boolean {
+    if (this.#state !== 'paused' || !this.#pause) return false
+    this.#pause.waiting = info
+    return true
+  }
+
   supersede(info: PauseSupersession): boolean {
     if (this.#state !== 'paused' || !this.#pause) return false
     this.#pause.superseded = info

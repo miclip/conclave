@@ -135,11 +135,25 @@ export interface RelayRunEndEvent extends RelayEventBase {
  * Raised by the session that added `pause` and `resume`, which noticed it had no way to
  * know whether an out-of-repo consumer existed and flagged it rather than assuming.
  */
+/**
+ * A pause's verdict was withdrawn while the operator was still deciding.
+ *
+ * Carries the pause, whose `superseded` is now set. Emitted rather than left to polling
+ * because the run STAYS PAUSED through it by design -- so `state` is unchanged before and
+ * after, and a watcher observing state alone is silent through the one event a waiting
+ * operator is waiting for.
+ */
+export interface RelaySupersedeEvent extends RelayEventBase {
+  type: 'supersede'
+  pause: RunPause
+}
+
 export type RelayEvent =
   | RelayMessageEvent
   | RelayActivityEvent
   | RelayPauseEvent
   | RelayResumeEvent
+  | RelaySupersedeEvent
   | RelayRunEndEvent
 
 /** Distributes over the union; a plain Omit would collapse it to the common keys. */

@@ -673,11 +673,26 @@ export class Relay {
     }
   }
 
+  /**
+   * A verdict a pause rests on has been withdrawn.
+   *
+   * On the stream as well as the pause, because it is the ONE moment a waiting operator
+   * cares about and `state` never changes across it: paused while the child works, paused
+   * once it finishes. A monitor polling state is silent through exactly the event it is
+   * waiting for, so it had to be discovered by re-reading the status file.
+   */
+  #emitSupersession(pause: RunPause): void {
+    this.#stream.emit({ type: 'supersede', pause })
+  }
+
   #supersede(pending: VerdictPause, note: string, verdict?: Verdict): void {
     const info: PauseSupersession = { at: Date.now(), note, ...(verdict === undefined ? {} : { verdict }) }
     // Recorded only if the pause was still there to amend. Logging a supersession for a
     // pause the operator has already resolved would put a decision in the log that nobody made.
     if (pending.handle.supersede(info)) {
+      // On the stream too. See `#emitSupersession`: the run stays paused across this, so a
+      // watcher polling `state` never sees it.
+      if (pending.handle.pause) this.#emitSupersession(pending.handle.pause)
       // Marked, because this one arrives AFTER the pause block has been written to a
       // terminal and cannot be taken back. `RunPause.superseded` carries the same note for a
       // pause printed after the fact; the mark is what lets a reader see the two arrival
@@ -1369,6 +1384,14 @@ export class Relay {
     const aboutImplementer = p.verdictOf === undefined || p.verdictOf.participant === implId
     const options: PauseOption[] = ['continue', 'constrain', 'abort']
     if (armed && aboutImplementer) options.splice(1, 0, 'rotate')
+    // `wait` only where it is the right answer: the child is measurably alive, so the turn
+    // is still happening and every other option is destructive. Offering it always would
+    // invite waiting on a child that has already exited, which is a decision to sit
+    // indefinitely on something that will never arrive.
+    //
+    // The evidence carrying the liveness reading is the same one the operator reads, so the
+    // option and the reason for it cannot disagree.
+    if (p.evidence.some((e) => /is still working \(cpu/.test(e))) options.splice(1, 0, 'wait')
 
     const deciding = handle.pauseAt({
       reason: p.reason,
