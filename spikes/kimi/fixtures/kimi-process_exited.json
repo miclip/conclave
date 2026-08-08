@@ -1,0 +1,18 @@
+{
+  "agent": "kimi",
+  "cliVersion": "1.49.0",
+  "capturedAt": "2026-08-07",
+  "scenario": "close('graceful') while a turn was still running",
+  "how": "live run against a Moonshot provider, closed 2.5s in",
+  "turn": {
+    "state": "process_exited",
+    "confidence": "proven",
+    "provenance": [
+      {
+        "source": "process",
+        "detail": "signal SIGTERM"
+      }
+    ]
+  },
+  "note": "Distinct from `cancelled`, which is the same signal with our own bookkeeping saying we asked for it."
+}

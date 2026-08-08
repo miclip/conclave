@@ -45,7 +45,10 @@ export const CLAUDE_CAPABILITIES: AdapterCapabilities = {
     // recorded fixture rather than found in a transcript, because an adapter that stopped
     // observing leaves nothing in the file it stopped reading -- the verdict IS the evidence.
     transport_lost: 'observed',
-    unknown_abnormal_end: 'reasoned_but_unverified',
+    // The watchdog firing under EXTERNAL input ownership. Under `mediated` the same fire is
+    // `timed_out`; the difference is that we can rule out a keystroke having ended the turn
+    // unseen, which is precisely what the two ownership modes buy.
+    unknown_abnormal_end: 'observed',
   },
 }
 
@@ -132,7 +135,9 @@ export const OPENCODE_CAPABILITIES: AdapterCapabilities = {
     process_exited: 'observed',
     // Driven past a 5s watchdog on a real run.
     timed_out: 'observed',
-    transport_lost: 'reasoned_but_unverified',
+    // The binary is not on PATH. No CLI version behind it, because the failure IS that
+    // there is no CLI.
+    transport_lost: 'observed',
     // Deliberately distinct from `completed`: a run CAN exit non-zero, or exit 0 having
     // silently failed an auxiliary model call, so exit status alone never proves a turn
     // finished. Captured from a paid model on an account with no payment method.
@@ -164,9 +169,11 @@ export const KIMI_CAPABILITIES: AdapterCapabilities = {
     cancelled: 'observed',
     // `--print` auto-approves for the invocation; there is no dialog to refuse.
     permission_refused: 'unsupported',
-    process_exited: 'reasoned_but_unverified',
+    // `close('graceful')` with a turn in flight.
+    process_exited: 'observed',
     timed_out: 'observed',
-    transport_lost: 'reasoned_but_unverified',
+    // The binary is not on PATH.
+    transport_lost: 'observed',
     // Captured live from a model name the provider does not have.
     unknown_abnormal_end: 'observed',
   },

@@ -1,0 +1,18 @@
+{
+  "agent": "opencode",
+  "cliVersion": "n/a",
+  "capturedAt": "2026-08-07",
+  "scenario": "the binary is not on PATH",
+  "how": "spawned a nonexistent command",
+  "turn": {
+    "state": "transport_lost",
+    "confidence": "proven",
+    "provenance": [
+      {
+        "source": "transport",
+        "detail": "/nonexistent/opencode is not on PATH (spawn ENOENT). Install it, or name a different agent."
+      }
+    ]
+  },
+  "note": "The one outcome with no CLI version behind it, because the failure IS that there is no CLI. A spawn that never starts emits an asynchronous 'error' event rather than throwing, so it escaped every catch and took the process down until this was handled."
+}

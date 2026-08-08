@@ -54,21 +54,33 @@ test('no adapter claims evidence it does not have', { skip: gradable }, () => {
 test('an inflated claim is caught', () => {
   // Claiming an outcome nothing has ever produced must fail, not pass quietly.
   //
-  // The example is chosen at RUN TIME rather than named here. Two hardcoded ones -- first
-  // `transport_lost`, then `timed_out` -- became genuinely backed while the audit ran, and
-  // each time this test started passing for the wrong reason: it was asserting that a backed
-  // claim is unbacked. A test whose stand-in for "unbacked" can quietly become backed is
-  // testing the fixture corpus, not the checker.
-  const backed = fixtureOutcomesFor('claude')
-  const unbacked = OUTCOMES.find((o) => !backed.get(o)?.found)
-  assert.ok(unbacked, 'if every outcome is backed this test has nothing to say -- delete it')
-
-  const inflated = {
+  // Asserted against a FICTIONAL agent with no fixtures, which is the only formulation that
+  // survives. Three earlier versions named a real outcome as their stand-in for "unbacked" --
+  // transport_lost, then timed_out, then whichever was unbacked at run time -- and each was
+  // overtaken as the audit captured evidence. The last one broke when Claude ran out of
+  // unbacked outcomes entirely, which is a good thing to have happen and a terrible thing to
+  // have a test depend on.
+  //
+  // An agent with no corpus can never acquire one by accident, so this tests the CHECKER
+  // rather than how far the evidence has got.
+  const invented = {
     ...CLAUDE_CAPABILITIES,
-    outcomes: { ...CLAUDE_CAPABILITIES.outcomes, [unbacked!]: 'observed' as const },
+    agent: 'no-such-agent',
+    outcomes: Object.fromEntries(OUTCOMES.map((o) => [o, 'observed' as const])) as typeof CLAUDE_CAPABILITIES.outcomes,
   }
-  const row = checkAdapter(inflated).find((r) => r.outcome === unbacked)!
-  assert.equal(row.verdict, 'unsupported_claim')
+  const rows = checkAdapter(invented)
+  assert.equal(rows.length, OUTCOMES.length)
+  for (const row of rows) {
+    assert.equal(row.verdict, 'unsupported_claim', `${row.outcome} has no evidence and must say so`)
+  }
+})
+
+test('the fixture path backs nothing for an agent it has never seen', () => {
+  // The direction that matters. A mechanism that quietly satisfied every claim would turn the
+  // suite into a rubber stamp, and it would look exactly like progress while doing it.
+  const none = fixtureOutcomesFor('no-such-agent')
+  assert.equal(none.size, 0, 'no corpus, no evidence')
+  for (const outcome of OUTCOMES) assert.equal(none.get(outcome)?.found, undefined)
 })
 
 test('codex outcomes are graded from live 0.146.0 fixtures, not history', () => {
@@ -170,17 +182,4 @@ test('a recorded fixture backs an outcome a transcript cannot contain', () => {
   assert.ok(found?.found, 'the recorded fixture is read')
   assert.match(found!.where!, /claude-transport_lost\.json/)
   assert.equal(found!.historical, false, 'captured against the installed CLI')
-})
-
-test('the recorded-fixture path does not back everything it is asked about', () => {
-  // The direction that matters. A mechanism that quietly satisfied every claim would turn the
-  // suite into a rubber stamp, and it would look exactly like progress while doing it.
-  //
-  // Asserted as a property rather than against a named outcome, for the reason above: naming
-  // one couples this test to how far the audit has got.
-  for (const agent of ['claude', 'codex', 'opencode', 'kimi']) {
-    const backed = fixtureOutcomesFor(agent)
-    const unbacked = OUTCOMES.filter((o) => !backed.get(o)?.found)
-    assert.ok(unbacked.length > 0, `${agent}: something must still be unbacked, or say so loudly`)
-  }
 })

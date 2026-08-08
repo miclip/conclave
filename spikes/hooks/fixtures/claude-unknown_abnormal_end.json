@@ -1,0 +1,33 @@
+{
+  "agent": "claude",
+  "cliVersion": "2.1.224",
+  "capturedAt": "2026-08-07",
+  "scenario": "the watchdog fires under EXTERNAL input ownership",
+  "how": "inputOwnership 'external', watchdogMs 7000, a turn shelling out to `sleep 40`",
+  "turn": {
+    "state": "unknown_abnormal_end",
+    "confidence": "uncertain",
+    "provenance": [
+      {
+        "source": "watchdog",
+        "detail": "7s > 7s with no Stop"
+      },
+      {
+        "source": "watchdog",
+        "detail": "completion is uncertain; this is not evidence of cancellation",
+        "caveat": true
+      },
+      {
+        "source": "orchestrator",
+        "detail": "input not mediated: a direct keystroke could have ended it unseen",
+        "caveat": true
+      },
+      {
+        "source": "transport",
+        "detail": "terminal showed: Sock-hopping... (6s) bypass permissions on - 1 shell",
+        "caveat": true
+      }
+    ]
+  },
+  "note": "Reachable ONLY under external input ownership. Under `mediated` the same watchdog fire is `timed_out`, because we own the input and can rule out a keystroke having ended the turn unseen. That is the whole difference the two ownership modes buy, and this fixture is the evidence for it."
+}
