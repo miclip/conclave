@@ -15,6 +15,12 @@ test('a process doing nothing reads as idle, and a busy one does not', async () 
   const idle = spawn('sleep', ['30'], { stdio: 'ignore' })
   const busy = spawn('sh', ['-c', 'while :; do :; done'], { stdio: 'ignore' })
   try {
+    // Let them age before measuring. `%cpu` is CPU time over ELAPSED time, so a process a
+    // few milliseconds old reads as busy on its startup cost alone -- a freshly spawned
+    // `sleep` measured 0.8% on a CI runner and failed a release. The production caller
+    // samples a child that has been silent for minutes; this reproduces that precondition
+    // rather than pretending it does not exist.
+    await new Promise((r) => setTimeout(r, 1_500))
     const [i, b] = await Promise.all([
       sampleLiveness(idle.pid!, { samples: 3, everyMs: 250 }),
       sampleLiveness(busy.pid!, { samples: 3, everyMs: 250 }),

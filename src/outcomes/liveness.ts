@@ -24,6 +24,14 @@
  * second apart is enough to tell a process that is doing nothing from one that is pausing
  * between chunks, and cheap enough to spend before a pause a human is about to read.
  *
+ * ## It measures a process that has been running a while
+ *
+ * `%cpu` is CPU time over ELAPSED time, so a process a few milliseconds old is dominated by
+ * its own startup and reads as busy however idle it is about to be. That is not a problem
+ * where this is used -- a pause fires after minutes of silence, by which point the average
+ * has long since decayed -- but it is a real precondition, and it broke a release when a
+ * test sampled a `sleep` the instant it spawned and got 0.8%.
+ *
  * ## What it deliberately does not conclude
  *
  * It reports what it measured; it does not decide the turn's fate. A child at 0% CPU may be
