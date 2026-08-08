@@ -34,6 +34,7 @@ import {
   type Visibility,
 } from './message.ts'
 import { RelayEventStream, type ObserveOptions, type RelayEvent, type RunReason } from './observe.ts'
+import { describeLiveness, sampleLiveness } from '../outcomes/liveness.ts'
 import {
   RunHandle,
   type PauseOption,
@@ -1037,7 +1038,7 @@ export class Relay {
   async #exchange(
     p: RelayParticipant,
     text: string,
-  ): Promise<{ prose: string; end: TurnEndEvent; unsettled: boolean; changedDuringTurn: string[] }> {
+  ): Promise<{ prose: string; end: TurnEndEvent; unsettled: boolean; emittedSinceSend: number; changedDuringTurn: string[] }> {
     // Counted here, where a turn actually starts, so the ceiling measures work done rather
     // than rounds entered -- a round can contain one turn or several.
     this.#turnsTaken += 1
@@ -1146,7 +1147,7 @@ export class Relay {
     for (const text of extractFlags(prose)) {
       this.flags.push({ participant: p.id, text, seq: this.log.length })
     }
-    return { prose, end, unsettled, changedDuringTurn: dirtyPaths(this.#opts.cwd).filter((f) => !treeBeforeTurn.has(f)) }
+    return { prose, end, unsettled, emittedSinceSend: p.events.length - before, changedDuringTurn: dirtyPaths(this.#opts.cwd).filter((f) => !treeBeforeTurn.has(f)) }
   }
 
   /**
@@ -1275,6 +1276,28 @@ export class Relay {
    * Still coarse, and still never asserts intent. It claims the participant touched the
    * path, not that it meant to, and not that the aside is why.
    */
+  /**
+   * The evidence line that says whether a quiet child is working or idle.
+   *
+   * Appended to a `turn_incomplete` pause because it is the fact that decides what the
+   * operator should do, and until now every one of them left to fetch it from `ps` by hand
+   * -- three times in one day, across two projects, one of whom still chose wrong and lost a
+   * run (#43, #45).
+   *
+   * Best effort by construction. An adapter with no single child to name returns nothing and
+   * the pause reads exactly as it did before; a sampling failure is not worth sinking a
+   * pause a human is waiting on.
+   */
+  async #livenessEvidence(p: RelayParticipant, emittedSinceSend: number): Promise<string[]> {
+    const pid = p.session.childPid
+    if (pid === undefined) return []
+    try {
+      return [describeLiveness(await sampleLiveness(pid), emittedSinceSend)]
+    } catch {
+      return []
+    }
+  }
+
   #attributeArtifacts(): void {
     const origin = this.restrictedOrigins.at(-1)
     if (!origin || !this.#treeAtOrigin) return
@@ -1684,7 +1707,8 @@ export class Relay {
         const halted = await this.#halt(handle, {
           reason: 'turn_incomplete',
           detail: why,
-          evidence,
+          evidence: [...evidence, ...(await this.#livenessEvidence(lead, next.emittedSinceSend))],
+          verdictOf: { participant: lead.id, endSeq: next.end.seq },
         })
         if (halted) return halted
         // Unattended, `#halt` ends the run. Reaching here means an operator resumed, so the
@@ -1893,7 +1917,10 @@ export class Relay {
         const halted = await this.#halt(handle, {
           reason: 'turn_incomplete',
           detail: `${impl.id} turn ended ${formatVerdict(current.verdict)}`,
-          evidence: current.verdict.provenance.map((p) => `${p.source}: ${p.detail}`),
+          evidence: [
+            ...current.verdict.provenance.map((p) => `${p.source}: ${p.detail}`),
+            ...(await this.#livenessEvidence(impl, report.emittedSinceSend)),
+          ],
           verdictOf: { participant: impl.id, endSeq: current.seq },
           ...(pre === undefined ? {} : { superseded: pre }),
         })

@@ -128,6 +128,12 @@ export class CodexPtyHookAdapter implements AgentSession {
     )
   }
 
+
+  /** The pty's child, so a quiet turn can be told from a dead one. See `outcomes/liveness`. */
+  get childPid(): number | undefined {
+    return this.#pty?.pid
+  }
+
   get sessionId(): string {
     return this.#sessionId
   }

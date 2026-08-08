@@ -254,6 +254,15 @@ export type SessionState = 'running' | 'quiesced' | 'rotating' | 'terminated'
 
 export interface AgentSession {
   readonly agent: string
+  /**
+   * The child process, when this adapter has one it can name.
+   *
+   * Optional because not every transport has a single process to point at, and because a
+   * consumer must not come to depend on it: it exists so a watchdog timeout can say whether
+   * the child is still computing, which is the fact that decides what an operator does about
+   * a quiet turn (#43, #45). Absent means "cannot say", never "not running".
+   */
+  readonly childPid?: number | undefined
   readonly sessionId: string
   readonly guarantees: Guarantees
 

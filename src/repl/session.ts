@@ -670,8 +670,24 @@ export async function runSession(opts: SessionOptions): Promise<number> {
    * resuming the handle without releasing the loop -- which presents as a console that
    * accepted the command and then did nothing.
    */
-  const resumeRun = async (): Promise<void> => {
+  const resumeRun = async (opts: { force?: boolean } = {}): Promise<void> => {
     if (!run || run.state !== 'paused') return
+    // Refused when the child is visibly still working, because continuing SENDS -- and
+    // neither CLI accepts input mid-turn, so the run ends `transport_failed`. A watchdog
+    // that says "completion is uncertain" correctly warns off rotate and abort, which
+    // leaves continue looking like the safe choice when it is the destructive one. Reported
+    // by an operator who lost a run to exactly that, with the token counter still moving.
+    //
+    // Overridable, because the measurement is a measurement: a child pinned by something
+    // unrelated would otherwise be unresumable, and taking the decision away from the
+    // operator is not what a pause is for.
+    const busy = run.pause?.evidence.find((e) => /is still working \(cpu/.test(e))
+    if (busy && !opts.force) {
+      write(yellow('  not continuing: the child looks alive and busy.'))
+      write(`  ${busy}`)
+      write('  wait for it to finish, or /continue force to send anyway.')
+      return
+    }
     await run.continue()
     wake()
   }
@@ -1096,7 +1112,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     if (word === '/continue') {
       if (!run) return void write(dim('  nothing is running; type a goal to start'))
       if (run.state !== 'paused') return void write(`  not paused (${run.state})`)
-      await resumeRun()
+      await resumeRun({ force: rest.trim() === 'force' })
       return
     }
 
