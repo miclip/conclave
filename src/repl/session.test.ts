@@ -198,6 +198,7 @@ test('a pause is rendered with its evidence and the operator resumes it', async 
   const impl = slow('impl', 'claude', ['ack', 'Did it.', 'And again.'])
   impl.compactOnTurn = 1
   const out = collect()
+  const input = new PassThrough()
   const running = runSession({
     cwd: dir,
     goal: 'Keep the work moving.',
@@ -209,9 +210,18 @@ test('a pause is rendered with its evidence and the operator resumes it', async 
       codex: [slow('advisor', 'codex', ['Do it.', 'More.', 'DONE'])],
       claude: [impl, slow('fresh', 'claude', [])],
     }),
-    input: script(['/state', '/continue'], 900),
+    // Driven by the pause ARRIVING, not by a 900ms guess that it will have. `/state` typed
+    // early reports `run: running` and the assertion below then reads as a bug in `/state`
+    // -- which is how this failed a release on the slower Intel runner while passing
+    // everywhere else. A test whose correctness depends on which machine runs it is not
+    // testing what it claims to.
+    input: input,
     output: out.stream,
   })
+  await untilText('the pause to be rendered', out.text, /● paused rotation_candidate/)
+  input.write('/state\n')
+  await untilText('/state to answer', out.text, /run: paused|run: running/)
+  input.write('/continue\n')
   assert.equal(await running, 0)
 
   const text = out.text()

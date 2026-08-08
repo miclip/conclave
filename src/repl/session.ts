@@ -154,6 +154,17 @@ export interface SessionOptions {
    * has now made seven times.
    */
   operator?: 'human' | 'agent' | undefined
+  /**
+   * How long a turn's transcript is given to catch up with the hook that ended it, and how
+   * much longer an EMPTY report buys before it is treated as lost. See `Relay#exchange`.
+   *
+   * Not remotely front-end specific: the transcript lags a long turn the same way whoever is
+   * watching. They existed on `relay` alone, so the console had no way to widen the window
+   * that #39 was about -- on the front-end where the same empty report costs a pause rather
+   * than a whole run, and is therefore the one you would want to reproduce it on.
+   */
+  transcriptSettleMs?: number | undefined
+  transcriptSalvageMs?: number | undefined
   /** Streams for testing; defaults to the process's own. */
   input?: NodeJS.ReadableStream
   output?: NodeJS.WritableStream
@@ -534,6 +545,8 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     registry: opts.registry ?? defaultRegistry(),
     cwd: opts.cwd,
     ...(opts.operator ? { operator: opts.operator } : {}),
+    ...(opts.transcriptSettleMs ? { transcriptSettleMs: opts.transcriptSettleMs } : {}),
+    ...(opts.transcriptSalvageMs ? { transcriptSalvageMs: opts.transcriptSalvageMs } : {}),
     lead: { id: 'advisor', agent: opts.lead, role: 'advisor', ...(leadArgs.length > 0 ? { args: leadArgs } : {}) },
     implementer: {
       id: 'implementer',
