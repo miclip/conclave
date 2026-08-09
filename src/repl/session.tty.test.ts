@@ -28,8 +28,9 @@ import { Progress } from './render.ts'
 const REPO = join(import.meta.dirname, '..', '..')
 
 /** A driver that runs the console over fakes slow enough to type at. */
-function driver(dir: string): string {
+function driver(dir: string, goal: string | null = 'Keep the work moving.'): string {
   const path = join(dir, 'driver.mjs')
+  const goalArg = goal === null ? 'undefined' : JSON.stringify(goal)
   writeFileSync(
     path,
     `
@@ -63,7 +64,7 @@ for (const [agent, session] of [['codex', slow('advisor', 'codex', ['Do it.', 'M
 setInterval(() => impl.emit({ type: 'tool_use', tool: 'Read', input: {}, seq: 99, at: Date.now(), provisional: true }), 700).unref()
 
 const code = await runSession({
-  cwd: ${JSON.stringify(dir)}, goal: 'Keep the work moving.',
+  cwd: ${JSON.stringify(dir)}, goal: ${goalArg},
   lead: 'codex', implementer: 'claude', rounds: 6, checks: [], registry,
 })
 process.exit(code)
@@ -88,9 +89,9 @@ function repo(): string {
  * survived, and node could not exit — so one broken expectation hung the whole suite past
  * every per-test timeout. A test that cannot fail cleanly is worse than no test.
  */
-async function spawnConsole(dir: string, t?: { after: (fn: () => void) => void }) {
+async function spawnConsole(dir: string, t?: { after: (fn: () => void) => void }, goal: string | null = 'Keep the work moving.') {
   const { default: pty } = await import('node-pty')
-  const p = pty.spawn(process.execPath, [driver(dir)], {
+  const p = pty.spawn(process.execPath, [driver(dir, goal)], {
     name: 'xterm-256color',
     cols: 100,
     rows: 30,
@@ -98,7 +99,23 @@ async function spawnConsole(dir: string, t?: { after: (fn: () => void) => void }
     env: { ...process.env } as Record<string, string>,
   })
   let buf = ''
-  p.onData((d: string) => (buf += d))
+  const rows = 30
+  const cols = 100
+  let answeredQueryIndex = 0
+  p.onData((d: string) => {
+    buf += d
+    // If the console queries the cursor position, answer it from the replayed cursor
+    // position so the test harness behaves like a real terminal emulator. Track answered
+    // offsets separately so the captured byte stream remains byte-for-byte intact.
+    for (;;) {
+      const queryIndex = buf.indexOf('\x1b[6n', answeredQueryIndex)
+      if (queryIndex < 0) break
+      const before = buf.slice(0, queryIndex)
+      const pos = parseTerminal(before, rows, cols).cursor
+      p.write(`\x1b[${pos.r + 1};${pos.c + 1}R`)
+      answeredQueryIndex = queryIndex + 4
+    }
+  })
   t?.after(() => {
     try {
       p.kill()
@@ -131,6 +148,91 @@ async function spawnConsole(dir: string, t?: { after: (fn: () => void) => void }
       return false
     },
   }
+}
+
+/**
+ * Replay a terminal byte stream into a character grid and the final cursor position.
+ *
+ * The screen is a DEC-style scroll region plus absolute cursor addressing. To assert where
+ * something *is* rather than merely whether it appears somewhere in the byte stream, the
+ * same primitives (scroll region, cursor movement, line clears, scroll down) are replayed
+ * here.
+ */
+function parseTerminal(buf: string, rows: number, cols: number): { grid: string[][]; cursor: { r: number; c: number } } {
+  const grid: string[][] = Array.from({ length: rows }, () => ' '.repeat(cols).split(''))
+  let r = 0
+  let c = 0
+  let top = 1
+  let bot = rows
+  // OSC title sequences, CSI sequences, newlines, carriage returns, and plain text.
+  const re = /\x1b\]0;[^\x07]*\x07|\x1b\[([0-9;]*)([A-Za-z])|\n|\r|[^\x1b\n\r]+/g
+  let m: RegExpExecArray | null
+  while ((m = re.exec(buf))) {
+    const tok = m[0]
+    if (tok === '\n') {
+      if (r >= bot - 1) {
+        grid.splice(top - 1, 1)
+        grid.splice(bot - 1, 0, ' '.repeat(cols).split(''))
+      } else {
+        r = Math.min(rows - 1, r + 1)
+      }
+    } else if (tok === '\r') {
+      c = 0
+    } else if (tok.startsWith('\x1b[')) {
+      const a = (m[1] ?? '').split(';')
+      const k = m[2]
+      if (k === 'H') {
+        r = (parseInt(a[0] ?? '1') || 1) - 1
+        c = (parseInt(a[1] ?? '1') || 1) - 1
+      } else if (k === 'r') {
+        top = parseInt(a[0] ?? '1') || 1
+        bot = parseInt(a[1] ?? String(rows)) || rows
+      } else if (k === 'K') {
+        const mode = parseInt(a[0] ?? '0') || 0
+        if (mode === 0 || mode === 2) {
+          for (let i = mode === 0 ? c : 0; i < cols; i++) grid[r]![i] = ' '
+        } else if (mode === 1) {
+          for (let i = 0; i <= c; i++) grid[r]![i] = ' '
+        }
+      } else if (k === 'J') {
+        const mode = parseInt(a[0] ?? '0') || 0
+        if (mode === 0) {
+          for (let i = c; i < cols; i++) grid[r]![i] = ' '
+        } else if (mode === 2) {
+          for (let row = 0; row < rows; row++) {
+            for (let i = 0; i < cols; i++) grid[row]![i] = ' '
+          }
+        }
+      } else if (k === 'T') {
+        // Scroll Down: insert n blank lines at the top of the scroll region.
+        const n = parseInt(a[0] ?? '1') || 1
+        for (let i = 0; i < n; i++) {
+          grid.splice(top - 1, 0, ' '.repeat(cols).split(''))
+          grid.splice(bot, 1)
+        }
+      } else if (k === 'L') {
+        // Insert Line: insert n blank lines at the cursor row.
+        const n = parseInt(a[0] ?? '1') || 1
+        for (let i = 0; i < n; i++) {
+          grid.splice(r, 0, ' '.repeat(cols).split(''))
+          grid.splice(bot, 1)
+        }
+      }
+      // SGR (m), save/restore cursor (s/u), DSR (6n), and other ignored sequences are no-ops
+      // for grid placement.
+    } else if (tok.startsWith('\x1b]')) {
+      // OSC sequences (window title, etc.) are non-printing.
+    } else {
+      for (const ch of tok) {
+        if (c < cols) grid[r]![c++] = ch
+      }
+    }
+  }
+  return { grid, cursor: { r, c } }
+}
+
+function renderGrid(buf: string, rows: number, cols: number): string[][] {
+  return parseTerminal(buf, rows, cols).grid
 }
 
 test('typed-but-unsubmitted text survives asynchronous output', async (t) => {
@@ -317,4 +419,98 @@ test('the box is pinned below the transcript, and progress lives only in it', as
       .map((n) => `${n}| ${line(n)}`)
       .join('\n')}`,
   )
+})
+
+test('the banner stays visible and the first post-open transcript line is close to the startup text', async (t) => {
+  // Reconstructed from the byte stream rather than searched in it. The first line written
+  // after Screen.open() is the no-goal prompt; the rule printed before it is the last startup
+  // line. The gap between them must be small, not the entire empty scroll region.
+  const dir = repo()
+  const c = await spawnConsole(dir, t, null)
+  const rows = 30
+  const cols = 100
+  const plain = (s: string) => s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '')
+  assert.ok(
+    await c.until((s) => plain(s).includes('no goal given — type one to start, or /help'), 20_000),
+    'the no-goal prompt should appear',
+  )
+
+  const grid = renderGrid(c.text(), rows, cols)
+  const lineText = (n: number) => grid[n - 1]!.join('').replace(/\s+$/, '')
+
+  const bannerRow = grid.findIndex((row) => /conclave\s+\d/.test(row.join('').replace(/\s+$/, '')))
+  assert.notEqual(bannerRow, -1, 'the banner should remain visible')
+
+  // The rule printed before Screen.open() is the last startup line.
+  const startupRuleRow = grid.findIndex((row) => /^─{20,}$/.test(row.join('').replace(/\s+$/, '')))
+  assert.notEqual(startupRuleRow, -1, 'the startup rule should be present')
+  const lastStartupRow = startupRuleRow + 1
+
+  // The no-goal prompt is the first line written after Screen.open(), so it is the first
+  // transcript line.
+  const firstTranscriptRow = grid.findIndex((row) => /no goal given — type one to start/.test(row.join('').replace(/\s+$/, '')))
+  assert.notEqual(firstTranscriptRow, -1, 'the no-goal prompt should be present in the grid')
+  const firstTranscriptRowNum = firstTranscriptRow + 1
+
+  const blankRows = Array.from(
+    { length: firstTranscriptRow - startupRuleRow - 1 },
+    (_, i) => startupRuleRow + i + 1,
+  ).filter((n) => lineText(n + 1).length === 0).length
+  assert.ok(
+    blankRows <= 2,
+    `expected at most 2 blank rows between the startup rule and the first post-open transcript line, got ${blankRows} (startup rule row ${lastStartupRow}, first transcript row ${firstTranscriptRowNum})`,
+  )
+  c.proc.kill()
+})
+
+test('successive transcript writes stay anchored to the last scrolling row', async (t) => {
+  // Each new transcript line must be written at the bottom of the scroll region, pushing the
+  // previous one up by exactly one row. A second write that lands elsewhere (for example
+  // inside the reserved box, or above the previous line) means the scroll region is not
+  // being respected.
+  const dir = repo()
+  const c = await spawnConsole(dir, t)
+  const rows = 30
+  const cols = 100
+  const plain = (s: string) => s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '')
+  assert.ok(
+    await c.until((s) => /─{20,}/.test(plain(s)), 20_000),
+    'the banner rule should appear',
+  )
+
+  c.type('>advisor first message\r')
+  assert.ok(
+    await c.until((s) => plain(s).includes('first message'), 20_000),
+    'first message should be in the transcript',
+  )
+
+  c.type('>advisor second message\r')
+  assert.ok(
+    await c.until((s) => plain(s).includes('second message'), 20_000),
+    'second message should be in the transcript',
+  )
+  await new Promise((r) => setTimeout(r, 500))
+
+  const grid = renderGrid(c.text(), rows, cols)
+  const lineText = (n: number) => grid[n - 1]!.join('').replace(/\s+$/, '')
+
+  // The reserved box is 4 rows tall, so the last scrolling row is rows - 4.
+  const lastScrollRow = rows - 4
+  const firstRows = []
+  const secondRows = []
+  for (let n = 1; n <= lastScrollRow; n++) {
+    const text = lineText(n)
+    if (text.includes('first message')) firstRows.push(n)
+    if (text.includes('second message')) secondRows.push(n)
+  }
+
+  assert.ok(
+    secondRows.includes(lastScrollRow),
+    `second message should be anchored at the last scrolling row (${lastScrollRow}), found at ${secondRows.join(',') || 'nowhere'}`,
+  )
+  assert.ok(
+    firstRows.some((n) => n < lastScrollRow),
+    `first message should be above the second in the scroll region, found at ${firstRows.join(',') || 'nowhere'}`,
+  )
+  c.proc.kill()
 })

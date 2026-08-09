@@ -1021,6 +1021,24 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     return line ? '' : `  ${dim('/ for commands  ·  > to address  ·  @ for a path  ·  no prefix goes to both')}`
   }
 
+  /**
+   * Separate the input area from the transcript.
+   *
+   * A rule drawn immediately above the prompt, and only when something has been written
+   * since the last one — otherwise every keystroke would stack rules. It is not pinned to
+   * the bottom of the screen: that needs the console to own the screen, which is a
+   * different piece of work (see the note in render.ts).
+   */
+  const prompt = () => {
+    if (done) return
+    if (screen) return void screen.draw()
+    if (dirtySincePrompt && interactive) {
+      out.write(`\n${rule(width)}\n`)
+      dirtySincePrompt = false
+    }
+    rl!.prompt()
+  }
+
   if (interactive) {
     // The console owns the screen. readline can only draw at the cursor, which is why three
     // attempts at a pinned status line failed; see screen.ts.
@@ -1035,7 +1053,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
       pending: pendingRows,
       onInterrupt: () => onInterrupt(),
     })
-    screen.open()
+    await screen.open()
     // Motion is the liveness signal, and it cannot be event-driven: a participant deep in
     // a single `Bash` call emits nothing for minutes, so an event-driven redraw left the
     // status frozen — same spinner glyph, same elapsed time — which is indistinguishable
@@ -1060,23 +1078,6 @@ export async function runSession(opts: SessionOptions): Promise<number> {
       // `[1G[0J>` escape sequences in its log because readline drew a prompt for it.
       terminal: false,
     })
-  }
-  /**
-   * Separate the input area from the transcript.
-   *
-   * A rule drawn immediately above the prompt, and only when something has been written
-   * since the last one — otherwise every keystroke would stack rules. It is not pinned to
-   * the bottom of the screen: that needs the console to own the screen, which is a
-   * different piece of work (see the note in render.ts).
-   */
-  const prompt = () => {
-    if (done) return
-    if (screen) return void screen.draw()
-    if (dirtySincePrompt && interactive) {
-      out.write(`\n${rule(width)}\n`)
-      dirtySincePrompt = false
-    }
-    rl!.prompt()
   }
   prompt()
 
