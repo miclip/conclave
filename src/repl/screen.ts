@@ -122,11 +122,36 @@ export class Screen {
    * changes is that the console arrives at it rather than starting there.
    */
   #contentRow = 0
+  /**
+   * The row the box was last painted at, so it can be erased before it is painted elsewhere.
+   *
+   * `draw()` erases from the box's BOTTOM downward, which is right while it descends — the
+   * only stale rows are the copy it just left below itself. It is wrong whenever the box
+   * moves UP, and a resize is the first thing that ever did that: the abandoned frame sits
+   * above the new one, nothing clears it, and it stays until the transcript scrolls over it.
+   */
+  #drawnTop: number | undefined
   #onResize = () => {
-    // Re-establish the scroll region for the new dimensions and redraw the box. Content that
-    // no longer fits above the floor is clamped to it — a terminal that just got shorter is
-    // already anchored, whatever it was doing before.
-    this.#contentRow = Math.min(this.#contentRow, this.#floor)
+    // A resize is the one event after which conclave does not know where its own output is.
+    //
+    // The terminal REFLOWS the scrollback it already has: every line longer than the new
+    // width rewraps, so the row the transcript ends on moves by an amount that depends on
+    // the text above, not on the size change. `#contentRow` is not told, and querying the
+    // cursor does not help — the cursor is sitting in the input box, not at the end of the
+    // transcript, so the answer describes where the box was rather than where the text is.
+    //
+    // So it anchors, which is the same answer given to a terminal that never replies to the
+    // cursor query: when the position of the content is unknown, the floor is the one place
+    // the box is certainly not on top of anything. The descending box is given up for the
+    // rest of the session, which is a real cost and the right one — the alternative on show
+    // in #54 was several box frames on screen at once, each drawn against a row that no
+    // longer meant anything.
+    if (this.#drawnTop !== undefined) {
+      // Erase the old frame first. It was drawn for the previous dimensions, so its rules are
+      // padded to a width that no longer matches and its rows are not where they were.
+      this.#out.write(`${ESC}${Math.min(this.#drawnTop, this.rows)};1H${ESC}0J`)
+    }
+    this.#contentRow = this.#floor
     this.#reserve()
     this.draw()
   }
@@ -411,6 +436,7 @@ export class Screen {
     this.#resize(this.#base + queued.length + menuRows.length - 1)
     const w = this.columns
     const top = this.#boxTop
+    this.#drawnTop = top
     const rule = '─'.repeat(Math.max(4, w))
     const prompt = this.#o.prompt()
     const visible = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '').length

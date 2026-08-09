@@ -219,16 +219,25 @@ test('resize resets the scroll region and redraws the pinned box', async () => {
   const last = resized.at(-1)
   assert.equal(Number(last?.match(/\x1b\[1;(\d+)r/)?.[1]), 26, 'resized region ends at the new last scrolling row')
 
-  // The box is redrawn after the resize, and redrawn UNDER THE CONTENT rather than at the new
-  // floor. A terminal that grew by six rows did not move the transcript, so the box does not
-  // move either — it goes on descending from where it was, and reaches the floor when the
-  // output does. Asserting a row here would re-fix the box to the bottom of the terminal,
-  // which is the arrangement two operators reported as a jump.
+  // The box anchors at the new floor rather than continuing to descend.
+  //
+  // This assertion said the opposite when the descending box was written, on the reasoning
+  // that a terminal which grew by six rows had not moved the transcript, so the box need not
+  // move either. That was wrong, and #54 is what it looked like: the terminal REFLOWS its
+  // scrollback on a resize, so `#contentRow` — a row conclave increments itself — stops
+  // describing anything real, and every subsequent frame is drawn against it. The screen
+  // ended up holding several box frames at once.
+  //
+  // Nothing in the process can recover the true position: the cursor is in the box, so the
+  // cursor query answers where the box was, not where the text is. Anchoring is the same
+  // answer given to a terminal that never replies to that query — when the content's
+  // position is unknown, the floor is the one row the box is certainly not on top of.
   const frame = h.raw().slice(h.raw().lastIndexOf('\x1b[1;26r'))
-  assert.match(frame, /\x1b\[21;1H/, 'the box should be redrawn at its current top, not at the floor')
+  assert.match(frame, /\x1b\[27;1H/, 'the box should anchor at the new floor after a resize')
   assert.match(frame, /›/)
-  // Everything below it is cleared, so the box does not leave a copy behind as it descends.
-  assert.match(frame, /\x1b\[25;1H\x1b\[0J/)
+  // And the frame drawn for the old dimensions is erased before the new one is painted.
+  // `draw()` alone only clears BELOW the box, which cannot reach a frame left above it.
+  assert.match(h.raw(), /\x1b\[21;1H\x1b\[0J/, 'the old frame should be erased, not left behind')
 })
 
 /**
