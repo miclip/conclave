@@ -28,7 +28,7 @@ import { describeTool } from '../relay/subagents.ts'
 import { formatGoalFindings, lintGoal } from '../relay/goalLint.ts'
 import { preflightRefusals } from '../relay/guardrails.ts'
 import { createWriteStream, existsSync, realpathSync } from 'node:fs'
-import { basename, join } from 'node:path'
+import { basename, join, relative } from 'node:path'
 import { Writable } from 'node:stream'
 import { clearLine, createInterface, cursorTo, type Interface } from 'node:readline'
 import { suggest } from './complete.ts'
@@ -801,10 +801,16 @@ export async function runSession(opts: SessionOptions): Promise<number> {
         // an indent in the middle of it is pasted along with everything else. A path on its
         // own line soft-wraps at the edge and stays copyable, which is the property that
         // matters for the one line whose entire purpose is being copied.
-        write(summaryLine('===', 'run log:', width))
-        write(`      ${runLogPath}`)
-        write(summaryLine('===', 'resume with:', width))
-        write(`      conclave session "<goal>" --resume ${runLogPath}`)
+        // Relative to the directory the operator is standing in, when it is under it.
+        //
+        // The log always lives in `.conclave/runs/` inside the project, so the absolute path
+        // is the project prefix repeated back at someone who is already there -- and in a
+        // temp directory that prefix is sixty characters, enough to break the line whatever
+        // is done about wrapping. `.conclave/runs/session-….ndjson` fits, and `--resume`
+        // takes it verbatim from that directory, which is where they are.
+        const shown = runLogPath.startsWith(`${opts.cwd}/`) ? relative(opts.cwd, runLogPath) : runLogPath
+        write(summaryLine('===', `run log: ${shown}`, width))
+        write(summaryLine('===', `resume with: conclave session "<goal>" --resume ${shown}`, width))
         for (const line of relay.flagSummary()) write(summaryLine('===', line, width))
         // The session does not end with the run. There are participants alive and a human
         // at the prompt; ending here would throw away a working session at the exact moment
