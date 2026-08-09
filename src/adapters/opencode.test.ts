@@ -319,3 +319,39 @@ test("close('graceful') lets an in-flight turn settle before the stream closes",
   // And it agrees with the canonical side, which is the property the seam promises.
   assert.equal((await session.snapshot()).turns.at(-1)!.state, 'process_exited')
 })
+
+test('a provider failure the child announced reaches the verdict', async () => {
+  // OpenCode announces a failed provider call as a record of its own and then exits
+  // non-zero. The parser ignored that record, so the run was graded
+  // `unknown_abnormal_end (assumed)` from the exit code alone -- true, and no help at all:
+  // the reason was in the stream and was thrown away, leaving `exit code 1` and nowhere to
+  // go. Seen for real as `CreditsError: No payment method`.
+  const error = JSON.stringify({
+    type: 'error',
+    sessionID: 'ses_1',
+    error: { name: 'APIError', data: { message: 'No payment method. Add one here: ...', statusCode: 401 } },
+  })
+  // A cascade, because one failing call usually produces several and the last is vaguer
+  // than the first.
+  const second = JSON.stringify({ type: 'error', error: { name: 'AbortError', data: { message: 'aborted' } } })
+  const { command } = stub(`${error}\n${second}\n`, 1)
+
+  const session = await OpenCodeRunAdapter.start({ cwd: REPO, role: 'implementer', command })
+  const events: AgentEvent[] = []
+  void (async () => {
+    for await (const e of session.events()) events.push(e)
+  })()
+  await session.send('go', { kind: 'orchestrator' })
+  await new Promise((r) => setTimeout(r, 600))
+
+  const end = events.find((e): e is TurnEndEvent => e.type === 'turn_end')
+  assert.ok(end, 'the turn must settle')
+  assert.equal(end.verdict.outcome, 'unknown_abnormal_end')
+  const said = end.verdict.provenance.map((p) => `${p.source}: ${p.detail}`).join(' | ')
+  assert.match(said, /exit code 1/, 'the exit is still reported')
+  assert.match(said, /No payment method/, 'and so is what the child said went wrong')
+  assert.match(said, /HTTP 401/)
+  // The first error wins; the vaguer follow-up must not displace it.
+  assert.doesNotMatch(said, /AbortError/)
+  await session.close('graceful')
+})

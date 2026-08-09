@@ -83,6 +83,19 @@ export interface OpenCodeRecord {
   type: string
   timestamp?: number
   sessionID?: string
+  /**
+   * Present on `type: "error"`, which the parser ignored entirely.
+   *
+   * OpenCode announces a failed provider call here and then exits non-zero, so the run was
+   * graded `unknown_abnormal_end (assumed)` from the exit code alone -- true, and no help at
+   * all in finding the cause. The cause was in this field the whole time. Seen with
+   * `CreditsError: No payment method`, which reads as an inexplicable exit unless the
+   * message survives.
+   */
+  error?: {
+    name?: string
+    data?: { message?: string; statusCode?: number }
+  }
   part?: {
     type?: string
     text?: string
@@ -146,6 +159,8 @@ interface TurnState {
   tokens?: TurnTokens | undefined
   /** Content hash from the last step that reported one. Artifact attribution, free. */
   snapshot?: string | undefined
+  /** What the child said went wrong, if it said anything. See `OpenCodeRecord.error`. */
+  announcedError?: string | undefined
   startedAt: number
   endedAt?: number | undefined
 }
@@ -358,6 +373,20 @@ export class OpenCodeRunAdapter implements AgentSession {
 
     const part = record.part ?? {}
     switch (record.type) {
+      // Kept, not acted on. An announced error does not settle the turn -- the process
+      // decides that by exiting -- but it is the only place the reason is stated, and
+      // without it a failed provider call is indistinguishable from any other non-zero
+      // exit. The first one wins: a cascade usually ends with something less specific
+      // than what started it.
+      case 'error': {
+        const e = record.error
+        const said = [e?.name, e?.data?.statusCode ? `HTTP ${e.data.statusCode}` : '', e?.data?.message]
+          .filter(Boolean)
+          .join(': ')
+        if (said && !turn.announcedError) turn.announcedError = said
+        break
+      }
+
       case 'step_start':
         turn.steps += 1
         if (part.snapshot) turn.snapshot = part.snapshot
@@ -501,6 +530,9 @@ export class OpenCodeRunAdapter implements AgentSession {
         confidence: 'assumed',
         provenance: [
           { source: 'process', detail: `exit code ${code}, no step_finish reason=stop` },
+          // First, when the child said why. The exit code says a turn failed; only this says
+          // what failed, and an operator reading `exit code 1` has nowhere to go.
+          ...(turn.announcedError ? [{ source: 'transport' as const, detail: turn.announcedError }] : []),
           ...(stderr.trim()
             ? [{ source: 'process' as const, detail: stderr.trim().slice(0, 400), caveat: true }]
             : []),
