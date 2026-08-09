@@ -12,6 +12,14 @@ without Conclave learning anything about that model.
 
 Supervised use. There is no orchestrator model, no summariser, and no third seat.
 
+![The conclave console: two seats joined, hooks registered and trusted, a goal routed to the advisor, and the live footer showing who is working](docs/images/console.png)
+
+The banner names the build and both seats. Everything under the rule is the run accounting
+for itself: what it registered, what it had to trust, that permission prompts are bypassed
+and on whose authority, and the session id to inspect it from another terminal. The goal is
+linted before anything starts — that warning is the tool saying the outcome cannot be graded
+better than `reasoned_but_unverified` however well the work goes.
+
 ## Supported REPLs
 
 | agent id | CLI | how it is driven | what registration it needs |
@@ -74,6 +82,34 @@ npm install
 ln -sf "$PWD/bin/conclave.ts" ~/.local/bin/conclave
 ```
 
+## Two ways to drive it
+
+Someone has to answer when the run stops — a rotation candidate, an escalation, a turn that
+ended badly, a permission prompt. That someone is **the operator**, and whether they are a
+human or a machine changes more than the interface.
+
+|  | human at a terminal | agent driving |
+|---|---|---|
+| command | `conclave session` | `conclave session --operator agent` |
+| how it answers | typed at the prompt | lines written to stdin, held open |
+| how it observes | the console: pinned footer, live narration, tab title | `conclave status --json`, `conclave events --follow` |
+| what a pause looks like | prose with its evidence | `pause.reason`, `pause.evidence`, `pause.options` as data |
+| what the advisor is told | a person is answering | a machine is: escalate readily about premises and ambiguous criteria, never about permission |
+
+`--operator agent` is not cosmetic. It changes the advisor's briefing, and it is recorded in
+the run report — because **it changes what an escalation means**. An agent operator is the
+same kind of thing as the participants and may share their blind spots, so its answer is
+another opinion with authority rather than independent confirmation. A reader auditing a run
+cannot recover that from the routing log, where both look identical.
+
+Use `session` either way. `relay` returns an outcome, so a pause has nowhere to suspend to
+and every pause point ENDS the run; `--operator agent` does not change that. The one thing
+an agent must not do is pick `relay` because the name sounds unattended.
+
+Everything the tool decides is written where a machine can read it, not only printed: a
+refused `/continue`, a pause, a resume, a rotation, a verdict and the evidence behind it.
+That is deliberate — see [Watching a session from somewhere else](#watching-a-session-from-somewhere-else).
+
 ## Using it
 
 Run it in the project you want worked on. Conclave registers its own hooks there; the
@@ -112,9 +148,16 @@ The goal is optional. Start with none and the first thing you type becomes it.
 >implementer <text>    to the implementer only
 @src/relay/relay.ts    a path. Tab completes both sigils.
 
-/pause  /continue  /rotate [reason]  /abort   /allow [who]  /deny [who]
+/pause  /continue [force]  /wait [minutes]  /rotate [reason]  /abort
+/allow [who]  /deny [who]
 /state  /log [n]  /queue  /audit  /help  /exit
 ```
+
+At a pause you may also just answer: a reply is delivered and resumes the run, because
+answering a pause is the decision. `/wait` is for the other case — the child is still
+working and every option would be destructive, so it records that you looked and chose to
+wait rather than leaving the run indistinguishable from one nobody has read. `/continue`
+refuses while the child is measurably busy; `force` overrides it.
 
 During a run, an addressed line is queued and delivered at the next turn boundary. Neither
 CLI takes input mid-turn.

@@ -231,3 +231,30 @@ test('version reports the commit when run from a checkout', () => {
   ).trim()
   assert.match(out, /^\d+\.\d+\.\d+ \([0-9a-f]{7,}(-dirty)?\)$/, `saw: ${out}`)
 })
+
+test('the README lists every console command, and no others', () => {
+  // The `--help` list is checked against `COMMANDS`; the README's was not, and drifted --
+  // `/wait` shipped and the README kept describing the set without it. A reader following
+  // documentation that omits the one command for the situation they are in has been told
+  // there is nothing they can do.
+  //
+  // Both directions, because inventing a command is the worse failure: a missing one is
+  // discoverable from `/help`, an imaginary one sends someone looking for a bug.
+  const readme = readFileSync(join(import.meta.dirname, '..', '..', 'README.md'), 'utf8')
+  const section = readme.split('### At the console')[1]?.split('\n###')[0] ?? ''
+  assert.ok(section.length > 0, 'the console section must be findable')
+  const documented = new Set([...section.matchAll(/\/[a-z]+/g)].map((m) => m[0]))
+  // Paths in the examples are not commands.
+  for (const notACommand of ['/relay', '/src', '/repl']) documented.delete(notACommand)
+
+  assert.deepEqual(
+    [...documented].filter((c) => !COMMANDS.includes(c)),
+    [],
+    'the README documents a command the console does not accept',
+  )
+  assert.deepEqual(
+    COMMANDS.filter((c) => !documented.has(c)),
+    [],
+    'the console accepts a command the README never mentions',
+  )
+})
