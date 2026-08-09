@@ -162,12 +162,29 @@ export class Screen {
   /**
    * Reserve the bottom rows.
    *
-   * The region is set first, then the cursor is parked on the last scrolling row, so the
-   * first line of output lands above the box rather than inside it.
+   * Scroll up to make room; do NOT jump the cursor down to reach it.
+   *
+   * The first version set the region and then parked the cursor on the last scrolling row,
+   * so that the next line of output would land above the box rather than inside it. That is
+   * right only when the cursor is already below that row. It is usually far above: the
+   * console prints its banner, its registrations and the Codex trust dance long before the
+   * screen is opened, so on a 40-row terminal the cursor sits around row 20 and gets thrown
+   * to row 36 -- sixteen blank rows of nothing, and then the banner scrolls off the top as
+   * output resumes. Reported as "it jumps down and the banner is never shown, like there's
+   * whitespace being injected".
+   *
+   * Writing `height` newlines instead scrolls whatever is on screen up by exactly the number
+   * of rows about to be covered, which is the amount that has to move and no more. The
+   * cursor ends where the text ended, so nothing is skipped and nothing is lost.
+   *
+   * The alternative is asking the terminal where the cursor is (`ESC[6n`) and moving only
+   * when it is below the line. That is a round trip with a reply to parse in a method that
+   * has no business being asynchronous, to save at most `height` rows.
    */
   #reserve(): void {
     const last = Math.max(1, this.rows - this.#height)
-    this.#out.write(`${ESC}1;${last}r${ESC}${last};1H`)
+    this.#out.write('\n'.repeat(this.#height))
+    this.#out.write(`${ESC}1;${last}r`)
     this.draw()
   }
 

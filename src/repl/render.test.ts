@@ -11,7 +11,7 @@
 
 import { strict as assert } from 'node:assert'
 import test from 'node:test'
-import { markdown, setColor, titleSequence } from './render.ts'
+import { markdown, setColor, summaryLine, titleSequence } from './render.ts'
 
 test('colour is off when asked, so piped output stays clean', () => {
   setColor(false)
@@ -86,4 +86,32 @@ test('a title puts the state first and cannot escape its own sequence', () => {
   assert.ok(titleSequence('working', 'x'.repeat(200)).length < 60)
   // No subject yet is legitimate: a session with no goal typed is still worth naming.
   assert.equal(titleSequence('waiting'), '\x1b]0;waiting\x07')
+})
+
+test('a long summary line wraps under its sentence, not under the marker', () => {
+  // The closing block writes one line per fact, and a carried flag is a sentence a
+  // participant wrote — often long. On a real terminal those soft-wrapped to column zero, so
+  // each continuation read as a separate broken line; seven in a row looked like the console
+  // had come apart, which is how it was reported.
+  const flag =
+    '  implementer [msg 7] — buildUrl sends orderby=time with limit=500 while toQuakes sorts ' +
+    'nearest-first client-side, so a wide search silently shows the nearest among the 500 ' +
+    'most recent rather than the nearest overall.'
+  const lines = summaryLine('===', flag, 96).split('\n')
+  assert.ok(lines.length > 1, 'it must actually wrap')
+  assert.ok(lines.every((l) => l.length <= 96), `no line may exceed the width:\n${lines.join('\n')}`)
+
+  // The marker introduces the first line only.
+  assert.match(lines[0]!, /^=== {3}implementer/)
+  assert.ok(!lines[1]!.startsWith('==='), 'a continuation is not a new item')
+
+  // ...and it hangs under the sentence, so the eye follows the text rather than the marker.
+  const textStarts = lines[0]!.indexOf('implementer')
+  assert.equal(lines[1]!.search(/\S/), textStarts, 'continuations align with the sentence')
+})
+
+test('a short summary line is left exactly as it was', () => {
+  // Most lines are short and must not gain padding for the sake of a rule about long ones.
+  assert.equal(summaryLine('===', 'run ended: done — DONE', 96), '=== run ended: done — DONE')
+  assert.equal(summaryLine('===', '8 messages routed', 96), '=== 8 messages routed')
 })

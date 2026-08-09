@@ -33,7 +33,7 @@ import { Writable } from 'node:stream'
 import { clearLine, createInterface, cursorTo, type Interface } from 'node:readline'
 import { suggest } from './complete.ts'
 import { Screen } from './screen.ts'
-import { banner, bold, colorFor, dim, elapsedSince, grey, markdown, Progress, releaseTitleSequence, rule, setColor, speakerColor, titleSequence, yellow } from './render.ts'
+import { banner, bold, colorFor, dim, elapsedSince, grey, markdown, Progress, releaseTitleSequence, rule, setColor, speakerColor, summaryLine, titleSequence, yellow } from './render.ts'
 import type { AgentEvent } from '../contract/session.ts'
 import { defaultRegistry } from '../registry/builtin.ts'
 import type { CheckSpec } from '../rotation/record.ts'
@@ -784,18 +784,18 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     for (;;) {
       const s = await handle.settled()
       if (s.kind === 'ended') {
-        write(`\n=== run ended: ${s.outcome.reason}${s.outcome.detail ? ` — ${s.outcome.detail}` : ''}`)
-        write(`=== ${relay.log.length} messages routed`)
+        write(`\n${summaryLine('===', `run ended: ${s.outcome.reason}${s.outcome.detail ? ` — ${s.outcome.detail}` : ''}`, width)}`)
+        write(summaryLine('===', `${relay.log.length} messages routed`, width))
         // The rotation summary and any carried flags, on BOTH front-ends. The console had
         // neither: a `done` carrying an unresolved caveat read as unqualified success here
         // too, and an operator who was present for the turn is not thereby guaranteed to
         // have registered a single sentence 300 lines ago.
-        write(`=== ${relay.rotationSummary()}`)
+        write(summaryLine('===', relay.rotationSummary(), width))
         // The line that makes an abnormal ending recoverable, as `relay` prints. A console
         // run ends with work in flight for the same reasons an unattended one does.
         write(`=== run log: ${runLogPath}`)
         write(`===   resume with: conclave session "<goal>" --resume ${runLogPath}`)
-        for (const line of relay.flagSummary()) write(`=== ${line}`)
+        for (const line of relay.flagSummary()) write(summaryLine('===', line, width))
         // The session does not end with the run. There are participants alive and a human
         // at the prompt; ending here would throw away a working session at the exact moment
         // the next instruction was about to arrive.

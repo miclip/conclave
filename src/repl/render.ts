@@ -54,7 +54,7 @@ const RESET = /\x1b\[[0-9;]*m/g
 const visible = (s: string) => s.replace(RESET, '').length
 
 /** Wrap to width, preserving indent and ignoring ANSI in the measurement. */
-function wrap(text: string, width: number, indent: string): string[] {
+export function wrap(text: string, width: number, indent: string): string[] {
   const words = text.split(/\s+/).filter(Boolean)
   if (words.length === 0) return []
   const lines: string[] = []
@@ -400,4 +400,30 @@ export function titleSequence(state: string, subject?: string): string {
  */
 export function releaseTitleSequence(): string {
   return '\x1b]0;\x07'
+}
+
+/**
+ * A summary line, wrapped so its continuations are legible.
+ *
+ * The closing block writes one line per fact — the outcome, the counters, the run log, and
+ * every carried flag verbatim. A flag is a sentence a participant wrote and can be long, so
+ * on a real terminal it soft-wrapped to column zero and the continuation read as a separate,
+ * broken line. Seven of them in a row looked like the console had come apart, which is what
+ * it was reported as.
+ *
+ * Hanging indent rather than truncation: these are the lines that stop a `done` reading as
+ * unqualified success, and cutting one off to fit would defeat the point of carrying it.
+ */
+export function summaryLine(marker: string, text: string, width: number): string {
+  // The line's OWN leading spaces count toward the indent. `flagSummary` indents carried
+  // items under their heading, and a continuation that ignored that would hang under the
+  // marker instead of under the sentence it continues -- which reads as a new item.
+  const own = /^\s*/.exec(text)?.[0] ?? ''
+  const indent = ' '.repeat(marker.length + 1 + own.length)
+  // `wrap` prefixes EVERY line with the indent, including the first -- it is written for
+  // blocks that are indented whole. Here the first line is introduced by the marker instead,
+  // so its indent is stripped back off and the rest keep theirs.
+  const lines = wrap(text.slice(own.length), Math.max(20, width), indent)
+  const [first, ...rest] = lines
+  return [`${marker} ${own}${(first ?? '').slice(indent.length)}`, ...rest].join('\n')
 }
