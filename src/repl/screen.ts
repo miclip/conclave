@@ -162,29 +162,12 @@ export class Screen {
   /**
    * Reserve the bottom rows.
    *
-   * Scroll up to make room; do NOT jump the cursor down to reach it.
-   *
-   * The first version set the region and then parked the cursor on the last scrolling row,
-   * so that the next line of output would land above the box rather than inside it. That is
-   * right only when the cursor is already below that row. It is usually far above: the
-   * console prints its banner, its registrations and the Codex trust dance long before the
-   * screen is opened, so on a 40-row terminal the cursor sits around row 20 and gets thrown
-   * to row 36 -- sixteen blank rows of nothing, and then the banner scrolls off the top as
-   * output resumes. Reported as "it jumps down and the banner is never shown, like there's
-   * whitespace being injected".
-   *
-   * Writing `height` newlines instead scrolls whatever is on screen up by exactly the number
-   * of rows about to be covered, which is the amount that has to move and no more. The
-   * cursor ends where the text ended, so nothing is skipped and nothing is lost.
-   *
-   * The alternative is asking the terminal where the cursor is (`ESC[6n`) and moving only
-   * when it is below the line. That is a round trip with a reply to parse in a method that
-   * has no business being asynchronous, to save at most `height` rows.
+   * The region is set first, then the cursor is parked on the last scrolling row, so the
+   * first line of output lands above the box rather than inside it.
    */
   #reserve(): void {
     const last = Math.max(1, this.rows - this.#height)
-    this.#out.write('\n'.repeat(this.#height))
-    this.#out.write(`${ESC}1;${last}r`)
+    this.#out.write(`${ESC}1;${last}r${ESC}${last};1H`)
     this.draw()
   }
 
@@ -209,22 +192,10 @@ export class Screen {
       this.#out.write(`${text}\n`)
       return
     }
-    // Printed where the text already is, NOT at the bottom of the region.
-    //
-    // This used to jump to the last scrolling row every time, so that output hugged the
-    // input box. It does -- eventually. The banner, the registrations and the trust dance
-    // are printed BEFORE the screen opens, so they sit at the top and the first line written
-    // through here lands at the bottom, with the rows between them belonging to nobody. On a
-    // busy run that band scrolls away in a minute; on a short one, like `conclave demo`, it
-    // is most of the screen for the whole run, and reads as the console having lost its
-    // banner into a void.
-    //
-    // Writing at the current position lets the text flow down from where it already is and
-    // fills that band. Nothing is lost by dropping the anchor: `draw()` saves and restores
-    // the cursor, so the content position survives every redraw, and once the region is set
-    // the terminal clamps scrolling to it -- so the cursor cannot walk into the input box
-    // however much is printed.
-    this.#out.write(`${ESC}s${ESC}u\n${text}`)
+    const last = Math.max(1, this.rows - this.#height)
+    // Save, move into the scrolling area, print, restore. `ESC[s`/`ESC[u` are honoured by
+    // every terminal that honours the region, and are cheaper than tracking a row.
+    this.#out.write(`${ESC}s${ESC}${last};1H\n${text}${ESC}u`)
     this.draw()
   }
 
