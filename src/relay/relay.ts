@@ -790,12 +790,21 @@ export class Relay {
     // it. A withdrawal with no replacement is also possible — the turn is simply open again
     // — which is why the note above stands on its own rather than waiting for this.
     if (e.type === 'turn_end') {
-      this.#supersede(
-        pending,
-        `the ${pending.outcome} verdict this pause was raised on was withdrawn and replaced ` +
-          `with ${formatVerdict(e.verdict)}; the run is still paused, and the decision is still yours`,
-        e.verdict,
-      )
+      // `completed` means the Stop hook proved the turn ended. Another `timed_out` means the
+      // watchdog fired again on the same still-running turn. Those two are the only cases where
+      // the operator must be told the running state explicitly; other outcomes are terminal
+      // verdicts and use the neutral `formatVerdict()` wording instead.
+      const outcome = e.verdict.outcome
+      const note =
+        outcome === 'completed'
+          ? `the ${pending.outcome} verdict this pause was raised on was withdrawn and replaced ` +
+            `with completed; the turn ended, but the run is still paused until you decide`
+          : outcome === 'timed_out'
+            ? `the ${pending.outcome} verdict this pause was raised on was withdrawn and replaced ` +
+              `with another timed_out; the turn is still running, so the same decision faces you`
+            : `the ${pending.outcome} verdict this pause was raised on was withdrawn and replaced ` +
+              `with ${formatVerdict(e.verdict)}; the run is still paused, and the decision is still yours`
+      this.#supersede(pending, note, e.verdict)
       this.#verdictPause = undefined
     }
   }
