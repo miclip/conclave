@@ -618,7 +618,7 @@ test('a verdict withdrawn while the operator reads the pause is surfaced in the 
   const replacement = marked.find((l) => /withdrawn and replaced/.test(l))
   assert.ok(replacement, `the supersession must carry the ~ marker:\n${text.slice(-1200)}`)
   assert.match(replacement, /timed_out/, 'the verdict the pause rests on, by name')
-  assert.match(replacement, /completed/, 'and the verdict that replaced it')
+  assert.match(replacement, /replaced with completed/, 'the replacement is terminal and the line says the turn ended')
   assert.match(replacement, /still paused/, 'surfaced, not decided')
 
   // ...and it reaches the STATUS FILE, which is where an operator outside the process reads
@@ -634,6 +634,45 @@ test('a verdict withdrawn while the operator reads the pause is surfaced in the 
     outside.session.status.pause?.superseded,
     `pause.superseded must reach the status file:\n${JSON.stringify(outside.session.status.pause, null, 2)}`,
   )
+
+  input.write('/continue\n')
+  assert.equal(await running, 0)
+})
+
+test('another timeout on the still-running turn is shown as the turn still running', async () => {
+  const dir = repo()
+  const impl = slow('impl', 'claude', ['ack', 'Did it, slowly.', 'And again.'])
+  impl.endTurn = { index: 1, verdict: TIMED_OUT }
+  const out = collect()
+  const input = new PassThrough()
+  const running = runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'claude',
+    rounds: 4,
+    checks: [],
+    registry: registryOf({
+      codex: [slow('advisor', 'codex', ['Do it.', 'More.', 'DONE'])],
+      claude: [impl],
+    }),
+    input,
+    output: out.stream,
+  })
+
+  await untilText('the pause to be printed', out.text, /paused/)
+  // The watchdog fires a second time on the same still-running turn. The line must say the
+  // turn is still running, not sound like the Stop hook proved it ended.
+  impl.lateSignal(TIMED_OUT)
+  await untilText('the replacement verdict to reach the console', out.text, /withdrawn and replaced/)
+
+  const text = out.text()
+  const marked = text.split('\n').filter((l) => /^\s*~ /.test(l))
+  const replacement = marked.find((l) => /withdrawn and replaced/.test(l))
+  assert.ok(replacement, `the supersession must carry the ~ marker:\n${text.slice(-1200)}`)
+  assert.match(replacement, /timed_out/, 'the verdict the pause rests on, by name')
+  assert.match(replacement, /replaced with another timed_out/, 'the replacement is another timeout on the still-running turn')
+  assert.doesNotMatch(replacement, /turn ended/, 'another timeout on the still-running turn does not say the turn ended')
 
   input.write('/continue\n')
   assert.equal(await running, 0)

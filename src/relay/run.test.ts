@@ -22,6 +22,7 @@ import { AgentRegistry } from '../registry/registry.ts'
 import { FakeRotationSession } from '../rotation/fakeSession.ts'
 import type { RelayEvent } from './observe.ts'
 import { Relay, type RelayOptions } from './relay.ts'
+import { RunHandle, type RunControl } from './run.ts'
 import { NO_DEADLINE_CLOCKS } from '../registry/types.ts'
 
 function repo(): string {
@@ -694,6 +695,11 @@ const COMPLETED: Verdict = {
   confidence: 'proven',
   provenance: [{ source: 'hook', detail: 'Stop' }],
 }
+const CANCELLED: Verdict = {
+  outcome: 'cancelled',
+  confidence: 'uncertain',
+  provenance: [{ source: 'orchestrator', detail: 'cancelled by test control' }],
+}
 
 /** Poll for something the relay does asynchronously. Bounded, so a failure is a failure. */
 async function until<T>(what: string, f: () => T | undefined, ms = 3000): Promise<T> {
@@ -830,6 +836,241 @@ test('a late signal does not amend a pause that was never about a verdict', asyn
   await new Promise((r) => setTimeout(r, 100))
   assert.ok(!run.pause?.superseded, 'nothing about a rotation candidate rests on a turn verdict')
   await run.abort()
+})
+
+// ---------------------------------------------------------------------------------------
+// Issue #49: a superseded verdict can be another timeout on the still-running turn, so `pause.superseded`
+// is not a "turn landed" signal. The note must say what the verdict was replaced WITH, and
+// an unexpired `/wait` must carry across a re-raised pause for the same turn.
+// ---------------------------------------------------------------------------------------
+
+test('supersession by completed says the turn ended', async (t) => {
+  const dir = repo()
+  const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it, slowly.'])
+  impl.endTurn = { index: 1, verdict: TIMED_OUT }
+  const relay = await relayOf(dir, new FakeRotationSession('advisor', 'codex', ['Do it.', 'DONE']), [impl])
+  t.after(() => relay.stop())
+
+  const run = relay.start('Keep the work moving.')
+  await run.untilPause()
+
+  impl.lateSignal(COMPLETED)
+  await until('the pause to be marked superseded', () => run.pause?.superseded?.verdict)
+
+  assert.equal(run.pause?.superseded?.verdict?.outcome, 'completed')
+  assert.match(run.pause!.superseded!.note, /completed/i)
+  assert.match(run.pause!.superseded!.note, /turn ended|turn has ended|the turn landed/i)
+  assert.doesNotMatch(run.pause!.superseded!.note, /still running|another timeout|watchdog fired again/i)
+  await run.abort()
+})
+
+test('supersession by another timed_out says the turn is still running', async (t) => {
+  const dir = repo()
+  const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it, slowly.'])
+  impl.endTurn = { index: 1, verdict: TIMED_OUT }
+  const relay = await relayOf(dir, new FakeRotationSession('advisor', 'codex', ['Do it.', 'DONE']), [impl])
+  t.after(() => relay.stop())
+
+  const run = relay.start('Keep the work moving.')
+  await run.untilPause()
+
+  impl.lateSignal(TIMED_OUT)
+  await until('the pause to be marked superseded', () => run.pause?.superseded?.verdict)
+
+  assert.equal(run.pause?.superseded?.verdict?.outcome, 'timed_out')
+  assert.match(run.pause!.superseded!.note, /timed_out/i)
+  assert.match(run.pause!.superseded!.note, /still running|another timeout|watchdog fired again|the turn is still/i)
+  assert.doesNotMatch(run.pause!.superseded!.note, /turn ended|turn has ended|the turn landed|completed/i)
+  await run.abort()
+})
+
+test('supersession by a terminal verdict other than completed uses neutral formatVerdict wording', async (t) => {
+  const dir = repo()
+  const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it, slowly.'])
+  impl.endTurn = { index: 1, verdict: TIMED_OUT }
+  const relay = await relayOf(dir, new FakeRotationSession('advisor', 'codex', ['Do it.', 'DONE']), [impl])
+  t.after(() => relay.stop())
+
+  const run = relay.start('Keep the work moving.')
+  await run.untilPause()
+
+  impl.lateSignal(CANCELLED)
+  await until('the pause to be marked superseded', () => run.pause?.superseded?.verdict)
+
+  assert.equal(run.pause?.superseded?.verdict?.outcome, 'cancelled')
+  assert.match(run.pause!.superseded!.note, /cancelled/i)
+  assert.match(run.pause!.superseded!.note, /orchestrator:cancelled by test control/, 'the provenance from formatVerdict is preserved')
+  assert.doesNotMatch(run.pause!.superseded!.note, /turn ended|turn has ended|the turn landed|still running|another timeout|watchdog fired again/i)
+  await run.abort()
+})
+
+test('an unexpired /wait carries across a re-raised pause with the same verdictOf', async (t) => {
+  const dir = repo()
+  const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it, slowly.'])
+  impl.endTurn = { index: 1, verdict: TIMED_OUT }
+  const relay = await relayOf(dir, new FakeRotationSession('advisor', 'codex', ['Do it.', 'DONE']), [impl])
+  t.after(() => relay.stop())
+
+  const run = relay.start('Keep the work moving.')
+  const pause = await run.untilPause()
+  assert.ok(pause)
+  const originalEndSeq = pause.verdictOf?.endSeq
+
+  const untilTs = Date.now() + 10_000
+  assert.ok(run.wait({ at: Date.now(), until: untilTs }))
+
+  impl.lateSignal(TIMED_OUT)
+  await until('the pause to be marked superseded', () => run.pause?.superseded?.verdict)
+
+  assert.ok(run.pause?.waiting, 'the unexpired wait is carried across the re-raised pause')
+  assert.equal(run.pause?.waiting?.until, untilTs)
+  assert.equal(run.pause?.verdictOf?.endSeq, originalEndSeq, 'the verdict the pause rests on is unchanged')
+  await run.abort()
+})
+
+test('a /wait is not carried across a re-raised pause after it has expired', async (t) => {
+  const dir = repo()
+  const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it, slowly.'])
+  impl.endTurn = { index: 1, verdict: TIMED_OUT }
+  const relay = await relayOf(dir, new FakeRotationSession('advisor', 'codex', ['Do it.', 'DONE']), [impl])
+  t.after(() => relay.stop())
+
+  const run = relay.start('Keep the work moving.')
+  await run.untilPause()
+
+  const untilTs = Date.now() - 1
+  assert.ok(run.wait({ at: Date.now() - 1000, until: untilTs }))
+
+  impl.lateSignal(TIMED_OUT)
+  await until('the pause to be marked superseded', () => run.pause?.superseded?.verdict)
+
+  assert.equal(run.pause?.waiting, undefined, 'an expired wait is dropped when the pause is re-raised')
+  await run.abort()
+})
+
+test('a /wait is not carried to a fresh pause on a different turn', async (t) => {
+  const dir = repo()
+  const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it, slowly.', 'Did it again.'])
+  impl.endTurn = { index: 1, verdict: TIMED_OUT }
+  const relay = await relayOf(dir, new FakeRotationSession('advisor', 'codex', ['Do it.', 'Do it again.', 'DONE']), [impl])
+  t.after(() => relay.stop())
+
+  const run = relay.start('Keep the work moving.')
+  const first = await run.untilPause()
+  assert.ok(first)
+  const firstEndSeq = first.verdictOf?.endSeq
+  assert.ok(run.wait({ at: Date.now(), until: Date.now() + 10_000 }))
+
+  // The supersession resolves the first turn, so the operator can continue. The next turn ends
+  // with another timed_out and raises a fresh pause — the wait decision was tied to the first.
+  impl.lateSignal(COMPLETED)
+  await until('the first pause to be marked superseded', () => run.pause?.superseded?.verdict)
+  await run.continue()
+
+  impl.endTurn = { index: 2, verdict: TIMED_OUT }
+  const second = await run.untilPause()
+  assert.ok(second)
+  assert.notEqual(second.verdictOf?.endSeq, firstEndSeq, 'the second pause rests on a different turn')
+  assert.equal(second.waiting, undefined, 'the wait from the first turn does not leak to the next')
+  await run.abort()
+})
+
+// ---------------------------------------------------------------------------------------
+// RunHandle memory keyed by verdictOf: the in-place mutation is preserved, but a later,
+// distinct pause object for the same turn must also carry an unexpired wait decision.
+// ---------------------------------------------------------------------------------------
+
+function runHandle(): RunHandle {
+  const control = {
+    rotate: async () => ({ status: 'rolled_back', reason: 'test', detail: 'test' }) as any,
+    constrain: () => ({}) as any,
+    requestStop: () => {},
+    requestPause: () => {},
+  } satisfies RunControl
+  return new RunHandle(control)
+}
+
+const verdictOf = (participant: string, endSeq: number) => ({ participant, endSeq })
+
+function pauseShape(participant: string, endSeq: number): Omit<import('./run.ts').RunPause, 'at'> {
+  return {
+    reason: 'turn_incomplete',
+    detail: 'timed out',
+    evidence: [],
+    options: ['continue', 'abort'],
+    verdictOf: verdictOf(participant, endSeq),
+    atSeq: endSeq,
+  }
+}
+
+test('RunHandle copies an unexpired wait to a distinct later pause with the same verdictOf', async () => {
+  const run = runHandle()
+  const firstDecision = run.pauseAt(pauseShape('impl', 1))
+  const firstPause = run.pause
+  assert.ok(firstPause)
+
+  const untilTs = Date.now() + 10_000
+  assert.ok(run.wait({ at: Date.now(), until: untilTs }))
+  assert.equal(firstPause.waiting?.until, untilTs)
+
+  await run.continue()
+  await firstDecision
+
+  const secondDecision = run.pauseAt(pauseShape('impl', 1))
+  const secondPause = run.pause
+  assert.ok(secondPause)
+  assert.notEqual(firstPause, secondPause, 'the two pauses are distinct objects')
+  assert.ok(secondPause.waiting, 'the unexpired wait is copied onto the distinct later pause')
+  assert.equal(secondPause.waiting?.until, untilTs)
+  assert.equal(secondPause.verdictOf?.endSeq, 1)
+
+  await run.continue()
+  await secondDecision
+})
+
+test('RunHandle does not copy an expired wait to a distinct later pause', async () => {
+  const run = runHandle()
+  const firstDecision = run.pauseAt(pauseShape('impl', 1))
+  assert.ok(run.wait({ at: Date.now() - 1000, until: Date.now() - 1 }))
+
+  await run.continue()
+  await firstDecision
+
+  const secondDecision = run.pauseAt(pauseShape('impl', 1))
+  assert.equal(run.pause?.waiting, undefined, 'an expired wait is not copied onto a later pause')
+
+  await run.continue()
+  await secondDecision
+})
+
+test('RunHandle does not copy a wait to a distinct later pause with a different endSeq', async () => {
+  const run = runHandle()
+  const firstDecision = run.pauseAt(pauseShape('impl', 1))
+  assert.ok(run.wait({ at: Date.now(), until: Date.now() + 10_000 }))
+
+  await run.continue()
+  await firstDecision
+
+  const secondDecision = run.pauseAt(pauseShape('impl', 2))
+  assert.equal(run.pause?.waiting, undefined, 'a different endSeq is a different turn')
+
+  await run.continue()
+  await secondDecision
+})
+
+test('RunHandle does not copy a wait to a distinct later pause with a different participant', async () => {
+  const run = runHandle()
+  const firstDecision = run.pauseAt(pauseShape('impl', 1))
+  assert.ok(run.wait({ at: Date.now(), until: Date.now() + 10_000 }))
+
+  await run.continue()
+  await firstDecision
+
+  const secondDecision = run.pauseAt(pauseShape('advisor', 1))
+  assert.equal(run.pause?.waiting, undefined, 'a different participant is a different seat')
+
+  await run.continue()
+  await secondDecision
 })
 
 // ---------------------------------------------------------------------------------------

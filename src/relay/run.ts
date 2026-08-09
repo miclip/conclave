@@ -102,7 +102,14 @@ export interface PauseSupersession {
   at: number
   /** Assembled from the revision rather than narrated, per §9: what the human should read. */
   note: string
-  /** The replacement verdict, once the adapter has issued one. */
+  /**
+   * The replacement verdict, once the adapter has issued one.
+   *
+   * Most outcomes are terminal: the turn has ended one way or another. `timed_out` is the
+   * exception — a repeatedly firing watchdog can re-report the same still-running turn. The
+   * replacement `outcome` is what distinguishes "the turn ended" from "the turn is still
+   * running".
+   */
   verdict?: Verdict | undefined
 }
 
@@ -202,9 +209,22 @@ export class RunHandle {
   /** Waiting `untilPause()` callers. Resolved with the pause, or `undefined` if it ended. */
   #watchers: ((p: RunPause | undefined) => void)[] = []
   #settled: { resolve: (o: RunOutcome) => void; reject: (e: Error) => void }[] = []
+  /**
+   * Wait decisions the operator has made, keyed by the verdict they were made against.
+   *
+   * The current pause is mutated in place, so the memory is not needed for it. It is kept so
+   * a later, distinct pause object raised for the same `verdictOf` can carry the same
+   * unexpired decision forward — otherwise a repeatedly firing watchdog `timed_out` would
+   * re-ask the same judgement, which is what issue #49 is about.
+   */
+  #waitMemory = new Map<string, PauseWait>()
 
   constructor(control: RunControl) {
     this.#control = control
+  }
+
+  #verdictKey(v: { participant: string; endSeq: number }): string {
+    return `${v.participant}:${v.endSeq}`
   }
 
   get state(): RunState {
@@ -338,7 +358,16 @@ export class RunHandle {
 
   /** Suspend the loop until the operator decides. */
   pauseAt(pause: Omit<RunPause, 'at'>): Promise<Decision> {
-    this.#pause = { ...pause, at: Date.now() }
+    const full = { ...pause, at: Date.now() }
+    // A later pause for the same turn inherits an unexpired wait decision so the operator
+    // is not asked again until their stated deadline. Different turns or expired waits do not.
+    if (full.verdictOf) {
+      const stored = this.#waitMemory.get(this.#verdictKey(full.verdictOf))
+      if (stored && stored.until > Date.now()) {
+        full.waiting = stored
+      }
+    }
+    this.#pause = full
     this.#state = 'paused'
     const watchers = this.#watchers
     this.#watchers = []
@@ -385,12 +414,35 @@ export class RunHandle {
   wait(info: PauseWait): boolean {
     if (this.#state !== 'paused' || !this.#pause) return false
     this.#pause.waiting = info
+    if (this.#pause.verdictOf) {
+      this.#waitMemory.set(this.#verdictKey(this.#pause.verdictOf), info)
+    }
     return true
   }
 
   supersede(info: PauseSupersession): boolean {
     if (this.#state !== 'paused' || !this.#pause) return false
     this.#pause.superseded = info
+    // MUTATES the current pause in place, preserving the existing contract. The stored wait
+    // decision is also kept keyed by `verdictOf`, so a later distinct pause for the same turn
+    // can carry it forward.
+    //
+    // A `completed` replacement means the turn ended, so the wait is no longer about this turn.
+    // Another `timed_out` is the only case where the turn is still running; an unexpired wait
+    // carries across, but one that has lapsed is not a decision any more. Any other terminal
+    // outcome also ends the turn, so the wait is cleared.
+    if (this.#pause.verdictOf && info.verdict) {
+      const key = this.#verdictKey(this.#pause.verdictOf)
+      if (info.verdict.outcome === 'timed_out') {
+        if (this.#pause.waiting && this.#pause.waiting.until <= Date.now()) {
+          this.#pause.waiting = undefined
+          this.#waitMemory.delete(key)
+        }
+      } else {
+        this.#pause.waiting = undefined
+        this.#waitMemory.delete(key)
+      }
+    }
     return true
   }
 
@@ -400,6 +452,7 @@ export class RunHandle {
     this.#outcome = outcome
     this.#state = 'ended'
     this.#pause = undefined
+    this.#waitMemory.clear()
     const watchers = this.#watchers
     this.#watchers = []
     for (const w of watchers) w(undefined)
