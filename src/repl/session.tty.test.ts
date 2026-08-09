@@ -395,25 +395,48 @@ test('the box is pinned below the transcript, and progress lives only in it', as
         top = parseInt(a[0] ?? '1') || 1
         bot = parseInt(a[1] ?? String(rows)) || rows
       } else if (k === 'K') for (let i = col; i < cols; i++) grid[r]![i] = ' '
+      else if (k === 'J') {
+        // Erase in display. Without this the model kept every row the console had erased,
+        // and the box appeared to exist at every position it had ever occupied — so a test
+        // looking for the input row found the oldest one and read the transcript line above
+        // it as a missing rule. The console has erased to end-of-screen since it started
+        // clearing under a descending box; the emulator simply could not see it.
+        const mode = parseInt(a[0] ?? '0') || 0
+        const from = mode === 1 ? 0 : mode === 2 ? 0 : r
+        const to = mode === 1 ? r : rows - 1
+        for (let y = from; y <= to; y++) {
+          const startCol = mode === 0 && y === r ? col : 0
+          for (let i = startCol; i < cols; i++) grid[y]![i] = ' '
+        }
+      }
     } else for (const ch of tok) if (col < cols) grid[r]![col++] = ch
   }
   const line = (n: number) => grid[n - 1]!.join('').replace(/\s+$/, '')
 
+  // Find the box rather than assuming it is at the bottom of the terminal. It is only there
+  // once output has filled the screen; before that it sits directly under the last transcript
+  // line and descends as more is printed. This test is about the box's internal layout and
+  // about where the status may appear, neither of which depends on which row it starts on.
+  const inputRow = Array.from({ length: rows }, (_, i) => i + 1).find((n) =>
+    /›\s*typing here/.test(line(n)),
+  )
+  assert.ok(inputRow, `the input row should be on screen, holding what was typed`)
+
   // The status is inlaid into the top rule rather than given a row of its own: a permanent
   // row for one short phrase is a row spent on nothing.
-  assert.match(line(rows - 3), /─{10,}/, 'rule above the input')
-  assert.match(line(rows - 2), /›\s*typing here/, 'the input row holds what was typed')
-  assert.match(line(rows - 1), /─{20,}/, 'rule below the input')
+  assert.match(line(inputRow - 1), /─{10,}/, 'rule above the input')
+  assert.match(line(inputRow), /›\s*typing here/, 'the input row holds what was typed')
+  assert.match(line(inputRow + 1), /─{20,}/, 'rule below the input')
   // The row below answers what is being typed. With an ordinary line typed and no
   // completion pending it is empty, which is the point — it is not a status line.
-  assert.ok(!/⋯/.test(line(rows)), 'the row below is not a second status line')
+  assert.ok(!/⋯/.test(line(inputRow + 2)), 'the row below is not a second status line')
 
   // Wherever the status appears, it is on the top rule and nowhere else. Asserting that it
   // IS present would be timing-dependent — it exists only while a turn runs — but asserting
   // where it may appear holds whether or not one is running.
   const statusRows = Array.from({ length: rows }, (_, i) => i + 1).filter((n) => /⋯/.test(line(n)))
   assert.deepEqual(
-    statusRows.filter((n) => n !== rows - 3),
+    statusRows.filter((n) => n !== inputRow - 1),
     [],
     `the status appeared off the top rule — in the transcript it reads as duplicates:\n${statusRows
       .map((n) => `${n}| ${line(n)}`)
@@ -463,11 +486,17 @@ test('the banner stays visible and the first post-open transcript line is close 
   c.proc.kill()
 })
 
-test('successive transcript writes stay anchored to the last scrolling row', async (t) => {
-  // Each new transcript line must be written at the bottom of the scroll region, pushing the
-  // previous one up by exactly one row. A second write that lands elsewhere (for example
-  // inside the reserved box, or above the previous line) means the scroll region is not
-  // being respected.
+test('a second message prints below the first without moving it', async (t) => {
+  // The property is that ALREADY-PRINTED TEXT DOES NOT MOVE. Output goes under the last line
+  // and the box follows it down; nothing above is disturbed.
+  //
+  // The version this replaces asserted the opposite — that every write lands on the region's
+  // last row — which is true only once the box has reached the floor. Starting there is what
+  // two operators reported as a bug: first as a band of blank rows between the startup rule
+  // and the first line, then, after that was "fixed" by scrolling the screen down to close
+  // it, as the whole terminal lurching downward and taking their shell prompt with it. The
+  // old assertion held throughout both, because a console that puts every line at the floor
+  // satisfies it whether or not it moved the screen to get there.
   const dir = repo()
   const c = await spawnConsole(dir, t)
   const rows = 30
@@ -484,6 +513,17 @@ test('successive transcript writes stay anchored to the last scrolling row', asy
     'first message should be in the transcript',
   )
 
+  // Where the first message sits BEFORE the second one is sent. Captured rather than
+  // computed: the row depends on how many setup lines this build prints, and a test that
+  // hard-codes it fails for reasons that have nothing to do with the property.
+  const rowOf = (text: string, at: string) => {
+    const g = renderGrid(at, rows, cols)
+    for (let n = 1; n <= rows; n++) if (g[n - 1]!.join('').includes(text)) return n
+    return 0
+  }
+  const firstRowBefore = rowOf('first message', c.text())
+  assert.ok(firstRowBefore > 0, 'first message should be on screen before the second is sent')
+
   c.type('>advisor second message\r')
   assert.ok(
     await c.until((s) => plain(s).includes('second message'), 20_000),
@@ -493,6 +533,14 @@ test('successive transcript writes stay anchored to the last scrolling row', asy
 
   const grid = renderGrid(c.text(), rows, cols)
   const lineText = (n: number) => grid[n - 1]!.join('').replace(/\s+$/, '')
+
+  // The whole point: printing the second message must not have moved the first.
+  const firstRowAfter = rowOf('first message', c.text())
+  assert.equal(
+    firstRowAfter,
+    firstRowBefore,
+    `the first message moved from row ${firstRowBefore} to ${firstRowAfter} when the second was printed`,
+  )
 
   // The reserved box is 4 rows tall, so the last scrolling row is rows - 4.
   const lastScrollRow = rows - 4
@@ -505,12 +553,19 @@ test('successive transcript writes stay anchored to the last scrolling row', asy
   }
 
   assert.ok(
-    secondRows.includes(lastScrollRow),
-    `second message should be anchored at the last scrolling row (${lastScrollRow}), found at ${secondRows.join(',') || 'nowhere'}`,
+    secondRows.length > 0 && firstRows.length > 0,
+    `both messages should be in the scroll region: first at ${firstRows.join(',') || 'nowhere'}, second at ${secondRows.join(',') || 'nowhere'}`,
   )
   assert.ok(
-    firstRows.some((n) => n < lastScrollRow),
-    `first message should be above the second in the scroll region, found at ${firstRows.join(',') || 'nowhere'}`,
+    Math.min(...secondRows) > Math.max(...firstRows),
+    `the second message should be below the first, found first at ${firstRows.join(',')} and second at ${secondRows.join(',')}`,
+  )
+  // And the box is directly under the newest line rather than at the floor with a gap. The
+  // blank band between the two was the first of the two reported bugs.
+  const boxTop = Math.max(...secondRows) + 1
+  assert.ok(
+    boxTop <= lastScrollRow + 1 && /─{10,}/.test(lineText(boxTop)),
+    `the box should start immediately under the last transcript line (row ${boxTop}), found ${JSON.stringify(lineText(boxTop))}`,
   )
   c.proc.kill()
 })
