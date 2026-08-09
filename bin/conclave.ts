@@ -46,7 +46,8 @@ import {
   formatSessionLine,
 } from '../src/workspace/sessionView.ts'
 import { formatGoalFindings, lintGoal } from '../src/relay/goalLint.ts'
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, statSync } from 'node:fs'
+import { version } from '../src/version.ts'
+import { closeSync, existsSync, mkdirSync, openSync, readSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { seedCodexTrust } from '../src/deployment/codexHookTrust.ts'
 import { defaultRegistry } from '../src/registry/builtin.ts'
@@ -262,49 +263,6 @@ Commands:
                                    escape codes included, so a rendering fault can be
                                    inspected rather than screenshotted.
 `
-
-/**
- * The version in the banner, read from package.json.
- *
- * A release ships one archive per platform and they are otherwise indistinguishable, so a
- * session has to be able to say which build produced it. Read rather than compiled in,
- * because there is no build step to compile it in at.
- */
-/**
- * What this build actually is, not what its package.json claims.
- *
- * `package.json` is bumped once per release, so a checkout running thirteen commits past a
- * tag reported the tag -- and a symlink on PATH pointing into a working tree is the normal
- * way to run this while developing it. Two projects filed bugs against builds it described
- * as `0.2.7`; one of them supplied the commit by hand because the tool would not.
- *
- * A release archive carries no `.git`, so it gets the plain version and nothing is appended.
- * A checkout gets the commit and a `-dirty` marker, which is the difference between "I know
- * exactly what you ran" and a guess.
- */
-function version(): string {
-  let base = 'unknown'
-  try {
-    base = JSON.parse(readFileSync(join(import.meta.dirname, '..', 'package.json'), 'utf8')).version
-  } catch {
-    /* an install missing its manifest is broken in a way this line cannot fix */
-  }
-  try {
-    const root = join(import.meta.dirname, '..')
-    const git = (args: string[]) =>
-      execFileSync('git', args, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim()
-    // `--git-dir` rather than `rev-parse HEAD` so a checkout of some OTHER repository that
-    // happens to contain this install is not mistaken for conclave's own history.
-    if (git(['rev-parse', '--show-toplevel']) !== realpathSync(root)) return base
-    const commit = git(['rev-parse', '--short', 'HEAD'])
-    const dirty = git(['status', '--porcelain']) === '' ? '' : '-dirty'
-    return `${base} (${commit}${dirty})`
-  } catch {
-    // No git, or not a checkout: a release archive, which is exactly the case where the
-    // package version is the whole truth.
-    return base
-  }
-}
 
 /**
  * `--claude` / `--codex` select what to register; naming neither registers both.
@@ -807,6 +765,7 @@ async function main(argv: string[]): Promise<number> {
     // mode the operator had configured — and an unattended run is the one with nobody to
     // answer a prompt it then stops at.
     const runStartedAt = Date.now()
+    const build = version()
 
     if (!rejectUnicodeDashes(rest)) return 1
 
@@ -886,6 +845,7 @@ async function main(argv: string[]): Promise<number> {
         startedAt: runStartedAt,
         messages: 0,
         participants: [],
+        build,
       })
       if (asJson) {
         console.log(JSON.stringify({ detached: true, id, pid: child.pid, dir, stdio: logFile }, null, 2))
@@ -1091,6 +1051,7 @@ async function main(argv: string[]): Promise<number> {
       front: 'relay',
       startedAt: runStartedAt,
       logPath: recordPath,
+      build,
     })
     say(`  session: ${recording.id} — conclave status ${recording.id}`)
     recording.set('running')
@@ -1104,7 +1065,7 @@ async function main(argv: string[]): Promise<number> {
       if (asJson) {
         // stdout, alone, parseable in full. The prose lines below still go to stderr, so a
         // human watching a --json run is not left staring at nothing.
-        console.log(JSON.stringify(await runReport(relay, { goal, outcome, startedAt: runStartedAt }), null, 2))
+        console.log(JSON.stringify(await runReport(relay, { goal, outcome, startedAt: runStartedAt, build }), null, 2))
       }
       say(`\n=== relay ended: ${outcome.reason}${outcome.detail ? ` — ${outcome.detail}` : ''}`)
       failed = outcome.reason === 'transport_failed' || outcome.reason === 'ceiling'

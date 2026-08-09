@@ -108,6 +108,7 @@ export async function withHeartbeat<T>(
   }
 }
 import { describeLiveness, sampleLiveness, type ChildLiveness } from '../outcomes/liveness.ts'
+import { version } from '../version.ts'
 import { guard } from '../workspace/sessionLock.ts'
 import { newSessionId, projectRootFor, recordSession } from '../workspace/sessionRecord.ts'
 import { RunLogWriter, readRunLog, runLogExists } from '../relay/resume.ts'
@@ -612,6 +613,17 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     front: 'session',
     startedAt: sessionStartedAt,
     logPath: runLogPath,
+    // The same value shown in the banner, captured at startup. Recomputing at shutdown would
+    // lose the commit identity in a release archive or a checkout that moves after the run.
+    // Computed, never taken from the caller.
+    //
+    // This was `opts.version ?? '0.0.0'` -- the string the BANNER is given. The CLI happens
+    // to pass the real one, so the record looked right there and was wrong everywhere else:
+    // a caller that passes nothing recorded `0.0.0`, and `demo` recorded `demo`. A record
+    // whose correctness depends on its caller remembering to supply the truth is the thing
+    // this field exists to replace, since the whole point is telling "this build predates
+    // the feature" from "the feature is broken" without asking anyone.
+    build: version(),
   })
   write(dim(`  session ${recording.id} — inspect from elsewhere with: conclave status ${recording.id}`))
 

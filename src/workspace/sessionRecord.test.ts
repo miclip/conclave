@@ -136,6 +136,7 @@ test('a status is written at construction, before anything has happened', () => 
     startedAt: 1,
     messages: 0,
     participants: [],
+    build: 'test-build',
   })
   assert.ok(existsSync(rec.statusPath))
   // The window this closes is real: launching two CLIs takes seconds, and an operator
@@ -159,6 +160,7 @@ test('liveness is reconciled against the pid, never read from the file', () => {
     startedAt: 1,
     messages: 0,
     participants: [],
+    build: 'test-build',
   })
   const mine = readSession(root, 'mine')
   assert.equal(mine?.alive, true)
@@ -189,6 +191,7 @@ test('a session is resolved by prefix, and an ambiguous one is refused', () => {
       startedAt,
       messages: 0,
       participants: [],
+      build: 'test-build',
     })
   mk('20260101-000000-1', 1)
   mk('20260101-000000-2', 2)
@@ -220,6 +223,7 @@ test('the event stream is written to disk, terminal event included', async () =>
     goal: 'g',
     front: 'relay',
     startedAt: Date.now(),
+    build: 'test-build',
   })
   relay.stream.emit({ type: 'activity', participant: 'implementer', rank: 'implementer', event: { type: 'turn_start', seq: 1, at: 1, prompt: 'do it' } as never })
   relay.stream.emit({ type: 'run_end', reason: 'done' })
@@ -243,6 +247,7 @@ test('an outcome survives a later state change; a pause does not', async () => {
     goal: 'g',
     front: 'session',
     startedAt: Date.now(),
+    build: 'test-build',
   })
   const pause = {
     reason: 'operator_requested' as const,
@@ -281,6 +286,7 @@ test('a seat stopped at a permission prompt says so in the status file', async (
     goal: 'g',
     front: 'relay',
     startedAt: Date.now(),
+    build: 'test-build',
   })
   relay.pending.push({ id: 'implementer', tool: 'Bash' })
   // Driven by an EVENT rather than by a lifecycle change, which is the whole point: a seat
@@ -315,6 +321,7 @@ test('a turn reaches the status file with its grade, not just its state', async 
     goal: 'g',
     front: 'session',
     startedAt: Date.now(),
+    build: 'test-build',
   })
   // Empty rather than absent before anything has run: a reader must be able to tell "no
   // turns yet" from "this build does not report turns".
@@ -347,6 +354,7 @@ test('a turn ending refreshes the record without waiting for a lifecycle change'
     goal: 'g',
     front: 'relay',
     startedAt: Date.now(),
+    build: 'test-build',
   })
   relay.seats.implementer!.turns = [graded('impl-turn-0')]
   // A long run reports `running` once and then nothing until it is over. If turns were only
@@ -384,6 +392,7 @@ test('a slow snapshot cannot overwrite the turns a newer one already wrote', asy
     goal: 'g',
     front: 'relay',
     startedAt: Date.now(),
+    build: 'test-build',
   })
   // The first read sees one turn and takes 120ms to say so; the second sees two and is
   // instant. Run concurrently and unordered, the first would land last and the record would
@@ -419,6 +428,7 @@ test('close() takes a last snapshot, so graded turns survive the ended state', a
     goal: 'g',
     front: 'session',
     startedAt: Date.now(),
+    build: 'test-build',
   })
   recording.set('ended', { outcome: { reason: 'done', detail: 'DONE' } })
   // Graded only after the front-end has already said `ended` — which is the real order:
@@ -448,6 +458,7 @@ test('a snapshot that fails keeps the turns already recorded, rather than blanki
     goal: 'g',
     front: 'relay',
     startedAt: Date.now(),
+    build: 'test-build',
   })
   relay.seats.implementer!.turns = [graded('impl-turn-0')]
   await recording.refresh()
@@ -492,6 +503,7 @@ function stale(
     messages: 0,
     participants: [],
     eventsPath: join(dir, 'events.ndjson'),
+    build: 'test-build',
   }
   writeFileSync(join(dir, 'status.json'), `${JSON.stringify(status, null, 2)}\n`)
   writeFileSync(status.eventsPath, '{"type":"run_end","reason":"done"}\n')

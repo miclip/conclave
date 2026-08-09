@@ -68,6 +68,7 @@ function record(
     messages: 0,
     participants: [],
     eventsPath: join(dir, 'events.ndjson'),
+    build: 'test-build',
   }
   writeFileSync(join(dir, 'status.json'), `${JSON.stringify(status, null, 2)}\n`)
   writeFileSync(status.eventsPath, '{"type":"run_end","reason":"done"}\n')
