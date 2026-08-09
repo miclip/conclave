@@ -108,6 +108,45 @@ conditions into resolution authority + blocking scope*, not *add a `seat` field*
 fossilize the abstraction that needs removing. Everything below is preserved as written, and
 should be read knowing this supersedes the pause treatment in both designs.
 
+## The constraint that outranks everything below
+
+**One advisor and one implementer stays the default, and its UX does not change.** Adding
+seats brings new arguments and nothing else. Someone who wants one implementer must not pay
+for a feature they did not ask for.
+
+The design below violates this in four places, all of which are consequences of N>1 and must
+be gated on it rather than shipped with the feature:
+
+| would change at N=1 | why it must not |
+| --- | --- |
+| worktree per seat, enforced | the implementer leaves the operator's checkout and the work stops appearing in their `git status` |
+| clean-base rule refusing a dirty tree | a new refusal for something that works today |
+| seat ids `impl-a`/`impl-b` | `bin/conclave.ts:988` sets `id: 'implementer'`; changing it changes every message header, the routing log, the run report and `status --json` |
+| ceilings become mandatory | they stay optional at N=1, exactly as now |
+
+**The rule: N=1 is the identity case of every new abstraction, not a special case.** If one
+needs an `if (seats.length === 1)` branch, it is the wrong abstraction.
+
+- a seat's tree at N=1 IS the operator's cwd; branch is the current branch; merge is a no-op
+- the task queue at N=1 with one seat dispatching serially IS the round loop
+- blocking scope at N=1 — `participant`, `workstream`, `conclave` all denote the same set
+
+Each degenerates to today's behaviour by construction rather than by a conditional.
+
+**Enforce it, do not promise it.** "We will not change the default" erodes one commit at a
+time. This repo already knows the answer: `frontEndParity.test.ts:20` inverts the usual
+arrangement — divergence is ALLOWED and must be DECLARED, with a reason per entry (`:58`).
+Nine capabilities had diverged silently before that guard existed. A `DEFAULT_UNCHANGED`
+guard pins the observable surface of a default run: participant ids exactly
+`['advisor', 'implementer']`, the implementer's cwd is the run's cwd with no worktree
+created, no flag becomes required, and `status --json` gains no key at N=1 outside the
+declared set.
+
+**One deliberate exception.** Authority routing sends `implementer_unanswered` to the advisor
+before the operator, so a default run interrupts the human less than today. A real change at
+N=1, an improvement, and it belongs in the declared set and the release note rather than
+being discovered.
+
 ## The headline: both designs found the same fracture, from opposite ends
 
 I led with it: **a pause today is a global quiescent point and concurrency destroys it.**
