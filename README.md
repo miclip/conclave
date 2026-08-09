@@ -27,7 +27,7 @@ better than `reasoned_but_unverified` however well the work goes.
 | `claude` | Claude Code | pty + hooks + transcript | generated `--settings`, written per session |
 | `codex` | Codex CLI | pty + hooks + transcript | project `.codex/hooks.json`, **and** those hooks trusted in your user-level config |
 | `opencode` | OpenCode | `run --format json` on stdout | none |
-| `kimi` | Kimi CLI | `--print --output-format stream-json` | none |
+| `kimi` | Kimi CLI (needs a provider; access waitlisted — see below) | `--print --output-format stream-json` | none |
 
 Any of the three can take either seat. Assign them per participant:
 
@@ -48,6 +48,29 @@ REPL — the OpenCode system prompt, tool set and agent loop still apply. `kimi`
 REPL itself, with its own prompt, tools and agent loop; point it at a provider with
 `--implementer-args "--config-file ~/.kimi-conclave.toml"`. Maincode's Matilda is
 [#25](https://github.com/miclip/conclave/issues/25).
+
+**A Kimi seat needs a provider, and says so badly.** With none configured the CLI exits 1
+having printed `LLM not set`, and conclave grades that `unknown_abnormal_end (assumed)` from
+the exit code alone — accurate, and no help at all in finding the cause. That is what
+`--config-file` is for, and omitting it is the first mistake to rule out:
+
+```sh
+conclave session "<goal>" --implementer kimi \
+  --implementer-args "--config-file ~/.kimi-conclave.toml"
+```
+
+Separately, **Kimi Code access is waitlisted** at the time of writing, so a configured seat
+may still be unable to reach a model. The adapter is written and fixtured against
+`kimi 1.49.0`; what it waits on is access, not work.
+
+A Kimi *model* is reachable today through OpenCode without either:
+
+```sh
+conclave session "<goal>" --implementer opencode \
+  --implementer-args "-m opencode/kimi-k2.7-code"
+```
+
+which is the different-model-same-harness case above, not the Kimi REPL.
 
 The four are not equally well understood, and `npm run conformance` prints the difference
 rather than hiding it. Claude Code and Codex announce turn completion through hooks; OpenCode
