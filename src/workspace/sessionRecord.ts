@@ -157,6 +157,15 @@ export interface SessionStatus {
   eventsPath: string
   /** The resumable routing log, when one is being written. */
   logPath?: string | undefined
+  /**
+   * The build string that produced this session.
+   *
+   * `conclave version` reports the package version and, in a checkout, the commit. A status
+   * file read after the fact must be able to say which build wrote it, and recomputing at
+   * read time would borrow whatever git state exists then -- which in a release archive is
+   * none. Captured at startup and recorded once.
+   */
+  build: string
 }
 
 /** A status plus what could only be learned from outside it. */
@@ -582,6 +591,7 @@ export function recordSession(
     front: 'relay' | 'session'
     startedAt: number
     logPath?: string | undefined
+    build: string
   },
 ): SessionRecording {
   /** The last adapter event per seat, which is what "what is it doing" means live. */
@@ -621,6 +631,7 @@ export function recordSession(
     startedAt: opts.startedAt,
     messages: relay.log.length,
     participants: seats(),
+    build: opts.build,
     ...(opts.logPath ? { logPath: opts.logPath } : {}),
   })
 

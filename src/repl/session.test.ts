@@ -932,6 +932,35 @@ test('a console session records a status and an event stream a stranger can read
   assert.equal(events.at(-1)?.type, 'run_end', `the stream must end with run_end:\n${events.slice(-3).map((e) => e.type).join(', ')}`)
 })
 
+test('the recorded session build matches the CLI version for this checkout', async () => {
+  const dir = repo()
+  const out = collect()
+  const expected = execFileSync(process.execPath, [join(import.meta.dirname, '..', '..', 'bin', 'conclave.ts'), 'version'], {
+    encoding: 'utf8',
+  }).trim()
+  await runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'claude',
+    rounds: 2,
+    checks: [],
+    registry: registryOf({
+      codex: [new FakeRotationSession('advisor', 'codex', ['Do it.', 'DONE'])],
+      claude: [new FakeRotationSession('impl', 'claude', ['ack', 'Did it.'])],
+    }),
+    input: script([]),
+    output: out.stream,
+  })
+  const found = resolveSession(dir)
+  assert.ok('session' in found)
+  // Deliberately NOT passed in. The first version handed `version: expected` to the session
+  // and asserted it came back, which tests a round trip and not the thing that matters: the
+  // record has to identify the build whether or not a caller remembered to say so, because
+  // the caller that forgets is exactly the one whose record you end up trying to read.
+  assert.equal(found.session.status.build, expected)
+})
+
 /**
  * What a finished console run leaves behind for someone who was not watching it.
  *

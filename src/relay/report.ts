@@ -65,6 +65,14 @@ export interface RunReport {
   goal: string
   cwd: string
   /**
+   * The build string captured at startup.
+   *
+   * Reported rather than recomputed at shutdown so the record names the build that ran the
+   * session, not the build that happened to be present when the report was assembled. Release
+   * archives have no git history, so recomputing would silently drop the commit identity.
+   */
+  build: string
+  /**
    * Who was answering escalations.
    *
    * Recorded because it changes what an escalation MEANS. An agent operator is the same kind
@@ -130,6 +138,7 @@ export interface ReportInput {
   outcome: RunOutcome
   startedAt: number
   endedAt?: number
+  build: string
 }
 
 /**
@@ -166,6 +175,7 @@ export async function runReport(relay: Relay, input: ReportInput): Promise<RunRe
     schema: REPORT_SCHEMA,
     goal: input.goal,
     cwd: relay.cwd,
+    build: input.build,
     operator: relay.operator,
     outcome: input.outcome,
     // Read whole. Resolving a declared clock against this run's configuration is the relay's

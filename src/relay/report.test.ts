@@ -13,6 +13,7 @@ import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 
 const REPO = fileURLToPath(new URL('../..', import.meta.url))
+const BUILD = 'test-build'
 import { FakeRotationSession } from '../rotation/fakeSession.ts'
 import { AgentRegistry } from '../registry/registry.ts'
 import type { DeadlineSupport } from '../registry/types.ts'
@@ -89,10 +90,15 @@ async function reportOf(replies: string[] = ['DONE']) {
   })
   const startedAt = Date.now()
   const outcome = await relay.run('a goal')
-  const report = await runReport(relay, { goal: 'a goal', outcome, startedAt })
+  const report = await runReport(relay, { goal: 'a goal', outcome, startedAt, build: BUILD })
   await relay.stop()
   return { report, relay, dir }
 }
+
+test('the report carries the supplied build string', async () => {
+  const { report } = await reportOf()
+  assert.equal(report.build, BUILD)
+})
 
 test('the report carries the same claims the prose lines make', async () => {
   const { report, dir } = await reportOf()
@@ -134,7 +140,7 @@ async function mixedDeadlines(turnWatchdogMs?: number) {
   })
   const startedAt = Date.now()
   const outcome = await relay.run('a goal')
-  const report = await runReport(relay, { goal: 'a goal', outcome, startedAt })
+  const report = await runReport(relay, { goal: 'a goal', outcome, startedAt, build: BUILD })
   await relay.stop()
   return report
 }
@@ -231,7 +237,7 @@ test('a flagged caveat reaches the record', async () => {
     maxRounds: 2,
   })
   const outcome = await relay.run('a goal')
-  const report = await runReport(relay, { goal: 'a goal', outcome, startedAt: Date.now() })
+  const report = await runReport(relay, { goal: 'a goal', outcome, startedAt: Date.now(), build: BUILD })
   await relay.stop()
 
   assert.equal(report.flags.length, 1)
@@ -427,7 +433,7 @@ test('an agent operator is told what to escalate, and what not to', async () => 
   assert.match(first, /not independent confirmation/)
 
   // Recorded, because it changes what an escalation MEANS and the routing log cannot show it.
-  const report = await runReport(relay, { goal: 'a goal', outcome, startedAt: Date.now() })
+  const report = await runReport(relay, { goal: 'a goal', outcome, startedAt: Date.now(), build: BUILD })
   assert.equal(report.operator, 'agent')
   await relay.stop()
 })
@@ -484,7 +490,7 @@ test('the implementer gets a guaranteed last word when the advisor says DONE (#3
     maxRounds: 3,
   })
   const outcome = await relay.run('a goal with a false premise')
-  const report = await runReport(relay, { goal: 'g', outcome, startedAt: Date.now() })
+  const report = await runReport(relay, { goal: 'g', outcome, startedAt: Date.now(), build: BUILD })
   await relay.stop()
 
   assert.match(impl.received.at(-1)!, /is anything unresolved, unverified, or unanswered/)
@@ -509,7 +515,7 @@ test('an unstructured closing answer is carried anyway (#38)', async () => {
     maxRounds: 3,
   })
   const outcome = await relay.run('a goal')
-  const report = await runReport(relay, { goal: 'g', outcome, startedAt: Date.now() })
+  const report = await runReport(relay, { goal: 'g', outcome, startedAt: Date.now(), build: BUILD })
   await relay.stop()
 
   assert.equal(report.flags.length, 1)
@@ -531,7 +537,7 @@ test('NONE means nothing outstanding, and adds no noise', async () => {
     maxRounds: 3,
   })
   const outcome = await relay.run('a goal')
-  const report = await runReport(relay, { goal: 'g', outcome, startedAt: Date.now() })
+  const report = await runReport(relay, { goal: 'g', outcome, startedAt: Date.now(), build: BUILD })
   await relay.stop()
 
   assert.deepEqual(report.flags, [])
