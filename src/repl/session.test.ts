@@ -1386,7 +1386,10 @@ test('a console run records a routing log it can be resumed from', async () => {
   assert.ok(lines.length > 0)
   assert.ok(lines.some((m) => m.kind === 'goal'), 'including the goal')
   // And the operator is told where it is, or it may as well not exist.
-  assert.match(first.text(), /resume with: conclave session/)
+  // The label and the command are separate lines now: a path wrapped with a hanging indent
+  // is pasted with the indent in it, and this is the one line whose purpose is being copied.
+  assert.match(first.text(), /resume with:/)
+  assert.match(first.text(), /conclave session "<goal>" --resume /)
 
   const second = collect()
   await runSession({
