@@ -28,7 +28,7 @@ import { Progress } from './render.ts'
 const REPO = join(import.meta.dirname, '..', '..')
 
 /** A driver that runs the console over fakes slow enough to type at. */
-function driver(dir: string, goal: string | null = 'Keep the work moving.'): string {
+function driver(dir: string, goal: string | null = 'Keep the work moving.', quiet: boolean = false): string {
   const path = join(dir, 'driver.mjs')
   const goalArg = goal === null ? 'undefined' : JSON.stringify(goal)
   writeFileSync(
@@ -61,7 +61,7 @@ for (const [agent, session] of [['codex', slow('advisor', 'codex', ['Do it.', 'M
   })
 }
 // Emit activity on a timer, so something lands while a line is half-typed.
-setInterval(() => impl.emit({ type: 'tool_use', tool: 'Read', input: {}, seq: 99, at: Date.now(), provisional: true }), 700).unref()
+${quiet ? '' : `setInterval(() => impl.emit({ type: 'tool_use', tool: 'Read', input: {}, seq: 99, at: Date.now(), provisional: true }), 700).unref()`}
 
 const code = await runSession({
   cwd: ${JSON.stringify(dir)}, goal: ${goalArg},
@@ -89,9 +89,9 @@ function repo(): string {
  * survived, and node could not exit — so one broken expectation hung the whole suite past
  * every per-test timeout. A test that cannot fail cleanly is worse than no test.
  */
-async function spawnConsole(dir: string, t?: { after: (fn: () => void) => void }, goal: string | null = 'Keep the work moving.') {
+async function spawnConsole(dir: string, t?: { after: (fn: () => void) => void }, goal: string | null = 'Keep the work moving.', quiet: boolean = false) {
   const { default: pty } = await import('node-pty')
-  const p = pty.spawn(process.execPath, [driver(dir, goal)], {
+  const p = pty.spawn(process.execPath, [driver(dir, goal, quiet)], {
     name: 'xterm-256color',
     cols: 100,
     rows: 30,
@@ -362,7 +362,7 @@ test('the box is pinned below the transcript, and progress lives only in it', as
   // in the stream whether it landed in the box, above it, or was overwritten a frame later.
   // Replaying the escapes into a grid answers where it actually IS.
   const dir = repo()
-  const c = await spawnConsole(dir, t)
+  const c = await spawnConsole(dir, t, undefined, true)
   assert.ok(await c.until((s) => /─{20,}/.test(s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '')), 20_000))
   c.type('typing here')
   await new Promise((r) => setTimeout(r, 1500))
@@ -449,7 +449,7 @@ test('the banner stays visible and the first post-open transcript line is close 
   // after Screen.open() is the no-goal prompt; the rule printed before it is the last startup
   // line. The gap between them must be small, not the entire empty scroll region.
   const dir = repo()
-  const c = await spawnConsole(dir, t, null)
+  const c = await spawnConsole(dir, t, null, true)
   const rows = 30
   const cols = 100
   const plain = (s: string) => s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '')
