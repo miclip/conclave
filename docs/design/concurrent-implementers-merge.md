@@ -54,9 +54,57 @@ Advisor-authority conditions need one bound: the advisor's answer is untrusted t
 other, so a condition that recurs unresolved escalates on its second occurrence. Same rule as
 the merge-conflict design.
 
+### Second axis: blocking scope
+
+Authority alone leaves seat identity homeless. It belongs on a second, orthogonal axis.
+
+```ts
+type ResolutionRequest = {
+  reason: ResolutionReason
+  authority: 'mechanical' | 'advisor' | 'operator'
+  scope:
+    | { kind: 'participant'; participantId: string }
+    | { kind: 'workstream'; workstreamId: string }
+    | { kind: 'conclave' }
+}
+```
+
+**Block the smallest scope whose continuation would require making the unresolved decision.**
+
+At N=1 seat-scoping looks plausible because there is one obvious target. At N=4 it collapses:
+A asks what the advisor meant, B hits a permission prompt, C compacts, D conflicts with a
+restricted human instruction. Four conditions, four respondents, four blast radii — and B, C
+and D should keep working. A global pause costs more with every seat added; stopping everyone
+for one seat's scope question is barrier synchronization on every ambiguity.
+
+`RunPause` becomes an EFFECT rather than the model: what happens when an operator-authority
+request meets interactive latency. That also avoids a state machine spelling
+`paused_for_A_and_C_but_not_B` — resolution requests are just multiple outstanding blockers,
+each scoped.
+
+**Both axes are derived.** Authority from configuration and evidence, as above. Scope from the
+task graph: `dependsOn` makes blast radius the transitive closure of a blocked task's
+dependents, so `workstream` is computed rather than declared. Dependencies are not sufficient
+on their own — this design discovers contention at MERGE time, so two seats with no declared
+edge can still collide. Scope must trace artifacts as well as dependencies, which is what
+`#attributeArtifacts` is for, and is how `authority_conflict` gets a real scope: restricted
+message to artifacts, artifacts to tasks, tasks to dependents.
+
+**`advisor_escalated` leaks**, because coordination for every workstream flows through one
+advisor. Its real scope is *admission of new tasks*, with in-flight seats running to
+completion — the `drain` shutdown already designed here, rather than a new scope kind.
+
+**The global stop does not disappear; it becomes emergent.** A waits on the advisor, the
+advisor waits on the operator, the operator is asleep. Nothing in the model notices. The
+system must detect when the blocked set covers everything that could progress and report ONE
+global stop rather than four independent waits that each look like healthy waiting — the
+failure this project keeps finding in itself, a true state that does not carry the fact which
+would resolve it. It also gives the queue-depth ceiling a second job: bound outstanding
+requests, not just queued tasks.
+
 **Consequence for the build order below.** Section 4 of "Where I had something the session
-did not" said scope the pause first at N=1. That still holds, but the work is *split
-`PauseReason` by resolution authority*, not *add a `seat` field* — adding `seat` would
+did not" said scope the pause first at N=1. That still holds, but the work is *split unresolved
+conditions into resolution authority + blocking scope*, not *add a `seat` field* — adding `seat` would
 fossilize the abstraction that needs removing. Everything below is preserved as written, and
 should be read knowing this supersedes the pause treatment in both designs.
 
