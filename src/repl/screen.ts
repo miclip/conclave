@@ -209,10 +209,22 @@ export class Screen {
       this.#out.write(`${text}\n`)
       return
     }
-    const last = Math.max(1, this.rows - this.#height)
-    // Save, move into the scrolling area, print, restore. `ESC[s`/`ESC[u` are honoured by
-    // every terminal that honours the region, and are cheaper than tracking a row.
-    this.#out.write(`${ESC}s${ESC}${last};1H\n${text}${ESC}u`)
+    // Printed where the text already is, NOT at the bottom of the region.
+    //
+    // This used to jump to the last scrolling row every time, so that output hugged the
+    // input box. It does -- eventually. The banner, the registrations and the trust dance
+    // are printed BEFORE the screen opens, so they sit at the top and the first line written
+    // through here lands at the bottom, with the rows between them belonging to nobody. On a
+    // busy run that band scrolls away in a minute; on a short one, like `conclave demo`, it
+    // is most of the screen for the whole run, and reads as the console having lost its
+    // banner into a void.
+    //
+    // Writing at the current position lets the text flow down from where it already is and
+    // fills that band. Nothing is lost by dropping the anchor: `draw()` saves and restores
+    // the cursor, so the content position survives every redraw, and once the region is set
+    // the terminal clamps scrolling to it -- so the cursor cannot walk into the input box
+    // however much is printed.
+    this.#out.write(`${ESC}s${ESC}u\n${text}`)
     this.draw()
   }
 
