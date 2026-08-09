@@ -363,6 +363,25 @@ test('the advisor is told to investigate itself rather than delegate everything'
   assert.match(opening, /what you FOUND/)
 })
 
+test('the implementer is told the difference between UNANSWERED and FLAG', async () => {
+  // The two markers are only useful if the implementer knows which one to use. The distinction
+  // is load-bearing: UNANSWERED: pauses the run for a build-changing scope question, while
+  // FLAG: qualifies the result and the run continues. The briefing must say both what the
+  // failure mode is and what the implementer should still decide itself.
+  const { relay, impl } = await twoParty(['DONE'], [])
+  await relay.run('a goal')
+
+  const opening = impl.received[0]!
+  assert.match(opening, /UNANSWERED:/, 'the implementer must be told about the UNANSWERED: marker')
+  assert.match(opening, /had to choose a build-changing scope direction without an answer/, 'UNANSWERED: is for a build-changing scope choice made without an answer')
+  assert.match(opening, /Include what you did\s+meanwhile in the same reply/, 'UNANSWERED: must carry what was done meanwhile')
+  assert.match(opening, /PAUSES the run/, 'an UNANSWERED: line pauses the run')
+  assert.match(opening, /FLAG:/, 'the implementer must be told about the FLAG: marker')
+  assert.match(opening, /does NOT stop the run/, 'a FLAG: does not stop the run')
+  assert.match(opening, /Choices about\s+how to build remain yours/, 'how-to-build choices remain the implementer')
+  assert.match(opening, /use FLAG: for every concern that only qualifies the result[\s\S]*?than invalidating it/, 'FLAG: is for concerns that only qualify the result')
+})
+
 // --- asking a participant outside a run ----------------------------------------------
 
 test('a participant can be asked directly once the run has ended', async () => {

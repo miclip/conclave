@@ -305,6 +305,25 @@ export function extractFlags(prose: string): string[] {
 }
 
 /**
+ * The marker that separates a build-changing scope question from a result-qualifying concern.
+ *
+ * The relay cannot read intent, so it needs a line-initial prefix. A question that would change
+ * what is built is answered on the implementer's authority if the run continues, so it must
+ * pause for a human answer; a concern that only qualifies the result is a `FLAG:` and the run
+ * continues. The distinction is the whole reason the two markers exist.
+ */
+export const UNANSWERED_MARKER = /^\s*UNANSWERED:\s*(.+)$/gim
+
+export function extractUnanswered(prose: string): string[] {
+  const out: string[] = []
+  for (const m of prose.matchAll(UNANSWERED_MARKER)) {
+    const text = m[1]?.trim()
+    if (text) out.push(text)
+  }
+  return out
+}
+
+/**
  * How the advisor says something to the HUMAN without halting the run.
  *
  * Until now it had two options and neither is this. Fold the finding into the next
@@ -428,7 +447,14 @@ If you finish work while something remains unchecked -- a test you did not run, 
 took from a comment rather than confirmed, an assumption you could not close -- end your
 report with a line beginning FLAG: and say it in one sentence. A flag does NOT stop the run.
 It is carried into the final summary so the operator sees it, because the summary is the part
-anyone actually reads.`
+anyone actually reads.
+
+If you had to choose a build-changing scope direction without an answer, end your reply with a
+line beginning UNANSWERED: followed by the question in one sentence. Include what you did
+meanwhile in the same reply. An UNANSWERED line PAUSES the run until the human answers it; it
+is not a flag, because the build cannot proceed until the question is settled. Choices about
+how to build remain yours; use FLAG: for every concern that only qualifies the result rather
+than invalidating it.`
 
 /**
  * What the implementer is told INSTEAD of the goal.
@@ -1950,6 +1976,26 @@ export class Relay {
         text: report.prose,
         ...(report.unsettled ? { unsettled: true } : {}),
       })
+
+      // A build-changing scope question is not a report the advisor can act on. The
+      // implementer is the one that would choose an answer by continuing, so the loop stops
+      // and records both the question and what has been done so far. This is the distinction
+      // the briefing draws between a FLAG: (a result-qualifying concern) and an UNANSWERED:
+      // line (something that has to be settled before the build can proceed).
+      const questions = extractUnanswered(report.prose)
+      if (questions.length > 0) {
+        const question = questions[0]!
+        const done = report.prose.replace(UNANSWERED_MARKER, '').trim().replace(/\n{3,}/g, '\n\n')
+        const halted = await this.#halt(handle, {
+          reason: 'implementer_unanswered',
+          detail: `UNANSWERED: ${question}\n\nDone so far: ${done || '(nothing recorded)'}`,
+          evidence: [
+            `${impl.id} asked a build-changing scope question that the instruction did not settle`,
+            report.prose,
+          ],
+        })
+        if (halted) return halted
+      }
 
       // Empty AND unverified is not a report. The turn completed — the hook proved it —
       // but the relay read the transcript before it settled and got nothing, so what would

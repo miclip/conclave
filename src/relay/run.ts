@@ -39,6 +39,14 @@ export type PauseReason =
   | 'rotation_candidate'
   /** The advisor asked for a human. */
   | 'advisor_escalated'
+  /**
+   * The implementer asked a build-changing scope question that the instruction does not settle.
+   *
+   * A flag qualifies the result; an unanswered question blocks the build, because continuing
+   * would choose an answer on the implementer's authority rather than the human's. The pause
+   * carries the question and what has been done so far.
+   */
+  | 'implementer_unanswered'
   /** A turn ended as something other than `completed`. */
   | 'turn_incomplete'
   /**

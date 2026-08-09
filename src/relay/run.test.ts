@@ -285,6 +285,71 @@ test('an advisor escalation is a pause, and continuing asks it again rather than
   assert.ok(advisor.received.some((m) => m.includes('It is in scope.')), 'the human answer must reach the advisor')
 })
 
+test('an implementer UNANSWERED marker pauses the run with the question and what was done', async (t) => {
+  // A FLAG: qualifies the result; an UNANSWERED: line asks a question that would change the
+  // build if the implementer answered it itself. The loop stops before the advisor reasons
+  // from an instruction that has not actually settled the scope.
+  const dir = repo()
+  const impl = new FakeRotationSession('impl', 'claude', [
+    'ack',
+    'Read the existing routes.\n' +
+      'UNANSWERED: Should the new endpoint be under /api/v1 or /api/v2?',
+    'Done.',
+    'NONE',
+  ])
+  const advisor = new FakeRotationSession('advisor', 'codex', [
+    'Read the routes and report what you find.',
+    'Use /api/v1 for the endpoint.',
+    'DONE',
+  ])
+  const relay = await relayOf(dir, advisor, [impl])
+  t.after(() => relay.stop())
+
+  const run = relay.start('Add the endpoint.')
+  const pause = await run.untilPause()
+  assert.ok(pause)
+  assert.equal(pause.reason, 'implementer_unanswered')
+  assert.ok(pause.detail.includes('UNANSWERED: Should the new endpoint be under /api/v1 or /api/v2?'))
+  assert.ok(pause.detail.includes('Done so far:'))
+  assert.ok(pause.detail.includes('Read the existing routes'))
+
+  run.injectConstraint('Use /api/v1.', { only: 'implementer' })
+  await run.continue()
+
+  assert.equal((await run.result()).reason, 'done')
+  assert.ok(
+    impl.received.some((m) => m.includes('Use /api/v1.')),
+    'the human answer must reach the implementer',
+  )
+  assert.ok(
+    !relay.log.some((m) => m.kind === 'instruction' && /UNANSWERED:/.test(m.text)),
+    'the UNANSWERED marker is not routed as an instruction',
+  )
+})
+
+test('a FLAG marker does not pause the run', async (t) => {
+  // A FLAG: is a result-qualifying concern, not a build-blocking question. It is carried into
+  // the summary and the run continues, so the distinction from UNANSWERED: is enforced by
+  // behaviour rather than only by the briefing.
+  const dir = repo()
+  const relay = await relayOf(
+    dir,
+    new FakeRotationSession('advisor', 'codex', ['Do it.', 'DONE']),
+    [
+      new FakeRotationSession('impl', 'claude', [
+        'ack',
+        'Done.\nFLAG: conformance.sh remains unrun; inherited reasoning.',
+      ]),
+    ],
+  )
+  t.after(() => relay.stop())
+
+  const run = relay.start('Do the thing.')
+  assert.equal(await run.untilPause(), undefined, 'a FLAG does not stop the run')
+  assert.equal((await run.result()).reason, 'done')
+  assert.ok(relay.flags.some((f) => /conformance\.sh/.test(f.text)))
+})
+
 test('a declined candidate is remembered, and a LATER compaction raises it again', async (t) => {
   // Found by three tests hanging: without this the same compaction re-pauses every round
   // forever, and the operator either abandons the feature or stops reading the pauses.
