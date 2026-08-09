@@ -9,6 +9,57 @@ which parts are adopted.
 is the decision layer over it — read that one for the model, this one for what changed and
 why.
 
+## Superseded first: pauses are not one thing
+
+Both designs below treat the pause as a structure to *scope* — mine by adding a seat, the
+session's by splitting `PauseReason` into a per-seat `SeatBlock`. Both are wrong in the same
+way, and the correction came from the operator after reading them:
+
+**Classify unresolved conditions by resolution authority, not by originating seat.**
+
+`RunPause` conflates DETECTION of an unresolved condition with ESCALATION to the human. They
+look like one thing only because the first operator happened to be a person.
+
+```ts
+type ResolutionAuthority = 'mechanical' | 'advisor' | 'operator'
+```
+
+`operator`, not `human`: it is a person interactively and an agent under `--operator agent`.
+Naming it `human` bakes latency into an epistemic classification. The authority boundary is
+identical in both modes; only the cost of crossing it differs — an interactive operator
+suspends the run, an agent operator resolves synchronously and continues.
+
+Of today's six reasons, `advisor_escalated`, `authority_conflict` and `operator_requested`
+are operator authority; `implementer_unanswered` is the advisor's, because the advisor
+authored the instruction being questioned; `turn_incomplete` is mechanical. Two of six are
+handed to a human today that the advisor could answer — at N=1, now.
+
+`operator_requested` is operator-directed but is not an escalation: it is an externally
+requested suspension, and probably a distinct shape in the type even though it shares a
+respondent.
+
+**And authority is derived, not declared — the product already does this.** Supplying
+`--checks` IS the operator pre-delegating rotation authority, by supplying the verification
+method that makes the decision mechanical: `session.ts:472` says a degraded implementer
+"escalates to you rather than being replaced" without it, and `relay.ts:1170` reports
+`rotation: NOT ARMED (no checks configured)`. The same condition is `mechanical` when armed
+and `operator` when not. So the authority is computed from configuration and evidence rather
+than stored per reason.
+
+That splits operator authority in two: **delegable** (rotation, once a verification method
+exists) and **structurally non-delegable** (`authority_conflict`, where the information is
+deliberately withheld from the advisor — no capability moves it).
+
+Advisor-authority conditions need one bound: the advisor's answer is untrusted text like any
+other, so a condition that recurs unresolved escalates on its second occurrence. Same rule as
+the merge-conflict design.
+
+**Consequence for the build order below.** Section 4 of "Where I had something the session
+did not" said scope the pause first at N=1. That still holds, but the work is *split
+`PauseReason` by resolution authority*, not *add a `seat` field* — adding `seat` would
+fossilize the abstraction that needs removing. Everything below is preserved as written, and
+should be read knowing this supersedes the pause treatment in both designs.
+
 ## The headline: both designs found the same fracture, from opposite ends
 
 I led with it: **a pause today is a global quiescent point and concurrency destroys it.**
