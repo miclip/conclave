@@ -43,6 +43,21 @@
 
 import { execFileSync } from 'node:child_process'
 
+/**
+ * Below this, a child is not doing work.
+ *
+ * Was 0.5, with a comment asserting that was "comfortably below anything actually running a
+ * model turn" -- asserted, never measured. An idle Claude Code TUI sits above it: it redraws
+ * a spinner and services timers, and an operator watched one hold just under 1% for nearly
+ * four hours while conclave insisted it was working.
+ *
+ * 3 is calibrated against both ends of the same day's readings rather than invented: an idle
+ * session at ~1%, and a working one at 12-17% while its turn was demonstrably producing
+ * files. It is a heuristic and the number will be wrong for some machine; what must not
+ * happen again is a number chosen by intuition and then described as though it were not.
+ */
+export const IDLE_CPU_PERCENT = 3
+
 export interface ChildLiveness {
   pid: number
   /** Whether the process still exists at all. */
@@ -94,10 +109,7 @@ export async function sampleLiveness(
     if (i < count - 1) await new Promise((r) => setTimeout(r, everyMs))
   }
   const alive = samples.length > 0
-  // Below a threshold rather than exactly zero: a process doing nothing still wakes for
-  // timers and signal handling, and `ps` rounds. 0.5% is comfortably below anything that is
-  // actually running a model turn or a test suite.
-  return { pid, alive, samples, idle: alive && samples.every((c) => c < 0.5) }
+  return { pid, alive, samples, idle: alive && samples.every((c) => c < IDLE_CPU_PERCENT) }
 }
 
 /**

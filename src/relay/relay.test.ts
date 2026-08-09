@@ -93,6 +93,17 @@ class FakeSession implements AgentSession {
         provisional: true,
       })
     }
+    for (const text of this.#narration) {
+      this.#emit({
+        type: 'message',
+        role: 'assistant',
+        text,
+        turnKey: key,
+        seq: ++this.#seq,
+        at: Date.now(),
+        provisional: true,
+      })
+    }
     this.#emit({
       type: 'turn_end',
       verdict: { outcome: 'completed', confidence: 'proven', provenance: [{ source: 'hook', detail: 'Stop' }] },
@@ -166,6 +177,17 @@ class FakeSession implements AgentSession {
 
   /** Called on every send, so a fake can change the working tree the way a real turn does. */
   onSend: ((message: string) => void) | undefined
+
+  /**
+   * Narration streamed during the turn, as a real adapter emits it.
+   *
+   * The console renders these live, which is the proof that a turn's prose exists in memory
+   * even when the transcript later yields none of it -- the case this exists to exercise.
+   */
+  #narration: string[] = []
+  streamNarration(...lines: string[]): void {
+    this.#narration = lines
+  }
 
   /** Narration and closing message as the parsers now distinguish them. */
   #split: { narration: string; report: string } | undefined
@@ -1151,4 +1173,38 @@ test('a report that never arrives escalates in terms of what was lost', async ()
   assert.match(escalation.text, /record-\d\.md/, 'and name the file that changed, so the loss is legible')
   assert.match(escalation.text, /resume/, 'and warn that a resume starts from a turn saying nothing')
   rmSync(dir, { recursive: true, force: true })
+})
+
+test('a completed turn whose transcript yields nothing is rebuilt from what it was seen to say', async () => {
+  // #39's remaining half, found in a live run on a build that already had the first half.
+  // The Stop-hook fallback only helps when `last_assistant_message` is present; twice in one
+  // session it was not, both salvage windows expired, and one of the discarded reports
+  // described eight changed files. The work was on disk and the account of it was thrown
+  // away while a copy sat in the event list the console had been rendering from all along.
+  const impl = new FakeSession('claude', 'impl', ['ack', 'IGNORED', 'NONE'])
+  impl.lagTranscript('never arrives', 60_000, { silent: true })
+  impl.streamNarration('Read the parser.', 'Rewrote the inline-table branch and added a test.')
+
+  const relay = await Relay.start({
+    registry: registryWith({ codex: new FakeSession('codex', 'advisor', ['Do it.', 'DONE']), claude: impl }),
+    cwd: process.cwd(),
+    lead: { id: 'advisor', agent: 'codex', role: 'advisor' },
+    implementer: { id: 'implementer', agent: 'claude', role: 'implementer' },
+    maxRounds: 2,
+    transcriptSettleMs: 100,
+    transcriptSalvageMs: 150,
+  })
+  await relay.run('Keep the work moving.')
+  await relay.stop()
+
+  const report = relay.log.filter((m) => m.kind === 'report').at(-1)
+  assert.match(report?.text ?? '', /Rewrote the inline-table branch/, 'the streamed narration is routed rather than a blank')
+
+  // Marked, not passed off. Narration is longer and less pointed than a closing statement,
+  // and a reader deciding how much to trust an instruction built on it should know which of
+  // the two they have.
+  assert.ok(
+    relay.log.some((m) => /rebuilt from the 2 message\(s\) streamed during the turn/.test(m.text)),
+    `the log must say the report was reconstructed:\n${relay.log.map((m) => m.text).join('\n---\n')}`,
+  )
 })

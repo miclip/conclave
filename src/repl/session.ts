@@ -107,6 +107,7 @@ export async function withHeartbeat<T>(
     progress.done(label)
   }
 }
+import { describeLiveness, sampleLiveness } from '../outcomes/liveness.ts'
 import { guard } from '../workspace/sessionLock.ts'
 import { newSessionId, projectRootFor, recordSession } from '../workspace/sessionRecord.ts'
 import { RunLogWriter, readRunLog, runLogExists } from '../relay/resume.ts'
@@ -720,12 +721,28 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     // Overridable, because the measurement is a measurement: a child pinned by something
     // unrelated would otherwise be unresumable, and taking the decision away from the
     // operator is not what a pause is for.
-    const busy = run.pause?.evidence.find((e) => /is still working \(cpu/.test(e))
-    if (busy && !opts.force) {
-      write(yellow('  not continuing: the child looks alive and busy.'))
-      write(`  ${busy}`)
-      write('  wait for it to finish, or /continue force to send anyway.')
-      return
+    // Sampled NOW, never read off the pause.
+    //
+    // The first version matched the liveness line in `pause.evidence` -- a string captured
+    // when the pause was RAISED. So the check that decides "is it safe to continue at this
+    // moment" was made from a snapshot of the past, and it could never lift: a child that
+    // went idle after the pause still carried an evidence line saying it was working, so
+    // `/continue` refused forever and the run could not be resumed at all.
+    //
+    // Reported after nearly four hours of it, by an operator whose only way out was a flag
+    // they had not been told about. A guard that cannot change its mind is not a guard, it
+    // is a wall.
+    const seat = run.pause?.verdictOf?.participant
+    const child = relay.participants.find((x) => (seat ? x.id === seat : x.rank === 'implementer'))
+    const pid = child?.session.childPid
+    if (pid !== undefined && !opts.force) {
+      const now = await sampleLiveness(pid)
+      if (now.alive && !now.idle) {
+        write(yellow('  not continuing: the child is working right now.'))
+        write(`  ${describeLiveness(now, 0)}`)
+        write('  wait for it to finish, or /continue force to send anyway.')
+        return
+      }
     }
     await run.continue()
     wake()

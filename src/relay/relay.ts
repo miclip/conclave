@@ -1289,7 +1289,44 @@ export class Relay {
       })
     }
     this.#collectEvidence(p, snap)
-    const prose = proseOf(snap)
+    let prose = proseOf(snap)
+
+    // Last resort: rebuild the report from what we WATCHED the child say.
+    //
+    // The transcript is the canonical account and this is not it -- but a completed turn
+    // whose canonical account is empty is the case where canonical has already failed. The
+    // adapter streamed `message` events throughout the turn (it is how the console renders
+    // narration live), so the prose exists in memory even when the snapshot has none of it
+    // and the Stop hook carried no `last_assistant_message` to fall back to.
+    //
+    // Observed twice in one live run, on a build that already had the hook fallback: both
+    // turns completed, both salvage windows expired, and one of the lost reports described
+    // eight changed files. The work was on disk and the account of it was thrown away while
+    // a copy sat in the event list.
+    //
+    // Marked as reconstructed rather than passed off as the report. It is the narration, not
+    // the closing message, so it is longer and less pointed than what the peer would have
+    // received -- and a reader deciding how much to trust an instruction built on it should
+    // be told which one they have.
+    if (prose.trim() === '') {
+      const streamed = p.events
+        .slice(before)
+        .filter((e): e is Extract<AgentEvent, { type: 'message' }> => e.type === 'message' && e.role === 'assistant')
+        .map((e) => e.text.trim())
+        .filter(Boolean)
+      if (streamed.length > 0) {
+        prose = streamed.join('\n\n')
+        this.#record({
+          from: 'orchestrator',
+          fromRank: 'human',
+          to: [],
+          kind: 'note',
+          text:
+            `${p.id}'s transcript yielded no report, so the one below was rebuilt from the ` +
+            `${streamed.length} message(s) streamed during the turn — narration, not its closing statement`,
+        })
+      }
+    }
     for (const text of extractFlags(prose)) {
       this.flags.push({ participant: p.id, text, seq: this.log.length })
     }
@@ -2034,6 +2071,11 @@ export class Relay {
             `turn_end was proven by the hook; the transcript never produced a body`,
             `waited the settle window, then a further salvage window, and it stayed empty`,
             `raising --settle may help — see transcriptSettleMs and transcriptSalvageMs`,
+            // Wired here too, and it was not. Liveness went into the two `turn_incomplete`
+            // paths only, so a live run's three pauses carried it once -- and the two that
+            // missed out were these, where "the report could not be read" is exactly when
+            // knowing whether the child is still writing changes what the operator does.
+            ...(await this.#livenessEvidence(impl, report.emittedSinceSend)),
           ],
         })
         if (halted) return halted

@@ -1568,3 +1568,56 @@ test('--turn-timeout reaches the relay from the console, not just the argv parse
   })
   assert.equal(seen, 4242, 'the console must hand the configured deadline to the adapters')
 })
+
+test('a refusal to continue re-samples, so it can lift', async () => {
+  // The deadlock. The first version matched the liveness line in `pause.evidence` — a string
+  // captured when the pause was RAISED — so the check deciding "is it safe NOW" was made
+  // from a snapshot of the past and could never change its mind. An operator sat on it for
+  // nearly four hours: the child had long gone idle, the stale evidence still said it was
+  // working, `/continue` refused every time, and the process never exited to break the tie.
+  //
+  // A guard that cannot lift is not a guard, it is a wall. This asserts the lifting, which
+  // is the half that was missing — the refusing half was already tested and was never the
+  // problem.
+  const dir = repo()
+  const out = collect()
+  const input = new PassThrough()
+  const running = runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'claude',
+    rounds: 6,
+    checks: [],
+    // In-memory doubles: no child process at all, so `childPid` is undefined and no sample
+    // is possible. That is the case the old code got wrong in the other direction — it
+    // refused on a STRING, which a fake could carry without ever having a process.
+    registry: registryOf({
+      codex: [slow('advisor', 'codex', ['Do it.', 'More.', 'DONE'], 300)],
+      claude: [slow('impl', 'claude', ['ack', 'Did it.', 'Again.'], 300)],
+    }),
+    input,
+    output: out.stream,
+  })
+  const until = async (pred: (f: ReturnType<typeof resolveSession>) => boolean, ms = 10_000) => {
+    const t = Date.now()
+    while (Date.now() - t < ms) {
+      const f = resolveSession(dir)
+      if (pred(f)) return f
+      await new Promise((r) => setTimeout(r, 50))
+    }
+    throw new Error(`timed out; console said:\n${out.text().slice(-700)}`)
+  }
+
+  await new Promise((r) => setTimeout(r, 500))
+  input.write('/pause\n')
+  await until((f) => 'session' in f && f.session.status.state === 'paused')
+
+  input.write('/continue\n')
+  // It must actually resume. Nothing here is working, so nothing may stand in the way.
+  await until((f) => 'session' in f && f.session.status.state === 'running')
+  assert.doesNotMatch(out.text(), /not continuing/, 'an idle seat must not be treated as busy')
+
+  input.end()
+  await running
+})
