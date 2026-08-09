@@ -317,7 +317,12 @@ test('activity refreshes the live turn even when the event key differs', async (
   // events carry `claude-transcript-turn-N`. A keyed touch matched nothing, so every Claude
   // turn was capped at the idle deadline however busy it was.
   const { updates, onUpdate } = collector()
-  const w = new TurnWatchdog<Turn>(10_000, onUpdate, MS * 2)
+  // The idle window is TEN touch intervals, not two. It was two, which is not a margin: a
+  // `sleep(40)` overrunning to 80ms on a loaded runner fired the deadline between touches
+  // and failed a release. The property under test is that `touchAll` refreshes a turn armed
+  // under a different key -- nothing about it needs the margin to be tight, and a test whose
+  // result depends on how busy the machine is proves something other than what it claims.
+  const w = new TurnWatchdog<Turn>(10_000, onUpdate, MS * 10)
   const turn = turnAt(Date.now())
   turn.lastActivityAt = Date.now()
   w.arm('hook-key-prompt_id', turn)
