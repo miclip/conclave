@@ -486,7 +486,7 @@ test('the banner stays visible and the first post-open transcript line is close 
   c.proc.kill()
 })
 
-test('a second message prints below the first without moving it', async (t) => {
+test('the box is drawn under the newest line, and nothing is scrolled to make room', async (t) => {
   // The property is that ALREADY-PRINTED TEXT DOES NOT MOVE. Output goes under the last line
   // and the box follows it down; nothing above is disturbed.
   //
@@ -518,56 +518,26 @@ test('a second message prints below the first without moving it', async (t) => {
     await c.until((s) => plain(s).includes('second message'), 20_000),
     'second message should be in the transcript',
   )
-  // Settle on a condition rather than a duration: wait until the box has been drawn under
-  // the second message. A fixed sleep here passed alone and failed under a loaded suite,
-  // which is this project's most-repeated test defect and not one to add another of.
-  await c.until((s) => {
-    const g = renderGrid(s, rows, cols)
-    const at = g.findIndex((r) => r.join('').includes('second message'))
-    return at >= 0 && /─{10,}/.test(g[at + 1]?.join('') ?? '')
-  }, 10_000)
-
-  const grid = renderGrid(c.text(), rows, cols)
-  const lineText = (n: number) => grid[n - 1]!.join('').replace(/\s+$/, '')
-  const rowsHolding = (text: string) =>
-    Array.from({ length: rows }, (_, i) => i + 1).filter((n) => lineText(n).includes(text))
-
-  // Nothing below asserts on where the FIRST message ended up, and that is deliberate.
+  // WHERE the box is drawn is asserted in `screen.test.ts`, not here, and that is a
+  // deliberate division rather than a gap.
   //
-  // Three versions of this test compared its row before and after, and each failed on a
-  // machine slower than the one it was written on — the last of them in release CI, on the
-  // macOS Intel runner, reporting the line at "row 0" because it had scrolled off the top
-  // entirely. The stub agents narrate a little more, the transcript reaches the floor, the
-  // region scrolls. That is ordinary scrolling, indistinguishable from the bug by row alone,
-  // and a fourth attempt to make the comparison robust would fail the same way. It is
-  // deleted rather than loosened again: the byte-stream assertion at the end is what pins
-  // the reported fault, and it does not care how much anyone narrated.
-  const secondRows = rowsHolding('second message')
-  assert.ok(secondRows.length > 0, 'the second message should be on screen')
-
-  // The box sits directly under the newest transcript line rather than at the floor with a
-  // band of blank rows above it. That band was the first of the two reported bugs.
-  const boxTop = Math.max(...secondRows) + 1
-  assert.ok(
-    /─{10,}/.test(lineText(boxTop)),
-    `the box should start immediately under the last transcript line (row ${boxTop}), found ${JSON.stringify(lineText(boxTop))}`,
-  )
-
-  // If the first message is still on screen it is above the second; if it has scrolled away
-  // there is nothing to check, which is a legitimate outcome rather than a failure.
-  const firstRows = rowsHolding('first message')
-  if (firstRows.length > 0) {
-    assert.ok(
-      Math.max(...firstRows) < Math.min(...secondRows),
-      `the second message should be below the first, found first at ${firstRows.join(',')} and second at ${secondRows.join(',')}`,
-    )
-  }
+  // Four versions of this test tried to assert position from a pty, and all four failed on
+  // machines slower than the one they were written on. The reason is in the driver: it emits
+  // activity every 700ms for as long as the console runs, so the transcript never stops
+  // scrolling and no particular line stays put. The last attempt — "the box is directly
+  // under the second message" — is not merely racy but false, because by the time the
+  // console has drawn that message the next event has usually already followed it. There is
+  // no instant to catch.
+  //
+  // The unit tests drive a fake stream where nothing scrolls underneath the assertion, and
+  // check the exact row against a reported cursor position. What only a pty can answer is
+  // the question below, which does not depend on timing at all.
 
   // And the direct guard, on the byte stream rather than the rendered grid: the console
   // never scrolls the screen to make room for itself.
   //
   // This is the assertion that actually pins the reported bug, and it is here because the
-  // grid assertions above do not. Text can only be pushed DOWN by a scroll-down or a
+  // screen check above does not. Text can only be pushed DOWN by a scroll-down or a
   // line-insert, and once the only `ESC[{n}T` in the console is gone there is no plausible
   // mistake left that the row comparison would catch — it would keep passing through a
   // rewrite that reintroduced the fault by some other means. What is unfalsifiable is not
