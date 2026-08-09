@@ -67,6 +67,11 @@ export class FakeRotationSession implements AgentSession {
   readonly sessionId: string
   readonly agent: string
   /**
+   * Optional child pid, so tests can exercise the console's liveness guard without a real
+   * adapter. Set by the test; the fake itself has no child process.
+   */
+  childPid?: number
+  /**
    * How long a turn takes before `turn_end`. Default 0 — instantaneous, which is what most
    * tests want. A console test does not: with instant turns the whole run completes before
    * scripted stdin delivers its first line, and the test races itself rather than the code.

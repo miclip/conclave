@@ -19,6 +19,7 @@ import { join } from 'node:path'
 import { PassThrough, Readable, Writable } from 'node:stream'
 import test from 'node:test'
 import type { Verdict } from '../contract/outcome.ts'
+import type { ChildLiveness } from '../outcomes/liveness.ts'
 import { NO_DEADLINE_CLOCKS } from '../registry/types.ts'
 import type { AgentSession } from '../contract/session.ts'
 import { AgentRegistry } from '../registry/registry.ts'
@@ -553,6 +554,19 @@ const COMPLETED: Verdict = {
   outcome: 'completed',
   confidence: 'proven',
   provenance: [{ source: 'hook', detail: 'Stop' }],
+}
+
+const BUSY_LIVENESS: ChildLiveness = {
+  pid: 1,
+  alive: true,
+  samples: [12.5, 15.0, 11.0],
+  idle: false,
+}
+const IDLE_LIVENESS: ChildLiveness = {
+  pid: 1,
+  alive: true,
+  samples: [0.0, 0.1, 0.0],
+  idle: true,
 }
 
 async function untilText(what: string, text: () => string, re: RegExp, ms = 5000): Promise<void> {
@@ -1617,6 +1631,245 @@ test('a refusal to continue re-samples, so it can lift', async () => {
   // It must actually resume. Nothing here is working, so nothing may stand in the way.
   await until((f) => 'session' in f && f.session.status.state === 'running')
   assert.doesNotMatch(out.text(), /not continuing/, 'an idle seat must not be treated as busy')
+
+  input.end()
+  await running
+})
+
+// ---------------------------------------------------------------------------------------
+// Child liveness at the console resume path.
+//
+// The sampler protects against sending into a live turn, but the verdict the pause was raised
+// on can be superseded. A completed replacement means the Stop hook proved the turn ended, so
+// the child may still be alive but process liveness is irrelevant; a withdrawal without a
+// replacement verdict leaves the original concern in place.
+// ---------------------------------------------------------------------------------------
+
+test('a completed replacement verdict bypasses child liveness sampling on /continue', async () => {
+  // The pause rests on a timed_out verdict, but the child later proves it completed. The
+  // sampler must not be asked: the replacement Stop verdict is the authority on whether the
+  // turn ended, and the child may still be alive without that meaning a turn is in flight.
+  // A busy reading would falsely refuse a resumption the evidence has already cleared.
+  // The replacement is emitted AFTER the pause is raised, so the pause actually exists.
+  const dir = repo()
+  const impl = slow('impl', 'claude', ['ack', 'Did it, slowly.', 'And again.'])
+  impl.endTurn = { index: 1, verdict: TIMED_OUT }
+  impl.childPid = 1
+  const out = collect()
+  const input = new PassThrough()
+  let sampled = false
+  const running = runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'claude',
+    rounds: 6,
+    checks: [],
+    registry: registryOf({
+      codex: [slow('advisor', 'codex', ['Do it.', 'More.', 'DONE'], 300)],
+      claude: [impl],
+    }),
+    liveness: async () => {
+      sampled = true
+      return BUSY_LIVENESS
+    },
+    input,
+    output: out.stream,
+  })
+  const until = async (pred: (f: ReturnType<typeof resolveSession>) => boolean, ms = 10_000) => {
+    const t = Date.now()
+    while (Date.now() - t < ms) {
+      const f = resolveSession(dir)
+      if (pred(f)) return f
+      await new Promise((r) => setTimeout(r, 50))
+    }
+    throw new Error(`timed out; console said:\n${out.text().slice(-700)}`)
+  }
+
+  await until((f) => 'session' in f && f.session.status.state === 'paused')
+  impl.lateSignal(COMPLETED)
+  await until(
+    (f) => 'session' in f && f.session.status.pause?.superseded?.verdict?.outcome === 'completed',
+  )
+  input.write('/continue\n')
+  const resumed = await until((f) => 'session' in f && f.session.status.state === 'running')
+  assert.ok('session' in resumed)
+  assert.equal(sampled, false, 'liveness must not be sampled when the replacement is completed')
+  assert.doesNotMatch(out.text(), /not continuing/, 'the run must resume without refusing')
+
+  input.end()
+  await running
+})
+
+test('a withdrawal with no replacement still samples child liveness before /continue', async () => {
+  // The verdict is gone and the turn is open again, but the concern the sampler guards --
+  // "is the child still working?" -- is unchanged. So sampling still runs, and a busy
+  // child still refuses the continue.
+  const dir = repo()
+  const impl = slow('impl', 'claude', ['ack', 'Did it, slowly.', 'And again.'])
+  impl.endTurn = { index: 1, verdict: TIMED_OUT, withdraw: 'no_replacement' }
+  impl.childPid = 1
+  const out = collect()
+  const input = new PassThrough()
+  let sampled = false
+  const running = runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'claude',
+    rounds: 6,
+    checks: [],
+    registry: registryOf({
+      codex: [slow('advisor', 'codex', ['Do it.', 'More.', 'DONE'], 300)],
+      claude: [impl],
+    }),
+    liveness: async () => {
+      sampled = true
+      return BUSY_LIVENESS
+    },
+    input,
+    output: out.stream,
+  })
+  const until = async (pred: (f: ReturnType<typeof resolveSession>) => boolean, ms = 10_000) => {
+    const t = Date.now()
+    while (Date.now() - t < ms) {
+      const f = resolveSession(dir)
+      if (pred(f)) return f
+      await new Promise((r) => setTimeout(r, 50))
+    }
+    throw new Error(`timed out; console said:\n${out.text().slice(-700)}`)
+  }
+
+  await until((f) => 'session' in f && f.session.status.state === 'paused')
+  await until(
+    (f) =>
+      'session' in f &&
+      f.session.status.pause?.superseded !== undefined &&
+      f.session.status.pause?.superseded?.verdict === undefined,
+  )
+  input.write('/continue\n')
+  await new Promise((r) => setTimeout(r, 300))
+  const found = resolveSession(dir)
+  assert.ok('session' in found)
+  assert.equal(found.session.status.state, 'paused', 'the run must stay paused')
+  assert.equal(sampled, true, 'liveness must be sampled when the verdict is withdrawn without replacement')
+  assert.match(out.text(), /not continuing/, 'the busy child must refuse the continue')
+
+  input.end()
+  await running
+})
+
+test('a refusal to continue is recorded on the paused session status', async () => {
+  // The run stays paused, so `state` alone cannot tell an outside reader that a decision was
+  // attempted and rejected. The refusal must be on the pause record, rewritten to disk, so
+  // `conclave status --json` can observe it without scraping the console.
+  const dir = repo()
+  const impl = slow('impl', 'claude', ['ack', 'Did it, slowly.', 'And again.'])
+  impl.endTurn = { index: 1, verdict: TIMED_OUT, withdraw: 'no_replacement' }
+  impl.childPid = 1
+  const out = collect()
+  const input = new PassThrough()
+  const running = runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'claude',
+    rounds: 6,
+    checks: [],
+    registry: registryOf({
+      codex: [slow('advisor', 'codex', ['Do it.', 'More.', 'DONE'], 300)],
+      claude: [impl],
+    }),
+    liveness: async () => BUSY_LIVENESS,
+    input,
+    output: out.stream,
+  })
+  const until = async (pred: (f: ReturnType<typeof resolveSession>) => boolean, ms = 10_000) => {
+    const t = Date.now()
+    while (Date.now() - t < ms) {
+      const f = resolveSession(dir)
+      if (pred(f)) return f
+      await new Promise((r) => setTimeout(r, 50))
+    }
+    throw new Error(`timed out; console said:\n${out.text().slice(-700)}`)
+  }
+
+  await until((f) => 'session' in f && f.session.status.state === 'paused')
+  await until(
+    (f) =>
+      'session' in f &&
+      f.session.status.pause?.superseded !== undefined &&
+      f.session.status.pause?.superseded?.verdict === undefined,
+  )
+  input.write('/continue\n')
+  const found = await until((f) => 'session' in f && f.session.status.pause?.refusal !== undefined)
+  assert.ok('session' in found)
+  const refusal = found.session.status.pause!.refusal!
+  assert.equal(typeof refusal.at, 'number')
+  assert.equal(refusal.liveness.pid, 1)
+  assert.equal(refusal.liveness.idle, false)
+  assert.match(refusal.reason, /still working/)
+  // Readable through the JSON rendering, not only in-process.
+  const asJson = JSON.parse(formatSessionJson(found.session))
+  assert.equal(asJson.pause.refusal.liveness.idle, false)
+
+  input.end()
+  await running
+})
+
+test('a busy child that goes idle lets /continue resume on retry', async () => {
+  // The guard re-samples rather than remembering the past. A child that was busy the first
+  // time and idle the second time must resume, or the guard is a wall again.
+  const dir = repo()
+  const impl = slow('impl', 'claude', ['ack', 'Did it, slowly.', 'And again.'])
+  impl.endTurn = { index: 1, verdict: TIMED_OUT, withdraw: 'no_replacement' }
+  impl.childPid = 1
+  const out = collect()
+  const input = new PassThrough()
+  let calls = 0
+  const running = runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'claude',
+    rounds: 6,
+    checks: [],
+    registry: registryOf({
+      codex: [slow('advisor', 'codex', ['Do it.', 'More.', 'DONE'], 300)],
+      claude: [impl],
+    }),
+    liveness: async () => {
+      calls++
+      return calls === 1 ? BUSY_LIVENESS : IDLE_LIVENESS
+    },
+    input,
+    output: out.stream,
+  })
+  const until = async (pred: (f: ReturnType<typeof resolveSession>) => boolean, ms = 10_000) => {
+    const t = Date.now()
+    while (Date.now() - t < ms) {
+      const f = resolveSession(dir)
+      if (pred(f)) return f
+      await new Promise((r) => setTimeout(r, 50))
+    }
+    throw new Error(`timed out; console said:\n${out.text().slice(-700)}`)
+  }
+
+  await until((f) => 'session' in f && f.session.status.state === 'paused')
+  await until(
+    (f) =>
+      'session' in f &&
+      f.session.status.pause?.superseded !== undefined &&
+      f.session.status.pause?.superseded?.verdict === undefined,
+  )
+  input.write('/continue\n')
+  await new Promise((r) => setTimeout(r, 300))
+  assert.equal(calls, 1)
+  assert.match(out.text(), /not continuing/)
+
+  input.write('/continue\n')
+  await until((f) => 'session' in f && f.session.status.state === 'running')
+  assert.equal(calls, 2, 'liveness must be re-sampled on retry')
 
   input.end()
   await running
