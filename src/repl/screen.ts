@@ -104,7 +104,12 @@ export class Screen {
   #menu: (Suggestion & { index: number }) | undefined
   #open = false
   #base: number
-  #onResize = () => this.#reserve()
+  #onResize = () => {
+    // Re-establish the scroll region for the new dimensions and redraw the pinned box so a
+    // resized terminal does not leave the old region in place or the box at the wrong height.
+    this.#reserve(this.rows)
+    this.draw()
+  }
 
   constructor(opts: ScreenOptions) {
     this.#o = opts
@@ -144,31 +149,92 @@ export class Screen {
     }
   }
 
-  open(): void {
+  async open(): Promise<void> {
     if (this.#open) return
     this.#open = true
     process.once('exit', this.#restore)
-    this.#reserve()
+    // Raw mode must be on before the cursor query, otherwise the terminal reply cannot be read.
     if (this.#o.input.isTTY) {
-      emitKeypressEvents(this.#o.input)
       this.#o.input.setRawMode(true)
       this.#o.input.resume()
     }
+
+    // The console prints the banner, the rule, and setup messages before the screen is
+    // created. If we reserve the bottom rows without accounting for those lines, the cursor
+    // is parked at the bottom of the scroll region and the first post-open write is separated
+    // from the startup rule by a large empty gap. Query the cursor position so we can scroll
+    // the already-printed content down until the cursor is just above the reserved box, keeping
+    // the banner and the startup rule visible.
+    const { pos, leftover } = await this.#queryCursorPosition()
+    const cursorRow = pos?.row ?? this.rows
+
+    this.#reserve(cursorRow)
+
+    if (this.#o.input.isTTY) {
+      emitKeypressEvents(this.#o.input)
+    }
     this.#o.input.on('keypress', this.#key)
-    this.#out.on('resize', this.#onResize)
+    this.#o.output.on('resize', this.#onResize)
     this.draw()
+
+    // Re-emit any input that arrived while we were waiting for the cursor-position reply, so
+    // keystrokes typed before the box was drawn are not lost.
+    if (leftover) {
+      this.#o.input.emit('data', Buffer.from(leftover))
+    }
   }
 
   /**
    * Reserve the bottom rows.
    *
-   * The region is set first, then the cursor is parked on the last scrolling row, so the
-   * first line of output lands above the box rather than inside it.
+   * The region is set first, then the already-printed rows are scrolled down so the cursor is
+   * parked just above the box. The first line of output then lands immediately after the
+   * startup rule rather than at the bottom of the screen with a large empty gap.
    */
-  #reserve(): void {
+  #reserve(cursorRow: number): void {
     const last = Math.max(1, this.rows - this.#height)
-    this.#out.write(`${ESC}1;${last}r${ESC}${last};1H`)
-    this.draw()
+    this.#out.write(`${ESC}1;${last}r`)
+    if (cursorRow < last) {
+      // Scroll the existing content down so the cursor's row lands just above the box. The
+      // banner, rule, and setup messages move together toward the bottom of the screen.
+      const shift = last - cursorRow
+      this.#out.write(`${ESC}${shift}T`)
+    }
+    this.#out.write(`${ESC}${last};1H`)
+  }
+
+  async #queryCursorPosition(): Promise<{ pos?: { row: number; col: number }; leftover?: string }> {
+    const input = this.#o.input
+    if (!input.isTTY) return {}
+    return new Promise((resolve) => {
+      const chunks: Buffer[] = []
+      const cprRe = /\x1b\[(\d+);(\d+)R/
+      let timer: NodeJS.Timeout | undefined
+      const cleanup = () => {
+        if (timer) clearTimeout(timer)
+        input.off('data', onData)
+      }
+      const onData = (chunk: Buffer) => {
+        chunks.push(chunk)
+        const s = Buffer.concat(chunks).toString()
+        const m = cprRe.exec(s)
+        if (m) {
+          cleanup()
+          const marker = `\x1b[${m[1]};${m[2]}R`
+          const idx = s.indexOf(marker)
+          resolve({
+            pos: { row: parseInt(m[1]!, 10), col: parseInt(m[2]!, 10) },
+            leftover: s.slice(0, idx) + s.slice(idx + marker.length),
+          })
+        }
+      }
+      input.on('data', onData)
+      timer = setTimeout(() => {
+        cleanup()
+        resolve({ leftover: Buffer.concat(chunks).toString() })
+      }, 500)
+      this.#out.write(`${ESC}6n`)
+    })
   }
 
   close(): void {
