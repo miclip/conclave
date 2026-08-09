@@ -219,7 +219,14 @@ test('resize resets the scroll region and redraws the pinned box', async () => {
   const last = resized.at(-1)
   assert.equal(Number(last?.match(/\x1b\[1;(\d+)r/)?.[1]), 26, 'resized region ends at the new last scrolling row')
 
-  // The box should be redrawn after the resize: prompt and rules are present in the latest frame.
-  assert.match(h.raw(), /\x1b\[30;1H/)
-  assert.match(h.raw(), /›/)
+  // The box is redrawn after the resize, and redrawn UNDER THE CONTENT rather than at the new
+  // floor. A terminal that grew by six rows did not move the transcript, so the box does not
+  // move either — it goes on descending from where it was, and reaches the floor when the
+  // output does. Asserting a row here would re-fix the box to the bottom of the terminal,
+  // which is the arrangement two operators reported as a jump.
+  const frame = h.raw().slice(h.raw().lastIndexOf('\x1b[1;26r'))
+  assert.match(frame, /\x1b\[21;1H/, 'the box should be redrawn at its current top, not at the floor')
+  assert.match(frame, /›/)
+  // Everything below it is cleared, so the box does not leave a copy behind as it descends.
+  assert.match(frame, /\x1b\[25;1H\x1b\[0J/)
 })

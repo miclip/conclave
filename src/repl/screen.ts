@@ -104,11 +104,63 @@ export class Screen {
   #menu: (Suggestion & { index: number }) | undefined
   #open = false
   #base: number
+  /**
+   * The last screen row occupied by transcript output.
+   *
+   * The box's position is DERIVED from this rather than fixed at the bottom of the terminal,
+   * which is the difference between a console that starts where you launched it and one that
+   * does not. A box permanently at the floor has to be met: either output is separated from
+   * the startup rule by a band of blank rows, or — the version that shipped — the whole
+   * screen is scrolled down to close the gap, dragging the operator's own shell prompt with
+   * it. Both were reported as bugs, because both are the console moving text the operator
+   * was reading.
+   *
+   * So it grows instead. Output prints directly under the last line, the box follows it down
+   * a row at a time, and when it reaches the floor it stays there and the region scrolls
+   * underneath it exactly as before. The anchored end state is the old behaviour; what
+   * changes is that the console arrives at it rather than starting there.
+   */
+  #contentRow = 0
   #onResize = () => {
-    // Re-establish the scroll region for the new dimensions and redraw the pinned box so a
-    // resized terminal does not leave the old region in place or the box at the wrong height.
-    this.#reserve(this.rows)
+    // Re-establish the scroll region for the new dimensions and redraw the box. Content that
+    // no longer fits above the floor is clamped to it — a terminal that just got shorter is
+    // already anchored, whatever it was doing before.
+    this.#contentRow = Math.min(this.#contentRow, this.#floor)
+    this.#reserve()
     this.draw()
+  }
+
+  /**
+   * The lowest row transcript output may occupy: everything below belongs to the box.
+   *
+   * Depends on `#height`, which changes as the queue and the menu grow, so it is computed
+   * rather than stored — a stored floor and a grown box disagree, and the box wins by
+   * painting over a line somebody was reading.
+   */
+  get #floor(): number {
+    return Math.max(1, this.rows - this.#height)
+  }
+
+  /** The row the box starts on: just under the content, or the floor once it gets there. */
+  get #boxTop(): number {
+    return Math.min(this.#contentRow + 1, this.#floor + 1)
+  }
+
+  /**
+   * How many screen rows a write will occupy.
+   *
+   * Counts wrapping, because a line longer than the terminal takes more than one row and a
+   * box placed as though it did not would land on top of it. Colour codes are stripped
+   * first: they occupy no columns, and counting them wraps text that fits.
+   *
+   * Only ever consulted while the box is still descending. Once anchored the terminal's own
+   * scrolling keeps the count, and any drift here stops mattering.
+   */
+  #rowsUsed(text: string): number {
+    const w = Math.max(1, this.columns)
+    return text
+      .split('\n')
+      .reduce((n, l) => n + Math.max(1, Math.ceil(l.replace(/\x1b\[[0-9;]*m/g, '').length / w)), 0)
   }
 
   constructor(opts: ScreenOptions) {
@@ -142,7 +194,7 @@ export class Screen {
     if (!this.#open) return
     this.#open = false
     try {
-      this.#out.write(`${ESC}r${ESC}${this.rows};1H`)
+      this.#out.write(`${ESC}r${ESC}${this.#boxTop};1H`)
       if (this.#o.input.isTTY) this.#o.input.setRawMode(false)
     } catch {
       /* the stream may already be gone; nothing useful to do */
@@ -160,15 +212,18 @@ export class Screen {
     }
 
     // The console prints the banner, the rule, and setup messages before the screen is
-    // created. If we reserve the bottom rows without accounting for those lines, the cursor
-    // is parked at the bottom of the scroll region and the first post-open write is separated
-    // from the startup rule by a large empty gap. Query the cursor position so we can scroll
-    // the already-printed content down until the cursor is just above the reserved box, keeping
-    // the banner and the startup rule visible.
+    // created, so the box has to be placed relative to them rather than to the terminal. Ask
+    // the terminal where the cursor is and start the box on the next row: output continues
+    // where the startup messages left off, and nothing already on screen moves.
+    //
+    // A terminal that never answers falls back to `rows`, which clamps to the floor — the
+    // fully-anchored box this used to start with. Degrading to the old behaviour is the
+    // point of that default; it is the one arrangement known to be safe on a terminal we
+    // have learned nothing about.
     const { pos, leftover } = await this.#queryCursorPosition()
-    const cursorRow = pos?.row ?? this.rows
+    this.#contentRow = Math.min(pos?.row ?? this.rows, this.#floor)
 
-    this.#reserve(cursorRow)
+    this.#reserve()
 
     if (this.#o.input.isTTY) {
       emitKeypressEvents(this.#o.input)
@@ -185,22 +240,20 @@ export class Screen {
   }
 
   /**
-   * Reserve the bottom rows.
+   * Set the scrolling region to everything above the floor.
    *
-   * The region is set first, then the already-printed rows are scrolled down so the cursor is
-   * parked just above the box. The first line of output then lands immediately after the
-   * startup rule rather than at the bottom of the screen with a large empty gap.
+   * The region is the FINAL one from the very first call, even while the box is still
+   * descending through it. That is deliberate: the region only does anything once output
+   * reaches its last row, and until then the box is repainted below the content on every
+   * draw anyway. Resizing the region as the box moved would mean a DECSTBM for every line
+   * of output, and each one homes the cursor.
+   *
+   * Nothing is scrolled here. The previous version shifted the whole screen down with
+   * `ESC[{n}T` to bring already-printed rows to a box waiting at the floor, which moved the
+   * operator's shell prompt along with it.
    */
-  #reserve(cursorRow: number): void {
-    const last = Math.max(1, this.rows - this.#height)
-    this.#out.write(`${ESC}1;${last}r`)
-    if (cursorRow < last) {
-      // Scroll the existing content down so the cursor's row lands just above the box. The
-      // banner, rule, and setup messages move together toward the bottom of the screen.
-      const shift = last - cursorRow
-      this.#out.write(`${ESC}${shift}T`)
-    }
-    this.#out.write(`${ESC}${last};1H`)
+  #reserve(): void {
+    this.#out.write(`${ESC}1;${this.#floor}r${ESC}${this.#contentRow};1H`)
   }
 
   async #queryCursorPosition(): Promise<{ pos?: { row: number; col: number }; leftover?: string }> {
@@ -244,12 +297,13 @@ export class Screen {
     this.#o.input.off('keypress', this.#key)
     this.#out.off('resize', this.#onResize)
     if (this.#o.input.isTTY) this.#o.input.setRawMode(false)
-    // Clear the reserved rows, drop the region, and leave the cursor at the bottom. Without
-    // resetting the region the operator's next command scrolls inside our box.
-    for (let r = this.rows - this.#height + 1; r <= this.rows; r++) {
-      this.#out.write(`${ESC}${r};1H${ESC}2K`)
-    }
-    this.#out.write(`${ESC}r${ESC}${this.rows};1H`)
+    // Clear the box and everything under it, drop the region, and leave the cursor where the
+    // transcript ended rather than at the bottom of the terminal. Without resetting the
+    // region the operator's next command scrolls inside our box; without placing the cursor
+    // their next shell prompt appears at the floor, separated from the session's last line by
+    // the blank rows the box used to cover — the exit-time version of the jump this whole
+    // arrangement exists to avoid.
+    this.#out.write(`${ESC}${this.#boxTop};1H${ESC}0J${ESC}r${ESC}${this.#boxTop};1H`)
   }
 
   /** Print into the scrolling region, leaving the input box untouched. */
@@ -258,10 +312,19 @@ export class Screen {
       this.#out.write(`${text}\n`)
       return
     }
-    const last = Math.max(1, this.rows - this.#height)
-    // Save, move into the scrolling area, print, restore. `ESC[s`/`ESC[u` are honoured by
-    // every terminal that honours the region, and are cheaper than tracking a row.
-    this.#out.write(`${ESC}s${ESC}${last};1H\n${text}${ESC}u`)
+    if (this.#contentRow < this.#floor) {
+      // Still descending: print directly under the last line. `ESC[0J` wipes from there to
+      // the bottom of the screen first, which erases the box at its current position —
+      // everything below the cursor at this point IS the box, and the redraw below puts it
+      // back one row lower. Without it a short line leaves the tail of the old box beside it.
+      this.#out.write(`${ESC}${this.#contentRow};1H\n${ESC}0J${text}`)
+      this.#contentRow = Math.min(this.#floor, this.#contentRow + this.#rowsUsed(text))
+    } else {
+      // Anchored: the region scrolls under a box that no longer moves. Save, move to the
+      // region's last row, print, restore. Do not remove the save/restore — a version
+      // without it shipped as 0.2.11 and made prose wander back and forth across the screen.
+      this.#out.write(`${ESC}s${ESC}${this.#floor};1H\n${text}${ESC}u`)
+    }
     this.draw()
   }
 
@@ -326,19 +389,19 @@ export class Screen {
    */
   #resize(height: number): void {
     if (height === this.#height) return
-    if (height > this.#height) {
-      const last = Math.max(1, this.rows - this.#height)
-      this.#out.write(`${ESC}s${ESC}${last};1H${'\n'.repeat(height - this.#height)}${ESC}u`)
-    } else {
-      // Shrinking frees rows that still hold the old box; clear them so they do not linger
-      // above the transcript as text nothing will overwrite.
-      for (let r = this.rows - this.#height + 1; r <= this.rows; r++) {
-        this.#out.write(`${ESC}${r};1H${ESC}2K`)
-      }
-    }
+    const wasFloor = this.#floor
     this.#height = height
-    const last = Math.max(1, this.rows - this.#height)
-    this.#out.write(`${ESC}1;${last}r`)
+    // A taller box lowers the floor. Content already below the new one has to go somewhere,
+    // and only here — while the box is anchored, or has just been overtaken by it — is
+    // pushing the transcript up the right answer: those rows are about to be painted over.
+    // While the box is still descending there is nothing to push, because it takes its extra
+    // rows from the blank screen underneath rather than from the transcript.
+    const overflow = this.#contentRow - this.#floor
+    if (overflow > 0) {
+      this.#out.write(`${ESC}s${ESC}${wasFloor};1H${'\n'.repeat(overflow)}${ESC}u`)
+      this.#contentRow = this.#floor
+    }
+    this.#out.write(`${ESC}1;${this.#floor}r`)
   }
 
   /** Redraw the reserved rows from scratch. */
@@ -348,7 +411,7 @@ export class Screen {
     const menuRows = this.#menuRows()
     this.#resize(this.#base + queued.length + menuRows.length - 1)
     const w = this.columns
-    const top = this.rows - this.#height + 1
+    const top = this.#boxTop
     const rule = '─'.repeat(Math.max(4, w))
     const prompt = this.#o.prompt()
     const visible = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '').length
@@ -370,6 +433,11 @@ export class Screen {
     rows.forEach((text, i) => {
       out += `${ESC}${top + i};1H${ESC}2K${text}`
     })
+    // While the box is descending it does not reach the bottom of the terminal, and the rows
+    // under it hold whatever it painted there a moment ago. Erase to the end of the screen so
+    // the box does not leave a copy of itself behind each time it moves down a row.
+    const bottom = top + this.#height - 1
+    if (bottom < this.rows) out += `${ESC}${bottom + 1};1H${ESC}0J`
     // Cursor into the input row, after the prompt and the typed text.
     out += `${ESC}${top + waiting.length + 1};${visible(prompt) + this.#cursor + 1}H`
     this.#out.write(out)
