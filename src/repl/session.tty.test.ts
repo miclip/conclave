@@ -529,17 +529,29 @@ test('a second message prints below the first without moving it', async (t) => {
     await c.until((s) => plain(s).includes('second message'), 20_000),
     'second message should be in the transcript',
   )
-  await new Promise((r) => setTimeout(r, 500))
+  // Settle on a condition rather than a duration: wait until the box has been drawn under
+  // the second message. A fixed sleep here passed alone and failed under a loaded suite,
+  // which is this project's most-repeated test defect and not one to add another of.
+  await c.until((s) => {
+    const g = renderGrid(s, rows, cols)
+    const at = g.findIndex((r) => r.join('').includes('second message'))
+    return at >= 0 && /─{10,}/.test(g[at + 1]?.join('') ?? '')
+  }, 10_000)
 
   const grid = renderGrid(c.text(), rows, cols)
   const lineText = (n: number) => grid[n - 1]!.join('').replace(/\s+$/, '')
 
-  // The whole point: printing the second message must not have moved the first.
+  // The whole point: printing the second message must not have pushed the first DOWN.
+  //
+  // Downward is the direction that is always wrong — it is the console moving text the
+  // operator is reading in order to make room for itself, which is what both reported bugs
+  // did. Upward is ordinary scrolling and becomes correct the moment the box reaches the
+  // floor, so asserting the row is simply unchanged makes this test a race against how much
+  // the stub agents happen to narrate. It failed exactly that way under a loaded suite.
   const firstRowAfter = rowOf('first message', c.text())
-  assert.equal(
-    firstRowAfter,
-    firstRowBefore,
-    `the first message moved from row ${firstRowBefore} to ${firstRowAfter} when the second was printed`,
+  assert.ok(
+    firstRowAfter > 0 && firstRowAfter <= firstRowBefore,
+    `the first message was pushed down from row ${firstRowBefore} to ${firstRowAfter} when the second was printed`,
   )
 
   // The reserved box is 4 rows tall, so the last scrolling row is rows - 4.
@@ -566,6 +578,21 @@ test('a second message prints below the first without moving it', async (t) => {
   assert.ok(
     boxTop <= lastScrollRow + 1 && /─{10,}/.test(lineText(boxTop)),
     `the box should start immediately under the last transcript line (row ${boxTop}), found ${JSON.stringify(lineText(boxTop))}`,
+  )
+
+  // And the direct guard, on the byte stream rather than the rendered grid: the console
+  // never scrolls the screen to make room for itself.
+  //
+  // This is the assertion that actually pins the reported bug, and it is here because the
+  // grid assertions above do not. Text can only be pushed DOWN by a scroll-down or a
+  // line-insert, and once the only `ESC[{n}T` in the console is gone there is no plausible
+  // mistake left that the row comparison would catch — it would keep passing through a
+  // rewrite that reintroduced the fault by some other means. What is unfalsifiable is not
+  // load-bearing, so the falsifiable version sits next to it.
+  assert.doesNotMatch(
+    c.text(),
+    /\x1b\[\d*[TL]/,
+    'the console scrolled or inserted lines, which moves text the operator was reading',
   )
   c.proc.kill()
 })

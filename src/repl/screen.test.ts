@@ -230,3 +230,139 @@ test('resize resets the scroll region and redraws the pinned box', async () => {
   // Everything below it is cleared, so the box does not leave a copy behind as it descends.
   assert.match(frame, /\x1b\[25;1H\x1b\[0J/)
 })
+
+/**
+ * A terminal that answers the cursor query, one that answers it in pieces, and one that
+ * never answers at all.
+ *
+ * These three paths decide where the box starts, and until now none of them had a test. The
+ * default harness gives the console a non-TTY input, which skips the query entirely — so
+ * every existing test in this file exercised the same branch, and the branch that runs on a
+ * real terminal ran only on real terminals.
+ *
+ * That matters more since the box began descending from the cursor rather than sitting at
+ * the floor: the reply is now the difference between a console that starts where it was
+ * launched and one that starts at the bottom of the screen.
+ */
+async function ttyHarness(reply?: (write: (s: string) => void) => void) {
+  const input = Object.assign(new PassThrough(), {
+    isTTY: true,
+    setRawMode: () => {},
+  })
+  // The console attaches a keypress listener, a data listener for the reply, and a resize
+  // listener; several harnesses in one process otherwise trip Node's leak warning, which is
+  // noise here rather than a signal.
+  input.setMaxListeners(50)
+  const written: string[] = []
+  const output = Object.assign(new PassThrough(), {
+    rows: 24,
+    columns: 80,
+    isTTY: true,
+    write: (chunk: string) => {
+      written.push(chunk)
+      // Answer as a terminal would: only once the query has actually been written, so the
+      // test cannot pass by replying to a query that was never sent.
+      if (chunk.includes(`${ESC}6n`) && reply) {
+        const r = reply
+        reply = undefined
+        setImmediate(() => r((s) => input.emit('data', Buffer.from(s))))
+      }
+      return true
+    },
+  })
+  const lines: string[] = []
+  const screen = new Screen({
+    input: input as unknown as NodeJS.ReadStream,
+    output: output as unknown as NodeJS.WriteStream,
+    onLine: (l) => lines.push(l),
+    onInterrupt: () => {},
+    status: () => '',
+    hint: () => 'hint',
+    prompt: () => '› ',
+  })
+  await screen.open()
+  return {
+    screen,
+    lines,
+    raw: () => written.join(''),
+    /** The most recent redraw. `draw()` emits one write, so the last one is a whole frame. */
+    frame: () => written.at(-1) ?? '',
+  }
+}
+
+test('the box starts under the cursor the terminal reports', async () => {
+  const h = await ttyHarness((write) => write(`${ESC}8;1R`))
+  // Reported row 8, so the box begins on row 9 — directly under the setup messages, with
+  // the operator's own scrollback above it untouched.
+  assert.match(h.raw(), /\x1b\[9;1H/, 'the box should start on the row below the cursor')
+  assert.doesNotMatch(h.raw(), /\x1b\[\d*T/, 'nothing on screen should be scrolled to meet it')
+})
+
+test('a cursor reply split across reads is still understood', async () => {
+  // Terminals are under no obligation to deliver the reply in one read, and a console that
+  // assumed they did would fall back to the anchored box on whichever machine happened to
+  // split it. Worth a test precisely because it would be intermittent and blamed elsewhere.
+  const h = await ttyHarness((write) => {
+    write(`${ESC}8`)
+    write(';1')
+    write('R')
+  })
+  assert.match(h.raw(), /\x1b\[9;1H/, 'the reassembled reply should place the box at row 9')
+})
+
+test('a terminal that never answers gets the anchored box rather than a hang', async () => {
+  // No reply at all. `open()` resolves on its own timeout — the assertion is that it
+  // resolves and that the fallback is the fully-anchored arrangement, which is the one
+  // layout known to be safe on a terminal nothing is known about.
+  const h = await ttyHarness()
+  // 24 rows, a 4-row box: the floor is 20 and the box begins at 21.
+  assert.match(h.raw(), /\x1b\[1;20r/, 'the region should end at the floor')
+  assert.match(h.raw(), /\x1b\[21;1H/, 'the box should be drawn at the floor')
+  assert.doesNotMatch(h.raw(), /\x1b\[\d*T/, 'and still nothing should be scrolled')
+})
+
+test('keystrokes typed before the terminal answers are not swallowed', async () => {
+  // The query is written and then awaited; anything typed in that window arrives on the same
+  // stream as the reply and is consumed with it. It has to be given back, or the first thing
+  // an operator types into a slow terminal disappears.
+  const h = await ttyHarness((write) => write(`ab${ESC}8;1Rc\r`))
+  assert.deepEqual(h.lines, ['abc'], 'the typed line should survive the cursor query')
+})
+
+/**
+ * Where the descending box lands is decided by counting the rows the transcript just took,
+ * and that count was `String.length` — the wrong unit for anything but ASCII.
+ *
+ * Both of these go wrong in the same place and in opposite directions, which is why they
+ * are tested together: CJK under-counts the rows and puts the box on top of the last line
+ * of text, combining marks over-count them and leave a blank gap above the box.
+ *
+ * The assertion is on the FIRST row each frame addresses, which is the top of the box. The
+ * rows after it are the box's own three, so matching those proves nothing.
+ */
+test('wrapped wide text leaves the box below the last row it rendered', async () => {
+  const h = await ttyHarness((write) => write(`${ESC}8;1R`))
+  // 60 ideographs at two columns each is 120 columns, which wraps to two rows in an
+  // 80-column terminal: text on rows 9 and 10, so the box opens on 11. Counted as 60
+  // characters it is one row, and the box opens on 10 — erasing the second half of the
+  // sentence to draw its top rule there.
+  h.screen.write('\u754c'.repeat(60))
+  assert.match(
+    h.frame(),
+    /^\x1b\[s\x1b\[11;1H/,
+    'the box should open below both rendered rows, not on the second one',
+  )
+})
+
+test('combining marks do not push the box down a row they never used', async () => {
+  const h = await ttyHarness((write) => write(`${ESC}8;1R`))
+  // `e` + U+0301, seventy-nine times: 158 UTF-16 units, 79 columns, one row. Written as a
+  // decomposed sequence deliberately — the precomposed U+00E9 is one unit and would pass
+  // under the bug this is here to catch.
+  h.screen.write('e\u0301'.repeat(79))
+  assert.match(
+    h.frame(),
+    /^\x1b\[s\x1b\[10;1H/,
+    'one row of text, so the box opens on the next — not a row lower with a gap above it',
+  )
+})

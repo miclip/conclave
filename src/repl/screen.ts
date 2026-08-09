@@ -22,6 +22,7 @@
  */
 
 import type { Suggestion } from './complete.ts'
+import { rowsUsed } from './width.ts'
 import { emitKeypressEvents } from 'node:readline'
 
 export interface Key {
@@ -150,17 +151,15 @@ export class Screen {
    * How many screen rows a write will occupy.
    *
    * Counts wrapping, because a line longer than the terminal takes more than one row and a
-   * box placed as though it did not would land on top of it. Colour codes are stripped
-   * first: they occupy no columns, and counting them wraps text that fits.
+   * box placed as though it did not would land on top of it. Measured in columns rather
+   * than characters — see `width.ts`; a transcript full of CJK is half as many rows as its
+   * `String.length` suggests, and accented Latin is fewer still.
    *
    * Only ever consulted while the box is still descending. Once anchored the terminal's own
    * scrolling keeps the count, and any drift here stops mattering.
    */
   #rowsUsed(text: string): number {
-    const w = Math.max(1, this.columns)
-    return text
-      .split('\n')
-      .reduce((n, l) => n + Math.max(1, Math.ceil(l.replace(/\x1b\[[0-9;]*m/g, '').length / w)), 0)
+    return rowsUsed(text, this.columns)
   }
 
   constructor(opts: ScreenOptions) {
