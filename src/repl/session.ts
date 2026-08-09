@@ -107,7 +107,7 @@ export async function withHeartbeat<T>(
     progress.done(label)
   }
 }
-import { describeLiveness, sampleLiveness } from '../outcomes/liveness.ts'
+import { describeLiveness, sampleLiveness, type ChildLiveness } from '../outcomes/liveness.ts'
 import { guard } from '../workspace/sessionLock.ts'
 import { newSessionId, projectRootFor, recordSession } from '../workspace/sessionRecord.ts'
 import { RunLogWriter, readRunLog, runLogExists } from '../relay/resume.ts'
@@ -212,6 +212,13 @@ export interface SessionOptions {
   output?: NodeJS.WritableStream
   /** Injected for testing. Production uses the built-in registry. */
   registry?: AgentRegistry
+  /**
+   * Injected for testing the console's child-liveness guard.
+   *
+   * Production samples the actual child process; a fake that has no child cannot exercise
+   * the path without this seam.
+   */
+  liveness?: (pid: number) => Promise<ChildLiveness>
   /** Shown in the banner. */
   version?: string
   /** How often to print a progress line per participant. Default 10s. */
@@ -710,7 +717,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
    * resuming the handle without releasing the loop -- which presents as a console that
    * accepted the command and then did nothing.
    */
-  const resumeRun = async (opts: { force?: boolean } = {}): Promise<void> => {
+  const resumeRun = async (runOpts: { force?: boolean } = {}): Promise<void> => {
     if (!run || run.state !== 'paused') return
     // Refused when the child is visibly still working, because continuing SENDS -- and
     // neither CLI accepts input mid-turn, so the run ends `transport_failed`. A watchdog
@@ -732,15 +739,32 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     // Reported after nearly four hours of it, by an operator whose only way out was a flag
     // they had not been told about. A guard that cannot change its mind is not a guard, it
     // is a wall.
+    //
+    // Bypassed when the verdict the pause was raised on has been superseded by a completed
+    // replacement. The pause still exists -- withdrawing the reason for it is not the same
+    // as making the decision -- but a Stop hook is the authority on whether the turn ended,
+    // and the replacement verdict says it did. The child may still be alive, but that no
+    // longer tells us anything we need to know, so sampling it would only stall a resumption
+    // the evidence model has already cleared. A withdrawal with no replacement verdict still
+    // leaves the original concern in place, so sampling runs there.
     const seat = run.pause?.verdictOf?.participant
     const child = relay.participants.find((x) => (seat ? x.id === seat : x.rank === 'implementer'))
     const pid = child?.session.childPid
-    if (pid !== undefined && !opts.force) {
-      const now = await sampleLiveness(pid)
+    const supersededCompleted = run.pause?.superseded?.verdict?.outcome === 'completed'
+    if (pid !== undefined && !runOpts.force && !supersededCompleted) {
+      const sample = opts.liveness ?? sampleLiveness
+      const now = await sample(pid)
       if (now.alive && !now.idle) {
+        const reason = describeLiveness(now, 0)
         write(yellow('  not continuing: the child is working right now.'))
-        write(`  ${describeLiveness(now, 0)}`)
+        write(`  ${reason}`)
         write('  wait for it to finish, or /continue force to send anyway.')
+        // The run stays paused, so a watcher polling `state` sees no change. Record the
+        // refusal so an external reader can see why `/continue` did not move the run.
+        if (run.pause) {
+          run.pause.refusal = { at: Date.now(), reason, liveness: now }
+          recording.set('paused', { pause: run.pause })
+        }
         return
       }
     }

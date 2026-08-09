@@ -30,6 +30,7 @@ import type { AuthorityConflict } from './authority.ts'
 import type { Audience, RelayMessage } from './message.ts'
 import type { RunReason } from './observe.ts'
 import type { Verdict } from '../contract/outcome.ts'
+import type { ChildLiveness } from '../outcomes/liveness.ts'
 import type { RotationResult } from '../rotation/rotate.ts'
 
 export type RunState = 'running' | 'paused' | 'ended'
@@ -126,6 +127,19 @@ export interface PauseWait {
   detail?: string | undefined
 }
 
+/**
+ * A `/continue` refused because the child was still working.
+ *
+ * The run stays paused, so a watcher polling `state` sees no change. The refusal is the only
+ * durable record that a decision was attempted and rejected, and it carries the measurement
+ * so the reason is inspectable later rather than being a transient console line.
+ */
+export interface PauseContinueRefusal {
+  at: number
+  reason: string
+  liveness: ChildLiveness
+}
+
 export interface RunPause {
   reason: PauseReason
   detail: string
@@ -147,6 +161,8 @@ export interface RunPause {
   superseded?: PauseSupersession | undefined
   /** Set when the operator chose to keep waiting rather than answer. See `PauseWait`. */
   waiting?: PauseWait | undefined
+  /** Set when `/continue` was refused because the child was still working. See `PauseContinueRefusal`. */
+  refusal?: PauseContinueRefusal | undefined
   /** Position in the routing log when the run paused, for lining up against `audit()`. */
   atSeq: number
   at: number
