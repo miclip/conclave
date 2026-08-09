@@ -793,8 +793,18 @@ export async function runSession(opts: SessionOptions): Promise<number> {
         write(summaryLine('===', relay.rotationSummary(), width))
         // The line that makes an abnormal ending recoverable, as `relay` prints. A console
         // run ends with work in flight for the same reasons an unattended one does.
-        write(`=== run log: ${runLogPath}`)
-        write(`===   resume with: conclave session "<goal>" --resume ${runLogPath}`)
+        // Label and path on separate lines, and the path NOT wrapped.
+        //
+        // Both were single lines carrying an absolute path, so they ran to three or four
+        // times the terminal width and broke mid-path. Wrapping them with a hanging indent
+        // would be worse than the break: the resume line exists to be selected and run, and
+        // an indent in the middle of it is pasted along with everything else. A path on its
+        // own line soft-wraps at the edge and stays copyable, which is the property that
+        // matters for the one line whose entire purpose is being copied.
+        write(summaryLine('===', 'run log:', width))
+        write(`      ${runLogPath}`)
+        write(summaryLine('===', 'resume with:', width))
+        write(`      conclave session "<goal>" --resume ${runLogPath}`)
         for (const line of relay.flagSummary()) write(summaryLine('===', line, width))
         // The session does not end with the run. There are participants alive and a human
         // at the prompt; ending here would throw away a working session at the exact moment
