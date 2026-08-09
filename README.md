@@ -188,8 +188,9 @@ The reasoning is in [`DESIGN-BRIEF.md`](DESIGN-BRIEF.md).
   acceptance flows each; OpenCode and Kimi are graded against recorded runs.
 - A two-party relay: prose only in both directions, a ranked committee, and human asides
   addressed to one participant with an audit trail of who was excluded.
-- Pauses as decision points — rotation candidate, advisor escalation, authority conflict —
-  resolved from the console or from `RunHandle`.
+- Pauses as decision points — rotation candidate, advisor escalation, authority conflict,
+  and an implementer question that would change the build — resolved from the console or from
+  `RunHandle`.
 - Rotation as a transaction: quiesce the old implementer, the advisor authors a handoff,
   the replacement reproduces the verification, and it rolls back if it cannot. Both
   branches proven live, rollback included.
@@ -205,6 +206,10 @@ The reasoning is in [`DESIGN-BRIEF.md`](DESIGN-BRIEF.md).
 - Unresolved items carried into the summary. A participant ending a report with a line
   beginning `FLAG:` has it lifted verbatim into the final lines, so a run that completed
   while something stayed unchecked does not read as unqualified success.
+- Build-changing scope questions paused for a human answer. A line beginning `UNANSWERED:`
+  in an implementer report means it had to choose a build-changing direction without an
+  answer; the run pauses until the human settles it, while choices about how to build remain
+  the implementer’s. It is distinct from `FLAG:`, which only qualifies the result.
 - Outcomes graded by evidence, and the four agents do not offer the same evidence. `Stop`
   proves normal completion on Claude Code and Kimi, `step_finish reason=stop` on OpenCode,
   `task_complete` on Codex; anything weaker is labelled as what it is. A run exiting 0 is
