@@ -12,13 +12,21 @@ without Conclave learning anything about that model.
 
 Supervised use. There is no orchestrator model, no summariser, and no third seat.
 
-![The conclave console: two seats joined, hooks registered and trusted, a goal routed to the advisor, and the live footer showing who is working](docs/images/console.png)
+![The conclave console: a goal routed to the advisor, the advisor instructing the implementer, the implementer narrating to the human and reporting to the advisor](docs/images/console.png)
 
-The banner names the build and both seats. Everything under the rule is the run accounting
-for itself: what it registered, what it had to trust, that permission prompts are bypassed
-and on whose authority, and the session id to inspect it from another terminal. The goal is
-linted before anything starts — that warning is the tool saying the outcome cannot be graded
-better than `reasoned_but_unverified` however well the work goes.
+`conclave demo`, so the participants are scripted and no model was called — the rendering is
+the real thing, the conversation is not.
+
+What it shows is the routing. **The goal goes to the advisor only**; the advisor decides what
+the implementer needs to know. The implementer then says two different things to two
+different audiences: `implementer → you` is narration, printed live so you can see work
+happening, and `implementer → advisor` is the report — the closing statement, rendered as
+markdown. A peer that received the narration would answer the intention instead of the
+result.
+
+The goal is linted before anything starts. That warning is the tool saying this ask names
+nothing that could be run, compared or observed, so the outcome cannot be graded better than
+`reasoned_but_unverified` however well the work goes.
 
 ## Supported REPLs
 
