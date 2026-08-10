@@ -252,6 +252,48 @@ One constraint from the descending box: the box's height determines `#floor`, an
 pushes the transcript up when `#contentRow` falls below it. With N seats that path runs
 constantly instead of rarely, and it has one unit test.
 
+## D9b. A reviewer seat, because the advisor cannot see the code
+
+The advisor judges from reports — it cannot see the implementer's tools, by design. So it
+catches reasoning errors and reported errors, and cannot catch an error the implementer never
+mentions. That bound is real and no amount of advisor capability removes it.
+
+Concurrent seats remove it, because a seat can be given the role of reading what another seat
+WROTE rather than what it said. This is a better argument for the feature than the throughput
+one #42 leads with: it converts a class of undetectable error into a detectable one.
+
+**The load-bearing condition: the reviewer reads the diff and the tree, never the producer's
+summary.** A reviewer fed the producer's report inherits exactly the defect it exists to
+catch. Observed in dogfooding: an implementer produced correct, well-covered code and
+reported a test failure in a script that does not exist, in a suite that was clean. The code
+was right and the story about it was wrong, and only reading the tree distinguishes those.
+
+**It slots into the merge boundary already designed in D6**, and needs no new machinery: seat
+completes, checks run in its own tree, review runs against the diff, then merge to integration.
+A rejection becomes a new task with `parent` set, assigned back to the producing seat —
+identical to the conflict handling D6 already specifies. The reviewer never needs write access.
+
+**Rank `implementer`, role `reviewer`.** This is what D5's split is for. A reviewer must not
+outrank a producer: its rejection creates WORK, which the dispatcher admits, and authority
+stays with the advisor. If review required widening `Rank`, the model would be wrong.
+
+**It does not replace human review.** It is a gate before one, and it changes what reaches a
+human: a diff that has already been read by something that cannot be fooled by its author's
+description of it.
+
+### Consequence for cost
+
+It inverts the obvious allocation. Review is read-heavy but BOUNDED — one diff — where
+production is unbounded. So the frontier spend belongs on the reviewer rather than the
+advisor: same money, but positioned where it can see the code instead of only the story about
+the code.
+
+    advisor      mid-tier; judgement-heavy, low token volume
+    producers    cheap, numerous, high token volume
+    reviewer     frontier; bounded input, gates the merge
+
+Unmeasured, and it stays that way until #71 records which model a seat ran.
+
 ## D10. One branch, no incremental merges to main
 
 All of it lands on a single long-lived branch, `concurrent-implementers`. Nothing merges to
