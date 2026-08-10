@@ -102,7 +102,7 @@ const CITED: Record<string, string> = {
   'src/relay/run.ts:169-183': 'reason: PauseReason',
   'src/relay/run.ts:183': 'resolution: ResolutionRequest',
   'src/relay/subagents.ts:68': 'export function worktreePaths',
-  'src/repl/session.ts:199-212': 'turnWatchdogMs?: number | undefined',
+  'src/repl/session.ts:193-206': 'turnWatchdogMs?: number | undefined',
   'src/repl/session.ts:528': 'escalates to you rather than being replaced',
   'src/repl/session.ts:680': 'logPath: runLogPath,',
   'src/repl/session.ts:854': "recording.set('paused', { pause: run.pause })",
