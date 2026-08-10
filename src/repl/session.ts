@@ -789,14 +789,25 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     // longer tells us anything we need to know, so sampling it would only stall a resumption
     // the evidence model has already cleared. A withdrawal with no replacement verdict still
     // leaves the original concern in place, so sampling runs there.
+    //
+    // When the pause names a seat, that seat is the whole question. When it does not, the
+    // question is about the run rather than about one child, so EVERY implementer seat is
+    // sampled and any one of them working refuses the continue. The `find` that stood here
+    // took the first implementer by rank, which is the right seat only because there is one
+    // of them -- at N>1 it would clear a resume while another seat was mid-turn, and
+    // continuing SENDS, which is the exact destructive case this guard exists for.
     const seat = run.pause?.verdictOf?.participant
-    const child = relay.participants.find((x) => (seat ? x.id === seat : x.rank === 'implementer'))
-    const pid = child?.session.childPid
+    const children = relay.participants.filter((x) => (seat ? x.id === seat : x.rank === 'implementer'))
     const supersededCompleted = run.pause?.superseded?.verdict?.outcome === 'completed'
-    if (pid !== undefined && !runOpts.force && !supersededCompleted) {
+    if (!runOpts.force && !supersededCompleted) {
       const sample = opts.liveness ?? sampleLiveness
-      const now = await sample(pid)
-      if (now.alive && !now.idle) {
+      for (const child of children) {
+        const pid = child.session.childPid
+        // No pid is no reading, not a reading of idle: an adapter that does not expose one
+        // leaves this guard with nothing to say about that seat.
+        if (pid === undefined) continue
+        const now = await sample(pid)
+        if (!now.alive || now.idle) continue
         const reason = describeLiveness(now, 0)
         write(yellow('  not continuing: the child is working right now.'))
         write(`  ${reason}`)

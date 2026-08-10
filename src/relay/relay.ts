@@ -69,6 +69,7 @@ import {
   parseDecisions,
   recordCompletion,
   refuseDispatch,
+  seatsFor,
   type SeatExecution,
   type Task,
   type TaskEvent,
@@ -215,7 +216,29 @@ export interface RelayOptions {
   ceilings?: Ceilings | undefined
   /** The advisor. Steers, and cannot see the implementer's tools. */
   lead: ParticipantSpec
+  /**
+   * The implementer. Still required, and still the whole answer for a default run.
+   *
+   * At N>1 it keeps a specific job rather than becoming decoration: it names the LEAD
+   * implementer -- the seat whose role an untargeted instruction resolves against, and the
+   * seat `rotateImplementer` means when nothing names one. That is why `implementers`, when
+   * given, must contain it (see `Relay.start`): a singular field nothing reads would be a trap,
+   * and every operation that is genuinely singular needs a seat it can name without choosing.
+   */
   implementer: ParticipantSpec
+  /**
+   * Every implementer seat, when a run has more than one.
+   *
+   * Absent is the default and must stay behaviourless: the effective seat list is
+   * `implementers ?? [implementer]` (see `implementerSeats`), so a caller that never heard of
+   * this field gets exactly the run it got before -- one seat, joined in the same order, with
+   * the same routing log. That is D1's identity case stated as an option rather than as a
+   * branch: nothing downstream asks how many seats there are, it asks the seat list.
+   *
+   * Neither front-end sets it. There is no flag for it and adding one is a separate decision;
+   * this is the programmatic surface the dispatcher's seat table was already written against.
+   */
+  implementers?: ParticipantSpec[] | undefined
   /**
    * Advisor turns before the relay stops and hands back to the human.
    *
@@ -288,6 +311,24 @@ export const DEFAULT_ADVISOR_TURNS = 6
  */
 export function boundOf(opts: Pick<RelayOptions, 'maxAdvisorTurns' | 'maxRounds'>): number {
   return opts.maxAdvisorTurns ?? opts.maxRounds ?? DEFAULT_ADVISOR_TURNS
+}
+
+/**
+ * The implementer seats this run actually has, in configured order.
+ *
+ * A function for the same reason `boundOf` is one: the rule that reconciles the plural option
+ * with the singular one is the whole of the compatibility promise, and a `??` written at each
+ * point of use is a rule that eventually disagrees with itself. One reader, so "what are the
+ * seats" has exactly one answer and the N=1 identity cannot rot.
+ *
+ * Order is configured order, and it is load-bearing at join time only: seats are joined in this
+ * order, which at N=1 is the order the default run has always had. Nothing else reads the
+ * position -- scheduling reads the seat table, and the lead implementer is named by id.
+ */
+export function implementerSeats(
+  opts: Pick<RelayOptions, 'implementer' | 'implementers'>,
+): ParticipantSpec[] {
+  return opts.implementers ?? [opts.implementer]
 }
 
 /**
@@ -671,16 +712,41 @@ export class Relay {
   }
 
   static async start(opts: RelayOptions): Promise<Relay> {
+    const seats = implementerSeats(opts)
+    // Checked before anything is launched, because every one of these fails SILENTLY later.
+    // `#join` keys the participant map by id, so a duplicate id would overwrite a seat that
+    // already has a live child -- leaving a process nothing routes to and nothing closes.
+    if (seats.length === 0) {
+      throw new Error('a relay needs at least one implementer seat: `implementers` was empty')
+    }
+    const ids = new Set<string>()
+    for (const spec of [opts.lead, ...seats]) {
+      if (ids.has(spec.id)) throw new Error(`duplicate participant id '${spec.id}': seat ids must be unique`)
+      ids.add(spec.id)
+    }
+    // The singular option must be one of the seats. It is not a formality: `untargeted` and
+    // `rotateImplementer` both name it, so an `implementers` list that omits it would leave
+    // those two reading a spec no participant was created from.
+    if (!seats.some((s) => s.id === opts.implementer.id)) {
+      throw new Error(
+        `implementers must include the lead implementer '${opts.implementer.id}': it is the seat ` +
+          `an untargeted instruction and a rotation name, and a run whose seat list omits it has no ` +
+          `answer for either`,
+      )
+    }
     const relay = new Relay(opts)
     // Sequential rather than parallel: two CLIs negotiating terminals and hook trust at
-    // once produces interleaved failures that are miserable to attribute.
+    // once produces interleaved failures that are miserable to attribute. That argument does
+    // not weaken with more seats, so the loop stays sequential too.
     await relay.#join(opts.lead, 'advisor')
-    await relay.#join(opts.implementer, 'implementer')
+    for (const spec of seats) await relay.#join(spec, 'implementer')
     // Records what the tree looked like before the participants touched it, so the
-    // operator's own tooling can refuse to sweep their work into an unrelated commit.
+    // operator's own tooling can refuse to sweep their work into an unrelated commit. Every
+    // seat is listed: the lock names who is working in this checkout, and a seat missing from
+    // it is a writer the guard cannot attribute a change to.
     acquire(opts.cwd, [
       { id: opts.lead.id, agent: opts.lead.agent },
-      { id: opts.implementer.id, agent: opts.implementer.agent },
+      ...seats.map((s) => ({ id: s.id, agent: s.agent })),
     ])
     return relay
   }
@@ -697,6 +763,34 @@ export class Relay {
 
   get participants(): RelayParticipant[] {
     return [...this.#participants.values()]
+  }
+
+  /**
+   * Every implementer seat, in join order.
+   *
+   * The replacement for `participants.find((p) => p.rank === 'implementer')`, which was correct
+   * only because there was one. A `find` over a rank does not fail at N>1 -- it returns the
+   * first seat, quietly, and whatever it fed goes on looking right. So the plural answer is the
+   * only one this class offers, and the two operations that genuinely need a single seat name
+   * one explicitly below.
+   */
+  #implementers(): RelayParticipant[] {
+    return this.participants.filter((p) => p.rank === 'implementer')
+  }
+
+  /**
+   * The seat the required singular option names.
+   *
+   * Not "the first implementer": `RelayOptions.implementer` is a spec the caller wrote, and
+   * `Relay.start` has already refused a seat list that omits it, so this is a lookup by id and
+   * cannot pick between seats. At N=1 it is the only seat there is.
+   */
+  #leadImplementer(): RelayParticipant {
+    const p = this.#participants.get(this.#opts.implementer.id)
+    // Unreachable through `start`, which validates it. Thrown rather than `!`-asserted because
+    // the alternative is a `undefined.role` several frames away from the cause.
+    if (!p) throw new Error(`the lead implementer '${this.#opts.implementer.id}' is not a participant`)
+    return p
   }
 
   /**
@@ -1649,10 +1743,14 @@ export class Relay {
     //
     // Everything needed was already on the pause: `verdictOf` names the seat whose verdict
     // this rests on, and the relay knows whether rotation is armed.
-    const implId = this.participants.find((x) => x.rank === 'implementer')?.id
-    const aboutImplementer = p.verdictOf === undefined || p.verdictOf.participant === implId
+    const implIds = new Set(this.#implementers().map((x) => x.id))
+    const aboutImplementer = p.verdictOf === undefined || implIds.has(p.verdictOf.participant)
+    // And `rotate` only where it names something. `rotateImplementer` takes a reason and no
+    // seat, so at N>1 there is no seat it could mean -- offering it would put back the exact
+    // inert choice the paragraph above is about, one release after taking it out.
+    const rotatable = implIds.size === 1
     const options: PauseOption[] = ['continue', 'constrain', 'abort']
-    if (armed && aboutImplementer) options.splice(1, 0, 'rotate')
+    if (armed && rotatable && aboutImplementer) options.splice(1, 0, 'rotate')
     // `wait` only where it is the right answer: the child is measurably alive, so the turn
     // is still happening and every other option is destructive. Offering it always would
     // invite waiting on a child that has already exited, which is a decision to sit
@@ -2133,7 +2231,9 @@ export class Relay {
 
   async #runLoop(goal: string, handle: RunHandle | undefined): Promise<RunOutcome> {
     const lead = this.participants.find((p) => p.rank === 'advisor')!
-    const impl = this.participants.find((p) => p.rank === 'implementer')!
+    const seats = this.#implementers()
+    /** Named, not chosen: whose role an instruction that targets nothing resolves against. */
+    const impl = this.#leadImplementer()
 
     // `to` is the whole of it. `#record` derives `restricted` and `excluded` from the gap
     // between recipients and participants, so a goal the implementer does not get is
@@ -2145,10 +2245,16 @@ export class Relay {
     // that re-issues an instruction the log shows as completed is the failure this prevents.
     const prior = this.#opts.resume?.length ? `${resumeBriefing(this.#opts.resume)}\n\n` : ''
 
-    await this.#exchange(
-      impl,
-      `${IMPLEMENTER_BRIEFING}\n\n${SUBAGENT_BRIEFING}\n\n${WITHHELD_GOAL_NOTICE}\n\n${prior}Acknowledge briefly; do not start work yet.`,
-    )
+    // Every seat, sequentially and in join order. A seat that was never briefed does not know
+    // it is in a relay, what it may not assume about the goal, or what the subagent rule is --
+    // and it would find out only by receiving its first instruction cold, which is not a
+    // failure anything reports. At N=1 this is the one exchange it has always been.
+    for (const seat of seats) {
+      await this.#exchange(
+        seat,
+        `${IMPLEMENTER_BRIEFING}\n\n${SUBAGENT_BRIEFING}\n\n${WITHHELD_GOAL_NOTICE}\n\n${prior}Acknowledge briefly; do not start work yet.`,
+      )
+    }
     let next = await this.#exchange(
       lead,
       `${LEAD_BRIEFING}\n\n${SUBAGENT_BRIEFING}\n\n` +
@@ -2161,18 +2267,20 @@ export class Relay {
     this.#worktreesAtStart = worktreePaths(this.#opts.cwd)
     this.#worktreesSeen = new Set(this.#worktreesAtStart)
     this.#seatState = new Map(
-      this.participants
-        .filter((p) => p.rank === 'implementer')
-        .map((p): [string, SeatExecution] => [
-          p.id,
-          { seat: p.id, role: p.role, state: 'idle', idleSince: this.#startedAt, dispatched: 0 },
-        ]),
+      seats.map((p): [string, SeatExecution] => [
+        p.id,
+        { seat: p.id, role: p.role, state: 'idle', idleSince: this.#startedAt, dispatched: 0 },
+      ]),
     )
     // The target for an instruction that names none, which is every instruction the advisor can
     // currently write: there is no target syntax in its briefing, and inventing one here would
     // change what the advisor is asked to produce rather than how the relay schedules it. The
     // ROLE rather than the seat id, because the rule that resolves it -- longest-idle seat
     // filling the role -- is the same rule at any N, and at N=1 it has exactly one answer.
+    //
+    // The LEAD implementer's role, read off the option the caller wrote rather than off
+    // whichever seat a rank scan returned first. At N>1 with seats in different roles those
+    // two are different answers, and only one of them is something a caller decided.
     const untargeted: TaskTarget = { kind: 'role', role: impl.role }
 
     // The dispatcher. One iteration is one ADVISOR TURN: the advisor's standing reply is read
@@ -2334,24 +2442,28 @@ export class Relay {
               `${outstanding.map((p) => p.id).join(', ')} — the human outranks the advisor, so the ` +
               `session continues rather than ending`,
           })
-          if ((this.#pending.get(impl.id) ?? []).length > 0) {
-            const extra = await this.#exchange(impl, this.#drain(impl.id))
-            this.#record({ from: impl.id, fromRank: 'implementer', to: [lead.id], kind: 'report', text: extra.prose })
-            next = await this.#exchange(
-              lead,
-              [this.#drain(lead.id), envelope({ from: impl.id, fromRank: 'implementer', fromRole: impl.role, kind: 'report', text: extra.prose })]
-                .filter(Boolean)
-                .join('\n\n'),
-            )
-          } else {
-            next = await this.#exchange(lead, this.#drain(lead.id))
+          // Every seat holding a human message, not just one. `outstanding` above already
+          // counts them all -- it is what decided the session continues -- so draining a
+          // single seat would name several in the note and then answer for one, leaving the
+          // rest queued behind an advisor that has been told the work is done.
+          const answers: string[] = []
+          for (const seat of seats) {
+            if ((this.#pending.get(seat.id) ?? []).length === 0) continue
+            const extra = await this.#exchange(seat, this.#drain(seat.id))
+            this.#record({ from: seat.id, fromRank: 'implementer', to: [lead.id], kind: 'report', text: extra.prose })
+            answers.push(envelope({ from: seat.id, fromRank: 'implementer', fromRole: seat.role, kind: 'report', text: extra.prose }))
           }
+          next = await this.#exchange(lead, [this.#drain(lead.id), ...answers].filter(Boolean).join('\n\n'))
           // Bounded by the advisor-turn budget like everything else, so a human who keeps talking
           // extends the session rather than making it unstoppable.
           continue
         }
         this.#record({ from: lead.id, fromRank: 'advisor', to: [], kind: 'note', text: `advisor reports the work complete: ${instruction}` })
-        await this.#closingQuestion(impl)
+        // Asked of every seat, in join order. The guarantee is "the implementer's last word",
+        // and a seat that worked and was never asked is exactly the silent loss this exists to
+        // prevent -- `#closingQuestion` already returns immediately for a seat that never
+        // worked, so at N=1 nothing about this changed.
+        for (const seat of seats) await this.#closingQuestion(seat)
         return this.#end('done', instruction)
       }
       if (decision.kind === 'escalate') {
@@ -2393,12 +2505,20 @@ export class Relay {
       const conflict = detectConflict(task.instruction, this.restrictedOrigins)
       if (conflict && !this.#adjudicated.has(`${conflict.origin.seq}:${instruction}`)) {
         this.#adjudicated.add(`${conflict.origin.seq}:${instruction}`)
+        // Who this task can actually land on, read off its own target rather than off a rank
+        // scan. At N=1 that is the one seat, so both the workstream name and the delivery
+        // below are the values they have always been.
+        const targeted = seatsFor([...this.#seatState.values()], task.target)
         const halted = await this.#halt(handle, {
           // The workstream carrying the instruction under adjudication. At N=1 there is one,
           // and it is the implementer's -- the seat id names it because at this size they
           // are the same thing (D1), not because a workstream is a seat. #57's task graph is
           // what gives them separate names.
-          subject: { reason: 'authority_conflict', workstream: impl.id },
+          //
+          // When the target resolves to more than one seat there is no seat that names it, and
+          // picking one would be the guess this whole audit is against -- so the TASK names it.
+          // A task id is a workstream identity that does not have to pretend to be a seat.
+          subject: { reason: 'authority_conflict', workstream: targeted.length === 1 ? targeted[0]!.seat : task.id },
           detail:
             `the advisor's instruction would reverse work traceable to your restricted ` +
             `message #${conflict.origin.seq} (matched: ${conflict.matched.join(', ')})`,
@@ -2419,7 +2539,12 @@ export class Relay {
         //
         // It named the missing message. Continuing past the conflict IS the human
         // accounting for it; the implementer simply had no way to know.
-        this.#adjudicate(impl.id, conflict.origin.seq)
+        //
+        // Delivered to every seat this task could be dispatched to, because which one takes it
+        // is not decided until below and the adjudication has to be waiting wherever it lands.
+        // The lead implementer used to be told regardless of who the task was for, which at
+        // N=1 is the same seat and at N>1 is the wrong one.
+        for (const seat of targeted) this.#adjudicate(seat.seat, conflict.origin.seq)
       }
 
       // Before choosing anything, take out the work that can never run. A dependent of a
@@ -2679,8 +2804,19 @@ export class Relay {
           'something to reproduce. Rotating without them would be a transfer nobody demonstrated.',
       )
     }
+    // Genuinely singular, and refused rather than guessed at. This method takes a reason and no
+    // seat: at N>1 "the implementer" names nothing, and quietly rotating the first seat would
+    // retire a session whose operator asked about another one. Rotating a NAMED seat is a
+    // different method with a different signature, and it does not exist yet.
+    const seats = this.#implementers()
+    if (seats.length > 1) {
+      throw new Error(
+        `rotateImplementer names no seat, and this run has ${seats.length} (${seats.map((s) => s.id).join(', ')}). ` +
+          `Rotation replaces one session and carries its work forward, so it needs to be told which.`,
+      )
+    }
     const advisor = this.participants.find((p) => p.rank === 'advisor')!
-    const impl = this.participants.find((p) => p.rank === 'implementer')!
+    const impl = this.#leadImplementer()
     const spec = this.#opts.implementer
     /** The replacement while it is proving itself, before it is anyone's session. */
     let audition: RelayParticipant | undefined
