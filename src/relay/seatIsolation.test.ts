@@ -693,7 +693,7 @@ test('a seat whose merge conflicts is blocked, told to the advisor, and repaired
     const { relay, alpha, beta, lead } = await conflictingRun(
       repo,
       { alpha: ['ack', 'Set it to one.', 'NONE'], beta: ['ack', 'Set it to two.', 'Reconciled.', 'NONE'] },
-      ['Set it to one.', 'Set it to two.', 'Resolve the conflict.', 'DONE'],
+      ['Set it to one.', 'Set it to two.', '@seat seat-beta: Resolve the conflict.', 'DONE'],
     )
     try {
       alpha.onSend = () => writeFileSync(join(alpha.cwd, 'shared.txt'), 'one\n')
@@ -754,7 +754,7 @@ test('a second failure against the same parent escalates, and blocks only that s
     const { relay, alpha, beta } = await conflictingRun(
       repo,
       { alpha: ['ack', 'Set it to one.', 'NONE'], beta: ['ack', 'Set it to two.', 'Still stuck.', 'NONE'] },
-      ['Set it to one.', 'Set it to two.', 'Resolve the conflict.', 'DONE'],
+      ['Set it to one.', 'Set it to two.', '@seat seat-beta: Resolve the conflict.', 'DONE'],
     )
     try {
       alpha.onSend = () => writeFileSync(join(alpha.cwd, 'shared.txt'), 'one\n')
@@ -810,7 +810,7 @@ test('a task whose merge conflicted is failed, not integrated, and never complet
     const { relay, alpha, beta } = await conflictingRun(
       repo,
       { alpha: ['ack', 'Set it to one.', 'NONE'], beta: ['ack', 'Set it to two.', 'Still stuck.', 'NONE'] },
-      ['Set it to one.', 'Set it to two.', 'Resolve the conflict.', 'DONE'],
+      ['Set it to one.', 'Set it to two.', '@seat seat-beta: Resolve the conflict.', 'DONE'],
     )
     try {
       alpha.onSend = () => writeFileSync(join(alpha.cwd, 'shared.txt'), 'one\n')
@@ -925,7 +925,7 @@ test('only the designated repair enters a blocked seat, and it is designated by 
       // One instruction MORE than the repair, so there is a later task to look at: the point is
       // that the designation ends with the block rather than sticking to the seat.
       { alpha: ['ack', 'Set it to one.', 'Did the extra thing.', 'NONE'], beta: ['ack', 'Set it to two.', 'Reconciled.', 'NONE'] },
-      ['Set it to one.', 'Set it to two.', 'Resolve the conflict.', 'Now do one more thing.', 'DONE'],
+      ['Set it to one.', 'Set it to two.', '@seat seat-beta: Resolve the conflict.', 'Now do one more thing.', 'DONE'],
     )
     try {
       alpha.onSend = () => writeFileSync(join(alpha.cwd, 'shared.txt'), 'one\n')
@@ -949,6 +949,85 @@ test('only the designated repair enters a blocked seat, and it is designated by 
       // Once the block cleared, the relay went back to designating ordinary work.
       assert.equal(tasks.at(-1)!.purpose, 'work')
       assert.deepEqual(tasks.at(-1)!.target, { kind: 'role', role: 'implementer' })
+    } finally {
+      await relay.stop()
+    }
+  } finally {
+    rmSync(repo, { recursive: true, force: true })
+  }
+})
+
+/**
+ * A blocked seat does not swallow the work the other seats could be doing.
+ *
+ * The redirect that puts an untargeted instruction onto a blocked seat is what makes a
+ * single-seat repair possible at all: with one seat there is nowhere else for the work to go,
+ * and a seat nothing can be sent to is a seat nothing can repair. Fired unconditionally it is
+ * starvation. One seat failing to merge captured EVERY subsequent untargeted instruction, so
+ * the free seats idled while the blocked one collected work it is not allowed to do — and
+ * `canTake` refuses all of it, so the queue fills with tasks nothing will ever dispatch.
+ *
+ * So the condition is "every compatible seat is blocked" rather than "any seat is blocked",
+ * which at N=1 is the same question and at N>1 is this test. The advisor reaches a blocked seat
+ * the way it is told to: by name.
+ */
+test('an untargeted instruction goes to a free seat rather than to the blocked one', async () => {
+  const repo = tempRepo()
+  try {
+    const { relay, alpha, beta, lead } = await conflictingRun(
+      repo,
+      {
+        alpha: ['ack', 'Set it to one.', 'Did the untargeted work.', 'NONE'],
+        beta: ['ack', 'Set it to two.', 'Reconciled.', 'NONE'],
+      },
+      // The third reply names nobody. Before the fix it was redirected onto seat-beta, which
+      // was blocked; now it must reach seat-alpha, which is free.
+      ['Set it to one.', 'Set it to two.', 'Do something unrelated.', '@seat seat-beta: Resolve the conflict.', 'DONE'],
+    )
+    try {
+      alpha.onSend = () => writeFileSync(join(alpha.cwd, 'shared.txt'), 'one\n')
+      let turn = 0
+      beta.onSend = () => {
+        turn += 1
+        writeFileSync(join(beta.cwd, 'shared.txt'), turn <= 2 ? 'two\n' : 'one\n')
+      }
+
+      assert.equal((await relay.run('Keep the work moving.')).reason, 'done')
+
+      const entries = relay.tasks()
+      // Task 3 is the untargeted one issued while seat-beta was blocked.
+      const untargeted = entries[2]!
+      assert.deepEqual(
+        untargeted.task.target,
+        { kind: 'role', role: 'implementer' },
+        'an untargeted instruction must stay untargeted while another seat can take it',
+      )
+      assert.equal(untargeted.task.purpose, 'work', 'and must not be designated as somebody else\'s repair')
+      assert.equal(untargeted.runtime.seat, 'seat-alpha', 'it must land on the seat that is free')
+
+      // The repair still happened, and only because the advisor addressed it.
+      const repair = entries[3]!
+      assert.deepEqual(repair.task.target, { kind: 'seat', seat: 'seat-beta' })
+      assert.equal(repair.task.purpose, 'merge_resolution', 'naming a blocked seat IS the designation')
+      assert.equal(repair.runtime.seat, 'seat-beta')
+
+      // The advisor was told how to reach it, which is the half that makes the rule usable.
+      const toldAt = lead.received.findIndex((m) => /blocked and takes no other work/.test(m))
+      assert.ok(toldAt >= 0)
+      assert.match(
+        lead.received[toldAt]!,
+        /@seat seat-beta:/,
+        'a rule the advisor is not told about is a seat that stays blocked',
+      )
+
+      assert.deepEqual(
+        relay.seats().map((s) => [s.seat, s.state]),
+        [
+          ['seat-alpha', 'idle'],
+          ['seat-beta', 'idle'],
+        ],
+        'both seats end dispatchable, so nothing was stranded',
+      )
     } finally {
       await relay.stop()
     }

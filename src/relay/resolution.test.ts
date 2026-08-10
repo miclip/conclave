@@ -337,7 +337,7 @@ async function provoke(t: TestContext, reason: RunPause['reason']): Promise<Prov
       advisor = new FakeRotationSession('advisor', 'codex', [
         'Set the answer to one.',
         'Set the answer to two.',
-        'Resolve the conflict in your own worktree.',
+        '@seat implementer-2: Resolve the conflict in your own worktree.',
         'DONE',
       ])
       const first = new FakeRotationSession('impl', 'claude', ['ack', 'Did it.', 'NONE'])

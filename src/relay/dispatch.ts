@@ -518,22 +518,62 @@ export type Decision =
 /**
  * Why a reply produced no decisions.
  *
- * `empty` is today's empty instruction. `unknown_target` is a reply naming a seat id or role
- * the run does not have — unreachable at N=1, where no reply carries a target, and included
- * because the alternative is a parser that invents a seat the moment one does.
+ * `empty` is today's empty instruction. The rest belong to the ADDRESSED form: a reply that
+ * uses `@seat`/`@role` at all is held to it completely, because a reply that is half addressed
+ * and half not is exactly the ambiguity a parser must not resolve on its own.
+ *
+ *   - `unknown_target` — a seat id or role the run does not have. A hallucinated seat id that
+ *     silently created capacity would be a scheduling decision nobody made.
+ *   - `stray_prose` — text outside every directive. It is an instruction with no target, and
+ *     attaching it to a neighbouring one would put work on a seat nobody named.
+ *   - `empty_instruction` — a directive with nothing after it. A seat addressed and given
+ *     nothing is a turn spent on a routing header.
+ *   - `mixed_keyword` — DONE or ESCALATE inside an addressed reply. Ending the run and
+ *     assigning work are different decisions and a reply cannot be both.
  */
-export type ParseFailure = { why: 'empty' | 'unknown_target'; detail: string }
+export type ParseFailure = {
+  why: 'empty' | 'unknown_target' | 'stray_prose' | 'empty_instruction' | 'mixed_keyword'
+  detail: string
+}
 
 export type ParseResult = { ok: true; decisions: Decision[] } | { ok: false } & ParseFailure
 
 /**
+ * A line that addresses one seat or one role, and everything after it until the next such line.
+ *
+ * `@seat <id>:` and `@role <id>:`, anchored to the start of a line. Two spellings rather than
+ * one, because seat ids and role ids share no namespace and cannot be told apart by shape: a
+ * run has a seat called `implementer` AND a role called `implementer`, so a single `@implementer`
+ * would need a precedence rule, and a precedence rule is a silent answer to a question the
+ * advisor thought it had asked explicitly. Naming the KIND makes the reply say which it meant.
+ *
+ * `@` because that is the sigil this product already uses for addressing a participant -- the
+ * console's `@advisor` / `@implementer` asides -- so the advisor is not learning a second
+ * convention for the same idea.
+ */
+const DIRECTIVE = /^@(seat|role)[ \t]+([^\s:]+)[ \t]*:[ \t]*(.*)$/
+
+/** DONE and ESCALATE, matched the way the whole-reply forms are, for the mixed-form refusal. */
+const KEYWORD_LINE = /^(DONE|ESCALATE)\b/i
+
+/**
  * Parse an advisor reply into decisions, and **fail closed**.
  *
- * A reply that does not parse cleanly — including one naming a target the run does not have —
- * is treated exactly as an empty instruction is treated today: recorded, and the advisor asked
- * once more. Guessing at an ambiguous reply would let a parser invent work nobody authorised,
- * and guessing at an unrecognised target would let it invent a seat; a hallucinated seat id
- * that silently created capacity would be a scheduling decision nobody made.
+ * Two forms, and which one a reply is in is decided by whether it contains a directive line at
+ * all:
+ *
+ *   - **unaddressed** — no `@seat`/`@role` anywhere. The whole reply is one instruction and it
+ *     goes to `fallback`, which is exactly what this function did before the addressed form
+ *     existed. This is the form the default run's advisor writes, because the syntax is only in
+ *     its briefing when the run has more than one seat, and it must stay byte-identical.
+ *   - **addressed** — at least one directive. Then EVERY part of the reply must belong to one,
+ *     and any defect fails the WHOLE reply rather than the offending decision. Atomic on
+ *     purpose: admitting the three decisions that parsed and dropping the fourth would run
+ *     three-quarters of a plan the advisor wrote as one, and the quarter that vanished is the
+ *     one nothing reports.
+ *
+ * A failure of either kind is treated exactly as an empty instruction is treated today:
+ * recorded, and the advisor asked once more.
  *
  * `instruction` arrives already trimmed and with NOTE: lines lifted, because those are
  * addressed to the operator and must not reach a seat as part of the work.
@@ -544,21 +584,86 @@ export function parseDecisions(
   fallback: TaskTarget,
 ): ParseResult {
   if (instruction === '') return { ok: false, why: 'empty', detail: 'the reply carried no instruction' }
+  // Whole-reply keywords first, and matched exactly as they were before any of this existed: a
+  // reply that ended a run yesterday must end one today.
   if (/^DONE\b/i.test(instruction)) return { ok: true, decisions: [{ kind: 'done', instruction }] }
   if (/^ESCALATE\b/i.test(instruction)) {
     return { ok: true, decisions: [{ kind: 'escalate', instruction }] }
   }
-  // Validated against the run's CONFIGURED seats, not against the free ones: a task for a busy
-  // seat is a scheduling wait, and a task for a seat that does not exist is a parse failure.
-  if (seatsFor(seats, fallback).length === 0) {
+
+  const lines = instruction.split('\n')
+  const first = lines.findIndex((l) => DIRECTIVE.test(l))
+  if (first === -1) {
+    // Validated against the run's CONFIGURED seats, not against the free ones: a task for a busy
+    // seat is a scheduling wait, and a task for a seat that does not exist is a parse failure.
+    if (seatsFor(seats, fallback).length === 0) {
+      return {
+        ok: false,
+        why: 'unknown_target',
+        detail:
+          fallback.kind === 'seat'
+            ? `no seat named ${fallback.seat}`
+            : `no seat fills the role ${fallback.role}`,
+      }
+    }
+    return { ok: true, decisions: [{ kind: 'instruct', instruction, target: fallback }] }
+  }
+
+  // Anything before the first directive is work addressed to nobody. Not silently attached to
+  // the first decision: the advisor that wrote a preamble and the advisor that wrote an
+  // instruction it forgot to address look identical here, and one of them is asking for work to
+  // happen on a seat it did not name.
+  const preamble = lines.slice(0, first).join('\n').trim()
+  if (preamble !== '') {
     return {
       ok: false,
-      why: 'unknown_target',
-      detail:
-        fallback.kind === 'seat'
-          ? `no seat named ${fallback.seat}`
-          : `no seat fills the role ${fallback.role}`,
+      why: 'stray_prose',
+      detail: `text before the first @seat/@role directive: ${JSON.stringify(preamble.slice(0, 80))}`,
     }
   }
-  return { ok: true, decisions: [{ kind: 'instruct', instruction, target: fallback }] }
+
+  /** One directive and its body, before either has been validated. */
+  const blocks: { kind: string; name: string; body: string[] }[] = []
+  for (const line of lines.slice(first)) {
+    const m = DIRECTIVE.exec(line)
+    if (m) {
+      blocks.push({ kind: m[1]!, name: m[2]!, body: m[3]! === '' ? [] : [m[3]!] })
+      continue
+    }
+    blocks.at(-1)!.body.push(line)
+  }
+
+  const decisions: Decision[] = []
+  for (const block of blocks) {
+    const body = block.body.join('\n').trim()
+    if (body === '') {
+      return {
+        ok: false,
+        why: 'empty_instruction',
+        detail: `@${block.kind} ${block.name} was addressed and given no instruction`,
+      }
+    }
+    const keyword = body.split('\n').find((l) => KEYWORD_LINE.test(l.trim()))
+    if (keyword !== undefined) {
+      return {
+        ok: false,
+        why: 'mixed_keyword',
+        detail:
+          `${keyword.trim().split(/\s/)[0]!.toUpperCase()} appears inside an addressed reply. ` +
+          `Ending the run and assigning work are different decisions; send them in different turns.`,
+      }
+    }
+    const target: TaskTarget =
+      block.kind === 'seat' ? { kind: 'seat', seat: block.name } : { kind: 'role', role: block.name }
+    if (seatsFor(seats, target).length === 0) {
+      return {
+        ok: false,
+        why: 'unknown_target',
+        detail:
+          target.kind === 'seat' ? `no seat named ${target.seat}` : `no seat fills the role ${target.role}`,
+      }
+    }
+    decisions.push({ kind: 'instruct', instruction: body, target })
+  }
+  return { ok: true, decisions }
 }

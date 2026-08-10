@@ -589,10 +589,15 @@ async function provokeMergeBlocked(repo: string): Promise<{ relay: Relay; run: R
   execFileSync('git', ['add', 'work.ts'], { cwd: repo })
   execFileSync('git', ['commit', '-qm', 'work'], { cwd: repo })
 
+  // The repair is ADDRESSED, and only because this run has two seats. An untargeted
+  // instruction now reaches whichever seat is free rather than being redirected onto the
+  // blocked one — that redirect fired unconditionally and was starvation at N>1. At N=1 the
+  // blocked seat is the only seat, so the redirect still fires and nothing about the default
+  // run's repair path changed; this provocation is the two-seat case and says so above.
   const advisor = new FakeRotationSession('advisor', 'codex', [
     'Set the answer to one.',
     'Set the answer to two.',
-    'Resolve the conflict in your own worktree.',
+    '@seat implementer-2: Resolve the conflict in your own worktree.',
     'DONE',
   ])
   const first = new FakeRotationSession('impl', 'claude', ['ack', 'Did it.', 'NONE'])
@@ -778,6 +783,110 @@ async function pausedStatusDocument(reason: PauseReason): Promise<unknown> {
     rmSync(repo, { recursive: true, force: true })
   }
 }
+
+/**
+ * What the default advisor is TOLD, which nothing in this file was watching.
+ *
+ * The briefing is part of the default run's observable surface and arguably the most
+ * consequential part of it: everything the advisor does is downstream of it, and this project
+ * has a live experiment running against the unmodified text whose pre-registration says not to
+ * change it mid-study (spikes/experiments/04-complaint-as-studying is at
+ * spikes/experiments/04-complaint-as-signal.md). Every other guard here reads ids, cwds, flags
+ * and JSON shapes -- a paragraph appended to the advisor's opening prompt changed none of
+ * those, so it would have shipped unremarked.
+ *
+ * Found by mutation: making `MULTI_SEAT_BRIEFING` unconditional -- so a one-seat run learns a
+ * multi-seat syntax and is told its reports arrive out of order -- passed the entire focused
+ * suite, this file included.
+ *
+ * Both halves, because either alone is worth little. The absence at N=1 is the D1 claim; the
+ * presence at N>1 is what stops the claim being satisfied by deleting the feature.
+ */
+test('the multi-seat briefing reaches a two-seat advisor and no part of it reaches a default one', async () => {
+  const MARKERS = [/MORE THAN ONE IMPLEMENTER SEAT/, /@seat <seat-id>:/, /@role <role>:/, /dispatched CONCURRENTLY/]
+
+  const repo = tempRepo()
+  const one = new FakeRotationSession('lead-1', 'codex', ['DONE'])
+  const solo = await Relay.start({
+    registry: registryOf(one, new FakeRotationSession('impl-1', 'claude', [])),
+    cwd: repo,
+    lead: { id: 'advisor', agent: 'codex', role: 'advisor' },
+    implementer: { id: 'implementer', agent: 'claude', role: 'implementer' },
+    maxAdvisorTurns: 1,
+  })
+  try {
+    await solo.run('a default goal')
+    const opening = one.received[0] ?? ''
+    assert.match(opening, /^You are the ADVISOR on a two-agent coding session/, 'the opening prompt is the briefing')
+    for (const marker of MARKERS) {
+      assert.doesNotMatch(opening, marker, 'a default advisor must not be taught a syntax for seats it does not have')
+    }
+    // Nor anywhere else in the run: the syntax is not smuggled in on a later prompt either.
+    for (const m of one.received) {
+      assert.doesNotMatch(m, /MORE THAN ONE IMPLEMENTER SEAT/)
+    }
+  } finally {
+    await solo.stop()
+    rmSync(repo, { recursive: true, force: true })
+  }
+
+  // The other half. A two-seat run is where the syntax is the only way to say who work is for,
+  // so its advisor must be told -- and this is the assertion that would fail if the N=1 claim
+  // above were satisfied by removing the briefing altogether.
+  const twoSeatRepo = tempRepo()
+  const pair = new FakeRotationSession('lead-2', 'codex', ['DONE'])
+  const registry = new AgentRegistry()
+  const queue = [new FakeRotationSession('a-1', 'claude', []), new FakeRotationSession('b-1', 'claude', [])]
+  for (const [agent, sessions] of [['codex', [pair]], ['claude', queue]] as const) {
+    const remaining = [...sessions]
+    registry.register({
+      id: agent,
+      displayName: agent,
+      capabilities: {
+        agent,
+        readinessSignal: 'unknown',
+        turnKeySource: 'prompt_id',
+        outcomes: {
+          completed: 'observed',
+          cancelled: 'reasoned_but_unverified',
+          permission_refused: 'reasoned_but_unverified',
+          process_exited: 'reasoned_but_unverified',
+          timed_out: 'reasoned_but_unverified',
+          transport_lost: 'reasoned_but_unverified',
+          unknown_abnormal_end: 'reasoned_but_unverified',
+        },
+      },
+      deadlines: NO_DEADLINE_CLOCKS,
+      launch: { command: agent, baseArgs: [] },
+      async create() {
+        const next = remaining.shift()
+        if (!next) throw new Error(`no session left for ${agent}`)
+        return next
+      },
+    })
+  }
+  const many = await Relay.start({
+    registry,
+    cwd: twoSeatRepo,
+    lead: { id: 'advisor', agent: 'codex', role: 'advisor' },
+    implementer: { id: 'implementer', agent: 'claude', role: 'implementer' },
+    implementers: [
+      { id: 'implementer', agent: 'claude', role: 'implementer' },
+      { id: 'implementer-2', agent: 'claude', role: 'implementer' },
+    ],
+    maxAdvisorTurns: 1,
+  })
+  try {
+    await many.run('a two-seat goal')
+    const opening = pair.received[0] ?? ''
+    for (const marker of MARKERS) {
+      assert.match(opening, marker, 'a multi-seat advisor must be taught the syntax it is required to use')
+    }
+  } finally {
+    await many.stop()
+    rmSync(twoSeatRepo, { recursive: true, force: true })
+  }
+})
 
 test('default relay and session runs construct exactly the two participant ids', async () => {
   // The lead is 'advisor' and the implementer is 'implementer', on both front-ends, and a
