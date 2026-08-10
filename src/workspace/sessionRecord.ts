@@ -98,6 +98,52 @@ export interface SessionTurnStatus {
   provenance?: Provenance[] | undefined
 }
 
+/**
+ * Where one implementer seat's work IS: which task, which tree, which branch, and what the
+ * scheduler thinks of it.
+ *
+ * Only meaningful once a run has more than one seat, and only emitted then -- see the note on
+ * `SessionParticipantStatus.seat`. Every field is projected from what the relay already holds
+ * (`seats()`, `tasks()`, `worktrees`); nothing here is a second copy of state the dispatcher
+ * would have to keep in step.
+ *
+ * The four together are what a poller cannot reconstruct from anything else in this file. `id`
+ * says which seat, and at N>1 that is where the resemblance to a default run ends: the seats
+ * hold different tasks, on different branches, in different checkouts, and an operator or an
+ * agent asking "what is seat-beta doing" has no other place to read the answer. `activity`
+ * beside it is the last adapter event -- what the child is doing this second -- which is a
+ * different question from what it was ASKED to do.
+ */
+export interface SessionSeatStatus {
+  /**
+   * The dispatcher's scheduler state: idle, queued, running, integrating, rotation_pending
+   * or merge_blocked.
+   *
+   * A string rather than the `SchedulerState` union, like every other state in this file: the
+   * record is JSON and a consumer parses strings. Importing the union would also point the
+   * dependency the wrong way -- the relay knows nothing about being recorded.
+   */
+  state: string
+  /** Tasks dispatched to this seat so far. Diagnostic; the events stream is the record. */
+  dispatched: number
+  /**
+   * The task in flight, or absent when the seat is holding none.
+   *
+   * Absent rather than null for the reason the file gives about `pause`: JSON cannot spell
+   * undefined, and a consumer's `if (seat.task)` must mean "there is one".
+   */
+  task?: { id: string; state: string; instruction: string } | undefined
+  /**
+   * The linked worktree this seat works in, and the branch its commits land on.
+   *
+   * Absent when the seat has no worktree of its own. That is every seat of a run started
+   * without them, and it is the honest answer rather than a repetition of `cwd`: a seat
+   * sharing the operator's checkout has no branch that is ITS branch, and reporting one
+   * would tell a recovering operator to look somewhere nothing was written.
+   */
+  worktree?: { path: string; branch: string } | undefined
+}
+
 export interface SessionParticipantStatus {
   id: string
   agent: string
@@ -137,6 +183,29 @@ export interface SessionParticipantStatus {
   activity?: { kind: string; tool?: string | undefined; since: number } | undefined
   /** Stopped at a permission prompt, and for what. Read from `relay.permissionsPending()`. */
   awaitingPermission?: { tool: string } | undefined
+  /**
+   * This seat's place in the dispatcher, at N>1 only.
+   *
+   * ABSENT on every participant of a default run, and that omission is the point rather than
+   * an oversight. D1: the default run must not change, and a key appearing on the one
+   * implementer of a one-seat run is a key every existing consumer of `status --json` would
+   * start seeing. The rest of this file argues the opposite way about fields that vanish when
+   * they agree with a default -- `role` and `turns` are present and empty for exactly that
+   * reason -- and the two rules genuinely conflict here. D1 wins because this field has
+   * nothing to say at N=1: with one seat there is no task to tell from another seat's, no
+   * branch that is not the operator's own, and a scheduler state whose only reader is the
+   * dispatcher that wrote it.
+   *
+   * Present on the ADVISOR of no run at any N: the advisor holds no seat, takes no task and
+   * has no worktree, and inventing an idle block for it would report a queue position it can
+   * never occupy.
+   *
+   * Emitted from the moment the dispatcher knows its seats, which is when the run starts --
+   * so a two-seat session polled while it is still `starting` carries no seat blocks yet, the
+   * same way it carries no `activity` yet. A field that is not there because the fact does not
+   * exist yet is the honest report of a run that has not begun.
+   */
+  seat?: SessionSeatStatus | undefined
 }
 
 export interface SessionStatus {
@@ -562,6 +631,20 @@ export interface RecordableRelay {
   readonly log: readonly unknown[]
   permissionsPending(): { id: string; tool: string }[]
   observe(opts?: { replay?: boolean }): AsyncIterable<RelayEvent>
+  /**
+   * The dispatcher's per-seat state, the queue, and the seat worktrees -- the three reads the
+   * seat block is projected from.
+   *
+   * OPTIONAL, all three, and structural like everything else here. A `Relay` satisfies them by
+   * having them; a stand-in written before they existed satisfies them by omission, and gets
+   * the document it got before -- which is what makes this additive to the recorder's contract
+   * rather than a break in it. `Relay` populates `seats()` when a run STARTS, so all three are
+   * empty on a session that has not run yet, and the projection says nothing rather than
+   * guessing.
+   */
+  seats?(): readonly { seat: string; state: string; current?: string | undefined; dispatched: number }[]
+  tasks?(): readonly { task: { id: string; instruction: string }; runtime: { state: string } }[]
+  readonly worktrees?: { seats: readonly { seatId: string; worktreePath: string; branch: string }[] } | undefined
 }
 
 /** Live recording, and the handle the front-end uses to report state changes. */
@@ -617,10 +700,24 @@ export function recordSession(
    */
   const turns = new Map<string, SessionTurnStatus[]>()
 
-  const seats = (): SessionParticipantStatus[] =>
-    relay.participants.map((p) => {
+  const seats = (): SessionParticipantStatus[] => {
+    // Read ONCE per document rather than once per participant: `seats()` and `tasks()` both
+    // deep-copy what they return, so a call inside the map would clone the whole queue N
+    // times to answer N questions about it.
+    const execs = relay.seats?.() ?? []
+    // The gate, and the only one: more than one seat in the dispatcher. Not "the run has
+    // worktrees" (a seat can share a checkout), not "the participant list has two
+    // implementers" (that is true before the dispatcher has any state to report), and not a
+    // flag the front-end passes down (a recorder that had to be TOLD the shape of the run
+    // would be a second place the seat count is decided).
+    const multi = execs.length > 1
+    const queue = multi ? (relay.tasks?.() ?? []) : []
+    return relay.participants.map((p) => {
       const pending = relay.permissionsPending().find((x) => x.id === p.id)
       const seen = activity.get(p.id)
+      const exec = multi ? execs.find((s) => s.seat === p.id) : undefined
+      const current = exec?.current === undefined ? undefined : queue.find((e) => e.task.id === exec.current)
+      const tree = exec && relay.worktrees?.seats.find((w) => w.seatId === p.id)
       return {
         id: p.id,
         agent: p.session.agent,
@@ -629,8 +726,25 @@ export function recordSession(
         turns: turns.get(p.id) ?? [],
         ...(seen ? { activity: seen } : {}),
         ...(pending ? { awaitingPermission: { tool: pending.tool } } : {}),
+        ...(exec
+          ? {
+              seat: {
+                state: exec.state,
+                dispatched: exec.dispatched,
+                // The instruction WHOLE, not a first line. A truncation in a field named
+                // `instruction` is a lie a consumer cannot detect, and there is at most one
+                // of these per seat -- the growth this file worries about is per-turn tool
+                // lists, which are unbounded, not a task the seat is holding right now.
+                ...(current
+                  ? { task: { id: current.task.id, state: current.runtime.state, instruction: current.task.instruction } }
+                  : {}),
+                ...(tree ? { worktree: { path: tree.worktreePath, branch: tree.branch } } : {}),
+              },
+            }
+          : {}),
       }
     })
+  }
 
   const recorder = new SessionRecorder(opts.repoRoot, {
     id: opts.id,

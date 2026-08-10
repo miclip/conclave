@@ -1008,6 +1008,49 @@ export async function runSession(opts: SessionOptions): Promise<number> {
   }
 
   /**
+   * Whether this run has seats to tell apart.
+   *
+   * Read off the DISPATCHER rather than off `opts.implementers`, so it answers the same
+   * question the status file answers and answers it from the same place. A console told by
+   * its own flags that it has two seats, while the dispatcher had one, would draw a row for
+   * a seat nothing could ever be dispatched to.
+   */
+  const multiSeat = (): boolean => relay.seats().length > 1
+
+  /**
+   * One row per implementer seat with a task in flight.
+   *
+   * EMPTY AT N=1, which is what keeps the default console byte-identical: with one seat the
+   * status rule already names it, its elapsed time and its current tool, and a second row
+   * saying the same thing is the "three places reporting the queue" failure this box was
+   * built to end. At N>1 the rule cannot do the job — see `ScreenOptions.seats` — so the
+   * seats move off it and onto rows of their own, one each.
+   *
+   * Busy rather than every seat. An idle seat is not a thing the operator is waiting on, and
+   * a row that says `seat-beta idle` costs a row of transcript to report an absence. `/state`
+   * lists them all, which is what the overflow line points at.
+   *
+   * Each row carries the seat, how long its turn has been running, and what it was asked to
+   * do — first line only, because the instruction is prose and the row is a row. The screen
+   * clips whatever still does not fit.
+   */
+  function seatRows(): string[] {
+    if (!multiSeat()) return []
+    const queue = new Map(relay.tasks().map((e) => [e.task.id, e]))
+    const rows: string[] = []
+    for (const s of relay.seats()) {
+      if (s.current === undefined) continue
+      const entry = queue.get(s.current)
+      const startedAt = entry?.runtime.sentAt ?? turnStartedAt.get(s.seat)
+      const elapsed = startedAt === undefined ? '' : ` ${dim(elapsedSince(startedAt))}`
+      const head = entry?.task.instruction.split('\n')[0] ?? ''
+      const what = head ? `  ${dim(`${s.current} · ${head}`)}` : `  ${dim(s.current)}`
+      rows.push(`${speakerColor(s.seat, 'implementer')(s.seat)}${elapsed}${what}`)
+    }
+    return rows
+  }
+
+  /**
    * Ask one participant something with no run in flight, and wait for the answer.
    *
    * A run ending does not end the session: both participants are still alive, holding
@@ -1080,7 +1123,15 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     // invisible while only one could ever be shown and becomes a lie once both are: two
     // names in the same colour is the one thing that would stop the operator telling the
     // advisor's work from the implementer's at a glance.
-    const active = progress.line((p) => speakerColor(p, p === 'advisor' ? 'advisor' : 'implementer')(p))
+    // At N>1 the seats have rows of their own directly above the box, so they come OFF the
+    // rule — otherwise every busy seat is named twice, and the rule, which is one line inlaid
+    // into one row, is the copy that wraps and paints over the transcript. The advisor stays
+    // here at every N: it has no seat, no row, and nowhere else to be reported.
+    //
+    // At N=1 no filter is passed at all, so this is the call it has always been.
+    const seatIds = multiSeat() ? new Set(relay.seats().map((s) => s.seat)) : undefined
+    const colour = (p: string) => speakerColor(p, p === 'advisor' ? 'advisor' : 'implementer')(p)
+    const active = seatIds ? progress.line(colour, (p) => !seatIds.has(p)) : progress.line(colour)
     // Names the other door too. "Type a goal to start" was the only one offered, which is
     // why a question for one participant looked impossible rather than merely unqueued.
     const idle = !run && !active ? dim('type a goal to start, or >advisor / >implementer to ask') : ''
@@ -1135,6 +1186,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
       onLine: (raw) => submit(raw),
       suggest: (line, cursor) => suggest(line, cursor, opts.cwd, COMMANDS),
       pending: pendingRows,
+      seats: seatRows,
       onInterrupt: () => onInterrupt(),
     })
     await screen.open()
@@ -1244,6 +1296,19 @@ export async function runSession(opts: SessionOptions): Promise<number> {
       if (run?.pause?.superseded) write(`  ${yellow('~')} ${run.pause.superseded.note}`)
       for (const p of relay.participants) {
         write(`  ${p.id} (${p.rank}): session ${p.session.state}, ${p.events.length} events`)
+      }
+      // The full seat state, which is what the box's overflow row points here for. Nothing at
+      // N=1: with one seat the lines above already are the whole answer, and this command's
+      // output on a default run must not change.
+      if (multiSeat()) {
+        const queue = new Map(relay.tasks().map((e) => [e.task.id, e]))
+        for (const s of relay.seats()) {
+          const entry = s.current === undefined ? undefined : queue.get(s.current)
+          const task = entry ? `${entry.task.id} · ${entry.task.instruction.split('\n')[0]}` : 'no task'
+          const tree = relay.worktrees?.seats.find((w) => w.seatId === s.seat)
+          const branch = tree ? `, ${tree.branch}` : ''
+          write(`  ${s.seat}: ${s.state}${branch} — ${task}`)
+        }
       }
       return
     }

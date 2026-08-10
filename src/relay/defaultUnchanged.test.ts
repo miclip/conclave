@@ -376,15 +376,38 @@ const DECLARED: Record<string, string> = {
     'against a default run that never mentions the new flag. That the flag DOES something is a ' +
     'separate claim, proved in src/relay/seatCli.test.ts by driving both real front-ends to a ' +
     'run with two constructed seats.',
+  'per-seat dispatcher state in status --json':
+    'A run with more than one implementer seat now reports, per seat, the dispatcher state ' +
+    'that only exists at N>1: `participants[].seat = {state, dispatched, task?, worktree?}` ' +
+    '(src/workspace/sessionRecord.ts). The operator’s reason: at N=1 "what is the implementer ' +
+    'doing" is answered by the one thing on screen, and at N>1 it is four questions — which ' +
+    'seat, holding which task, on which branch, in which tree — and a poller had NO way to ' +
+    'answer any of them. `conclave status --json` is the whole interface an agent operator ' +
+    'has (#26), and a status document that cannot distinguish two seats is the file-shaped ' +
+    'version of the console bug beside it. Every value is projected from state the relay ' +
+    'already holds and already copies out — `seats()`, `tasks()` and `worktrees` — so nothing ' +
+    'here is a second record that could disagree with the first. NESTED deliberately, and ' +
+    'that nesting is the part being declared: four loose keys on the participant would put ' +
+    'seat facts beside `rank` and `turns`, which are facts about a participant at every N, ' +
+    'and a consumer could not tell by looking which half stops meaning anything at N=1. ' +
+    'THE DEFAULT RUN DOES NOT CHANGE: the block is emitted only when the dispatcher holds ' +
+    'more than one seat, so every N=1 document — ended and all six paused shapes above — is ' +
+    'pinned byte-for-byte as it was, and none of those pins was relaxed to accommodate this. ' +
+    'The one guarded document that does change is the merge_blocked pause, which takes two ' +
+    'seats to provoke; its pin now records the advisor/seat DISAGREEMENT explicitly rather ' +
+    'than being unioned or dropped. The console half of the same issue (#65) is not in this ' +
+    'file: it renders one pinned row per busy seat, and at N=1 renders none, which ' +
+    'src/repl/screen.test.ts and src/repl/session.tty.test.ts cover.',
 }
 
-test('DECLARED contains exactly the routing, pause-resolution, attribution, ceiling-flag and seat-flag entries', () => {
+test('DECLARED contains exactly the routing, pause-resolution, attribution, ceiling-flag, seat-flag and seat-status entries', () => {
   assert.deepEqual(Object.keys(DECLARED), [
     'implementer_unanswered -> advisor',
     'status.pause.resolution',
     'per-seat artifact attribution',
     'optional ceiling flags on both front-ends',
     '--implementers on both front-ends',
+    'per-seat dispatcher state in status --json',
   ])
 })
 
@@ -1274,6 +1297,24 @@ const PAUSED_SUBTREE: Record<PauseReason, Record<string, string>> = {
     pause: 'at, atSeq, detail, evidence, options, reason, resolution',
     'pause.resolution': 'authority, reason, scope',
     'pause.resolution.scope': 'kind, participantId',
+    // The one document in this corpus that HAS seats to tell apart, and therefore the only one
+    // carrying the seat block; see DECLARED['per-seat dispatcher state in status --json'].
+    //
+    // Pinned as a DISAGREEMENT rather than as a union, which is the whole reason `shapesIn`
+    // records both key sets joined by ` | `. The advisor has no seat and no block; the two
+    // implementers have one each. Relaxing this line to the union — or dropping `participants[]`
+    // from the merge_blocked override so the common pin applied — would let the block vanish
+    // from a seat, or appear on the advisor, with nothing failing. That the two sides are
+    // exactly `…, role, turns` and `…, role, seat, turns` is the assertion.
+    'participants[]': 'activity, agent, id, rank, role, turns | activity, agent, id, rank, role, seat, turns',
+    // `state`, `dispatched` and `worktree`, and NO `task`: this pause is raised after both
+    // seats' turns have been graded and their tasks released, so neither is holding one. A
+    // build that started reporting a task here would be reporting a seat as busy at the moment
+    // the run stopped to ask a human about it. The busy shape — `task` present, with its own
+    // three keys — is pinned in src/relay/seatStatus.test.ts against a seat caught mid-turn,
+    // which is the state this corpus cannot reach because a paused run has no turn in flight.
+    'participants[].seat': 'dispatched, state, worktree',
+    'participants[].seat.worktree': 'branch, path',
   },
 }
 

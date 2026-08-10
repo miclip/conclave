@@ -291,8 +291,17 @@ export class Progress {
    * 8s · Bash` then `implementer 20s · Bash` — which read as duplicates however correct
    * they are. One line that updates says the same thing and repeats nothing.
    */
-  line(colour: (s: string) => string = (x) => x): string {
-    const active = [...this.#started.entries()]
+  /**
+   * @param include which working participants belong on this line. Everyone, by default.
+   *
+   * The filter exists because a caller may have somewhere BETTER to show some of them: a
+   * console with several implementer seats gives each seat a pinned row of its own, and the
+   * seats would otherwise be named twice — once on their row and once here, on a rule that
+   * has to fit the terminal width. A default run passes nothing and gets the line it always
+   * got, participant for participant.
+   */
+  line(colour: (s: string) => string = (x) => x, include: (participant: string) => boolean = () => true): string {
+    const active = [...this.#started.entries()].filter(([participant]) => include(participant))
     if (active.length === 0) return ''
     // EVERY participant that is working, not just the most recent to start. Turns overlap
     // — an advisor asked to research while the implementer builds is the case the whole
