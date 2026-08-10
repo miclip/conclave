@@ -330,6 +330,20 @@ const DECLARED: Record<string, string> = {
     '`reason` is deliberately duplicated between pause.reason and pause.resolution.reason: the loose ' +
     'field is what every existing reader is written against and the nested one is the whole ' +
     'classification (src/relay/run.ts:162-164). Nothing an existing consumer read changed value.',
+  'per-seat artifact attribution':
+    'Artifact attribution (#62) is now scoped to the ROOT a participant works in, and records ' +
+    'which seat each attributed path came from. `RestrictedOrigin` gains one key, ' +
+    '`attributions` — a list of {path, support, seat, confidence} — so a status document paused ' +
+    'on authority_conflict carries it too, and the pinned shape above was updated rather than ' +
+    'relaxed. Nothing at N=1 changed value or meaning: every participant shares the operator ' +
+    'cwd, so the candidate set and the evidence set are the ones the single-root code produced, ' +
+    'and every entry is `seat: null` with `confidence: reasoned_but_unverified` — the same claim ' +
+    'this made before the field existed. A shared checkout does not learn who wrote a file ' +
+    'because the code got more careful, and the `observed` grade is reachable ONLY from a linked ' +
+    'worktree, which the default run does not have. The default `relay --json` report is ' +
+    'byte-identical: `restricted` is empty on a run with no restricted message, which the shape ' +
+    'guard below asserts explicitly rather than relying on. Declared because the N>1 report ' +
+    'surface is intentional and the pause document key is a change an existing consumer can see.',
   'optional ceiling flags on both front-ends':
     'The optional flag surface grows by four: --max-queue-depth and --max-concurrent-seats on ' +
     'both commands, and --max-turns / --max-minutes on `session`, which had neither. The ' +
@@ -345,10 +359,11 @@ const DECLARED: Record<string, string> = {
     'addition land unremarked. No assertion in this file was relaxed to accommodate it.',
 }
 
-test('DECLARED contains exactly the routing, pause-resolution and ceiling-flag entries', () => {
+test('DECLARED contains exactly the routing, pause-resolution, attribution and ceiling-flag entries', () => {
   assert.deepEqual(Object.keys(DECLARED), [
     'implementer_unanswered -> advisor',
     'status.pause.resolution',
+    'per-seat artifact attribution',
     'optional ceiling flags on both front-ends',
   ])
 })
@@ -993,6 +1008,15 @@ test('the default relay --json report emits exactly these keys at every depth', 
     },
     'the default run report must not gain or lose a key at any depth without a decision',
   )
+  // Said out loud rather than left implicit. `restricted` is why the shape above is unchanged
+  // by #62: a default run has no restricted message, so the array is empty and contributes no
+  // element path — which is exactly the reasoning DECLARED['per-seat artifact attribution']
+  // rests on, and it would be silently false if a default run ever produced one.
+  assert.deepEqual(
+    (report as { restricted: unknown[] }).restricted,
+    [],
+    'a default run has no restricted message, which is what keeps the attribution fields off its report',
+  )
 })
 
 /**
@@ -1093,7 +1117,10 @@ const PAUSED_SUBTREE: Record<PauseReason, Record<string, string>> = {
   authority_conflict: {
     pause: 'at, atSeq, conflict, detail, evidence, options, reason, resolution',
     'pause.conflict': 'instruction, matched, origin, verb',
-    'pause.conflict.origin': 'artifactSupport, artifacts, at, excluded, informed, seq, text, tokens',
+    // `attributions` is the declared addition; see DECLARED['per-seat artifact attribution'].
+    // It is present and EMPTY here, which is why it contributes no element path: this
+    // provocation attributes nothing, exactly as `artifactSupport: {}` beside it records.
+    'pause.conflict.origin': 'artifactSupport, artifacts, at, attributions, excluded, informed, seq, text, tokens',
     // An object with no keys at all, and pinned as one: `artifactSupport` is a map keyed by
     // artifact, and this origin supports none. A build that started emitting an entry here
     // would change what a reader of the conflict sees.

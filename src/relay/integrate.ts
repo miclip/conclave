@@ -167,7 +167,12 @@ export function mergeIntoIntegration(
   const paths = conflictedPaths(repoRoot)
   const aborted = run(repoRoot, ['merge', '--abort'])
   const after = run(repoRoot, ['rev-parse', 'HEAD'])
-  const restored = aborted.ok && after.ok && after.out.trim() === before
+  // What "restored" means is the STATE, not whether the abort command succeeded. A merge git
+  // refused to start -- local changes that would be overwritten -- leaves nothing to abort, so
+  // `--abort` fails and the checkout was never disturbed. Reading the command's exit code alone
+  // attached a scary warning to the tidiest possible outcome.
+  const midMerge = run(repoRoot, ['rev-parse', '--verify', 'MERGE_HEAD']).ok
+  const restored = after.ok && after.out.trim() === before && !midMerge
   return {
     status: 'blocked',
     paths,

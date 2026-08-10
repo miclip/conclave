@@ -59,6 +59,8 @@ import {
 import { actorFor, resolutionFor, type ResolutionSubject } from './resolution.ts'
 import {
   attributable,
+  evidenceForRoot,
+  recordAttribution,
   supportFor,
   describeConflict,
   detectConflict,
@@ -891,6 +893,20 @@ export class Relay {
   }
 
   /**
+   * The working root a participant's changes appear in.
+   *
+   * Modelled on the ROOT, never on the seat count. At N=1 every participant answers
+   * `opts.cwd`, so every read below groups exactly as it always did and the default run is
+   * byte-for-byte what it was; at N>1 each linked implementer answers its own worktree and the
+   * advisor still answers the integration checkout. Nothing here asks how many seats there are
+   * -- an `if (seats.length === 1)` would be D1's wrong abstraction, and wrong on its own terms
+   * as well, since two participants can share a root at any N.
+   */
+  #rootOf(participantId: string): string {
+    return this.#worktrees?.seats.find((s) => s.seatId === participantId)?.worktreePath ?? this.#opts.cwd
+  }
+
+  /**
    * The seat the required singular option names.
    *
    * Not "the first implementer": `RelayOptions.implementer` is a spec the caller wrote, and
@@ -1498,7 +1514,12 @@ export class Relay {
     // would have described: an escalation that says "the report came back empty" and one
     // that says "the report came back empty; 3 files changed on disk" ask very different
     // things of whoever reads it (#39).
-    const treeBeforeTurn = new Set(dirtyPaths(this.#opts.cwd))
+    // THIS participant's root, not the run's. The diff exists to say what this turn changed,
+    // and at N>1 the integration checkout is not where this turn's work lands -- reading it
+    // would report another seat's merge as this seat's turn, and would miss everything this
+    // seat actually wrote. At N=1 the two are the same directory.
+    const turnRoot = this.#rootOf(p.id)
+    const treeBeforeTurn = new Set(dirtyPaths(turnRoot))
     await p.session.send(text, { kind: 'peer_relay' })
 
     // No timeout of its own. The adapter's watchdog guarantees a terminal verdict for a
@@ -1632,7 +1653,7 @@ export class Relay {
     for (const text of extractFlags(prose)) {
       this.flags.push({ participant: p.id, text, seq: this.log.length })
     }
-    return { prose, end, unsettled, emittedSinceSend: p.events.length - before, changedDuringTurn: dirtyPaths(this.#opts.cwd).filter((f) => !treeBeforeTurn.has(f)) }
+    return { prose, end, unsettled, emittedSinceSend: p.events.length - before, changedDuringTurn: dirtyPaths(turnRoot).filter((f) => !treeBeforeTurn.has(f)) }
   }
 
   /**
@@ -1690,15 +1711,33 @@ export class Relay {
    * could not see it.
    */
   readonly restrictedOrigins: RestrictedOrigin[] = []
-  #treeAtOrigin: string[] | undefined
+  /**
+   * What each ROOT looked like when the last restricted message was delivered, keyed by root.
+   *
+   * A map rather than one list, because at N>1 there is no single tree for "the tree at the
+   * origin" to mean. Participants that share a root share one entry -- which is every
+   * participant at N=1, so the map has exactly one key there and holds exactly the list the
+   * single field used to hold.
+   *
+   * Only the roots of the INFORMED recipients are snapshotted. A root nobody was told about is
+   * a root whose changes cannot have come from this message, and taking the snapshot anyway
+   * would be scanning another seat's tree for artifacts that are not its business.
+   */
+  #treeAtOrigin: Map<string, string[]> | undefined
 
   say(text: string, audience: Audience = 'all', kind: MessageKind = 'constraint'): RelayMessage {
     const to = this.#resolve(audience)
     const m = this.#record({ from: 'human', fromRank: 'human', to, kind, text })
     if (m.visibility === 'restricted') {
       this.restrictedOrigins.push(originOf(m))
-      // Snapshot the tree so paths appearing after this message can be attributed to it.
-      this.#treeAtOrigin = dirtyPaths(this.#opts.cwd)
+      // Snapshot each root a recipient works in, so paths appearing after this message can be
+      // attributed to it. One entry per DISTINCT root: two participants in the same checkout
+      // are looking at the same tree, and diffing it twice would say so twice.
+      this.#treeAtOrigin = new Map()
+      for (const id of to) {
+        const root = this.#rootOf(id)
+        if (!this.#treeAtOrigin.has(root)) this.#treeAtOrigin.set(root, dirtyPaths(root))
+      }
       // And mark where each recipient's evidence stands, so attribution reads only the
       // tool calls made AFTER the message — work done before it cannot have come from it.
       for (const id of to) this.#evidenceAtOrigin.set(id, (this.#evidence.get(id) ?? []).length)
@@ -1783,21 +1822,49 @@ export class Relay {
     }
   }
 
-  #attributeArtifacts(): void {
+  /**
+   * What the last restricted message can be shown to have caused, in ONE participant's tree.
+   *
+   * The reporter is passed in rather than assumed, and everything below is scoped to the root
+   * that reporter works in:
+   *
+   *   - the CANDIDATES come from that root and no other. Diffing the integration checkout for a
+   *     seat's artifacts would attribute another seat's merge to this seat's aside, and would
+   *     miss everything the seat actually wrote, since uncommitted work in a linked worktree is
+   *     invisible everywhere else.
+   *   - the EVIDENCE comes only from informed participants sharing that root. An excluded
+   *     participant could not have acted on the message -- that rule is unchanged -- and an
+   *     informed one working in a DIFFERENT tree cannot have caused a path in this one.
+   *   - the SEAT is recorded when the root is a seat's own worktree, because then the tree
+   *     itself names the actor. On a shared root it is `null` and the confidence stays what it
+   *     has always been.
+   *
+   * At N=1 every participant shares `opts.cwd`, so the candidate set and the evidence set are
+   * the ones this produced before there were roots to distinguish, and every attribution is
+   * `seat: null` / `reasoned_but_unverified`. Nothing about the default run is upgraded: a
+   * shared checkout does not learn who wrote a file because the code got more careful.
+   */
+  #attributeArtifacts(reporter: RelayParticipant): void {
     const origin = this.restrictedOrigins.at(-1)
     if (!origin || !this.#treeAtOrigin) return
-    const before = new Set(this.#treeAtOrigin)
-    const candidates = dirtyPaths(this.#opts.cwd).filter((p) => !before.has(p))
+    const root = this.#rootOf(reporter.id)
+    const snapshot = this.#treeAtOrigin.get(root)
+    // No snapshot for this root means nobody working here was told, so there is no baseline to
+    // diff against and nothing here can be traced to the message.
+    if (!snapshot) return
+    const before = new Set(snapshot)
+    const candidates = dirtyPaths(root).filter((p) => !before.has(p))
     if (candidates.length === 0) return
 
-    // Only the participants that were told. One kept from the aside cannot have acted on
-    // it, so its tool calls are not evidence of what the aside caused.
-    const evidence = origin.informed.flatMap((id) =>
-      (this.#evidence.get(id) ?? []).slice(this.#evidenceAtOrigin.get(id) ?? 0),
+    const evidence = evidenceForRoot(
+      origin.informed,
+      (id) => this.#rootOf(id),
+      root,
+      (id) => (this.#evidence.get(id) ?? []).slice(this.#evidenceAtOrigin.get(id) ?? 0),
     )
+    const seat = root === this.#opts.cwd ? null : reporter.id
     for (const path of attributable(candidates, evidence)) {
-      origin.artifactSupport[path] = supportFor(path, evidence)
-      if (!origin.artifacts.includes(path)) origin.artifacts.push(path)
+      recordAttribution(origin, { path, support: supportFor(path, evidence), seat })
     }
   }
 
@@ -2982,7 +3049,10 @@ export class Relay {
         // turn edited again, having been edited in an earlier one, is indistinguishable from
         // a file left alone -- so an empty diff must not be reported as "nothing happened".
         // A reader who trusts a false negative here restarts work that was already done.
-        const dirtyNow = dirtyPaths(this.#opts.cwd).length
+        // The seat's own root, for the same reason the turn diff uses it: "how many paths are
+        // dirty" is being offered as context for THIS seat's missing report, and counting the
+        // integration checkout would answer a question nobody asked.
+        const dirtyNow = dirtyPaths(this.#rootOf(seat.id)).length
         const lost =
           changed.length > 0
             ? `${changed.length} path(s) changed on disk during it: ${changed.slice(0, 8).join(', ')}` +
@@ -3011,7 +3081,7 @@ export class Relay {
         if (halted) return halted
       }
       this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text: `${seat.id} turn: ${formatVerdict(report.end.verdict)}` })
-      this.#attributeArtifacts()
+      this.#attributeArtifacts(seat)
 
       // The verdict may already be stale by the time we read it. `#exchange` settles on the
       // FIRST `turn_end`, and the late signal that withdraws it can land during the

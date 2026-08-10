@@ -138,7 +138,20 @@ export interface RunReport {
     seq: number
     informed: string[]
     excluded: string[]
-    artifacts: { path: string; support: string }[]
+    /**
+     * One entry per attributed path PER SEAT, not per path.
+     *
+     * `support` is how well the path is tied to the message; `confidence` is how well it is
+     * tied to the actor, and `seat` is that actor when a linked worktree names one. Two
+     * dimensions because they answer different questions and a run can be strong on one and
+     * weak on the other -- a `named_path` in a shared checkout still cannot exclude a second
+     * writer, and a path found in a seat's own tree names its author whatever the tool inputs
+     * looked like.
+     *
+     * At N=1 every entry is `seat: null` / `reasoned_but_unverified`, which is exactly the
+     * claim this made before the fields existed. Nothing is upgraded by them.
+     */
+    artifacts: { path: string; support: string; seat: string | null; confidence: string }[]
   }[]
 }
 
@@ -214,11 +227,14 @@ export async function runReport(relay: Relay, input: ReportInput): Promise<RunRe
       seq: o.seq,
       informed: o.informed,
       excluded: o.excluded,
-      artifacts: o.artifacts.map((path) => ({
-        path,
-        // Defaulted rather than optional: a consumer that had to handle a missing support
-        // level would have to invent a default anyway, and would pick a different one.
-        support: o.artifactSupport[path] ?? 'text_match',
+      // Read off `attributions`, which is the record, rather than off the deduplicated
+      // `artifacts` view: two seats can each create the same relative path in their own
+      // worktrees, and a per-path view reports one of them under the other's name.
+      artifacts: o.attributions.map((a) => ({
+        path: a.path,
+        support: a.support,
+        seat: a.seat,
+        confidence: a.confidence,
       })),
     })),
   }
