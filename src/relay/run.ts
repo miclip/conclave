@@ -60,6 +60,23 @@ export type PauseReason =
    */
   | 'authority_conflict'
   /**
+   * A seat's work could not be merged, and the seat could not repair it either.
+   *
+   * NOT raised by the first conflict. A conflict is ordinary at N>1 and is handled inside the
+   * run: the merge is aborted, that one seat is marked `merge_blocked`, and the advisor is
+   * asked for an instruction that resolves it in the seat's own worktree. Every other seat
+   * keeps working, because blocking a run on one seat's conflict is lockstep reached from a
+   * different direction.
+   *
+   * This is the SECOND failure against the same integration parent — the repair was dispatched,
+   * came back, and the merge still will not go. Nothing has changed that another turn could
+   * change, so continuing would spend the advisor's budget re-asking a question the seat has
+   * already failed to answer. The work is committed on the seat's branch and its tree is
+   * retained; what the operator gets is a decision point rather than a run that quietly stops
+   * making progress.
+   */
+  | 'merge_blocked'
+  /**
    * The operator asked to stop at the next advisor-turn boundary.
    *
    * Not in the original set, and added for a reason worth recording: without it the only

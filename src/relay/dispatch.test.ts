@@ -30,8 +30,10 @@ import { AgentRegistry } from '../registry/registry.ts'
 import { NO_DEADLINE_CLOCKS } from '../registry/types.ts'
 import { FakeRotationSession } from '../rotation/fakeSession.ts'
 import {
+  canTake,
   cancelledByFailedDependencies,
   dependenciesMet,
+  isFree,
   nextDispatch,
   parseDecisions,
   recordCompletion,
@@ -42,6 +44,7 @@ import {
   type Task,
   type TaskEvent,
   type TaskRuntime,
+  type TaskTarget,
 } from './dispatch.ts'
 import { Relay, type RelayOptions } from './relay.ts'
 
@@ -143,6 +146,7 @@ function task(over: Partial<Task> = {}): Task {
     origin: 0,
     instruction: 'do the thing',
     target: { kind: 'role', role: 'implementer' },
+    purpose: 'work',
     dependsOn: [],
     restrictedOrigins: [],
     admittedAt: 0,
@@ -398,8 +402,8 @@ test('the dispatcher itself refuses a seat holding an ungraded verdict, not just
   assert.equal(nextDispatch([held, byRole, bySeat], runtime, seats), undefined)
   // Both targeting kinds, because they take different routes to the same freedom check and a
   // rule fixed on one of them would leave the other open.
-  assert.equal(seatFor(seats, { kind: 'role', role: 'implementer' }), undefined)
-  assert.equal(seatFor(seats, { kind: 'seat', seat: 'implementer' }), undefined)
+  assert.equal(seatFor(seats, { target: { kind: 'role', role: 'implementer' }, purpose: 'work' }), undefined)
+  assert.equal(seatFor(seats, { target: { kind: 'seat', seat: 'implementer' }, purpose: 'work' }), undefined)
   assert.match(refuseDispatch(seats[0]!, runtime) ?? '', /whose verdict is not graded/)
 
   // A positive control, so the assertion above is not passing because the queue was empty or
@@ -491,17 +495,17 @@ test('DONE and ESCALATE parse as decisions rather than as instructions', () => {
 test('role-targeted work goes to the longest-idle seat, with the id as tie-breaker', () => {
   const busiest = seat({ seat: 'b', idleSince: 500 })
   const longest = seat({ seat: 'a', idleSince: 100 })
-  assert.equal(seatFor([busiest, longest], { kind: 'role', role: 'implementer' })?.seat, 'a')
+  assert.equal(seatFor([busiest, longest], { target: { kind: 'role', role: 'implementer' }, purpose: 'work' })?.seat, 'a')
 
   // Identical idle timestamps are not a coin toss. Map iteration order would make the choice
   // depend on insertion, which is not something a test can assert or an operator can predict.
   const tied = [seat({ seat: 'z', idleSince: 7 }), seat({ seat: 'q', idleSince: 7 })]
-  assert.equal(seatFor(tied, { kind: 'role', role: 'implementer' })?.seat, 'q')
+  assert.equal(seatFor(tied, { target: { kind: 'role', role: 'implementer' }, purpose: 'work' })?.seat, 'q')
 
   // A seat targeted by id gets the work even when a longer-idle peer exists.
-  assert.equal(seatFor([longest, busiest], { kind: 'seat', seat: 'b' })?.seat, 'b')
+  assert.equal(seatFor([longest, busiest], { target: { kind: 'seat', seat: 'b' }, purpose: 'work' })?.seat, 'b')
   // And a busy seat takes nothing, however it was targeted.
-  assert.equal(seatFor([seat({ state: 'running', current: 't-9' })], { kind: 'seat', seat: 'implementer' }), undefined)
+  assert.equal(seatFor([seat({ state: 'running', current: 't-9' })], { target: { kind: 'seat', seat: 'implementer' }, purpose: 'work' }), undefined)
 })
 
 test('a blocked task does not hold the queue behind it', () => {
@@ -863,4 +867,82 @@ test('Relay calls #cancelUnrunnable immediately before nextDispatch (source insp
       `only comments may sit between the sweep and the dispatch, found: ${line}`,
     )
   }
+})
+
+/**
+ * A blocked seat is reachable by NAME and by nothing else.
+ *
+ * The two halves are one rule and are asserted together, because either alone is a bug. Only
+ * excluding it strands the conflict: the sole way out is a task that resolves it in that
+ * seat's own worktree, and a seat nothing can be sent to is a seat nothing can repair. Only
+ * including it makes the block decorative: ordinary work keeps landing there, every task adds
+ * another commit to a branch that will not merge, and the conflict grows while the run reports
+ * healthy.
+ */
+test('a merge_blocked seat takes a task addressed to it, and no role-targeted work at all', () => {
+  const blocked = seat({ seat: 'impl-a', state: 'merge_blocked' })
+  const free = seat({ seat: 'impl-b', state: 'idle', idleSince: 5 })
+  const byRole: TaskTarget = { kind: 'role', role: 'implementer' }
+  const byName: TaskTarget = { kind: 'seat', seat: 'impl-a' }
+
+  assert.equal(canTake(blocked, { target: byRole, purpose: 'work' }), false, 'ordinary work must route past a blocked seat')
+  assert.equal(canTake(blocked, { target: byName, purpose: 'merge_resolution' }), true, 'the repair has to be able to reach it')
+  assert.equal(isFree(blocked), false, 'and it is still not FREE — the two questions differ')
+
+  // Addressing is NOT enough, and this is the loophole the purpose field closes. An ordinary
+  // task that merely names the seat is still ordinary work landing on a branch that will not
+  // merge — every turn adding another commit to the conflict while the run reports healthy.
+  assert.equal(canTake(blocked, { target: byName, purpose: 'work' }), false)
+  // Nor is the purpose enough on its own: a repair designated for one seat must not be able to
+  // unlock a different blocked seat, and a role-targeted "repair" names no tree to resolve in.
+  assert.equal(canTake(blocked, { target: { kind: 'seat', seat: 'impl-b' }, purpose: 'merge_resolution' }), false)
+  assert.equal(canTake(blocked, { target: byRole, purpose: 'merge_resolution' }), false)
+  // A free seat is unaffected by any of it: purpose gates a BLOCKED seat and nothing else.
+  assert.equal(canTake(free, { target: byRole, purpose: 'work' }), true)
+  assert.equal(canTake(free, { target: { kind: 'seat', seat: 'impl-b' }, purpose: 'merge_resolution' }), true)
+
+  // Role-targeted work goes to the other seat even though the blocked one has been idle
+  // longer, which is the ordering rule losing to the block on purpose.
+  assert.equal(seatFor([blocked, free], { target: byRole, purpose: 'work' })?.seat, 'impl-b')
+  assert.equal(seatFor([blocked, free], { target: byName, purpose: 'merge_resolution' })?.seat, 'impl-a')
+
+  // The last seat standing does not make a blocked one eligible: a run whose only compatible
+  // seat is blocked has nowhere to put role-targeted work, and waiting is the correct answer.
+  assert.equal(seatFor([blocked], { target: byRole, purpose: 'work' }), undefined)
+
+  // `refuseDispatch` must agree with `seatFor`, or the dispatcher deadlocks on itself: a seat
+  // the scan chose and the guard then refused would throw an invariant violation.
+  assert.equal(refuseDispatch(blocked, new Map(), { target: byName, purpose: 'merge_resolution' }), undefined)
+  assert.match(refuseDispatch(blocked, new Map(), { target: byRole, purpose: 'work' }) ?? '', /impl-a is merge_blocked/)
+  assert.match(refuseDispatch(blocked, new Map(), { target: byName, purpose: 'work' }) ?? '', /impl-a is merge_blocked/)
+  assert.match(refuseDispatch(blocked, new Map()) ?? '', /impl-a is merge_blocked/)
+
+  // And a blocked seat holding a turn is still busy first. Blocked is about where work may
+  // go next, not about abandoning work in flight.
+  const busy = seat({ seat: 'impl-a', state: 'merge_blocked', current: 't-9' })
+  assert.equal(canTake(busy, { target: byName, purpose: 'merge_resolution' }), false)
+})
+
+test('a queue scan sends the repair to the blocked seat and ordinary work to its neighbour', () => {
+  const repair = task({ id: 't-1', seq: 1, target: { kind: 'seat', seat: 'impl-a' }, purpose: 'merge_resolution' })
+  const impostor = task({ id: 't-0', seq: 0, target: { kind: 'seat', seat: 'impl-a' } })
+  const ordinary = task({ id: 't-2', seq: 2, target: { kind: 'role', role: 'implementer' } })
+  const runtime = new Map<string, TaskRuntime>([
+    ['t-0', { state: 'ready', marks: [] }],
+    ['t-1', { state: 'ready', marks: [] }],
+    ['t-2', { state: 'ready', marks: [] }],
+  ])
+  const seats = [seat({ seat: 'impl-a', state: 'merge_blocked' }), seat({ seat: 'impl-b', idleSince: 9 })]
+
+  // `t-0` is ordinary work addressed at the blocked seat and has the LOWEST seq, so a scan that
+  // let addressing alone through would pick it first. It goes nowhere.
+  const first = nextDispatch([impostor, repair, ordinary], runtime, seats)
+  assert.equal(first?.task.id, 't-1')
+  assert.equal(first?.seat.seat, 'impl-a', 'the repair is addressed and must arrive')
+
+  // With the repair taken out, the ordinary task still refuses to land on the blocked seat.
+  runtime.get('t-1')!.state = 'running'
+  const second = nextDispatch([impostor, repair, ordinary], runtime, seats)
+  assert.equal(second?.task.id, 't-2')
+  assert.equal(second?.seat.seat, 'impl-b')
 })

@@ -324,6 +324,42 @@ async function provoke(t: TestContext, reason: RunPause['reason']): Promise<Prov
       assert.ok(pause)
       return { pause, run, relay, advisor, impl }
     }
+    case 'merge_blocked': {
+      // The one condition that needs two seats and real git, because it is about two seats
+      // and real git. Both write the same line from the same base: the first merges, the
+      // second cannot, and its repair turn changes nothing — which is the second failure
+      // against the same integration parent, and the only thing that escalates.
+      //
+      // The repo() above commits with `-c user.email` rather than configuring the repository,
+      // so a boundary commit made by the relay would have no identity to use.
+      execFileSync('git', ['config', 'user.email', 't@t'], { cwd: dir })
+      execFileSync('git', ['config', 'user.name', 't'], { cwd: dir })
+      advisor = new FakeRotationSession('advisor', 'codex', [
+        'Set the answer to one.',
+        'Set the answer to two.',
+        'Resolve the conflict in your own worktree.',
+        'DONE',
+      ])
+      const first = new FakeRotationSession('impl', 'claude', ['ack', 'Did it.', 'NONE'])
+      impl = new FakeRotationSession('impl-2', 'claude', ['ack', 'Did it.', 'Still stuck.', 'NONE'])
+      const relay = await relayOf(dir, advisor, [first, impl], {
+        implementers: [
+          { id: 'implementer', agent: 'claude', role: 'implementer' },
+          { id: 'implementer-2', agent: 'claude', role: 'implementer' },
+        ],
+        maxAdvisorTurns: 5,
+      })
+      t.after(() => relay.stop())
+      const trees = Object.fromEntries(relay.worktrees!.seats.map((s) => [s.seatId, s.worktreePath]))
+      // Each seat writes into ITS OWN tree, which is the only reason these conflict at merge
+      // time rather than overwriting each other as they go.
+      first.onSend = () => writeFileSync(join(trees.implementer!, 'work.ts'), 'export const answer = 1\n')
+      impl.onSend = () => writeFileSync(join(trees['implementer-2']!, 'work.ts'), 'export const answer = 2\n')
+      const run = relay.start('Keep the work moving.')
+      const pause = await run.untilPause()
+      assert.ok(pause)
+      return { pause, run, relay, advisor, impl }
+    }
     case 'operator_requested': {
       // Slow turns, so the request lands while a turn is in flight and the loop honours it
       // at the advisor-turn boundary — which is the only place it can, since neither child CLI
@@ -372,6 +408,15 @@ const EXPECTED: Record<
     authority: 'operator',
     scope: { kind: 'workstream', workstreamId: 'implementer' },
     options: ['continue', 'rotate', 'constrain', 'abort'],
+  },
+  merge_blocked: {
+    authority: 'operator',
+    // The SEAT, not the conclave: its branch and tree are what cannot proceed, and no other
+    // seat's work is waiting on this decision.
+    scope: { kind: 'participant', participantId: 'implementer-2' },
+    // No `rotate`. This run has two implementer seats and `rotateImplementer` names none of
+    // them, so offering it would be the inert menu entry the option list exists to prevent.
+    options: ['continue', 'constrain', 'abort'],
   },
   advisor_escalated: {
     authority: 'operator',

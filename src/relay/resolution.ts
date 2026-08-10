@@ -90,6 +90,8 @@ export type ResolutionSubject =
   | { reason: 'implementer_unanswered'; participant: string }
   /** The workstream whose instruction is being adjudicated. */
   | { reason: 'authority_conflict'; workstream: string }
+  /** The seat whose branch will not merge, after its own repair attempt failed. */
+  | { reason: 'merge_blocked'; participant: string }
   | { reason: 'advisor_escalated' }
   | { reason: 'operator_requested' }
 
@@ -223,6 +225,18 @@ export function resolutionFor(subject: ResolutionSubject, config: ResolutionConf
         reason: subject.reason,
         authority: 'operator',
         scope: { kind: 'workstream', workstreamId: subject.workstream },
+      }
+    case 'merge_blocked':
+      // The advisor's authority has already been spent on this: it was told the seat was
+      // blocked and dispatched the repair, and the repair did not take. What is left needs
+      // hands in the repository, which is the operator's. The scope is the SEAT, not the
+      // conclave -- its branch and tree are what cannot proceed, and every other seat's work
+      // is unaffected by this decision. That the run happens to stop while the operator
+      // answers is a property of how pauses are delivered today, not of what is blocked.
+      return {
+        reason: subject.reason,
+        authority: 'operator',
+        scope: { kind: 'participant', participantId: subject.participant },
       }
     case 'advisor_escalated':
       // The advisor has already used up its own authority by asking. Scope is the conclave

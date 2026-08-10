@@ -540,6 +540,86 @@ function registryOf(advisor: FakeRotationSession, impl: FakeRotationSession): Ag
 }
 
 /**
+ * The two-seat conflict, driven to the second failure.
+ *
+ * Seat `implementer` and seat `implementer-2` rewrite the same line from the same base. The
+ * first merges; the second is blocked, told about it, and given a repair turn that changes
+ * nothing — a second failure against the same integration parent, which is what escalates.
+ * Every step is the production path: real worktrees, a real `git merge`, a real abort.
+ */
+async function provokeMergeBlocked(repo: string): Promise<{ relay: Relay; run: RunHandle; pause: RunPause }> {
+  execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: repo })
+  execFileSync('git', ['config', 'user.name', 'Test'], { cwd: repo })
+  writeFileSync(join(repo, 'work.ts'), 'export const answer = 0\n')
+  execFileSync('git', ['add', 'work.ts'], { cwd: repo })
+  execFileSync('git', ['commit', '-qm', 'work'], { cwd: repo })
+
+  const advisor = new FakeRotationSession('advisor', 'codex', [
+    'Set the answer to one.',
+    'Set the answer to two.',
+    'Resolve the conflict in your own worktree.',
+    'DONE',
+  ])
+  const first = new FakeRotationSession('impl', 'claude', ['ack', 'Did it.', 'NONE'])
+  const second = new FakeRotationSession('impl-2', 'claude', ['ack', 'Did it.', 'Still stuck.', 'NONE'])
+
+  // A queue rather than one session per agent: two seats filled by the same agent must be two
+  // children, or the run is one session pretending to be two.
+  const registry = new AgentRegistry()
+  for (const [agent, queue] of [
+    ['codex', [advisor]],
+    ['claude', [first, second]],
+  ] as const) {
+    const remaining = [...queue]
+    registry.register({
+      id: agent,
+      displayName: agent,
+      capabilities: {
+        agent,
+        readinessSignal: 'unknown',
+        turnKeySource: 'prompt_id',
+        outcomes: {
+          completed: 'observed',
+          cancelled: 'reasoned_but_unverified',
+          permission_refused: 'reasoned_but_unverified',
+          process_exited: 'reasoned_but_unverified',
+          timed_out: 'reasoned_but_unverified',
+          transport_lost: 'reasoned_but_unverified',
+          unknown_abnormal_end: 'reasoned_but_unverified',
+        },
+      },
+      deadlines: NO_DEADLINE_CLOCKS,
+      launch: { command: agent, baseArgs: [] },
+      async create() {
+        const next = remaining.shift()
+        if (!next) throw new Error(`no session left for ${agent}`)
+        return next
+      },
+    })
+  }
+
+  const relay = await Relay.start({
+    registry,
+    cwd: repo,
+    lead: { id: 'advisor', agent: 'codex', role: 'advisor' },
+    implementer: { id: 'implementer', agent: 'claude', role: 'implementer' },
+    implementers: [
+      { id: 'implementer', agent: 'claude', role: 'implementer' },
+      { id: 'implementer-2', agent: 'claude', role: 'implementer' },
+    ],
+    maxAdvisorTurns: 5,
+  })
+  const trees = Object.fromEntries(relay.worktrees!.seats.map((s) => [s.seatId, s.worktreePath]))
+  first.onSend = () => writeFileSync(join(trees.implementer!, 'work.ts'), 'export const answer = 1\n')
+  second.onSend = () => writeFileSync(join(trees['implementer-2']!, 'work.ts'), 'export const answer = 2\n')
+
+  const run = relay.start('Keep the work moving.')
+  const pause = await run.untilPause()
+  assert.ok(pause, 'the relay must raise a merge_blocked pause for its status document to exist')
+  return { relay, run, pause }
+}
+
+/**
  * Drive a real relay into one condition and return the pause it raised.
  *
  * The provocations are the ones `resolution.test.ts:203-291` already uses, deliberately: the
@@ -555,6 +635,12 @@ async function provoke(
   repo: string,
   reason: PauseReason,
 ): Promise<{ relay: Relay; run: RunHandle; pause: RunPause }> {
+  // Two seats, one file, real git — the only condition here that a default run cannot reach
+  // even in principle, since it needs a second implementer to conflict with. It is provoked
+  // separately rather than being squeezed into the table below, and the run is otherwise
+  // ordinary: no flags, no overrides beyond the seat list.
+  if (reason === 'merge_blocked') return provokeMergeBlocked(repo)
+
   const armed = reason === 'rotation_candidate'
   const scripts: Record<PauseReason, { advisor: string[]; impl: string[] }> = {
     rotation_candidate: { advisor: ['Do the thing.', 'DONE'], impl: ['ack', 'Did it.'] },
@@ -576,6 +662,11 @@ async function provoke(
       impl: ['ack', 'Wrote two.txt.', 'Removed it.'],
     },
     turn_incomplete: { advisor: ['Do it.', 'DONE'], impl: ['ack', 'Did it, slowly.'] },
+    // Unused by the single-implementer path below: `merge_blocked` needs two seats and a real
+    // conflict, and is provoked in its own branch. Present because the table is keyed by
+    // `PauseReason` on purpose — a reason that appears here and nowhere else is a reason
+    // somebody has to come and finish.
+    merge_blocked: { advisor: [], impl: [] },
     operator_requested: {
       advisor: ['Do the first thing.', 'Do the second thing.', 'DONE'],
       impl: ['ack', 'Did the first thing.', 'Did the second thing.', 'NONE'],
@@ -1014,6 +1105,14 @@ const PAUSED_SUBTREE: Record<PauseReason, Record<string, string>> = {
     pause: 'at, atSeq, detail, evidence, options, reason, resolution',
     'pause.resolution': 'authority, reason, scope',
     'pause.resolution.scope': 'kind',
+  },
+  // The only entry whose run is not a default run: it takes two implementer seats, because a
+  // merge conflict between seats needs two seats. The document shape is pinned for the same
+  // reason as the other six — this is what a consumer parses when it happens.
+  merge_blocked: {
+    pause: 'at, atSeq, detail, evidence, options, reason, resolution',
+    'pause.resolution': 'authority, reason, scope',
+    'pause.resolution.scope': 'kind, participantId',
   },
 }
 

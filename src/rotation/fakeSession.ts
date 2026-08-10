@@ -47,6 +47,16 @@ export class FakeRotationSession implements AgentSession {
    * exactly that.
    */
   toolsPerTurn: string[] = []
+  /**
+   * Called with the prompt as a turn begins, so a test can make the turn DO something.
+   *
+   * The fake could only ever talk. Anything keyed to a participant changing the tree -- the
+   * worktree boundary most of all, where a run with clean trees merges nothing and proves
+   * nothing -- had no way to be exercised at all. `DefaultRunFakeSession` in
+   * `defaultUnchanged.test.ts` grew the same hook for the same reason; this is that hook on
+   * the shared double, so three suites do not each carry a private copy of the session.
+   */
+  onSend: ((message: string) => void) | undefined
 
   #state: SessionState = 'running'
   #replies: string[]
@@ -111,6 +121,7 @@ export class FakeRotationSession implements AgentSession {
       throw new Error('no UserPromptSubmit hook after send')
     }
     this.received.push(message)
+    this.onSend?.(message)
     const index = this.#turns.length
     const key = turnKey(`${this.sessionId}-turn-${index}`)
     this.#turns.push({ key, prose: this.#replies.shift() ?? '' })

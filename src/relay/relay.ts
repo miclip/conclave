@@ -27,6 +27,18 @@ import type { ParticipantSpec } from '../registry/types.ts'
 import type { RoleId } from '../registry/roles.ts'
 import { acquire, release } from '../workspace/sessionLock.ts'
 import {
+  cleanupSeatWorktrees,
+  createSeatWorktrees,
+  ensureWorktreeHookTrigger,
+  nextRunId,
+  recoveryLines,
+  seatCwd,
+  unwindSeatWorktrees,
+  writeManifest,
+  type WorktreeManifest,
+} from '../workspace/worktrees.ts'
+import { integrateSeat, integrationHead } from './integrate.ts'
+import {
   envelope,
   type Audience,
   type MessageKind,
@@ -73,6 +85,7 @@ import {
   type SeatExecution,
   type Task,
   type TaskEvent,
+  type TaskPurpose,
   type TaskGrade,
   type TaskRuntime,
   type TaskTarget,
@@ -296,6 +309,18 @@ export interface RelayOptions {
   /** Enables automatic rotation on mechanical degradation. See `RotationConfig`. */
   rotation?: RotationConfig
 }
+
+/**
+ * What the git boundary decided about one seat.
+ *
+ * Returned rather than acted on inside `#crossBoundary`, because the seat is still `integrating`
+ * when the merge runs and marking it blocked there would be overwritten by the release that
+ * follows. The caller owns the ordering; this owns the judgement.
+ */
+type BoundaryOutcome =
+  /** Merged, empty, or not a worktree run at all — the seat carries on normally. */
+  | { kind: 'clear' }
+  | { kind: 'blocked'; seatId: string; escalate: boolean; detail: string; evidence: string[] }
 
 /** The default when a caller names no bound, in one place so the two fields cannot disagree. */
 export const DEFAULT_ADVISOR_TURNS = 6
@@ -701,6 +726,33 @@ export class Relay {
   #verdictPause: VerdictPause | undefined
   #stream = new RelayEventStream()
   #ended = false
+  /**
+   * The seat worktrees this run created, or `undefined` at N=1.
+   *
+   * `undefined` is the load-bearing value: it is what makes a default run touch none of this
+   * code rather than run a one-element version of it. Every read is `?.`-guarded for that
+   * reason, and none of them asks how many seats there are.
+   */
+  #worktrees: WorktreeManifest | undefined
+  /**
+   * Seats whose merge failed, keyed by seat id, in the order they blocked.
+   *
+   * `parent` is the integration HEAD the failed merge was attempted against, and it is what
+   * makes a repeat distinguishable from a fresh conflict: a second failure against a MOVED
+   * parent is new information and gets its own repair round, while a second failure against
+   * the same one means the repair did not repair and nothing another turn could change has
+   * changed. Insertion order is the queue order, so the oldest block is repaired first.
+   */
+  #blocked = new Map<string, { parent: string; paths: string[]; attempts: number }>()
+  /**
+   * Mechanical facts the advisor must have before it writes its next instruction.
+   *
+   * Deliberately NOT `#pending`. That queue is human messages, and the DONE guard reads it to
+   * decide that the human outranks an advisor calling the work finished — putting orchestrator
+   * bookkeeping in there would make a merge conflict masquerade as an operator instruction.
+   * These are prefixed and unenveloped: nobody should read them as participant speech.
+   */
+  #leadNotices: string[] = []
   /** True while `#loop` owns the participants. `ask` refuses rather than racing it. */
   #looping = false
 
@@ -735,11 +787,60 @@ export class Relay {
       )
     }
     const relay = new Relay(opts)
+
+    // Isolation, and only where it is needed. One implementer works in the operator's cwd on
+    // the operator's branch with no worktree, no branch and no manifest -- the default run must
+    // not pay for an isolation it does not need, and D1 makes that the identity case rather
+    // than a fast path. Every call below is inside this branch for that reason.
+    //
+    // Created BEFORE any implementer is launched, all of them or none: an adapter's cwd is
+    // fixed at launch, so a tree that appears afterwards is a tree its seat can never move
+    // into. `createSeatWorktrees` refuses a dirty integration checkout first, which is the
+    // refusal the whole scheme rests on.
+    if (seats.length > 1) {
+      const runId = nextRunId(opts.cwd, Date.now(), process.pid)
+      relay.#worktrees = createSeatWorktrees({
+        repoRoot: opts.cwd,
+        runId,
+        seatIds: seats.map((s) => s.id),
+      })
+    }
+
     // Sequential rather than parallel: two CLIs negotiating terminals and hook trust at
     // once produces interleaved failures that are miserable to attribute. That argument does
     // not weaken with more seats, so the loop stays sequential too.
-    await relay.#join(opts.lead, 'advisor')
-    for (const spec of seats) await relay.#join(spec, 'implementer')
+    try {
+      await relay.#join(opts.lead, 'advisor')
+      for (const spec of seats) {
+        // The advisor stays in the integration checkout at every N. It reads committed state
+        // and steers; it is not one of the writers this isolates from each other.
+        const tree = relay.#worktrees?.seats.find((s) => s.seatId === spec.id)
+        if (tree) ensureWorktreeHookTrigger(tree)
+        await relay.#join(spec, 'implementer', tree ? seatCwd(tree) : opts.cwd)
+      }
+    } catch (e) {
+      // CHILDREN FIRST, and unconditionally. Every session that did start is a live process,
+      // and an earlier version of this returned through the unwind's own throw before reaching
+      // them -- so the one case that leaves a tree behind was also the one case that leaked
+      // every child that had already launched. Closing is best-effort because the startup
+      // failure is the thing being reported and a teardown error must not replace it.
+      for (const p of relay.participants) {
+        try {
+          await p.session.close('graceful')
+        } catch {
+          /* already gone, or never fully there. The original failure is what matters. */
+        }
+      }
+      // Then the trees, which are only safe to read once nothing is writing to them. Unwound
+      // narrowly: only the trees this start created, only while they are still clean, and
+      // never with `--force` -- anything else is retained and named, because a tree that is
+      // not obviously ours to delete is not ours to delete.
+      if (relay.#worktrees) {
+        const lines = recoveryLines(unwindSeatWorktrees(relay.#worktrees))
+        if (lines.length > 0) throw new Error(`${(e as Error).message}\n${lines.join('\n')}`)
+      }
+      throw e
+    }
     // Records what the tree looked like before the participants touched it, so the
     // operator's own tooling can refuse to sweep their work into an unrelated commit. Every
     // seat is listed: the lock names who is working in this checkout, and a seat missing from
@@ -754,6 +855,17 @@ export class Relay {
   /** The repository the run works in. Read by the terminal record; see relay/report.ts. */
   get cwd(): string {
     return this.#opts.cwd
+  }
+
+  /**
+   * The seat worktrees, or `undefined` when the run has none — which is every default run.
+   *
+   * Read-only on purpose. The manifest on disk is the record; this is a view of it for a
+   * caller that already holds the relay, and a second writer would put the file and the
+   * object into a disagreement no reader could settle.
+   */
+  get worktrees(): WorktreeManifest | undefined {
+    return this.#worktrees
   }
 
   /** Who answers escalations. Default `'human'`; see RelayOptions.operator. */
@@ -825,9 +937,18 @@ export class Relay {
     }
   }
 
-  async #join(spec: ParticipantSpec, rank: Rank): Promise<void> {
+  /**
+   * `cwd` is where this participant's adapter is launched, and it is fixed at launch.
+   *
+   * Defaulting to the run cwd is the whole of the N=1 case and the whole of the advisor's case
+   * at any N: the integration checkout is where they belong. An implementer seat at N>1 is
+   * handed its own linked worktree instead, and it has to be handed it HERE -- an adapter's
+   * working directory cannot be changed afterwards, so a session started in the shared
+   * checkout is a seat that shares the checkout for the rest of the run.
+   */
+  async #join(spec: ParticipantSpec, rank: Rank, cwd: string = this.#opts.cwd): Promise<void> {
     const session = await this.#opts.registry.createParticipant(spec, {
-      cwd: this.#opts.cwd,
+      cwd,
       watchdogMs: this.#opts.turnWatchdogMs,
     })
     const p: RelayParticipant = { id: spec.id, agent: spec.agent, rank, role: spec.role, session, events: [], baselineGeneration: 0, degradationCursor: 0 }
@@ -2054,13 +2175,17 @@ export class Relay {
    * dependency: a rule that only starts running once there is something to test it with is a
    * rule nobody has tested.
    */
-  #admit(instruction: string, target: TaskTarget, origin: number): Task {
+  #admit(instruction: string, target: TaskTarget, origin: number, purpose: TaskPurpose): Task {
     const task: Task = {
       id: `t-${++this.#taskSeq}`,
       seq: this.#taskSeq,
       origin,
       instruction,
       target,
+      // Designated at admission by whoever routed it, never inferred from the prose. See
+      // `TaskPurpose`: this is the one fact that lets a blocked seat accept its repair and
+      // nothing else.
+      purpose,
       dependsOn: [],
       // Snapshotted at admission, so the conflict question is answered against the restricted
       // messages that existed when the advisor decided rather than against later ones.
@@ -2113,7 +2238,9 @@ export class Relay {
    * that is a scheduling wait, and refusing it would reintroduce lockstep at the front door.
    */
   #assign(task: Task, seat: SeatExecution): void {
-    const refusal = refuseDispatch(seat, this.#taskRuntime)
+    // The task's own target, so this asks exactly what `seatFor` asked. A resolution task
+    // named at a `merge_blocked` seat is a legal dispatch and must not be refused here.
+    const refusal = refuseDispatch(seat, this.#taskRuntime, task)
     if (refusal) throw new Error(`dispatcher refused ${task.id}: ${refusal}`)
     const runtime = this.#taskRuntime.get(task.id)!
     runtime.state = 'assigned'
@@ -2184,6 +2311,185 @@ export class Relay {
     seat.state = 'idle'
     seat.idleSince = Date.now()
     this.#mark(task, 'released')
+  }
+
+  /**
+   * The boundary that did not happen: release the seat, and record that it did not.
+   *
+   * The counterpart to `#integrate`, and it exists because the two used to be one. Every
+   * boundary went through `#integrate` whatever the merge did, so a task whose merge
+   * CONFLICTED still recorded `integratedAt` and could derive `complete` — a queue in which
+   * "this work is in the integration checkout" was true of work that provably was not, and the
+   * dependency rules are written against exactly that fact. A dependent of a conflicted task
+   * would have been released to run against a base that never absorbed it.
+   *
+   * So: no `recordCompletion`, which is what leaves `integratedAt` unset and keeps `complete`
+   * underivable, and an explicit `failed` mark so the transition is in the record rather than
+   * inferred from an absence. The seat is released from its task — the turn really did end —
+   * but into `merge_blocked` rather than `idle`, so nothing but its own repair can reach it.
+   *
+   * `routed` may still land afterwards and must: the advisor did hear the report, and
+   * `recordCompletion` already refuses to move a `failed` task off its state.
+   */
+  #failBoundary(task: Task, seat: SeatExecution): void {
+    const runtime = this.#taskRuntime.get(task.id)!
+    if (runtime.grade === undefined) {
+      throw new Error(`dispatcher cannot free ${seat.seat}: ${task.id} has no graded verdict`)
+    }
+    runtime.state = 'failed'
+    this.#mark(task, 'failed')
+    seat.current = undefined
+    seat.state = 'merge_blocked'
+    // Stamped even though a blocked seat is not selectable: it becomes the ordering key the
+    // moment the block clears, and a seat resuming with an ancient `idleSince` would jump the
+    // queue ahead of seats that have genuinely been waiting.
+    seat.idleSince = Date.now()
+    this.#mark(task, 'released')
+  }
+
+  /**
+   * Commit this seat's work and merge it into the integration checkout.
+   *
+   * A no-op without seat worktrees, which is every default run — the guard is the `undefined`
+   * manifest and not a seat count, so N=1 does not take a shorter path through this code, it
+   * takes none of it.
+   *
+   * Every outcome is recorded as an orchestrator note, because a merge is a change to the
+   * operator's own checkout made by something they are not watching, and a boundary that
+   * moved their HEAD without saying so is indistinguishable from one that did nothing.
+   *
+   * A conflict does NOT stop the run and does not pause it. Only that seat is marked; its
+   * branch and tree are untouched, its work is committed and intact, and resolution is work
+   * the advisor has to dispatch back to that seat. Blocking every other seat on one seat's
+   * conflict would be lockstep again, reached from a different direction. Making the blocked
+   * seat undispatchable, and raising this onto a decision queue the advisor services, is the
+   * seat-block machinery — not built here.
+   */
+  #crossBoundary(task: Task, seatId: string): BoundaryOutcome {
+    const manifest = this.#worktrees
+    if (!manifest) return { kind: 'clear' }
+    const tree = manifest.seats.find((s) => s.seatId === seatId)
+    if (!tree) return { kind: 'clear' }
+    const note = (text: string): void => {
+      this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text })
+    }
+    try {
+      const result = integrateSeat(manifest, tree, {
+        taskId: task.id,
+        seq: task.seq,
+        advisorTurn: task.origin,
+      })
+      if (result.status !== 'blocked') {
+        if (result.status === 'nothing_to_merge') {
+          note(`${seatId} changed nothing for ${task.id}; nothing to integrate`)
+        } else {
+          note(`${seatId}'s work for ${task.id} merged into ${manifest.integrationRoot} at ${result.integrationSha.slice(0, 12)}`)
+          for (const n of result.notes) note(n)
+        }
+        // A boundary that got through IS the repair, whatever the instruction that produced it
+        // was called. Nothing else clears a block: not a turn, not an advisor saying so.
+        if (this.#blocked.delete(seatId)) {
+          const cleared = `${seatId}'s merge conflict is resolved and its work is in the integration checkout. It takes ordinary work again.`
+          note(cleared)
+          this.#tellLead(cleared)
+        }
+        return { kind: 'clear' }
+      }
+
+      const prior = this.#blocked.get(seatId)
+      const repeat = prior !== undefined && prior.parent === result.parent
+      this.#blocked.set(seatId, {
+        parent: result.parent,
+        paths: result.paths,
+        attempts: repeat ? prior.attempts + 1 : 1,
+      })
+      const conflicting = result.paths.length > 0 ? ` Conflicting: ${result.paths.join(', ')}.` : ''
+      note(
+        `${seatId}'s work for ${task.id} could not be merged and the integration checkout was ` +
+          `left as it was. Its work is committed on ${tree.branch} and nothing has been discarded.` +
+          `${conflicting} ${result.detail}`,
+      )
+      if (!repeat) {
+        // The advisor is told because resolution is WORK, and work is dispatched. It is told in
+        // the terms it has to act in: the conflict is the seat's to resolve, in the seat's own
+        // tree, and the next instruction goes there whether or not the advisor names it.
+        this.#tellLead(
+          `${seatId}'s work is committed on ${tree.branch} but will not merge into the integration ` +
+            `checkout.${conflicting} It is blocked and takes no other work until this clears. Your next ` +
+            `instruction goes to ${seatId}: tell it to merge the current integration HEAD into its own ` +
+            `branch, resolve the conflict IN ITS OWN WORKTREE, verify whatever you think that needs, and ` +
+            `report. Nothing has been lost and no other seat is affected.`,
+        )
+      }
+      return {
+        kind: 'blocked',
+        seatId,
+        escalate: repeat,
+        detail:
+          `${seatId}'s branch ${tree.branch} still will not merge into ${result.parent.slice(0, 12)} ` +
+          `after a resolution turn.${conflicting}`,
+        evidence: [
+          `attempt ${repeat ? prior.attempts + 1 : 1} against the same integration parent ${result.parent.slice(0, 12)}`,
+          `the work is committed on ${tree.branch} and its worktree ${tree.worktreePath} is retained`,
+          `no other seat is blocked by this`,
+        ],
+      }
+    } catch (e) {
+      // The run does not die on a boundary it could not complete. But it does not shrug either:
+      // this used to return `clear`, which released the seat for ordinary work on the strength
+      // of a boundary that THREW -- the one case in which nothing is known about whether the
+      // work merged, whether the tree is mid-merge, or whether the manifest was written. An
+      // unknown boundary is treated exactly as a failed one, because the safe reading of "I
+      // could not tell" is not "it was fine".
+      const detail = (e as Error).message
+      note(`${seatId}'s boundary for ${task.id} did not complete: ${detail}`)
+      // Best-effort, and its failure is not fatal: the tree is retained either way by the
+      // cleanup rules, and a manifest that could not be written is one more thing the operator
+      // is told about rather than a reason to lose the seat state.
+      try {
+        tree.mergeState = 'merge_blocked'
+        writeManifest(manifest)
+      } catch (writeError) {
+        note(`${seatId}'s manifest could not be updated: ${(writeError as Error).message}`)
+      }
+      // The same repeat rule as a conflict. `parent` is read best-effort, because a boundary
+      // that threw may have been git failing in the first place; an unreadable HEAD is its own
+      // value, so two unreadable attempts in a row still count as a repeat.
+      const parent = integrationHead(manifest.integrationRoot) ?? 'unreadable'
+      const prior = this.#blocked.get(seatId)
+      const repeat = prior !== undefined && prior.parent === parent
+      this.#blocked.set(seatId, { parent, paths: [], attempts: repeat ? prior.attempts + 1 : 1 })
+      if (!repeat) {
+        this.#tellLead(
+          `${seatId}'s work could not be integrated: the boundary itself failed (${detail}). Its work is ` +
+            `on ${tree.branch} and nothing has been discarded. It is blocked and takes no other work ` +
+            `until this clears. Your next instruction goes to ${seatId}: tell it to get its branch into ` +
+            `a state that merges cleanly, working IN ITS OWN WORKTREE, and report.`,
+        )
+      }
+      return {
+        kind: 'blocked',
+        seatId,
+        escalate: repeat,
+        detail: `${seatId}'s boundary for ${task.id} failed again: ${detail}`,
+        evidence: [
+          `attempt ${repeat ? prior.attempts + 1 : 1} against integration parent ${parent.slice(0, 12)}`,
+          `the boundary raised an error rather than reporting a conflict, so what merged is unknown`,
+          `${tree.worktreePath} is retained and its branch ${tree.branch} is untouched`,
+        ],
+      }
+    }
+  }
+
+  /** Queue a mechanical fact for the advisor's next prompt. See `#leadNotices`. */
+  #tellLead(text: string): void {
+    this.#leadNotices.push(`[ORCHESTRATOR — mechanical, not a participant speaking]\n\n${text}`)
+  }
+
+  #drainLeadNotices(): string {
+    const notices = this.#leadNotices
+    this.#leadNotices = []
+    return notices.join('\n\n')
   }
 
   /**
@@ -2282,6 +2588,25 @@ export class Relay {
     // whichever seat a rank scan returned first. At N>1 with seats in different roles those
     // two are different answers, and only one of them is something a caller decided.
     const untargeted: TaskTarget = { kind: 'role', role: impl.role }
+    /**
+     * Where an instruction that names no target actually goes.
+     *
+     * The role, unless a seat is blocked — then that seat, by name. The advisor has no target
+     * syntax today (`parseDecisions` takes one fallback and applies it to every reply), so the
+     * relay is the only thing that can put the repair where it has to go, and a repair that
+     * cannot be addressed is a block that can never clear. The advisor is told this in the
+     * same breath it is told about the conflict, so the instruction it writes is the one that
+     * arrives. Oldest block first: `#blocked` is insertion-ordered.
+     */
+    const nextAssignment = (): { target: TaskTarget; purpose: TaskPurpose } => {
+      const first = [...this.#blocked.keys()][0]
+      // `merge_resolution` is designated HERE and nowhere else, on the one path that creates a
+      // repair: the relay redirected this instruction, so the relay knows what it is. Nothing
+      // reads the advisor's prose to decide.
+      return first === undefined
+        ? { target: untargeted, purpose: 'work' }
+        : { target: { kind: 'seat', seat: first }, purpose: 'merge_resolution' }
+    }
 
     // The dispatcher. One iteration is one ADVISOR TURN: the advisor's standing reply is read
     // as assignment decisions, at most one task is admitted, and that task runs to a graded
@@ -2362,7 +2687,8 @@ export class Relay {
       // exactly as an empty instruction is treated today, by the guard immediately below.
       // Guessing at an ambiguous reply would let a parser invent work nobody authorised, and
       // guessing at an unrecognised target would let it invent a seat.
-      const decisions = parseDecisions(instruction, [...this.#seatState.values()], untargeted)
+      const assignment = nextAssignment()
+      const decisions = parseDecisions(instruction, [...this.#seatState.values()], assignment.target)
 
       // An advisor turn that ended badly, or produced nothing that can be admitted, must not be
       // forwarded.
@@ -2497,7 +2823,7 @@ export class Relay {
       // whether or not it survives adjudication. Admission logs nothing: the task record is the
       // dispatcher's account of the schedule, and the routing log stays the account of what
       // actually moved between participants.
-      const task = this.#admit(decision.instruction, decision.target, next.end.seq)
+      const task = this.#admit(decision.instruction, decision.target, next.end.seq, assignment.purpose)
 
       // BEFORE delivery, not after. The point of the pause is that the human adjudicates
       // while the instruction is still a proposal. Once per admission rather than once per
@@ -2762,16 +3088,45 @@ export class Relay {
       const rotated = await this.#considerRotation(seat, report.prose, handle)
       if (rotated) return rotated
 
-      // The integration boundary, and the release it earns. Ahead of the advisor turn rather
-      // than after it: a seat whose work is integrated, with ready work waiting for it, must
-      // not idle through an advisor turn to collect it. At N=1 there is nothing waiting and
-      // nothing to commit, so this is where the seat simply becomes free again.
-      this.#integrate(dispatch.task, dispatch.seat)
+      // The git side of the same boundary, and only when this run has seat worktrees. The
+      // seat's work is invisible to everyone else until it is committed and merged, so this is
+      // where it stops being the seat's and starts being the run's. At N=1 `#worktrees` is
+      // undefined and nothing here runs -- one tree, one branch, and no merge to do.
+      const boundary = this.#crossBoundary(dispatch.task, seat.id)
+
+      // The integration boundary, and the release it earns -- or the release it does NOT earn.
+      // Ahead of the advisor turn rather than after it: a seat whose work is integrated, with
+      // ready work waiting for it, must not idle through an advisor turn to collect it. At N=1
+      // `#crossBoundary` is a no-op and this is always `#integrate`, which is where the seat
+      // simply becomes free again.
+      //
+      // A boundary that did not merge takes the other branch. It must not record `integrated`:
+      // that fact is what dependents are released against, and a conflicted task claiming it
+      // would let work run on a base that never absorbed the thing it depends on.
+      if (boundary.kind === 'blocked') this.#failBoundary(dispatch.task, dispatch.seat)
+      else this.#integrate(dispatch.task, dispatch.seat)
+
+      // The second failure against the same integration parent. The repair was dispatched, it
+      // came back, and the merge still will not go -- so another advisor turn is another turn
+      // spent on a question the seat has already failed to answer.
+      if (boundary.kind === 'blocked' && boundary.escalate) {
+        const halted = await this.#halt(handle, {
+          subject: { reason: 'merge_blocked', participant: boundary.seatId },
+          detail: boundary.detail,
+          evidence: boundary.evidence,
+        })
+        if (halted) return halted
+        // Resumed. The operator may have resolved it by hand or may simply want another
+        // round, and either way the count starts again -- an escalation on every subsequent
+        // boundary would make resuming pointless.
+        const block = this.#blocked.get(boundary.seatId)
+        if (block) block.attempts = 1
+      }
 
       const leadAside = this.#drain(lead.id)
       next = await this.#exchange(
         lead,
-        [leadAside, envelope({ from: seat.id, fromRank: 'implementer', fromRole: seat.role, kind: 'report', text: report.prose })]
+        [leadAside, this.#drainLeadNotices(), envelope({ from: seat.id, fromRank: 'implementer', fromRole: seat.role, kind: 'report', text: report.prose })]
           .filter(Boolean)
           .join('\n\n'),
       )
@@ -2910,6 +3265,46 @@ export class Relay {
     // outcome. Only a relay stopped without ever finishing a run reports 'stopped'.
     this.#end('stopped')
     for (const p of this.participants) await p.session.close('graceful')
+    // Between closing the sessions and releasing the claim, in that order and for a reason.
+    // Cleanup reads each seat's tree, so it must happen after the writers are gone; and
+    // releasing the claim while a seat worktree still holds uncommitted work would report the
+    // run cleanly finished with work stranded outside the integration checkout.
+    this.#cleanupWorktrees()
     release(this.#opts.cwd)
+  }
+
+  /**
+   * Remove the trees that are safe to remove, and account for every one that is not.
+   *
+   * "Safe" is narrow and deliberately so: merged, clean, present, and with nothing on its
+   * branch the integration checkout lacks. Everything else is RETAINED with its path, its
+   * branch, and the commands to inspect, merge or discard it — the same posture `guard()`
+   * takes towards a lock left by a dead pid, which tells the operator what to run once they
+   * have accounted for the files rather than clearing it for them.
+   *
+   * The recovery lines go into the routing log rather than to stdout: `stop()` can be called
+   * from a console that owns the screen, and a print from here would land in the middle of
+   * whatever it was drawing.
+   */
+  #cleanupWorktrees(): void {
+    const manifest = this.#worktrees
+    if (!manifest) return
+    try {
+      const report = cleanupSeatWorktrees(manifest)
+      for (const line of recoveryLines(report)) {
+        this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text: line })
+      }
+    } catch (e) {
+      this.#record({
+        from: 'orchestrator',
+        fromRank: 'human',
+        to: [],
+        kind: 'note',
+        text:
+          `seat worktree cleanup did not complete: ${(e as Error).message}. ` +
+          `The trees under ${manifest.integrationRoot}/.conclave/worktrees/${manifest.runId} are ` +
+          `still there and the manifest names what each one holds.`,
+      })
+    }
   }
 }

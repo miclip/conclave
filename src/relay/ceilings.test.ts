@@ -184,6 +184,7 @@ function task(id: string): Task {
     seq: 0,
     instruction: 'do it',
     target: { kind: 'role', role: 'implementer' },
+    purpose: 'work' as const,
     origin: 0,
     dependsOn: [],
     restrictedOrigins: [],

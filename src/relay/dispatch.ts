@@ -50,6 +50,25 @@ import type { RoleId } from '../registry/roles.ts'
 export type TaskTarget = { kind: 'seat'; seat: string } | { kind: 'role'; role: RoleId }
 
 /**
+ * What a task is FOR, as distinct from where it goes.
+ *
+ * Two values, and the second exists because a `merge_blocked` seat must accept exactly one
+ * kind of work — the repair — and the dispatcher must be able to tell which that is without
+ * reading the instruction. Classifying prose would be guessing: an advisor that happened to
+ * write "resolve the conflict" in an ordinary instruction would slip work onto a blocked seat,
+ * and one that wrote a repair in different words would be locked out of its own seat.
+ *
+ * So the purpose is DESIGNATED, by the orchestrator, at admission, on the one path that
+ * creates a repair: the relay redirected this instruction to the blocked seat and knows it
+ * did. It is a fact about how the task was routed, not a reading of what it says.
+ */
+export type TaskPurpose =
+  /** Ordinary work. Everything, unless the relay redirected it to a blocked seat. */
+  | 'work'
+  /** The mechanically designated repair for the seat named in `target`. */
+  | 'merge_resolution'
+
+/**
  * What the advisor decided. Immutable from the moment it is admitted.
  *
  * Every field is what was ASKED FOR. Nothing about how it went belongs here; that is
@@ -66,6 +85,11 @@ export interface Task {
   readonly instruction: string
   /** The advisor's assignment, validated against the run's configured seats at admission. */
   readonly target: TaskTarget
+  /**
+   * Why this task exists. Required, and required with no default: a task whose purpose could
+   * be left unstated is a task the blocked-seat rule would have to guess about.
+   */
+  readonly purpose: TaskPurpose
   /**
    * Task ids that must reach successful `routed` before this one may be assigned.
    *
@@ -227,6 +251,32 @@ export function isFree(seat: SeatExecution): boolean {
 }
 
 /**
+ * Whether this seat can take THIS task. Free, or blocked and holding its own designated repair.
+ *
+ * A `merge_blocked` seat is not free, and ordinary work must never land on it: work sent to a
+ * seat whose branch will not merge produces more commits on that branch and makes the conflict
+ * bigger while the run reports healthy. But it has to remain reachable, because the only way
+ * out is a task that resolves the conflict IN ITS OWN worktree, and a seat nothing can be sent
+ * to is a seat nothing can repair.
+ *
+ * Three conditions, all of them, and none of them a reading of the instruction: the task must
+ * be the designated `merge_resolution`, it must name a seat, and the seat it names must be
+ * this one. Targeting alone was not enough — it let ANY seat-targeted task in, so the moment
+ * something other than the relay's own redirection could address a seat, ordinary work would
+ * flow onto a blocked one again.
+ */
+export function canTake(seat: SeatExecution, task: Pick<Task, 'target' | 'purpose'>): boolean {
+  if (seat.current !== undefined) return false
+  if (isFree(seat)) return true
+  return (
+    seat.state === 'merge_blocked' &&
+    task.purpose === 'merge_resolution' &&
+    task.target.kind === 'seat' &&
+    task.target.seat === seat.seat
+  )
+}
+
+/**
  * How much admitted work is waiting for a seat.
  *
  * The reading behind `Ceilings.maxQueueDepth`. `admitted` and `ready` are the two states in
@@ -282,9 +332,9 @@ export function seatsFor(seats: readonly SeatExecution[], target: TaskTarget): S
  */
 export function seatFor(
   seats: readonly SeatExecution[],
-  target: TaskTarget,
+  task: Pick<Task, 'target' | 'purpose'>,
 ): SeatExecution | undefined {
-  const free = seatsFor(seats, target).filter(isFree)
+  const free = seatsFor(seats, task.target).filter((s) => canTake(s, task))
   return free.sort((a, b) => a.idleSince - b.idleSince || a.seat.localeCompare(b.seat))[0]
 }
 
@@ -420,7 +470,7 @@ export function nextDispatch(
 ): { task: Task; seat: SeatExecution } | undefined {
   for (const task of [...queue].sort((a, b) => a.seq - b.seq)) {
     if (runtime.get(task.id)?.state !== 'ready') continue
-    const seat = seatFor(seats, task.target)
+    const seat = seatFor(seats, task)
     if (seat) return { task, seat }
   }
   return undefined
@@ -438,6 +488,7 @@ export function nextDispatch(
 export function refuseDispatch(
   seat: SeatExecution,
   runtime: ReadonlyMap<string, TaskRuntime>,
+  task?: Pick<Task, 'target' | 'purpose'>,
 ): string | undefined {
   if (seat.current !== undefined) {
     const held = runtime.get(seat.current)
@@ -445,7 +496,11 @@ export function refuseDispatch(
       ? `${seat.seat} still holds ${seat.current}, whose verdict is not graded`
       : `${seat.seat} still holds ${seat.current}`
   }
-  if (!isFree(seat)) return `${seat.seat} is ${seat.state}`
+  // Without a task this is the old question — "is this seat free" — which is the right one for
+  // every caller that is not about to dispatch a specific one. With one it is the same question
+  // `seatFor` answered, and the two must not be able to disagree: a seat `seatFor` chose and
+  // `refuseDispatch` then refused would be a dispatcher deadlocking on itself.
+  if (task ? !canTake(seat, task) : !isFree(seat)) return `${seat.seat} is ${seat.state}`
   return undefined
 }
 
