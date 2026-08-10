@@ -16,7 +16,7 @@
  *   await run.rotateImplementer()
  *   await run.continue()
  *
- * The loop suspends at the pause point holding everything it had — the round counter, the
+ * The loop suspends at the pause point holding everything it had — the advisor-turn counter, the
  * advisor's last instruction, the implementer's report — and picks up from there. Rotation
  * is safe at exactly that moment and nowhere else: no turn is in flight, so replacing the
  * implementer cannot race a send.
@@ -60,7 +60,7 @@ export type PauseReason =
    */
   | 'authority_conflict'
   /**
-   * The operator asked to stop at the next round boundary.
+   * The operator asked to stop at the next advisor-turn boundary.
    *
    * Not in the original set, and added for a reason worth recording: without it the only
    * way to reach a pause is to wait for the orchestrator to raise one, so "does a real
@@ -207,9 +207,9 @@ export type Decision = { kind: 'continue' } | { kind: 'abort'; detail: string }
 export interface RunControl {
   rotate(reason: string): Promise<RotationResult>
   constrain(text: string, audience: Audience): RelayMessage
-  /** Ask the loop to stop at its next round boundary. */
+  /** Ask the loop to stop at its next advisor-turn boundary. */
   requestStop(): void
-  /** Ask the loop to pause at its next round boundary. */
+  /** Ask the loop to pause at its next advisor-turn boundary. */
   requestPause(reason: string): void
 }
 
@@ -323,7 +323,7 @@ export class RunHandle {
   }
 
   /**
-   * Ask the run to pause at its next round boundary.
+   * Ask the run to pause at its next advisor-turn boundary.
    *
    * Not immediate, and cannot be: neither child CLI ingests input mid-turn (§5c), so the
    * earliest safe point is after the turn in flight ends. Returns the pause once it is

@@ -83,7 +83,7 @@ function repo(): string {
   return dir
 }
 
-/** One round: the advisor instructs, the implementer reports, the advisor says DONE. */
+/** One advisor turn: the advisor instructs, the implementer reports, the advisor says DONE. */
 async function runWith(implementerRole: string) {
   const dir = repo()
   const lead = new FakeRotationSession('lead-1', 'codex', ['build the thing', 'DONE'])
@@ -93,7 +93,7 @@ async function runWith(implementerRole: string) {
     cwd: dir,
     lead: { id: 'advisor', agent: 'codex', role: 'advisor' },
     implementer: { id: 'implementer', agent: 'claude', role: implementerRole },
-    maxRounds: 2,
+    maxAdvisorTurns: 2,
   })
   const startedAt = Date.now()
   const outcome = await relay.run('a goal')

@@ -26,7 +26,7 @@
 
 import { describeTool } from '../relay/subagents.ts'
 import { formatGoalFindings, lintGoal } from '../relay/goalLint.ts'
-import { preflightRefusals } from '../relay/guardrails.ts'
+import { preflightRefusals, type Ceilings } from '../relay/guardrails.ts'
 import { createWriteStream, existsSync, realpathSync } from 'node:fs'
 import { basename, join, relative } from 'node:path'
 import { Writable } from 'node:stream'
@@ -134,6 +134,12 @@ export interface SessionOptions {
    */
   leadArgs?: string[] | undefined
   implementerArgs?: string[] | undefined
+  /**
+   * The `--rounds` flag, which populates `RelayOptions.maxAdvisorTurns`.
+   *
+   * The flag keeps its spelling because operators and scripts already type it; only the relay
+   * option it feeds was renamed, and the value means the same thing on both sides of that wire.
+   */
   rounds: number
   /**
    * Verification commands. A bare string is `required`; pass `{command, relevance}` for a
@@ -179,6 +185,20 @@ export interface SessionOptions {
    * anywhere, so it agreed with me.
    */
   turnWatchdogMs?: number | undefined
+  /**
+   * Resource ceilings for the run: wall clock, total turns, queue depth, concurrent seats.
+   *
+   * Console-side for the first time, and on today's merits rather than N>1's. `--operator
+   * agent` already makes a console run unattended, and an unattended console run had no
+   * ceiling of ANY kind -- the assumption that the console could rely on a human noticing a
+   * run had gone long stopped being true the day that flag shipped, not at some future N.
+   *
+   * Passed to `Relay.start` unchanged. No default, no clamping, no console-specific
+   * reinterpretation: a ceiling that meant something different depending on which command
+   * started the run would be worse than not having one, because the operator would have to
+   * know which. A session given none behaves exactly as it did before this existed.
+   */
+  ceilings?: Ceilings | undefined
   /**
    * How long a turn's transcript is given to catch up with the hook that ended it, and how
    * much longer an EMPTY report buys before it is treated as lost. See `Relay#exchange`.
@@ -277,7 +297,7 @@ const HELP = `
   open the file themselves, and @path means the same to their own CLIs — so the
   reference survives being forwarded, which inlined text would not.
 
-  /pause                 pause at the next round boundary
+  /pause                 pause at the next advisor-turn boundary
   /continue              resume from a pause
   /rotate [reason]       replace the implementer, carrying a handoff forward
   /abort [reason]        end the run, and stay here for the next one
@@ -580,6 +600,8 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     ...(opts.transcriptSettleMs ? { transcriptSettleMs: opts.transcriptSettleMs } : {}),
     ...(opts.transcriptSalvageMs ? { transcriptSalvageMs: opts.transcriptSalvageMs } : {}),
     ...(opts.turnWatchdogMs ? { turnWatchdogMs: opts.turnWatchdogMs } : {}),
+    // Unchanged, deliberately. See `SessionOptions.ceilings`.
+    ...(opts.ceilings ? { ceilings: opts.ceilings } : {}),
     lead: { id: 'advisor', agent: opts.lead, role: 'advisor', ...(leadArgs.length > 0 ? { args: leadArgs } : {}) },
     implementer: {
       id: 'implementer',
@@ -587,7 +609,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
       role: 'implementer',
       ...(implArgs.length > 0 ? { args: implArgs } : {}),
     },
-    maxRounds: opts.rounds,
+    maxAdvisorTurns: opts.rounds,
     ...(opts.checks.length > 0 ? { rotation: { checks: opts.checks } } : {}),
     onLog: (m) => {
       // A message the operator just typed is already on screen twice over: the pinned row
@@ -1221,7 +1243,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     if (word === '/pause') {
       if (!run) return void write(dim('  nothing is running; type a goal to start'))
       if (run.state === 'paused') return void write('  already paused')
-      write('  pausing at the next round boundary — a turn in flight has to finish first')
+      write('  pausing at the next advisor-turn boundary — a turn in flight has to finish first')
       void run.requestPause('the operator asked to pause')
       return
     }

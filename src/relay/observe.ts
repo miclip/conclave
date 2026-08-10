@@ -12,7 +12,7 @@
  *   message   an entry in the routing log. What the orchestrator ROUTED.
  *   activity  an adapter event from one participant. What a child is DOING right now.
  *
- * Only the second makes a live view worth having. A relay round records an instruction,
+ * Only the second makes a live view worth having. An advisor turn records an instruction,
  * then waits — with no deadline, deliberately (see `Relay.#exchange`) — for the turn to
  * end, and that wait is where the work happens. A view fed only by the routing log shows
  * nothing at all for the whole of it.
@@ -48,10 +48,10 @@ export type RunReason =
   /**
    * A configured ceiling was reached: wall clock or total turns.
    *
-   * Its own reason rather than `budget`, which means the ROUND structure was exhausted. The
-   * two answer different questions -- "the exchange ran its course" versus "this run was
-   * still going and was stopped" -- and an operator deciding whether to resume needs to know
-   * which happened.
+   * Its own reason rather than `budget`, which means the ADVISOR TURNS were exhausted. The
+   * two answer different questions -- "the advisor ran out of turns to steer with" versus
+   * "this run was still going and was stopped" -- and an operator deciding whether to resume
+   * needs to know which happened.
    */
   | 'ceiling'
 

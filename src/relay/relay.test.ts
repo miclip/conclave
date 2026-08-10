@@ -302,7 +302,7 @@ async function twoParty(
     cwd: '/tmp',
     lead: { id: 'advisor', agent: 'fake-lead', role: 'advisor' },
     implementer: { id: 'implementer', agent: 'fake-impl', role: 'implementer' },
-    maxRounds: 3,
+    maxAdvisorTurns: 3,
     ...(onLog ? { onLog } : {}),
   })
   return { relay, lead, impl }
@@ -720,7 +720,7 @@ test('DONE and ESCALATE hand back to the human rather than being acted on', asyn
   assert.ok(outcome.detail?.includes('contradict'))
 })
 
-test('the round budget stops an unbounded loop', async () => {
+test('the advisor-turn budget stops an unbounded loop', async () => {
   const { relay } = await twoParty(
     ['a', 'b', 'c', 'd', 'e', 'f'],
     ['1', '2', '3', '4', '5', '6'],
@@ -955,7 +955,7 @@ async function attributionRun(
     cwd,
     lead: { id: 'advisor', agent: 'fake-lead', role: 'advisor' },
     implementer: { id: 'implementer', agent: 'fake-impl', role: 'implementer' },
-    maxRounds: 3,
+    maxAdvisorTurns: 3,
     onLog: (m) => {
       if (m.kind !== 'report' || armed) return
       armed = true
@@ -1038,7 +1038,7 @@ test('a report is not read until the transcript has caught up with the turn', as
     cwd: process.cwd(),
     lead: { id: 'advisor', agent: 'codex', role: 'advisor' },
     implementer: { id: 'implementer', agent: 'claude', role: 'implementer' },
-    maxRounds: 2,
+    maxAdvisorTurns: 2,
   })
   await relay.run('Keep the work moving.')
   await relay.stop()
@@ -1064,7 +1064,7 @@ test('a transcript that never settles is used anyway, and the shortfall is recor
     cwd: process.cwd(),
     lead: { id: 'advisor', agent: 'codex', role: 'advisor' },
     implementer: { id: 'implementer', agent: 'claude', role: 'implementer' },
-    maxRounds: 2,
+    maxAdvisorTurns: 2,
     transcriptSettleMs: 300,
   })
   await relay.run('Keep the work moving.')
@@ -1086,7 +1086,7 @@ test('the other participant receives the report, not the narration', async () =>
     cwd: process.cwd(),
     lead: { id: 'advisor', agent: 'codex', role: 'advisor' },
     implementer: { id: 'implementer', agent: 'claude', role: 'implementer' },
-    maxRounds: 2,
+    maxAdvisorTurns: 2,
   })
   await relay.run('Keep the work moving.')
   await relay.stop()
@@ -1120,7 +1120,7 @@ test('an empty report from a completed turn is waited for, not discarded', async
     cwd: process.cwd(),
     lead: { id: 'advisor', agent: 'codex', role: 'advisor' },
     implementer: { id: 'implementer', agent: 'claude', role: 'implementer' },
-    maxRounds: 2,
+    maxAdvisorTurns: 2,
     transcriptSettleMs: 150,
     transcriptSalvageMs: 5_000,
   })
@@ -1161,7 +1161,7 @@ test('a report that never arrives escalates in terms of what was lost', async ()
     cwd: dir,
     lead: { id: 'advisor', agent: 'codex', role: 'advisor' },
     implementer: { id: 'implementer', agent: 'claude', role: 'implementer' },
-    maxRounds: 2,
+    maxAdvisorTurns: 2,
     transcriptSettleMs: 100,
     transcriptSalvageMs: 200,
   })
@@ -1190,7 +1190,7 @@ test('a completed turn whose transcript yields nothing is rebuilt from what it w
     cwd: process.cwd(),
     lead: { id: 'advisor', agent: 'codex', role: 'advisor' },
     implementer: { id: 'implementer', agent: 'claude', role: 'implementer' },
-    maxRounds: 2,
+    maxAdvisorTurns: 2,
     transcriptSettleMs: 100,
     transcriptSalvageMs: 150,
   })

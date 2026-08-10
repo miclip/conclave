@@ -69,7 +69,7 @@ test('delegation is detected from participant events, which carry the tool name'
     registry, cwd: dir,
     lead: { id: 'advisor', agent: 'codex', role: 'advisor' },
     implementer: { id: 'implementer', agent: 'claude', role: 'implementer' },
-    maxRounds: 2,
+    maxAdvisorTurns: 2,
   })
   await relay.run('a goal')
   const use = relay.subagentUse()

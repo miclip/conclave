@@ -25,7 +25,7 @@ import type { CheckSpec } from '../src/rotation/record.ts'
 import type { ProjectConfig } from '../src/config/project.ts'
 import { runReport } from '../src/relay/report.ts'
 import { RunLogWriter, readRunLog, runLogExists } from '../src/relay/resume.ts'
-import { preflightRefusals } from '../src/relay/guardrails.ts'
+import { ceilingsFrom, preflightRefusals } from '../src/relay/guardrails.ts'
 import { ensureCodexHooksTrusted } from '../src/deployment/ensureTrust.ts'
 import type { ReadSession } from '../src/workspace/sessionRecord.ts'
 import { execFileSync, spawn } from 'node:child_process'
@@ -136,7 +136,8 @@ Commands:
                  [--checks-unrelated "..."] [--advisor-args "..."] [--implementer-args "..."]
                  [--salvage SECONDS] [--json] [--resume <log>] [--record <path>] [--dry-run]
                  [--force]
-                 [--max-turns N] [--max-minutes N] [--strict-goal] [--operator agent]
+                 [--max-turns N] [--max-minutes N] [--max-queue-depth N]
+                 [--max-concurrent-seats N] [--strict-goal] [--operator agent]
                  [--bypass [agent]] [--detach] [--turn-timeout SECONDS]
                                    Run a two-agent session unattended and print the
                                    routing log. --json prints a structured record of the
@@ -162,8 +163,15 @@ Commands:
                                    --dry-run resolves everything and starts nothing.
                                    --max-turns / --max-minutes stop a run that is still
                                    going, exit non-zero, and put the intended length into
-                                   the record. Refuses to start outside a git repository
-                                   unless --force.
+                                   the record. --max-queue-depth bounds admitted work
+                                   waiting for a seat and --max-concurrent-seats bounds
+                                   seats working at once; both read the dispatcher at a
+                                   turn boundary, and both permit the number they are
+                                   given, stopping only above it. Every ceiling is
+                                   optional and absent means no limit, so a run given
+                                   none is bounded only by --rounds as before.
+                                   All four are on session too. Refuses to start outside
+                                   a git repository unless --force.
                                    --settle bounds how long a turn's transcript is given to
                                    catch up with the hook that says the turn ended. If it
                                    catches up with NOTHING, --salvage (default 90s) is how
@@ -229,7 +237,8 @@ Commands:
                    [--checks-unrelated "..."] [--advisor-args "..."] [--implementer-args "..."]
                    [--bypass [agent]] [--operator agent] [--settle SECONDS]
                    [--salvage SECONDS] [--record <path>] [--resume <log>] [--force]
-                   [--turn-timeout SECONDS]
+                   [--turn-timeout SECONDS] [--max-turns N] [--max-minutes N]
+                   [--max-queue-depth N] [--max-concurrent-seats N]
                                    The same session, interactively. The goal is optional:
                                    without one the console waits and the first thing you
                                    type starts the run. Pauses become decision
@@ -261,6 +270,11 @@ Commands:
                                    run that hits a pause is held open for you, where relay
                                    would end again at the first one.
                                    --settle / --salvage / --turn-timeout as in relay.
+                                   --max-turns / --max-minutes / --max-queue-depth /
+                                   --max-concurrent-seats as in relay. Worth setting when
+                                   driving with --operator agent: nobody is watching that
+                                   run, and without a ceiling nothing but --rounds bounds
+                                   it. Absent means no limit, as before.
                                    --record tees every byte written to the terminal,
                                    escape codes included, so a rendering fault can be
                                    inspected rather than screenshotted.
@@ -1024,17 +1038,20 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
         role: 'implementer',
         ...(implArgs.length > 0 ? { args: implArgs } : {}),
       },
-      maxRounds: Number(flag('rounds', '4')),
-      ...(flag('max-turns', '') || flag('max-minutes', '')
-        ? {
-            ceilings: {
-              ...(flag('max-turns', '') ? { maxTurns: Number(flag('max-turns', '')) } : {}),
-              ...(flag('max-minutes', '')
-                ? { maxDurationMs: Number(flag('max-minutes', '')) * 60_000 }
-                : {}),
-            },
-          }
-        : {}),
+      maxAdvisorTurns: Number(flag('rounds', '4')),
+      // Built by `ceilingsFrom` rather than inline, so this command and `session` cannot
+      // disagree about what a ceiling flag means. The `flag()` calls stay HERE: the pinned
+      // flag sets read this block, and a flag parsed out of their sight leaves the guarded
+      // surface without anyone deciding to remove it.
+      ...(() => {
+        const ceilings = ceilingsFrom({
+          maxTurns: flag('max-turns', ''),
+          maxMinutes: flag('max-minutes', ''),
+          maxQueueDepth: flag('max-queue-depth', ''),
+          maxConcurrentSeats: flag('max-concurrent-seats', ''),
+        })
+        return ceilings ? { ceilings } : {}
+      })(),
       // Without these, degradation has nothing to verify a replacement against, so the run
       // ESCALATES and ends rather than rotating. An unattended form that cannot rotate
       // cannot exercise the mechanism it exists to run unattended.
@@ -1195,6 +1212,15 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
     const record = flag('record', '')
     const resume = flag('resume', '')
     const turnTimeout = flag('turn-timeout', '')
+    // Ceilings, console-side for the first time. `--operator agent` already makes this an
+    // unattended run, and an unattended run with no ceiling of any kind is the live gap this
+    // closes -- not a provision for N>1. Same builder as `relay`, so the two cannot drift.
+    const ceilings = ceilingsFrom({
+      maxTurns: flag('max-turns', ''),
+      maxMinutes: flag('max-minutes', ''),
+      maxQueueDepth: flag('max-queue-depth', ''),
+      maxConcurrentSeats: flag('max-concurrent-seats', ''),
+    })
     const leadArgs = extraArgs(flag('advisor-args', '') || flag('lead-args', ''))
     const implementerArgs = extraArgs(flag('implementer-args', ''))
     // Both front-ends, together. Wiring a capability into one and not the other is the
@@ -1228,6 +1254,7 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
       ...(implementerArgs.length > 0 ? { implementerArgs } : {}),
       version: version(),
       ...(turnTimeout ? { turnWatchdogMs: Number(turnTimeout) * 1000 } : {}),
+      ...(ceilings ? { ceilings } : {}),
       // Testing seams, and nothing production passes. Wiring one into `relay` and not here
       // is the mistake this codebase keeps making, and this time it made the console CLI
       // itself untestable rather than a flag unreachable.

@@ -3,7 +3,7 @@
  *
  * Deliberately mechanical. It owns process lifecycle, sanitized environment, input
  * serialization, hook ingestion, transcript reconciliation and evidence classification.
- * It owns no relay policy, no round budgets, no role prompting and no summarisation --
+ * It owns no relay policy, no advisor-turn budgets, no role prompting and no summarisation --
  * those belong above the seam and would make the adapter's guarantees harder to check.
  *
  * The three claims that were hardest to establish, and how they are honoured here:

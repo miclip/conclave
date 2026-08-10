@@ -101,7 +101,7 @@ test('a failed acceptance rolls back against real sessions, leaking nothing', { 
     cwd: repo,
     lead: { id: 'advisor', agent: 'codex', role: 'advisor' },
     implementer: { id: 'implementer', agent: 'claude', role: 'implementer' },
-    maxRounds: 4,
+    maxAdvisorTurns: 4,
     rotation: {
       checks: [CHECK],
       checkTimeoutMs: 120_000,

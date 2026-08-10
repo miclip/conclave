@@ -246,7 +246,7 @@ export function parseCodex(records: Record<string, any>[]): ParsedTranscript {
             //
             // Grading that `completed` made an errored turn indistinguishable from one that
             // legitimately said nothing, so the relay forwarded an empty message, the
-            // implementer asked for a resend, and the run churned rounds toward its budget
+            // implementer asked for a resend, and the run churned advisor turns toward its budget
             // instead of failing with the real reason. See issue #35.
             const err = p.error as { message?: string; codex_error_info?: string } | null | undefined
             if (err) {

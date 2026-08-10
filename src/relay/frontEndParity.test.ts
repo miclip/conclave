@@ -74,12 +74,12 @@ const DECLARED: Record<string, string> = {
     'deliberate and documented in `begin()`: a goal typed at the console was written by the ' +
     'person reading the warning, who can retype it in a second. Refusing costs more than it ' +
     'saves. Unattended there is nobody to retype it, so relay refuses.',
-  'max-turns':
-    'UNRESOLVED, and worth resolving now that `session --operator agent` exists: the ' +
-    'console relied on a human noticing a run had gone long, and an agent-driven one has ' +
-    'nobody watching. Declared rather than fixed because a ceiling that ENDS a console is ' +
-    'not obviously what it should do -- pausing may be right, and that is a design call.',
-  'max-minutes': 'as --max-turns.',
+  // `max-turns` and `max-minutes` were declared here, UNRESOLVED, on the grounds that a
+  // ceiling which ENDS a console might be the wrong behaviour. Resolved rather than deleted
+  // quietly: `session --operator agent` already makes a console run unattended, so the
+  // premise that a human would notice a long run was already false, and the gap was live
+  // rather than hypothetical. Both flags now reach both front-ends, along with
+  // `max-queue-depth` and `max-concurrent-seats`, so there is no divergence left to declare.
 }
 
 test('every flag one front-end takes and the other does not is declared', () => {
@@ -135,6 +135,48 @@ test('both front-ends can shorten the deadline a hung turn is measured against',
       `${name} must pass --turn-timeout into turnWatchdogMs, converted from seconds`,
     )
   }
+})
+
+test('every ceiling flag is parsed AND lands on the options both front-ends build', () => {
+  // The #69 shape, applied to ceilings before it can happen again. The flag-set test above
+  // compares which flags EXIST; it passes on a flag that is read into a local and then never
+  // used, which is exactly how `--record` reached neither front-end and `--turn-timeout`
+  // reached only one while both looked wired. A ceiling that is parsed and dropped is the
+  // worst version of that bug, because the operator believes the run is bounded.
+  //
+  // So this asserts arrival, not presence: each block must read each flag, and each block
+  // must hand the parsed values to the SHARED builder. Naming `ceilingsFrom` is the point --
+  // a block that rebuilt the object inline could differ from the other in units or in which
+  // fields it set, and nothing here or above would see it.
+  const relay = commandBlock('relay', "if (command === 'session')")
+  const session = commandBlock('session', "if (command === 'demo')")
+
+  for (const [name, block] of [['relay', relay], ['session', session]] as const) {
+    for (const [flagName, field] of [
+      ['max-turns', 'maxTurns'],
+      ['max-minutes', 'maxMinutes'],
+      ['max-queue-depth', 'maxQueueDepth'],
+      ['max-concurrent-seats', 'maxConcurrentSeats'],
+    ] as const) {
+      assert.ok(block.includes(`flag('${flagName}', '')`), `${name} must read --${flagName}`)
+      assert.ok(
+        new RegExp(`${field}:\\s*flag\\('${flagName}', ''\\)`).test(block),
+        `${name} must pass --${flagName} into ceilingsFrom as ${field}, not parse it and drop it`,
+      )
+    }
+    assert.match(block, /ceilingsFrom\(\{/, `${name} must build its ceilings with the shared builder`)
+    assert.match(block, /ceilings \? \{ ceilings \} : \{\}/, `${name} must pass the built ceilings into its options`)
+  }
+
+  // And the console's option must reach the relay unchanged, which is the half the CLI block
+  // cannot show: `runSession` is where a value could still be dropped between the two.
+  const consoleSrc = readFileSync(join(import.meta.dirname, '..', 'repl', 'session.ts'), 'utf8')
+  assert.match(consoleSrc, /ceilings\?: Ceilings \| undefined/, 'SessionOptions must have a field to receive them')
+  assert.match(
+    consoleSrc,
+    /\.\.\.\(opts\.ceilings \? \{ ceilings: opts\.ceilings \} : \{\}\)/,
+    'runSession must pass ceilings into Relay.start unchanged',
+  )
 })
 
 test('both front-ends read the project config, and both can write the bypass', () => {

@@ -59,10 +59,12 @@ import { assess, ComplaintLedger, topicOf } from '../rotation/degradation.ts'
 import { rotate, type RotationResult } from '../rotation/rotate.ts'
 import type { CheckSpec } from '../rotation/record.ts'
 import { resumeBriefing } from './resume.ts'
-import { breached, type Ceilings } from './guardrails.ts'
+import { breached, type CeilingBreach, type CeilingState, type Ceilings } from './guardrails.ts'
 import {
+  concurrentSeats,
   dependenciesMet,
   nextDispatch,
+  queueDepth,
   parseDecisions,
   recordCompletion,
   refuseDispatch,
@@ -119,7 +121,7 @@ export interface RelayParticipant {
    * Index into `events` at which the current session began.
    *
    * Rotation keeps the routing history and the event list, so without a cursor the
-   * retired session's compaction events would be re-read every round and the replacement
+   * retired session's compaction events would be re-read on every advisor turn and the replacement
    * would be judged degraded from the moment it started.
    */
   degradationCursor: number
@@ -200,10 +202,10 @@ export interface RelayOptions {
   /**
    * Wall-clock and turn ceilings, checked at turn boundaries.
    *
-   * Distinct from `maxRounds`, which bounds the ADVISOR/IMPLEMENTER exchange structure. A
+   * Distinct from `maxAdvisorTurns`, which bounds how many times the advisor gets to steer. A
    * ceiling bounds the run as a resource: it is what stops a run that is progressing but has
-   * been progressing for two hours, which `maxRounds` cannot express because a single round
-   * can contain an arbitrarily long turn.
+   * been progressing for two hours, which `maxAdvisorTurns` cannot express because a single
+   * advisor turn can dispatch work that takes arbitrarily long.
    *
    * Also a recording device. The rotation experiments need "it ran for two hours" to be a
    * deliberate setting rather than an accident, and a ceiling that must be raised on purpose
@@ -213,7 +215,33 @@ export interface RelayOptions {
   /** The advisor. Steers, and cannot see the implementer's tools. */
   lead: ParticipantSpec
   implementer: ParticipantSpec
-  /** Exchanges before the relay stops and hands back to the human. */
+  /**
+   * Advisor turns before the relay stops and hands back to the human.
+   *
+   * One advisor turn is one pass of the dispatcher: the advisor's standing reply is read as
+   * assignment decisions, at most one task is admitted, and that task runs to a graded verdict
+   * and a released seat before the advisor is asked again. Counting advisor turns is what the
+   * bound has always measured; it is named for that now rather than for the exchange shape it
+   * used to be described by.
+   */
+  maxAdvisorTurns?: number
+  /**
+   * @deprecated The former name of `maxAdvisorTurns`. Use that instead.
+   *
+   * PROGRAMMATIC COMPATIBILITY ONLY. It exists so an existing caller that constructs
+   * `RelayOptions` directly -- a test, a script, an embedder -- keeps working across the
+   * rename instead of failing to compile. Neither front-end reads it: `--rounds` feeds
+   * `maxAdvisorTurns` in `bin/conclave.ts` and in `src/repl/session.ts`, and that must stay
+   * true, because the alias is the compatibility shim and not the supported path.
+   *
+   * `maxAdvisorTurns` wins when both are given. Deliberately not an error: a caller that
+   * sets both has almost certainly added the new name over an old one it did not notice, and
+   * the new name is the one it meant. The precedence is pinned by a test rather than left to
+   * be rediscovered from `??` -- see `advisorTurns.test.ts`.
+   *
+   * Nothing in the product should grow a reader for this. When the last external caller is
+   * gone, this field goes with it, and `boundOf` below is the one place that has to change.
+   */
   maxRounds?: number
   /**
    * Per-turn deadline, handed to each adapter's watchdog rather than kept here.
@@ -243,6 +271,22 @@ export interface RelayOptions {
   onLog?: (m: RelayMessage) => void
   /** Enables automatic rotation on mechanical degradation. See `RotationConfig`. */
   rotation?: RotationConfig
+}
+
+/** The default when a caller names no bound, in one place so the two fields cannot disagree. */
+export const DEFAULT_ADVISOR_TURNS = 6
+
+/**
+ * How many advisor turns this run gets.
+ *
+ * A function rather than a `??` chain at the point of use, so the deprecated alias is read in
+ * exactly one place. That matters more than the line it saves: the resolution rule is the
+ * whole content of the compatibility promise, and a rule written inline is a rule that gets
+ * written a second time somewhere else and quietly disagrees with itself. Deleting the alias
+ * later means deleting one clause here.
+ */
+export function boundOf(opts: Pick<RelayOptions, 'maxAdvisorTurns' | 'maxRounds'>): number {
+  return opts.maxAdvisorTurns ?? opts.maxRounds ?? DEFAULT_ADVISOR_TURNS
 }
 
 /**
@@ -609,7 +653,7 @@ export class Relay {
   #seq = 0
   #opts: RelayOptions
   #stopped = false
-  /** Set by `RunHandle.requestPause()`; consumed at the next round boundary. */
+  /** Set by `RunHandle.requestPause()`; consumed at the next advisor-turn boundary. */
   #pauseRequested: string | undefined
   /** The pause currently in front of a human, when it rests on a verdict. See `#trackSupersession`. */
   #verdictPause: VerdictPause | undefined
@@ -1228,7 +1272,7 @@ export class Relay {
     text: string,
   ): Promise<{ prose: string; end: TurnEndEvent; unsettled: boolean; emittedSinceSend: number; changedDuringTurn: string[] }> {
     // Counted here, where a turn actually starts, so the ceiling measures work done rather
-    // than rounds entered -- a round can contain one turn or several.
+    // than advisor turns entered -- one advisor turn can drive one turn or several.
     this.#turnsTaken += 1
     // Sampled per turn: a worktree created and removed inside one turn is still evidence the
     // rule was followed, and only a repeated sample can see it.
@@ -1485,7 +1529,7 @@ export class Relay {
   /**
    * Run the session. Returns why it stopped.
    *
-   * The relay itself decides nothing beyond the round budget: DONE and ESCALATE are the
+   * The relay itself decides nothing beyond the advisor-turn budget: DONE and ESCALATE are the
    * advisor's calls, and both hand back to the human rather than being acted on. §7a's
    * rotation and termination authority is not implemented here.
    */
@@ -1667,7 +1711,7 @@ export class Relay {
   /**
    * Should this implementer be replaced?
    *
-   * Called every round, because a session may compact without saying so and a session
+   * Called every advisor turn, because a session may compact without saying so and a session
    * that says so may not have. Returns a run-ending verdict when the answer needs a human,
    * and `undefined` when the run should carry on -- either because nothing is wrong or
    * because the rotation succeeded and there is now a fresh implementer to carry on with.
@@ -1778,7 +1822,7 @@ export class Relay {
   /**
    * The human saw this evidence and chose to carry on. Stop re-raising it.
    *
-   * Without this, declining a candidate pauses again on the very next round, on the same
+   * Without this, declining a candidate pauses again on the very next advisor turn, on the same
    * compaction, forever -- the operator either abandons the feature or stops reading the
    * pauses, and the second is worse. Moving the baseline means a *later* compaction is new
    * evidence and does pause again, which is the distinction that makes the signal worth
@@ -2026,6 +2070,37 @@ export class Relay {
     this.#mark(task, 'routed')
   }
 
+  /**
+   * The run as the ceilings see it, read from the live dispatcher rather than reconstructed.
+   *
+   * One reader, so the two check points below cannot disagree about what "queue depth" meant
+   * at each of them. The counts come from `dispatch.ts` for the same reason the transitions
+   * do: this class owns the objects, that module owns what their states mean.
+   */
+  #ceilingState(): CeilingState {
+    return {
+      elapsedMs: Date.now() - this.#startedAt,
+      turns: this.#turnsTaken,
+      queueDepth: queueDepth(this.#queue, this.#taskRuntime),
+      concurrentSeats: concurrentSeats([...this.#seatState.values()]),
+    }
+  }
+
+  /**
+   * `undefined` when no ceilings were configured, so absent stays exactly behaviourless.
+   *
+   * `projection` overrides individual readings to ask what the state WOULD be. Ceilings are
+   * checked before the mutation they would forbid (D8), not after it, so the check that stops
+   * an admission asks about the queue that admission would produce -- and when it stops the
+   * run, the task was never admitted and the seat was never marked running. A check placed
+   * after the mutation leaves a task nothing will dispatch and a seat nothing will free, which
+   * is a dispatcher state no reader could interpret and no resume could continue from.
+   */
+  #breachedNow(projection: Partial<CeilingState> = {}): CeilingBreach | undefined {
+    if (!this.#opts.ceilings) return undefined
+    return breached(this.#opts.ceilings, { ...this.#ceilingState(), ...projection })
+  }
+
   async #runLoop(goal: string, handle: RunHandle | undefined): Promise<RunOutcome> {
     const lead = this.participants.find((p) => p.rank === 'advisor')!
     const impl = this.participants.find((p) => p.rank === 'implementer')!
@@ -2051,7 +2126,7 @@ export class Relay {
         `${prior}The goal for this session:\n\n${goal}\n\nGive the implementer its first instruction.`,
     )
 
-    const maxRounds = this.#opts.maxRounds ?? 6
+    const maxAdvisorTurns = boundOf(this.#opts)
     this.#startedAt = Date.now()
     this.#worktreesAtStart = worktreePaths(this.#opts.cwd)
     this.#worktreesSeen = new Set(this.#worktreesAtStart)
@@ -2070,28 +2145,24 @@ export class Relay {
     // filling the role -- is the same rule at any N, and at N=1 it has exactly one answer.
     const untargeted: TaskTarget = { kind: 'role', role: impl.role }
 
-    // The dispatcher. One iteration is one ADMISSION CYCLE: the advisor's standing reply is
-    // read as assignment decisions, at most one task is admitted, and that task runs to a
-    // graded verdict and a released seat before the next cycle can admit anything.
+    // The dispatcher. One iteration is one ADVISOR TURN: the advisor's standing reply is read
+    // as assignment decisions, at most one task is admitted, and that task runs to a graded
+    // verdict and a released seat before the advisor is asked for its next instruction.
     //
-    // At N=1 this IS the round loop it replaced -- same turns, in the same order, producing the
-    // same routing log -- because a queue that admits one task at a time and a table with one
-    // dispatchable seat is a round (D1). Nothing here counts seats.
+    // At N=1 this produces exactly the turns the exchange loop it replaced produced, in the
+    // same order and with the same routing log, because a queue that admits one task at a time
+    // and a table with one dispatchable seat leaves nothing to choose between (D1). Nothing
+    // here counts seats.
     //
-    // `maxRounds` survives as the bound on admission cycles rather than being reinterpreted or
-    // removed. It stops describing the structure the day a second seat exists and D8 removes it
-    // then; doing it here would change `RelayOptions` and both front-ends for no behaviour.
-    for (let cycle = 1; ; cycle++) {
+    // `maxAdvisorTurns` bounds these iterations. That is the thing it has always counted --
+    // one pass through here has always cost the advisor exactly one turn -- so the bound is
+    // named for what it measures rather than for the shape it used to sit inside.
+    for (let advisorTurn = 1; ; advisorTurn++) {
       // Every ceiling at the dispatch boundary, before anything is admitted or assigned, and
       // never mid-turn. A run cannot be interrupted mid-turn without discarding that turn's
       // work -- the same reason #exchange has no timeout of its own.
-      if (cycle > maxRounds) break
-      const ceiling = this.#opts.ceilings
-        ? breached(this.#opts.ceilings, {
-            elapsedMs: Date.now() - this.#startedAt,
-            turns: this.#turnsTaken,
-          })
-        : undefined
+      if (advisorTurn > maxAdvisorTurns) break
+      const ceiling = this.#breachedNow()
       if (ceiling) {
         this.#record({
           from: 'orchestrator',
@@ -2110,7 +2181,7 @@ export class Relay {
         const halted = await this.#halt(handle, {
           subject: { reason: 'operator_requested' },
           detail: reason,
-          evidence: [`round ${cycle} of ${maxRounds}; no turn is in flight`],
+          evidence: [`advisor turn ${advisorTurn} of ${maxAdvisorTurns}; no turn is in flight`],
         })
         if (halted) return halted
       }
@@ -2128,7 +2199,7 @@ export class Relay {
       // A reply that was ONLY notes is not a failure to instruct -- it is the advisor using
       // the channel that was just given to it. Halting there would end a run because the
       // advisor said something useful, so it is asked once for the instruction that goes with
-      // the note. Bounded: this happens inside the round, and the guard below still catches a
+      // the note. Bounded: this happens inside the advisor turn, and the guard below still catches a
       // second empty reply.
       if (instruction === '' && notes.length > 0 && next.end.verdict.outcome === 'completed') {
         next = await this.#exchange(
@@ -2160,7 +2231,7 @@ export class Relay {
       //
       // The `turn_incomplete` guard below covers the IMPLEMENTER only, so an advisor whose
       // turn errored was relayed as an empty instruction: the implementer received a routing
-      // header with no body, asked for a resend, and the run churned rounds toward its budget
+      // header with no body, asked for a resend, and the run churned advisor turns toward its budget
       // instead of failing with the real reason. Observed live when Codex returned
       // `usage_limit_exceeded` -- the workspace was out of credits (issue #35).
       //
@@ -2245,7 +2316,7 @@ export class Relay {
           } else {
             next = await this.#exchange(lead, this.#drain(lead.id))
           }
-          // Bounded by the round budget like everything else, so a human who keeps talking
+          // Bounded by the advisor-turn budget like everything else, so a human who keeps talking
           // extends the session rather than making it unstoppable.
           continue
         }
@@ -2265,6 +2336,19 @@ export class Relay {
         // asked again rather than having its escalation replayed as an instruction.
         next = await this.#exchange(lead, this.#drain(lead.id) || 'The human has seen your escalation and asked you to continue. Give the implementer its next instruction.')
         continue
+      }
+
+      // The queue ceiling, asked BEFORE the admission it would forbid. The reading is
+      // projected -- what the queue becomes if this task is admitted -- because the actual
+      // depth at every boundary the loop can check is the depth before the advisor's decision
+      // is applied, and a ceiling that only ever saw that would never see a queue at all.
+      //
+      // Before rather than after so a breach leaves nothing behind: no `Task` record that
+      // nothing will dispatch, and no runtime entry stuck at `admitted` forever.
+      const wouldQueue = this.#breachedNow({ queueDepth: queueDepth(this.#queue, this.#taskRuntime) + 1 })
+      if (wouldQueue) {
+        this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text: wouldQueue.detail })
+        return this.#end('ceiling', wouldQueue.detail)
       }
 
       // Admitted before anything is delivered, so the record of what the advisor decided exists
@@ -2314,7 +2398,7 @@ export class Relay {
       // rather than the code that will be written when there is something to overtake.
       const dispatch = nextDispatch(this.#queue, this.#taskRuntime, [...this.#seatState.values()])
       if (!dispatch) {
-        // Unreachable while admission is serial: the previous cycle graded its verdict and
+        // Unreachable while admission is serial: the previous advisor turn graded its verdict and
         // released its seat before the advisor was asked for this instruction. Thrown rather
         // than worked around, because there is no correct fallback -- waiting for a seat that
         // nothing will ever free is a run that reports healthy forever. `#loop` turns this into
@@ -2325,6 +2409,27 @@ export class Relay {
         )
       }
       const seat = this.#participants.get(dispatch.seat.seat)!
+
+      // The concurrency ceiling, asked BEFORE the assignment it would forbid, and projected
+      // for the same reason the queue one is: at every boundary the loop can check, no seat is
+      // running yet, so only "what would be running if this were assigned" is a question with
+      // a non-zero answer.
+      //
+      // D8's rule, and not a stylistic preference. Checking after `#assign` would end the run
+      // holding a seat marked `running` with a task nothing will ever send, ending or free --
+      // a phantom that `seats()` reports as working and `tasks()` reports as assigned.
+      //
+      // Every check runs the FULL ceiling set rather than just the axis being projected: two
+      // boundaries that disagreed about which ceilings apply would be a rule nobody could
+      // state.
+      const wouldRun = this.#breachedNow({
+        concurrentSeats: concurrentSeats([...this.#seatState.values()]) + 1,
+      })
+      if (wouldRun) {
+        this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text: wouldRun.detail })
+        return this.#end('ceiling', wouldRun.detail)
+      }
+
       this.#assign(dispatch.task, dispatch.seat)
 
       this.#record({ from: lead.id, fromRank: 'advisor', to: [seat.id], kind: 'instruction', text: dispatch.task.instruction })

@@ -481,7 +481,7 @@ test('/exit ends the session, stopping the participants with it', async () => {
     output: out.stream,
   })
   assert.equal(code, 0)
-  // The run was nowhere near its 20 rounds, so leaving has to abort it rather than wait.
+  // The run was nowhere near its 20 advisor turns, so leaving has to abort it rather than wait.
   assert.match(out.text(), /aborting the run and stopping participants/)
   assert.equal(advisor.state, 'terminated', 'a console that exits must not leave CLIs running')
   assert.equal(impl.state, 'terminated')

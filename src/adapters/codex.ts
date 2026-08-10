@@ -17,7 +17,7 @@
  *
  * The adapter owns process lifecycle, sanitized environment, input serialization, hook
  * ingestion, transcript reconciliation and evidence classification. No relay policy, no
- * round budgets, no role prompting, no summarisation.
+ * advisor-turn budgets, no role prompting, no summarisation.
  *
  * Hook registration is NOT generated per session the way Claude's is: Codex reads a
  * project-local `.codex/hooks.json`, and its trust hash covers the command string. The

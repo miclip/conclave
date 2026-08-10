@@ -3,8 +3,9 @@
  *
  * Two things are being pinned here, and they are pinned differently.
  *
- * **The schedule.** At N=1 the dispatcher must produce exactly the turn sequence the round
- * loop produced: advisor, implementer, advisor, implementer, and a closing question. Asserted
+ * **The schedule.** At N=1 the dispatcher must produce exactly the turn sequence the exchange
+ * loop it replaced produced: advisor, implementer, advisor, implementer, and a closing
+ * question. Asserted
  * against the real order the two sessions were sent to — not against each session separately,
  * because two correct-looking per-seat sequences can still interleave wrongly, and the
  * interleaving is the whole property.
@@ -120,7 +121,7 @@ async function relayOf(
     cwd,
     lead: { id: 'advisor', agent: 'codex', role: 'advisor' },
     implementer: { id: 'implementer', agent: 'claude', role: 'implementer' },
-    maxRounds: 4,
+    maxAdvisorTurns: 4,
     ...over,
   })
 }
@@ -205,7 +206,7 @@ test('admission order is the order the routing log recorded the instructions in'
     'DONE',
   ])
   const impl = new FakeRotationSession('impl-1', 'claude', ['ack', 'one', 'two', 'three', 'NONE'])
-  const relay = await relayOf(dir, advisor, impl, { maxRounds: 5 })
+  const relay = await relayOf(dir, advisor, impl, { maxAdvisorTurns: 5 })
   t.after(() => relay.stop())
 
   await relay.run('build the thing')
@@ -475,7 +476,7 @@ test('DONE and ESCALATE parse as decisions rather than as instructions', () => {
     ok: true,
     decisions: [{ kind: 'done', instruction: 'DONE' }],
   })
-  // Matched exactly as the round loop matched them: leading keyword, case-insensitive, and a
+  // Matched exactly as the exchange loop this replaced matched them: leading keyword, case-insensitive, and a
   // word boundary -- so `DONENESS` is an instruction and `done: the tests pass` is not.
   assert.equal(parseDecisions('done: the tests pass', seats, target).ok, true)
   assert.deepEqual(parseDecisions('doneness is not a verdict', seats, target), {

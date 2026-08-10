@@ -306,11 +306,12 @@ function assertFlagHelperOptional(block: string, label: string): void {
 /**
  * Divergence that is a decision rather than an oversight.
  *
- * Two entries, and they are different kinds of thing. The first is PENDING: a routing change
+ * Three entries, and they are different kinds of thing. The first is PENDING: a routing change
  * written down before it ships. The second has ALREADY SHIPPED and is declared retroactively,
  * because it reached the status document while the guard was reading interfaces as text and
  * therefore could not see it -- which is the argument for the guard being observational, made
- * by the one field that proves it.
+ * by the one field that proves it. The third is a change to the guarded FLAG SURFACE, declared
+ * here as the change ships rather than recorded only in the pinned list it moves.
  */
 const DECLARED: Record<string, string> = {
   'implementer_unanswered -> advisor':
@@ -329,10 +330,27 @@ const DECLARED: Record<string, string> = {
     '`reason` is deliberately duplicated between pause.reason and pause.resolution.reason: the loose ' +
     'field is what every existing reader is written against and the nested one is the whole ' +
     'classification (src/relay/run.ts:162-164). Nothing an existing consumer read changed value.',
+  'optional ceiling flags on both front-ends':
+    'The optional flag surface grows by four: --max-queue-depth and --max-concurrent-seats on ' +
+    'both commands, and --max-turns / --max-minutes on `session`, which had neither. The ' +
+    "operator's reason: `session --operator agent` already makes a console run unattended, and " +
+    'an unattended console run had NO ceiling of any kind. D8 recorded that "the console relied ' +
+    'on a human noticing a run had gone long"; that premise is already false for agent-driven ' +
+    'runs, so this closes a live gap rather than provisioning for N>1. Declared rather than ' +
+    'merely added: D1 forbids an optional flag becoming required and forbids the default run ' +
+    'changing, and neither happens here -- all four are optional, none has a default, and a run ' +
+    'given none is bounded exactly as before (proved by `absent ceilings are behaviourless` in ' +
+    'src/relay/ceilings.test.ts). The pinned flag sets below are stricter than D1 requires, and ' +
+    'that strictness is the point: it forced this entry to be written instead of letting the ' +
+    'addition land unremarked. No assertion in this file was relaxed to accommodate it.',
 }
 
-test('DECLARED contains exactly the pending authority-routing and shipped pause-resolution entries', () => {
-  assert.deepEqual(Object.keys(DECLARED), ['implementer_unanswered -> advisor', 'status.pause.resolution'])
+test('DECLARED contains exactly the routing, pause-resolution and ceiling-flag entries', () => {
+  assert.deepEqual(Object.keys(DECLARED), [
+    'implementer_unanswered -> advisor',
+    'status.pause.resolution',
+    'optional ceiling flags on both front-ends',
+  ])
 })
 
 /**
@@ -771,6 +789,9 @@ test('both flag helpers fall back when the flag is absent, and each block reads 
   // Pin the current optional flag set for each front-end. This includes both the valued flags
   // read with flag('--name') and the boolean flags checked with includes('--name').
   // Adding a flag or removing the fallback from a valued flag must be a deliberate change.
+  //
+  // The four ceiling flags below are a declared change to this surface, not an oversight:
+  // see DECLARED['optional ceiling flags on both front-ends'] for the operator's reason.
   const relayFlags = flagsIn(relay)
   const sessionFlags = flagsIn(session)
   assert.deepEqual(
@@ -790,7 +811,9 @@ test('both flag helpers fall back when the flag is absent, and each block reads 
       'json',
       'lead',
       'lead-args',
+      'max-concurrent-seats',
       'max-minutes',
+      'max-queue-depth',
       'max-turns',
       'operator',
       'record',
@@ -816,6 +839,10 @@ test('both flag helpers fall back when the flag is absent, and each block reads 
       'implementer-args',
       'lead',
       'lead-args',
+      'max-concurrent-seats',
+      'max-minutes',
+      'max-queue-depth',
+      'max-turns',
       'operator',
       'record',
       'resume',

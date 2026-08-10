@@ -55,7 +55,7 @@ test('a real implementer is replaced and the replacement proves it can continue'
     cwd: repo,
     lead: { id: 'advisor', agent: 'codex', role: 'advisor' },
     implementer: { id: 'implementer', agent: 'claude', role: 'implementer' },
-    maxRounds: 5,
+    maxAdvisorTurns: 5,
     rotation: {
       // Cheap, deterministic, and genuinely dependent on the repository — a check the
       // replacement can only reproduce by being in the right tree.
@@ -70,7 +70,7 @@ test('a real implementer is replaced and the replacement proves it can continue'
       `then wait for the next instruction. Touch nothing outside that directory.`,
   )
 
-  // Wait for real work before rotating. `requestPause()` is honoured at the next round
+  // Wait for real work before rotating. `requestPause()` is honoured at the next advisor
   // boundary, and the first of those precedes any instruction — so pausing immediately
   // rotates an implementer that has done nothing but acknowledge its briefing, and the
   // handoff describes an empty directory. The first live run did exactly that: the advisor

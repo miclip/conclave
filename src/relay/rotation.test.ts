@@ -111,7 +111,7 @@ async function relayOf(
     cwd,
     lead: { id: 'advisor', agent: 'codex', role: 'advisor' },
     implementer: { id: 'implementer', agent: 'claude', role: 'implementer' },
-    maxRounds: 2,
+    maxAdvisorTurns: 2,
     rotation: { checks: ['exit 0'], checkTimeoutMs: 30_000, onDegradation: 'automatic' },
     ...over,
     // `exactOptionalPropertyTypes` treats `rotation: undefined` as an error rather than an
@@ -289,7 +289,7 @@ test('compaction is a rotation CANDIDATE by default, recorded and not acted on',
   const fresh = new FakeRotationSession('fresh', 'claude', [ACCEPTED, 'Carried on.'])
 
   const relay = await relayOf(dir, advisor, [old, fresh], {
-    maxRounds: 3,
+    maxAdvisorTurns: 3,
     rotation: { checks: ['exit 0'], checkTimeoutMs: 30_000 },
   })
   t.after(() => relay.stop())
@@ -324,7 +324,7 @@ test('a run rotates automatically when the implementer compacts, if opted in', a
   const old = new FakeRotationSession('old', 'claude', ['ack', 'Did the first thing.'])
   const fresh = new FakeRotationSession('fresh', 'claude', [ACCEPTED, 'Carried on.'])
 
-  const relay = await relayOf(dir, advisor, [old, fresh], { maxRounds: 3 })
+  const relay = await relayOf(dir, advisor, [old, fresh], { maxAdvisorTurns: 3 })
   t.after(() => relay.stop())
 
   // Compaction with no complaint: degradation alone is sufficient, because a model may
@@ -346,7 +346,7 @@ test('a complaint with nothing behind it continues, and is counted', async (t) =
   const old = new FakeRotationSession('old', 'claude', ['ack', 'I need a fresh session before I can continue.'])
   const fresh = new FakeRotationSession('fresh', 'claude', [ACCEPTED])
 
-  const relay = await relayOf(dir, advisor, [old, fresh], { maxRounds: 2 })
+  const relay = await relayOf(dir, advisor, [old, fresh], { maxAdvisorTurns: 2 })
   t.after(() => relay.stop())
 
   await relay.run('Keep the work moving.')
@@ -361,7 +361,7 @@ test('degradation with no checks configured escalates rather than rotating blind
   const advisor = new FakeRotationSession('advisor', 'codex', ['Do the thing.', 'DONE'])
   const old = new FakeRotationSession('old', 'claude', ['ack', 'Done that.'])
 
-  const relay = await relayOf(dir, advisor, [old], { rotation: undefined, maxRounds: 2 })
+  const relay = await relayOf(dir, advisor, [old], { rotation: undefined, maxAdvisorTurns: 2 })
   t.after(() => relay.stop())
 
   old.compact()
@@ -382,7 +382,7 @@ test('the replacement is not judged degraded by the retired session’s compacti
   const old = new FakeRotationSession('old', 'claude', ['ack', 'Did it.'])
   const fresh = new FakeRotationSession('fresh', 'claude', [ACCEPTED, 'Still going.'])
 
-  const relay = await relayOf(dir, advisor, [old, fresh], { maxRounds: 4 })
+  const relay = await relayOf(dir, advisor, [old, fresh], { maxAdvisorTurns: 4 })
   t.after(() => relay.stop())
 
   old.compact()

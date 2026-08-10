@@ -174,7 +174,7 @@ async function relayOf(
     cwd,
     lead: { id: 'advisor', agent: 'codex', role: 'advisor' },
     implementer: { id: 'implementer', agent: 'claude', role: 'implementer' },
-    maxRounds: 4,
+    maxAdvisorTurns: 4,
     rotation: { checks: ['exit 0'], checkTimeoutMs: 30_000 },
     ...over,
   })
@@ -274,7 +274,7 @@ async function provoke(t: TestContext, reason: RunPause['reason']): Promise<Prov
     }
     case 'operator_requested': {
       // Slow turns, so the request lands while a turn is in flight and the loop honours it
-      // at the round boundary — which is the only place it can, since neither child CLI
+      // at the advisor-turn boundary — which is the only place it can, since neither child CLI
       // ingests input mid-turn.
       advisor = new FakeRotationSession('advisor', 'codex', ['Do the first thing.', 'Do the second thing.', 'DONE'])
       impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did the first thing.', 'Did the second thing.', 'NONE'])
@@ -398,7 +398,7 @@ test('an unarmed run ends on degradation rather than raising a rotation candidat
     cwd: dir,
     lead: { id: 'advisor', agent: 'codex', role: 'advisor' },
     implementer: { id: 'implementer', agent: 'claude', role: 'implementer' },
-    maxRounds: 4,
+    maxAdvisorTurns: 4,
   })
   t.after(() => relay.stop())
 

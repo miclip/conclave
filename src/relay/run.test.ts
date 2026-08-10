@@ -4,7 +4,7 @@
  * The property these are about is that a pause **preserves the loop**. Restarting `run()`
  * from the goal was always available; what was missing was continuing from where the
  * session actually was. So the assertions are mostly about what the participants see next
- * — an implementer that gets the round-3 instruction rather than the round-1 one is the
+ * — an implementer that gets advisor turn 3's instruction rather than turn 1's is the
  * whole difference.
  *
  *   node --test src/relay/run.test.ts
@@ -104,7 +104,7 @@ async function relayOf(
     cwd,
     lead: { id: 'advisor', agent: 'codex', role: 'advisor' },
     implementer: { id: 'implementer', agent: 'claude', role: 'implementer' },
-    maxRounds: 4,
+    maxAdvisorTurns: 4,
     rotation: { checks: ['exit 0'], checkTimeoutMs: 30_000 },
     ...over,
   })
@@ -145,7 +145,7 @@ test('a rotation candidate pauses the loop and reports its evidence', async (t) 
 })
 
 test('continuing resumes the loop where it was, rather than replaying the goal', async (t) => {
-  // The whole point. Restarting run() was always available; continuing from the round the
+  // The whole point. Restarting run() was always available; continuing from the advisor turn the
   // session had actually reached was not.
   const dir = repo()
   const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did the first thing.', 'Did the second thing.', 'NONE'])
@@ -159,7 +159,7 @@ test('continuing resumes the loop where it was, rather than replaying the goal',
   await run.continue()
 
   assert.equal((await run.result()).reason, 'done')
-  // Four sends: the briefing, one instruction per round, and the closing question the relay
+  // Four sends: the briefing, one instruction per advisor turn, and the closing question the relay
   // asks when the advisor says DONE. A replay would have sent the briefing and the first
   // instruction twice.
   assert.equal(impl.received.length, 4)
@@ -353,7 +353,7 @@ test('a FLAG marker does not pause the run', async (t) => {
 })
 
 test('a declined candidate is remembered, and a LATER compaction raises it again', async (t) => {
-  // Found by three tests hanging: without this the same compaction re-pauses every round
+  // Found by three tests hanging: without this the same compaction re-pauses every advisor turn
   // forever, and the operator either abandons the feature or stops reading the pauses.
   // The second is worse than never having built it.
   const dir = repo()
@@ -556,7 +556,7 @@ test('an adjudicated conflict is not raised again for the same instruction', asy
     'Remove two.txt and wait.',
     'DONE',
   ])
-  const relay = await relayOf(dir, advisor, [impl], { maxRounds: 5 })
+  const relay = await relayOf(dir, advisor, [impl], { maxAdvisorTurns: 5 })
   t.after(() => relay.stop())
 
   const run = relay.start('Keep the work moving.')
@@ -569,7 +569,7 @@ test('an adjudicated conflict is not raised again for the same instruction', asy
     pauses += 1
     await run.continue()
   }
-  assert.equal(pauses, 1, 'the identical instruction must be adjudicated once, not every round')
+  assert.equal(pauses, 1, 'the identical instruction must be adjudicated once, not every advisor turn')
 })
 
 test('an advisor instruction unrelated to the aside is delivered without a pause', async (t) => {

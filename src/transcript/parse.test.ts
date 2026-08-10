@@ -198,7 +198,7 @@ test('a task_complete carrying an error is not a completion (#35)', () => {
   //
   // Grading that `completed` made it indistinguishable from a turn that legitimately said
   // nothing, so the relay forwarded an empty instruction, the implementer asked for a resend,
-  // and the run churned rounds toward its budget instead of failing with the real reason.
+  // and the run churned advisor turns toward its budget instead of failing with the real reason.
   const { turns } = parseCodex([
     { type: 'event_msg', payload: { type: 'task_started', turn_id: 'T1' } },
     { type: 'event_msg', payload: { type: 'user_message', message: 'do the thing' } },

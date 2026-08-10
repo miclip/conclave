@@ -75,7 +75,7 @@ test('a real session survives a human-scale pause and resumes without drift', { 
     cwd: repo,
     lead: { id: 'advisor', agent: 'codex', role: 'advisor' },
     implementer: { id: 'implementer', agent: 'claude', role: 'implementer' },
-    maxRounds: 4,
+    maxAdvisorTurns: 4,
   })
   t.after(() => relay.stop())
 
@@ -86,7 +86,7 @@ test('a real session survives a human-scale pause and resumes without drift', { 
   )
 
   // Wait until the implementer has reported once. `requestPause()` is honoured at the next
-  // round boundary, and the first of those comes BEFORE any instruction has been issued --
+  // advisor-turn boundary, and the first of those comes BEFORE any instruction has been issued --
   // so pausing immediately gives the drift check nothing to compare against. The first run
   // of this test failed exactly there, on its own instrument rather than on the product.
   // `relay.live.test.ts` already waits for a report before injecting its aside; the same
@@ -188,7 +188,7 @@ test('a real session survives a human-scale pause and resumes without drift', { 
   // on the 30-minute hold and the drift claim was never evaluated, because the ADVISOR --
   // which never saw the human's aside -- instructed the implementer to delete the file,
   // and it complied. Legitimate session behaviour, and an artifact assertion at end of run
-  // in a multi-round session cannot tell it apart from a failure to act.
+  // in a multi-turn session cannot tell it apart from a failure to act.
   //
   // Recall is measured over EVERY post-resume report rather than only the last, for the
   // same reason: which turn is last depends on what the advisor decided to do next.

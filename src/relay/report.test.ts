@@ -85,7 +85,7 @@ async function reportOf(replies: string[] = ['DONE']) {
     cwd: dir,
     lead: { id: 'advisor', agent: 'codex', role: 'advisor' },
     implementer: { id: 'implementer', agent: 'claude', role: 'implementer' },
-    maxRounds: 2,
+    maxAdvisorTurns: 2,
     rotation: { checks: ['exit 0'], checkTimeoutMs: 30_000 },
   })
   const startedAt = Date.now()
@@ -135,7 +135,7 @@ async function mixedDeadlines(turnWatchdogMs?: number) {
     cwd: dir,
     lead: { id: 'advisor', agent: 'codex', role: 'advisor' },
     implementer: { id: 'implementer', agent: 'kimi', role: 'implementer' },
-    maxRounds: 2,
+    maxAdvisorTurns: 2,
     ...(turnWatchdogMs === undefined ? {} : { turnWatchdogMs }),
   })
   const startedAt = Date.now()
@@ -234,7 +234,7 @@ test('a flagged caveat reaches the record', async () => {
     cwd: dir,
     lead: { id: 'advisor', agent: 'codex', role: 'advisor' },
     implementer: { id: 'implementer', agent: 'claude', role: 'implementer' },
-    maxRounds: 2,
+    maxAdvisorTurns: 2,
   })
   const outcome = await relay.run('a goal')
   const report = await runReport(relay, { goal: 'a goal', outcome, startedAt: Date.now(), build: BUILD })
@@ -339,7 +339,7 @@ test('a resumed relay tells both seats they are continuing (#34)', async () => {
     cwd: dir,
     lead: { id: 'advisor', agent: 'codex', role: 'advisor' },
     implementer: { id: 'implementer', agent: 'claude', role: 'implementer' },
-    maxRounds: 2,
+    maxAdvisorTurns: 2,
     resume: [
       {
         seq: 1,
@@ -376,13 +376,13 @@ test('a turn ceiling ends the run with its own reason (#28)', async () => {
     cwd: dir,
     lead: { id: 'advisor', agent: 'codex', role: 'advisor' },
     implementer: { id: 'implementer', agent: 'claude', role: 'implementer' },
-    maxRounds: 20,
+    maxAdvisorTurns: 20,
     ceilings: { maxTurns: 3 },
   })
   const outcome = await relay.run('a long goal')
   await relay.stop()
 
-  // Its own reason, not `budget`. `budget` means the round structure ran its course; this
+  // Its own reason, not `budget`. `budget` means the advisor turns ran out; this
   // means the run was still going and was stopped, and an operator deciding whether to
   // resume needs to know which happened.
   assert.equal(outcome.reason, 'ceiling')
@@ -401,7 +401,7 @@ test('the default briefing is byte-identical when the operator is human (#27)', 
     cwd: dir,
     lead: { id: 'advisor', agent: 'codex', role: 'advisor' },
     implementer: { id: 'implementer', agent: 'claude', role: 'implementer' },
-    maxRounds: 2,
+    maxAdvisorTurns: 2,
   })
   await relay.run('a goal')
   await relay.stop()
@@ -418,7 +418,7 @@ test('an agent operator is told what to escalate, and what not to', async () => 
     cwd: dir,
     lead: { id: 'advisor', agent: 'codex', role: 'advisor' },
     implementer: { id: 'implementer', agent: 'claude', role: 'implementer' },
-    maxRounds: 2,
+    maxAdvisorTurns: 2,
     operator: 'agent',
   })
   const outcome = await relay.run('a goal')
@@ -441,7 +441,7 @@ test('an agent operator is told what to escalate, and what not to', async () => 
 test('an advisor that produces no instruction never relays an empty message (#35)', async () => {
   // The minimum bar from the issue: there is no circumstance in which relaying nothing is
   // right. The implementer received a routing header with no body, asked for a resend, and
-  // the run churned rounds toward its budget instead of failing with the real reason.
+  // the run churned advisor turns toward its budget instead of failing with the real reason.
   //
   // The existing `turn_incomplete` guard covers the IMPLEMENTER only, which is why an
   // advisor whose turn errored went straight through it.
@@ -456,12 +456,12 @@ test('an advisor that produces no instruction never relays an empty message (#35
     cwd: dir,
     lead: { id: 'advisor', agent: 'codex', role: 'advisor' },
     implementer: { id: 'implementer', agent: 'claude', role: 'implementer' },
-    maxRounds: 4,
+    maxAdvisorTurns: 4,
   })
   const outcome = await relay.run('a goal')
   await relay.stop()
 
-  // Ends rather than churning rounds.
+  // Ends rather than churning advisor turns.
   assert.equal(outcome.reason, 'escalated')
   assert.match(outcome.detail ?? '', /produced no instruction/)
   // And the implementer was never handed an empty body.
@@ -487,7 +487,7 @@ test('the implementer gets a guaranteed last word when the advisor says DONE (#3
     cwd: dir,
     lead: { id: 'advisor', agent: 'codex', role: 'advisor' },
     implementer: { id: 'implementer', agent: 'claude', role: 'implementer' },
-    maxRounds: 3,
+    maxAdvisorTurns: 3,
   })
   const outcome = await relay.run('a goal with a false premise')
   const report = await runReport(relay, { goal: 'g', outcome, startedAt: Date.now(), build: BUILD })
@@ -512,7 +512,7 @@ test('an unstructured closing answer is carried anyway (#38)', async () => {
     cwd: dir,
     lead: { id: 'advisor', agent: 'codex', role: 'advisor' },
     implementer: { id: 'implementer', agent: 'claude', role: 'implementer' },
-    maxRounds: 3,
+    maxAdvisorTurns: 3,
   })
   const outcome = await relay.run('a goal')
   const report = await runReport(relay, { goal: 'g', outcome, startedAt: Date.now(), build: BUILD })
@@ -534,7 +534,7 @@ test('NONE means nothing outstanding, and adds no noise', async () => {
     cwd: dir,
     lead: { id: 'advisor', agent: 'codex', role: 'advisor' },
     implementer: { id: 'implementer', agent: 'claude', role: 'implementer' },
-    maxRounds: 3,
+    maxAdvisorTurns: 3,
   })
   const outcome = await relay.run('a goal')
   const report = await runReport(relay, { goal: 'g', outcome, startedAt: Date.now(), build: BUILD })
@@ -564,7 +564,7 @@ test('an advisor NOTE reaches the human without halting or reaching the implemen
     cwd: dir,
     lead: { id: 'advisor', agent: 'codex', role: 'advisor' },
     implementer: { id: 'implementer', agent: 'claude', role: 'implementer' },
-    maxRounds: 3,
+    maxAdvisorTurns: 3,
   })
   const outcome = await relay.run('a goal')
   await relay.stop()
@@ -612,7 +612,7 @@ test('a note-only reply is asked again rather than ending the run (#1)', async (
     cwd: dir,
     lead: { id: 'advisor', agent: 'codex', role: 'advisor' },
     implementer: { id: 'implementer', agent: 'claude', role: 'implementer' },
-    maxRounds: 3,
+    maxAdvisorTurns: 3,
   })
   const outcome = await relay.run('a goal')
   await relay.stop()
@@ -639,7 +639,7 @@ test('a dead implementer does not turn a completed run into a transport failure 
     cwd: dir,
     lead: { id: 'advisor', agent: 'codex', role: 'advisor' },
     implementer: { id: 'implementer', agent: 'claude', role: 'implementer' },
-    maxRounds: 3,
+    maxAdvisorTurns: 3,
   })
   // Every send after the first throws, as a dead pty does.
   impl.failSendOnTurn = 1

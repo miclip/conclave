@@ -18,7 +18,8 @@
  * D1: if an abstraction needs an `if (seats.length === 1)` branch, it is the wrong
  * abstraction. Nothing here counts seats. One advisor and one implementer is a queue that
  * admits one task at a time and a table with one dispatchable seat, and the dispatch loop that
- * results IS the round loop it replaced — same turns, same order, same routing log.
+ * results reproduces the exchange loop it replaced — same turns, same order, same routing log.
+ * One pass of that loop is one advisor turn, which is what `RelayOptions.maxAdvisorTurns` bounds.
  *
  * ## What this module does not do
  *
@@ -225,6 +226,42 @@ export function isFree(seat: SeatExecution): boolean {
   return seat.current === undefined && (seat.state === 'idle' || seat.state === 'queued')
 }
 
+/**
+ * How much admitted work is waiting for a seat.
+ *
+ * The reading behind `Ceilings.maxQueueDepth`. `admitted` and `ready` are the two states in
+ * which a task exists and no seat has it: `admitted` is waiting on a dependency, `ready` is
+ * waiting only on a seat, and an operator asking "how deep is the backlog" means both. Every
+ * later state belongs to a seat and is `concurrentSeats`' problem, not this one.
+ *
+ * Here rather than in `guardrails.ts` because this module owns what these states mean.
+ * `breached()` compares numbers; deciding which tasks are a queue is a scheduling fact.
+ */
+export function queueDepth(queue: readonly Task[], runtime: ReadonlyMap<string, TaskRuntime>): number {
+  return queue.filter((t) => {
+    const state = runtime.get(t.id)?.state
+    return state === 'admitted' || state === 'ready'
+  }).length
+}
+
+/**
+ * How many seats are working right now.
+ *
+ * The reading behind `Ceilings.maxConcurrentSeats`. A seat counts from `#assign` to
+ * `#reported` -- `state === 'running'` with a task in hand, which spans the task's `assigned`
+ * and `running` states. Both conditions, not just the state: a seat left `running` with no
+ * `current` would be a bookkeeping fault, and counting it would report phantom work rather
+ * than surfacing the fault.
+ *
+ * `integrating` is excluded deliberately. That seat is occupied, but no agent is running on
+ * it and no quota is being spent; a concurrency ceiling asks how much is IN FLIGHT. Counting
+ * it would also make the number depend on how long the integration boundary takes, which at
+ * N=1 is no time at all and at N>1 is not agent work either.
+ */
+export function concurrentSeats(seats: readonly SeatExecution[]): number {
+  return seats.filter((s) => s.state === 'running' && s.current !== undefined).length
+}
+
 function matches(seat: SeatExecution, target: TaskTarget): boolean {
   return target.kind === 'seat' ? seat.seat === target.seat : seat.role === target.role
 }
@@ -366,8 +403,8 @@ export function refuseDispatch(
 /**
  * An advisor reply, read as assignment decisions.
  *
- * The existing keywords survive as decisions of their own, matched exactly as the round loop
- * matched them, because a reply that ended a run yesterday must end one today.
+ * The existing keywords survive as decisions of their own, matched exactly as the exchange loop
+ * this replaced matched them, because a reply that ended a run yesterday must end one today.
  */
 export type Decision =
   | { kind: 'instruct'; instruction: string; target: TaskTarget }
