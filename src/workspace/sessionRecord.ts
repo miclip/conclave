@@ -103,6 +103,16 @@ export interface SessionParticipantStatus {
   agent: string
   rank: string
   /**
+   * What this seat is for, as opposed to what it can overrule.
+   *
+   * A poller deciding where to look — which seat is building the api — cannot get that from
+   * `rank`, which is the authority ordering and is identical across seats doing different
+   * jobs. Present and equal to `implementer` at N=1 rather than omitted, for the reason given
+   * about `turns` below: a field that disappears when it agrees with the default forces a
+   * reader to tell "no role" apart from "this build does not report roles".
+   */
+  role: string
+  /**
    * This seat's turns, from `snapshot()` -- the canonical side of the adapter seam.
    *
    * Required and empty rather than absent before anything has run, for the reason
@@ -531,6 +541,7 @@ export interface RecordableRelay {
   readonly participants: readonly {
     id: string
     rank: string
+    role: string
     session: {
       readonly agent: string
       /**
@@ -614,6 +625,7 @@ export function recordSession(
         id: p.id,
         agent: p.session.agent,
         rank: p.rank,
+        role: p.role,
         turns: turns.get(p.id) ?? [],
         ...(seen ? { activity: seen } : {}),
         ...(pending ? { awaitingPermission: { tool: pending.tool } } : {}),

@@ -24,6 +24,7 @@ import type {
 import { formatVerdict, type Verdict } from '../contract/outcome.ts'
 import { AgentRegistry } from '../registry/registry.ts'
 import type { ParticipantSpec } from '../registry/types.ts'
+import type { RoleId } from '../registry/roles.ts'
 import { acquire, release } from '../workspace/sessionLock.ts'
 import {
   envelope,
@@ -83,6 +84,20 @@ export interface RelayParticipant {
    */
   agent: string
   rank: Rank
+  /**
+   * What this seat is FOR, as distinct from what it may overrule.
+   *
+   * `RoleId` is open on purpose (`registry/roles.ts:15`) — project configuration assigns
+   * agents to roles, so a role a build has never heard of has to be a validation error with a
+   * message rather than a compile error in someone else's checkout. `ParticipantSpec` has
+   * carried it all along and `#join` used to read `spec.agent` and drop it, which is why
+   * "named implementers" looked blocked on the rank type when it never was.
+   *
+   * `Rank` stays closed and is not this. It is an AUTHORITY ordering feeding `outranks()`;
+   * three implementers are different in job and identical in authority, and widening it would
+   * force an invented ordering among peers into the header `envelope()` renders.
+   */
+  role: RoleId
   session: AgentSession
   events: AgentEvent[]
   /** Compaction generation when this session joined. Degradation is measured against it. */
@@ -663,10 +678,14 @@ export class Relay {
       cwd: this.#opts.cwd,
       watchdogMs: this.#opts.turnWatchdogMs,
     })
-    const p: RelayParticipant = { id: spec.id, agent: spec.agent, rank, session, events: [], baselineGeneration: 0, degradationCursor: 0 }
+    const p: RelayParticipant = { id: spec.id, agent: spec.agent, rank, role: spec.role, session, events: [], baselineGeneration: 0, degradationCursor: 0 }
     this.#participants.set(spec.id, p)
     this.#attach(p)
-    this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text: `${spec.id} joined as ${rank} (${spec.agent})` })
+    // The role is named only when it says something the rank has not. At N=1 it repeats it,
+    // and the join note is the line an operator reads at startup -- so the default run's log
+    // is the same log it has always been.
+    const as = spec.role === rank ? `${rank}` : `${rank} in role ${spec.role}`
+    this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text: `${spec.id} joined as ${as} (${spec.agent})` })
   }
 
   /**
@@ -1964,7 +1983,7 @@ export class Relay {
             this.#record({ from: impl.id, fromRank: 'implementer', to: [lead.id], kind: 'report', text: extra.prose })
             next = await this.#exchange(
               lead,
-              [this.#drain(lead.id), envelope({ from: impl.id, fromRank: 'implementer', kind: 'report', text: extra.prose })]
+              [this.#drain(lead.id), envelope({ from: impl.id, fromRank: 'implementer', fromRole: impl.role, kind: 'report', text: extra.prose })]
                 .filter(Boolean)
                 .join('\n\n'),
             )
@@ -2031,7 +2050,7 @@ export class Relay {
       const aside = this.#drain(impl.id)
       const report = await this.#exchange(
         impl,
-        [aside, envelope({ from: lead.id, fromRank: 'advisor', kind: 'instruction', text: instruction })]
+        [aside, envelope({ from: lead.id, fromRank: 'advisor', fromRole: lead.role, kind: 'instruction', text: instruction })]
           .filter(Boolean)
           .join('\n\n'),
       )
@@ -2184,7 +2203,7 @@ export class Relay {
       const leadAside = this.#drain(lead.id)
       next = await this.#exchange(
         lead,
-        [leadAside, envelope({ from: impl.id, fromRank: 'implementer', kind: 'report', text: report.prose })]
+        [leadAside, envelope({ from: impl.id, fromRank: 'implementer', fromRole: impl.role, kind: 'report', text: report.prose })]
           .filter(Boolean)
           .join('\n\n'),
       )
@@ -2241,7 +2260,10 @@ export class Relay {
             cwd: this.#opts.cwd,
             watchdogMs: this.#opts.turnWatchdogMs,
           })
-          audition = { id: `${spec.id}~replacement`, agent: spec.agent, rank: 'implementer', session, events: [], baselineGeneration: 0, degradationCursor: 0 }
+          // Same spec, so the same role: a replacement that changed what the seat is FOR
+          // would be a different seat wearing the id, and the handoff it just proved was
+          // measured against the outgoing session's job.
+          audition = { id: `${spec.id}~replacement`, agent: spec.agent, rank: 'implementer', role: spec.role, session, events: [], baselineGeneration: 0, degradationCursor: 0 }
           this.#attach(audition)
           return session
         },

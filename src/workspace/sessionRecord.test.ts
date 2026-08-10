@@ -55,7 +55,7 @@ function graded(key: string): FakeTurn {
  * defect it exists to reproduce is a slow read of an early transcript landing after a fast
  * read of a later one.
  */
-function fakeSeat(id: string, rank: string, agent: string) {
+function fakeSeat(id: string, rank: string, agent: string, role: string = rank) {
   const state = {
     turns: [] as FakeTurn[],
     fail: false,
@@ -75,6 +75,7 @@ function fakeSeat(id: string, rank: string, agent: string) {
     seat: {
       id,
       rank,
+      role,
       session: {
         agent,
         async snapshot() {

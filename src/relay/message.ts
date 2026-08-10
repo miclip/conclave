@@ -6,6 +6,8 @@
  * — each holds only what it was shown. This log is the only place the whole thing exists.
  */
 
+import type { RoleId } from '../registry/roles.ts'
+
 export type Rank = 'human' | 'advisor' | 'implementer'
 
 /** Rank breaks ties. It does not buy silence — see the brief, §2. */
@@ -90,6 +92,23 @@ export interface RelayMessage {
 }
 
 /**
+ * How the sender is named inside the header.
+ *
+ * The seat id alone answers WHICH participant; it does not say what that participant is for.
+ * With one implementer those are the same question, so the role is omitted when it merely
+ * repeats the rank — the default run's header is then byte-identical to the one it has always
+ * rendered, which is what `defaultUnchanged.test.ts` pins.
+ *
+ * A role that differs is information the recipient cannot get anywhere else: `impl-api` and
+ * `impl-ui` are two seat ids with no meaning until someone says which builds what. Rank is
+ * deliberately NOT where that goes — three implementers differ in job and are identical in
+ * authority, and `outranks()` must keep reading a closed ordering.
+ */
+function attribution(from: string, rank: Rank, role: RoleId | undefined): string {
+  return role === undefined || role === rank ? from : `${from}, role: ${role}`
+}
+
+/**
  * Rank has to be legible or it does nothing.
  *
  * An instruction the implementer cannot distinguish from a human directive gets
@@ -97,12 +116,23 @@ export interface RelayMessage {
  * committee wants neither — it wants disagreement stated and then work proceeding, which
  * requires the recipient to know exactly who is talking.
  */
-export function envelope(m: Pick<RelayMessage, 'from' | 'fromRank' | 'kind' | 'text'>): string {
+export function envelope(
+  m: Pick<RelayMessage, 'from' | 'fromRank' | 'kind' | 'text'> & {
+    /**
+     * The sender's role, when the caller holds one. Optional because the routing LOG does not
+     * carry it: the header is rendered for a reader who is being addressed right now, and
+     * widening `RelayMessage` would change the resumable log's wire shape for a field nothing
+     * replays.
+     */
+    fromRole?: RoleId | undefined
+  },
+): string {
+  const who = attribution(m.from, m.fromRank, m.fromRole)
   const header =
     m.fromRank === 'human'
       ? `[FROM THE HUMAN — authoritative. Outranks every participant. Not open to relitigation, though you may say if you think it is mistaken.]`
       : m.fromRank === 'advisor'
-        ? `[FROM THE ADVISOR (${m.from}) — a peer AI model, not your user. It outranks you on process and continuity, and it cannot see your tool calls or your code, only what you write. You may disagree: say so plainly, then proceed unless a human overrules.]`
-        : `[FROM THE IMPLEMENTER (${m.from}) — a peer AI model doing the work. You cannot see its tool calls or its code, only what it writes.]`
+        ? `[FROM THE ADVISOR (${who}) — a peer AI model, not your user. It outranks you on process and continuity, and it cannot see your tool calls or your code, only what you write. You may disagree: say so plainly, then proceed unless a human overrules.]`
+        : `[FROM THE IMPLEMENTER (${who}) — a peer AI model doing the work. You cannot see its tool calls or its code, only what it writes.]`
   return `${header}\n\n${m.text}`
 }

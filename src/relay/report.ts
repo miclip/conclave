@@ -54,6 +54,15 @@ export interface ReportedParticipant {
   id: string
   agent: string
   rank: string
+  /**
+   * What the seat was for. Beside `rank` because they answer different questions and a reader
+   * auditing a finished run cannot recover either from the other: rank says who deferred to
+   * whom, role says which of the seats this was. At N=1 they agree, and the field is present
+   * and equal to `implementer` rather than absent — the same rule `turns` follows above, for
+   * the same reason. A field that vanishes when it has nothing to say makes a reader
+   * distinguish "no role" from "this build does not report roles".
+   */
+  role: string
   sessionId: string
   turns: ReportedTurn[]
   /** Times the transcript was rewritten under this session. Rotation's mechanical trigger. */
@@ -156,6 +165,7 @@ export async function runReport(relay: Relay, input: ReportInput): Promise<RunRe
       id: p.id,
       agent: snap.agent,
       rank: p.rank,
+      role: p.role,
       sessionId: snap.sessionId,
       compactionGeneration: snap.compactionGeneration,
       turns: snap.turns.map((t) => ({

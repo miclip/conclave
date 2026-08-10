@@ -566,6 +566,34 @@ test('status --json keys at N=1 are the current SessionStatus set plus alive and
   )
 })
 
+/**
+ * The seat block inside both records, pinned separately.
+ *
+ * The two tests either side of this one read TOP-LEVEL keys, so a field added to a
+ * participant would have slipped past them — and the participant block is exactly where
+ * per-seat features land. `role` is the first of those and is the reason this pin exists.
+ *
+ * It is NOT a declared divergence. It is additive and constant at N=1: every default run
+ * reports `implementer`, no key changes value, no prose changes, and nothing that was
+ * optional becomes required. A reader who ignores the field sees the record it saw before.
+ * The alternative — omitting `role` when it equals the rank — is the `if (seats.length === 1)`
+ * branch D1 rules out, and `report.ts` already argues the case against fields that vanish
+ * when they have nothing to say: a reader then cannot tell "no role" from "this build does
+ * not report roles".
+ */
+test('the participant block in the report and the status file gains role and nothing else', () => {
+  assert.deepEqual(
+    interfaceKeys(REPORT, 'ReportedParticipant'),
+    ['id', 'agent', 'rank', 'role', 'sessionId', 'turns', 'compactionGeneration'],
+    'ReportedParticipant must not gain or lose fields without a decision',
+  )
+  assert.deepEqual(
+    interfaceKeys(SESSION_RECORD, 'SessionParticipantStatus'),
+    ['id', 'agent', 'rank', 'role', 'turns', 'activity', 'awaitingPermission'],
+    'SessionParticipantStatus must not gain or lose fields without a decision',
+  )
+})
+
 test('run report shape is unchanged', () => {
   // The report schema is the wire contract for the final run record: src/relay/report.ts:63-134.
   const reportKeys = interfaceKeys(REPORT, 'RunReport')
