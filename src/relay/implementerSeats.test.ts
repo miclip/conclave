@@ -378,3 +378,72 @@ test('rotateImplementer refuses to pick a seat when the run has more than one', 
     rmSync(repo, { recursive: true, force: true })
   }
 })
+
+test('a degraded seat in a multi-seat run is declined in words, not thrown as a transport fault (#78)', async () => {
+  // The refusal above is right, and the run loop used to walk straight into it: with rotation
+  // set to act, `#considerRotation` called `rotateImplementer` the moment any seat looked
+  // degraded, the throw left the loop, and `#loop`'s catch reported the run as
+  // `transport_failed: rotateImplementer names no seat...`. Nothing about the transport was
+  // wrong. An operator reading that would go looking at the child processes for a fault that
+  // is really a missing feature -- per-seat rotation -- and the seat that triggered it is
+  // fine, still running, and never named as still in service.
+  const repo = tempRepo()
+  const lead = new FakeRotationSession('lead-1', 'lead', ['@seat seat-alpha: Do the thing.', 'DONE', 'DONE'])
+  const alpha = new FakeRotationSession('alpha-1', 'alpha', ['ack', 'Did it.', 'NONE', 'NONE'])
+  const beta = new FakeRotationSession('beta-1', 'beta', ['ack', 'NONE', 'NONE'])
+  try {
+    const relay = await Relay.start({
+      registry: registryOf({ lead, alpha, beta }),
+      cwd: repo,
+      lead: { id: 'advisor', agent: 'lead', role: 'advisor' },
+      implementer: { id: 'seat-alpha', agent: 'alpha', role: 'implementer' },
+      implementers: [
+        { id: 'seat-alpha', agent: 'alpha', role: 'implementer' },
+        { id: 'seat-beta', agent: 'beta', role: 'implementer' },
+      ],
+      maxAdvisorTurns: 4,
+      // Set to ACT, which is the only configuration that reaches the rotation call at all: the
+      // default records a candidate and returns before it.
+      rotation: { checks: ['exit 0'], checkTimeoutMs: 30_000, onDegradation: 'automatic' },
+    })
+    try {
+      // Turn 0 is the briefing, so turn 1 is the first turn that does work. Compaction alone
+      // is degradation -- a session may compact without saying so.
+      alpha.compactOnTurn = 1
+      const outcome = await relay.run('Keep the work moving.')
+
+      assert.notEqual(
+        outcome.reason,
+        'transport_failed',
+        'a policy gap reported as a transport fault sends the operator to the wrong place entirely',
+      )
+      // Unattended, so the decision point ends the run rather than suspending it -- the same
+      // way every other unattended halt does. What matters here is that it is a DECISION with
+      // a reason, not an exception with a stack.
+      assert.equal(outcome.reason, 'escalated')
+      assert.match(outcome.detail!, /seat-alpha is degraded/)
+      assert.match(
+        outcome.detail!,
+        /cannot currently be replaced/,
+        'the operator has to be told that the rotation did not happen, not just that something did not',
+      )
+      assert.match(outcome.detail!, /2 implementer seats \(seat-alpha, seat-beta\)/)
+      assert.match(outcome.detail!, /stays in service/)
+
+      // And it really did stay in service: no session was quiesced, retired or replaced.
+      assert.equal(alpha.state, 'running', 'the degraded seat is not spent on a rotation that cannot happen')
+      assert.equal(beta.state, 'running')
+      assert.equal(relay.rotationWatch.rotations, 0)
+      assert.ok(
+        !relay.log.some((m) => /^rotating /.test(m.text)),
+        'nothing may claim a rotation began: the decline happens before the transaction is entered',
+      )
+      // The detector still ran and still saw it. Declining to act is not declining to look.
+      assert.ok(relay.rotationWatch.degradationsSeen >= 1, 'the degradation was seen and counted')
+    } finally {
+      await relay.stop()
+    }
+  } finally {
+    rmSync(repo, { recursive: true, force: true })
+  }
+})

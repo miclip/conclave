@@ -2291,6 +2291,38 @@ export class Relay {
       return this.#acknowledge(impl, snap.compactionGeneration)
     }
 
+    // Declined here rather than attempted, because `rotateImplementer` takes a reason and no
+    // seat: at N>1 it THROWS, and a throw out of this method is caught by the backstop in
+    // `start()` and reported as `transport_failed` -- a transport fault, for a policy gap. The
+    // operator would read "the run threw" over a run where nothing about the transport was
+    // wrong, and the actual reason (rotation cannot name one of several seats) would appear
+    // nowhere. The pause menu already declines the same thing on the same grounds (`rotatable`
+    // in #halt), so this is that rule applied where the loop rotates by itself.
+    //
+    // Per-seat rotation is the fix and it does not exist yet, so the seat STAYS IN SERVICE and
+    // the human is told. Degraded is not unusable, and ending a run over a proxy that has never
+    // been checked against quality is worse than carrying on with the evidence on the record.
+    const seats = this.#implementers()
+    if (seats.length > 1) {
+      const halted = await this.#halt(handle, {
+        subject: { reason: 'rotation_candidate', participant: impl.id },
+        detail:
+          `${detail}. Rotation is set to act, but this run has ${seats.length} implementer seats ` +
+          `(${seats.map((s) => s.id).join(', ')}) and rotation can only replace "the implementer" ` +
+          `when there is exactly one, so ${impl.id} cannot currently be replaced. It stays in service.`,
+        evidence: [
+          ...verdict.evidence,
+          `${seats.length} implementer seats (${seats.map((s) => s.id).join(', ')}); rotation names no seat`,
+          `${impl.id} is still in service`,
+        ],
+      })
+      // Acknowledged on the way out for the same reason the failed-rotation path below does it:
+      // the evidence has been put in front of a human, and re-raising it on the next advisor
+      // turn -- on the same compaction, every turn, forever -- teaches the operator to stop
+      // reading pauses. A LATER compaction is new evidence and does raise it again.
+      return halted ?? this.#acknowledge(impl, snap.compactionGeneration)
+    }
+
     const result = await this.rotateImplementer(detail)
     if (result.status === 'rotated') return undefined
     const halted = await this.#halt(handle, {
