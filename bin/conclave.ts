@@ -47,10 +47,12 @@ import {
 } from '../src/workspace/sessionView.ts'
 import { formatGoalFindings, lintGoal } from '../src/relay/goalLint.ts'
 import { version } from '../src/version.ts'
-import { closeSync, existsSync, mkdirSync, openSync, readSync, statSync } from 'node:fs'
+import { closeSync, existsSync, mkdirSync, openSync, readSync, realpathSync, statSync } from 'node:fs'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { seedCodexTrust } from '../src/deployment/codexHookTrust.ts'
 import { defaultRegistry } from '../src/registry/builtin.ts'
+import type { AgentRegistry } from '../src/registry/registry.ts'
 import { runSession } from '../src/repl/session.ts'
 import { Relay } from '../src/relay/relay.ts'
 import { formatGuardReportJson, guard } from '../src/workspace/sessionLock.ts'
@@ -567,7 +569,21 @@ async function streamEvents(found: ReadSession, follow: boolean): Promise<number
   }
 }
 
-async function main(argv: string[]): Promise<number> {
+/**
+ * Injected for testing. Production passes nothing and builds the default registry.
+ *
+ * The console has had this seam since it was written -- `SessionOptions.registry`, "injected
+ * for testing" -- and `relay` had none, so the participants the unattended front-end actually
+ * constructs were reachable from no test at all. What stood in for one was a test that read
+ * THIS FILE as text and matched an `id:` out of it (#55), which passes whether or not the
+ * call it parsed is the call that runs.
+ */
+export interface MainOverrides {
+  /** Replaces `defaultRegistry()` for the `relay` command. */
+  registry?: AgentRegistry
+}
+
+export async function main(argv: string[], overrides: MainOverrides = {}): Promise<number> {
   const [command, sub, ...rest] = argv
 
   // Before dispatch, for every command rather than per-command. `relay` grew its own help
@@ -742,7 +758,7 @@ async function main(argv: string[]): Promise<number> {
       const i = rest.indexOf(`--${name}`)
       return i >= 0 ? (rest[i + 1] ?? fallback) : fallback
     }
-    const registry = defaultRegistry()
+    const registry = overrides.registry ?? defaultRegistry()
     // Everything a human would read goes to STDERR under --json, so stdout carries the
     // report and nothing else. A consumer that had to strip log lines out of a JSON stream
     // is a consumer that will eventually strip the wrong one.
@@ -1219,10 +1235,33 @@ async function main(argv: string[]): Promise<number> {
   return 1
 }
 
-main(process.argv.slice(2)).then(
-  (code) => process.exit(code),
-  (err) => {
-    console.error(`conclave: ${err instanceof Error ? err.message : String(err)}`)
-    process.exit(1)
-  },
-)
+/**
+ * Only when this file IS the program.
+ *
+ * `main` is exported so the default-run guard can drive the real `relay` command instead of
+ * reading this file as text. Without this check, importing it would run the importer's argv
+ * as a command -- under `node --test` that is a file path, so every test file would try to
+ * start a session and exit the process.
+ *
+ * Through realpath on both sides because an npm-installed `conclave` is a symlink into this
+ * file, and comparing the link to its target would take the CLI out of service entirely.
+ */
+function invokedDirectly(): boolean {
+  const entry = process.argv[1]
+  if (entry === undefined) return false
+  try {
+    return realpathSync(entry) === realpathSync(fileURLToPath(import.meta.url))
+  } catch {
+    return false
+  }
+}
+
+if (invokedDirectly()) {
+  main(process.argv.slice(2)).then(
+    (code) => process.exit(code),
+    (err) => {
+      console.error(`conclave: ${err instanceof Error ? err.message : String(err)}`)
+      process.exit(1)
+    },
+  )
+}

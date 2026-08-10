@@ -17,7 +17,10 @@ import { execFileSync } from 'node:child_process'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { PassThrough, Writable } from 'node:stream'
 import test from 'node:test'
+import { main } from '../../bin/conclave.ts'
+import { runSession } from '../repl/session.ts'
 import type { AgentEvent, AgentSession, CloseMode, SessionSnapshot, SessionState, TurnKey } from '../contract/session.ts'
 import { guaranteesFor, turnKey } from '../contract/session.ts'
 import { AgentRegistry } from '../registry/registry.ts'
@@ -177,36 +180,48 @@ function commandBlock(name: string, endsBefore: string): string {
   return CLI.slice(start, end)
 }
 
-function seatId(block: string, seatName: 'lead' | 'implementer'): string {
-  const start = block.indexOf(`${seatName}:`)
-  assert.ok(start > 0, `${seatName} object must be present in the block`)
-  const open = block.indexOf('{', start)
-  const close = block.indexOf('}', open)
-  assert.ok(open > start && close > open, `${seatName} object must be a braced literal`)
-  const obj = block.slice(open, close + 1)
-  const match = obj.match(/id:\s*'([^']+)'/)
-  assert.ok(match, `${seatName} object must have an id field`)
-  return match[1]!
+/** A repository for a front-end to run in. Both refuse to start outside one. */
+function tempRepo(): string {
+  const dir = mkdtempSync(join(tmpdir(), 'conclave-default-'))
+  execFileSync('git', ['init', '--quiet'], { cwd: dir })
+  execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: dir })
+  execFileSync('git', ['config', 'user.name', 'Test'], { cwd: dir })
+  writeFileSync(join(dir, '.gitignore'), '.conclave/\n')
+  writeFileSync(join(dir, 'README.md'), '# hello')
+  execFileSync('git', ['add', '.'], { cwd: dir })
+  execFileSync('git', ['commit', '-m', 'init', '--quiet'], { cwd: dir })
+  return dir
 }
 
-function relayStartBlock(source: string): string {
-  const start = source.indexOf('const relay = await Relay.start({')
-  assert.ok(start > 0, 'console Relay.start assignment must be present')
-  const open = source.indexOf('{', start)
-  let depth = 0
-  let end = open
-  for (let i = open; i < source.length; i++) {
-    if (source[i] === '{') depth++
-    else if (source[i] === '}') {
-      depth--
-      if (depth === 0) {
-        end = i
-        break
-      }
-    }
+/**
+ * Run a front-end with its prose swallowed.
+ *
+ * `relay` writes its whole routing log through `console.log`/`console.error`, which is the
+ * right behaviour for the command and unreadable interleaved with a test reporter.
+ */
+async function quietly<T>(work: () => Promise<T>): Promise<T> {
+  const [log, error] = [console.log, console.error]
+  console.log = () => {}
+  console.error = () => {}
+  try {
+    return await work()
+  } finally {
+    console.log = log
+    console.error = error
   }
-  assert.ok(end > open, 'console Relay.start call must close')
-  return source.slice(start, end + 1)
+}
+
+/** A console input that stays open, so the session ends on its own terms rather than on EOF. */
+function idleInput(): PassThrough {
+  return new PassThrough()
+}
+
+function sink(): NodeJS.WritableStream {
+  return new Writable({
+    write(_c, _e, cb) {
+      cb()
+    },
+  })
 }
 
 function interfaceKeys(source: string, name: string): string[] {
@@ -290,19 +305,93 @@ test('DECLARED contains exactly the one pending authority-routing exception', ()
   assert.deepEqual(Object.keys(DECLARED), ['implementer_unanswered -> advisor'])
 })
 
-test('default relay and session runs use exactly the two participant ids', () => {
-  // Narrow to the Relay.start({...}) call so the dry-run plan in the relay block does not
-  // masquerade as a participant spec.
-  const relayStart = relayStartBlock(CLI)
-  const sessionStart = relayStartBlock(SESSION)
+/**
+ * The seat ids each front-end actually constructs.
+ *
+ * Observed at the registry, which is the last place the id is Conclave's own before it
+ * becomes a participant: `Relay.start` resolves each spec and hands it to
+ * `AgentRegistry#createParticipant`, so `resolved.spec.id` here is the string the front-end
+ * put in the option object and nothing the test supplied.
+ *
+ * Both front-ends are driven through their production entry point -- `main('relay', ...)`
+ * from `bin/conclave.ts` and `runSession` from the console -- with only the registry
+ * replaced. Nothing else about the default invocation is stubbed: no seat ids, no cwd, no
+ * rounds beyond the default flag parsing.
+ */
+async function seatIdsFromRelayCli(): Promise<string[]> {
+  const repo = tempRepo()
+  const before = process.cwd()
+  const creates: CreateRecord[] = []
+  const registry = defaultRegistry(
+    {
+      'fake-lead': new DefaultRunFakeSession('fake-lead', 'lead-1', ['DONE']),
+      'fake-impl': new DefaultRunFakeSession('fake-impl', 'impl-1', []),
+    },
+    creates,
+  )
+  try {
+    // The relay command reads `process.cwd()` and takes no cwd flag, which is itself part of
+    // the default surface this file guards.
+    process.chdir(repo)
+    const code = await quietly(() =>
+      main(['relay', 'a default goal', '--advisor', 'fake-lead', '--implementer', 'fake-impl', '--rounds', '2'], {
+        registry,
+      }),
+    )
+    assert.equal(code, 0, 'a default relay run must succeed')
+  } finally {
+    process.chdir(before)
+    rmSync(repo, { recursive: true, force: true })
+  }
+  return creates.map((c) => c.id)
+}
 
-  // Both front-ends name the lead 'advisor' and the implementer 'implementer'.
-  // bin/conclave.ts:986 sets the lead id; bin/conclave.ts:988 sets the implementer id.
-  // src/repl/session.ts:575 and src/repl/session.ts:577 do the same for the console.
-  assert.equal(seatId(relayStart, 'lead'), 'advisor', 'relay lead id must be advisor')
-  assert.equal(seatId(relayStart, 'implementer'), 'implementer', 'relay implementer id must be implementer')
-  assert.equal(seatId(sessionStart, 'lead'), 'advisor', 'session lead id must be advisor')
-  assert.equal(seatId(sessionStart, 'implementer'), 'implementer', 'session implementer id must be implementer')
+async function seatIdsFromConsole(): Promise<string[]> {
+  const repo = tempRepo()
+  const creates: CreateRecord[] = []
+  const registry = defaultRegistry(
+    {
+      'fake-lead': new DefaultRunFakeSession('fake-lead', 'lead-1', ['DONE']),
+      'fake-impl': new DefaultRunFakeSession('fake-impl', 'impl-1', []),
+    },
+    creates,
+  )
+  try {
+    const code = await runSession({
+      cwd: repo,
+      goal: 'a default goal',
+      lead: 'fake-lead',
+      implementer: 'fake-impl',
+      rounds: 2,
+      checks: [],
+      registry,
+      input: idleInput(),
+      output: sink(),
+    })
+    assert.equal(code, 0, 'a default console run must succeed')
+  } finally {
+    rmSync(repo, { recursive: true, force: true })
+  }
+  return creates.map((c) => c.id)
+}
+
+test('default relay and session runs construct exactly the two participant ids', async () => {
+  // The lead is 'advisor' and the implementer is 'implementer', on both front-ends, and a
+  // default run has exactly those two seats and no third. bin/conclave.ts sets the relay
+  // pair; src/repl/session.ts sets the console's.
+  //
+  // Sorted rather than ordered: which seat is constructed first is Relay.start's business,
+  // and pinning it here would make this guard fail on a change it does not speak to.
+  assert.deepEqual(
+    (await seatIdsFromRelayCli()).sort(),
+    ['advisor', 'implementer'],
+    'the relay CLI must construct exactly the advisor and implementer seats',
+  )
+  assert.deepEqual(
+    (await seatIdsFromConsole()).sort(),
+    ['advisor', 'implementer'],
+    'the console must construct exactly the advisor and implementer seats',
+  )
 })
 
 test('default run works in the run cwd and creates no worktree', async () => {
