@@ -12,6 +12,7 @@ import { test } from 'node:test'
 
 import type { Suggestion } from './complete.ts'
 import { Screen } from './screen.ts'
+import { displayWidth } from './width.ts'
 
 const ESC = '\x1b['
 const strip = (s: string) => s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '')
@@ -226,6 +227,41 @@ test('more busy seats than rows stops at a fixed height and says where to read t
   assert.match(h.raw(), /alpha/)
   assert.match(h.raw(), /beta/)
   assert.doesNotMatch(h.raw(), /epsilon/, 'a box that grew with the seat count would eat the transcript')
+})
+
+test('exactly as many seats as rows are all shown, with nothing claiming to be hidden', async () => {
+  // The boundary, and it is the one an off-by-one lands on: a cap that fires at the limit
+  // rather than past it drops a seat that fits and reports `1 more working` over a row it had
+  // the space to draw. Neither the two-seat nor the five-seat case above can see that.
+  const h = await harness(undefined, undefined, () => ['alpha', 'beta', 'gamma'])
+  h.screen.draw()
+  const frame = strip(h.frame())
+  for (const seat of ['alpha', 'beta', 'gamma']) assert.match(frame, new RegExp(seat), `${seat} fits and must be drawn`)
+  assert.doesNotMatch(frame, /more working/, 'nothing is hidden, so nothing may say it is')
+})
+
+test('an over-wide seat row is clipped to one row rather than wrapping onto the next seat', async () => {
+  // The box reserved exactly one row for this seat. A row that wraps is drawn into the row
+  // below it, which belongs to another seat — so the terminal shows one seat's instruction
+  // over another seat's name, and every row under it is off by one.
+  //
+  // Clipping is measured in VISIBLE columns: the seat id carries a colour, and escapes occupy
+  // no columns. A slice taken against `.length` would cut the row short and, worse, could cut
+  // a colour sequence in half and leave the rest of the box wearing it.
+  const wide = `\x1b[36mseat-alpha\x1b[0m ${'x'.repeat(200)}`
+  const h = await harness(undefined, undefined, () => [wide])
+  h.screen.draw()
+  const drawn = [...h.frame().matchAll(/\x1b\[\d+;1H\x1b\[2K([^\x1b]*(?:\x1b\[[0-9;]*m[^\x1b]*)*)/g)]
+    .map((m) => m[1]!)
+    .find((row) => row.includes('seat-alpha'))
+  assert.ok(drawn, 'the seat row must have been drawn')
+  // EXACTLY the width, not merely within it. A clip that counted the colour escapes as
+  // columns would also fit — by throwing away nine columns of the instruction it was given
+  // room to show — and "fits" cannot tell that from a correct cut.
+  assert.equal(displayWidth(drawn), 80, 'a seat row must use its row and not overflow it')
+  assert.match(strip(drawn), /…$/, 'and must say it was cut rather than simply stopping')
+  assert.ok(drawn.includes('\x1b[36m'), 'the colour it carries must survive the clip')
+  assert.doesNotMatch(drawn, /\x1b\[[0-9;]*$/, 'and no escape may be cut in half')
 })
 
 test('busy seats grow the box, and growing it pushes the transcript up rather than over', async () => {

@@ -17,7 +17,7 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -99,7 +99,12 @@ const BOTH = '@seat seat-alpha: rebuild the parser\n@seat seat-beta: rewrite the
  * this block, exists only between dispatch and grading. Reading the file after the run would
  * show two idle seats and prove nothing about the field that matters most.
  */
-async function statusWhileBusy(): Promise<{ participants: SessionParticipantStatus[]; repo: string }> {
+async function statusWhileBusy(): Promise<{
+  participants: SessionParticipantStatus[]
+  repo: string
+  /** What git said about each claimed worktree path, asked WHILE the trees still existed. */
+  observed: Record<string, { exists: boolean; branch?: string }>
+}> {
   const repo = tempRepo()
   const before = process.cwd()
   const lead = new FakeRotationSession('lead-1', 'lead', [BOTH, 'DONE', 'DONE'])
@@ -130,7 +135,9 @@ async function statusWhileBusy(): Promise<{ participants: SessionParticipantStat
     // when the status is read a moment later. `#exchange` polls every 250ms, so this beats a
     // poll interval several times over rather than by a margin that proves nothing.
     alpha.delayMs = 2000
-    let captured: Promise<string> | undefined
+    let captured:
+      | Promise<{ status: { participants: SessionParticipantStatus[] }; observed: Record<string, { exists: boolean; branch?: string }> }>
+      | undefined
     beta.onSend = (message) => {
       if (captured || !/rewrite the docs/.test(message)) return
       captured = (async () => {
@@ -139,14 +146,36 @@ async function statusWhileBusy(): Promise<{ participants: SessionParticipantStat
         // what a poller's read is racing anyway.
         recording.set('running')
         await recording.refresh()
-        return stdoutOf(() => main(['status', '--json']))
+        const json = await stdoutOf(() => main(['status', '--json']))
+        // Asked here rather than after the run, because `relay.stop()` prunes the seat
+        // worktrees: a path checked afterwards is always gone, whatever the document said.
+        // This walks the paths the document CLAIMS and asks git what is actually there —
+        // the one reading in this file that does not come from the relay.
+        const status = JSON.parse(json) as { participants: SessionParticipantStatus[] }
+        const observed: Record<string, { exists: boolean; branch?: string }> = {}
+        for (const p of status.participants) {
+          const tree = p.seat?.worktree
+          if (!tree) continue
+          if (!existsSync(tree.path)) {
+            observed[p.id] = { exists: false }
+            continue
+          }
+          observed[p.id] = {
+            exists: true,
+            branch: execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
+              cwd: tree.path,
+              encoding: 'utf8',
+            }).trim(),
+          }
+        }
+        return { status, observed }
       })()
     }
     const outcome = await relay.run('keep the work moving')
     assert.equal(outcome.reason, 'done', 'the two-seat run must finish')
     assert.ok(captured, 'the capture must have happened: without it this test asserts nothing')
-    const status = JSON.parse(await captured) as { participants: SessionParticipantStatus[] }
-    return { participants: status.participants, repo }
+    const { status, observed } = await captured
+    return { participants: status.participants, repo, observed }
   } finally {
     process.chdir(before)
     await recording.close()
@@ -155,7 +184,7 @@ async function statusWhileBusy(): Promise<{ participants: SessionParticipantStat
 }
 
 test('every implementer seat of a two-seat run reports its task, tree, branch and scheduler state', async () => {
-  const { participants, repo } = await statusWhileBusy()
+  const { participants, repo, observed } = await statusWhileBusy()
   try {
     const seats = participants.filter((p) => p.rank === 'implementer')
     assert.deepEqual(
@@ -189,7 +218,17 @@ test('every implementer seat of a two-seat run reports its task, tree, branch an
       // reason a status file that could not tell them apart was worth fixing.
       assert.ok(seat.worktree, `${p.id} must name the tree it works in`)
       assert.notEqual(seat.worktree!.path, repo, `${p.id} must not be reported in the integration checkout`)
-      assert.match(seat.worktree!.branch, /seat/, 'the branch is the seat’s own')
+      // Checked against git rather than against a pattern. Both strings contain the seat's
+      // name, so a shape assertion — "the path is not the repo, the branch mentions the seat" —
+      // passes with the two fields SWAPPED, which is a recovery instruction pointing at a
+      // directory that does not exist and a branch nobody can check out. Asking the checkout
+      // what branch it is on ties the two fields to each other and to the disk.
+      assert.equal(observed[p.id]?.exists, true, `${p.id}'s worktree path must have been a real directory`)
+      assert.equal(
+        observed[p.id]?.branch,
+        seat.worktree!.branch,
+        `${p.id}'s branch must be the branch its own tree actually had checked out`,
+      )
     }
 
     // The pairing is the point: the instructions and the trees must belong to the RIGHT seats.

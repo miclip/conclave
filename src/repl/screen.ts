@@ -22,7 +22,7 @@
  */
 
 import type { Suggestion } from './complete.ts'
-import { rowsUsed } from './width.ts'
+import { clipToWidth, rowsUsed } from './width.ts'
 import { emitKeypressEvents } from 'node:readline'
 
 export interface Key {
@@ -500,16 +500,13 @@ export class Screen {
     // the whole row in an attribute would flatten that. Clipping matters more than for the
     // queue — the box reserved exactly one row for each of these, so a row that wrapped would
     // be drawn into the row below it, which is another seat's.
-    const seatRows = working.map((t) => {
-      const text = `  ${t}`
-      const visibleWidth = visible(text)
-      if (visibleWidth <= w) return text
-      // Escapes cost no columns, so the slice is taken against the visible length: cutting
-      // the raw string at `w` would cut a colour sequence in half and leave the rest of the
-      // box wearing it.
-      const budget = Math.max(1, w - 1 - (text.length - visibleWidth))
-      return `${text.slice(0, budget)}…\x1b[0m`
-    })
+    //
+    // Measured in COLUMNS by `clipToWidth`, not in characters. The hand-rolled version here
+    // charged the row for its own colour codes and cut it nine columns short of the width it
+    // had been given; a version that charged nothing for a CJK ideograph would cut it long,
+    // which is the wrap this row cannot survive. Both are the same mistake in opposite
+    // directions, and `width.ts` is where that arithmetic already lives.
+    const seatRows = working.map((t) => clipToWidth(`  ${t}`, w))
     const rows = [...seatRows, ...waiting, head, `${prompt}${this.#line}`, rule, ...menuRows]
     let out = `${ESC}s`
     rows.forEach((text, i) => {

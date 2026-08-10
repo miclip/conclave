@@ -109,3 +109,41 @@ export function rowsUsed(text: string, columns: number): number {
   }
   return rows
 }
+
+/**
+ * `text` cut to fit `columns`, with an ellipsis where it was cut.
+ *
+ * Written here rather than at the call site because the naive version — slice the string at
+ * `columns` characters — is wrong in both directions at once, and the two errors hide each
+ * other. Counting colour codes as columns cuts the line SHORT, wasting width the row was
+ * given; not counting a CJK ideograph as two cuts it LONG, and a row one column too wide
+ * wraps onto the row below, which in a pinned box belongs to something else.
+ *
+ * Colour survives the cut: every SGR sequence is copied through whatever the budget, and a
+ * reset is appended so an unterminated colour cannot leak onto the rest of the frame.
+ */
+export function clipToWidth(text: string, columns: number): string {
+  const limit = Math.max(1, columns)
+  if (displayWidth(text) <= limit) return text
+  // One column for the ellipsis, so the result is exactly `limit` and never a column more.
+  const room = limit - 1
+  let out = ''
+  let used = 0
+  // One exit, deliberately. An early `return` inside the loop left a second, identical return
+  // after it that nothing can reach -- text wider than the limit always trips the budget --
+  // and unreachable code is code no mutation can kill and no reader can trust.
+  outer: for (const token of text.match(/\x1b\[[0-9;]*m|[^\x1b]+/g) ?? []) {
+    if (token.startsWith('\x1b')) {
+      out += token
+      continue
+    }
+    for (const { segment } of graphemes.segment(token)) {
+      // A cluster that does not fit is not half-drawn: the terminal moves the whole thing to
+      // the next row, so the cut stops here and the ellipsis takes the column it left.
+      if (used + displayWidth(segment) > room) break outer
+      out += segment
+      used += displayWidth(segment)
+    }
+  }
+  return `${out}…\x1b[0m`
+}
