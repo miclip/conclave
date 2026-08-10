@@ -294,7 +294,7 @@ function assertFlagHelperOptional(block: string, label: string): void {
   const helperEnd = block.indexOf('\n    const ', helperStart)
   const helper = block.slice(helperStart, helperEnd > 0 ? helperEnd : helperStart + 500)
   // The relay helper returns the fallback when the flag is absent:
-  // bin/conclave.ts:811-815. The session helper returns the fallback both when the flag is
+  // bin/conclave.ts:811-814. The session helper returns the fallback both when the flag is
   // absent and when it is present without a value: bin/conclave.ts:1250-1259.
   assert.match(
     helper,
@@ -1205,7 +1205,7 @@ const runDocuments = (): Promise<{ report: unknown; status: unknown }> =>
  *     field added inside any of them was invisible -- which is precisely where per-seat
  *     features land.
  *   - A declared field is not an emitted one. `turnWatchdogMs` was declared and dropped for
- *     its whole life (src/repl/session.ts:199-212), and a text-level pin cannot tell the
+ *     its whole life (src/repl/session.ts:193-206), and a text-level pin cannot tell the
  *     difference.
  *   - An emitted field need not be declared anywhere this test was reading. A key spread in
  *     from another type, or written by a builder that widens its return, appears in the JSON
