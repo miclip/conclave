@@ -159,6 +159,10 @@ export interface SessionOptions {
   /**
    * Verification commands. A bare string is `required`; pass `{command, relevance}` for a
    * check that should run and be reported without gating a transfer.
+   *
+   * Two stations read them (#80): what a replacement must reproduce, and — with more than
+   * one seat — what the MERGED tree must pass after every merge. One console run with one
+   * seat is unaffected by the second, which has no merge to check.
    */
   checks: CheckSpec[]
   /**

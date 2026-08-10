@@ -193,6 +193,51 @@ for suites known to be isolated. A seat waiting for the check lane is `assigned`
 `rotate()` (`rotation/rotate.ts:171`) gains a root parameter; the plumbing exists —
 `record.ts:139` and `:160` already `spawnSync` with `cwd: root`.
 
+### D7a. Per-seat checks are not enough: the integration tree needs its own station (#80)
+
+Added after the first real two-seat run, which is the only reason it is stated as an amendment
+rather than as part of D7: three tasks merged with no git conflict at all and the resulting
+tree failed two tests. Both failures were cross-seat. Each seat's work was correct, each
+seat's own tree was green, every merge was clean, and the result was broken.
+
+D7 is right about what it covers and blind past it. Per-seat checks verify a rotation
+candidate against that seat's work, in that seat's tree — which is exactly why every seat can
+pass while the tree they produce together fails. D6 designs the merge boundary around
+*textual* conflict, which git reports. **Concurrency creates a class of conflict git cannot
+see, and no station in the design was positioned to catch it.**
+
+So the **already-configured** `--checks` run against the **integration checkout, after every
+merge including the last**. A separate option was built first and then removed: the argument
+against reusing `rotation.checks` — that it changes what an existing configuration does, how
+often those commands run and what a failure means — is true and was overruled, because an
+opt-in station leaves exactly the run that failed unprotected unless someone discovers the new
+flag and duplicates configuration they have already supplied. An operator who has said
+`--checks "npm test"` has already said what "working" means for this project; asking them to
+say it twice is a second chance to say it zero times.
+
+The cost is recorded rather than argued away: at N>1 those commands now run once per merge as
+well as at a rotation, and a failure means one of two things depending on where it happened.
+At N=1 nothing changes, and not by a seat-count branch — there is no merge, so the boundary
+this runs in is not reached.
+
+Two things follow that D6's conflict rule cannot supply:
+
+- **Neither seat is at fault**, so "assign the repair to the producing seat" has no answer.
+  The failure belongs to the *pair*, so the repair names **both contributing tasks**, no seat
+  is marked, and which seat takes it is the advisor's decision — it is the only participant
+  that can see both halves.
+- **The final merge has no seat left to repair it.** While a seat is still working the failure
+  is self-limiting: the first run recovered only because a seat happened to still be active in
+  a tree someone else's merge had just broken, which is luck of timing rather than a mechanism.
+  When the last merge lands and nothing is left working, a queued task is a task nobody will
+  take — so a red tree at the end is an **outcome the run reports** (`integration_failed`, and
+  a non-zero exit), never a task it queues.
+
+This does not replace the argument for #72's reviewer seat; it sharpens it. A reviewer reading
+the *integrated* diff is the only station that can catch a defect that exists in neither half
+before the checks do. This one catches it after, mechanically, which is what a run with nobody
+watching needs.
+
 ## D8. Ceilings change meaning and stop being optional at N>1
 
 `#turnsTaken` counts every participant's turns and is what `breached()` reads. N seats burn

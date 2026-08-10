@@ -160,6 +160,16 @@ Commands:
                                    refused rather than reconciled. Seats are named
                                    implementer, implementer-2, ...; more than one gets a git
                                    worktree each and refuses to start on a dirty checkout.
+                                   With more than one seat, --checks ALSO run against the
+                                   merged tree after every merge including the last. Nothing
+                                   else looks at it: git reports conflicts, and per-seat
+                                   checks run in one seat's own tree, so every seat can pass
+                                   while the tree they produce together fails. A failure
+                                   mid-run becomes a repair naming both contributing tasks
+                                   rather than blaming a seat; after the final merge there is
+                                   no seat left to repair it, so the run ends
+                                   integration_failed and exits non-zero. One seat has no
+                                   merge, so nothing about it changes.
                                    The goal is linted before anything starts: an ask with
                                    nothing observable in it cannot be graded better than
                                    reasoned_but_unverified however well the work goes.
@@ -265,6 +275,9 @@ Commands:
                                    that do not exercise the transferred work.
                                    --checks enables rotation; without it a degraded
                                    implementer escalates rather than rotating unverified.
+                                   With more than one seat they also run against the MERGED
+                                   tree after every merge, as in relay: a clean merge is not
+                                   a correct merge.
                                    --operator agent as in relay. Prefer THIS command for an
                                    agent driver: a pause here is held open as a decision
                                    point, where relay ends the run at every one of them.
@@ -1219,7 +1232,14 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
         console.log(JSON.stringify(await runReport(relay, { goal, outcome, startedAt: runStartedAt, build }), null, 2))
       }
       say(`\n=== relay ended: ${outcome.reason}${outcome.detail ? ` — ${outcome.detail}` : ''}`)
-      failed = outcome.reason === 'transport_failed' || outcome.reason === 'ceiling'
+      // `integration_failed` joins the two endings that already exit non-zero: the run
+      // finished and left a tree that does not pass its own checks (#80). An unattended
+      // caller — CI, a wrapper script, an agent operator — decides on the exit code, and a
+      // zero there is the whole failure the issue is about, one layer out.
+      failed =
+        outcome.reason === 'transport_failed' ||
+        outcome.reason === 'ceiling' ||
+        outcome.reason === 'integration_failed'
     } catch (err) {
       // Belt and braces. The relay converts transport failures into outcomes now, so this
       // should be unreachable -- but the operator's record must not depend on that being

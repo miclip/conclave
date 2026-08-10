@@ -38,7 +38,7 @@ import {
   writeManifest,
   type WorktreeManifest,
 } from '../workspace/worktrees.ts'
-import { integrateSeat, integrationHead } from './integrate.ts'
+import { failedRequired, integrateSeat, integrationHead, type IntegrationCheckResult } from './integrate.ts'
 import {
   envelope,
   type Audience,
@@ -160,12 +160,18 @@ export interface RelayParticipant {
 }
 
 /**
- * What a replacement must reproduce.
+ * What a replacement must reproduce -- and, since #80, what the merged tree must pass.
  *
  * Rotation without verification commands would be a transfer nobody demonstrated, which
  * is the thing §7a exists to prevent -- so leaving this unset does not disable the
  * *detection* of degradation, only the automatic response to it. A degraded implementer
  * with nothing to verify against escalates to the human instead.
+ *
+ * The name is now narrower than the field's use, and that is deliberate rather than
+ * unnoticed: renaming it would break every existing programmatic caller for a change that
+ * ADDS a reader, and `--checks` is the spelling operators and scripts already have. What is
+ * true is written here instead -- these commands are the run's statement of what "working"
+ * means, and two stations read it.
  */
 export interface RotationConfig {
   /**
@@ -174,6 +180,19 @@ export interface RotationConfig {
    * A bare string is `required`: a mismatch rolls the rotation back. Pass
    * `{command, relevance}` for a check that should be run and reported without gating the
    * transfer. Relevance is declared HERE, by the orchestrator, and never by a participant.
+   *
+   * ALSO run against the integration checkout after every merge, including the last (#80).
+   * Same commands, same relevance vocabulary, a different tree and a different question: a
+   * rotation asks whether a replacement reproduces what the original did, and the merge
+   * boundary asks whether the tree the seats built TOGETHER works. Two seats can each be
+   * green in their own worktree and merge cleanly into a tree that does not build, which is
+   * what a real two-seat run produced and what no other station could see.
+   *
+   * This changes what an existing N>1 configuration does -- these commands run more often,
+   * and a failure now means one of two things depending on where it happened. It changes
+   * nothing at N=1, where there is no merge to check. The alternative considered and
+   * rejected was a second option to arm separately; see `integrate.ts`, which records both
+   * the original objection to reusing this field and why the objection was overruled.
    */
   checks: CheckSpec[]
   /**
@@ -338,6 +357,30 @@ type BoundaryOutcome =
   /** Merged, empty, or not a worktree run at all — the seat carries on normally. */
   | { kind: 'clear' }
   | { kind: 'blocked'; seatId: string; escalate: boolean; detail: string; evidence: string[] }
+  /**
+   * The merge went in and the integrated tree fails its configured checks (#80).
+   *
+   * NOT `blocked`, and the difference is the whole of what this issue is about. A blocked
+   * merge is one seat's problem in one seat's tree: git said so, the work is on a branch that
+   * will not go in, and the seat that produced it is the seat that repairs it. This is the
+   * opposite shape -- every merge succeeded, every seat's own tree was green, and what is red
+   * is the combination. So no seat is marked, no seat is blocked, and the task that happened
+   * to be merged last is not the task at fault. The seat is released exactly as a clear
+   * boundary releases it.
+   */
+  | {
+      kind: 'integration_red'
+      /** The tasks whose combination is red, newest last. Never one seat's name alone. */
+      contributors: MergeContribution[]
+      failures: IntegrationCheckResult[]
+    }
+
+/** One merge that is in the integration checkout, and whose work is therefore in the tree. */
+interface MergeContribution {
+  taskId: string
+  seatId: string
+  integrationSha: string
+}
 
 /**
  * One completed turn, as `#exchange` hands it back.
@@ -954,6 +997,35 @@ export class Relay {
    */
   #blocked = new Map<string, { parent: string; paths: string[]; attempts: number }>()
   /**
+   * Every merge that reached the integration checkout, oldest first.
+   *
+   * Kept because a red tree has to be attributed to a COMBINATION, and the combination is not
+   * readable from the merge that happened to be last: that one merged cleanly, its seat's tree
+   * was green, and blaming it would be the same error as blaming the other half. What can be
+   * said honestly is which tasks are in the tree, so that is what is recorded and what the
+   * repair instruction names.
+   *
+   * Empty on every run without seat worktrees, which is every default run.
+   */
+  #merges: MergeContribution[] = []
+  /**
+   * The integration checks that were red when they last ran, and are not known to be green.
+   *
+   * Cleared ONLY by a later merge whose checks pass -- not by a repair being dispatched, not
+   * by a seat reporting that it fixed it, and not by the advisor saying the work is done. The
+   * tree is what it is; a claim about it is not a measurement of it. This is what `#end` reads
+   * to refuse to report success over a tree that does not build (#80).
+   */
+  #integrationRed: { contributors: MergeContribution[]; failures: IntegrationCheckResult[] } | undefined
+  /**
+   * Index into `#merges` of the last merge whose checks passed, or `undefined` if none has.
+   *
+   * The fixed point a red result is attributed from: the tree was measured working there, so
+   * the tasks merged up to and including it are not implicated by a failure that appeared
+   * later. Everything from it onward is.
+   */
+  #lastGreenMerge: number | undefined
+  /**
    * Mechanical facts the advisor must have before it writes its next instruction.
    *
    * Deliberately NOT `#pending`. That queue is human messages, and the DONE guard reads it to
@@ -1412,14 +1484,62 @@ export class Relay {
     return this.#stream.droppedAfterClose
   }
 
-  /** Terminal, and emitted exactly once however the run and `stop()` interleave. */
+  /**
+   * Terminal, and emitted exactly once however the run and `stop()` interleave.
+   *
+   * One filter sits in front of it: a run whose integration checkout is red does not report
+   * an outcome that reads as success (#80). Here rather than at the call sites because there
+   * are eleven of them and the guarantee has to hold at all of them -- a red tree that reached
+   * `done` down one path and `integration_failed` down another would be the same silent
+   * failure with an extra step. `done` and `budget` are the two endings that claim the work
+   * finished, so those are REPLACED; every other reason already says something went wrong and
+   * keeps saying it, with the tree's state appended so nothing is lost either way.
+   */
   #end(reason: RunReason, detail?: string): { reason: RunReason; detail?: string } {
+    const note = this.#integrationRedNote()
+    if (note) {
+      if (reason === 'done' || reason === 'budget') reason = 'integration_failed'
+      detail = detail === undefined ? note : `${detail}. ${note}`
+    }
     if (!this.#ended) {
       this.#ended = true
       this.#stream.emit({ type: 'run_end', reason, detail })
       this.#stream.close()
     }
     return detail === undefined ? { reason } : { reason, detail }
+  }
+
+  /**
+   * What an outcome has to say about the tree, or nothing when the tree is not known to be red.
+   *
+   * One sentence, built in one place, so `#end` and the drain's return say the same thing and
+   * a reader can tell they are the same claim rather than two independent descriptions.
+   */
+  #integrationRedNote(): string | undefined {
+    const red = this.#integrationRed
+    if (!red) return undefined
+    const tasks = red.contributors.map((c) => `${c.taskId} (${c.seatId})`).join(' + ')
+    const failing = red.failures
+      .map((f) => `\`${f.command}\` exited ${f.exitCode ?? 'without a status'}`)
+      .join(', ')
+    return (
+      `the integration checkout fails its configured checks — ${failing} — after merging ${tasks}; ` +
+      `each seat's own work was green in its own tree and no merge conflicted`
+    )
+  }
+
+  /**
+   * An outcome `#halt` already emitted, amended if the drain that followed it left a red tree.
+   *
+   * The ordering here is the honest limitation recorded on `Closing`: a halt calls `#end`
+   * itself, so `run_end` is on the stream before the seats still in flight have merged. What
+   * the CALLER gets back can still be true, and a run that ends holding a tree that does not
+   * build must say so in every place it says anything.
+   */
+  #redAware(outcome: RunOutcome): RunOutcome {
+    const note = this.#integrationRedNote()
+    if (!note || outcome.detail?.includes(note)) return outcome
+    return { reason: outcome.reason, detail: outcome.detail === undefined ? note : `${outcome.detail}. ${note}` }
   }
 
   /**
@@ -2680,11 +2800,23 @@ export class Relay {
       this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text })
     }
     try {
-      const result = integrateSeat(manifest, tree, {
-        taskId: task.id,
-        seq: task.seq,
-        advisorTurn: task.origin,
-      })
+      const result = integrateSeat(
+        manifest,
+        tree,
+        {
+          taskId: task.id,
+          seq: task.seq,
+          advisorTurn: task.origin,
+        },
+        // The run's already-configured checks, against the tree the merge just produced. No
+        // second option to arm: an operator who has said what "working" means for this
+        // project has said it, and a station that needs saying twice is a station that will
+        // not be armed on the run that needs it (#80).
+        {
+          checks: this.#opts.rotation?.checks,
+          checkTimeoutMs: this.#opts.rotation?.checkTimeoutMs,
+        },
+      )
       if (result.status !== 'blocked') {
         if (result.status === 'nothing_to_merge') {
           note(`${seatId} changed nothing for ${task.id}; nothing to integrate`)
@@ -2698,6 +2830,10 @@ export class Relay {
           const cleared = `${seatId}'s merge conflict is resolved and its work is in the integration checkout. It takes ordinary work again.`
           note(cleared)
           this.#tellLead(cleared)
+        }
+        if (result.status === 'merged') {
+          const red = this.#judgeIntegration(task, seatId, result.integrationSha, result.checks, note)
+          if (red) return red
         }
         return { kind: 'clear' }
       }
@@ -2785,6 +2921,87 @@ export class Relay {
         ],
       }
     }
+  }
+
+  /**
+   * What the configured checks said about the tree this merge produced (#80).
+   *
+   * Called once per merge that actually went in, and it is the only place the run learns
+   * anything about the INTEGRATION result. Everything before it -- git reporting no conflict,
+   * every seat's own checks passing in every seat's own tree -- is compatible with a tree that
+   * does not build, which is what the first real two-seat run produced.
+   *
+   * Returns the red outcome, or `undefined` when the tree is green or unchecked. The caller
+   * decides what a red one costs; this decides only what is true.
+   */
+  #judgeIntegration(
+    task: Task,
+    seatId: string,
+    integrationSha: string,
+    checks: IntegrationCheckResult[],
+    note: (text: string) => void,
+  ): BoundaryOutcome | undefined {
+    const merge: MergeContribution = { taskId: task.id, seatId, integrationSha }
+    this.#merges.push(merge)
+    // Unchecked is not green, and it is not red either. A run with no integration checks
+    // configured says nothing about its tree, and saying nothing is the honest answer.
+    if (checks.length === 0) return undefined
+
+    // Reported whatever their relevance, because an operator reading the log is entitled to
+    // see a check that did not pass even when it was declared not to decide anything.
+    for (const c of checks.filter((c) => c.exitCode !== 0)) {
+      note(
+        `integration check \`${c.command}\` exited ${c.exitCode ?? 'without a status'} ` +
+          `[${c.relevance}] after ${task.id} merged at ${integrationSha.slice(0, 12)}`,
+      )
+    }
+
+    const failures = failedRequired(checks)
+    if (failures.length === 0) {
+      // Green, and this is the ONLY thing that clears a red tree. A repair that was dispatched
+      // and a seat that reports success are both claims; this is the measurement.
+      if (this.#integrationRed) {
+        const cleared = `the integration checkout passes its checks again at ${integrationSha.slice(0, 12)}.`
+        note(cleared)
+        this.#tellLead(cleared)
+      }
+      this.#integrationRed = undefined
+      this.#lastGreenMerge = this.#merges.length - 1
+      return undefined
+    }
+
+    // The combination, not the last merge. Everything from the last merge that was GREEN
+    // through this one is in the tree and is part of what is red; before that green point the
+    // tree was measured working, so those tasks are not implicated by this failure.
+    const from = this.#lastGreenMerge ?? 0
+    const contributors = this.#merges.slice(from)
+    this.#integrationRed = { contributors, failures }
+    return { kind: 'integration_red', contributors, failures }
+  }
+
+  /**
+   * How the advisor is told a merge produced a red tree, and what it is asked to do about it.
+   *
+   * Deliberately NOT the `merge_blocked` wording one function up, and the difference is the
+   * point of #80. That notice says "your next instruction goes to THIS seat, this is its
+   * conflict, in its own worktree" -- correct for a conflict, wrong here. Neither seat did
+   * anything wrong, so the repair cannot be assigned by fault; it names both tasks, says the
+   * failure belongs to their combination, and leaves the choice of seat to the advisor, which
+   * is the only participant that can see both halves.
+   */
+  #tellLeadIntegrationRed(red: { contributors: MergeContribution[]; failures: IntegrationCheckResult[] }): void {
+    const tasks = red.contributors.map((c) => `${c.taskId} (${c.seatId})`).join(' + ')
+    const failing = red.failures
+      .map((f) => `\`${f.command}\` exited ${f.exitCode ?? 'without a status'}:\n${f.output || '(no output)'}`)
+      .join('\n\n')
+    this.#tellLead(
+      `The integration checkout now fails its configured checks. Every merge was clean and every ` +
+        `seat's own work was green in its own tree; what is red is the COMBINATION of ${tasks}. ` +
+        `No seat is blocked and no seat is at fault, so this is not assigned for you: dispatch a ` +
+        `repair task for it, to whichever seat you judge best placed, and say in the instruction ` +
+        `that the seat must read BOTH halves — the defect exists in neither of them alone. Naming ` +
+        `one seat as the cause would be a guess.\n\n${failing}`,
+    )
   }
 
   /**
@@ -3122,7 +3339,9 @@ export class Relay {
         // The drain is over when nothing is outstanding. Everything below is skipped while
         // `closing` is set, so this is the only way out of a run that has decided to end.
         if (closing && outstanding() === 0) {
-          return closing.kind === 'end' ? this.#end(closing.reason, closing.detail) : closing.outcome
+          return closing.kind === 'end'
+            ? this.#end(closing.reason, closing.detail)
+            : this.#redAware(closing.outcome)
         }
         if (!closing) {
         // Every ceiling at the dispatch boundary, before anything is admitted or assigned, and
@@ -3660,8 +3879,37 @@ export class Relay {
         // A boundary that did not merge takes the other branch. It must not record `integrated`:
         // that fact is what dependents are released against, and a conflicted task claiming it
         // would let work run on a base that never absorbed the thing it depends on.
+        //
+        // `integration_red` takes the SAME branch as a clear boundary, and that is not an
+        // oversight: the merge went in, the work is in the tree, and a dependent released
+        // against it is released against a base that really did absorb it. What is wrong with
+        // the tree is a separate fact, and it is carried by `#integrationRed` rather than by
+        // pretending the merge did not happen.
         if (boundary.kind === 'blocked') this.#failBoundary(task, exec)
         else this.#integrate(task, exec)
+
+        // A red integration tree, and the fork the addendum to #80 is about: while the run is
+        // still admitting work there is a seat to repair it, so it becomes a repair the advisor
+        // dispatches; once the run has decided to end there is not, and queueing a task nobody
+        // will ever take would be the silent version of the same failure. Either way
+        // `#integrationRed` stands until a later merge measures the tree green, so an ending
+        // that arrives with it set cannot report success -- see `#end`.
+        if (boundary.kind === 'integration_red') {
+          if (closing) {
+            this.#record({
+              from: 'orchestrator',
+              fromRank: 'human',
+              to: [],
+              kind: 'note',
+              text:
+                `the integration checkout is red after the final merge (${boundary.contributors
+                  .map((c) => c.taskId)
+                  .join(' + ')}) and no seat remains to repair it; the run reports it as its outcome`,
+            })
+          } else {
+            this.#tellLeadIntegrationRed(boundary)
+          }
+        }
 
         // The second failure against the same integration parent. The repair was dispatched, it
         // came back, and the merge still will not go -- so another advisor turn is another turn

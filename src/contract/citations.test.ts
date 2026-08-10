@@ -71,38 +71,41 @@ const CITED: Record<string, string> = {
   // evidence FOR a divergence that no longer exists, so there is nothing left for them to point
   // at. What replaced them is cited by symbol -- `flagReader` and `PASS_THROUGH_FLAGS` in
   // src/config/cliFlags.ts -- which needs no line to survive.
-  'bin/conclave.ts:1132': 'cwd: process.cwd(),',
-  'bin/conclave.ts:1219': 'runReport(relay, { goal, outcome, startedAt: runStartedAt, build })',
+  //
+  // The three below moved twice over, once for #81 and once for #80's integration work in the
+  // same file, and are pinned against the merged tree rather than against either side of it.
+  'bin/conclave.ts:1145': 'cwd: process.cwd(),',
+  'bin/conclave.ts:1232': 'runReport(relay, { goal, outcome, startedAt: runStartedAt, build })',
   // One flag for every implementer seat, which is why per-seat launch args are not yet
   // expressible on the command line.
-  'bin/conclave.ts:998-1001': "...extraArgs(flag('implementer-args', ''))",
+  'bin/conclave.ts:1011-1014': "...extraArgs(flag('implementer-args', ''))",
   'src/config/project.ts:160-163': 'export function launchArgsFor',
   'src/registry/roles.ts:15': 'export type RoleId = string',
   // The relay.ts citations below moved together when `launch` was added to RelayParticipant
   // and `#join` (#71). Repaired rather than deleted: each still points at the thing it was
   // written about, and the one whose LINE no longer says what it said -- `#join` now passes a
   // named context object rather than an inline literal -- is pinned on the new spelling.
-  'src/relay/relay.ts:1065-1067': 'get cwd(): string',
-  'src/relay/relay.ts:1172-1178': 'createParticipant(spec, ctx)',
-  'src/relay/relay.ts:1671': 'worktreePaths(this.#opts.cwd)',
-  'src/relay/relay.ts:1689': 'NOT ARMED (no checks configured)',
-  'src/relay/relay.ts:1718': 'worktreePaths(this.#opts.cwd)',
-  'src/relay/relay.ts:2109': 'resolutionFor(p.subject, { rotationArmed: armed })',
-  'src/relay/relay.ts:2271-2276': 'No rotation checks are configured',
-  'src/relay/relay.ts:2277': "onDegradation ?? 'candidate'",
-  'src/relay/relay.ts:2903': 'worktreePaths(this.#opts.cwd)',
-  'src/relay/relay.ts:3241': "subject: { reason: 'turn_incomplete', participant: lead.id }",
-  'src/relay/relay.ts:3491': "subject: { reason: 'implementer_unanswered', participant: seat.id }",
-  'src/relay/relay.ts:3624': "subject: { reason: 'turn_incomplete', participant: seat.id }",
+  'src/relay/relay.ts:1137-1139': 'get cwd(): string',
+  'src/relay/relay.ts:1244-1250': 'createParticipant(spec, ctx)',
+  'src/relay/relay.ts:1791': 'worktreePaths(this.#opts.cwd)',
+  'src/relay/relay.ts:1809': 'NOT ARMED (no checks configured)',
+  'src/relay/relay.ts:1838': 'worktreePaths(this.#opts.cwd)',
+  'src/relay/relay.ts:2229': 'resolutionFor(p.subject, { rotationArmed: armed })',
+  'src/relay/relay.ts:2391-2396': 'No rotation checks are configured',
+  'src/relay/relay.ts:2397': "onDegradation ?? 'candidate'",
+  'src/relay/relay.ts:3120': 'worktreePaths(this.#opts.cwd)',
+  'src/relay/relay.ts:3460': "subject: { reason: 'turn_incomplete', participant: lead.id }",
+  'src/relay/relay.ts:3710': "subject: { reason: 'implementer_unanswered', participant: seat.id }",
+  'src/relay/relay.ts:3843': "subject: { reason: 'turn_incomplete', participant: seat.id }",
   'src/relay/resolution.ts:188': 'export function resolutionFor',
   'src/relay/run.ts:51': "| 'implementer_unanswered'",
   'src/relay/run.ts:169-183': 'reason: PauseReason',
   'src/relay/run.ts:183': 'resolution: ResolutionRequest',
   'src/relay/subagents.ts:68': 'export function worktreePaths',
-  'src/repl/session.ts:189-202': 'turnWatchdogMs?: number | undefined',
-  'src/repl/session.ts:524': 'escalates to you rather than being replaced',
-  'src/repl/session.ts:676': 'logPath: runLogPath,',
-  'src/repl/session.ts:850': "recording.set('paused', { pause: run.pause })",
+  'src/repl/session.ts:199-212': 'turnWatchdogMs?: number | undefined',
+  'src/repl/session.ts:528': 'escalates to you rather than being replaced',
+  'src/repl/session.ts:680': 'logPath: runLogPath,',
+  'src/repl/session.ts:854': "recording.set('paused', { pause: run.pause })",
 }
 
 /**
@@ -273,8 +276,8 @@ test('the scanner sees both citation forms, so neither can be added unnoticed', 
   assert.deepEqual(citationsInLine('// see src/relay/run.ts:51 for the reason'), [
     { path: 'src/relay/run.ts', start: 51, end: 51, text: 'src/relay/run.ts:51' },
   ])
-  assert.deepEqual(citationsInLine(' * a range (`bin/conclave.ts:998-1001`) is one citation'), [
-    { path: 'bin/conclave.ts', start: 998, end: 1001, text: 'bin/conclave.ts:998-1001' },
+  assert.deepEqual(citationsInLine(' * a range (`bin/conclave.ts:1011-1014`) is one citation'), [
+    { path: 'bin/conclave.ts', start: 1011, end: 1014, text: 'bin/conclave.ts:1011-1014' },
   ])
   // The continuation form, and the reason it is worth the regex: two of the three citations on
   // this shape of line carry no path of their own.
