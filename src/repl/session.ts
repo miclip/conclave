@@ -208,11 +208,19 @@ export interface SessionOptions {
    * This is the messages, which is what a resume needs.
    */
   runLog?: string | undefined
-  /** Streams for testing; defaults to the process's own. */
-  input?: NodeJS.ReadableStream
-  output?: NodeJS.WritableStream
+  /**
+   * Streams for testing; defaults to the process's own.
+   *
+   * Explicitly `| undefined`, like most of this interface, so a caller can pass the field
+   * through unconditionally. Under `exactOptionalPropertyTypes` the alternative is a
+   * conditional spread at every call site -- and a spread is not excess-property checked,
+   * so a mistyped key in one compiles and is silently dropped. That is how
+   * `turnWatchdogMs` above went unwired for its whole life.
+   */
+  input?: NodeJS.ReadableStream | undefined
+  output?: NodeJS.WritableStream | undefined
   /** Injected for testing. Production uses the built-in registry. */
-  registry?: AgentRegistry
+  registry?: AgentRegistry | undefined
   /**
    * Injected for testing the console's child-liveness guard.
    *

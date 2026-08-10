@@ -579,8 +579,26 @@ async function streamEvents(found: ReadSession, follow: boolean): Promise<number
  * call it parsed is the call that runs.
  */
 export interface MainOverrides {
-  /** Replaces `defaultRegistry()` for the `relay` command. */
+  /**
+   * Replaces `defaultRegistry()` for BOTH front-ends.
+   *
+   * It reached `relay` only, which left the `session` block below in exactly the position
+   * `relay` was in before this seam existed: the participants the console CLI constructs
+   * were reachable from no test, and what stood in for one was a regex over this file
+   * (#69). `runSession` has had `SessionOptions.registry` all along -- the console tests
+   * called it directly and skipped the argv parsing, which is the half that breaks.
+   */
   registry?: AgentRegistry
+  /**
+   * The console's streams. Production passes nothing and the session attaches to the
+   * process's own; see `SessionOptions.input`/`output`.
+   *
+   * Required for the registry override to be usable here at all: an in-process
+   * `main(['session', ...])` with no streams draws a live console over the test
+   * reporter's stdout and reads its stdin.
+   */
+  input?: NodeJS.ReadableStream
+  output?: NodeJS.WritableStream
 }
 
 export async function main(argv: string[], overrides: MainOverrides = {}): Promise<number> {
@@ -1210,6 +1228,17 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
       ...(implementerArgs.length > 0 ? { implementerArgs } : {}),
       version: version(),
       ...(turnTimeout ? { turnWatchdogMs: Number(turnTimeout) * 1000 } : {}),
+      // Testing seams, and nothing production passes. Wiring one into `relay` and not here
+      // is the mistake this codebase keeps making, and this time it made the console CLI
+      // itself untestable rather than a flag unreachable.
+      //
+      // Assigned rather than conditionally spread, which is why the three fields are
+      // declared `| undefined` on SessionOptions: a spread is not excess-property checked,
+      // so `{ registy: ... }` inside one compiles and drops the seam without a word. These
+      // keys are now the compiler's problem rather than a reviewer's.
+      registry: overrides.registry,
+      input: overrides.input,
+      output: overrides.output,
     })
   }
 
