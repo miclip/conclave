@@ -60,6 +60,19 @@ import { rotate, type RotationResult } from '../rotation/rotate.ts'
 import type { CheckSpec } from '../rotation/record.ts'
 import { resumeBriefing } from './resume.ts'
 import { breached, type Ceilings } from './guardrails.ts'
+import {
+  dependenciesMet,
+  nextDispatch,
+  parseDecisions,
+  recordCompletion,
+  refuseDispatch,
+  type SeatExecution,
+  type Task,
+  type TaskEvent,
+  type TaskGrade,
+  type TaskRuntime,
+  type TaskTarget,
+} from './dispatch.ts'
 import { isSubagentTool, worktreePaths } from './subagents.ts'
 import type { ClockSupport } from '../registry/types.ts'
 
@@ -1819,6 +1832,200 @@ export class Relay {
     }
   }
 
+  /**
+   * The task queue: immutable records of what the advisor decided, in admission order.
+   *
+   * Append-only, and never edited after admission. Anything that would be an edit is instead a
+   * new record or a change to `#taskRuntime`, which references it. See `dispatch.ts` for why
+   * the two are separate structures and why only this class touches either.
+   */
+  #queue: Task[] = []
+  /** What happened to each task, keyed by `Task.id`. */
+  #taskRuntime = new Map<string, TaskRuntime>()
+  /**
+   * Per-seat execution state, keyed by participant id.
+   *
+   * Built from the seats work can be dispatched TO. The advisor is not one of them at any N --
+   * it is the seat that decides what the others do, which is a fact about rank rather than
+   * about how many implementers there are (D5). Keyed by id rather than holding the
+   * participant, so it survives a rotation: `rotateImplementer` swaps the SESSION in place and
+   * keeps the id, precisely so existing references stay valid.
+   */
+  #seatState = new Map<string, SeatExecution>()
+  #taskSeq = 0
+  /**
+   * A monotonic counter stamped on every dispatcher transition.
+   *
+   * Wall clock cannot answer "was the next task assigned before the previous verdict was
+   * graded?" -- two transitions in the same millisecond are indistinguishable, and that is
+   * exactly the pair a scheduling change reorders without anyone noticing. This can.
+   *
+   * Deliberately NOT a `#record` note. D4 asks each transition to write one so the routing log
+   * explains the schedule as well as the traffic, and that is right the day seats run
+   * concurrently -- but at N=1 it would add messages to a log whose numbering is asserted
+   * contiguous, for a schedule that has exactly one shape. The marks carry the same ordering
+   * evidence without changing what a default run records.
+   */
+  #ordinal = 0
+
+  /**
+   * The dispatcher's account of this run: what was admitted, and what became of it.
+   *
+   * Deep copies, sharing nothing with the originals. The queue and the runtime are Relay's
+   * alone (D4), and a caller holding a live reference is the second writer the rule exists to
+   * prevent -- `readonly` on `Task` stops the compiler and stops nothing at runtime, and a
+   * shallow copy leaves `target`, `dependsOn`, `restrictedOrigins`, the marks and the verdict's
+   * provenance all pointing at the objects the dispatcher is still scheduling against.
+   *
+   * `structuredClone` rather than a copy written out field by field, deliberately: a hand-rolled
+   * copy shares every nested field added after it was written, and it fails silently the day
+   * `TaskRuntime` grows one. This cannot.
+   */
+  tasks(): { task: Task; runtime: TaskRuntime }[] {
+    return this.#queue.map((task) => ({
+      task: structuredClone(task),
+      runtime: structuredClone(this.#taskRuntime.get(task.id)!),
+    }))
+  }
+
+  /** Per-seat execution state, copied the same way and for the same reason. */
+  seats(): SeatExecution[] {
+    return [...this.#seatState.values()].map((s) => structuredClone(s))
+  }
+
+  #mark(task: Task, event: TaskEvent): void {
+    this.#taskRuntime.get(task.id)!.marks.push({ event, ordinal: ++this.#ordinal })
+  }
+
+  /**
+   * Admit a task. The advisor PROPOSES; the dispatcher validates and admits, and this is the
+   * only place a `Task` record comes into existence.
+   *
+   * The dependency check runs even though nothing the advisor can currently write carries a
+   * dependency: a rule that only starts running once there is something to test it with is a
+   * rule nobody has tested.
+   */
+  #admit(instruction: string, target: TaskTarget, origin: number): Task {
+    const task: Task = {
+      id: `t-${++this.#taskSeq}`,
+      seq: this.#taskSeq,
+      origin,
+      instruction,
+      target,
+      dependsOn: [],
+      // Snapshotted at admission, so the conflict question is answered against the restricted
+      // messages that existed when the advisor decided rather than against later ones.
+      restrictedOrigins: this.restrictedOrigins.map((o) => o.seq),
+      admittedAt: Date.now(),
+    }
+    this.#queue.push(task)
+    this.#taskRuntime.set(task.id, { state: 'admitted', marks: [] })
+    this.#mark(task, 'admitted')
+    if (dependenciesMet(task, this.#taskRuntime)) {
+      this.#taskRuntime.get(task.id)!.state = 'ready'
+      this.#mark(task, 'ready')
+    }
+    return task
+  }
+
+  /**
+   * Hand a ready task to a seat, and refuse if that seat is not free.
+   *
+   * The ungraded refusal is the one this exists for. A seat is free when its turn ended AND its
+   * verdict is graded (D4): a `timed_out (uncertain)` seat must not be handed more work, and
+   * freeing it at `turn_end` would do exactly that while looking like a scheduling decision
+   * somebody made. Enforced here rather than left to the order of the calls, because a
+   * two-stage release is precisely the kind of ordering a later change collapses by accident.
+   *
+   * Admission is deliberately NOT guarded this way. A queue may hold work for a busy seat --
+   * that is a scheduling wait, and refusing it would reintroduce lockstep at the front door.
+   */
+  #assign(task: Task, seat: SeatExecution): void {
+    const refusal = refuseDispatch(seat, this.#taskRuntime)
+    if (refusal) throw new Error(`dispatcher refused ${task.id}: ${refusal}`)
+    const runtime = this.#taskRuntime.get(task.id)!
+    runtime.state = 'assigned'
+    runtime.seat = seat.seat
+    seat.current = task.id
+    seat.state = 'running'
+    seat.dispatched += 1
+    this.#mark(task, 'assigned')
+  }
+
+  /** The turn is sent. This is the point `#exchange` counts against the turn ceiling. */
+  #sending(task: Task): void {
+    const runtime = this.#taskRuntime.get(task.id)!
+    runtime.state = 'running'
+    runtime.sentAt = Date.now()
+    this.#mark(task, 'sent')
+  }
+
+  /**
+   * The turn ended, settled, and its report was recorded.
+   *
+   * The seat becomes `integrating`: not running, and not available. The report being ready and
+   * the tree being ready are different facts, and at N>1 handing this seat new work here would
+   * write into a tree the boundary flow is still committing.
+   */
+  #reported(task: Task, seat: SeatExecution, reportSeq: number, unsettled: boolean): void {
+    const runtime = this.#taskRuntime.get(task.id)!
+    runtime.endedAt = Date.now()
+    runtime.unsettled = unsettled
+    runtime.reportSeq = reportSeq
+    runtime.state = 'reported'
+    seat.state = 'integrating'
+    this.#mark(task, 'ended')
+    this.#mark(task, 'reported')
+  }
+
+  /**
+   * The verdict, resolved through supersession and judged. No seat is freed without one.
+   *
+   * `end` is the event the verdict was READ FROM -- the replacement when a late revision
+   * withdrew the original. Recorded here rather than when the turn ended, because until this
+   * point there is no answer to which event that is, and a field holding the withdrawn one in
+   * the meantime would say something the relay had already stopped believing.
+   */
+  #grade(task: Task, end: TurnEndEvent, grade: TaskGrade): void {
+    const runtime = this.#taskRuntime.get(task.id)!
+    runtime.end = end
+    runtime.grade = grade
+    this.#mark(task, 'graded')
+  }
+
+  /**
+   * The integration boundary, and the release it earns.
+   *
+   * At N=1 there is nothing to commit: one tree, and it is the operator's cwd (D1). A
+   * no-change boundary passes straight through rather than being treated as an error -- most
+   * tasks at any N change no files, and requiring a commit to free a seat would deadlock every
+   * read-only one.
+   */
+  #integrate(task: Task, seat: SeatExecution): void {
+    const runtime = this.#taskRuntime.get(task.id)!
+    if (runtime.grade === undefined) {
+      throw new Error(`dispatcher cannot free ${seat.seat}: ${task.id} has no graded verdict`)
+    }
+    recordCompletion(runtime, 'integrated', Date.now())
+    this.#mark(task, 'integrated')
+    seat.current = undefined
+    seat.state = 'idle'
+    seat.idleSince = Date.now()
+    this.#mark(task, 'released')
+  }
+
+  /**
+   * The report reached the advisor.
+   *
+   * Independent of integration, and a task reaches the two in either order: the advisor must
+   * not wait on a merge to hear what a seat found, and a seat whose integration succeeded must
+   * not idle through an advisor turn to collect its next task.
+   */
+  #routed(task: Task): void {
+    recordCompletion(this.#taskRuntime.get(task.id)!, 'routed', Date.now())
+    this.#mark(task, 'routed')
+  }
+
   async #runLoop(goal: string, handle: RunHandle | undefined): Promise<RunOutcome> {
     const lead = this.participants.find((p) => p.rank === 'advisor')!
     const impl = this.participants.find((p) => p.rank === 'implementer')!
@@ -1848,9 +2055,37 @@ export class Relay {
     this.#startedAt = Date.now()
     this.#worktreesAtStart = worktreePaths(this.#opts.cwd)
     this.#worktreesSeen = new Set(this.#worktreesAtStart)
-    for (let round = 1; round <= maxRounds; round++) {
-      // At the boundary rather than on a timer. A run cannot be interrupted mid-turn without
-      // discarding that turn's work -- the same reason #exchange has no timeout of its own.
+    this.#seatState = new Map(
+      this.participants
+        .filter((p) => p.rank === 'implementer')
+        .map((p): [string, SeatExecution] => [
+          p.id,
+          { seat: p.id, role: p.role, state: 'idle', idleSince: this.#startedAt, dispatched: 0 },
+        ]),
+    )
+    // The target for an instruction that names none, which is every instruction the advisor can
+    // currently write: there is no target syntax in its briefing, and inventing one here would
+    // change what the advisor is asked to produce rather than how the relay schedules it. The
+    // ROLE rather than the seat id, because the rule that resolves it -- longest-idle seat
+    // filling the role -- is the same rule at any N, and at N=1 it has exactly one answer.
+    const untargeted: TaskTarget = { kind: 'role', role: impl.role }
+
+    // The dispatcher. One iteration is one ADMISSION CYCLE: the advisor's standing reply is
+    // read as assignment decisions, at most one task is admitted, and that task runs to a
+    // graded verdict and a released seat before the next cycle can admit anything.
+    //
+    // At N=1 this IS the round loop it replaced -- same turns, in the same order, producing the
+    // same routing log -- because a queue that admits one task at a time and a table with one
+    // dispatchable seat is a round (D1). Nothing here counts seats.
+    //
+    // `maxRounds` survives as the bound on admission cycles rather than being reinterpreted or
+    // removed. It stops describing the structure the day a second seat exists and D8 removes it
+    // then; doing it here would change `RelayOptions` and both front-ends for no behaviour.
+    for (let cycle = 1; ; cycle++) {
+      // Every ceiling at the dispatch boundary, before anything is admitted or assigned, and
+      // never mid-turn. A run cannot be interrupted mid-turn without discarding that turn's
+      // work -- the same reason #exchange has no timeout of its own.
+      if (cycle > maxRounds) break
       const ceiling = this.#opts.ceilings
         ? breached(this.#opts.ceilings, {
             elapsedMs: Date.now() - this.#startedAt,
@@ -1875,7 +2110,7 @@ export class Relay {
         const halted = await this.#halt(handle, {
           subject: { reason: 'operator_requested' },
           detail: reason,
-          evidence: [`round ${round} of ${maxRounds}; no turn is in flight`],
+          evidence: [`round ${cycle} of ${maxRounds}; no turn is in flight`],
         })
         if (halted) return halted
       }
@@ -1913,7 +2148,15 @@ export class Relay {
         instruction = second.rest.trim()
       }
 
-      // An advisor turn that ended badly, or produced nothing at all, must not be forwarded.
+      // The reply, read as assignment decisions. Fails closed: a reply that does not parse
+      // cleanly -- including one naming a seat id or role the run does not have -- is treated
+      // exactly as an empty instruction is treated today, by the guard immediately below.
+      // Guessing at an ambiguous reply would let a parser invent work nobody authorised, and
+      // guessing at an unrecognised target would let it invent a seat.
+      const decisions = parseDecisions(instruction, [...this.#seatState.values()], untargeted)
+
+      // An advisor turn that ended badly, or produced nothing that can be admitted, must not be
+      // forwarded.
       //
       // The `turn_incomplete` guard below covers the IMPLEMENTER only, so an advisor whose
       // turn errored was relayed as an empty instruction: the implementer received a routing
@@ -1924,11 +2167,17 @@ export class Relay {
       // Two conditions, because they fail differently. A bad verdict carries a reason worth
       // reporting; an empty body on a clean verdict does not, and is the minimum bar either
       // way -- there is no circumstance in which relaying nothing is the right move.
-      if (next.end.verdict.outcome !== 'completed' || instruction === '') {
+      if (next.end.verdict.outcome !== 'completed' || !decisions.ok) {
         const why =
           next.end.verdict.outcome !== 'completed'
             ? `${lead.id} turn ended ${formatVerdict(next.end.verdict)}`
-            : `${lead.id} produced no instruction`
+            : // EVERY parse failure, not just the empty reply: one sentence, and it is the one
+              // an empty instruction has always produced. D4 says an unparseable reply is
+              // treated exactly as an empty instruction is treated today, and a second wording
+              // would be a divergence in the operator-visible path -- the kind the guards can
+              // only pin as an exact string. `ParseFailure` still carries `why` and `detail`
+              // for whenever surfacing them is a change somebody declares on purpose.
+              `${lead.id} produced no instruction`
         const evidence = next.end.verdict.provenance.map((v) => `${v.source}: ${v.detail}`)
         this.#record({
           from: 'orchestrator',
@@ -1957,7 +2206,13 @@ export class Relay {
         continue
       }
 
-      if (/^DONE\b/i.test(instruction)) {
+      // Exactly one decision per reply today: the advisor emits one instruction per turn and
+      // has no syntax for more. `parseDecisions` is where a reply becomes several, and this is
+      // the line that has to change with it -- silently taking the first of a longer list would
+      // be the dispatcher dropping work the advisor asked for.
+      const decision = decisions.decisions[0]!
+
+      if (decision.kind === 'done') {
         // §7a, first paragraph: "The advisor can end the session; the human outranks that
         // and can send them back to work." Returning here regardless let the advisor
         // terminate an outstanding human instruction out of existence -- the human message
@@ -1998,7 +2253,7 @@ export class Relay {
         await this.#closingQuestion(impl)
         return this.#end('done', instruction)
       }
-      if (/^ESCALATE\b/i.test(instruction)) {
+      if (decision.kind === 'escalate') {
         this.#record({ from: lead.id, fromRank: 'advisor', to: [], kind: 'note', text: instruction })
         const halted = await this.#halt(handle, {
           subject: { reason: 'advisor_escalated' },
@@ -2012,9 +2267,16 @@ export class Relay {
         continue
       }
 
+      // Admitted before anything is delivered, so the record of what the advisor decided exists
+      // whether or not it survives adjudication. Admission logs nothing: the task record is the
+      // dispatcher's account of the schedule, and the routing log stays the account of what
+      // actually moved between participants.
+      const task = this.#admit(decision.instruction, decision.target, next.end.seq)
+
       // BEFORE delivery, not after. The point of the pause is that the human adjudicates
-      // while the instruction is still a proposal.
-      const conflict = detectConflict(instruction, this.restrictedOrigins)
+      // while the instruction is still a proposal. Once per admission rather than once per
+      // dispatch, which is why the task carries the restricted origins it was judged against.
+      const conflict = detectConflict(task.instruction, this.restrictedOrigins)
       if (conflict && !this.#adjudicated.has(`${conflict.origin.seq}:${instruction}`)) {
         this.#adjudicated.add(`${conflict.origin.seq}:${instruction}`)
         const halted = await this.#halt(handle, {
@@ -2046,22 +2308,45 @@ export class Relay {
         this.#adjudicate(impl.id, conflict.origin.seq)
       }
 
-      this.#record({ from: lead.id, fromRank: 'advisor', to: [impl.id], kind: 'instruction', text: instruction })
-      const aside = this.#drain(impl.id)
+      // The lowest-`seq` ready task whose target seat is free -- at N=1 the task just admitted
+      // and the one seat that can take it. Read out of the queue rather than used directly, so
+      // the scan that lets a later task overtake a blocked one is the code that runs today
+      // rather than the code that will be written when there is something to overtake.
+      const dispatch = nextDispatch(this.#queue, this.#taskRuntime, [...this.#seatState.values()])
+      if (!dispatch) {
+        // Unreachable while admission is serial: the previous cycle graded its verdict and
+        // released its seat before the advisor was asked for this instruction. Thrown rather
+        // than worked around, because there is no correct fallback -- waiting for a seat that
+        // nothing will ever free is a run that reports healthy forever. `#loop` turns this into
+        // an outcome, so the operator gets the sentence rather than a hang.
+        throw new Error(
+          `dispatcher has no free seat for ${task.id} targeting ` +
+            `${task.target.kind === 'seat' ? task.target.seat : `role ${task.target.role}`}`,
+        )
+      }
+      const seat = this.#participants.get(dispatch.seat.seat)!
+      this.#assign(dispatch.task, dispatch.seat)
+
+      this.#record({ from: lead.id, fromRank: 'advisor', to: [seat.id], kind: 'instruction', text: dispatch.task.instruction })
+      const aside = this.#drain(seat.id)
+      this.#sending(dispatch.task)
       const report = await this.#exchange(
-        impl,
-        [aside, envelope({ from: lead.id, fromRank: 'advisor', fromRole: lead.role, kind: 'instruction', text: instruction })]
+        seat,
+        [aside, envelope({ from: lead.id, fromRank: 'advisor', fromRole: lead.role, kind: 'instruction', text: dispatch.task.instruction })]
           .filter(Boolean)
           .join('\n\n'),
       )
-      this.#record({
-        from: impl.id,
+      const recorded = this.#record({
+        from: seat.id,
         fromRank: 'implementer',
         to: [lead.id],
         kind: 'report',
         text: report.prose,
         ...(report.unsettled ? { unsettled: true } : {}),
       })
+      // The seat is now `integrating`: not running, and not available. Its verdict has not been
+      // graded yet, and until it has, nothing can be dispatched to it.
+      this.#reported(dispatch.task, dispatch.seat, recorded.seq, report.unsettled)
 
       // A build-changing scope question is not a report the advisor can act on. The
       // implementer is the one that would choose an answer by continuing, so the loop stops
@@ -2073,10 +2358,10 @@ export class Relay {
         const question = questions[0]!
         const done = report.prose.replace(UNANSWERED_MARKER, '').trim().replace(/\n{3,}/g, '\n\n')
         const halted = await this.#halt(handle, {
-          subject: { reason: 'implementer_unanswered', participant: impl.id },
+          subject: { reason: 'implementer_unanswered', participant: seat.id },
           detail: `UNANSWERED: ${question}\n\nDone so far: ${done || '(nothing recorded)'}`,
           evidence: [
-            `${impl.id} asked a build-changing scope question that the instruction did not settle`,
+            `${seat.id} asked a build-changing scope question that the instruction did not settle`,
             report.prose,
           ],
         })
@@ -2115,7 +2400,7 @@ export class Relay {
           // reason names who is being asked to take it, and the scope follows the reason.
           subject: { reason: 'advisor_escalated' },
           detail:
-            `${impl.id}'s turn completed and its report could not be read, so there is ` +
+            `${seat.id}'s turn completed and its report could not be read, so there is ` +
             `nothing to route — ${lost}. The work is on disk; what is missing is the ` +
             `account of it, and a resume from this log starts with that turn saying nothing.`,
           evidence: [
@@ -2126,12 +2411,12 @@ export class Relay {
             // paths only, so a live run's three pauses carried it once -- and the two that
             // missed out were these, where "the report could not be read" is exactly when
             // knowing whether the child is still writing changes what the operator does.
-            ...(await this.#livenessEvidence(impl, report.emittedSinceSend)),
+            ...(await this.#livenessEvidence(seat, report.emittedSinceSend)),
           ],
         })
         if (halted) return halted
       }
-      this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text: `${impl.id} turn: ${formatVerdict(report.end.verdict)}` })
+      this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text: `${seat.id} turn: ${formatVerdict(report.end.verdict)}` })
       this.#attributeArtifacts()
 
       // The verdict may already be stale by the time we read it. `#exchange` settles on the
@@ -2139,7 +2424,7 @@ export class Relay {
       // transcript settle window that follows — the same window that is there because a
       // late `Stop` is expected. Pausing on a verdict the system has already retracted asks
       // the human to adjudicate nothing at all, so the current one is used instead.
-      const already = supersessionOf(impl.events, report.end)
+      const already = supersessionOf(seat.events, report.end)
       const current = already?.replacement ?? report.end
       if (already) {
         this.#record({
@@ -2148,7 +2433,7 @@ export class Relay {
           to: [],
           kind: 'note',
           text:
-            `${impl.id}'s ${report.end.verdict.outcome} verdict was withdrawn (${already.revision.reason})` +
+            `${seat.id}'s ${report.end.verdict.outcome} verdict was withdrawn (${already.revision.reason})` +
             (already.replacement
               ? ` and replaced with ${formatVerdict(already.replacement.verdict)}`
               : ` with no replacement`),
@@ -2166,6 +2451,15 @@ export class Relay {
             }
           : undefined
 
+      // GRADED. The verdict has been resolved through supersession and judged, which is the
+      // fact a seat's freedom rests on: a `timed_out (uncertain)` seat must not be handed more
+      // work, and a seat freed on `turn_end` alone would be. Everything below this line may
+      // halt the run; nothing below it may dispatch until `#integrate` has run.
+      this.#grade(dispatch.task, current, {
+        outcome: current.verdict.outcome,
+        superseded: already !== undefined,
+      })
+
       // A turn that did not complete is the human's call, not the advisor's. Escalating
       // here rather than relaying the partial prose keeps the advisor from steering on a
       // report that never finished being written.
@@ -2175,20 +2469,20 @@ export class Relay {
         if (handle) {
           this.#verdictPause = {
             handle,
-            participant: impl.id,
+            participant: seat.id,
             endSeq: current.seq,
             outcome: current.verdict.outcome,
             withdrawn: pre !== undefined,
           }
         }
         const halted = await this.#halt(handle, {
-          subject: { reason: 'turn_incomplete', participant: impl.id },
-          detail: `${impl.id} turn ended ${formatVerdict(current.verdict)}`,
+          subject: { reason: 'turn_incomplete', participant: seat.id },
+          detail: `${seat.id} turn ended ${formatVerdict(current.verdict)}`,
           evidence: [
             ...current.verdict.provenance.map((p) => `${p.source}: ${p.detail}`),
-            ...(await this.#livenessEvidence(impl, report.emittedSinceSend)),
+            ...(await this.#livenessEvidence(seat, report.emittedSinceSend)),
           ],
-          verdictOf: { participant: impl.id, endSeq: current.seq },
+          verdictOf: { participant: seat.id, endSeq: current.seq },
           ...(pre === undefined ? {} : { superseded: pre }),
         })
         this.#verdictPause = undefined
@@ -2197,16 +2491,25 @@ export class Relay {
 
       // §7a. Assessed before the advisor sees the report, so a degraded implementer is
       // replaced rather than issued another instruction it cannot act on well.
-      const rotated = await this.#considerRotation(impl, report.prose, handle)
+      const rotated = await this.#considerRotation(seat, report.prose, handle)
       if (rotated) return rotated
+
+      // The integration boundary, and the release it earns. Ahead of the advisor turn rather
+      // than after it: a seat whose work is integrated, with ready work waiting for it, must
+      // not idle through an advisor turn to collect it. At N=1 there is nothing waiting and
+      // nothing to commit, so this is where the seat simply becomes free again.
+      this.#integrate(dispatch.task, dispatch.seat)
 
       const leadAside = this.#drain(lead.id)
       next = await this.#exchange(
         lead,
-        [leadAside, envelope({ from: impl.id, fromRank: 'implementer', fromRole: impl.role, kind: 'report', text: report.prose })]
+        [leadAside, envelope({ from: seat.id, fromRank: 'implementer', fromRole: seat.role, kind: 'report', text: report.prose })]
           .filter(Boolean)
           .join('\n\n'),
       )
+      // The report has reached the advisor. Independent of integration above, and recorded
+      // separately: at N>1 a task reaches the two in either order.
+      this.#routed(dispatch.task)
     }
     return this.#end('budget')
   }
