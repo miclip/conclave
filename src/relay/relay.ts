@@ -160,12 +160,18 @@ export interface RelayParticipant {
 }
 
 /**
- * What a replacement must reproduce.
+ * What a replacement must reproduce -- and, since #80, what the merged tree must pass.
  *
  * Rotation without verification commands would be a transfer nobody demonstrated, which
  * is the thing §7a exists to prevent -- so leaving this unset does not disable the
  * *detection* of degradation, only the automatic response to it. A degraded implementer
  * with nothing to verify against escalates to the human instead.
+ *
+ * The name is now narrower than the field's use, and that is deliberate rather than
+ * unnoticed: renaming it would break every existing programmatic caller for a change that
+ * ADDS a reader, and `--checks` is the spelling operators and scripts already have. What is
+ * true is written here instead -- these commands are the run's statement of what "working"
+ * means, and two stations read it.
  */
 export interface RotationConfig {
   /**
@@ -174,6 +180,19 @@ export interface RotationConfig {
    * A bare string is `required`: a mismatch rolls the rotation back. Pass
    * `{command, relevance}` for a check that should be run and reported without gating the
    * transfer. Relevance is declared HERE, by the orchestrator, and never by a participant.
+   *
+   * ALSO run against the integration checkout after every merge, including the last (#80).
+   * Same commands, same relevance vocabulary, a different tree and a different question: a
+   * rotation asks whether a replacement reproduces what the original did, and the merge
+   * boundary asks whether the tree the seats built TOGETHER works. Two seats can each be
+   * green in their own worktree and merge cleanly into a tree that does not build, which is
+   * what a real two-seat run produced and what no other station could see.
+   *
+   * This changes what an existing N>1 configuration does -- these commands run more often,
+   * and a failure now means one of two things depending on where it happened. It changes
+   * nothing at N=1, where there is no merge to check. The alternative considered and
+   * rejected was a second option to arm separately; see `integrate.ts`, which records both
+   * the original objection to reusing this field and why the objection was overruled.
    */
   checks: CheckSpec[]
   /**
@@ -325,39 +344,6 @@ export interface RelayOptions {
   onLog?: (m: RelayMessage) => void
   /** Enables automatic rotation on mechanical degradation. See `RotationConfig`. */
   rotation?: RotationConfig
-  /** What the INTEGRATION checkout must satisfy after a merge. See `IntegrationConfig`. */
-  integration?: IntegrationConfig
-}
-
-/**
- * What the integrated tree must satisfy, checked after every merge including the last (#80).
- *
- * Its own option rather than a second reading of `rotation.checks`, and the separation is the
- * decision rather than an accident of naming. Rotation checks answer "can a replacement
- * reproduce what the original did", they run in ONE SEAT'S tree, and a failure rolls a
- * transfer back. These answer "does the tree the seats built together work", they run in the
- * integration checkout, and a failure belongs to a combination of tasks rather than to a seat.
- * Reusing the first option for the second would change what an operator's existing
- * configuration does -- how often those commands run and what their failure means -- without
- * them asking for it, which is the objection recorded in `integrate.ts` and it still holds.
- *
- * Absent is the default and is behaviourless: no checks run, and the merge boundary is exactly
- * what it was. It is also inert at N=1 by construction rather than by a seat count -- without
- * seat worktrees there is no merge, so there is no integration result distinct from the tree
- * the implementer has been working in all along.
- */
-export interface IntegrationConfig {
-  /**
-   * Commands the merged tree must pass, run through a shell from the integration checkout.
-   *
-   * A bare string is `required` and gates: its failure is the run's problem. Pass
-   * `{command, relevance}` for one that should be run and reported without gating, exactly as
-   * `rotation.checks` does -- the vocabulary is shared because relevance means the same thing
-   * in both places, and it is declared by the orchestrator in both.
-   */
-  checks: CheckSpec[]
-  /** Per-check ceiling. A hung check must not hang the boundary. Default 10 minutes. */
-  checkTimeoutMs?: number
 }
 
 /**
@@ -2822,9 +2808,13 @@ export class Relay {
           seq: task.seq,
           advisorTurn: task.origin,
         },
+        // The run's already-configured checks, against the tree the merge just produced. No
+        // second option to arm: an operator who has said what "working" means for this
+        // project has said it, and a station that needs saying twice is a station that will
+        // not be armed on the run that needs it (#80).
         {
-          checks: this.#opts.integration?.checks,
-          checkTimeoutMs: this.#opts.integration?.checkTimeoutMs,
+          checks: this.#opts.rotation?.checks,
+          checkTimeoutMs: this.#opts.rotation?.checkTimeoutMs,
         },
       )
       if (result.status !== 'blocked') {

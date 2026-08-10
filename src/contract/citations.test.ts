@@ -64,45 +64,45 @@ const SELF = 'src/contract/citations.test.ts'
  * together, which is the point: the two cannot drift apart without this test saying so.
  */
 const CITED: Record<string, string> = {
-  'bin/conclave.ts:812': 'const flag = (name: string, fallback: string) =>',
-  'bin/conclave.ts:812-815': 'return i >= 0 ? (rest[i + 1] ?? fallback) : fallback',
-  'bin/conclave.ts:1107': 'cwd: process.cwd(),',
-  'bin/conclave.ts:1198': 'runReport(relay, { goal, outcome, startedAt: runStartedAt, build })',
-  'bin/conclave.ts:1271': 'const flag = (name: string, fallback: string) =>',
-  'bin/conclave.ts:1271-1280': 'if (i < 0) return fallback',
+  'bin/conclave.ts:811': 'const flag = (name: string, fallback: string) =>',
+  'bin/conclave.ts:811-815': 'return i >= 0 ? (rest[i + 1] ?? fallback) : fallback',
+  'bin/conclave.ts:1090': 'cwd: process.cwd(),',
+  'bin/conclave.ts:1177': 'runReport(relay, { goal, outcome, startedAt: runStartedAt, build })',
+  'bin/conclave.ts:1250': 'const flag = (name: string, fallback: string) =>',
+  'bin/conclave.ts:1250-1259': 'if (i < 0) return fallback',
   // Why the console cannot be passed `--model x` through `--implementer-args`: its flag helper
   // reads a value beginning with `--` as a missing one. The relay's helper does not.
-  'bin/conclave.ts:1275': "value.startsWith('--')",
+  'bin/conclave.ts:1254': "value.startsWith('--')",
   // One flag for every implementer seat, which is why per-seat launch args are not yet
   // expressible on the command line.
-  'bin/conclave.ts:964-967': "...extraArgs(flag('implementer-args', ''))",
+  'bin/conclave.ts:956-959': "...extraArgs(flag('implementer-args', ''))",
   'src/config/project.ts:160-163': 'export function launchArgsFor',
   'src/registry/roles.ts:15': 'export type RoleId = string',
   // The relay.ts citations below moved together when `launch` was added to RelayParticipant
   // and `#join` (#71). Repaired rather than deleted: each still points at the thing it was
   // written about, and the one whose LINE no longer says what it said -- `#join` now passes a
   // named context object rather than an inline literal -- is pinned on the new spelling.
-  'src/relay/relay.ts:1151-1153': 'get cwd(): string',
-  'src/relay/relay.ts:1258-1264': 'createParticipant(spec, ctx)',
-  'src/relay/relay.ts:1805': 'worktreePaths(this.#opts.cwd)',
-  'src/relay/relay.ts:1823': 'NOT ARMED (no checks configured)',
-  'src/relay/relay.ts:1852': 'worktreePaths(this.#opts.cwd)',
-  'src/relay/relay.ts:2243': 'resolutionFor(p.subject, { rotationArmed: armed })',
-  'src/relay/relay.ts:2405-2410': 'No rotation checks are configured',
-  'src/relay/relay.ts:2411': "onDegradation ?? 'candidate'",
-  'src/relay/relay.ts:3130': 'worktreePaths(this.#opts.cwd)',
-  'src/relay/relay.ts:3470': "subject: { reason: 'turn_incomplete', participant: lead.id }",
-  'src/relay/relay.ts:3720': "subject: { reason: 'implementer_unanswered', participant: seat.id }",
-  'src/relay/relay.ts:3853': "subject: { reason: 'turn_incomplete', participant: seat.id }",
+  'src/relay/relay.ts:1137-1139': 'get cwd(): string',
+  'src/relay/relay.ts:1244-1250': 'createParticipant(spec, ctx)',
+  'src/relay/relay.ts:1791': 'worktreePaths(this.#opts.cwd)',
+  'src/relay/relay.ts:1809': 'NOT ARMED (no checks configured)',
+  'src/relay/relay.ts:1838': 'worktreePaths(this.#opts.cwd)',
+  'src/relay/relay.ts:2229': 'resolutionFor(p.subject, { rotationArmed: armed })',
+  'src/relay/relay.ts:2391-2396': 'No rotation checks are configured',
+  'src/relay/relay.ts:2397': "onDegradation ?? 'candidate'",
+  'src/relay/relay.ts:3120': 'worktreePaths(this.#opts.cwd)',
+  'src/relay/relay.ts:3460': "subject: { reason: 'turn_incomplete', participant: lead.id }",
+  'src/relay/relay.ts:3710': "subject: { reason: 'implementer_unanswered', participant: seat.id }",
+  'src/relay/relay.ts:3843': "subject: { reason: 'turn_incomplete', participant: seat.id }",
   'src/relay/resolution.ts:188': 'export function resolutionFor',
   'src/relay/run.ts:51': "| 'implementer_unanswered'",
   'src/relay/run.ts:169-183': 'reason: PauseReason',
   'src/relay/run.ts:183': 'resolution: ResolutionRequest',
   'src/relay/subagents.ts:68': 'export function worktreePaths',
   'src/repl/session.ts:199-212': 'turnWatchdogMs?: number | undefined',
-  'src/repl/session.ts:534': 'escalates to you rather than being replaced',
-  'src/repl/session.ts:689': 'logPath: runLogPath,',
-  'src/repl/session.ts:863': "recording.set('paused', { pause: run.pause })",
+  'src/repl/session.ts:528': 'escalates to you rather than being replaced',
+  'src/repl/session.ts:680': 'logPath: runLogPath,',
+  'src/repl/session.ts:854': "recording.set('paused', { pause: run.pause })",
 }
 
 /**

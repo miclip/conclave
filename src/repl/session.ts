@@ -159,18 +159,12 @@ export interface SessionOptions {
   /**
    * Verification commands. A bare string is `required`; pass `{command, relevance}` for a
    * check that should run and be reported without gating a transfer.
+   *
+   * Two stations read them (#80): what a replacement must reproduce, and — with more than
+   * one seat — what the MERGED tree must pass after every merge. One console run with one
+   * seat is unaffected by the second, which has no merge to check.
    */
   checks: CheckSpec[]
-  /**
-   * What the MERGED tree must pass, checked after every merge including the last (#80).
-   *
-   * A different question from `checks` above, which is why it is a different option: those
-   * say what a replacement must reproduce and run in one seat's own tree. These run in the
-   * integration checkout, and they are the only thing in the design that looks at the result
-   * two seats produced together. Absent is behaviourless, and there is nothing to check with
-   * one seat -- its tree IS the integration checkout, and no merge happens.
-   */
-  integrationChecks?: CheckSpec[] | undefined
   /**
    * Who is answering escalations.
    *
@@ -652,9 +646,6 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     ...(opts.implementers ? { implementers: implSpecs } : {}),
     maxAdvisorTurns: opts.rounds,
     ...(opts.checks.length > 0 ? { rotation: { checks: opts.checks } } : {}),
-    ...(opts.integrationChecks && opts.integrationChecks.length > 0
-      ? { integration: { checks: opts.integrationChecks } }
-      : {}),
     onLog: (m) => {
       // A message the operator just typed is already on screen twice over: the pinned row
       // shows the text itself while it waits, and `pendingRows` promotes it to a speaker

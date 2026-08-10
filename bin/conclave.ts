@@ -21,7 +21,7 @@ import {
   setPermissionMode,
 } from '../src/config/project.ts'
 import { formatConfigShow, formatConfigShowJson, showConfig } from '../src/config/show.ts'
-import { checkCommand, type CheckSpec } from '../src/rotation/record.ts'
+import type { CheckSpec } from '../src/rotation/record.ts'
 import type { ProjectConfig } from '../src/config/project.ts'
 import { runReport } from '../src/relay/report.ts'
 import { RunLogWriter, readRunLog, runLogExists } from '../src/relay/resume.ts'
@@ -134,8 +134,7 @@ Commands:
   relay "<goal>" [--advisor codex] [--implementer claude] [--implementers "claude,claude"]
                  [--rounds N] [--settle SECONDS]
                  [--checks "npm test"] [--checks-informational "..."]
-                 [--checks-unrelated "..."] [--integration-checks "npm test"]
-                 [--advisor-args "..."] [--implementer-args "..."]
+                 [--checks-unrelated "..."] [--advisor-args "..."] [--implementer-args "..."]
                  [--salvage SECONDS] [--json] [--resume <log>] [--record <path>] [--dry-run]
                  [--force]
                  [--max-turns N] [--max-minutes N] [--max-queue-depth N]
@@ -160,15 +159,16 @@ Commands:
                                    refused rather than reconciled. Seats are named
                                    implementer, implementer-2, ...; more than one gets a git
                                    worktree each and refuses to start on a dirty checkout.
-                                   --integration-checks runs against the MERGED tree after
-                                   every merge including the last, which nothing else looks
-                                   at: git reports conflicts and --checks run in one seat's
-                                   own tree, so every seat can pass while the tree they
-                                   produce together fails. A failure mid-run becomes a repair
-                                   naming both contributing tasks rather than blaming a seat;
-                                   after the final merge there is no seat left to repair it,
-                                   so the run ends integration_failed and exits non-zero.
-                                   Inert with one seat, which has no merge to check.
+                                   With more than one seat, --checks ALSO run against the
+                                   merged tree after every merge including the last. Nothing
+                                   else looks at it: git reports conflicts, and per-seat
+                                   checks run in one seat's own tree, so every seat can pass
+                                   while the tree they produce together fails. A failure
+                                   mid-run becomes a repair naming both contributing tasks
+                                   rather than blaming a seat; after the final merge there is
+                                   no seat left to repair it, so the run ends
+                                   integration_failed and exits non-zero. One seat has no
+                                   merge, so nothing about it changes.
                                    The goal is linted before anything starts: an ask with
                                    nothing observable in it cannot be graded better than
                                    reasoned_but_unverified however well the work goes.
@@ -252,8 +252,7 @@ Commands:
   session ["<goal>"] [--advisor codex] [--implementer claude]
                    [--implementers "claude,claude"] [--rounds N]
                    [--checks "npm test"] [--checks-informational "..."]
-                   [--checks-unrelated "..."] [--integration-checks "npm test"]
-                   [--advisor-args "..."] [--implementer-args "..."]
+                   [--checks-unrelated "..."] [--advisor-args "..."] [--implementer-args "..."]
                    [--bypass [agent]] [--operator agent] [--settle SECONDS]
                    [--salvage SECONDS] [--record <path>] [--resume <log>] [--force]
                    [--turn-timeout SECONDS] [--max-turns N] [--max-minutes N]
@@ -275,9 +274,9 @@ Commands:
                                    that do not exercise the transferred work.
                                    --checks enables rotation; without it a degraded
                                    implementer escalates rather than rotating unverified.
-                                   --integration-checks is the other station and as in
-                                   relay: run against the MERGED tree after every merge,
-                                   because a clean merge is not a correct merge.
+                                   With more than one seat they also run against the MERGED
+                                   tree after every merge, as in relay: a clean merge is not
+                                   a correct merge.
                                    --operator agent as in relay. Prefer THIS command for an
                                    agent driver: a pause here is held open as a decision
                                    point, where relay ends the run at every one of them.
@@ -846,13 +845,6 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
       flag('checks-informational', ''),
       flag('checks-unrelated', ''),
     )
-    // What the INTEGRATION checkout must pass after every merge, including the last (#80).
-    // Its own flag rather than a second use of --checks: those say what a REPLACEMENT must
-    // reproduce, they run in one seat's own tree, and firing them at every merge would change
-    // what an existing configuration does without the operator asking. All `required`, because
-    // a check that cannot fail the tree is not what this flag is for; the relevance vocabulary
-    // is still on the option for a programmatic caller that wants a reported-only command.
-    const integrationChecks = parseChecks(flag('integration-checks', ''), '', '')
 
     // `.conclave/config.json` is a property of the PROJECT, not of which front-end opened
     // it. Reading it only in the console meant an unattended run ignored the permission
@@ -1068,12 +1060,6 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
             ? { command: c, relevance: 'required' }
             : { command: c.command, relevance: c.relevance },
         ),
-        // Only when the operator armed them, for the same reason `implementers` is
-        // conditional: a key on every plan would change what an existing reader parses to
-        // report an empty list it could already infer from its absence.
-        ...(integrationChecks.length > 0
-          ? { integrationChecks: integrationChecks.map((c) => ({ command: checkCommand(c), relevance: 'required' })) }
-          : {}),
       }
       if (asJson) {
         console.log(JSON.stringify(plan, null, 2))
@@ -1094,9 +1080,6 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
               : 'none — rotation not armed'
           }`,
         )
-        if (integrationChecks.length > 0) {
-          say(`  integration: ${integrationChecks.map((c) => checkCommand(c)).join(', ')} — after every merge`)
-        }
         say(`  goal:        ${goal}`)
       }
       return 0
@@ -1131,10 +1114,6 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
       // ESCALATES and ends rather than rotating. An unattended form that cannot rotate
       // cannot exercise the mechanism it exists to run unattended.
       ...(checks.length > 0 ? { rotation: { checks } } : {}),
-      // Without these nothing looks at the tree the seats produced TOGETHER: git reports
-      // conflicts, per-seat checks pass in per-seat trees, and a run whose final merge broke
-      // the build reports success (#80). Absent is behaviourless and inert at N=1.
-      ...(integrationChecks.length > 0 ? { integration: { checks: integrationChecks } } : {}),
       // A fixed window cannot serve both a chat-sized turn and one running a full test
       // suite plus a review. It existed on RelayOptions and was reachable from nowhere.
       ...(flag('settle', '') ? { transcriptSettleMs: Number(flag('settle', '')) * 1000 } : {}),
@@ -1283,10 +1262,6 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
       flag('checks-informational', ''),
       flag('checks-unrelated', ''),
     )
-    // Both front-ends, together, as everything else here has had to be retrofitted. See the
-    // relay block: what the MERGED tree must pass, which is a different question from what a
-    // replacement must reproduce (#80).
-    const integrationChecks = parseChecks(flag('integration-checks', ''), '', '')
     const lead = flag('advisor', '') || flag('lead', 'codex')
     // Both front-ends, together, through the same builder. See the relay block above: this is
     // the ninth capability that would otherwise have been wired into one command and not the
@@ -1361,9 +1336,6 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
       ...(seatPlan.kind === 'listed' ? { implementers: implementerAgents } : {}),
       rounds: Number(rounds),
       checks,
-      // Absent unless armed, so a default console run passes exactly the options it always
-      // passed and a run with one seat is unaffected either way.
-      ...(integrationChecks.length > 0 ? { integrationChecks } : {}),
       ...(leadArgs.length > 0 ? { leadArgs } : {}),
       ...(implementerArgs.length > 0 ? { implementerArgs } : {}),
       version: version(),

@@ -316,7 +316,7 @@ test('the console front-end records the same launch, and a run given no args rec
           '--implementer',
           'fake-impl',
           // `-m` rather than `--model` here, and not by preference: the session block's flag
-          // helper refuses a value beginning with `--` (bin/conclave.ts:1275), so the long
+          // helper refuses a value beginning with `--` (bin/conclave.ts:1254), so the long
           // spelling cannot be passed through `--implementer-args` on this front-end at all.
           // That asymmetry predates this change and is not touched by it; the long spellings
           // are covered against `modelFromArgs` above.
@@ -356,10 +356,10 @@ test('the console front-end records the same launch, and a run given no args rec
  *
  * Driven through `Relay.start` rather than a front-end, and that is a limitation of the CLI
  * rather than a choice here: `--implementer-args` is ONE flag and applies to every implementer
- * seat (bin/conclave.ts:964-967), and project config carries no per-agent launch args at all
+ * seat (bin/conclave.ts:956-959), and project config carries no per-agent launch args at all
  * (`launchArgsFor` only returns bypass flags, src/config/project.ts:160-163). So distinct args
  * per seat are expressible in the library and not yet on the command line. Both documents are
- * still the production ones: `runReport` is what `bin/conclave.ts:1198` prints, and the status
+ * still the production ones: `runReport` is what `bin/conclave.ts:1177` prints, and the status
  * is read back through `main(['status', '--json'])` after the real recorder wrote it.
  */
 test('two seats launched with two different models are recorded apart, in both documents', async () => {

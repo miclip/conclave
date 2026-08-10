@@ -206,10 +206,19 @@ pass while the tree they produce together fails. D6 designs the merge boundary a
 *textual* conflict, which git reports. **Concurrency creates a class of conflict git cannot
 see, and no station in the design was positioned to catch it.**
 
-So the configured checks run against the **integration checkout, after every merge including
-the last**, under their own option (`RelayOptions.integration`, `--integration-checks`) rather
-than by reinterpreting `rotation.checks` — the two answer different questions, and reusing one
-for the other changes what an operator's existing configuration does without them asking.
+So the **already-configured** `--checks` run against the **integration checkout, after every
+merge including the last**. A separate option was built first and then removed: the argument
+against reusing `rotation.checks` — that it changes what an existing configuration does, how
+often those commands run and what a failure means — is true and was overruled, because an
+opt-in station leaves exactly the run that failed unprotected unless someone discovers the new
+flag and duplicates configuration they have already supplied. An operator who has said
+`--checks "npm test"` has already said what "working" means for this project; asking them to
+say it twice is a second chance to say it zero times.
+
+The cost is recorded rather than argued away: at N>1 those commands now run once per merge as
+well as at a rotation, and a failure means one of two things depending on where it happened.
+At N=1 nothing changes, and not by a seat-count branch — there is no merge, so the boundary
+this runs in is not reached.
 
 Two things follow that D6's conflict rule cannot supply:
 

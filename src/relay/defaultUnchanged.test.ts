@@ -294,8 +294,8 @@ function assertFlagHelperOptional(block: string, label: string): void {
   const helperEnd = block.indexOf('\n    const ', helperStart)
   const helper = block.slice(helperStart, helperEnd > 0 ? helperEnd : helperStart + 500)
   // The relay helper returns the fallback when the flag is absent:
-  // bin/conclave.ts:812-815. The session helper returns the fallback both when the flag is
-  // absent and when it is present without a value: bin/conclave.ts:1271-1280.
+  // bin/conclave.ts:811-815. The session helper returns the fallback both when the flag is
+  // absent and when it is present without a value: bin/conclave.ts:1250-1259.
   assert.match(
     helper,
     /return i >= 0 \? \(rest\[i \+ 1\] \?\? fallback\) : fallback|if \(i < 0\) return fallback/,
@@ -318,7 +318,7 @@ const DECLARED: Record<string, string> = {
     'Authority routing (#56, D2) sends implementer_unanswered to the advisor before the operator, ' +
     'so a default run interrupts the human less than today. Real change at N=1, an improvement, ' +
     'declared rather than discovered. The pause reason exists at src/relay/run.ts:51 and the halt ' +
-    'that raises it is at src/relay/relay.ts:3720.',
+    'that raises it is at src/relay/relay.ts:3710.',
   'status.pause.resolution':
     'Classifying unresolved conditions on both axes (#56, D2) added `resolution` to every RunPause ' +
     '(src/relay/run.ts:183), so `conclave status --json` on a paused default run now carries ' +
@@ -423,30 +423,33 @@ const DECLARED: Record<string, string> = {
     'export their provider already holds. Every pinned shape below was updated rather than ' +
     'relaxed, and src/relay/launchRecord.test.ts proves the field carries a real value by ' +
     'driving both front-ends with --implementer-args.',
-  '--integration-checks on both front-ends, and the integration_failed outcome':
-    'The optional flag surface grows by one on each command: --integration-checks, commands ' +
-    'run against the MERGED tree after every merge including the last. The operator’s reason ' +
-    '(#80): the first real two-seat run merged three tasks with no git conflict at all and ' +
-    'produced a tree that failed two tests, because nothing in the design looks at the ' +
-    'integration RESULT — git reports textual conflict, --checks run per seat in that seat’s ' +
-    'own tree (D7), and every seat can therefore pass while the tree they build together ' +
-    'fails. Its own flag rather than a second reading of --checks, which is the objection ' +
-    'recorded in src/relay/integrate.ts and it still holds: those say what a REPLACEMENT must ' +
-    'reproduce, and firing them at every merge would change how often an operator’s existing ' +
-    'commands run and what their failure means without them asking. A failure mid-run is a ' +
-    'repair the advisor dispatches, naming BOTH contributing tasks — no seat is marked, ' +
-    'because the defect exists in neither half and assigning it by fault would be a guess. A ' +
-    'failure after the FINAL merge has no seat to repair it, so the run reports it instead: ' +
-    'RunReason gains `integration_failed` (src/relay/observe.ts), it replaces `done` and ' +
-    '`budget` in Relay.#end so no ending can report success over a tree that does not build, ' +
-    'and `relay` exits non-zero on it as it does on ceiling and transport_failed. THE ' +
-    'DEFAULT RUN DOES NOT CHANGE: the flag is optional with no default, an absent ' +
-    '`integration` option runs no command, and the station is unreachable at N=1 in any case ' +
-    '— without seat worktrees there is no merge and no integration checkout distinct from ' +
-    'the tree the implementer has been working in all along. Neither the ended nor any paused ' +
-    'status document changes, and no assertion in this file was relaxed to accommodate it. ' +
-    'That the flag DOES something is proved against real worktrees, real merges and real ' +
-    'check commands in src/relay/integrationRed.test.ts and src/relay/integrate.test.ts.',
+  '--checks also gate the merged tree at N>1, and the integration_failed outcome':
+    'NO FLAG IS ADDED and the pinned flag sets below are untouched, which is why this entry ' +
+    'exists at all: the change is invisible to every guard in this file and is a real change ' +
+    'to what an existing configuration DOES. --checks are now run a second time per merge, ' +
+    'against the integration checkout, and a failure there is a new kind of failure. The ' +
+    'operator’s reason (#80): the first real two-seat run merged three tasks with no git ' +
+    'conflict at all and produced a tree that failed two tests, because nothing in the design ' +
+    'looks at the integration RESULT — git reports textual conflict, and per-seat checks run ' +
+    'in each seat’s own tree (D7), so every seat can pass while the tree they build together ' +
+    'fails. A separate --integration-checks flag was built first and then removed on the ' +
+    'operator’s ruling: an opt-in station leaves exactly the run that failed unprotected ' +
+    'unless someone discovers the flag and duplicates configuration they have already ' +
+    'supplied. src/relay/integrate.ts carries the original objection to reusing this field ' +
+    'and why it was overruled; the cost is recorded there rather than dropped. A failure ' +
+    'mid-run is a repair the advisor dispatches, naming BOTH contributing tasks — no seat is ' +
+    'marked, because the defect exists in neither half and assigning it by fault would be a ' +
+    'guess. A failure after the FINAL merge has no seat to repair it, so the run reports it ' +
+    'instead: RunReason gains `integration_failed` (src/relay/observe.ts), it replaces `done` ' +
+    'and `budget` in Relay.#end so no ending can report success over a tree that does not ' +
+    'build, and `relay` exits non-zero on it as it does on ceiling and transport_failed. THE ' +
+    'DEFAULT RUN DOES NOT CHANGE, and not by a seat-count branch: without seat worktrees ' +
+    'there is no merge, so the boundary this runs in is not reached at all. A default run ' +
+    'with --checks behaves exactly as before — same commands, same frequency, same meaning — ' +
+    'and neither the ended nor any paused status document changes. No assertion in this file ' +
+    'was relaxed. That the second station DOES something is proved against real worktrees, ' +
+    'real merges and real check commands in src/relay/integrationRed.test.ts and ' +
+    'src/relay/integrate.test.ts.',
 }
 
 test('DECLARED contains exactly the routing, pause-resolution, attribution, ceiling-flag, seat-flag, seat-status, launch-record and integration-check entries', () => {
@@ -458,7 +461,7 @@ test('DECLARED contains exactly the routing, pause-resolution, attribution, ceil
     '--implementers on both front-ends',
     'per-seat dispatcher state in status --json',
     'per-seat launch args and model in status --json and the run report',
-    '--integration-checks on both front-ends, and the integration_failed outcome',
+    '--checks also gate the merged tree at N>1, and the integration_failed outcome',
   ])
 })
 
@@ -554,7 +557,7 @@ async function seatsFromSessionCli(): Promise<{ creates: CreateRecord[]; cwd: st
  * The two machine-readable documents a default run actually emits.
  *
  * Both come out of one `relay --json` run in a temporary repository, through the production
- * call sites: the report is what `bin/conclave.ts:1198` prints, and the status record is what
+ * call sites: the report is what `bin/conclave.ts:1177` prints, and the status record is what
  * `recordSession` wrote during that same run, read back by `main(['status', '--json'])` --
  * which resolves the most recent session in `process.cwd()`, so the record has to have been
  * written where an operator would look for it.
@@ -599,7 +602,7 @@ async function defaultRunDocuments(): Promise<{ report: unknown; status: unknown
  * blind to that subtree is claiming more than it checks.
  *
  * Built through the real recorder: `recordSession` is what both front-ends call, and
- * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:863
+ * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:854
  * with the same object -- a `RunPause` the run handle raised, not one written here. Read back
  * through `main(['status', '--json'])`, so the serialisation and the reconciliation against
  * the pid are the production ones.
@@ -737,7 +740,7 @@ async function provokeMergeBlocked(repo: string): Promise<{ relay: Relay; run: R
  * Drive a real relay into one condition and return the pause it raised.
  *
  * The provocations are the ones `resolution.test.ts`'s own `provoke` already uses, deliberately:
- * the same triggers reaching the same single halt site (src/relay/relay.ts:2243), where the
+ * the same triggers reaching the same single halt site (src/relay/relay.ts:2229), where the
  * classification is computed by production `resolutionFor` from the subject the caller passed.
  * Nothing here writes a `RunPause`.
  *
@@ -820,7 +823,7 @@ async function provoke(
  * The status document of a run paused for one given reason.
  *
  * Built through the real recorder: `recordSession` is what both front-ends call, and
- * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:863
+ * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:854
  * with the same object -- a `RunPause` the relay raised, not one written here. Read back
  * through `main(['status', '--json'])`, so the serialisation and the reconciliation against
  * the pid are the production ones.
@@ -840,7 +843,7 @@ async function pausedStatusDocument(reason: PauseReason): Promise<unknown> {
     goal: 'a default goal',
     front: 'session',
     startedAt: Date.now(),
-    // Passed because the console always passes one (src/repl/session.ts:689), so the status
+    // Passed because the console always passes one (src/repl/session.ts:680), so the status
     // documents this file pins differ only in what a pause actually changes.
     logPath: join(repo, '.conclave', 'runs', 'session-test.ndjson'),
     build: 'test',
@@ -1024,9 +1027,9 @@ test('default run works in the run cwd and creates no worktree', async () => {
     assert.equal(c.cwd, fromCli.cwd, `the session CLI must create ${c.id} in the run cwd`)
   }
 
-  // The relay CLI passes process.cwd() as the run cwd: bin/conclave.ts:1107.
-  // The relay hands that same cwd to each participant adapter: src/relay/relay.ts:1258-1264.
-  // The cwd getter simply returns the option: src/relay/relay.ts:1151-1153.
+  // The relay CLI passes process.cwd() as the run cwd: bin/conclave.ts:1090.
+  // The relay hands that same cwd to each participant adapter: src/relay/relay.ts:1244-1250.
+  // The cwd getter simply returns the option: src/relay/relay.ts:1137-1139.
   assert.match(relay, /cwd:\s*process\.cwd\(\)/, 'relay block must start in process.cwd')
   // Both creation sites now pass a NAMED context object rather than an inline literal, because
   // the same object composes the launch args that get recorded -- see
@@ -1054,7 +1057,7 @@ test('default run works in the run cwd and creates no worktree', async () => {
 
   // A default run with no subagents must not create any git worktree. The relay only samples
   // the worktree list for its subagent-use report: src/relay/subagents.ts:68 defines
-  // worktreePaths, and src/relay/relay.ts:1805, :1852 and :3130 read it.
+  // worktreePaths, and src/relay/relay.ts:1791, :1838 and :3120 read it.
   // Prove it by exercising the run in a real temporary repository.
   const repo = mkdtempSync(join(tmpdir(), 'conclave-default-'))
   try {
@@ -1108,7 +1111,7 @@ test('both flag helpers fall back when the flag is absent, and each block reads 
   const session = commandBlock('session', "if (command === 'demo')")
 
   // A default invocation must be able to run with just a goal. Both front-ends define the flag
-  // helper with a fallback: bin/conclave.ts:812 (relay) and bin/conclave.ts:1271 (session).
+  // helper with a fallback: bin/conclave.ts:811 (relay) and bin/conclave.ts:1250 (session).
   // Every flag read here uses that helper, so none become required.
   assertFlagHelperOptional(relay, 'relay')
   assertFlagHelperOptional(session, 'session')
@@ -1139,7 +1142,6 @@ test('both flag helpers fall back when the flag is absent, and each block reads 
       'implementer',
       'implementer-args',
       'implementers',
-      'integration-checks',
       'json',
       'lead',
       'lead-args',
@@ -1170,7 +1172,6 @@ test('both flag helpers fall back when the flag is absent, and each block reads 
       'implementer',
       'implementer-args',
       'implementers',
-      'integration-checks',
       'lead',
       'lead-args',
       'max-concurrent-seats',

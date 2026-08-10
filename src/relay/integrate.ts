@@ -8,24 +8,33 @@
  * one point in the run: the `reported` boundary, after the turn ended, the transcript settled
  * and supersession was checked.
  *
- * ## The seat's own checks do not run here, and the integration tree's do
+ * ## The configured checks run here, against the INTEGRATION tree
  *
- * An earlier draft of the design put "run that seat's checks" between quiesce and commit,
- * reusing `--checks`. That is wrong quietly. `rotation.checks` has one established meaning --
- * what a replacement must REPRODUCE (`src/rotation/record.ts`) -- and firing the same commands
- * at every task boundary turns a rotation gate into a per-task CI step, changing how often
- * they run and what a failure means, on an operator's existing configuration, without them
- * asking. Whether a merge boundary should gate on anything is a separate decision that needs
- * its own option; it must not be acquired by reinterpreting this one.
+ * This reverses a decision recorded in this header, so the reversal is recorded rather than
+ * the old text quietly replaced. What stood here was: an earlier draft put "run that seat's
+ * checks" between quiesce and commit, reusing `--checks`; `rotation.checks` has one
+ * established meaning -- what a replacement must REPRODUCE (`src/rotation/record.ts`) -- and
+ * firing the same commands at every task boundary turns a rotation gate into a per-task CI
+ * step, changing how often they run and what a failure means on an operator's existing
+ * configuration without them asking; whether a merge boundary should gate on anything needs
+ * its own option.
  *
- * That decision has now been taken, and it took its own option: `RelayOptions.integration`
- * (#80). What runs here is NOT the seat's checks in the seat's tree -- it is the integration
- * checkout's own checks, in the integration checkout, after a merge that succeeded. The two
- * ask different questions, which is why they are configured separately and why an operator
- * who armed rotation gets nothing new until they arm this as well. A clean merge is not a
- * correct merge: three merges with no git conflict at all produced a tree that failed two
- * tests, because each seat's work was correct in the tree it was written in and the pair was
- * not. Nothing in the design looked at the result. This is the station that does.
+ * That objection was answered by a real run rather than argued away (#80). Three tasks merged
+ * with no git conflict at all and the resulting tree failed two tests, both cross-seat: each
+ * seat's work was correct in the tree it was written in, and the pair was not. Nothing in the
+ * design looked at the RESULT. An option that must be discovered and armed separately would
+ * have left exactly that run unprotected -- the operator who has already said `--checks "npm
+ * test"` has already said what "working" means for this project, and asking them to say it
+ * twice is a second chance to say it zero times.
+ *
+ * So the objection is honoured in the part that was actually load-bearing and dropped in the
+ * part that was not. What does NOT happen is the earlier draft: the seat's checks are still
+ * not run in the seat's own tree at every boundary. What happens is that the same configured
+ * commands are ALSO run once per merge, in the integration checkout, on the tree the seats
+ * produced together. The cost is real and is stated plainly here: an existing N>1
+ * configuration now runs those commands more often, and their failure now means a second
+ * thing. At N=1 nothing changes at all, because there is no merge and no integration checkout
+ * distinct from the tree the implementer has been working in all along.
  *
  * A red result is reported, never acted on here. This module does not blame a seat, does not
  * mark one blocked and does not undo the merge: the failure belongs to a COMBINATION of
@@ -276,9 +285,17 @@ export function mergeIntoIntegration(
   }
 }
 
-/** What the boundary runs against the merged tree, and how long any one command gets. */
+/**
+ * What the boundary runs against the merged tree, and how long any one command gets.
+ *
+ * Plumbing rather than configuration: the caller passes the run's already-configured checks
+ * (`RelayOptions.rotation.checks`). There is no second thing for an operator to set, which is
+ * the whole point of #80's ruling -- a station nobody armed catches nothing.
+ *
+ * Absent or empty means the tree is not checked, which is a run with no checks configured at
+ * all. Unchecked is not green; see `MergeResult.checks`.
+ */
 export interface IntegrationChecks {
-  /** Absent or empty means the tree is not checked. See `RelayOptions.integration`. */
   checks?: CheckSpec[] | undefined
   checkTimeoutMs?: number | undefined
 }

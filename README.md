@@ -169,17 +169,16 @@ reported without gating the transfer, because a check can reproduce faithfully a
 nothing about the work being handed over. Relevance is declared by you, never by a
 participant: a replacement that classified its own checks would be grading its own transfer.
 
-`--integration-checks` is a different station and answers a different question: what the
-**merged** tree must pass, run in the integration checkout after every merge including the
-last. Nothing else looks at it. Git reports textual conflicts and `--checks` run in one seat's
-own tree, so with more than one seat every seat can pass while the tree they produce together
-fails — which is what
+With more than one seat, those same checks are **also** run against the merged tree after
+every merge including the last. Nothing else looks at the integration result: git reports
+textual conflicts, and the per-seat checks run in each seat's own tree, so every seat can pass
+while the tree they produce together fails — which is what
 [#80](https://github.com/miclip/conclave/issues/80) is: three tasks, no conflict on any merge,
 a red result. A failure while the run is still going becomes a repair naming both contributing
 tasks rather than blaming a seat, because the defect exists in neither half. A failure after
 the final merge has no seat left to repair it, so the run ends `integration_failed` and exits
-non-zero instead of reporting success on a tree that does not build. With one seat there is no
-merge, so it does nothing.
+non-zero instead of reporting success on a tree that does not build. One seat has no merge, so
+nothing about a single-seat run changes.
 
 The goal is optional. Start with none and the first thing you type becomes it.
 
