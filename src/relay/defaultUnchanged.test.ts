@@ -19,7 +19,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PassThrough, Writable } from 'node:stream'
 import test from 'node:test'
-import { main } from '../../bin/conclave.ts'
+import { VALUED_FLAGS, main } from '../../bin/conclave.ts'
+import { flagReader } from '../config/cliFlags.ts'
 import { newSessionId, recordSession } from '../workspace/sessionRecord.ts'
 import type { Verdict } from '../contract/outcome.ts'
 import { FakeRotationSession } from '../rotation/fakeSession.ts'
@@ -288,19 +289,24 @@ function flagsIn(block: string): Set<string> {
   ])
 }
 
-function assertFlagHelperOptional(block: string, label: string): void {
+function assertFlagHelperOptional(block: string, label: string, valued: readonly string[]): void {
   const helperStart = block.indexOf('const flag =')
   assert.ok(helperStart > 0, `${label} flag helper must be present`)
-  const helperEnd = block.indexOf('\n    const ', helperStart)
-  const helper = block.slice(helperStart, helperEnd > 0 ? helperEnd : helperStart + 500)
-  // The relay helper returns the fallback when the flag is absent:
-  // bin/conclave.ts:798-801. The session helper returns the fallback both when the flag is
-  // absent and when it is present without a value: bin/conclave.ts:1230-1239.
   assert.match(
-    helper,
-    /return i >= 0 \? \(rest\[i \+ 1\] \?\? fallback\) : fallback|if \(i < 0\) return fallback/,
-    `${label} flag helper must return the fallback when the flag is absent`,
+    block.slice(helperStart, helperStart + 200),
+    /const flag = flagReader\(/,
+    `${label} must read its flags with the shared reader (see DECLARED['one flag reader for both front-ends'])`,
   )
+  // The property this guard exists for, asserted against the reader itself rather than against
+  // the text of a helper. Every valued flag is OPTIONAL -- D1 forbids one becoming required --
+  // so an argv naming none of them must hand back every fallback unchanged and complain about
+  // nothing. Two three-line helpers used to be pinned here by their source, which said the same
+  // thing less directly and stopped saying it the moment the parsing moved.
+  const flag = flagReader([], valued)
+  for (const name of valued) {
+    assert.equal(flag(name, 'fallback'), 'fallback', `${label}: --${name} must be optional`)
+  }
+  assert.equal(flag.missing, undefined, `${label}: an argv with no flags is missing no values`)
 }
 
 /**
@@ -423,9 +429,33 @@ const DECLARED: Record<string, string> = {
     'export their provider already holds. Every pinned shape below was updated rather than ' +
     'relaxed, and src/relay/launchRecord.test.ts proves the field carries a real value by ' +
     'driving both front-ends with --implementer-args.',
+  'one flag reader for both front-ends':
+    'Both commands now read their argv with one shared `flagReader` over a declared list of ' +
+    'valued flags, and the two three-line helpers they each carried are gone. The flag SURFACE ' +
+    'does not change -- the two pinned sets below are the sets they were -- and neither does the ' +
+    'default run, which names no flag at all and so reads nothing but fallbacks. Two things DO ' +
+    'change and are declared for it. First, VALUES: `session --implementer-args "--model x"` was ' +
+    'refused while `relay --implementer-args "--model x"` launched, because the console read any ' +
+    'value beginning with `--` as a value that had gone missing and the relay read whatever token ' +
+    'followed the flag (#81). The console rule was the better half and is kept for every flag ' +
+    'except the ones whose value is argv for a CHILD cli (`PASS_THROUGH_FLAGS`), so the long ' +
+    'spelling now works on both -- which matters because picking a model per seat is the ' +
+    'mechanism behind heterogeneous seats (#77) and `--model` is exactly what was being refused. ' +
+    'Second, and it is a NARROWING: `relay --rounds --json` used to read `--json` as the number ' +
+    'of rounds and start anyway, and now refuses with the message the console already printed. ' +
+    'That is a real change to what relay accepts, made deliberately rather than as a side ' +
+    'effect -- the alternative was making the console as lenient as the relay, which reaches ' +
+    'parity by deleting the better diagnostic, and relay is the front-end whose runs nobody is ' +
+    'watching. One assertion in this file MOVED and none was relaxed: the pinned helper text ' +
+    'became a behavioural check that every valued flag is still optional ' +
+    '(`assertFlagHelperOptional`), which is what that pin was for and is now asserted by calling ' +
+    'the reader rather than by matching three lines of source. That the two front-ends AGREE ' +
+    'about values is not claimed here: it is proved in src/relay/frontEndParity.test.ts, which ' +
+    'drives both commands through `main` over every shared valued flag and compares what each ' +
+    'one accepts.',
 }
 
-test('DECLARED contains exactly the routing, pause-resolution, attribution, ceiling-flag, seat-flag, seat-status and launch-record entries', () => {
+test('DECLARED contains exactly the routing, pause-resolution, attribution, ceiling-flag, seat-flag, seat-status, launch-record and flag-reader entries', () => {
   assert.deepEqual(Object.keys(DECLARED), [
     'implementer_unanswered -> advisor',
     'status.pause.resolution',
@@ -434,6 +464,7 @@ test('DECLARED contains exactly the routing, pause-resolution, attribution, ceil
     '--implementers on both front-ends',
     'per-seat dispatcher state in status --json',
     'per-seat launch args and model in status --json and the run report',
+    'one flag reader for both front-ends',
   ])
 })
 
@@ -529,7 +560,7 @@ async function seatsFromSessionCli(): Promise<{ creates: CreateRecord[]; cwd: st
  * The two machine-readable documents a default run actually emits.
  *
  * Both come out of one `relay --json` run in a temporary repository, through the production
- * call sites: the report is what `bin/conclave.ts:1164` prints, and the status record is what
+ * call sites: the report is what `bin/conclave.ts:1219` prints, and the status record is what
  * `recordSession` wrote during that same run, read back by `main(['status', '--json'])` --
  * which resolves the most recent session in `process.cwd()`, so the record has to have been
  * written where an operator would look for it.
@@ -999,7 +1030,7 @@ test('default run works in the run cwd and creates no worktree', async () => {
     assert.equal(c.cwd, fromCli.cwd, `the session CLI must create ${c.id} in the run cwd`)
   }
 
-  // The relay CLI passes process.cwd() as the run cwd: bin/conclave.ts:1077.
+  // The relay CLI passes process.cwd() as the run cwd: bin/conclave.ts:1132.
   // The relay hands that same cwd to each participant adapter: src/relay/relay.ts:1172-1178.
   // The cwd getter simply returns the option: src/relay/relay.ts:1065-1067.
   assert.match(relay, /cwd:\s*process\.cwd\(\)/, 'relay block must start in process.cwd')
@@ -1082,11 +1113,11 @@ test('both flag helpers fall back when the flag is absent, and each block reads 
   const relay = commandBlock('relay', "if (command === 'session')")
   const session = commandBlock('session', "if (command === 'demo')")
 
-  // A default invocation must be able to run with just a goal. Both front-ends define the flag
-  // helper with a fallback: bin/conclave.ts:798 (relay) and bin/conclave.ts:1230 (session).
-  // Every flag read here uses that helper, so none become required.
-  assertFlagHelperOptional(relay, 'relay')
-  assertFlagHelperOptional(session, 'session')
+  // A default invocation must be able to run with just a goal. Both front-ends now read their
+  // flags with the one shared `flagReader`, and every flag read in either block goes through it,
+  // so none become required. See DECLARED['one flag reader for both front-ends'].
+  assertFlagHelperOptional(relay, 'relay', VALUED_FLAGS.relay)
+  assertFlagHelperOptional(session, 'session', VALUED_FLAGS.session)
 
   // Pin the current optional flag set for each front-end. This includes both the valued flags
   // read with flag('--name') and the boolean flags checked with includes('--name').

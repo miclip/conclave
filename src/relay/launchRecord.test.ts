@@ -315,13 +315,16 @@ test('the console front-end records the same launch, and a run given no args rec
           'fake-lead',
           '--implementer',
           'fake-impl',
-          // `-m` rather than `--model` here, and not by preference: the session block's flag
-          // helper refuses a value beginning with `--` (bin/conclave.ts:1234), so the long
-          // spelling cannot be passed through `--implementer-args` on this front-end at all.
-          // That asymmetry predates this change and is not touched by it; the long spellings
-          // are covered against `modelFromArgs` above.
+          // The LONG spelling, deliberately. This test used to pass `-m gpt-5` and say why:
+          // the session block's own flag helper read a value beginning with `--` as a value
+          // that had gone missing, so `--model gpt-5` could not be passed through
+          // `--implementer-args` on this front-end at all. That was #81, the workaround was
+          // written down here for as long as the bug existed, and both front-ends now read
+          // their argv with the shared `flagReader` -- see `PASS_THROUGH_FLAGS` in
+          // src/config/cliFlags.ts, and the acceptance table in
+          // src/relay/frontEndParity.test.ts that compares the two commands value by value.
           '--implementer-args',
-          '-m gpt-5',
+          '--model gpt-5',
           '--rounds',
           '2',
         ],
@@ -332,7 +335,7 @@ test('the console front-end records the same launch, and a run given no args rec
     const status = JSON.parse(statusText)
     assertAbsenceIsNull(statusText, "the console's status document")
     assert.equal(seat(status, 'implementer').launch.model, 'gpt-5', 'both front-ends record the model')
-    assert.deepEqual(seat(status, 'implementer').launch.args, ['-m', 'gpt-5'])
+    assert.deepEqual(seat(status, 'implementer').launch.args, ['--model', 'gpt-5'])
 
     // The default half of the same document: a seat nobody passed anything to reports an empty
     // argv and a null model, present rather than omitted. A consumer reading `launch.model`
@@ -356,10 +359,10 @@ test('the console front-end records the same launch, and a run given no args rec
  *
  * Driven through `Relay.start` rather than a front-end, and that is a limitation of the CLI
  * rather than a choice here: `--implementer-args` is ONE flag and applies to every implementer
- * seat (bin/conclave.ts:943-946), and project config carries no per-agent launch args at all
+ * seat (bin/conclave.ts:998-1001), and project config carries no per-agent launch args at all
  * (`launchArgsFor` only returns bypass flags, src/config/project.ts:160-163). So distinct args
  * per seat are expressible in the library and not yet on the command line. Both documents are
- * still the production ones: `runReport` is what `bin/conclave.ts:1164` prints, and the status
+ * still the production ones: `runReport` is what `bin/conclave.ts:1219` prints, and the status
  * is read back through `main(['status', '--json'])` after the real recorder wrote it.
  */
 test('two seats launched with two different models are recorded apart, in both documents', async () => {

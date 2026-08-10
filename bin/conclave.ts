@@ -21,6 +21,7 @@ import {
   setPermissionMode,
 } from '../src/config/project.ts'
 import { formatConfigShow, formatConfigShowJson, showConfig } from '../src/config/show.ts'
+import { flagReader, missingValueMessage } from '../src/config/cliFlags.ts'
 import type { CheckSpec } from '../src/rotation/record.ts'
 import type { ProjectConfig } from '../src/config/project.ts'
 import { runReport } from '../src/relay/report.ts'
@@ -315,6 +316,53 @@ function agentsFromFlags(flags: string[]): { agents?: AgentKind[] } {
 function extraArgs(raw: string): string[] {
   return raw.split(/\s+/).map((a) => a.trim()).filter(Boolean)
 }
+
+/**
+ * Every flag `relay` reads a VALUE for, and every flag `session` does.
+ *
+ * Two lists rather than one, and they are meant to be read side by side: the difference between
+ * them IS the divergence between the front-ends, expressed as data instead of as two blocks of
+ * parsing that have to be compared by eye. Today it is one entry (`--detached-id`, which is how
+ * a detached child adopts the id its parent printed and has nothing to say to a console), and
+ * `frontEndParity.test.ts` fails on any other difference that is not declared there.
+ *
+ * Boolean flags are absent by design. `--json`, `--force`, `--detach`, `--dry-run` and
+ * `--strict-goal` are read with `includes`, take no value, and are legitimately followed by
+ * another flag -- putting one here would turn `--force --json` into a missing value.
+ *
+ * Declared rather than derived from the call sites, because the missing-value check runs over
+ * the whole argv BEFORE the first read (see `flagReader`), and a check that only knew about
+ * flags something had already read could not refuse before the command started work.
+ */
+const RELAY_VALUED_FLAGS: readonly string[] = [
+  'advisor',
+  'advisor-args',
+  'checks',
+  'checks-informational',
+  'checks-unrelated',
+  'detached-id',
+  'implementer',
+  'implementer-args',
+  'implementers',
+  'lead',
+  'lead-args',
+  'max-concurrent-seats',
+  'max-minutes',
+  'max-queue-depth',
+  'max-turns',
+  'operator',
+  'record',
+  'resume',
+  'rounds',
+  'salvage',
+  'settle',
+  'turn-timeout',
+]
+
+const SESSION_VALUED_FLAGS: readonly string[] = RELAY_VALUED_FLAGS.filter((f) => f !== 'detached-id')
+
+/** Read by `frontEndParity.test.ts`, which compares the two surfaces as data. */
+export const VALUED_FLAGS = { relay: RELAY_VALUED_FLAGS, session: SESSION_VALUED_FLAGS } as const
 
 /**
  * Verification commands with their declared relevance.
@@ -795,9 +843,16 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
       )
       return 1
     }
-    const flag = (name: string, fallback: string) => {
-      const i = rest.indexOf(`--${name}`)
-      return i >= 0 ? (rest[i + 1] ?? fallback) : fallback
+    // The same reader the console builds, over the same rules. Both commands used to carry a
+    // helper of their own and the two disagreed about what a value is (#81); see `flagReader`.
+    const flag = flagReader(rest, RELAY_VALUED_FLAGS)
+    // Before anything is read, resolved or written, and in the same place on both front-ends.
+    // A flag whose value went missing is an invocation that does not mean what was typed, and
+    // relay is the command whose runs nobody is watching: reading `--json` as the round count
+    // and starting anyway is a run that has to be found and killed rather than retyped.
+    if (flag.missing !== undefined) {
+      console.error(missingValueMessage(flag.missing, 'relay'))
+      return 1
     }
     const registry = overrides.registry ?? defaultRegistry()
     // Everything a human would read goes to STDERR under --json, so stdout carries the
@@ -1226,16 +1281,17 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
         )
       }
     }
-    let bad: string | undefined
-    const flag = (name: string, fallback: string) => {
-      const i = args.indexOf(`--${name}`)
-      if (i < 0) return fallback
-      const value = args[i + 1]
-      if (value === undefined || value.startsWith('--')) {
-        bad = name
-        return fallback
-      }
-      return value
+    // The same reader `relay` builds, over the same rules. The console's own helper refused
+    // every value beginning with `--`, including the ones that are argv for a child CLI, so
+    // `--implementer-args "--model x"` was refused here and launched there (#81).
+    const flag = flagReader(args, SESSION_VALUED_FLAGS)
+    // Refused BEFORE the bypass is applied, as the seat-plan contradiction below is and for the
+    // same reason: an invocation that is not going to start a session must not leave a
+    // permission mode written into the operator's project on its way out. It used to be checked
+    // after, which it could not help being -- `bad` was only known once every read had happened.
+    if (flag.missing !== undefined) {
+      console.error(missingValueMessage(flag.missing, 'session'))
+      return 1
     }
     const checks = parseChecks(
       flag('checks', ''),
@@ -1290,15 +1346,6 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
     // The console applies and persists together: unlike `relay` there is no dry run and no
     // preflight refusal, so the point of no return is here.
     if (!applyBypassFlag(args, (l) => console.log(l))) return 1
-    if (bad) {
-      console.error(
-        `--${bad} was given without a value.\n\n` +
-          `If you used \`npm run session -- ...\`, npm mangles quoted arguments containing\n` +
-          `spaces. Call the binary directly instead:\n\n` +
-          `  node bin/conclave.ts session "<goal>" --checks "npm test"\n`,
-      )
-      return 1
-    }
     return runSession({
       cwd: process.cwd(),
       ...(operator ? { operator } : {}),

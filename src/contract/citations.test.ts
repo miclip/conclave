@@ -64,18 +64,18 @@ const SELF = 'src/contract/citations.test.ts'
  * together, which is the point: the two cannot drift apart without this test saying so.
  */
 const CITED: Record<string, string> = {
-  'bin/conclave.ts:798': 'const flag = (name: string, fallback: string) =>',
-  'bin/conclave.ts:798-801': 'return i >= 0 ? (rest[i + 1] ?? fallback) : fallback',
-  'bin/conclave.ts:1077': 'cwd: process.cwd(),',
-  'bin/conclave.ts:1164': 'runReport(relay, { goal, outcome, startedAt: runStartedAt, build })',
-  'bin/conclave.ts:1230': 'const flag = (name: string, fallback: string) =>',
-  'bin/conclave.ts:1230-1239': 'if (i < 0) return fallback',
-  // Why the console cannot be passed `--model x` through `--implementer-args`: its flag helper
-  // reads a value beginning with `--` as a missing one. The relay's helper does not.
-  'bin/conclave.ts:1234': "value.startsWith('--')",
+  // The two per-command flag helpers are gone (#81), and with them the four citations that
+  // pinned their bodies and the one that pinned `value.startsWith('--')` -- the line recording
+  // why the console could not be passed `--model x` through `--implementer-args`. Deleted
+  // rather than repaired, and that is the exception rather than the rule here: each was
+  // evidence FOR a divergence that no longer exists, so there is nothing left for them to point
+  // at. What replaced them is cited by symbol -- `flagReader` and `PASS_THROUGH_FLAGS` in
+  // src/config/cliFlags.ts -- which needs no line to survive.
+  'bin/conclave.ts:1132': 'cwd: process.cwd(),',
+  'bin/conclave.ts:1219': 'runReport(relay, { goal, outcome, startedAt: runStartedAt, build })',
   // One flag for every implementer seat, which is why per-seat launch args are not yet
   // expressible on the command line.
-  'bin/conclave.ts:943-946': "...extraArgs(flag('implementer-args', ''))",
+  'bin/conclave.ts:998-1001': "...extraArgs(flag('implementer-args', ''))",
   'src/config/project.ts:160-163': 'export function launchArgsFor',
   'src/registry/roles.ts:15': 'export type RoleId = string',
   // The relay.ts citations below moved together when `launch` was added to RelayParticipant
@@ -273,8 +273,8 @@ test('the scanner sees both citation forms, so neither can be added unnoticed', 
   assert.deepEqual(citationsInLine('// see src/relay/run.ts:51 for the reason'), [
     { path: 'src/relay/run.ts', start: 51, end: 51, text: 'src/relay/run.ts:51' },
   ])
-  assert.deepEqual(citationsInLine(' * a range (`bin/conclave.ts:798-801`) is one citation'), [
-    { path: 'bin/conclave.ts', start: 798, end: 801, text: 'bin/conclave.ts:798-801' },
+  assert.deepEqual(citationsInLine(' * a range (`bin/conclave.ts:998-1001`) is one citation'), [
+    { path: 'bin/conclave.ts', start: 998, end: 1001, text: 'bin/conclave.ts:998-1001' },
   ])
   // The continuation form, and the reason it is worth the regex: two of the three citations on
   // this shape of line carry no path of their own.
