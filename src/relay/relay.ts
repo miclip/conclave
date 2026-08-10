@@ -477,8 +477,29 @@ export function seatIdFor(index: number): string {
  */
 export type SeatPlan =
   | { kind: 'default' }
-  | { kind: 'listed'; agents: string[] }
+  | { kind: 'listed'; seats: SeatRequest[] }
   | { kind: 'refused'; reason: string }
+
+/**
+ * One seat as the operator asked for it: an agent, and the launch arguments meant for THAT seat.
+ *
+ * The agent and its arguments travel together because the alternative was two flags read
+ * positionally -- `--implementers a,b --implementers-args "x;y"` -- where the correlation
+ * between the two lists exists only in the operator's head and in the order they typed them. A
+ * shell that eats one entry of one list silently shifts every argument onto the wrong seat, and
+ * the run starts: seat two is launched with seat three's model and nothing anywhere says so.
+ * Heterogeneous seats (#77) are the point of the feature, so getting the pairing wrong is not a
+ * cosmetic failure -- it is the feature doing the opposite of what it was asked.
+ *
+ * `args` is always present and may be empty, rather than optional. A seat that named no
+ * arguments and a seat whose arguments were dropped somewhere read identically once the field
+ * can be absent, and this is the field the whole syntax exists to carry.
+ */
+export interface SeatRequest {
+  agent: string
+  /** Launch arguments typed for this seat alone, empty when the entry named only an agent. */
+  args: string[]
+}
 
 /**
  * Read the two seat flags together, or refuse the invocation.
@@ -500,6 +521,23 @@ export type SeatPlan =
  *
  * `--implementer claude --implementers claude,claude` is not a conflict and is accepted: the
  * operator restated the lead seat and then added one.
+ *
+ * ENTRY SYNTAX. An entry is an agent optionally followed by that seat's launch arguments,
+ * separated by whitespace, and entries are separated by commas:
+ *
+ *   --implementers "claude --model opus-5, claude --model sonnet-5"
+ *
+ * The comma is the seat boundary and the first token of each entry is the agent; everything
+ * after it belongs to that seat and to no other. The split is whitespace, the same naive rule
+ * `extraArgs` applies to `--implementer-args`, and deliberately not a shell parser: an argument
+ * needing quotes belongs in `.conclave/config.json`, which is keyed by agent and has a file's
+ * worth of room. The cost, stated rather than discovered: an argument containing a COMMA cannot
+ * be written here, because the comma is read as the next seat.
+ *
+ * Only the agent is checked for flag shape. `--implementers "claude --model x"` is an entry
+ * whose arguments legitimately begin with a dash, while `--implementers ",claude"` or an entry
+ * whose FIRST token is flag-shaped is still a shell that ate an argument -- so the refusal that
+ * catches a lost entry survives, and the one that would have caught the new syntax is gone.
  */
 export function implementerSeatPlan(raw: {
   /** What `--implementer` resolved to, its default included. */
@@ -511,18 +549,23 @@ export function implementerSeatPlan(raw: {
 }): SeatPlan {
   const listed = raw.implementers.trim()
   if (listed === '') return { kind: 'default' }
-  const agents = listed.split(',').map((a) => a.trim())
-  const bad = agents.find((a) => a === '' || a.startsWith('-'))
-  if (bad !== undefined) {
-    const detail = bad === '' ? 'an empty entry' : `an entry that looks like a flag ("${bad}")`
-    return {
-      kind: 'refused',
-      reason:
-        `--implementers "${raw.implementers}" has ${detail}. It is a comma-separated list of ` +
-        `agents, one per seat: --implementers "claude,claude".`,
+  const seats: SeatRequest[] = []
+  for (const entry of listed.split(',')) {
+    const [agent, ...args] = entry.trim().split(/\s+/).filter(Boolean)
+    if (agent === undefined || agent.startsWith('-')) {
+      const detail =
+        agent === undefined ? 'an empty entry' : `an entry whose agent looks like a flag ("${agent}")`
+      return {
+        kind: 'refused',
+        reason:
+          `--implementers "${raw.implementers}" has ${detail}. It is a comma-separated list of ` +
+          `seats, each an agent followed by that seat's own launch arguments: ` +
+          `--implementers "claude,claude" or --implementers "claude --model opus-5, claude --model sonnet-5".`,
+      }
     }
+    seats.push({ agent, args })
   }
-  if (raw.implementerNamed && agents[0] !== raw.implementer) {
+  if (raw.implementerNamed && seats[0]!.agent !== raw.implementer) {
     return {
       kind: 'refused',
       reason:
@@ -531,7 +574,7 @@ export function implementerSeatPlan(raw: {
         `('${seatIdFor(0)}'), so drop one or make them agree.`,
     }
   }
-  return { kind: 'listed', agents }
+  return { kind: 'listed', seats }
 }
 
 /**
@@ -541,16 +584,22 @@ export function implementerSeatPlan(raw: {
  * AGENT -- `.conclave/config.json` keys them that way -- and two seats can be filled by
  * different ones. At N=1 this returns exactly the object both front-ends built inline before it
  * existed, which is what keeps the default run's spec unchanged.
+ *
+ * Three sources, composed in that order: what the project configured for the agent, what
+ * `argsFor` adds for every implementer seat (`--implementer-args`), and last the arguments the
+ * operator typed for THIS seat. Last wins, which is the rule the child CLIs themselves apply to
+ * a repeated flag, so a seat that names its own `--model` overrides the one the run set for all
+ * of them rather than being overridden by it.
  */
 export function implementerSpecsFor(
-  agents: string[],
+  seats: readonly SeatRequest[],
   argsFor: (agent: string) => string[],
 ): ParticipantSpec[] {
-  return agents.map((agent, i) => {
-    const args = argsFor(agent)
+  return seats.map((seat, i) => {
+    const args = [...argsFor(seat.agent), ...seat.args]
     return {
       id: seatIdFor(i),
-      agent,
+      agent: seat.agent,
       role: 'implementer',
       ...(args.length > 0 ? { args } : {}),
     }

@@ -51,6 +51,20 @@ conclave relay "<goal>" --advisor codex --implementer opencode \
   --implementer-args "-m opencode/kimi-k2.6"
 ```
 
+`--implementer-args` says implementer, so it applies to every implementer seat. A run with
+more than one seat gives each its own agent and its own launch arguments in a single flag,
+one entry per seat:
+
+```sh
+conclave relay "<goal>" --advisor codex \
+  --implementers "claude --model opus-5, opencode -m opencode/kimi-k2.7-code"
+```
+
+The comma is the seat boundary and the first word of each entry is the agent; everything
+after it belongs to that seat alone, and is applied after `--implementer-args` so the seat's
+own spelling wins. Seats are named `implementer`, `implementer-2`, … An argument containing a
+comma cannot be written here — put it in `.conclave/config.json`, which is keyed by agent.
+
 That is a different MODEL in the same harness, which is not the same thing as a different
 REPL — the OpenCode system prompt, tool set and agent loop still apply. `kimi` is the Kimi
 REPL itself, with its own prompt, tools and agent loop; point it at a provider with

@@ -520,7 +520,16 @@ test('both front-ends read the seat list through the shared builder and pass it 
   // The console's half the CLI block cannot show: `runSession` is where the list could still
   // be dropped between the two.
   const consoleSrc = readFileSync(join(import.meta.dirname, '..', 'repl', 'session.ts'), 'utf8')
-  assert.match(consoleSrc, /implementers\?: string\[\] \| undefined/, 'SessionOptions must have a field to receive it')
+  // `SeatRequest[]`, not `string[]`, since per-seat launch arguments (#77). The field carries
+  // each seat's own arguments beside its agent; a bare agent list here would have needed a
+  // second list correlated with this one by index, which is the pairing the syntax exists to
+  // avoid. Widened deliberately rather than loosened -- the type is still named, so a wire that
+  // went back to agents alone, and with them dropped every seat's arguments, still fails here.
+  assert.match(
+    consoleSrc,
+    /implementers\?: SeatRequest\[\] \| undefined/,
+    'SessionOptions must have a field to receive it, carrying each seat with its own args',
+  )
   assert.match(
     consoleSrc,
     /\.\.\.\(opts\.implementers \? \{ implementers: implSpecs \} : \{\}\)/,

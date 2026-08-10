@@ -324,7 +324,7 @@ const DECLARED: Record<string, string> = {
     'Authority routing (#56, D2) sends implementer_unanswered to the advisor before the operator, ' +
     'so a default run interrupts the human less than today. Real change at N=1, an improvement, ' +
     'declared rather than discovered. The pause reason exists at src/relay/run.ts:51 and the halt ' +
-    'that raises it is at src/relay/relay.ts:3710.',
+    'that raises it is at src/relay/relay.ts:3759.',
   'status.pause.resolution':
     'Classifying unresolved conditions on both axes (#56, D2) added `resolution` to every RunPause ' +
     '(src/relay/run.ts:183), so `conclave status --json` on a paused default run now carries ' +
@@ -365,7 +365,8 @@ const DECLARED: Record<string, string> = {
     'addition land unremarked. No assertion in this file was relaxed to accommodate it.',
   '--implementers on both front-ends':
     'The optional flag surface grows by one on each command: --implementers, a comma-separated ' +
-    'list of agents naming one implementer seat each. This is D1 as written -- "adding seats ' +
+    'list of seats, each an agent optionally followed by that seat’s own launch arguments ' +
+    '("claude --model opus-5, claude --model sonnet-5"). This is D1 as written -- "adding seats ' +
     'brings new arguments and nothing else" -- and the argument is the thing being declared. ' +
     'What does NOT change is the default run: with the flag absent both front-ends pass no ' +
     '`implementers` key to Relay.start at all (the key is spread in conditionally in ' +
@@ -381,7 +382,27 @@ const DECLARED: Record<string, string> = {
     'accommodate it -- the seat-id, cwd, report-shape and status-shape guards all still run ' +
     'against a default run that never mentions the new flag. That the flag DOES something is a ' +
     'separate claim, proved in src/relay/seatCli.test.ts by driving both real front-ends to a ' +
-    'run with two constructed seats.',
+    'run with two constructed seats. ' +
+    'PER-SEAT LAUNCH ARGUMENTS ride inside that same flag (#77), and no flag is added for them, ' +
+    'which is the part being declared here. Seats that cannot differ in MODEL are barely ' +
+    'heterogeneous -- one agent id spans dozens of models -- and --implementer-args is one flag ' +
+    'that says implementer, so it applies to every seat by construction. The alternative was a ' +
+    'second flag holding a list correlated with this one by POSITION, and a pairing that exists ' +
+    'only as two array indices is one a single dropped entry silently reassigns: seat two ' +
+    'launched with seat three’s model, run started, nothing anywhere says so. Carrying the ' +
+    'arguments in the entry makes that unrepresentable. THE DEFAULT RUN DOES NOT CHANGE: with ' +
+    '--implementers absent both front-ends build one seat from --implementer carrying no ' +
+    'arguments of its own, so `implementerSpecsFor` composes the same argv from the same two ' +
+    'sources it always did, and the flag sets pinned below are untouched. Two surfaces DO ' +
+    'change and are named rather than left to be discovered: `SeatPlan.listed` carries `seats` ' +
+    '(agent and args) instead of `agents`, and `SessionOptions.implementers` is `SeatRequest[]` ' +
+    'rather than `string[]` -- the console front-end hands over a list and lets `runSession` ' +
+    'build the specs, so a bare agent list there is a wire on which a seat’s own arguments have ' +
+    'nowhere to be. One cost, stated rather than hidden: the comma is the seat boundary, so an ' +
+    'argument containing a comma cannot be written on this flag and belongs in ' +
+    '.conclave/config.json, which is keyed by agent. No assertion in this file was relaxed. That ' +
+    'each seat receives its OWN arguments and no other seat’s is proved at the CLI, through ' +
+    'both real front-ends, in src/relay/perSeatArgs.test.ts.',
   'per-seat dispatcher state in status --json':
     'A run with more than one implementer seat now reports, per seat, the dispatcher state ' +
     'that only exists at N>1: `participants[].seat = {state, dispatched, task?, worktree?}` ' +
@@ -588,7 +609,7 @@ async function seatsFromSessionCli(): Promise<{ creates: CreateRecord[]; cwd: st
  * The two machine-readable documents a default run actually emits.
  *
  * Both come out of one `relay --json` run in a temporary repository, through the production
- * call sites: the report is what `bin/conclave.ts:1232` prints, and the status record is what
+ * call sites: the report is what `bin/conclave.ts:1255` prints, and the status record is what
  * `recordSession` wrote during that same run, read back by `main(['status', '--json'])` --
  * which resolves the most recent session in `process.cwd()`, so the record has to have been
  * written where an operator would look for it.
@@ -633,7 +654,7 @@ async function defaultRunDocuments(): Promise<{ report: unknown; status: unknown
  * blind to that subtree is claiming more than it checks.
  *
  * Built through the real recorder: `recordSession` is what both front-ends call, and
- * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:854
+ * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:868
  * with the same object -- a `RunPause` the run handle raised, not one written here. Read back
  * through `main(['status', '--json'])`, so the serialisation and the reconciliation against
  * the pid are the production ones.
@@ -771,7 +792,7 @@ async function provokeMergeBlocked(repo: string): Promise<{ relay: Relay; run: R
  * Drive a real relay into one condition and return the pause it raised.
  *
  * The provocations are the ones `resolution.test.ts`'s own `provoke` already uses, deliberately:
- * the same triggers reaching the same single halt site (src/relay/relay.ts:2229), where the
+ * the same triggers reaching the same single halt site (src/relay/relay.ts:2278), where the
  * classification is computed by production `resolutionFor` from the subject the caller passed.
  * Nothing here writes a `RunPause`.
  *
@@ -854,7 +875,7 @@ async function provoke(
  * The status document of a run paused for one given reason.
  *
  * Built through the real recorder: `recordSession` is what both front-ends call, and
- * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:854
+ * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:868
  * with the same object -- a `RunPause` the relay raised, not one written here. Read back
  * through `main(['status', '--json'])`, so the serialisation and the reconciliation against
  * the pid are the production ones.
@@ -874,7 +895,7 @@ async function pausedStatusDocument(reason: PauseReason): Promise<unknown> {
     goal: 'a default goal',
     front: 'session',
     startedAt: Date.now(),
-    // Passed because the console always passes one (src/repl/session.ts:680), so the status
+    // Passed because the console always passes one (src/repl/session.ts:694), so the status
     // documents this file pins differ only in what a pause actually changes.
     logPath: join(repo, '.conclave', 'runs', 'session-test.ndjson'),
     build: 'test',
@@ -1058,9 +1079,9 @@ test('default run works in the run cwd and creates no worktree', async () => {
     assert.equal(c.cwd, fromCli.cwd, `the session CLI must create ${c.id} in the run cwd`)
   }
 
-  // The relay CLI passes process.cwd() as the run cwd: bin/conclave.ts:1145.
-  // The relay hands that same cwd to each participant adapter: src/relay/relay.ts:1244-1250.
-  // The cwd getter simply returns the option: src/relay/relay.ts:1137-1139.
+  // The relay CLI passes process.cwd() as the run cwd: bin/conclave.ts:1168.
+  // The relay hands that same cwd to each participant adapter: src/relay/relay.ts:1293-1299.
+  // The cwd getter simply returns the option: src/relay/relay.ts:1186-1188.
   assert.match(relay, /cwd:\s*process\.cwd\(\)/, 'relay block must start in process.cwd')
   // Both creation sites now pass a NAMED context object rather than an inline literal, because
   // the same object composes the launch args that get recorded -- see
@@ -1088,7 +1109,7 @@ test('default run works in the run cwd and creates no worktree', async () => {
 
   // A default run with no subagents must not create any git worktree. The relay only samples
   // the worktree list for its subagent-use report: src/relay/subagents.ts:68 defines
-  // worktreePaths, and src/relay/relay.ts:1791, :1838 and :3120 read it.
+  // worktreePaths, and src/relay/relay.ts:1840, :1887 and :3169 read it.
   // Prove it by exercising the run in a real temporary repository.
   const repo = mkdtempSync(join(tmpdir(), 'conclave-default-'))
   try {
@@ -1236,7 +1257,7 @@ const runDocuments = (): Promise<{ report: unknown; status: unknown }> =>
  *     field added inside any of them was invisible -- which is precisely where per-seat
  *     features land.
  *   - A declared field is not an emitted one. `turnWatchdogMs` was declared and dropped for
- *     its whole life (src/repl/session.ts:193-206), and a text-level pin cannot tell the
+ *     its whole life (src/repl/session.ts:201-214), and a text-level pin cannot tell the
  *     difference.
  *   - An emitted field need not be declared anywhere this test was reading. A key spread in
  *     from another type, or written by a builder that widens its return, appears in the JSON

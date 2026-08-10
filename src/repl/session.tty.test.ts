@@ -124,7 +124,8 @@ for (const [agent, session] of Object.entries(sessions)) {
 
 const code = await runSession({
   cwd: ${JSON.stringify(dir)}, goal: 'Keep the work moving.',
-  lead: 'codex', implementer: 'alpha', implementers: ['alpha', 'beta'],
+  lead: 'codex', implementer: 'alpha',
+  implementers: [{ agent: 'alpha', args: [] }, { agent: 'beta', args: [] }],
   rounds: 6, checks: [], registry,
 })
 process.exit(code)
