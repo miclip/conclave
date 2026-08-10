@@ -38,7 +38,7 @@ import type { AgentEvent } from '../contract/session.ts'
 import { defaultRegistry } from '../registry/builtin.ts'
 import type { CheckSpec } from '../rotation/record.ts'
 import type { AgentRegistry } from '../registry/registry.ts'
-import { Relay } from '../relay/relay.ts'
+import { implementerSpecsFor, Relay } from '../relay/relay.ts'
 import type { RelayMessage } from '../relay/message.ts'
 import type { RunHandle, RunPause } from '../relay/run.ts'
 import { ensureCodexHooksTrusted } from '../deployment/ensureTrust.ts'
@@ -125,6 +125,21 @@ export interface SessionOptions {
   goal?: string | undefined
   lead: string
   implementer: string
+  /**
+   * Every implementer seat's agent, when the operator named the seat list with
+   * `--implementers`. Absent is the default and must stay behaviourless.
+   *
+   * Agents rather than specs, because seat construction belongs to one place: `runSession`
+   * builds the specs with `implementerSpecsFor`, exactly as the relay CLI does, so `seatIdFor`
+   * is not applied on both sides of this wire and cannot disagree with itself. The first entry
+   * is the lead implementer and equals `implementer`; the CLI refuses the invocation where they
+   * disagree rather than passing a contradiction through.
+   *
+   * A console run given none is the run it was before this field existed: no `implementers` key
+   * reaches `Relay.start`, so `implementerSeats` returns `[implementer]` by the expression it
+   * always used (D1).
+   */
+  implementers?: string[] | undefined
   /**
    * Extra launch arguments per seat, e.g. `['-m', 'opencode/kimi-k2.6']`.
    *
@@ -479,6 +494,11 @@ export async function runSession(opts: SessionOptions): Promise<number> {
   }
   if (refusals.length > 0) return 1
 
+  // The seat list, resolved once and read by everything below that used to read
+  // `opts.implementer` and mean "the implementers". At N=1 it is `[opts.implementer]`, which is
+  // the same single agent those readers had.
+  const implementerAgents = opts.implementers ?? [opts.implementer]
+
   const existing = guard(opts.cwd)
   if (existing.live) {
     write(`refusing to start: ${existing.messages.join('\n')}`)
@@ -489,7 +509,10 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     banner({
       version: opts.version ?? '0.0.0',
       advisor: opts.lead,
-      implementer: opts.implementer,
+      // Every seat's agent, comma-joined. At N=1 that is the single string it has always been;
+      // at N>1 a banner naming only the first seat would be the run under-reporting itself in
+      // the first thing the operator reads.
+      implementer: implementerAgents.join(', '),
       cwd: opts.cwd,
       checks: opts.checks,
     }),
@@ -526,7 +549,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
   // Only the CLIs this session will actually launch. Both roles can be the same one, and
   // registering the other anyway would write a sidecar nobody reads and then require a
   // trust decision for it before anything reported ready.
-  const agents = [...new Set([opts.lead, opts.implementer])].filter(isAgentKind)
+  const agents = [...new Set([opts.lead, ...implementerAgents])].filter(isAgentKind)
   const installed = await installConfig({ projectRoot: opts.cwd, agents, diagnose: false })
   const changed = installed.written.filter((w) => w.changed)
   if (changed.length > 0) {
@@ -562,17 +585,26 @@ export async function runSession(opts: SessionOptions): Promise<number> {
   const projectConfig = readProjectConfig(opts.cwd)
   // Config-derived first, then per-invocation, so an explicit flag wins.
   const leadArgs = [...launchArgsFor(projectConfig, opts.lead), ...(opts.leadArgs ?? [])]
-  const implArgs = [
-    ...launchArgsFor(projectConfig, opts.implementer),
+  // Per agent, as in the relay CLI: config-derived arguments are keyed by agent and two seats
+  // can be filled by different ones, while `implementerArgs` is the operator's own and applies
+  // to every implementer seat.
+  const implArgsFor = (agent: string) => [
+    ...launchArgsFor(projectConfig, agent),
     ...(opts.implementerArgs ?? []),
   ]
+  const implSpecs = implementerSpecsFor(implementerAgents, implArgsFor)
 
   // Said once, at the top, naming who. A session that never asks permission is a thing
   // the operator should be reminded of while it runs, not something they configured weeks
   // ago in a file they are not looking at.
   const bypassing = [
     permissionModeFor(projectConfig, opts.lead) === 'bypass' ? `advisor (${opts.lead})` : '',
-    permissionModeFor(projectConfig, opts.implementer) === 'bypass' ? `implementer (${opts.implementer})` : '',
+    // Every distinct implementer agent, because a bypass is configured per agent and a seat
+    // whose agent never asks permission is a thing the operator should be told about whether or
+    // not it happens to be the first seat.
+    ...[...new Set(implementerAgents)].map((a) =>
+      permissionModeFor(projectConfig, a) === 'bypass' ? `implementer (${a})` : '',
+    ),
   ].filter(Boolean)
   if (bypassing.length > 0) {
     write(yellow(`  permission prompts bypassed for ${bypassing.join(' and ')} — per ${CONFIG_RELATIVE}`))
@@ -603,12 +635,11 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     // Unchanged, deliberately. See `SessionOptions.ceilings`.
     ...(opts.ceilings ? { ceilings: opts.ceilings } : {}),
     lead: { id: 'advisor', agent: opts.lead, role: 'advisor', ...(leadArgs.length > 0 ? { args: leadArgs } : {}) },
-    implementer: {
-      id: 'implementer',
-      agent: opts.implementer,
-      role: 'implementer',
-      ...(implArgs.length > 0 ? { args: implArgs } : {}),
-    },
+    // `implSpecs[0]` is the object this built by hand: `seatIdFor(0)` is 'implementer' and the
+    // args are the same list. The plural key is spread in only when the operator named a list,
+    // so a default console run reaches `Relay.start` with exactly the options it always did.
+    implementer: implSpecs[0]!,
+    ...(opts.implementers ? { implementers: implSpecs } : {}),
     maxAdvisorTurns: opts.rounds,
     ...(opts.checks.length > 0 ? { rotation: { checks: opts.checks } } : {}),
     onLog: (m) => {

@@ -54,7 +54,7 @@ import { seedCodexTrust } from '../src/deployment/codexHookTrust.ts'
 import { defaultRegistry } from '../src/registry/builtin.ts'
 import type { AgentRegistry } from '../src/registry/registry.ts'
 import { runSession } from '../src/repl/session.ts'
-import { Relay } from '../src/relay/relay.ts'
+import { implementerSeatPlan, implementerSpecsFor, Relay } from '../src/relay/relay.ts'
 import { formatGuardReportJson, guard } from '../src/workspace/sessionLock.ts'
 
 const USAGE = `conclave <command>
@@ -131,7 +131,8 @@ Commands:
                                    live, so it can gate a commit helper. --json prints the
                                    report as JSON on stdout instead of prose; the exit
                                    code is unchanged.
-  relay "<goal>" [--advisor codex] [--implementer claude] [--rounds N] [--settle SECONDS]
+  relay "<goal>" [--advisor codex] [--implementer claude] [--implementers "claude,claude"]
+                 [--rounds N] [--settle SECONDS]
                  [--checks "npm test"] [--checks-informational "..."]
                  [--checks-unrelated "..."] [--advisor-args "..."] [--implementer-args "..."]
                  [--salvage SECONDS] [--json] [--resume <log>] [--record <path>] [--dry-run]
@@ -152,6 +153,12 @@ Commands:
                                    --operator agent tells the advisor a machine is
                                    answering: escalate readily, but about premises and
                                    ambiguous criteria rather than permission.
+                                   --implementers is the seat LIST, one agent per seat:
+                                   "claude,claude" runs two. The first entry is the seat
+                                   --implementer names, so naming both differently is
+                                   refused rather than reconciled. Seats are named
+                                   implementer, implementer-2, ...; more than one gets a git
+                                   worktree each and refuses to start on a dirty checkout.
                                    The goal is linted before anything starts: an ask with
                                    nothing observable in it cannot be graded better than
                                    reasoned_but_unverified however well the work goes.
@@ -232,7 +239,8 @@ Commands:
                                    minutes. --record tees every byte, escape codes
                                    included, so a rendering fault can be inspected rather
                                    than screenshotted.
-  session ["<goal>"] [--advisor codex] [--implementer claude] [--rounds N]
+  session ["<goal>"] [--advisor codex] [--implementer claude]
+                   [--implementers "claude,claude"] [--rounds N]
                    [--checks "npm test"] [--checks-informational "..."]
                    [--checks-unrelated "..."] [--advisor-args "..."] [--implementer-args "..."]
                    [--bypass [agent]] [--operator agent] [--settle SECONDS]
@@ -248,6 +256,7 @@ Commands:
                                    --advisor-args / --implementer-args pass extra launch
                                    arguments, e.g. "-m opencode/kimi-k2.6". Required for
                                    any agent that picks its model per invocation.
+                                   --implementers is the seat list, as in relay.
                                    --checks are REQUIRED: a replacement that cannot
                                    reproduce one rolls the rotation back.
                                    --checks-informational and --checks-unrelated run and
@@ -801,7 +810,23 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
     // RelayOptions FIELD name leaking into the CLI, and it is kept as an alias so existing
     // scripts do not break.
     const lead = flag('advisor', '') || flag('lead', 'codex')
-    const implementer = flag('implementer', 'claude')
+    // `--implementers` is the seat LIST and `--implementer` is its first entry, so the two are
+    // read together by one shared builder rather than separately here. A run given neither
+    // passes no `implementers` key at all -- see SeatPlan; the default run must not acquire a
+    // seat list it did not ask for (D1).
+    const seatPlan = implementerSeatPlan({
+      implementer: flag('implementer', 'claude'),
+      implementers: flag('implementers', ''),
+      implementerNamed: rest.includes('--implementer'),
+    })
+    if (seatPlan.kind === 'refused') {
+      console.error(`conclave: ${seatPlan.reason}`)
+      return 1
+    }
+    const implementerAgents = seatPlan.kind === 'listed' ? seatPlan.agents : [flag('implementer', 'claude')]
+    // The lead implementer, which is what every singular reader below wants: registration,
+    // the bypass notice, the dry-run plan and `RelayOptions.implementer` itself.
+    const implementer = implementerAgents[0]!
     const checks = parseChecks(
       flag('checks', ''),
       flag('checks-informational', ''),
@@ -912,11 +937,18 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
     const projectConfig = withBypass(readProjectConfig(process.cwd()), bypass)
     // Config-derived args first, then per-invocation ones, so an explicit flag wins.
     const leadArgs = [...launchArgsFor(projectConfig, lead), ...extraArgs(flag('advisor-args', '') || flag('lead-args', ''))]
-    const implArgs = [
-      ...launchArgsFor(projectConfig, implementer),
+    // Per AGENT, not per seat: `.conclave/config.json` keys launch arguments by agent, and two
+    // seats can be filled by different ones. `--implementer-args` is the operator's own addition
+    // and applies to every implementer seat, because there is one flag and it says implementer.
+    const implArgsFor = (agent: string) => [
+      ...launchArgsFor(projectConfig, agent),
       ...extraArgs(flag('implementer-args', '')),
     ]
-    const bypassing = [lead, implementer].filter((a) => permissionModeFor(projectConfig, a) === 'bypass')
+    const implSpecs = implementerSpecsFor(implementerAgents, implArgsFor)
+    const implArgs = implArgsFor(implementer)
+    const bypassing = [lead, ...implementerAgents].filter(
+      (a) => permissionModeFor(projectConfig, a) === 'bypass',
+    )
     if (bypassing.length > 0) {
       say(`  permission prompts bypassed for ${[...new Set(bypassing)].join(', ')} — per ${CONFIG_RELATIVE}`)
     }
@@ -928,7 +960,7 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
     // editing someone's .gitignore, which is why the un-ignored paths are reported instead.
     const registered = await installConfig({
       projectRoot: process.cwd(),
-      agents: [...new Set([lead, implementer])].filter((a): a is AgentKind =>
+      agents: [...new Set([lead, ...implementerAgents])].filter((a): a is AgentKind =>
         (AGENT_KINDS as string[]).includes(a),
       ),
       diagnose: false,
@@ -948,7 +980,9 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
     // run without a human was the one missing the step that removes the need for one.
     await ensureCodexHooksTrusted({
       projectRoot: process.cwd(),
-      agents: [lead, implementer].filter((a): a is AgentKind => (AGENT_KINDS as string[]).includes(a)),
+      agents: [...new Set([lead, ...implementerAgents])].filter((a): a is AgentKind =>
+        (AGENT_KINDS as string[]).includes(a),
+      ),
       say,
       // Appended rather than redrawn: this is the unattended form, its output is usually a
       // file, and a spinner in a log is noise. It still says something, because a silent
@@ -1001,6 +1035,13 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
         goal,
         advisor: { agent: lead, args: leadArgs },
         implementer: { agent: implementer, args: implArgs },
+        // Only when the operator named a seat list. A default dry run's document is what it
+        // has always been -- one `implementer` key naming one agent -- and a `seats` array
+        // that appeared on every plan would change what an existing reader parses to say
+        // nothing it did not already know.
+        ...(seatPlan.kind === 'listed'
+          ? { implementers: implSpecs.map((s) => ({ id: s.id, agent: s.agent, args: s.args ?? [] })) }
+          : {}),
         checks: checks.map((c) =>
           typeof c === 'string'
             ? { command: c, relevance: 'required' }
@@ -1013,7 +1054,12 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
         say('dry run — nothing was started')
         say(`  cwd:         ${plan.cwd}`)
         say(`  advisor:     ${lead}${leadArgs.length ? ` ${leadArgs.join(' ')}` : ''}`)
-        say(`  implementer: ${implementer}${implArgs.length ? ` ${implArgs.join(' ')}` : ''}`)
+        // One line per seat when the operator named a list, so the prose says the same thing
+        // the JSON does. At N=1 it is the line it has always been.
+        for (const s of implSpecs) {
+          const label = implSpecs.length === 1 ? 'implementer' : s.id
+          say(`  ${label.padEnd(11)}: ${s.agent}${s.args?.length ? ` ${s.args.join(' ')}` : ''}`)
+        }
         say(
           `  checks:      ${
             plan.checks.length
@@ -1032,12 +1078,11 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
       ...(prior.length > 0 ? { resume: prior } : {}),
       ...(flag('operator', '') === 'agent' ? { operator: 'agent' as const } : {}),
       lead: { id: 'advisor', agent: lead, role: 'advisor', ...(leadArgs.length > 0 ? { args: leadArgs } : {}) },
-      implementer: {
-        id: 'implementer',
-        agent: implementer,
-        role: 'implementer',
-        ...(implArgs.length > 0 ? { args: implArgs } : {}),
-      },
+      // `implSpecs[0]` IS the seat this used to build by hand: `seatIdFor(0)` is 'implementer'
+      // and the args are the same list, so a default invocation hands `Relay.start` the object
+      // it always did. The plural key is spread in only when the operator named a seat list.
+      implementer: implSpecs[0]!,
+      ...(seatPlan.kind === 'listed' ? { implementers: implSpecs } : {}),
       maxAdvisorTurns: Number(flag('rounds', '4')),
       // Built by `ceilingsFrom` rather than inline, so this command and `session` cannot
       // disagree about what a ceiling flag means. The `flag()` calls stay HERE: the pinned
@@ -1198,7 +1243,17 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
       flag('checks-unrelated', ''),
     )
     const lead = flag('advisor', '') || flag('lead', 'codex')
-    const implementer = flag('implementer', 'claude')
+    // Both front-ends, together, through the same builder. See the relay block above: this is
+    // the ninth capability that would otherwise have been wired into one command and not the
+    // other, and the seat count is not one an operator should have to discover empirically.
+    const seatPlan = implementerSeatPlan({
+      implementer: flag('implementer', 'claude'),
+      implementers: flag('implementers', ''),
+      implementerNamed: args.includes('--implementer'),
+    })
+    const implementerAgents =
+      seatPlan.kind === 'listed' ? seatPlan.agents : [flag('implementer', 'claude')]
+    const implementer = implementerAgents[0]!
     const rounds = flag('rounds', '8')
     // The same flag `relay` has. Its absence here is what made an agent pick the front-end
     // that cannot hold a pause -- see SessionOptions.operator.
@@ -1225,6 +1280,13 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
     const implementerArgs = extraArgs(flag('implementer-args', ''))
     // Both front-ends, together. Wiring a capability into one and not the other is the
     // mistake this codebase has now made six times.
+    // Refused BEFORE the bypass is applied, which is this block's point of no return: an
+    // invocation that is not going to start a session must not leave a permission mode written
+    // into the operator's project on its way out.
+    if (seatPlan.kind === 'refused') {
+      console.error(`conclave: ${seatPlan.reason}`)
+      return 1
+    }
     // The console applies and persists together: unlike `relay` there is no dry run and no
     // preflight refusal, so the point of no return is here.
     if (!applyBypassFlag(args, (l) => console.log(l))) return 1
@@ -1248,6 +1310,10 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
       ...(goal === undefined ? {} : { goal }),
       lead,
       implementer,
+      // Agents rather than specs: `runSession` owns seat construction, and handing it a spec
+      // list would put `seatIdFor` on both sides of the wire. Absent unless the operator named
+      // a list, so a default console run passes exactly the options it always passed.
+      ...(seatPlan.kind === 'listed' ? { implementers: implementerAgents } : {}),
       rounds: Number(rounds),
       checks,
       ...(leadArgs.length > 0 ? { leadArgs } : {}),

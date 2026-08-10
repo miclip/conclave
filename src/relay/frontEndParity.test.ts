@@ -179,6 +179,50 @@ test('every ceiling flag is parsed AND lands on the options both front-ends buil
   )
 })
 
+test('both front-ends read the seat list through the shared builder and pass it on', () => {
+  // The ceilings shape, applied to seats. `--implementers` could be read into a local and
+  // dropped on either command and every other test in this file would pass: the flag-set test
+  // compares which flags EXIST, and a run with a silently ignored seat list looks exactly like
+  // a default run, which is the failure mode hardest to notice from the outside.
+  //
+  // Naming `implementerSeatPlan` is the point. A block that split the comma list itself could
+  // disagree with the other about a trailing comma or about which flag wins, and the operator
+  // would find out by getting a different number of seats from `relay` than from `session`.
+  const relay = commandBlock('relay', "if (command === 'session')")
+  const session = commandBlock('session', "if (command === 'demo')")
+
+  for (const [name, block] of [['relay', relay], ['session', session]] as const) {
+    assert.ok(block.includes(`flag('implementers', '')`), `${name} must read --implementers`)
+    assert.match(
+      block,
+      /implementers:\s*flag\('implementers', ''\)/,
+      `${name} must hand --implementers to implementerSeatPlan, not parse it and drop it`,
+    )
+    assert.match(block, /implementerSeatPlan\(\{/, `${name} must build its seat plan with the shared builder`)
+    // And refuse rather than start on a contradiction, which is the builder's other half.
+    assert.match(
+      block,
+      /seatPlan\.kind === 'refused'/,
+      `${name} must refuse the invocation the builder rejected`,
+    )
+    assert.match(
+      block,
+      /seatPlan\.kind === 'listed' \? \{ implementers/,
+      `${name} must pass the named seat list on, and pass nothing when none was named`,
+    )
+  }
+
+  // The console's half the CLI block cannot show: `runSession` is where the list could still
+  // be dropped between the two.
+  const consoleSrc = readFileSync(join(import.meta.dirname, '..', 'repl', 'session.ts'), 'utf8')
+  assert.match(consoleSrc, /implementers\?: string\[\] \| undefined/, 'SessionOptions must have a field to receive it')
+  assert.match(
+    consoleSrc,
+    /\.\.\.\(opts\.implementers \? \{ implementers: implSpecs \} : \{\}\)/,
+    'runSession must pass the seat list into Relay.start, and nothing when there is none',
+  )
+})
+
 test('both front-ends read the project config, and both can write the bypass', () => {
   // Two of the eight, and the pair that shows the shape best: `.conclave/config.json` is a
   // property of the PROJECT rather than of which command opened it, so reading it in one

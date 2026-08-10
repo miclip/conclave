@@ -357,14 +357,34 @@ const DECLARED: Record<string, string> = {
     'src/relay/ceilings.test.ts). The pinned flag sets below are stricter than D1 requires, and ' +
     'that strictness is the point: it forced this entry to be written instead of letting the ' +
     'addition land unremarked. No assertion in this file was relaxed to accommodate it.',
+  '--implementers on both front-ends':
+    'The optional flag surface grows by one on each command: --implementers, a comma-separated ' +
+    'list of agents naming one implementer seat each. This is D1 as written -- "adding seats ' +
+    'brings new arguments and nothing else" -- and the argument is the thing being declared. ' +
+    'What does NOT change is the default run: with the flag absent both front-ends pass no ' +
+    '`implementers` key to Relay.start at all (the key is spread in conditionally in ' +
+    'bin/conclave.ts and in src/repl/session.ts), so `implementerSeats` returns `[implementer]` ' +
+    'by the same expression as before, the lead seat is still `implementer` because ' +
+    '`seatIdFor(0)` is that string at every N, and the spec handed over is the object those two ' +
+    'blocks used to build inline. `--implementer claude` is untouched: it still names the lead ' +
+    'implementer, still defaults to claude, and is still the only way to say it. The two flags ' +
+    'are read by one shared builder (`implementerSeatPlan`) which REFUSES rather than ' +
+    'reconciles when they name different agents for the same seat, because there is no third ' +
+    'seat to put the loser in. Declared here rather than only in the pinned lists below: those ' +
+    'lists are what forced this to be written, and no assertion in this file was relaxed to ' +
+    'accommodate it -- the seat-id, cwd, report-shape and status-shape guards all still run ' +
+    'against a default run that never mentions the new flag. That the flag DOES something is a ' +
+    'separate claim, proved in src/relay/seatCli.test.ts by driving both real front-ends to a ' +
+    'run with two constructed seats.',
 }
 
-test('DECLARED contains exactly the routing, pause-resolution, attribution and ceiling-flag entries', () => {
+test('DECLARED contains exactly the routing, pause-resolution, attribution, ceiling-flag and seat-flag entries', () => {
   assert.deepEqual(Object.keys(DECLARED), [
     'implementer_unanswered -> advisor',
     'status.pause.resolution',
     'per-seat artifact attribution',
     'optional ceiling flags on both front-ends',
+    '--implementers on both front-ends',
   ])
 })
 
@@ -898,6 +918,9 @@ test('both flag helpers fall back when the flag is absent, and each block reads 
   //
   // The four ceiling flags below are a declared change to this surface, not an oversight:
   // see DECLARED['optional ceiling flags on both front-ends'] for the operator's reason.
+  // `implementers` is the second such change, declared at
+  // DECLARED['--implementers on both front-ends'] -- the flag that adds seats, which D1 says is
+  // the ONLY thing adding seats may do.
   const relayFlags = flagsIn(relay)
   const sessionFlags = flagsIn(session)
   assert.deepEqual(
@@ -914,6 +937,7 @@ test('both flag helpers fall back when the flag is absent, and each block reads 
       'force',
       'implementer',
       'implementer-args',
+      'implementers',
       'json',
       'lead',
       'lead-args',
@@ -943,6 +967,7 @@ test('both flag helpers fall back when the flag is absent, and each block reads 
       'force',
       'implementer',
       'implementer-args',
+      'implementers',
       'lead',
       'lead-args',
       'max-concurrent-seats',

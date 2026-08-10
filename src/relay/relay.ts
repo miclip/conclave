@@ -359,6 +359,115 @@ export function implementerSeats(
 }
 
 /**
+ * The id of the Nth implementer seat, counting from zero.
+ *
+ * The first seat is `implementer` at EVERY N, and that is the whole content of the function.
+ * That id is in every message header, every routing log line, the run report, the session lock
+ * and `status --json` today, and `RelayOptions.implementer` names it by hand -- so a scheme that
+ * renamed it once a second seat appeared would change all of those for an operator who asked
+ * only for a second seat. Later seats are numbered from two, the way an operator counts them,
+ * which is also the pair (`implementer`, `implementer-2`) the merge and attribution tests were
+ * already written against.
+ *
+ * Not operator-supplied. D6 wants seat ids the operator chooses, and choosing them means
+ * sanitising them into a path and a ref name (`sanitize` in `src/workspace/worktrees.ts`);
+ * that is a decision with its own failure modes and it is not this one.
+ */
+export function seatIdFor(index: number): string {
+  return index === 0 ? 'implementer' : `implementer-${index + 1}`
+}
+
+/**
+ * What `--implementer` and `--implementers` between them asked for.
+ *
+ * `default` is the absent case and it must stay literally absent: the front-end passes no
+ * `implementers` key at all, so `implementerSeats` returns `[implementer]` by the same
+ * expression it always did. `listed` is the operator naming the seat list themselves, whether
+ * that list has one entry or four.
+ */
+export type SeatPlan =
+  | { kind: 'default' }
+  | { kind: 'listed'; agents: string[] }
+  | { kind: 'refused'; reason: string }
+
+/**
+ * Read the two seat flags together, or refuse the invocation.
+ *
+ * One reader for both front-ends, for the reason `ceilingsFrom` is one: two blocks that each
+ * parsed a comma list would eventually disagree about a trailing comma, and the operator would
+ * discover it by getting a different number of seats from `relay` than from `session`.
+ *
+ * The refusals are the interesting part, and both are cases where the alternative is a run that
+ * starts wrong rather than one that fails:
+ *
+ *   - an empty or flag-shaped entry -- `--implementers claude,` or `--implementers --json` --
+ *     is a shell that ate an argument, and silently dropping it starts a run with fewer seats
+ *     than the operator typed.
+ *   - `--implementer x --implementers y,z` names two different agents for the SAME seat, since
+ *     the first entry of the list IS the seat `--implementer` names (`seatIdFor(0)`). Picking
+ *     one would ignore a flag the operator typed on purpose; there is no third seat to put the
+ *     loser in.
+ *
+ * `--implementer claude --implementers claude,claude` is not a conflict and is accepted: the
+ * operator restated the lead seat and then added one.
+ */
+export function implementerSeatPlan(raw: {
+  /** What `--implementer` resolved to, its default included. */
+  implementer: string
+  /** The raw `--implementers` value, empty when the flag was not given. */
+  implementers: string
+  /** Whether `--implementer` was actually typed, as opposed to falling back. */
+  implementerNamed: boolean
+}): SeatPlan {
+  const listed = raw.implementers.trim()
+  if (listed === '') return { kind: 'default' }
+  const agents = listed.split(',').map((a) => a.trim())
+  const bad = agents.find((a) => a === '' || a.startsWith('-'))
+  if (bad !== undefined) {
+    const detail = bad === '' ? 'an empty entry' : `an entry that looks like a flag ("${bad}")`
+    return {
+      kind: 'refused',
+      reason:
+        `--implementers "${raw.implementers}" has ${detail}. It is a comma-separated list of ` +
+        `agents, one per seat: --implementers "claude,claude".`,
+    }
+  }
+  if (raw.implementerNamed && agents[0] !== raw.implementer) {
+    return {
+      kind: 'refused',
+      reason:
+        `--implementer ${raw.implementer} and --implementers "${raw.implementers}" name different agents ` +
+        `for the same seat. The first entry of --implementers IS the seat --implementer names ` +
+        `('${seatIdFor(0)}'), so drop one or make them agree.`,
+    }
+  }
+  return { kind: 'listed', agents }
+}
+
+/**
+ * One `ParticipantSpec` per seat, ids assigned by `seatIdFor` and args resolved per agent.
+ *
+ * `argsFor` is a callback rather than a list because launch arguments are a property of the
+ * AGENT -- `.conclave/config.json` keys them that way -- and two seats can be filled by
+ * different ones. At N=1 this returns exactly the object both front-ends built inline before it
+ * existed, which is what keeps the default run's spec unchanged.
+ */
+export function implementerSpecsFor(
+  agents: string[],
+  argsFor: (agent: string) => string[],
+): ParticipantSpec[] {
+  return agents.map((agent, i) => {
+    const args = argsFor(agent)
+    return {
+      id: seatIdFor(i),
+      agent,
+      role: 'implementer',
+      ...(args.length > 0 ? { args } : {}),
+    }
+  })
+}
+
+/**
  * One clock, as one seat will actually run it.
  *
  * Tagged rather than `number | undefined`, because the two ways of having no number are not
