@@ -324,7 +324,7 @@ const DECLARED: Record<string, string> = {
     'Authority routing (#56, D2) sends implementer_unanswered to the advisor before the operator, ' +
     'so a default run interrupts the human less than today. Real change at N=1, an improvement, ' +
     'declared rather than discovered. The pause reason exists at src/relay/run.ts:51 and the halt ' +
-    'that raises it is at src/relay/relay.ts:3837.',
+    'that raises it is at src/relay/relay.ts:3850.',
   'status.pause.resolution':
     'Classifying unresolved conditions on both axes (#56, D2) added `resolution` to every RunPause ' +
     '(src/relay/run.ts:183), so `conclave status --json` on a paused default run now carries ' +
@@ -518,10 +518,25 @@ const DECLARED: Record<string, string> = {
     'wraps the whole boundary including the checks `integrateSeat` runs for itself, and ' +
     '`rotateImplementer` wraps the whole of `rotate()`. integrate.ts and rotate.ts know nothing ' +
     'about the lane, which is what stops the same section queueing twice. A seat waiting for ' +
-    'the lane is ASSIGNED: it keeps its task, its seat state stays `integrating`, and nothing ' +
-    'about it is `merge_blocked`, `failed` or a question for a human — a wait is recorded as an ' +
-    'orchestrator note and nothing else. THE DEFAULT RUN DOES NOT CHANGE, and not by a ' +
-    'seat-count branch: at N=1 there is no manifest, so the boundary never reaches the lane, ' +
+    'the lane is ASSIGNED, in D7’s own word, and that is a second declared change: ' +
+    '`SchedulerState` gains `assigned` (src/relay/dispatch.ts), the seat takes it at `#reported` ' +
+    'instead of `integrating`, and `integrating` is now claimed inside the lane section — so it ' +
+    'means a boundary UNDER WAY rather than a boundary due. Without the split a status document ' +
+    'would show four seats "integrating" while three of them are queued behind the first, which ' +
+    'is exactly the distinction the lane exists to create. It costs nothing in scheduling: ' +
+    '`isFree` and `canTake` already admit only `idle` and `queued`, so an `assigned` seat is ' +
+    'undispatchable by the rules that were already there, its task is not re-sent, and ' +
+    '`concurrentSeats` excludes it as it excludes `integrating` — a ceiling that counted it ' +
+    'would shrink while another seat’s test suite ran. Nothing about a waiting seat is ' +
+    '`merge_blocked`, `failed` or a question for a human — a wait is recorded as an ' +
+    'orchestrator note and nothing else. THE DEFAULT RUN DOES CHANGE IN ONE READABLE WAY, ' +
+    'declared rather than discovered: at N=1 a seat between its report and its release now ' +
+    'reads `assigned` where it read `integrating`, because there is no merge at N=1 and never ' +
+    'was — the old word claimed work that was not happening. It is not in either pinned status ' +
+    'document, because the `seat` block is emitted only above one seat; the one guard that could ' +
+    'see it is src/relay/dispatch.test.ts, whose assertion was REPAIRED to the true word and ' +
+    'strengthened with `isFree`/`canTake`, not relaxed. Nothing else changes: at N=1 there is no ' +
+    'manifest, so the boundary never reaches the lane, ' +
     'and with the flag absent no `checkConcurrency` key is passed to Relay.start at all. What ' +
     'this DOES NOT yet do is stated rather than implied: both check runners are `spawnSync` in ' +
     'the one orchestrator process, so two check commands cannot overlap in wall-clock time ' +
@@ -1141,7 +1156,7 @@ test('default run works in the run cwd and creates no worktree', async () => {
 
   // A default run with no subagents must not create any git worktree. The relay only samples
   // the worktree list for its subagent-use report: src/relay/subagents.ts:68 defines
-  // worktreePaths, and src/relay/relay.ts:1891, :1938 and :3247 read it.
+  // worktreePaths, and src/relay/relay.ts:1891, :1938 and :3260 read it.
   // Prove it by exercising the run in a real temporary repository.
   const repo = mkdtempSync(join(tmpdir(), 'conclave-default-'))
   try {

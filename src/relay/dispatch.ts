@@ -228,6 +228,35 @@ export type SchedulerState =
   | 'idle'
   | 'queued'
   | 'running'
+  /**
+   * Holding a task, with nothing running on it and no boundary work under way.
+   *
+   * The seat between the end of its turn and the start of its boundary: the report is in, the
+   * verdict may not be graded yet, and at N>1 the boundary itself may be queued behind another
+   * seat's checks (`CheckLane`). It is NOT free, NOT dispatchable and its task is not re-sent
+   * -- the whole content of the state is that this seat is spoken for and is waiting.
+   *
+   * D7 asks for exactly this word: "a seat waiting for the check lane is `assigned`, not
+   * blocked". The alternative was leaving it `integrating`, which reads in a status document as
+   * a merge in progress and would have four seats claiming to be integrating while three of
+   * them are queued -- the operator cannot tell a working boundary from a waiting one, which is
+   * the distinction the lane exists to create.
+   *
+   * The word is also a `TaskState`, and it means something adjacent rather than identical
+   * there: a task is `assigned` from dispatch until it is sent. Both readings are "spoken for
+   * and not yet acted on", which is why the collision is tolerable, but they are two enums and
+   * a reader should not assume one implies the other. `running` already appears in both.
+   */
+  | 'assigned'
+  /**
+   * The boundary is running for this seat: committing, merging, and running the configured
+   * checks against the integration checkout.
+   *
+   * Reached only once the check lane has ADMITTED the seat, so it is a claim that the machine
+   * is being used rather than that a merge is due. That makes it an N>1 state: at N=1 there is
+   * no manifest and no merge, so a seat goes from `assigned` straight to `idle` without ever
+   * passing through here.
+   */
   | 'integrating'
   | 'rotation_pending'
   | 'merge_blocked'
@@ -303,10 +332,11 @@ export function queueDepth(queue: readonly Task[], runtime: ReadonlyMap<string, 
  * `current` would be a bookkeeping fault, and counting it would report phantom work rather
  * than surfacing the fault.
  *
- * `integrating` is excluded deliberately. That seat is occupied, but no agent is running on
- * it and no quota is being spent; a concurrency ceiling asks how much is IN FLIGHT. Counting
- * it would also make the number depend on how long the integration boundary takes, which at
- * N=1 is no time at all and at N>1 is not agent work either.
+ * `assigned` and `integrating` are excluded deliberately. Those seats are occupied, but no
+ * agent is running on them and no quota is being spent; a concurrency ceiling asks how much is
+ * IN FLIGHT. Counting them would also make the number depend on how long the integration
+ * boundary takes -- and, once the check lane can make a boundary WAIT, on how long another
+ * seat's checks take, which is not this seat's work by any reading.
  */
 export function concurrentSeats(seats: readonly SeatExecution[]): number {
   return seats.filter((s) => s.state === 'running' && s.current !== undefined).length

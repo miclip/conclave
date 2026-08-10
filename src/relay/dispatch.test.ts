@@ -371,8 +371,14 @@ test('a seat whose report is in but whose verdict is not graded refuses a dispat
 
   const [held] = relay.seats()
   assert.ok(held)
-  assert.equal(held.state, 'integrating', 'not running, and not available')
+  // `assigned`, and at N=1 it stays that way to the end: the report is in, nothing is running
+  // on this seat, and there is no boundary for it to be integrating in -- one tree, and it is
+  // the operator's own. `integrating` is claimed only when the check lane admits a seat to a
+  // real merge, which is an N>1 event (#64).
+  assert.equal(held.state, 'assigned', 'not running, and not available')
   assert.equal(held.current, 't-1')
+  assert.equal(isFree(held), false, 'a seat holding a task is not free, whatever it is waiting for')
+  assert.equal(canTake(held, entry.task), false, 'and nothing can be dispatched to it')
   assert.match(
     refuseDispatch(held, new Map([[entry.task.id, entry.runtime]])) ?? '',
     /whose verdict is not graded/,

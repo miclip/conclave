@@ -27,6 +27,7 @@ import test from 'node:test'
 import { AgentRegistry } from '../registry/registry.ts'
 import { NO_DEADLINE_CLOCKS } from '../registry/types.ts'
 import { FakeRotationSession } from '../rotation/fakeSession.ts'
+import { canTake, concurrentSeats, isFree } from './dispatch.ts'
 import { Relay } from './relay.ts'
 
 /** A check that passes, so nothing here is about a red tree -- that is `integrationRed`'s. */
@@ -180,22 +181,47 @@ test('a seat queued for the lane stays assigned: not blocked, not failed, and no
     assert.ok(queuedSeat, 'a boundary must have queued behind the held lane')
     assert.ok(waiting, 'and the run must have been observable while it did')
     const seat = waiting.seats.find((s) => s.seat === queuedSeat)!
+    // THE CRITERION, in the word D7 uses: `assigned`. Not `integrating` -- nothing is being
+    // integrated, the lane has not admitted this seat and no git command has run for it -- and
+    // certainly not `merge_blocked`, which is git refusing a merge nobody has attempted.
     assert.equal(
       seat.state,
-      'integrating',
-      'a seat waiting for the lane is at its boundary, not blocked. `merge_blocked` is git ' +
-        'refusing a merge, and nothing here has asked git anything yet.',
+      'assigned',
+      'a seat waiting for the check lane is ASSIGNED: it holds its task and is waiting, which ' +
+        'is neither a merge in progress nor a question for anyone',
+    )
+    assert.ok(seat.current, 'and it still holds the task it is waiting for')
+    // Not dispatchable, which is the half that makes `assigned` safe to report. Both predicates
+    // the dispatcher actually consults, against the seat as it really was mid-wait.
+    assert.equal(isFree(seat), false, 'a waiting seat must not be selectable for new work')
+    assert.equal(
+      canTake(seat, { target: { kind: 'role', role: 'implementer' }, purpose: 'work' }),
+      false,
+      'and must refuse a role-targeted dispatch that would otherwise land on it',
+    )
+    assert.equal(
+      concurrentSeats(waiting.seats.filter((s) => s.seat === queuedSeat)),
+      0,
+      'nor may it count against the concurrency ceiling: no agent is running on it',
     )
     assert.deepEqual(
       waiting.seats.filter((s) => s.state === 'merge_blocked').map((s) => s.seat),
       [],
       'no seat may be marked blocked by a queue position',
     )
-    // The task is still that seat's, in the assigned family, with a graded verdict and no
-    // failure recorded. A dispatcher that released it here would hand the seat other work
-    // while its own boundary was still outstanding.
+    // The task is still that seat's, reported and graded, with no failure recorded. A
+    // dispatcher that released it here would hand the seat other work while its own boundary
+    // was still outstanding.
     const mine = waiting.tasks.find(({ runtime }) => runtime.seat === queuedSeat && runtime.state === 'reported')
     assert.ok(mine, 'the waiting seat must still hold a task at its boundary')
+    assert.equal(seat.current, mine.task.id, 'and `current` names it, so nothing can be sent alongside')
+    // Not RE-SENT either, which is the other way a wait could quietly cost a turn: exactly one
+    // `sent` mark, and `sentAt` is the one the turn actually went out at.
+    assert.equal(
+      mine.runtime.marks.filter((m) => m.event === 'sent').length,
+      1,
+      'a seat waiting for the lane must not have its instruction sent a second time',
+    )
     assert.deepEqual(
       waiting.tasks.filter(({ runtime }) => runtime.state === 'failed').map(({ task }) => task.id),
       [],
@@ -205,6 +231,15 @@ test('a seat queued for the lane stays assigned: not blocked, not failed, and no
       waiting.tasks.filter(({ runtime }) => runtime.state === 'cancelled').map(({ task }) => task.id),
       [],
       'and it does not cancel anything either',
+    )
+    // And the other side of the transition: `assigned` is left behind once the lane admits the
+    // seat. The `integrating` window itself cannot be sampled from this process -- the boundary
+    // and its checks are `spawnSync`, so nothing can run while they do -- so what is asserted
+    // is that no seat is still holding the waiting state when the run is over.
+    assert.deepEqual(
+      relay.seats().filter((s) => s.state === 'assigned').map((s) => s.seat),
+      [],
+      'a seat admitted to its boundary must leave `assigned`; one still there never got in',
     )
 
     // The wait really happened and is legible as a wait rather than as a slow check.

@@ -2788,9 +2788,16 @@ export class Relay {
   /**
    * The turn ended, settled, and its report was recorded.
    *
-   * The seat becomes `integrating`: not running, and not available. The report being ready and
-   * the tree being ready are different facts, and at N>1 handing this seat new work here would
+   * The seat becomes `assigned`: not running, and not available. The report being ready and the
+   * tree being ready are different facts, and at N>1 handing this seat new work here would
    * write into a tree the boundary flow is still committing.
+   *
+   * `assigned` rather than `integrating`, which is what stood here. Nothing is integrating yet
+   * -- the verdict is not graded, rotation has not been assessed, and at N>1 the boundary may
+   * then wait for the check lane behind another seat's checks. `integrating` is claimed in
+   * `#crossBoundary`, when the lane admits this seat and the boundary actually starts, so the
+   * two words in a status document mean "spoken for" and "working" rather than both meaning
+   * the first (D7, #64).
    */
   #reported(task: Task, seat: SeatExecution, reportSeq: number, unsettled: boolean): void {
     const runtime = this.#taskRuntime.get(task.id)!
@@ -2798,7 +2805,7 @@ export class Relay {
     runtime.unsettled = unsettled
     runtime.reportSeq = reportSeq
     runtime.state = 'reported'
-    seat.state = 'integrating'
+    seat.state = 'assigned'
     this.#mark(task, 'ended')
     this.#mark(task, 'reported')
   }
@@ -2904,10 +2911,16 @@ export class Relay {
     //
     // Outside the boundary's own try/catch on purpose. That catch converts a throw into
     // `merge_blocked`, and a lane fault is not a claim about anyone's branch.
-    return this.#checkLane.run(
-      { seat: seatId, station: 'integration', detail: task.id },
-      () => this.#mergeAndCheck(task, seatId),
-    )
+    return this.#checkLane.run({ seat: seatId, station: 'integration', detail: task.id }, () => {
+      // ADMITTED, so the boundary is now this seat's work rather than something it is waiting
+      // for. Until this line the seat has been `assigned` since its turn ended: holding its
+      // task, not dispatchable, not re-sent, and needing nothing from anyone. Set inside the
+      // lane section rather than before the acquire, which is the whole distinction -- a seat
+      // queued behind another seat's checks must not report a merge it has not started (D7).
+      const exec = this.#seatState.get(seatId)
+      if (exec) exec.state = 'integrating'
+      return this.#mergeAndCheck(task, seatId)
+    })
   }
 
   /**
