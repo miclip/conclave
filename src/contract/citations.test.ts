@@ -40,7 +40,8 @@
  */
 
 import { strict as assert } from 'node:assert'
-import { readFileSync, readdirSync } from 'node:fs'
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join, relative } from 'node:path'
 import test from 'node:test'
 
@@ -195,38 +196,40 @@ test('every path:line citation in the sources is declared with an expected token
   )
 })
 
-test('every declared citation still points at what it says it does', () => {
-  const wrong: string[] = []
-  for (const [cite, expected] of Object.entries(CITED)) {
-    const colon = cite.lastIndexOf(':')
-    const path = cite.slice(0, colon)
-    const [start, end] = cite
-      .slice(colon + 1)
-      .split('-')
-      .map(Number) as [number, number?]
-    let lines: string[]
-    try {
-      lines = readFileSync(join(REPO, path), 'utf8').split('\n')
-    } catch {
-      wrong.push(`${cite}: no such file (citations must be repo-root-relative)`)
-      continue
-    }
-    const last = end ?? start
-    if (!(start >= 1 && last >= start)) {
-      wrong.push(`${cite}: not a line or range`)
-      continue
-    }
-    if (last > lines.length) {
-      wrong.push(`${cite}: the file ends at line ${lines.length}`)
-      continue
-    }
-    const cited = lines.slice(start - 1, last).join('\n')
-    if (!cited.includes(expected)) {
-      wrong.push(`${cite}: expected ${JSON.stringify(expected)}, found ${JSON.stringify(cited.trim().slice(0, 120))}`)
-    }
+/**
+ * Why one citation is not checkable, or `undefined` when it is.
+ *
+ * Separated from the test that walks `CITED` so the two ways a citation rots -- the cited line
+ * is GONE, and the cited line is still there but no longer SAYS it -- can be proven against
+ * fixtures rather than argued for in a comment. A guard whose failure path never runs is a
+ * guard nobody has seen work.
+ */
+function citationFault(cite: string, expected: string, root: string = REPO): string | undefined {
+  const colon = cite.lastIndexOf(':')
+  const path = cite.slice(0, colon)
+  const [start, end] = cite
+    .slice(colon + 1)
+    .split('-')
+    .map(Number) as [number, number?]
+  let lines: string[]
+  try {
+    lines = readFileSync(join(root, path), 'utf8').split('\n')
+  } catch {
+    return `${cite}: no such file (citations must be repo-root-relative)`
   }
+  const last = end ?? start
+  if (!(start >= 1 && last >= start)) return `${cite}: not a line or range`
+  if (last > lines.length) return `${cite}: the file ends at line ${lines.length}`
+  const cited = lines.slice(start - 1, last).join('\n')
+  if (cited.includes(expected)) return undefined
+  return `${cite}: expected ${JSON.stringify(expected)}, found ${JSON.stringify(cited.trim().slice(0, 120))}`
+}
+
+test('every declared citation still points at what it says it does', () => {
   assert.deepEqual(
-    wrong,
+    Object.entries(CITED)
+      .map(([cite, expected]) => citationFault(cite, expected))
+      .filter((f) => f !== undefined),
     [],
     'These citations have rotted. Find where the cited thing moved to, repair the line number ' +
       'in the prose AND in CITED, and keep the citation -- a stale citation is evidence that ' +
@@ -277,4 +280,76 @@ test('the scanner sees both citation forms, so neither can be added unnoticed', 
   const invented = citationsInLine('// a claim about src/relay/relay.ts:99999')
   assert.equal(invented.length, 1)
   assert.ok(!(invented[0]!.text in CITED), 'an invented citation must not already be declared')
+})
+
+test('both ways a citation rots are caught, against a tree written for the purpose', () => {
+  // A fixture tree rather than an edit to a real source. The alternative -- break a file, run,
+  // put it back -- proves the same thing once, in a session nobody else can see, and leaves the
+  // repository one interrupted run away from carrying the damage. This runs on every `npm test`.
+  const root = mkdtempSync(join(tmpdir(), 'conclave-citations-'))
+  try {
+    writeFileSync(
+      join(root, 'moved.ts'),
+      ['export const first = 1', 'export const second = 2', 'export const third = 3', ''].join('\n'),
+    )
+
+    // Mode one: the cited line is GONE. The file used to be longer, the citation still names a
+    // line past its end, and nothing about reading the prose would tell you.
+    assert.equal(
+      citationFault('moved.ts:9', 'export const ninth = 9', root),
+      'moved.ts:9: the file ends at line 4',
+    )
+    // The same for a range whose tail has fallen off the end, which is the commoner shape --
+    // a block shrinks and the citation keeps the width it was written with.
+    assert.equal(
+      citationFault('moved.ts:2-9', 'export const second = 2', root),
+      'moved.ts:2-9: the file ends at line 4',
+    )
+
+    // Mode two, and the one line numbers alone can never catch: the line EXISTS and says
+    // something else. Code moved down, the citation kept its number, and it now points at a
+    // real line that supports a different claim -- exactly how a reader is misled.
+    assert.equal(
+      citationFault('moved.ts:1', 'export const second = 2', root),
+      'moved.ts:1: expected "export const second = 2", found "export const first = 1"',
+    )
+    // Range form: the token has to be inside the cited range, not merely in the file.
+    assert.equal(
+      citationFault('moved.ts:1-2', 'export const third = 3', root),
+      'moved.ts:1-2: expected "export const third = 3", found "export const first = 1\\nexport const second = 2"',
+    )
+
+    // And the true cases, so the two above are not passing because everything fails.
+    assert.equal(citationFault('moved.ts:2', 'export const second = 2', root), undefined)
+    assert.equal(citationFault('moved.ts:1-3', 'export const third = 3', root), undefined)
+
+    // A path that resolves nowhere is its own fault, and it is what a bare filename citation
+    // (`relay.ts:1818`) becomes once someone declares it: the check demands a real root.
+    assert.equal(
+      citationFault('nested/gone.ts:1', 'anything', root),
+      'nested/gone.ts:1: no such file (citations must be repo-root-relative)',
+    )
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('an undeclared citation is reported, and an exemption covers only where it was granted', () => {
+  // The bypass half, on synthetic input. `allCitations()` is what the real test feeds this
+  // filter; the filter itself is what decides whether a new citation can slip through.
+  const found: Found[] = [
+    { cite: 'src/relay/run.ts:51', path: 'src/relay/run.ts', start: 51, end: 51, at: 'src/relay/x.ts:7' },
+    { cite: 'src/relay/relay.ts:214', path: 'src/relay/relay.ts', start: 214, end: 214, at: 'src/repl/demo.ts:48' },
+    { cite: 'src/relay/relay.ts:214', path: 'src/relay/relay.ts', start: 214, end: 214, at: 'src/relay/y.ts:9' },
+    { cite: 'src/relay/relay.ts:31337', path: 'src/relay/relay.ts', start: 31337, end: 31337, at: 'src/relay/z.ts:3' },
+  ]
+  assert.deepEqual(
+    found.filter((c) => !(c.cite in CITED) && !(exemptKey(c) in NOT_CITATIONS)).map((c) => `${c.at} cites ${c.cite}`),
+    [
+      // The demo's copy is waived and this one is not, though the text is identical: an
+      // exemption is granted to a place, so fixture data cannot license a claim elsewhere.
+      'src/relay/y.ts:9 cites src/relay/relay.ts:214',
+      'src/relay/z.ts:3 cites src/relay/relay.ts:31337',
+    ],
+  )
 })
