@@ -1,60 +1,62 @@
 /**
- * One lane per run for the commands that measure a tree.
+ * One lane per run for the commands that measure a tree. INERT TODAY, and kept on purpose.
  *
- * Two stations run the operator's configured checks, and they are the same commands against
- * different trees asking different questions: `rotation/rotate.ts` asks whether a replacement
- * reproduces what the original did, and `integrate.ts` asks whether the tree the seats built
- * together works (#80). Both were designed without reference to each other, and at N>1 both
- * want the machine at once.
+ * ## Read this before believing the lane does anything
  *
- * ## Why a lane rather than nothing
+ * #64 asked for the configured checks to be serialised across seats behind a run-scoped mutex,
+ * on the grounds that `npm test` in four worktrees at once means four test runners and direct
+ * collision for anything binding a port. **That premise is false in this codebase**, and the
+ * operator who filed it withdrew it rather than having it argued away.
  *
- * D7's argument is contention: `npm test` in four worktrees at once is four test runners, four
- * `node_modules` resolutions and direct collision for anything binding a port. This project
- * already learned it about its own suite -- `--test-concurrency=4` in `package.json`, and the
- * note in `session.tty.test.ts` recording that raising a timeout was the wrong fix for
- * contention and capping concurrency was the right one.
+ * Both check runners are `spawnSync` -- `runCheck` in `src/rotation/record.ts` and
+ * `runIntegrationChecks` in `src/relay/integrate.ts`, cited by symbol because a line number
+ * here would rot the first time either moves -- in the one orchestrator process. A synchronous
+ * spawn blocks the whole process for the duration of the command, so there is never more than
+ * one check running, and **serialisation is already guaranteed by the synchronous call rather
+ * than by this or any other mutex**. There is no contention to prevent.
  *
- * There is a second reason, and it is the stronger one because it is about correctness rather
- * than speed. A rotation's verification window is not an instant: `rotate()` captures the
- * repository, starts a replacement, spends a full agent turn on acceptance, and captures the
- * repository AGAIN -- then rolls the whole transfer back as `repository_diverged` if the two
- * captures disagree. A merge landing inside that window changes the tree under it, and
- * `integrateSeat` does exactly that: it merges into the integration checkout and then
- * `reset --hard`s the seat worktrees onto the new HEAD. A perfectly good rotation would be
- * rolled back because a different seat's work merged while it was proving itself, and the
- * recorded reason would name the repository rather than the race. So the lane is held across
- * the WHOLE window, not around each `spawnSync`.
+ * It is narrower still than that. The two stations that run checks cannot even be live at the
+ * same time: at N=1 there is no merge boundary, and at N>1 `rotateImplementer` refuses, so no
+ * rotation runs. So this lane is never contended in any configuration the code can reach, no
+ * seat can ever wait for it, and nothing an operator can observe changes because it exists.
  *
- * The cost is stated rather than hidden: a rotation holds the lane for as long as its
- * replacement takes to answer, and other seats' merge boundaries wait behind it. That is the
- * intended trade -- a boundary that waits is late, and a rotation rolled back by a race is
- * work thrown away.
+ * ## Why it is kept anyway
  *
- * ## What this cannot do, today
+ * The second station is per-seat rotation (#78). When it lands, `rotate()` will run in a seat's
+ * own tree while other seats' boundaries merge into the integration checkout -- and the hazard
+ * then is not CPU contention but correctness. A rotation's verification window is not an
+ * instant: `rotate()` captures the repository, spends a full agent turn proving a replacement
+ * against that capture, and captures AGAIN, rolling the transfer back as `repository_diverged`
+ * if the two disagree. `integrateSeat` merges into the integration checkout and then
+ * `reset --hard`s the seat worktrees onto the new HEAD, which is exactly the change those two
+ * captures would read as divergence. A good rotation would be rolled back because someone
+ * else's work merged while it was proving itself, and the recorded reason would name the
+ * repository for what was a race.
  *
- * Both runners are `spawnSync` -- `runCheck` in `src/rotation/record.ts` and
- * `runIntegrationChecks` in `src/relay/integrate.ts` -- in the one orchestrator process, and
- * cited by symbol because a line number here would rot the first time either moves. Two check
- * commands therefore cannot overlap in wall-clock time however
- * many slots this lane hands out, so `--check-concurrency` above 1 is a statement of policy
- * that nothing can act on until those runners become asynchronous. It is wired anyway, because
- * the alternative is a flag that appears at the same moment as the code that would need it and
- * is therefore untested when it matters.
+ * That is what this mutex is for, and it is the reason it is held across the WHOLE window
+ * rather than around each `spawnSync`. It is retained now because a mechanism that is correct
+ * and directly unit-tested is cheaper to keep than to rebuild, NOT because it is doing work
+ * today. Nothing here should be read as behaviour #64 currently exercises.
  *
- * ## Waiting is not blocking
+ * What is NOT here, deliberately: a slot count. One slot, fixed. A `--check-concurrency` flag
+ * was built and removed on the operator's ruling -- a control that is accepted and plumbed and
+ * cannot have any effect is worse than an absent one, because someone will set it and believe
+ * something changed. Making the lane observable would mean building an asynchronous check
+ * runner or a second station for it to serialise against, which is building the problem in
+ * order to keep the solution; #78 is where that station comes from.
  *
- * A seat waiting for the lane is `assigned` -- it holds its task, its work is intact, and
- * nothing about it is a question for a human. `merge_blocked` means git refused a merge and
- * `failed` means a boundary did not complete; a queue position is neither, and recording it as
- * either would put a seat in front of an operator to answer a question that answers itself in
- * a few seconds. This module therefore changes no scheduler state at all: it hands out slots
- * and gets out of the way, and `onWait` exists so the wait is VISIBLE without being a verdict.
+ * ## Waiting would not be blocking
+ *
+ * If a wait ever becomes reachable, it is not a verdict about a seat: `merge_blocked` means git
+ * refused a merge and `failed` means a boundary did not complete, and a queue position is
+ * neither. This module therefore changes no scheduler state at all, and does not narrate
+ * itself -- a seat cannot wait here yet, and logging for a state nothing constructs is the
+ * same mistake as a flag for a control nobody has.
  *
  *   node --test src/relay/checkLane.test.ts
  */
 
-/** Which station wants the lane. Diagnostics, and the reentrancy message. */
+/** Which station wants the lane. Diagnostics, and the already-held message. */
 export type CheckStation = 'rotation' | 'integration'
 
 /** Who is asking, and what for. */
@@ -66,72 +68,21 @@ export interface LaneClaim {
   detail?: string | undefined
 }
 
-/** One completed section, as it actually ran. */
-export interface LaneRecord extends LaneClaim {
-  /** Milliseconds spent queued. `0` when the lane was free, which is every default run. */
-  waitedMs: number
-  /** Milliseconds the section held its slot. */
-  heldMs: number
-}
-
-export interface CheckLaneOptions {
-  /**
-   * How many check sections may hold the lane at once. Default 1, which is D7's ruling.
-   *
-   * `--check-concurrency` is the escape for suites known to be isolated. It is an integer
-   * because half a slot is not a thing, and it is refused rather than clamped: a run told to
-   * use `0` was told something its operator meant, and guessing which thing is worse than
-   * saying the value is not one.
-   */
-  concurrency?: number | undefined
-  /**
-   * Called when a claim is about to queue, with the claims already holding.
-   *
-   * Only when it actually waits. A run whose lane is never contended -- every default run, and
-   * every run at N=1 -- produces no notes at all, so this cannot change what an existing
-   * operator reads.
-   */
-  onWait?: ((claim: LaneClaim, holders: readonly LaneClaim[]) => void) | undefined
-  /** Injectable clock, so a test can assert on waits without sleeping through them. */
-  now?: (() => number) | undefined
-}
-
-/** A queued claim and the resolver that admits it. */
-interface Waiter {
-  claim: LaneClaim
-  admit: () => void
-}
-
 export class CheckLane {
-  readonly concurrency: number
-  readonly #now: () => number
-  readonly #onWait: ((claim: LaneClaim, holders: readonly LaneClaim[]) => void) | undefined
-  /** Live sections. Identity is the internal copy, never the caller's object. */
-  readonly #holders = new Set<LaneClaim>()
-  /** FIFO. A lane that admitted out of order would starve the seat that asked first. */
-  readonly #queue: Waiter[] = []
-  readonly #history: LaneRecord[] = []
+  /**
+   * The live section, or none. One slot, so this is the whole of the lane's state.
+   *
+   * Identity is an internal copy of the caller's claim, never the caller's own object: two
+   * calls passing the same literal would otherwise be indistinguishable here.
+   */
+  #holder: LaneClaim | undefined
+  /** FIFO. A lane that admitted out of order would starve the section that asked first. */
+  readonly #queue: { claim: LaneClaim; admit: () => void }[] = []
+  readonly #history: LaneClaim[] = []
 
-  constructor(opts: CheckLaneOptions = {}) {
-    const concurrency = opts.concurrency ?? 1
-    if (!Number.isInteger(concurrency) || concurrency < 1) {
-      throw new Error(
-        `check concurrency must be a whole number of slots, at least 1; got ${String(concurrency)}`,
-      )
-    }
-    this.concurrency = concurrency
-    this.#now = opts.now ?? (() => Date.now())
-    this.#onWait = opts.onWait
-  }
-
-  /** The sections running right now. */
-  held(): readonly LaneClaim[] {
-    return [...this.#holders].map((c) => ({ ...c }))
-  }
-
-  /** The sections waiting, in the order they will be admitted. */
-  queued(): readonly LaneClaim[] {
-    return this.#queue.map((w) => ({ ...w.claim }))
+  /** The section running right now, if any. */
+  held(): LaneClaim | undefined {
+    return this.#holder ? { ...this.#holder } : undefined
   }
 
   /**
@@ -139,83 +90,71 @@ export class CheckLane {
    *
    * One record per merge boundary and per rotation, so it is bounded by the run's task count
    * rather than by time. It exists because "the lane was never contended" and "the lane was
-   * never reached" are the same log otherwise, which is the failure `rotationWatch` was built
-   * to stop being possible for rotation.
+   * never reached" are the same log otherwise -- and because it is the only way to assert that
+   * a station acquires ONCE, which is the property that would deadlock this lane if it broke.
    */
-  history(): readonly LaneRecord[] {
+  history(): readonly LaneClaim[] {
     return this.#history.map((r) => ({ ...r }))
   }
 
   /**
    * Run one check section with the lane held.
    *
-   * The section may be synchronous -- both of today's runners are -- and is awaited either
-   * way, so a caller cannot accidentally release the lane before its checks have finished by
-   * forgetting to return a promise.
+   * The section may be synchronous -- both of today's runners are -- and is awaited either way,
+   * so a caller cannot release the lane before its checks have finished by forgetting to return
+   * a promise.
    *
    * The slot is released in a `finally`, so a section that throws does not strand the lane. A
-   * check that fails is an ordinary answer and a check that explodes is a fault, and neither
-   * is a reason for every later boundary in the run to wait forever.
+   * check that fails is an ordinary answer and a check that explodes is a fault, and neither is
+   * a reason for every later boundary in the run to wait forever.
    *
-   * ## Double-queuing is refused rather than deadlocked
+   * ## Acquiring twice is refused rather than deadlocked
    *
    * Each station acquires ONCE, at its outermost point: `#crossBoundary` wraps the whole
    * boundary including the checks `integrateSeat` runs for itself, and `rotateImplementer`
-   * wraps the whole of `rotate()`. Neither reaches into the other. If a future caller nests
-   * them, a lane of one slot would deadlock permanently and silently -- a run that stops with
-   * no error and no ending -- so a seat that already holds a slot is told so instead. A throw
-   * from a station that has not begun is recoverable; a hang is not.
+   * wraps the whole of `rotate()`. Neither reaches into the other, which is why `integrate.ts`
+   * and `rotate.ts` know nothing about this module. If a future caller nests them, a lane of
+   * one slot would deadlock permanently and silently -- a run that stops with no error and no
+   * ending -- so a seat that already holds the slot is told so instead. A throw from a station
+   * that has not begun is recoverable; a hang is not.
    */
   async run<T>(claim: LaneClaim, section: () => T | Promise<T>): Promise<T> {
-    const already = [...this.#holders].find((h) => h.seat === claim.seat)
-    if (already) {
+    if (this.#holder?.seat === claim.seat) {
       throw new Error(
-        `${claim.seat} already holds the check lane for its ${already.station} section, so its ` +
-          `${claim.station} section would wait for itself. Each station takes the lane once, at ` +
-          `its outermost point; nesting them deadlocks a lane of one slot.`,
+        `${claim.seat} already holds the check lane for its ${this.#holder.station} section, so ` +
+          `its ${claim.station} section would wait for itself. Each station takes the lane once, ` +
+          `at its outermost point; nesting them deadlocks a lane of one slot.`,
       )
     }
-    // The caller's object is never the identity: two calls passing the same literal would
-    // otherwise share a Set entry and the first release would free both.
     const hold: LaneClaim = { ...claim }
-    const requestedAt = this.#now()
 
-    if (this.#holders.size >= this.concurrency) {
-      this.#onWait?.({ ...claim }, this.held())
+    if (this.#holder) {
       await new Promise<void>((resolve) => this.#queue.push({ claim: hold, admit: resolve }))
-      // The slot was handed straight to this claim by `#release`, which already added it to
-      // `#holders`. Re-adding here is what would let a claim arriving during the handover jump
-      // the queue.
+      // The slot was handed straight to this claim by `#release`, which already installed it.
+      // Installing it here is what would let a claim arriving during the handover jump the
+      // queue.
     } else {
-      this.#holders.add(hold)
+      this.#holder = hold
     }
 
-    const startedAt = this.#now()
     try {
       return await section()
     } finally {
-      this.#history.push({
-        ...hold,
-        waitedMs: startedAt - requestedAt,
-        heldMs: this.#now() - startedAt,
-      })
-      this.#release(hold)
+      this.#history.push(hold)
+      this.#release()
     }
   }
 
   /**
    * Hand the slot on, rather than free it and let anyone take it.
    *
-   * The next waiter is put into `#holders` synchronously, before its promise resolves. A lane
-   * that simply decremented would leave a window -- one microtask, but a real one -- in which
-   * a claim arriving fresh sees a free slot and overtakes a section that has been queued since
-   * before it existed.
+   * The next waiter is installed synchronously, before its promise resolves. A lane that simply
+   * cleared the holder would leave a window -- one microtask, but a real one -- in which a claim
+   * arriving fresh sees a free slot and overtakes a section queued since before it existed.
    */
-  #release(hold: LaneClaim): void {
-    this.#holders.delete(hold)
+  #release(): void {
     const next = this.#queue.shift()
-    if (!next) return
-    this.#holders.add(next.claim)
-    next.admit()
+    this.#holder = next?.claim
+    next?.admit()
   }
 }

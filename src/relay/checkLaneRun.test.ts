@@ -1,19 +1,23 @@
 /**
- * The check lane as the RUN uses it (#64), driven through real worktrees and real merges.
+ * How the RUN uses the check lane (#64), driven through real worktrees and real merges.
  *
- * `checkLane.test.ts` proves the mechanism. This proves the three claims that are about the
- * relay rather than about the class, and that a unit test of a queue cannot make:
+ * `checkLane.test.ts` proves the mechanism. This proves the two things about the WIRING that a
+ * unit test of the class cannot, and both are claims a run can actually make:
  *
  *   once      every merge boundary takes the lane exactly ONCE. `integrateSeat` runs the
  *             configured checks for itself (#80), so a boundary that also wrapped those checks
  *             would take a one-slot lane twice and wait for itself for the rest of the run.
- *   assigned  a seat queued for the lane keeps its task. `merge_blocked` is git refusing a
- *             merge and `failed` is a boundary that did not complete; a queue position is
- *             neither, and reporting it as either puts a seat in front of an operator to
- *             answer a question that answers itself in a moment.
+ *             That is the one way the lane could BREAK a run today, so it is the one thing
+ *             worth driving a real two-seat run to assert.
  *   absent    a default run never touches the lane at all. There is no merge at N=1, so the
- *             station this serialises is not reached -- not by a seat-count branch, by there
- *             being nothing there.
+ *             station it wraps is not reached -- not by a seat-count branch, by there being
+ *             nothing there.
+ *
+ * What is NOT here, and was: a test that held the lane from outside the run so a boundary would
+ * queue behind it. It asserted a state no production path constructs -- checks are `spawnSync`,
+ * so they already serialise, and the second station that could contend does not exist until
+ * per-seat rotation (#78). Manufacturing the wait to observe it was testing the fixture. See
+ * `CheckLane` for the whole argument and for why the mechanism is kept regardless.
  *
  *   node --test src/relay/checkLaneRun.test.ts
  */
@@ -27,7 +31,6 @@ import test from 'node:test'
 import { AgentRegistry } from '../registry/registry.ts'
 import { NO_DEADLINE_CLOCKS } from '../registry/types.ts'
 import { FakeRotationSession } from '../rotation/fakeSession.ts'
-import { canTake, concurrentSeats, isFree } from './dispatch.ts'
 import { Relay } from './relay.ts'
 
 /** A check that passes, so nothing here is about a red tree -- that is `integrationRed`'s. */
@@ -109,8 +112,6 @@ async function twoSeatRelay(repo: string, advisorReplies: string[]): Promise<Rel
   return relay
 }
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
-
 test('every merge boundary takes the lane exactly once, checks included', async () => {
   const repo = tempRepo()
   try {
@@ -137,124 +138,6 @@ test('every merge boundary takes the lane exactly once, checks included', async 
       [],
       'no rotation happened in this scenario',
     )
-  } finally {
-    rmSync(repo, { recursive: true, force: true })
-  }
-})
-
-test('a seat queued for the lane stays assigned: not blocked, not failed, and nothing to answer', async () => {
-  const repo = tempRepo()
-  try {
-    const relay = await twoSeatRelay(repo, ['Write one.', 'Write two.', 'DONE', 'DONE'])
-
-    // The lane is held from outside the run, which is the only way to make a boundary WAIT on
-    // a machine where both check runners are `spawnSync`: nothing inside one process can
-    // overlap them, so the contention D7 designs for cannot be produced by running the relay
-    // harder. Held by a claim that is not a seat, so it cannot be mistaken for one.
-    let release!: () => void
-    const held = new Promise<void>((resolve) => (release = resolve))
-    const holder = relay.checkLane.run({ seat: 'operator-probe', station: 'integration' }, () => held)
-
-    /** What the run looked like at the moment a seat was queued behind the lane. */
-    let waiting: { seats: ReturnType<Relay['seats']>; tasks: ReturnType<Relay['tasks']> } | undefined
-    let queuedSeat: string | undefined
-    const watcher = (async () => {
-      const deadline = Date.now() + 20_000
-      while (relay.checkLane.queued().length === 0 && Date.now() < deadline) await sleep(5)
-      const queued = relay.checkLane.queued()[0]
-      if (queued) {
-        queuedSeat = queued.seat
-        waiting = { seats: relay.seats(), tasks: relay.tasks() }
-        // Held a little longer on purpose. The boundary is already queued -- that is what the
-        // poll above just observed -- and this only makes the wait longer than the clock's
-        // millisecond resolution, so `waitedMs` below measures a wait rather than a rounding.
-        await sleep(25)
-      }
-      // Always, including on the deadline: a probe that failed to observe a wait must not also
-      // hang the run it was observing.
-      release()
-    })()
-
-    const outcome = await relay.run('Keep the work moving.')
-    await Promise.all([holder, watcher])
-
-    assert.ok(queuedSeat, 'a boundary must have queued behind the held lane')
-    assert.ok(waiting, 'and the run must have been observable while it did')
-    const seat = waiting.seats.find((s) => s.seat === queuedSeat)!
-    // THE CRITERION, in the word D7 uses: `assigned`. Not `integrating` -- nothing is being
-    // integrated, the lane has not admitted this seat and no git command has run for it -- and
-    // certainly not `merge_blocked`, which is git refusing a merge nobody has attempted.
-    assert.equal(
-      seat.state,
-      'assigned',
-      'a seat waiting for the check lane is ASSIGNED: it holds its task and is waiting, which ' +
-        'is neither a merge in progress nor a question for anyone',
-    )
-    assert.ok(seat.current, 'and it still holds the task it is waiting for')
-    // Not dispatchable, which is the half that makes `assigned` safe to report. Both predicates
-    // the dispatcher actually consults, against the seat as it really was mid-wait.
-    assert.equal(isFree(seat), false, 'a waiting seat must not be selectable for new work')
-    assert.equal(
-      canTake(seat, { target: { kind: 'role', role: 'implementer' }, purpose: 'work' }),
-      false,
-      'and must refuse a role-targeted dispatch that would otherwise land on it',
-    )
-    assert.equal(
-      concurrentSeats(waiting.seats.filter((s) => s.seat === queuedSeat)),
-      0,
-      'nor may it count against the concurrency ceiling: no agent is running on it',
-    )
-    assert.deepEqual(
-      waiting.seats.filter((s) => s.state === 'merge_blocked').map((s) => s.seat),
-      [],
-      'no seat may be marked blocked by a queue position',
-    )
-    // The task is still that seat's, reported and graded, with no failure recorded. A
-    // dispatcher that released it here would hand the seat other work while its own boundary
-    // was still outstanding.
-    const mine = waiting.tasks.find(({ runtime }) => runtime.seat === queuedSeat && runtime.state === 'reported')
-    assert.ok(mine, 'the waiting seat must still hold a task at its boundary')
-    assert.equal(seat.current, mine.task.id, 'and `current` names it, so nothing can be sent alongside')
-    // Not RE-SENT either, which is the other way a wait could quietly cost a turn: exactly one
-    // `sent` mark, and `sentAt` is the one the turn actually went out at.
-    assert.equal(
-      mine.runtime.marks.filter((m) => m.event === 'sent').length,
-      1,
-      'a seat waiting for the lane must not have its instruction sent a second time',
-    )
-    assert.deepEqual(
-      waiting.tasks.filter(({ runtime }) => runtime.state === 'failed').map(({ task }) => task.id),
-      [],
-      'a wait is not a failed boundary',
-    )
-    assert.deepEqual(
-      waiting.tasks.filter(({ runtime }) => runtime.state === 'cancelled').map(({ task }) => task.id),
-      [],
-      'and it does not cancel anything either',
-    )
-    // And the other side of the transition: `assigned` is left behind once the lane admits the
-    // seat. The `integrating` window itself cannot be sampled from this process -- the boundary
-    // and its checks are `spawnSync`, so nothing can run while they do -- so what is asserted
-    // is that no seat is still holding the waiting state when the run is over.
-    assert.deepEqual(
-      relay.seats().filter((s) => s.state === 'assigned').map((s) => s.seat),
-      [],
-      'a seat admitted to its boundary must leave `assigned`; one still there never got in',
-    )
-
-    // The wait really happened and is legible as a wait rather than as a slow check.
-    const waited = relay.checkLane.history().filter((r) => r.station === 'integration' && r.waitedMs > 0)
-    assert.ok(waited.length >= 1, 'the boundary must record the time it spent queued')
-    // Recorded for the operator, and in the words that say it needs nothing from them.
-    const note = relay.log.find((m) => m.text.includes('waiting for the check lane'))
-    assert.ok(note, 'a real wait must be in the routing log — a queue is not a hang, and looks like one')
-    assert.match(note.text, /stays\s+assigned/)
-    assert.match(note.text, /nothing needs an answer/)
-
-    // And the run still ended the way it would have. The lane delays a boundary; it does not
-    // change what the boundary decided.
-    assert.ok(['done', 'budget'].includes(outcome.reason), `unexpected ending: ${outcome.reason} ${outcome.detail ?? ''}`)
-    assert.deepEqual(relay.worktrees!.seats.map((s) => s.mergeState), ['merged', 'merged'])
   } finally {
     rmSync(repo, { recursive: true, force: true })
   }

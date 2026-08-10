@@ -1,12 +1,15 @@
 /**
- * The check lane: one run, one queue, and a wait that is not a block (#64).
+ * The check lane's mechanism, tested directly — which is the whole of what it is kept for.
  *
- * Two claims are under test and they are different in kind. The first is mechanical -- slots,
- * order, release on failure -- and is asserted here against the lane itself. The second is
- * about what a wait MEANS to the rest of the run: a seat queued behind another seat's checks
- * still holds its task, and `merge_blocked` / `failed` are answers to different questions.
- * That one is asserted through a real two-seat run in `checkLaneRun.test.ts`, because it is a
- * claim about the dispatcher rather than about this class.
+ * The lane is INERT in production and says so at its own definition: both check runners are
+ * `spawnSync` in one process, so checks already serialise without it, and the two stations that
+ * would contend cannot be live at the same time until per-seat rotation exists (#78). So there
+ * is no run to observe it in, and this file does not pretend otherwise — it drives the class.
+ *
+ * That is the condition on keeping it: a mutex retained for a future station has to be a mutex
+ * that is known to work, which means acquire, release, release-on-failure and the refusal to
+ * acquire twice are each asserted here rather than inferred from a run that cannot exercise
+ * them. Everything below is a property of the class; nothing below claims the run does it.
  *
  *   node --test src/relay/checkLane.test.ts
  */
@@ -15,7 +18,7 @@ import { strict as assert } from 'node:assert'
 import test from 'node:test'
 import { CheckLane, type LaneClaim } from './checkLane.ts'
 
-/** A claim, spelled out once so the tests read as scheduling rather than as object literals. */
+/** A claim, spelled out once so the tests read as scheduling rather than object literals. */
 const claim = (seat: string, station: 'rotation' | 'integration' = 'integration'): LaneClaim => ({
   seat,
   station,
@@ -29,9 +32,29 @@ function gate(): { held: Promise<void>; open: () => void } {
   return { held, open }
 }
 
-test('one slot by default: a second section does not start until the first has finished', async () => {
+test('acquire: the section runs with the lane held, and the holder names it', async () => {
   const lane = new CheckLane()
-  assert.equal(lane.concurrency, 1)
+  assert.equal(lane.held(), undefined, 'a fresh lane holds nothing')
+  let seen: LaneClaim | undefined
+  const result = await lane.run(claim('seat-a', 'rotation'), () => {
+    seen = lane.held()
+    return 'ran'
+  })
+  assert.equal(result, 'ran', 'the section runs and its value reaches the caller')
+  assert.equal(seen?.seat, 'seat-a')
+  assert.equal(seen?.station, 'rotation', 'and the lane knows which station is holding it')
+})
+
+test('release: the lane is free again afterwards, and takes the next section', async () => {
+  const lane = new CheckLane()
+  await lane.run(claim('seat-a'), () => undefined)
+  assert.equal(lane.held(), undefined, 'released')
+  assert.equal(await lane.run(claim('seat-b'), () => 'ran'), 'ran', 'and usable')
+  assert.deepEqual(lane.history().map((r) => r.seat), ['seat-a', 'seat-b'], 'both are recorded')
+})
+
+test('one slot: a second section does not start until the first has finished', async () => {
+  const lane = new CheckLane()
   const order: string[] = []
   const first = gate()
 
@@ -40,23 +63,20 @@ test('one slot by default: a second section does not start until the first has f
     await first.held
     order.push('a out')
   })
-  const b = lane.run(claim('seat-b'), () => {
-    order.push('b in')
-  })
+  const b = lane.run(claim('seat-b'), () => void order.push('b in'))
 
-  // Long enough for anything not actually blocked to have run. `b` has not.
+  // Long enough for anything not actually held back to have run. `b` has not.
   await new Promise((r) => setImmediate(r))
   assert.deepEqual(order, ['a in'], 'the second section must not have started')
-  assert.deepEqual(lane.held().map((c) => c.seat), ['seat-a'])
-  assert.deepEqual(lane.queued().map((c) => c.seat), ['seat-b'], 'and must be visible as queued')
+  assert.equal(lane.held()?.seat, 'seat-a')
 
   first.open()
   await Promise.all([a, b])
-  assert.deepEqual(order, ['a in', 'a out', 'b in'], 'the second section runs only after the first ends')
-  assert.deepEqual(lane.held(), [], 'and the lane is free again')
+  assert.deepEqual(order, ['a in', 'a out', 'b in'], 'it runs only after the first ends')
+  assert.equal(lane.held(), undefined)
 })
 
-test('the lane is FIFO: a section arriving during a handover does not overtake one already queued', async () => {
+test('FIFO: a section arriving during a handover does not overtake one already queued', async () => {
   const lane = new CheckLane()
   const admitted: string[] = []
   const first = gate()
@@ -64,8 +84,8 @@ test('the lane is FIFO: a section arriving during a handover does not overtake o
   const a = lane.run(claim('seat-a'), () => first.held)
   const b = lane.run(claim('seat-b'), () => void admitted.push('b'))
   const c = lane.run(claim('seat-c'), () => void admitted.push('c'))
-  // Arrives while the queue is draining, which is the window a lane that merely decremented a
-  // counter would let it jump: `seat-b` has been admitted but has not yet re-entered its own
+  // Arrives while the queue is draining, which is the window a lane that merely cleared its
+  // holder would let it jump: `seat-b` has been admitted but has not yet re-entered its own
   // `run`, so a naive implementation sees a free slot.
   first.open()
   const d = lane.run(claim('seat-d'), () => void admitted.push('d'))
@@ -74,7 +94,7 @@ test('the lane is FIFO: a section arriving during a handover does not overtake o
   assert.deepEqual(admitted, ['b', 'c', 'd'], 'admitted in the order they asked')
 })
 
-test('a section that throws releases the lane, and the failure reaches its own caller', async () => {
+test('release on throw: a section that fails frees the lane, and the failure is its own', async () => {
   const lane = new CheckLane()
   await assert.rejects(
     lane.run(claim('seat-a'), () => {
@@ -83,103 +103,34 @@ test('a section that throws releases the lane, and the failure reaches its own c
     /the check runner exploded/,
     'the caller must see its own failure, not a lane error',
   )
-  assert.deepEqual(lane.held(), [], 'a fault must not strand the lane for the rest of the run')
-  // The proof that it is usable, rather than merely reported as empty.
-  assert.equal(await lane.run(claim('seat-b'), () => 'ran'), 'ran')
-  assert.deepEqual(lane.history().map((r) => r.seat), ['seat-a', 'seat-b'], 'both sections are recorded')
+  assert.equal(lane.held(), undefined, 'a fault must not strand the lane for the rest of the run')
+  assert.equal(await lane.run(claim('seat-b'), () => 'ran'), 'ran', 'proved by using it, not by reading it')
+  assert.deepEqual(lane.history().map((r) => r.seat), ['seat-a', 'seat-b'], 'the failed section is recorded too')
+})
+
+test('release on throw: a queued section is admitted rather than stranded behind the failure', async () => {
+  const lane = new CheckLane()
+  const first = gate()
+  const a = lane.run(claim('seat-a'), async () => {
+    await first.held
+    throw new Error('exploded while seat-b waited')
+  })
+  const b = lane.run(claim('seat-b'), () => 'ran')
+  first.open()
+  await assert.rejects(a, /exploded/)
+  assert.equal(await b, 'ran', 'the queue drains through a failure, or one fault stops the run')
 })
 
 test('a synchronous section is awaited, because both of the check runners are spawnSync', async () => {
   const lane = new CheckLane()
   // The failure this rules out: a `run` that returned before a synchronous section finished
-  // would release the lane while `spawnSync` was still holding the process, and the lane would
-  // be a decoration. Asserted by the value, which only exists once the section has run.
+  // would release the lane while `spawnSync` still held the process, and the lane would be a
+  // decoration. Asserted by the value, which exists only once the section has run.
   assert.equal(await lane.run(claim('seat-a'), () => 41 + 1), 42)
   assert.equal(lane.history()[0]?.station, 'integration')
 })
 
-test('--check-concurrency raises the slot count, and the slots are real', async () => {
-  const lane = new CheckLane({ concurrency: 2 })
-  const inside: string[] = []
-  const hold = gate()
-
-  const a = lane.run(claim('seat-a'), async () => {
-    inside.push('a')
-    await hold.held
-  })
-  const b = lane.run(claim('seat-b'), async () => {
-    inside.push('b')
-    await hold.held
-  })
-  const c = lane.run(claim('seat-c'), () => void inside.push('c'))
-
-  await new Promise((r) => setImmediate(r))
-  assert.deepEqual(inside, ['a', 'b'], 'two sections hold the lane at once')
-  assert.deepEqual(lane.queued().map((x) => x.seat), ['seat-c'], 'the third waits behind them')
-
-  hold.open()
-  await Promise.all([a, b, c])
-  assert.deepEqual(inside, ['a', 'b', 'c'])
-})
-
-test('a slot count that is not a whole number of slots is refused rather than guessed at', () => {
-  for (const bad of [0, -1, 1.5, Number.NaN]) {
-    assert.throws(
-      () => new CheckLane({ concurrency: bad }),
-      /at least 1/,
-      `${String(bad)} must be refused: a lane comparing a live count against it stops meaning anything`,
-    )
-  }
-  // Absent is not a value, and is the default rather than a refusal.
-  assert.equal(new CheckLane({ concurrency: undefined }).concurrency, 1)
-})
-
-test('a wait is announced, once, and only when it is real', async () => {
-  const waits: string[] = []
-  const lane = new CheckLane({
-    onWait: (c, holders) => waits.push(`${c.seat} behind ${holders.map((h) => h.seat).join('+')}`),
-  })
-  // Uncontended: the whole of a default run, and it must produce nothing to read.
-  await lane.run(claim('seat-a'), () => undefined)
-  assert.deepEqual(waits, [], 'an uncontended lane must not narrate itself')
-
-  const hold = gate()
-  const a = lane.run(claim('seat-a'), () => hold.held)
-  const b = lane.run(claim('seat-b', 'rotation'), () => undefined)
-  await new Promise((r) => setImmediate(r))
-  assert.deepEqual(waits, ['seat-b behind seat-a'], 'a real wait is announced with what is holding')
-  hold.open()
-  await Promise.all([a, b])
-})
-
-test('the record separates waiting from working, so a queue is not read as a slow check', async () => {
-  // A fake clock: the assertion is about which interval each figure measures, and sleeping
-  // through real ones would make the test slow and the numbers approximate.
-  let clock = 0
-  const tick = () => (clock += 10)
-  const lane = new CheckLane({ now: () => clock })
-  const hold = gate()
-
-  const a = lane.run(claim('seat-a'), async () => {
-    tick()
-    await hold.held
-    tick()
-  })
-  const b = lane.run(claim('seat-b'), () => tick())
-  await new Promise((r) => setImmediate(r))
-  tick() // time passing while seat-b is queued and seat-a works
-  hold.open()
-  await Promise.all([a, b])
-
-  const [first, second] = lane.history()
-  assert.equal(first?.seat, 'seat-a')
-  assert.equal(first?.waitedMs, 0, 'the first section waited for nothing')
-  assert.ok((first?.heldMs ?? 0) > 0, 'and held the lane for the time it ran')
-  assert.equal(second?.seat, 'seat-b')
-  assert.ok((second?.waitedMs ?? 0) > 0, 'the second section waited, and the wait is its own figure')
-})
-
-test('a seat cannot queue behind itself: nesting is refused rather than deadlocked', async () => {
+test('already held: a seat cannot acquire twice, and is told rather than deadlocked', async () => {
   const lane = new CheckLane()
   // The failure being ruled out is a run that stops with no error and no ending. `integrate.ts`
   // runs the configured checks itself, so a caller that wrapped BOTH the boundary and those
@@ -193,22 +144,35 @@ test('a seat cannot queue behind itself: nesting is refused rather than deadlock
   )
   // And the outer section's slot is still released, so the refusal costs one boundary and not
   // the rest of the run.
-  assert.deepEqual(lane.held(), [])
+  assert.equal(lane.held(), undefined)
   assert.equal(await lane.run(claim('implementer'), () => 'ran'), 'ran')
 })
 
-test('two different seats may hold and queue independently, which is the whole point', async () => {
+test('the refusal names both stations, because the fix is knowing which two nested', async () => {
+  const lane = new CheckLane()
+  await assert.rejects(
+    lane.run(claim('implementer-2', 'integration'), () =>
+      lane.run(claim('implementer-2', 'rotation'), () => 'unreachable'),
+    ),
+    (e: Error) =>
+      /already holds the check lane for its integration section/.test(e.message) &&
+      /its rotation section would wait for itself/.test(e.message),
+  )
+})
+
+test('two different seats hold and queue independently, which is what the lane is for', async () => {
   const lane = new CheckLane()
   const hold = gate()
   const a = lane.run(claim('implementer', 'rotation'), () => hold.held)
   const b = lane.run(claim('implementer-2', 'integration'), () => 'merged')
   await new Promise((r) => setImmediate(r))
-  assert.deepEqual(lane.queued().map((c) => `${c.seat}/${c.station}`), ['implementer-2/integration'])
+  assert.equal(lane.held()?.seat, 'implementer', 'the rotation holds it')
   hold.open()
   await Promise.all([a, b])
   assert.deepEqual(
     lane.history().map((r) => `${r.seat}/${r.station}`),
     ['implementer/rotation', 'implementer-2/integration'],
-    'the rotation went first and the boundary followed it, rather than running inside it',
+    'the boundary ran after the rotation rather than inside it — which is the future station ' +
+      'this mechanism is kept for (#78), not something a run can do today',
   )
 })

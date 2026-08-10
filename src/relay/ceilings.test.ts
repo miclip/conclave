@@ -215,10 +215,6 @@ test('concurrentSeats counts seats working, and not seats integrating or idle', 
       seat({ seat: 'b', state: 'running', current: 't2' }),
       // Occupied but not working: no agent is running on it and no quota is being spent.
       seat({ seat: 'c', state: 'integrating', current: 't3' }),
-      // The same, one step earlier: holding its task and waiting -- for a grade, or at N>1 for
-      // a turn at the check lane. A ceiling that counted this would shrink as another seat's
-      // test suite ran, which is not this seat's work by any reading (#64).
-      seat({ seat: 'e', state: 'assigned', current: 't4' }),
       seat({ seat: 'd', state: 'idle' }),
     ]),
     2,

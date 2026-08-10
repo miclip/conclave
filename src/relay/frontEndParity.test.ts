@@ -484,43 +484,6 @@ test('every ceiling flag is parsed AND lands on the options both front-ends buil
   )
 })
 
-/**
- * The ceilings shape, applied to `--check-concurrency` (#64) on the day it lands.
- *
- * It is exactly the flag this file's list is made of: a knob that changes how the run uses the
- * machine, easy to read into a local and drop, and invisible when dropped -- a run whose checks
- * were never serialised looks like a run whose checks never contended. The flag-set test above
- * passes on both front-ends merely MENTIONING it.
- */
-test('--check-concurrency is parsed by the shared builder and lands on the options both front-ends build', () => {
-  const relay = commandBlock('relay', "if (command === 'session')")
-  const session = commandBlock('session', "if (command === 'demo')")
-
-  for (const [name, block] of [['relay', relay], ['session', session]] as const) {
-    assert.ok(block.includes(`flag('check-concurrency', '')`), `${name} must read --check-concurrency`)
-    assert.match(
-      block,
-      /checkConcurrencyFrom\(flag\('check-concurrency', ''\)\)/,
-      `${name} must parse it with the shared builder — a block validating it inline could differ ` +
-        `from the other about what "4 lanes" means`,
-    )
-    assert.match(
-      block,
-      /checkLanes\.lanes === undefined \? \{\} : \{ checkConcurrency: checkLanes\.lanes \}/,
-      `${name} must pass the parsed value into its options, and must leave absent absent`,
-    )
-  }
-
-  // And through the console's own seam, which the CLI block cannot show.
-  const consoleSrc = readFileSync(join(import.meta.dirname, '..', 'repl', 'session.ts'), 'utf8')
-  assert.match(consoleSrc, /checkConcurrency\?: number \| undefined/, 'SessionOptions must have a field to receive it')
-  assert.match(
-    consoleSrc,
-    /checkConcurrency: opts\.checkConcurrency/,
-    'runSession must pass it into Relay.start unchanged',
-  )
-})
-
 test('both front-ends read the seat list through the shared builder and pass it on', () => {
   // The ceilings shape, applied to seats. `--implementers` could be read into a local and
   // dropped on either command and every other test in this file would pass: the flag-set test

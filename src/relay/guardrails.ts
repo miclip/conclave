@@ -161,42 +161,6 @@ export function ceilingsFrom(raw: {
 }
 
 /**
- * `--check-concurrency N`: how many check sections may run at once, run-wide.
- *
- * Shared by both front-ends for the reason `ceilingsFrom` is, and read into `RelayOptions`
- * unchanged. Absent is `undefined`, which is the lane's own default of one slot -- absent must
- * stay behaviourless, and a front-end that wrote `1` into the options would make every default
- * run look like one that had configured serialisation on purpose.
- *
- * Unlike the ceiling flags this one VALIDATES, and the difference is what the value does. A
- * ceiling that parses to `NaN` never fires, which is the same as not setting it; a slot count
- * that parses to `NaN` is compared against a live count and the lane stops meaning anything.
- * `0` is refused rather than read as "unlimited": an operator who typed it meant one of two
- * opposite things, and picking one is worse than saying so.
- *
- * Returns `{ refused }` rather than throwing, so the caller decides where in its own order the
- * refusal happens -- both blocks have work that must not be done on the way out of a run that
- * is not going to start.
- */
-export function checkConcurrencyFrom(
-  raw: string | undefined,
-): { lanes?: number | undefined; refused?: string } {
-  if (!raw) return {}
-  // Digits only, as `--older-than` does it: `Number('')` is 0 and `parseInt('4 lanes')` is 4,
-  // and both readings turn a typo into a configuration nobody chose.
-  if (!/^\d+$/.test(raw.trim()) || Number(raw.trim()) < 1) {
-    return {
-      refused:
-        `--check-concurrency takes a whole number of check slots, at least 1; got "${raw}". ` +
-        `It is the number of check commands allowed to run at once across the whole run — 1 ` +
-        `serialises them, which is the default and is what a suite that binds ports or fixture ` +
-        `directories needs.`,
-    }
-  }
-  return { lanes: Number(raw.trim()) }
-}
-
-/**
  * Whether a ceiling has been passed.
  *
  * Checked at turn boundaries rather than by a timer, because a run cannot be interrupted

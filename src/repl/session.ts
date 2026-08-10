@@ -227,14 +227,6 @@ export interface SessionOptions {
    */
   ceilings?: Ceilings | undefined
   /**
-   * How many check sections may run at once, run-wide. See `RelayOptions.checkConcurrency`.
-   *
-   * Both front-ends, together, for the reason `ceilings` is: `--check-concurrency` describes
-   * the machine the checks run on, and the machine does not change because a human is watching.
-   * Passed to `Relay.start` unchanged; absent means the lane's own default of one slot.
-   */
-  checkConcurrency?: number | undefined
-  /**
    * How long a turn's transcript is given to catch up with the hook that ended it, and how
    * much longer an EMPTY report buys before it is treated as lost. See `Relay#exchange`.
    *
@@ -660,8 +652,6 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     ...(opts.turnWatchdogMs ? { turnWatchdogMs: opts.turnWatchdogMs } : {}),
     // Unchanged, deliberately. See `SessionOptions.ceilings`.
     ...(opts.ceilings ? { ceilings: opts.ceilings } : {}),
-    // Same rule: absent stays absent, so the lane keeps its own default of one slot.
-    ...(opts.checkConcurrency === undefined ? {} : { checkConcurrency: opts.checkConcurrency }),
     lead: { id: 'advisor', agent: opts.lead, role: 'advisor', ...(leadArgs.length > 0 ? { args: leadArgs } : {}) },
     // `implSpecs[0]` is the object this built by hand: `seatIdFor(0)` is 'implementer' and the
     // args are the same list. The plural key is spread in only when the operator named a list,

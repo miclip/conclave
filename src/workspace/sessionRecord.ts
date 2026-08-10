@@ -116,12 +116,8 @@ export interface SessionTurnStatus {
  */
 export interface SessionSeatStatus {
   /**
-   * The dispatcher's scheduler state: idle, queued, running, assigned, integrating,
-   * rotation_pending or merge_blocked.
-   *
-   * `assigned` and `integrating` are the two a poller must not conflate: `assigned` is a seat
-   * holding a task with nothing running on it -- including one queued behind another seat's
-   * checks -- and `integrating` is a boundary actually under way.
+   * The dispatcher's scheduler state: idle, queued, running, integrating, rotation_pending
+   * or merge_blocked.
    *
    * A string rather than the `SchedulerState` union, like every other state in this file: the
    * record is JSON and a consumer parses strings. Importing the union would also point the

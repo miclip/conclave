@@ -26,7 +26,7 @@ import type { CheckSpec } from '../src/rotation/record.ts'
 import type { ProjectConfig } from '../src/config/project.ts'
 import { runReport } from '../src/relay/report.ts'
 import { RunLogWriter, readRunLog, runLogExists } from '../src/relay/resume.ts'
-import { ceilingsFrom, checkConcurrencyFrom, preflightRefusals } from '../src/relay/guardrails.ts'
+import { ceilingsFrom, preflightRefusals } from '../src/relay/guardrails.ts'
 import { ensureCodexHooksTrusted } from '../src/deployment/ensureTrust.ts'
 import type { ReadSession } from '../src/workspace/sessionRecord.ts'
 import { execFileSync, spawn } from 'node:child_process'
@@ -142,7 +142,6 @@ Commands:
                  [--max-turns N] [--max-minutes N] [--max-queue-depth N]
                  [--max-concurrent-seats N] [--strict-goal] [--operator agent]
                  [--bypass [agent]] [--detach] [--turn-timeout SECONDS]
-                 [--check-concurrency N]
                                    Run a two-agent session unattended and print the
                                    routing log. --json prints a structured record of the
                                    run on stdout instead — outcome, per-turn verdicts with
@@ -199,14 +198,6 @@ Commands:
                                    none is bounded only by --rounds as before.
                                    All four are on session too. Refuses to start outside
                                    a git repository unless --force.
-                                   --check-concurrency N is how many of the --checks
-                                   commands may run at once across the whole run. Default
-                                   1: check commands contend for the machine, and two test
-                                   runners in two worktrees collide over anything that
-                                   binds a port or a fixture directory. Raise it only for a
-                                   suite you know is isolated. A seat waiting for its turn
-                                   at the checks stays assigned to its task -- it is queued,
-                                   not blocked, and it needs no answer from you.
                                    --settle bounds how long a turn's transcript is given to
                                    catch up with the hook that says the turn ended. If it
                                    catches up with NOTHING, --salvage (default 90s) is how
@@ -276,7 +267,6 @@ Commands:
                    [--salvage SECONDS] [--record <path>] [--resume <log>] [--force]
                    [--turn-timeout SECONDS] [--max-turns N] [--max-minutes N]
                    [--max-queue-depth N] [--max-concurrent-seats N]
-                   [--check-concurrency N]
                                    The same session, interactively. The goal is optional:
                                    without one the console waits and the first thing you
                                    type starts the run. Pauses become decision
@@ -315,10 +305,6 @@ Commands:
                                    would end again at the first one.
                                    --settle / --salvage / --turn-timeout as in relay.
                                    --max-turns / --max-minutes / --max-queue-depth /
-                                   --check-concurrency as in relay: how many --checks
-                                   commands may run at once run-wide, default 1, and a
-                                   seat waiting for its turn stays assigned rather than
-                                   blocked.
                                    --max-concurrent-seats as in relay. Worth setting when
                                    driving with --operator agent: nobody is watching that
                                    run, and without a ceiling nothing but --rounds bounds
@@ -375,7 +361,6 @@ function extraArgs(raw: string): string[] {
 const RELAY_VALUED_FLAGS: readonly string[] = [
   'advisor',
   'advisor-args',
-  'check-concurrency',
   'checks',
   'checks-informational',
   'checks-unrelated',
@@ -1178,15 +1163,6 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
       return 0
     }
 
-    // After the dry run and after every refusal above it, because it is the same shape of
-    // decision as those: an invocation whose flag does not mean anything must not have started
-    // a run to find that out. Same builder as `session`, so the two cannot disagree.
-    const checkLanes = checkConcurrencyFrom(flag('check-concurrency', ''))
-    if (checkLanes.refused) {
-      console.error(`conclave: ${checkLanes.refused}`)
-      return 1
-    }
-
     const relay = await Relay.start({
       registry,
       cwd: process.cwd(),
@@ -1216,9 +1192,6 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
       // ESCALATES and ends rather than rotating. An unattended form that cannot rotate
       // cannot exercise the mechanism it exists to run unattended.
       ...(checks.length > 0 ? { rotation: { checks } } : {}),
-      // Spread only when given: the lane's own default is one slot, and writing 1 in here
-      // would make every default run indistinguishable from one that asked for serialisation.
-      ...(checkLanes.lanes === undefined ? {} : { checkConcurrency: checkLanes.lanes }),
       // A fixed window cannot serve both a chat-sized turn and one running a full test
       // suite plus a review. It existed on RelayOptions and was reachable from nowhere.
       ...(flag('settle', '') ? { transcriptSettleMs: Number(flag('settle', '')) * 1000 } : {}),
@@ -1414,14 +1387,6 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
       console.error(`conclave: ${seatPlan.reason}`)
       return 1
     }
-    // Same builder as `relay`, and refused in the same place relative to the point of no
-    // return: before the bypass is written, because an invocation that is not going to start a
-    // session must not leave a permission mode behind in the operator's project.
-    const checkLanes = checkConcurrencyFrom(flag('check-concurrency', ''))
-    if (checkLanes.refused) {
-      console.error(`conclave: ${checkLanes.refused}`)
-      return 1
-    }
     // The console applies and persists together: unlike `relay` there is no dry run and no
     // preflight refusal, so the point of no return is here.
     if (!applyBypassFlag(args, (l) => console.log(l))) return 1
@@ -1449,9 +1414,6 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
       version: version(),
       ...(turnTimeout ? { turnWatchdogMs: Number(turnTimeout) * 1000 } : {}),
       ...(ceilings ? { ceilings } : {}),
-      // Absent stays absent, exactly as on `relay`: `SessionOptions.checkConcurrency` is
-      // passed to `Relay.start` unchanged and the lane's default is the one slot D7 asks for.
-      ...(checkLanes.lanes === undefined ? {} : { checkConcurrency: checkLanes.lanes }),
       // Testing seams, and nothing production passes. Wiring one into `relay` and not here
       // is the mistake this codebase keeps making, and this time it made the console CLI
       // itself untestable rather than a flag unreachable.

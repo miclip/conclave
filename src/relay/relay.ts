@@ -345,21 +345,6 @@ export interface RelayOptions {
   onLog?: (m: RelayMessage) => void
   /** Enables automatic rotation on mechanical degradation. See `RotationConfig`. */
   rotation?: RotationConfig
-  /**
-   * How many check sections may run at once, run-wide. Default 1 (D7).
-   *
-   * The configured checks are run by two stations -- a rotation proving a replacement, and the
-   * merge boundary measuring the tree the seats built together -- and both want the machine.
-   * Serialised by default because check commands contend on machine-global resources: this
-   * project's own suite caps `--test-concurrency` for exactly that reason. Raise it only for a
-   * suite known to be isolated; see `CheckLane`, which also records why a value above 1 cannot
-   * yet change anything.
-   *
-   * Behaviourless at the default on every run that exists today: the two stations are never
-   * live at the same time, so nothing ever queues. It is here so that per-seat rotation lands
-   * against a lane that already exists rather than one written in the same change.
-   */
-  checkConcurrency?: number | undefined
 }
 
 /**
@@ -1107,38 +1092,23 @@ export class Relay {
     // Set here and nowhere else. Whether rotation was configured cannot depend on how far
     // the run got -- see rotationWatch.armed and issue #31.
     this.rotationWatch.armed = opts.rotation !== undefined
-    // In the constructor rather than as a field initialiser, because it reads `opts` and it
-    // records through `#record`: the lane must not exist before the thing it reports to.
-    this.#checkLane = new CheckLane({
-      ...(opts.checkConcurrency === undefined ? {} : { concurrency: opts.checkConcurrency }),
-      // A wait is a fact about scheduling, not a verdict about a seat. It is recorded so that
-      // a run which appears to have stalled at a boundary can be read as queueing rather than
-      // as a hang -- and it says out loud that the seat keeps its task, because "waiting" and
-      // "blocked" are the two words this run reports with and only one of them is a problem.
-      onWait: (claim, holders) => {
-        this.#record({
-          from: 'orchestrator',
-          fromRank: 'human',
-          to: [],
-          kind: 'note',
-          text:
-            `${claim.seat} is waiting for the check lane before its ${claim.station} checks ` +
-            `(held by ${holders.map((h) => `${h.seat}/${h.station}`).join(', ')}). It stays ` +
-            `assigned to ${claim.detail ?? 'its current work'}; nothing is blocked and nothing ` +
-            `needs an answer.`,
-        })
-      },
-    })
   }
 
   /**
-   * The run-scoped lane the configured checks run behind.
+   * The run-scoped lane the configured checks run behind. One slot, not configurable.
    *
-   * Public because it is evidence: `history()` is the only record that a station reached the
-   * lane at all, and a test asserting that two stations do not double-queue has nothing else
-   * to read. Nothing outside the relay should acquire it during a run.
+   * INERT: `spawnSync` already serialises every check in this process, and the two stations
+   * that would contend cannot be live at the same time until per-seat rotation lands (#78).
+   * `CheckLane` carries the whole argument, including why it is kept rather than deleted.
+   *
+   * No `onWait` and no note: a seat cannot wait here, and logging for a state nothing
+   * constructs would be a report an operator could never see and could not trust if they did.
+   *
+   * Public because `history()` is the only record that a station reached the lane at all --
+   * "never contended" and "never reached" are otherwise the same silence. Nothing outside the
+   * relay should acquire it during a run.
    */
-  readonly #checkLane: CheckLane
+  readonly #checkLane = new CheckLane()
 
   get checkLane(): CheckLane {
     return this.#checkLane
@@ -2788,16 +2758,9 @@ export class Relay {
   /**
    * The turn ended, settled, and its report was recorded.
    *
-   * The seat becomes `assigned`: not running, and not available. The report being ready and the
-   * tree being ready are different facts, and at N>1 handing this seat new work here would
+   * The seat becomes `integrating`: not running, and not available. The report being ready and
+   * the tree being ready are different facts, and at N>1 handing this seat new work here would
    * write into a tree the boundary flow is still committing.
-   *
-   * `assigned` rather than `integrating`, which is what stood here. Nothing is integrating yet
-   * -- the verdict is not graded, rotation has not been assessed, and at N>1 the boundary may
-   * then wait for the check lane behind another seat's checks. `integrating` is claimed in
-   * `#crossBoundary`, when the lane admits this seat and the boundary actually starts, so the
-   * two words in a status document mean "spoken for" and "working" rather than both meaning
-   * the first (D7, #64).
    */
   #reported(task: Task, seat: SeatExecution, reportSeq: number, unsettled: boolean): void {
     const runtime = this.#taskRuntime.get(task.id)!
@@ -2805,7 +2768,7 @@ export class Relay {
     runtime.unsettled = unsettled
     runtime.reportSeq = reportSeq
     runtime.state = 'reported'
-    seat.state = 'assigned'
+    seat.state = 'integrating'
     this.#mark(task, 'ended')
     this.#mark(task, 'reported')
   }
@@ -2911,16 +2874,10 @@ export class Relay {
     //
     // Outside the boundary's own try/catch on purpose. That catch converts a throw into
     // `merge_blocked`, and a lane fault is not a claim about anyone's branch.
-    return this.#checkLane.run({ seat: seatId, station: 'integration', detail: task.id }, () => {
-      // ADMITTED, so the boundary is now this seat's work rather than something it is waiting
-      // for. Until this line the seat has been `assigned` since its turn ended: holding its
-      // task, not dispatchable, not re-sent, and needing nothing from anyone. Set inside the
-      // lane section rather than before the acquire, which is the whole distinction -- a seat
-      // queued behind another seat's checks must not report a merge it has not started (D7).
-      const exec = this.#seatState.get(seatId)
-      if (exec) exec.state = 'integrating'
-      return this.#mergeAndCheck(task, seatId)
-    })
+    return this.#checkLane.run(
+      { seat: seatId, station: 'integration', detail: task.id },
+      () => this.#mergeAndCheck(task, seatId),
+    )
   }
 
   /**

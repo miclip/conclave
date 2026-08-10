@@ -238,6 +238,39 @@ the *integrated* diff is the only station that can catch a defect that exists in
 before the checks do. This one catches it after, mechanically, which is what a run with nobody
 watching needs.
 
+### D7b. The contention D7 serialises against does not exist, and the flag was withdrawn (#64)
+
+Appended rather than rewritten, for the reason D7a is: what was decided is evidence, and a
+decision record that quietly loses its own errors stops being one.
+
+**D7's premise is false in this codebase.** It reasons that `npm test` in four worktrees means
+four test runners contending for the machine. But both check runners are `spawnSync` —
+`runCheck` in `src/rotation/record.ts` and `runIntegrationChecks` in `src/relay/integrate.ts` —
+in the one orchestrator process. A synchronous spawn blocks the process for the whole command,
+so there is never more than one check running: **serialisation is already guaranteed by the
+call, not by any mutex.** It is narrower still, because the two stations cannot be live at the
+same time — there is no merge boundary at N=1, and `rotateImplementer` refuses at N>1.
+
+So of D7's three asks, one was already true and two are not built:
+
+- `--check-concurrency` — **built and removed before shipping.** A control that is accepted and
+  plumbed and cannot have an effect is worse than an absent one: someone sets it and believes
+  something changed.
+- "a seat waiting for the check lane is `assigned`" — **not built.** No production path
+  constructs a waiting seat, and a `SchedulerState` value for a state nothing reaches was
+  reverted along with the test that manufactured one in order to observe it.
+- the run-scoped mutex itself — **kept, inert, and unit-tested** (`src/relay/checkLane.ts`).
+  One slot, not configurable, wrapping each station once at its outermost point. It is retained
+  as the mechanism that will make **per-seat rotation (#78)** safe, where the hazard is not CPU
+  contention but a merge moving the tree between a rotation's two captures and being reported
+  as `repository_diverged`. Building an asynchronous runner so the lane had something to
+  serialise today would be building the problem in order to keep the solution.
+
+The operator's own note on filing it: this is the third goal on this branch — with #60's
+detector and parts of #61 — whose acceptance criteria named states the code cannot reach. The
+correction is to ask whether a production path constructs the state *before* writing the
+criterion.
+
 ## D8. Ceilings change meaning and stop being optional at N>1
 
 `#turnsTaken` counts every participant's turns and is what `breached()` reads. N seats burn
