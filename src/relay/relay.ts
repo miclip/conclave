@@ -44,7 +44,7 @@ import {
   type RunOutcome,
   type RunPause,
 } from './run.ts'
-import { resolutionFor, type ResolutionSubject } from './resolution.ts'
+import { actorFor, resolutionFor, type ResolutionSubject } from './resolution.ts'
 import {
   attributable,
   supportFor,
@@ -61,6 +61,7 @@ import type { CheckSpec } from '../rotation/record.ts'
 import { resumeBriefing } from './resume.ts'
 import { breached, type CeilingBreach, type CeilingState, type Ceilings } from './guardrails.ts'
 import {
+  cancelledByFailedDependencies,
   concurrentSeats,
   dependenciesMet,
   nextDispatch,
@@ -1617,6 +1618,12 @@ export class Relay {
     // would eventually declare the wrong one.
     const armed = (this.#opts.rotation?.checks.length ?? 0) > 0
     const resolution = resolutionFor(p.subject, { rotationArmed: armed })
+    // Every request that reaches here must have somebody routed to answer it. Total today --
+    // every authority falls back to the operator -- so this cannot throw and changes nothing.
+    // It is here rather than with the routing it guards because this is the one place every
+    // pause passes through, and because the day a `mechanical` authority is wired to a
+    // resolver that does not exist, the alternative to throwing is silence.
+    actorFor(resolution)
     this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text: `paused (${reason}): ${p.detail}` })
     if (!handle) {
       return this.#end(
@@ -1970,6 +1977,29 @@ export class Relay {
       this.#mark(task, 'ready')
     }
     return task
+  }
+
+  /**
+   * Cancel every queued task whose dependency failed, and everything behind it.
+   *
+   * A no-op today in the only way that matters: nothing the advisor can write carries a
+   * dependency, so `dependsOn` is empty on every admitted task and the sweep condemns
+   * nothing. It is wired now rather than with the feature that needs it because the rule it
+   * enforces is what makes dependencies SAFE to create -- a queue that can hold a task
+   * nothing will ever run is the thing that must not exist BEFORE the first edge is written,
+   * not after.
+   *
+   * `cancelledBy` records the causal task id rather than the bare fact, so an operator
+   * reading `tasks()` afterwards is told which failure took this work out rather than being
+   * left to reconstruct it from the marks.
+   */
+  #cancelUnrunnable(): void {
+    for (const { task, cancelledBy } of cancelledByFailedDependencies(this.#queue, this.#taskRuntime)) {
+      const runtime = this.#taskRuntime.get(task.id)!
+      runtime.state = 'cancelled'
+      runtime.cancelledBy = cancelledBy
+      this.#mark(task, 'cancelled')
+    }
   }
 
   /**
@@ -2391,6 +2421,14 @@ export class Relay {
         // accounting for it; the implementer simply had no way to know.
         this.#adjudicate(impl.id, conflict.origin.seq)
       }
+
+      // Before choosing anything, take out the work that can never run. A dependent of a
+      // failed or cancelled task is not waiting -- `dependenciesMet` reads a persistent fact,
+      // so its dependency keeps having failed and it can never become ready. Left in the
+      // queue it is invisible: no seat holds it, nothing is outstanding, and the run reports
+      // healthy while making no progress. Swept at the dispatch boundary rather than at the
+      // failure, because this is the one place that asks what the queue can do next.
+      this.#cancelUnrunnable()
 
       // The lowest-`seq` ready task whose target seat is free -- at N=1 the task just admitted
       // and the one seat that can take it. Read out of the queue rather than used directly, so

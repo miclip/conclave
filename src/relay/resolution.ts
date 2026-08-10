@@ -113,6 +113,54 @@ type Assert<T extends true> = T
  */
 export type EveryReasonIsClassified = Assert<Exactly<ResolutionSubject['reason'], PauseReason>>
 
+/**
+ * Who is actually ASKED today, as opposed to who is entitled to answer.
+ *
+ * One member, and that is the honest shape of it: every request routes to the operator,
+ * whatever its authority says. `authority` is an epistemic classification and this is the
+ * routing table, and the whole reason both exist is that they are not the same thing yet.
+ */
+export type ResolutionActor = 'operator'
+
+/**
+ * The routing that actually happens. Every authority falls back to the operator.
+ *
+ * A `Record` keyed by the authority union rather than a switch or a partial map, so a
+ * seventh authority cannot be added without deciding here who answers it -- the same
+ * argument `EveryReasonIsClassified` makes one axis over.
+ */
+const ROUTES: Record<ResolutionAuthority, ResolutionActor> = {
+  mechanical: 'operator',
+  advisor: 'operator',
+  operator: 'operator',
+}
+
+/**
+ * The actor that will answer this request, and an invariant that one exists.
+ *
+ * Vacuous today: the table above sends everything to the operator, so this cannot throw and
+ * a test of it proves only that the routing is total. It stops being vacuous the day a
+ * request stops being routed to the operator — when a `mechanical` authority is wired to a
+ * resolver, the failure mode is a request classified as mechanically resolvable and handed
+ * to a mechanism that was never built. That request has no respondent, nothing is waiting on
+ * it, and the run reports healthy. Two lines now, and the alternative is discovering it as
+ * silence later.
+ *
+ * A throw rather than a returned `undefined`, deliberately: a caller that has to remember to
+ * check a result is a caller that will forget, and this runs at the one place every pause
+ * passes through.
+ */
+export function actorFor(request: ResolutionRequest): ResolutionActor {
+  const actor = ROUTES[request.authority]
+  if (actor === undefined) {
+    throw new Error(
+      `no actor is routed for ${request.authority} authority (${request.reason}): ` +
+        `a request nobody answers would leave the run waiting on nothing`,
+    )
+  }
+  return actor
+}
+
 /** The run configuration authority is derived from. */
 export interface ResolutionConfig {
   /**

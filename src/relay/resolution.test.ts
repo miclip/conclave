@@ -24,7 +24,7 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test, { type TestContext } from 'node:test'
@@ -34,7 +34,13 @@ import { AgentRegistry } from '../registry/registry.ts'
 import { NO_DEADLINE_CLOCKS } from '../registry/types.ts'
 import { FakeRotationSession } from '../rotation/fakeSession.ts'
 import { Relay, type RelayOptions } from './relay.ts'
-import { resolutionFor, type EveryReasonIsClassified } from './resolution.ts'
+import {
+  actorFor,
+  resolutionFor,
+  type EveryReasonIsClassified,
+  type ResolutionRequest,
+  type ResolutionSubject,
+} from './resolution.ts'
 import type { PauseOption, RunHandle, RunPause } from './run.ts'
 
 // ---------------------------------------------------------------------------
@@ -104,6 +110,52 @@ test('every pause reason is classified, checked by the compiler rather than at r
   // A runtime tautology on purpose: it is the compile step above that has already failed if
   // the two sets have drifted, and there is no runtime evidence of a type to assert instead.
   assert.equal(EXHAUSTIVE, true)
+})
+
+/**
+ * Every subject, with the evidence its scope needs. One list, so a test asking "all of them"
+ * cannot quietly mean four.
+ */
+const EVERY_SUBJECT: ResolutionSubject[] = [
+  { reason: 'rotation_candidate', participant: 'implementer' },
+  { reason: 'turn_incomplete', participant: 'implementer' },
+  { reason: 'implementer_unanswered', participant: 'implementer' },
+  { reason: 'authority_conflict', workstream: 'implementer' },
+  { reason: 'advisor_escalated' },
+  { reason: 'operator_requested' },
+]
+
+test('every classified request has an actor routed to answer it', () => {
+  // The invariant, and it is vacuous today on purpose: routing sends everything to the
+  // operator whatever the authority says, so this passes for all six reasons under both
+  // configurations and could not fail. What it pins is that the routing table is TOTAL.
+  //
+  // It stops being vacuous when #56's routing lands. A `mechanical` authority wired to a
+  // resolver that was never built is a request with no respondent -- nothing is waiting on
+  // it, nobody was asked, and the run reports healthy. That failure arrives as silence, and
+  // this is the two lines that turn it into a throw at the halt site instead.
+  assert.equal(EVERY_SUBJECT.length, 6, 'all six reasons, not the ones that happened to be listed')
+  for (const config of [{ rotationArmed: true }, { rotationArmed: false }]) {
+    for (const subject of EVERY_SUBJECT) {
+      const request = resolutionFor(subject, config)
+      assert.equal(actorFor(request), 'operator', `${subject.reason} routes to the operator today`)
+    }
+  }
+  // Including the authority no reason currently produces at the site that raises pauses:
+  // `rotation_candidate` reaches `mechanical` only with checks configured, and the table is
+  // keyed by the authority union rather than by the reasons that happen to occur.
+  for (const authority of ['mechanical', 'advisor', 'operator'] as const) {
+    assert.equal(actorFor({ reason: 'turn_incomplete', authority, scope: { kind: 'conclave' } }), 'operator')
+  }
+})
+
+test('an authority with nobody routed to it is refused rather than left unanswered', () => {
+  // Unreachable through the union, which is the point of the `Record`: adding a seventh
+  // authority fails `tsc` until somebody says who answers it. This is the same guarantee at
+  // runtime, for the case the compiler cannot see -- a routing table assembled from
+  // configuration, or a cast. Constructed by cast because there is no honest way to build it.
+  const unrouted = { reason: 'turn_incomplete', authority: 'arbiter', scope: { kind: 'conclave' } } as unknown
+  assert.throws(() => actorFor(unrouted as ResolutionRequest), /no actor is routed for arbiter authority/)
 })
 
 test('the classification is pure: the same subject and configuration give the same request', () => {
@@ -459,4 +511,37 @@ test('the routing log says what it said before; the classification is not narrat
     'no note may narrate the classification',
   )
   await run.abort()
+})
+
+/**
+ * The same gap on the other axis: that the invariant is CALLED.
+ *
+ * `actorFor` is total today, so deleting its call from `#halt` changes nothing observable —
+ * measured, not assumed: the mutation survived the whole suite. The check exists for the day
+ * a request stops being routed to the operator, and a check that has been quietly unwired by
+ * then is worse than one that was never written, because its presence reads as coverage.
+ *
+ * Pinned by reading the source, for the reason the sweep's twin test in `dispatch.test.ts`
+ * gives: the alternative is a test-only seam in `Relay`, and production API that exists for
+ * a test is the thing this branch has twice now decided not to build.
+ */
+test('#halt calls actorFor on the classified request before raising the pause (source inspection)', () => {
+  const src = readFileSync(new URL('./relay.ts', import.meta.url), 'utf8')
+
+  // One classification site and one pause site, which is what makes "every pause passes
+  // through this check" a true statement rather than a hope about the one path that was
+  // read. A second `pauseAt` would need its own invariant, and this fails until it has one.
+  assert.equal(src.split('resolutionFor(').length - 1, 1, 'exactly one classification site')
+  assert.equal(src.split('pauseAt(').length - 1, 1, 'exactly one site that raises a pause')
+  assert.equal(src.split('actorFor(').length - 1, 1, 'called once, at that site')
+
+  const classified = src.indexOf('const resolution = resolutionFor(')
+  const checked = src.indexOf('actorFor(resolution)')
+  const raised = src.indexOf('pauseAt(')
+  assert.notEqual(classified, -1, '#halt classifies the condition')
+  assert.notEqual(checked, -1, '#halt asserts the request has an actor')
+  // Between the two: after the request exists, and before anything is asked of a human on the
+  // strength of it. A check placed after the pause would be asserting about a decision the
+  // operator had already been handed.
+  assert.ok(classified < checked && checked < raised, 'checked after classification, before the pause')
 })

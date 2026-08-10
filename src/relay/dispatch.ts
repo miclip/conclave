@@ -356,6 +356,55 @@ export function cancelledByDependency(
 }
 
 /**
+ * Every queued task that can never become ready, and the dependency that killed each.
+ *
+ * `dependenciesMet` reads a PERSISTENT routed fact, so a task that failed keeps having
+ * failed: nothing later makes `routedSuccessfully` true for it again. A dependent of a failed
+ * task is therefore not waiting, it is finished waiting and does not know — it sits in the
+ * queue at `admitted` forever, no seat is blocked by it, no request is outstanding, and every
+ * individual state reports healthy while the run stops progressing. Cancelling it is the
+ * PREVENTION of that state rather than the detection of it, and prevention is strictly
+ * better: a detector reports after the fact something that need not have happened at all.
+ *
+ * Transitive, and computed to a fixpoint here rather than one round per dispatch. A chain
+ * a -> b -> c dies whole the moment `a` fails; sweeping one hop at a time would leave `c`
+ * queued until the next boundary, which is a queue that briefly holds a task nothing will
+ * ever run — the exact state this exists to remove.
+ *
+ * Returns rather than mutates, unlike `recordCompletion`. Cancelling a task is a transition,
+ * and transitions are `Relay`'s to perform because only it owns the objects and the ordinal
+ * counter the marks are stamped from. Handing back a settled list also means the caller
+ * applies a complete sweep or none of it; a fixpoint that mutated as it went could be
+ * interrupted halfway into a state nobody designed.
+ *
+ * `admitted` and `ready` only. Anything further along belongs to a seat and is that seat's
+ * turn to finish; killing a running task from the queue side would abandon a child mid-turn.
+ */
+export function cancelledByFailedDependencies(
+  queue: readonly Task[],
+  runtime: ReadonlyMap<string, TaskRuntime>,
+): { task: Task; cancelledBy: string }[] {
+  const doomed = new Map<string, string>()
+  const ordered = [...queue].sort((a, b) => a.seq - b.seq)
+  for (let changed = true; changed; ) {
+    changed = false
+    for (const task of ordered) {
+      if (doomed.has(task.id)) continue
+      const state = runtime.get(task.id)?.state
+      if (state !== 'admitted' && state !== 'ready') continue
+      // The single-hop rule stays in one place; this adds only the tasks THIS sweep has
+      // already condemned, which the runtime does not know about yet.
+      const cause = cancelledByDependency(task, runtime) ?? task.dependsOn.find((id) => doomed.has(id))
+      if (cause === undefined) continue
+      doomed.set(task.id, cause)
+      changed = true
+    }
+  }
+  // In `seq` order, so the chain reads from the failure outwards rather than in map order.
+  return ordered.filter((t) => doomed.has(t.id)).map((task) => ({ task, cancelledBy: doomed.get(task.id)! }))
+}
+
+/**
  * The next task to assign, and where to put it.
  *
  * The lowest-`seq` ready task whose target seat is free. A later task may overtake an earlier

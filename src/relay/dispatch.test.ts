@@ -21,7 +21,7 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -30,6 +30,7 @@ import { AgentRegistry } from '../registry/registry.ts'
 import { NO_DEADLINE_CLOCKS } from '../registry/types.ts'
 import { FakeRotationSession } from '../rotation/fakeSession.ts'
 import {
+  cancelledByFailedDependencies,
   dependenciesMet,
   nextDispatch,
   parseDecisions,
@@ -652,4 +653,214 @@ test('the queue and the seat table handed out share nothing with the originals',
   // than left implicit: the id is the one field the dispatcher looks work up by.
   ;(relay.tasks()[0]!.task as { id: string }).id = 'rewritten'
   assert.equal(relay.tasks()[0]?.task.id, 't-1')
+})
+
+// ---------------------------------------------------------------------------
+// Work that can never run is taken out of the queue, rather than detected in it.
+// ---------------------------------------------------------------------------
+
+/**
+ * What `Relay.#cancelUnrunnable` does with the sweep, minus the marks it stamps.
+ *
+ * The transition belongs to the relay -- only it owns the objects and the ordinal counter --
+ * so a test of the rule has to perform it. Kept to the two fields the relay writes, so this
+ * cannot pass by doing something the production path does not.
+ */
+function applySweep(queue: readonly Task[], runtime: Map<string, TaskRuntime>): string[] {
+  const swept = cancelledByFailedDependencies(queue, runtime)
+  for (const { task, cancelledBy } of swept) {
+    const r = runtime.get(task.id)!
+    r.state = 'cancelled'
+    r.cancelledBy = cancelledBy
+  }
+  return swept.map((s) => s.task.id)
+}
+
+test('a failed task takes its dependents and their dependents out of the queue', () => {
+  // The state this prevents: `dependenciesMet` reads a PERSISTENT routed fact, so t-1 keeps
+  // having failed and t-2 can never become ready. Left alone it sits at `admitted` forever --
+  // no seat holds it, nothing is outstanding, every individual state reports healthy, and the
+  // run simply stops progressing. That is why this is a sweep and not a detector.
+  const queue = [
+    task({ id: 't-1', seq: 1 }),
+    task({ id: 't-2', seq: 2, dependsOn: ['t-1'] }),
+    task({ id: 't-3', seq: 3, dependsOn: ['t-2'] }),
+  ]
+  const runtime = new Map<string, TaskRuntime>([
+    ['t-1', { state: 'failed', routedAt: 5, marks: [] }],
+    ['t-2', { state: 'admitted', marks: [] }],
+    ['t-3', { state: 'admitted', marks: [] }],
+  ])
+
+  assert.equal(dependenciesMet(queue[1]!, runtime), false, 'the dependent could never have become ready')
+  assert.deepEqual(applySweep(queue, runtime), ['t-2', 't-3'])
+  // Each records the dependency that killed it, not the bare fact: t-3 died of t-2, which is
+  // the edge the operator has to walk back to reach t-1. A shared cause would say all three
+  // failed together, which is not what happened.
+  assert.equal(runtime.get('t-2')?.cancelledBy, 't-1')
+  assert.equal(runtime.get('t-3')?.cancelledBy, 't-2')
+  assert.equal(runtime.get('t-1')?.state, 'failed', 'the causal task keeps its own terminal state')
+
+  // The FAILED dependency, not merely the first one listed. With one edge per task the two
+  // are the same string and a sweep recording either would pass everything above, which is
+  // the kind of agreement that only holds until a task has two dependencies.
+  const multi = [
+    task({ id: 'm-1', seq: 1 }),
+    task({ id: 'm-2', seq: 2 }),
+    task({ id: 'm-3', seq: 3, dependsOn: ['m-1', 'm-2'] }),
+  ]
+  const mixed = new Map<string, TaskRuntime>([
+    ['m-1', { state: 'complete', routedAt: 1, integratedAt: 2, marks: [] }],
+    ['m-2', { state: 'failed', marks: [] }],
+    ['m-3', { state: 'admitted', marks: [] }],
+  ])
+  assert.deepEqual(applySweep(multi, mixed), ['m-3'])
+  assert.equal(mixed.get('m-3')?.cancelledBy, 'm-2')
+})
+
+test('the sweep reaches the whole chain in one pass, in seq order', () => {
+  // A four-deep chain, admitted out of order, so passing this cannot be an artifact of the
+  // queue happening to be sorted. One pass, because a sweep that took a hop per dispatch
+  // boundary would leave the tail queued in exactly the state it exists to remove.
+  const queue = [
+    task({ id: 't-4', seq: 4, dependsOn: ['t-3'] }),
+    task({ id: 't-2', seq: 2, dependsOn: ['t-1'] }),
+    task({ id: 't-3', seq: 3, dependsOn: ['t-2'] }),
+    task({ id: 't-1', seq: 1 }),
+  ]
+  const runtime = new Map<string, TaskRuntime>([
+    ['t-1', { state: 'cancelled', marks: [] }],
+    ['t-2', { state: 'ready', marks: [] }],
+    ['t-3', { state: 'admitted', marks: [] }],
+    ['t-4', { state: 'admitted', marks: [] }],
+  ])
+  // A CANCELLED dependency propagates as a failed one does, which is what makes the chain
+  // transitive at all: every hop past the first is a dependency on something this same sweep
+  // cancelled a moment ago.
+  assert.deepEqual(applySweep(queue, runtime), ['t-2', 't-3', 't-4'])
+  assert.deepEqual(
+    ['t-2', 't-3', 't-4'].map((id) => runtime.get(id)?.cancelledBy),
+    ['t-1', 't-2', 't-3'],
+  )
+})
+
+test('unrelated ready work survives the sweep and is still dispatchable', () => {
+  // The false-positive case, and it matters more than the positive one: a sweep that took out
+  // work with no failed dependency would silently delete the run's remaining agenda, and
+  // nothing downstream would report anything wrong.
+  const queue = [
+    task({ id: 't-1', seq: 1 }),
+    task({ id: 't-2', seq: 2, dependsOn: ['t-1'] }),
+    task({ id: 't-3', seq: 3 }),
+    task({ id: 't-4', seq: 4, dependsOn: ['t-3'] }),
+  ]
+  const runtime = new Map<string, TaskRuntime>([
+    ['t-1', { state: 'failed', marks: [] }],
+    ['t-2', { state: 'admitted', marks: [] }],
+    ['t-3', { state: 'ready', marks: [] }],
+    ['t-4', { state: 'admitted', marks: [] }],
+  ])
+  assert.deepEqual(applySweep(queue, runtime), ['t-2'], 'only the dependent of the failure')
+  assert.equal(runtime.get('t-3')?.state, 'ready')
+  assert.equal(runtime.get('t-4')?.state, 'admitted', 'blocked on work that has not failed, so still waiting')
+  assert.equal(runtime.get('t-3')?.cancelledBy, undefined)
+  // And the dispatcher can still see it. The sweep runs immediately before `nextDispatch`, so
+  // "survived" has to mean dispatchable rather than merely still present in the queue.
+  assert.equal(nextDispatch(queue, runtime, [seat()])?.task.id, 't-3')
+})
+
+test('the sweep leaves work that already belongs to a seat alone', () => {
+  // `admitted` and `ready` only. Anything further along is a seat's turn to finish, and
+  // cancelling it from the queue side would abandon a child mid-turn -- a running task's
+  // dependency having failed does not make the turn it is executing stop existing.
+  const queue = [
+    task({ id: 't-1', seq: 1 }),
+    task({ id: 't-2', seq: 2, dependsOn: ['t-1'] }),
+    task({ id: 't-3', seq: 3, dependsOn: ['t-1'] }),
+  ]
+  const runtime = new Map<string, TaskRuntime>([
+    ['t-1', { state: 'failed', marks: [] }],
+    ['t-2', { state: 'running', seat: 'implementer', marks: [] }],
+    ['t-3', { state: 'reported', marks: [] }],
+  ])
+  assert.deepEqual(cancelledByFailedDependencies(queue, runtime), [])
+})
+
+test('a queue with nothing failed in it is untouched', () => {
+  const queue = [task({ id: 't-1', seq: 1 }), task({ id: 't-2', seq: 2, dependsOn: ['t-1'] })]
+  const runtime = new Map<string, TaskRuntime>([
+    ['t-1', { state: 'ready', marks: [] }],
+    ['t-2', { state: 'admitted', marks: [] }],
+  ])
+  assert.deepEqual(cancelledByFailedDependencies(queue, runtime), [])
+  const done = new Map<string, TaskRuntime>([
+    ['t-1', { state: 'complete', routedAt: 3, integratedAt: 4, marks: [] }],
+    ['t-2', { state: 'admitted', marks: [] }],
+  ])
+  assert.deepEqual(cancelledByFailedDependencies(queue, done), [], 'a satisfied dependency is not a failure')
+  assert.equal(dependenciesMet(queue[1]!, done), true)
+})
+
+test('the sweep is wired into the dispatch boundary and cancels nothing in a real run', async (t) => {
+  // The wiring, and the whole of what can be observed of it today: no advisor reply can carry
+  // a dependency, so `dependsOn` is empty on every admitted task and the sweep has nothing to
+  // condemn. Asserted anyway, because "runs at the dispatch boundary and is inert" is the
+  // claim being made -- a sweep that cancelled work in an ordinary run would be the worst
+  // possible regression and nothing else in the suite is watching for it.
+  const dir = repo()
+  const advisor = new FakeRotationSession('advisor-1', 'codex', ['Do the thing.', 'And again.', 'DONE'])
+  const impl = new FakeRotationSession('impl-1', 'claude', ['ack', 'Did it.', 'ack', 'Did that too.', 'NONE'])
+  const relay = await relayOf(dir, advisor, impl, { maxAdvisorTurns: 5 })
+  t.after(() => relay.stop())
+  await relay.run('build the thing')
+
+  const tasks = relay.tasks()
+  assert.ok(tasks.length >= 2, 'more than one dispatch boundary was crossed')
+  for (const { task: admitted, runtime } of tasks) {
+    assert.deepEqual(admitted.dependsOn, [], 'nothing can express an edge yet')
+    assert.notEqual(runtime.state, 'cancelled')
+    assert.equal(runtime.cancelledBy, undefined)
+    assert.ok(!runtime.marks.some((m) => m.event === 'cancelled'))
+  }
+})
+
+/**
+ * The one thing a behavioural test cannot reach: that the sweep is CALLED.
+ *
+ * Deleting `this.#cancelUnrunnable()` from the dispatch loop changes nothing observable
+ * today. No advisor reply can carry a dependency and nothing anywhere sets a task's state to
+ * `failed`, so the sweep condemns nothing in any run that can be constructed through the
+ * public API — every behavioural assertion in this file passes with the call removed. That
+ * was measured, not assumed: the mutation survived the whole suite.
+ *
+ * So the wiring is pinned by reading the source. That is a blunt instrument and it is the
+ * honest one here: the alternative is a test-only injection point in `Relay`, which is
+ * production API existing for a test's benefit, and the whole reason this sweep was built
+ * instead of a detector is that machinery nobody can check is worse than none.
+ *
+ * It goes stale the day the call is renamed or moved, which is the intended failure: both
+ * are exactly the change that must not happen silently.
+ */
+test('Relay calls #cancelUnrunnable immediately before nextDispatch (source inspection)', () => {
+  const src = readFileSync(new URL('./relay.ts', import.meta.url), 'utf8')
+
+  // One dispatch boundary, so "before nextDispatch" names a single place. If a second one is
+  // ever added, this fails and whoever added it has to sweep there too — which is the real
+  // requirement, and the reason this counts rather than merely finding.
+  assert.equal(src.split('nextDispatch(').length - 1, 1, 'exactly one dispatch boundary in relay.ts')
+  const call = src.indexOf('this.#cancelUnrunnable()')
+  const boundary = src.indexOf('nextDispatch(')
+  assert.notEqual(call, -1, 'the dispatch loop calls the sweep')
+  assert.ok(call < boundary, 'the sweep runs BEFORE the queue is asked what to do next')
+
+  // Immediately before: nothing between the two but comments. A statement slipped in here
+  // would be a statement that reads or schedules against a queue still holding work nothing
+  // can ever run, which is the state the sweep exists to have already removed.
+  const between = src.slice(call + 'this.#cancelUnrunnable()'.length, src.lastIndexOf('\n', boundary))
+  for (const line of between.split('\n').map((l) => l.trim())) {
+    assert.ok(
+      line === '' || line.startsWith('//') || line.startsWith('*') || line.startsWith('/*'),
+      `only comments may sit between the sweep and the dispatch, found: ${line}`,
+    )
+  }
 })
