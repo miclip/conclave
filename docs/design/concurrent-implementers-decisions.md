@@ -81,6 +81,34 @@ interactive latency — rather than the model.
 | `turn_incomplete` | mechanical | that participant |
 | `rotation_candidate` | derived (D3) | that participant |
 
+### The table above is the END STATE, not what the first commit does
+
+Caught by an advisor mid-implementation, and it is a contradiction in this document rather
+than a misreading of it.
+
+D2 says `RunPause` exists only when an operator-authority request meets interactive latency,
+and the table then classifies `turn_incomplete` as mechanical and armed `rotation_candidate`
+as mechanical. **Both of those raise pauses today.** Implemented literally, the first commit
+would silently delete two decision points an operator has now — which D1 forbids, and D1
+outranks D2.
+
+So the classification and the routing land separately:
+
+- **#56 introduces the metadata only.** Compute authority and scope for all six reasons,
+  record them, assert them, and leave every existing pause exactly where it is. A test
+  asserts each of the six still produces the pause it produces today, so the metadata cannot
+  quietly begin changing behaviour later without a failure.
+- **Routing consequences are gated behind the work that makes them safe.** A `mechanical`
+  classification is not permission to stop pausing: nothing in the control plane can yet
+  RESOLVE `turn_incomplete`, and that promotion path is D3's work. Removing the pause before
+  building the resolution does not make the condition mechanical — it drops it on the floor.
+- The one DECLARED exception, `implementer_unanswered` routing to the advisor, is a routing
+  change and lands with the routing work, not with the classification.
+
+The general rule this is an instance of: **classifying a condition is not the same as acting
+on the classification**, and the design's tables describe where it is going rather than what
+any one commit should do.
+
 ### Both axes are derived, not declared
 
 **Authority** is computed from configuration and evidence. The product already does this:
