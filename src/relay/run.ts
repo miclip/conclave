@@ -32,6 +32,7 @@ import type { RunReason } from './observe.ts'
 import type { Verdict } from '../contract/outcome.ts'
 import type { ChildLiveness } from '../outcomes/liveness.ts'
 import type { RotationResult } from '../rotation/rotate.ts'
+import type { ResolutionRequest } from './resolution.ts'
 
 export type RunState = 'running' | 'paused' | 'ended'
 
@@ -149,6 +150,20 @@ export interface PauseContinueRefusal {
 
 export interface RunPause {
   reason: PauseReason
+  /**
+   * The condition this pause is the EFFECT of, classified on both axes (#56, D2).
+   *
+   * Computed at the halt site from the reason and the run's configuration, never stored or
+   * declared by the condition itself -- see `resolution.ts`. Recorded rather than acted on:
+   * a request whose authority is `mechanical` or `advisor` still produces this pause today,
+   * because nothing exists yet that could resolve one, and dropping the pause first would
+   * lose the decision point rather than automate it.
+   *
+   * `reason` above is the same value as `resolution.reason`; both are kept because this
+   * field is the whole classification and the loose one is what every existing reader,
+   * status file and rendering is written against.
+   */
+  resolution: ResolutionRequest
   detail: string
   /**
    * Why the orchestrator believes what it believes, in the project's provenance idiom.

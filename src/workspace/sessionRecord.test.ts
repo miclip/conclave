@@ -11,6 +11,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 import type { Confidence, Provenance } from '../contract/outcome.ts'
 import { RelayEventStream } from '../relay/observe.ts'
+import { resolutionFor } from '../relay/resolution.ts'
 import {
   listSessions,
   newSessionId,
@@ -251,6 +252,7 @@ test('an outcome survives a later state change; a pause does not', async () => {
   })
   const pause = {
     reason: 'operator_requested' as const,
+    resolution: resolutionFor({ reason: 'operator_requested' }, { rotationArmed: false }),
     detail: 'asked to stop',
     evidence: ['the operator typed /pause'],
     options: ['continue' as const],

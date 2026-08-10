@@ -43,6 +43,7 @@ import {
   type RunOutcome,
   type RunPause,
 } from './run.ts'
+import { resolutionFor, type ResolutionSubject } from './resolution.ts'
 import {
   attributable,
   supportFor,
@@ -1519,7 +1520,14 @@ export class Relay {
   async #halt(
     handle: RunHandle | undefined,
     p: {
-      reason: PauseReason
+      /**
+       * The condition and the evidence its scope is computed from -- not its reason alone.
+       *
+       * A caller says what its condition is ABOUT; `resolutionFor` says who may resolve it
+       * and what it stops. Taking the reason from here rather than as a separate field is
+       * what makes it impossible for a pause's reason and its classification to disagree.
+       */
+      subject: ResolutionSubject
       detail: string
       evidence: string[]
       conflict?: AuthorityConflict
@@ -1527,7 +1535,13 @@ export class Relay {
       superseded?: PauseSupersession
     },
   ): Promise<RunOutcome | undefined> {
-    this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text: `paused (${p.reason}): ${p.detail}` })
+    const reason: PauseReason = p.subject.reason
+    // Rotation checks are the operator pre-delegating rotation authority (D2), and they are
+    // read here rather than passed in: a condition that could declare its own authority
+    // would eventually declare the wrong one.
+    const armed = (this.#opts.rotation?.checks.length ?? 0) > 0
+    const resolution = resolutionFor(p.subject, { rotationArmed: armed })
+    this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text: `paused (${reason}): ${p.detail}` })
     if (!handle) {
       return this.#end(
         'escalated',
@@ -1553,7 +1567,6 @@ export class Relay {
     // Everything needed was already on the pause: `verdictOf` names the seat whose verdict
     // this rests on, and the relay knows whether rotation is armed.
     const implId = this.participants.find((x) => x.rank === 'implementer')?.id
-    const armed = (this.#opts.rotation?.checks.length ?? 0) > 0
     const aboutImplementer = p.verdictOf === undefined || p.verdictOf.participant === implId
     const options: PauseOption[] = ['continue', 'constrain', 'abort']
     if (armed && aboutImplementer) options.splice(1, 0, 'rotate')
@@ -1567,7 +1580,8 @@ export class Relay {
     if (p.evidence.some((e) => /is still working \(cpu/.test(e))) options.splice(1, 0, 'wait')
 
     const deciding = handle.pauseAt({
-      reason: p.reason,
+      reason,
+      resolution,
       detail: p.detail,
       evidence: p.evidence,
       options,
@@ -1587,7 +1601,7 @@ export class Relay {
     // Before the note, so the two events bracket the suspension itself as tightly as the
     // loop can see it; the note is the log's account of the same moment.
     this.#stream.emit({ type: 'resume', pause })
-    this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text: `resumed from ${p.reason}` })
+    this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text: `resumed from ${reason}` })
     return undefined
   }
 
@@ -1702,7 +1716,7 @@ export class Relay {
       this.rotationWatch.candidates += 1
       if (handle) {
         const halted = await this.#halt(handle, {
-          reason: 'rotation_candidate',
+          subject: { reason: 'rotation_candidate', participant: impl.id },
           detail: `${detail}. Recorded as a rotation candidate, not acted on.`,
           evidence: verdict.evidence,
         })
@@ -1722,7 +1736,7 @@ export class Relay {
     const result = await this.rotateImplementer(detail)
     if (result.status === 'rotated') return undefined
     const halted = await this.#halt(handle, {
-      reason: 'rotation_candidate',
+      subject: { reason: 'rotation_candidate', participant: impl.id },
       detail: `rotation failed (${result.reason}): ${result.detail}`,
       evidence: [...verdict.evidence, 'the original implementer is back in service'],
     })
@@ -1840,7 +1854,7 @@ export class Relay {
         const reason = this.#pauseRequested
         this.#pauseRequested = undefined
         const halted = await this.#halt(handle, {
-          reason: 'operator_requested',
+          subject: { reason: 'operator_requested' },
           detail: reason,
           evidence: [`round ${round} of ${maxRounds}; no turn is in flight`],
         })
@@ -1905,7 +1919,10 @@ export class Relay {
           text: [why, ...evidence].join(' — '),
         })
         const halted = await this.#halt(handle, {
-          reason: 'turn_incomplete',
+          // The ADVISOR's turn. The scope is the seat whose turn ended badly, which is not
+          // always the implementer -- and reading it off `verdictOf` would tie the axis to a
+          // field that only exists on the verdict-backed pauses.
+          subject: { reason: 'turn_incomplete', participant: lead.id },
           detail: why,
           evidence: [...evidence, ...(await this.#livenessEvidence(lead, next.emittedSinceSend))],
           verdictOf: { participant: lead.id, endSeq: next.end.seq },
@@ -1965,7 +1982,7 @@ export class Relay {
       if (/^ESCALATE\b/i.test(instruction)) {
         this.#record({ from: lead.id, fromRank: 'advisor', to: [], kind: 'note', text: instruction })
         const halted = await this.#halt(handle, {
-          reason: 'advisor_escalated',
+          subject: { reason: 'advisor_escalated' },
           detail: instruction,
           evidence: [`the advisor asked for a human rather than issuing an instruction`],
         })
@@ -1982,7 +1999,11 @@ export class Relay {
       if (conflict && !this.#adjudicated.has(`${conflict.origin.seq}:${instruction}`)) {
         this.#adjudicated.add(`${conflict.origin.seq}:${instruction}`)
         const halted = await this.#halt(handle, {
-          reason: 'authority_conflict',
+          // The workstream carrying the instruction under adjudication. At N=1 there is one,
+          // and it is the implementer's -- the seat id names it because at this size they
+          // are the same thing (D1), not because a workstream is a seat. #57's task graph is
+          // what gives them separate names.
+          subject: { reason: 'authority_conflict', workstream: impl.id },
           detail:
             `the advisor's instruction would reverse work traceable to your restricted ` +
             `message #${conflict.origin.seq} (matched: ${conflict.matched.join(', ')})`,
@@ -2033,7 +2054,7 @@ export class Relay {
         const question = questions[0]!
         const done = report.prose.replace(UNANSWERED_MARKER, '').trim().replace(/\n{3,}/g, '\n\n')
         const halted = await this.#halt(handle, {
-          reason: 'implementer_unanswered',
+          subject: { reason: 'implementer_unanswered', participant: impl.id },
           detail: `UNANSWERED: ${question}\n\nDone so far: ${done || '(nothing recorded)'}`,
           evidence: [
             `${impl.id} asked a build-changing scope question that the instruction did not settle`,
@@ -2071,7 +2092,9 @@ export class Relay {
             : `no new paths appeared during it, though ${dirtyNow} are dirty in the tree — ` +
               `a file this turn edited again looks the same as one it never touched`
         const halted = await this.#halt(handle, {
-          reason: 'advisor_escalated',
+          // `advisor_escalated` although it is the implementer's report that was lost: the
+          // reason names who is being asked to take it, and the scope follows the reason.
+          subject: { reason: 'advisor_escalated' },
           detail:
             `${impl.id}'s turn completed and its report could not be read, so there is ` +
             `nothing to route — ${lost}. The work is on disk; what is missing is the ` +
@@ -2140,7 +2163,7 @@ export class Relay {
           }
         }
         const halted = await this.#halt(handle, {
-          reason: 'turn_incomplete',
+          subject: { reason: 'turn_incomplete', participant: impl.id },
           detail: `${impl.id} turn ended ${formatVerdict(current.verdict)}`,
           evidence: [
             ...current.verdict.provenance.map((p) => `${p.source}: ${p.detail}`),

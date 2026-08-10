@@ -23,6 +23,7 @@ import { FakeRotationSession } from '../rotation/fakeSession.ts'
 import type { RelayEvent } from './observe.ts'
 import { Relay, type RelayOptions } from './relay.ts'
 import { RunHandle, type RunControl } from './run.ts'
+import { resolutionFor } from './resolution.ts'
 import { NO_DEADLINE_CLOCKS } from '../registry/types.ts'
 
 function repo(): string {
@@ -995,6 +996,9 @@ const verdictOf = (participant: string, endSeq: number) => ({ participant, endSe
 function pauseShape(participant: string, endSeq: number): Omit<import('./run.ts').RunPause, 'at'> {
   return {
     reason: 'turn_incomplete',
+    // Computed, exactly as the relay computes it. A literal here would be a second opinion
+    // about the classification, free to drift from the one the product actually records.
+    resolution: resolutionFor({ reason: 'turn_incomplete', participant }, { rotationArmed: true }),
     detail: 'timed out',
     evidence: [],
     options: ['continue', 'abort'],
