@@ -294,8 +294,8 @@ function assertFlagHelperOptional(block: string, label: string): void {
   const helperEnd = block.indexOf('\n    const ', helperStart)
   const helper = block.slice(helperStart, helperEnd > 0 ? helperEnd : helperStart + 500)
   // The relay helper returns the fallback when the flag is absent:
-  // bin/conclave.ts:775-778. The session helper returns the fallback both when the flag is
-  // absent and when it is present without a value: bin/conclave.ts:1168-1177.
+  // bin/conclave.ts:798-801. The session helper returns the fallback both when the flag is
+  // absent and when it is present without a value: bin/conclave.ts:1230-1239.
   assert.match(
     helper,
     /return i >= 0 \? \(rest\[i \+ 1\] \?\? fallback\) : fallback|if \(i < 0\) return fallback/,
@@ -318,18 +318,18 @@ const DECLARED: Record<string, string> = {
     'Authority routing (#56, D2) sends implementer_unanswered to the advisor before the operator, ' +
     'so a default run interrupts the human less than today. Real change at N=1, an improvement, ' +
     'declared rather than discovered. The pause reason exists at src/relay/run.ts:51 and the halt ' +
-    'that raises it is at src/relay/relay.ts:2075-2082.',
+    'that raises it is at src/relay/relay.ts:3473.',
   'status.pause.resolution':
     'Classifying unresolved conditions on both axes (#56, D2) added `resolution` to every RunPause ' +
-    '(src/relay/run.ts:166), so `conclave status --json` on a paused default run now carries ' +
+    '(src/relay/run.ts:183), so `conclave status --json` on a paused default run now carries ' +
     'pause.resolution = {reason, authority, scope} and pause.resolution.scope = {kind}. Additive and ' +
     'recorded rather than acted on: authority and scope are computed at the halt site from the reason ' +
-    'and the run configuration (src/relay/resolution.ts:138), and a request whose authority is ' +
+    'and the run configuration (src/relay/resolution.ts:188), and a request whose authority is ' +
     'mechanical or advisor still produces the same pause today, because nothing exists yet that could ' +
     'resolve one and dropping the pause first would lose the decision point rather than automate it. ' +
     '`reason` is deliberately duplicated between pause.reason and pause.resolution.reason: the loose ' +
     'field is what every existing reader is written against and the nested one is the whole ' +
-    'classification (src/relay/run.ts:162-164). Nothing an existing consumer read changed value.',
+    'classification (src/relay/run.ts:169-183). Nothing an existing consumer read changed value.',
   'per-seat artifact attribution':
     'Artifact attribution (#62) is now scoped to the ROOT a participant works in, and records ' +
     'which seat each attributed path came from. `RestrictedOrigin` gains one key, ' +
@@ -503,7 +503,7 @@ async function seatsFromSessionCli(): Promise<{ creates: CreateRecord[]; cwd: st
  * The two machine-readable documents a default run actually emits.
  *
  * Both come out of one `relay --json` run in a temporary repository, through the production
- * call sites: the report is what `bin/conclave.ts:1102` prints, and the status record is what
+ * call sites: the report is what `bin/conclave.ts:1164` prints, and the status record is what
  * `recordSession` wrote during that same run, read back by `main(['status', '--json'])` --
  * which resolves the most recent session in `process.cwd()`, so the record has to have been
  * written where an operator would look for it.
@@ -548,7 +548,7 @@ async function defaultRunDocuments(): Promise<{ report: unknown; status: unknown
  * blind to that subtree is claiming more than it checks.
  *
  * Built through the real recorder: `recordSession` is what both front-ends call, and
- * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:854
+ * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:850
  * with the same object -- a `RunPause` the run handle raised, not one written here. Read back
  * through `main(['status', '--json'])`, so the serialisation and the reconciliation against
  * the pid are the production ones.
@@ -685,8 +685,8 @@ async function provokeMergeBlocked(repo: string): Promise<{ relay: Relay; run: R
 /**
  * Drive a real relay into one condition and return the pause it raised.
  *
- * The provocations are the ones `resolution.test.ts:203-291` already uses, deliberately: the
- * same triggers reaching the same single halt site (src/relay/relay.ts:1539), where the
+ * The provocations are the ones `resolution.test.ts`'s own `provoke` already uses, deliberately:
+ * the same triggers reaching the same single halt site (src/relay/relay.ts:2091), where the
  * classification is computed by production `resolutionFor` from the subject the caller passed.
  * Nothing here writes a `RunPause`.
  *
@@ -769,7 +769,7 @@ async function provoke(
  * The status document of a run paused for one given reason.
  *
  * Built through the real recorder: `recordSession` is what both front-ends call, and
- * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:854
+ * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:850
  * with the same object -- a `RunPause` the relay raised, not one written here. Read back
  * through `main(['status', '--json'])`, so the serialisation and the reconciliation against
  * the pid are the production ones.
@@ -789,7 +789,7 @@ async function pausedStatusDocument(reason: PauseReason): Promise<unknown> {
     goal: 'a default goal',
     front: 'session',
     startedAt: Date.now(),
-    // Passed because the console always passes one (src/repl/session.ts:623), so the status
+    // Passed because the console always passes one (src/repl/session.ts:676), so the status
     // documents this file pins differ only in what a pause actually changes.
     logPath: join(repo, '.conclave', 'runs', 'session-test.ndjson'),
     build: 'test',
@@ -973,9 +973,9 @@ test('default run works in the run cwd and creates no worktree', async () => {
     assert.equal(c.cwd, fromCli.cwd, `the session CLI must create ${c.id} in the run cwd`)
   }
 
-  // The relay CLI passes process.cwd() as the run cwd: bin/conclave.ts:1017.
-  // The relay hands that same cwd to each participant adapter: src/relay/relay.ts:677-678.
-  // The cwd getter simply returns the option: src/relay/relay.ts:631-632.
+  // The relay CLI passes process.cwd() as the run cwd: bin/conclave.ts:1077.
+  // The relay hands that same cwd to each participant adapter: src/relay/relay.ts:1157-1159.
+  // The cwd getter simply returns the option: src/relay/relay.ts:1050-1052.
   assert.match(relay, /cwd:\s*process\.cwd\(\)/, 'relay block must start in process.cwd')
   assert.match(
     RELAY,
@@ -985,7 +985,7 @@ test('default run works in the run cwd and creates no worktree', async () => {
 
   // A default run with no subagents must not create any git worktree. The relay only samples
   // the worktree list for its subagent-use report: src/relay/subagents.ts:68 defines
-  // worktreePaths, and src/relay/relay.ts:1172, :1222 and :1849 read it.
+  // worktreePaths, and src/relay/relay.ts:1653, :1700 and :2885 read it.
   // Prove it by exercising the run in a real temporary repository.
   const repo = mkdtempSync(join(tmpdir(), 'conclave-default-'))
   try {
@@ -1039,7 +1039,7 @@ test('both flag helpers fall back when the flag is absent, and each block reads 
   const session = commandBlock('session', "if (command === 'demo')")
 
   // A default invocation must be able to run with just a goal. Both front-ends define the flag
-  // helper with a fallback: bin/conclave.ts:775 (relay) and bin/conclave.ts:1168 (session).
+  // helper with a fallback: bin/conclave.ts:798 (relay) and bin/conclave.ts:1230 (session).
   // Every flag read here uses that helper, so none become required.
   assertFlagHelperOptional(relay, 'relay')
   assertFlagHelperOptional(session, 'session')
@@ -1133,7 +1133,7 @@ const runDocuments = (): Promise<{ report: unknown; status: unknown }> =>
  *     field added inside any of them was invisible -- which is precisely where per-seat
  *     features land.
  *   - A declared field is not an emitted one. `turnWatchdogMs` was declared and dropped for
- *     its whole life (src/repl/session.ts:168-180), and a text-level pin cannot tell the
+ *     its whole life (src/repl/session.ts:189-202), and a text-level pin cannot tell the
  *     difference.
  *   - An emitted field need not be declared anywhere this test was reading. A key spread in
  *     from another type, or written by a builder that widens its return, appears in the JSON
@@ -1180,8 +1180,8 @@ test('the default relay --json report emits exactly these keys at every depth', 
  * The same, for what `conclave status --json` hands a process watching the run.
  *
  * Read back through `main(['status', '--json'])`, so this covers the record `recordSession`
- * wrote -- the participant block `seats()` builds at src/workspace/sessionRecord.ts:620-633 and
- * the record it goes into at :635-648 -- the reconciliation `readSession` does
+ * wrote -- the participant block `sessionRecord.ts`'s `seats()` builds and the document
+ * `recordSession` puts it in as `participants` -- the reconciliation `readSession` does
  * against the pid, and the two computed fields `formatSessionJson` adds outside the record --
  * `alive` and `abandoned` are at the root here because they are observed in the output, not
  * because a regex found them being spread in.

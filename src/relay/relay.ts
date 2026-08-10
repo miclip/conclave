@@ -119,7 +119,7 @@ export interface RelayParticipant {
   /**
    * What this seat is FOR, as distinct from what it may overrule.
    *
-   * `RoleId` is open on purpose (`registry/roles.ts:15`) — project configuration assigns
+   * `RoleId` is open on purpose (`src/registry/roles.ts:15`) — project configuration assigns
    * agents to roles, so a role a build has never heard of has to be a validation error with a
    * message rather than a compile error in someone else's checkout. `ParticipantSpec` has
    * carried it all along and `#join` used to read `spec.agent` and drop it, which is why
