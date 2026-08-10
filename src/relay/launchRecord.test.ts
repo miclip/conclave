@@ -34,6 +34,9 @@ import { effectiveLaunchArgs, modelFromArgs } from '../registry/launch.ts'
 import { AgentRegistry } from '../registry/registry.ts'
 import { NO_DEADLINE_CLOCKS } from '../registry/types.ts'
 import { FakeRotationSession } from '../rotation/fakeSession.ts'
+import { newSessionId, recordSession } from '../workspace/sessionRecord.ts'
+import { Relay } from './relay.ts'
+import { runReport } from './report.ts'
 
 const BUILTIN = readFileSync(join(import.meta.dirname, '..', 'registry', 'builtin.ts'), 'utf8')
 
@@ -201,6 +204,20 @@ function seat(doc: unknown, id: string): Recorded {
   return found
 }
 
+/**
+ * What "no model" looks like in the BYTES a consumer parses.
+ *
+ * Asserted on the serialised text rather than only on the parsed object, because the three
+ * ways this can go wrong are invisible from one side or the other: `''` parses to a string a
+ * reader cannot tell from a nameless model, `undefined` is dropped by `JSON.stringify` so the
+ * key disappears entirely, and both look fine to code that only ever reads `if (!model)`.
+ */
+function assertAbsenceIsNull(text: string, label: string): void {
+  assert.match(text, /"model":\s*null/, `${label} must spell an unnamed model as null`)
+  assert.doesNotMatch(text, /"model":\s*""/, `${label} must never spell it as an empty string`)
+  assert.match(text, /"model":/, `${label} must carry the key even when there is no model to name`)
+}
+
 /** Every key at every depth, so a claim about what is ABSENT can be made over the whole document. */
 function keysIn(value: unknown, into: Set<string> = new Set()): Set<string> {
   if (Array.isArray(value)) {
@@ -230,7 +247,7 @@ test('the relay report and status name the model each seat was launched with', a
   )
   try {
     process.chdir(repo)
-    const report = JSON.parse(
+    const reportText =
       await stdoutOf(() =>
         main(
           [
@@ -248,9 +265,14 @@ test('the relay report and status name the model each seat was launched with', a
           ],
           { registry },
         ),
-      ),
-    )
-    const status = JSON.parse(await stdoutOf(() => main(['status', '--json'])))
+      )
+    const report = JSON.parse(reportText)
+    const statusText = await stdoutOf(() => main(['status', '--json']))
+    const status = JSON.parse(statusText)
+
+    // The advisor of this run was given no model, so both documents must SPELL that.
+    assertAbsenceIsNull(reportText, 'the relay report')
+    assertAbsenceIsNull(statusText, 'the status document')
 
     for (const doc of [report, status]) {
       const impl = seat(doc, 'implementer')
@@ -306,7 +328,9 @@ test('the console front-end records the same launch, and a run given no args rec
         { registry, input: new PassThrough(), output: new Writable({ write(_c, _e, cb) { cb() } }) },
       ),
     )
-    const status = JSON.parse(await stdoutOf(() => main(['status', '--json'])))
+    const statusText = await stdoutOf(() => main(['status', '--json']))
+    const status = JSON.parse(statusText)
+    assertAbsenceIsNull(statusText, "the console's status document")
     assert.equal(seat(status, 'implementer').launch.model, 'gpt-5', 'both front-ends record the model')
     assert.deepEqual(seat(status, 'implementer').launch.args, ['-m', 'gpt-5'])
 
@@ -319,6 +343,101 @@ test('the console front-end records the same launch, and a run given no args rec
     assert.ok('model' in advisor.launch, 'the key is present on a seat that has no model to name')
   } finally {
     process.chdir(before)
+    rmSync(repo, { recursive: true, force: true })
+  }
+})
+
+/**
+ * Two implementer seats, launched with two different models.
+ *
+ * The single-seat tests above cannot fail on the defect this one is for: with one implementer,
+ * a record that smeared one seat's args across every seat, or read the args off the lead spec
+ * instead of the seat's own, is indistinguishable from a correct one. Per-seat means per seat.
+ *
+ * Driven through `Relay.start` rather than a front-end, and that is a limitation of the CLI
+ * rather than a choice here: `--implementer-args` is ONE flag and applies to every implementer
+ * seat (bin/conclave.ts:943-946), and project config carries no per-agent launch args at all
+ * (`launchArgsFor` only returns bypass flags, src/config/project.ts:160-163). So distinct args
+ * per seat are expressible in the library and not yet on the command line. Both documents are
+ * still the production ones: `runReport` is what `bin/conclave.ts:1164` prints, and the status
+ * is read back through `main(['status', '--json'])` after the real recorder wrote it.
+ */
+test('two seats launched with two different models are recorded apart, in both documents', async () => {
+  const repo = tempRepo('conclave-launch-seats-')
+  const before = process.cwd()
+  const handed: Record<string, string[]> = {}
+  const registry = registryOf(
+    {
+      'fake-lead': new FakeRotationSession('lead-1', 'fake-lead', ['DONE']),
+      'fake-alpha': new FakeRotationSession('alpha-1', 'fake-alpha', []),
+      'fake-beta': new FakeRotationSession('beta-1', 'fake-beta', []),
+    },
+    { handed },
+  )
+  const startedAt = Date.now()
+  const relay = await Relay.start({
+    registry,
+    cwd: repo,
+    lead: { id: 'advisor', agent: 'fake-lead', role: 'advisor' },
+    implementer: { id: 'implementer', agent: 'fake-alpha', role: 'implementer', args: ['-m', 'cheap/model-alpha'] },
+    implementers: [
+      { id: 'implementer', agent: 'fake-alpha', role: 'implementer', args: ['-m', 'cheap/model-alpha'] },
+      { id: 'implementer-2', agent: 'fake-beta', role: 'implementer', args: ['--model', 'expensive/model-beta'] },
+    ],
+    maxAdvisorTurns: 1,
+  })
+  const recording = recordSession(relay, {
+    repoRoot: repo,
+    id: newSessionId(Date.now(), process.pid),
+    goal: 'a two-seat goal',
+    front: 'relay',
+    startedAt,
+    build: 'test',
+  })
+  try {
+    const outcome = await relay.run('a two-seat goal')
+    const report = await runReport(relay, { goal: 'a two-seat goal', outcome, startedAt, build: 'test' })
+    await recording.refresh()
+    process.chdir(repo)
+    const statusText = await stdoutOf(() => main(['status', '--json']))
+    const status = JSON.parse(statusText)
+
+    const expected: Record<string, { args: string[]; model: string }> = {
+      implementer: { args: ['-m', 'cheap/model-alpha'], model: 'cheap/model-alpha' },
+      'implementer-2': { args: ['--model', 'expensive/model-beta'], model: 'expensive/model-beta' },
+    }
+    for (const doc of [report, status]) {
+      for (const [id, want] of Object.entries(expected)) {
+        assert.deepEqual(seat(doc, id).launch.args, want.args, `${id} keeps its own argv`)
+        assert.equal(seat(doc, id).launch.model, want.model, `${id} keeps its own model`)
+      }
+      // The two seats disagree, which is the whole point: a record that reported one model for
+      // the run would pass every assertion in this file that looks at a single seat.
+      assert.notEqual(seat(doc, 'implementer').launch.model, seat(doc, 'implementer-2').launch.model)
+      // And the advisor, in the same run, named none.
+      assert.equal(seat(doc, 'advisor').launch.model, null)
+      assert.deepEqual(seat(doc, 'advisor').launch.args, [])
+    }
+    assertAbsenceIsNull(statusText, 'a two-seat status document')
+
+    // Each seat's record against what its own adapter was handed, at the registry seam.
+    for (const id of ['advisor', 'implementer', 'implementer-2']) {
+      assert.deepEqual(seat(report, id).launch.args, handed[id], `${id}'s recorded argv is its launched argv`)
+    }
+
+    // The no-cost claim on the document that has the most to be tempted by: two seats, two
+    // models, two price points, and still nothing anywhere that reports a spend.
+    for (const [label, doc] of [['report', report], ['status', status]] as const) {
+      assert.deepEqual(
+        [...keysIn(doc)].filter((k) => /cost|price|usage|spend|billing|token/i.test(k)),
+        [],
+        `the two-seat ${label} must not report what a run cost or consumed`,
+      )
+    }
+  } finally {
+    process.chdir(before)
+    await recording.close()
+    await relay.stop()
     rmSync(repo, { recursive: true, force: true })
   }
 })

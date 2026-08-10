@@ -318,7 +318,7 @@ const DECLARED: Record<string, string> = {
     'Authority routing (#56, D2) sends implementer_unanswered to the advisor before the operator, ' +
     'so a default run interrupts the human less than today. Real change at N=1, an improvement, ' +
     'declared rather than discovered. The pause reason exists at src/relay/run.ts:51 and the halt ' +
-    'that raises it is at src/relay/relay.ts:3473.',
+    'that raises it is at src/relay/relay.ts:3491.',
   'status.pause.resolution':
     'Classifying unresolved conditions on both axes (#56, D2) added `resolution` to every RunPause ' +
     '(src/relay/run.ts:183), so `conclave status --json` on a paused default run now carries ' +
@@ -712,7 +712,7 @@ async function provokeMergeBlocked(repo: string): Promise<{ relay: Relay; run: R
  * Drive a real relay into one condition and return the pause it raised.
  *
  * The provocations are the ones `resolution.test.ts`'s own `provoke` already uses, deliberately:
- * the same triggers reaching the same single halt site (src/relay/relay.ts:2091), where the
+ * the same triggers reaching the same single halt site (src/relay/relay.ts:2109), where the
  * classification is computed by production `resolutionFor` from the subject the caller passed.
  * Nothing here writes a `RunPause`.
  *
@@ -1000,8 +1000,8 @@ test('default run works in the run cwd and creates no worktree', async () => {
   }
 
   // The relay CLI passes process.cwd() as the run cwd: bin/conclave.ts:1077.
-  // The relay hands that same cwd to each participant adapter: src/relay/relay.ts:1157-1159.
-  // The cwd getter simply returns the option: src/relay/relay.ts:1050-1052.
+  // The relay hands that same cwd to each participant adapter: src/relay/relay.ts:1172-1178.
+  // The cwd getter simply returns the option: src/relay/relay.ts:1065-1067.
   assert.match(relay, /cwd:\s*process\.cwd\(\)/, 'relay block must start in process.cwd')
   // Both creation sites now pass a NAMED context object rather than an inline literal, because
   // the same object composes the launch args that get recorded -- see
@@ -1029,7 +1029,7 @@ test('default run works in the run cwd and creates no worktree', async () => {
 
   // A default run with no subagents must not create any git worktree. The relay only samples
   // the worktree list for its subagent-use report: src/relay/subagents.ts:68 defines
-  // worktreePaths, and src/relay/relay.ts:1653, :1700 and :2885 read it.
+  // worktreePaths, and src/relay/relay.ts:1671, :1718 and :2903 read it.
   // Prove it by exercising the run in a real temporary repository.
   const repo = mkdtempSync(join(tmpdir(), 'conclave-default-'))
   try {

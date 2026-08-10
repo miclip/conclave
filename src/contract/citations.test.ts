@@ -70,19 +70,30 @@ const CITED: Record<string, string> = {
   'bin/conclave.ts:1164': 'runReport(relay, { goal, outcome, startedAt: runStartedAt, build })',
   'bin/conclave.ts:1230': 'const flag = (name: string, fallback: string) =>',
   'bin/conclave.ts:1230-1239': 'if (i < 0) return fallback',
+  // Why the console cannot be passed `--model x` through `--implementer-args`: its flag helper
+  // reads a value beginning with `--` as a missing one. The relay's helper does not.
+  'bin/conclave.ts:1234': "value.startsWith('--')",
+  // One flag for every implementer seat, which is why per-seat launch args are not yet
+  // expressible on the command line.
+  'bin/conclave.ts:943-946': "...extraArgs(flag('implementer-args', ''))",
+  'src/config/project.ts:160-163': 'export function launchArgsFor',
   'src/registry/roles.ts:15': 'export type RoleId = string',
-  'src/relay/relay.ts:1050-1052': 'get cwd(): string',
-  'src/relay/relay.ts:1157-1159': 'createParticipant(spec, {',
-  'src/relay/relay.ts:1653': 'worktreePaths(this.#opts.cwd)',
-  'src/relay/relay.ts:1671': 'NOT ARMED (no checks configured)',
-  'src/relay/relay.ts:1700': 'worktreePaths(this.#opts.cwd)',
-  'src/relay/relay.ts:2091': 'resolutionFor(p.subject, { rotationArmed: armed })',
-  'src/relay/relay.ts:2253-2258': 'No rotation checks are configured',
-  'src/relay/relay.ts:2259': "onDegradation ?? 'candidate'",
-  'src/relay/relay.ts:2885': 'worktreePaths(this.#opts.cwd)',
-  'src/relay/relay.ts:3223': "subject: { reason: 'turn_incomplete', participant: lead.id }",
-  'src/relay/relay.ts:3473': "subject: { reason: 'implementer_unanswered', participant: seat.id }",
-  'src/relay/relay.ts:3606': "subject: { reason: 'turn_incomplete', participant: seat.id }",
+  // The relay.ts citations below moved together when `launch` was added to RelayParticipant
+  // and `#join` (#71). Repaired rather than deleted: each still points at the thing it was
+  // written about, and the one whose LINE no longer says what it said -- `#join` now passes a
+  // named context object rather than an inline literal -- is pinned on the new spelling.
+  'src/relay/relay.ts:1065-1067': 'get cwd(): string',
+  'src/relay/relay.ts:1172-1178': 'createParticipant(spec, ctx)',
+  'src/relay/relay.ts:1671': 'worktreePaths(this.#opts.cwd)',
+  'src/relay/relay.ts:1689': 'NOT ARMED (no checks configured)',
+  'src/relay/relay.ts:1718': 'worktreePaths(this.#opts.cwd)',
+  'src/relay/relay.ts:2109': 'resolutionFor(p.subject, { rotationArmed: armed })',
+  'src/relay/relay.ts:2271-2276': 'No rotation checks are configured',
+  'src/relay/relay.ts:2277': "onDegradation ?? 'candidate'",
+  'src/relay/relay.ts:2903': 'worktreePaths(this.#opts.cwd)',
+  'src/relay/relay.ts:3241': "subject: { reason: 'turn_incomplete', participant: lead.id }",
+  'src/relay/relay.ts:3491': "subject: { reason: 'implementer_unanswered', participant: seat.id }",
+  'src/relay/relay.ts:3624': "subject: { reason: 'turn_incomplete', participant: seat.id }",
   'src/relay/resolution.ts:188': 'export function resolutionFor',
   'src/relay/run.ts:51': "| 'implementer_unanswered'",
   'src/relay/run.ts:169-183': 'reason: PauseReason',
