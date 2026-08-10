@@ -17,7 +17,13 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { createSeatWorktrees, readManifest, type SeatWorktree, type WorktreeManifest } from '../workspace/worktrees.ts'
-import { commitSeatWork, integrateSeat, mergeIntoIntegration } from './integrate.ts'
+import {
+  commitSeatWork,
+  failedRequired,
+  integrateSeat,
+  mergeIntoIntegration,
+  runIntegrationChecks,
+} from './integrate.ts'
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
@@ -208,6 +214,96 @@ test('a blocked seat integrates once its own worktree resolves the conflict', ()
     assert.equal(retried.status, 'merged')
     assert.equal(seats.b!.mergeState, 'merged')
     assert.equal(readFileSync(join(repo, 'shared.txt'), 'utf8'), 'both, reconciled\n')
+  })
+})
+
+/**
+ * The failure #80 is about, built from its own description.
+ *
+ * Two seats, disjoint files, no git conflict on either merge, and each seat's tree green when
+ * measured in that seat's tree — the exact situation the first real two-seat run produced, and
+ * the one every station in the design was blind to. Seat `a` renames what a symbol is called;
+ * seat `b` writes the guard that requires the old name to be there. Neither is wrong. The tree
+ * they make together does not pass.
+ *
+ * The check is a shell script IN the repository rather than a command supplied from outside,
+ * because that is what makes each half individually green: `b`'s guard does not exist in `a`'s
+ * tree, and `a`'s rename has not happened in `b`'s.
+ */
+test('two individually green trees merge cleanly into a tree that fails its checks', () => {
+  const CHECKS = ['sh check.sh']
+  withSeats(['a', 'b'], (repo, manifest, seats) => {
+    // The base: a symbol, and a check that has nothing to say about it yet.
+    writeFileSync(join(repo, 'api.txt'), 'alpha\n')
+    writeFileSync(join(repo, 'check.sh'), 'exit 0\n')
+    git(repo, 'add', '-A')
+    git(repo, 'commit', '-m', 'api and a check', '--quiet')
+    for (const seat of [seats.a!, seats.b!]) {
+      git(seat.worktreePath, 'merge', '--quiet', git(repo, 'rev-parse', 'HEAD').trim())
+    }
+
+    // Seat a renames the symbol. Seat b writes a guard that requires the old name. Different
+    // files, so git has nothing to report on either merge.
+    writeFileSync(join(seats.a!.worktreePath, 'api.txt'), 'gamma\n')
+    writeFileSync(join(seats.b!.worktreePath, 'check.sh'), 'grep -q alpha api.txt\n')
+
+    // The premise, measured rather than asserted: each seat's own tree passes the check that
+    // exists in it. Without this the test would prove only that a broken tree is broken.
+    for (const seat of [seats.a!, seats.b!]) {
+      git(seat.worktreePath, 'add', '-A')
+      git(seat.worktreePath, 'commit', '-m', 'work', '--quiet')
+      assert.deepEqual(
+        failedRequired(runIntegrationChecks(seat.worktreePath, CHECKS)),
+        [],
+        `seat ${seat.seatId}'s own tree must be green, or this proves nothing about the merge`,
+      )
+    }
+
+    const first = integrateSeat(manifest, seats.a!, { taskId: 't1', seq: 1, advisorTurn: 1 }, { checks: CHECKS })
+    assert.equal(first.status, 'merged')
+    assert.deepEqual(
+      failedRequired(first.status === 'merged' ? first.checks : []),
+      [],
+      'the first merge is green: the guard that will fail is not in the tree yet',
+    )
+
+    const second = integrateSeat(manifest, seats.b!, { taskId: 't2', seq: 2, advisorTurn: 2 }, { checks: CHECKS })
+    assert.equal(second.status, 'merged', 'the merge itself is clean — that is the whole point')
+    assert.equal(git(repo, 'status', '--porcelain').trim(), '', 'and left no conflict behind')
+
+    const red = failedRequired(second.status === 'merged' ? second.checks : [])
+    assert.equal(red.length, 1, 'the integrated tree must be measured, and it must be red')
+    assert.equal(red[0]!.command, 'sh check.sh')
+    assert.notEqual(red[0]!.exitCode, 0)
+    // Both seats are `merged` and neither is blocked. The failure belongs to the pair, and a
+    // boundary that marked one of them would be blaming a seat for work it could not see.
+    assert.equal(seats.a!.mergeState, 'merged')
+    assert.equal(seats.b!.mergeState, 'merged')
+  })
+})
+
+test('an unconfigured boundary reports no checks, and an unchecked tree is not a green one', () => {
+  withSeats(['a'], (_repo, manifest, seats) => {
+    writeFileSync(join(seats.a!.worktreePath, 'x.txt'), 'x\n')
+    const result = integrateSeat(manifest, seats.a!, META)
+    assert.equal(result.status, 'merged')
+    assert.deepEqual(
+      result.status === 'merged' ? result.checks : undefined,
+      [],
+      'a run that armed nothing must not report a check it never ran',
+    )
+  })
+})
+
+test('a check that cannot be launched is not a check that passed', () => {
+  withSeats(['a'], (repo) => {
+    const [result] = runIntegrationChecks(repo, ['exit 3'])
+    assert.equal(result!.exitCode, 3)
+    assert.equal(failedRequired([result!]).length, 1)
+    // Relevance decides what a failure is allowed to decide, here as in a rotation.
+    const reported = runIntegrationChecks(repo, [{ command: 'exit 3', relevance: 'informational' }])
+    assert.equal(reported[0]!.exitCode, 3)
+    assert.deepEqual(failedRequired(reported), [], 'a check declared not to gate must not gate')
   })
 })
 

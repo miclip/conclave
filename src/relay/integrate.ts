@@ -8,7 +8,7 @@
  * one point in the run: the `reported` boundary, after the turn ended, the transcript settled
  * and supersession was checked.
  *
- * ## No checks run here
+ * ## The seat's own checks do not run here, and the integration tree's do
  *
  * An earlier draft of the design put "run that seat's checks" between quiesce and commit,
  * reusing `--checks`. That is wrong quietly. `rotation.checks` has one established meaning --
@@ -17,6 +17,21 @@
  * they run and what a failure means, on an operator's existing configuration, without them
  * asking. Whether a merge boundary should gate on anything is a separate decision that needs
  * its own option; it must not be acquired by reinterpreting this one.
+ *
+ * That decision has now been taken, and it took its own option: `RelayOptions.integration`
+ * (#80). What runs here is NOT the seat's checks in the seat's tree -- it is the integration
+ * checkout's own checks, in the integration checkout, after a merge that succeeded. The two
+ * ask different questions, which is why they are configured separately and why an operator
+ * who armed rotation gets nothing new until they arm this as well. A clean merge is not a
+ * correct merge: three merges with no git conflict at all produced a tree that failed two
+ * tests, because each seat's work was correct in the tree it was written in and the pair was
+ * not. Nothing in the design looked at the result. This is the station that does.
+ *
+ * A red result is reported, never acted on here. This module does not blame a seat, does not
+ * mark one blocked and does not undo the merge: the failure belongs to a COMBINATION of
+ * tasks, and the merge that produced it is a fact whatever the checks say. What to do about
+ * it -- a repair the advisor dispatches, or an unsuccessful outcome when no seat is left to
+ * dispatch it to -- is the caller's decision, in `relay.ts`.
  *
  * ## Conflicts are never resolved here
  *
@@ -30,7 +45,8 @@
  *   node --test src/relay/integrate.test.ts
  */
 
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
+import { checkCommand, checkRelevance, type CheckRelevance, type CheckSpec } from '../rotation/record.ts'
 import {
   writeManifest,
   type SeatWorktree,
@@ -47,10 +63,83 @@ export interface BoundaryMeta {
   advisorTurn: number
 }
 
+/** One configured integration check, as it actually ran against the integration checkout. */
+export interface IntegrationCheckResult {
+  command: string
+  /**
+   * As declared when the check was configured, and it decides the same thing it decides for
+   * a rotation: `required` is a gate, the other two are reported and gate nothing. Declared by
+   * the orchestrator, never by a participant -- see `CheckRelevance`.
+   */
+  relevance: CheckRelevance
+  /** `null` when the command could not be launched, or was killed by the timeout. */
+  exitCode: number | null
+  /** Combined stdout and stderr, tail-trimmed. What a repair instruction has to carry. */
+  output: string
+}
+
+/** How much output travels with a failure. Enough to name the failing test, not a log file. */
+const MAX_CHECK_OUTPUT = 4000
+
+/** A red check is one that is BOTH a gate and did not pass. Everything else is reported. */
+export function failedRequired(checks: IntegrationCheckResult[]): IntegrationCheckResult[] {
+  return checks.filter((c) => c.relevance === 'required' && c.exitCode !== 0)
+}
+
+/**
+ * Run the configured checks against the integration checkout.
+ *
+ * Its own runner rather than `runCheck` from `src/rotation/record.ts`, and the difference is
+ * the whole point: rotation compares a check against a RECORDING of itself, so a digest of the
+ * output is all it needs and all it keeps. Here nothing is being compared -- the question is
+ * whether the tree works -- so what a reader needs is the failure text, and a digest of it
+ * would be the one thing that cannot be put in a repair instruction.
+ */
+export function runIntegrationChecks(
+  root: string,
+  checks: CheckSpec[],
+  timeoutMs = 600_000,
+): IntegrationCheckResult[] {
+  return checks.map((spec) => {
+    const command = checkCommand(spec)
+    const r = spawnSync(command, {
+      cwd: root,
+      shell: true,
+      encoding: 'utf8',
+      timeout: timeoutMs,
+      maxBuffer: 32 * 1024 * 1024,
+    })
+    const output = `${r.stdout ?? ''}${r.stderr ?? ''}`.trim()
+    return {
+      command,
+      relevance: checkRelevance(spec),
+      // A signalled or un-launchable command has no exit code, and recording 0 for it would
+      // report a check that never ran as a check that passed -- which is the failure this
+      // whole station exists to stop happening silently.
+      exitCode: r.status,
+      output: output.length > MAX_CHECK_OUTPUT ? `…${output.slice(-MAX_CHECK_OUTPUT)}` : output,
+    }
+  })
+}
+
 export type MergeResult =
   /** The seat wrote nothing this task. Not a failure, and not a merge either. */
   | { status: 'nothing_to_merge' }
-  | { status: 'merged'; seatCommit: string; integrationSha: string; notes: string[] }
+  | {
+      status: 'merged'
+      seatCommit: string
+      integrationSha: string
+      notes: string[]
+      /**
+       * The configured integration checks as they ran against the merged tree.
+       *
+       * Empty when none are configured, which is every run that has not armed them and every
+       * run at N=1 -- there is no integration checkout distinct from the seat's own tree, so
+       * this module does not run at all. Empty means NOT CHECKED, and it must not be read as
+       * checked-and-green: `failedRequired([])` is empty for both.
+       */
+      checks: IntegrationCheckResult[]
+    }
   /**
    * The merge was aborted and the integration checkout is back where it was.
    *
@@ -162,6 +251,10 @@ export function mergeIntoIntegration(
       seatCommit: must(repoRoot, ['rev-parse', seat.branch]).trim(),
       integrationSha: must(repoRoot, ['rev-parse', 'HEAD']).trim(),
       notes: [],
+      // The merge itself checks nothing. `integrateSeat` is the whole boundary and it is
+      // where the configured checks run; a caller reaching past it gets an honest empty list
+      // rather than one that looks like a green result.
+      checks: [],
     }
   }
   const paths = conflictedPaths(repoRoot)
@@ -183,17 +276,30 @@ export function mergeIntoIntegration(
   }
 }
 
+/** What the boundary runs against the merged tree, and how long any one command gets. */
+export interface IntegrationChecks {
+  /** Absent or empty means the tree is not checked. See `RelayOptions.integration`. */
+  checks?: CheckSpec[] | undefined
+  checkTimeoutMs?: number | undefined
+}
+
 /**
- * The whole boundary for one seat: commit, merge, and record what happened.
+ * The whole boundary for one seat: commit, merge, check, and record what happened.
  *
  * The manifest is written on every path including the blocked one. It is what makes a crash
  * recoverable -- a directory on disk is not evidence of whose it is or what state it is in --
  * so a transition that happened and was not recorded is worse than one that did not happen.
+ *
+ * Checks run only after a merge that SUCCEEDED, and only when they are configured. A blocked
+ * merge left the checkout exactly where it was, so checking it would be checking the previous
+ * merge's result a second time and reporting the answer against this seat's task; and a
+ * boundary with nothing to merge changed nothing at all.
  */
 export function integrateSeat(
   manifest: WorktreeManifest,
   seat: SeatWorktree,
   meta: BoundaryMeta,
+  integration: IntegrationChecks = {},
 ): MergeResult {
   const repoRoot = manifest.integrationRoot
   const seatCommit = commitSeatWork(seat, meta)
@@ -237,5 +343,13 @@ export function integrateSeat(
   }
 
   writeManifest(manifest)
-  return { ...result, notes }
+  // Last, and after the manifest: the checks can take as long as the project's test suite
+  // takes, and a crash during them must not lose the record that the merge happened. What
+  // they produce is a judgement about the tree, not a state transition -- the merge is in the
+  // checkout either way -- so nothing above this line depends on their result.
+  const checks =
+    integration.checks && integration.checks.length > 0
+      ? runIntegrationChecks(repoRoot, integration.checks, integration.checkTimeoutMs)
+      : []
+  return { ...result, notes, checks }
 }

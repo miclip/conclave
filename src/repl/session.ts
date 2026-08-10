@@ -162,6 +162,16 @@ export interface SessionOptions {
    */
   checks: CheckSpec[]
   /**
+   * What the MERGED tree must pass, checked after every merge including the last (#80).
+   *
+   * A different question from `checks` above, which is why it is a different option: those
+   * say what a replacement must reproduce and run in one seat's own tree. These run in the
+   * integration checkout, and they are the only thing in the design that looks at the result
+   * two seats produced together. Absent is behaviourless, and there is nothing to check with
+   * one seat -- its tree IS the integration checkout, and no merge happens.
+   */
+  integrationChecks?: CheckSpec[] | undefined
+  /**
    * Who is answering escalations.
    *
    * Existed on `relay` and on nothing else, which made the pair actively misleading: the
@@ -642,6 +652,9 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     ...(opts.implementers ? { implementers: implSpecs } : {}),
     maxAdvisorTurns: opts.rounds,
     ...(opts.checks.length > 0 ? { rotation: { checks: opts.checks } } : {}),
+    ...(opts.integrationChecks && opts.integrationChecks.length > 0
+      ? { integration: { checks: opts.integrationChecks } }
+      : {}),
     onLog: (m) => {
       // A message the operator just typed is already on screen twice over: the pinned row
       // shows the text itself while it waits, and `pendingRows` promotes it to a speaker

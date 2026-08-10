@@ -54,6 +54,20 @@ export type RunReason =
    * needs to know which happened.
    */
   | 'ceiling'
+  /**
+   * The integration checkout fails its configured checks, and the run ended anyway (#80).
+   *
+   * The one reason here that is a statement about the ARTIFACT rather than about the run.
+   * Every other member says why the loop stopped; this says what it left behind. It replaces
+   * `done` and `budget` -- the two endings that would otherwise report success -- because a
+   * run whose final merge produced a tree that does not build has not done the thing it says
+   * it did, and the operator finds out later from a tree they did not watch being assembled.
+   *
+   * NOT raised by a red tree mid-run: while a seat is still working, the failure is a repair
+   * the advisor dispatches, and a run that recovers ends normally. This is what is left when
+   * there is no seat to dispatch it to, which is exactly the final merge.
+   */
+  | 'integration_failed'
 
 export interface RelayEventBase {
   /**
