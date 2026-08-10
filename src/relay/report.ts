@@ -28,6 +28,7 @@
  */
 
 import type { Confidence, Provenance } from '../contract/outcome.ts'
+import type { ParticipantLaunch } from '../registry/launch.ts'
 import type { RunOutcome } from './run.ts'
 import type { Relay, RunDeadlines } from './relay.ts'
 
@@ -63,6 +64,21 @@ export interface ReportedParticipant {
    * distinguish "no role" from "this build does not report roles".
    */
   role: string
+  /**
+   * What this seat was launched with, and the model that argv names.
+   *
+   * `agent` alone does not identify what ran. One `agent: opencode` can be any of dozens of
+   * models across a ~30x price spread (#71), so a reader could neither cost the run nor
+   * repeat it. Copied from the relay's participant rather than recomputed here, per the rule
+   * at the top of this file: the relay composed that argv when it launched the seat.
+   *
+   * `model` is `null` when the argv named none, and NOT an empty string — see
+   * `modelFromArgs`. There is no token count and no cost anywhere in this report, and that
+   * is a decision rather than an omission: conclave drives the operator's own CLI on the
+   * operator's own subscription, and the honest thing it can offer is the join key for the
+   * billing export their provider already has.
+   */
+  launch: ParticipantLaunch
   sessionId: string
   turns: ReportedTurn[]
   /** Times the transcript was rewritten under this session. Rotation's mechanical trigger. */
@@ -179,6 +195,9 @@ export async function runReport(relay: Relay, input: ReportInput): Promise<RunRe
       agent: snap.agent,
       rank: p.rank,
       role: p.role,
+      // Copied, and the array with it: the report is handed to a caller that may keep it, and
+      // a shared array would let a reader of a finished run see a list the relay still owns.
+      launch: { args: [...p.launch.args], model: p.launch.model },
       sessionId: snap.sessionId,
       compactionGeneration: snap.compactionGeneration,
       turns: snap.turns.map((t) => ({

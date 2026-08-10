@@ -23,6 +23,7 @@ import type {
 } from '../contract/session.ts'
 import { formatVerdict, type Verdict } from '../contract/outcome.ts'
 import { AgentRegistry } from '../registry/registry.ts'
+import { launchRecordFor, type ParticipantLaunch } from '../registry/launch.ts'
 import type { ParticipantSpec } from '../registry/types.ts'
 import type { RoleId } from '../registry/roles.ts'
 import { acquire, release } from '../workspace/sessionLock.ts'
@@ -130,6 +131,20 @@ export interface RelayParticipant {
    * force an invented ordering among peers into the header `envelope()` renders.
    */
   role: RoleId
+  /**
+   * What this seat was started with, and which model that names.
+   *
+   * `ParticipantSpec.args` reached the launch and was then dropped here, the same way
+   * `role` was before it (#71): a run could be started with `-m opencode/kimi-k2.7-code`
+   * and the record would say only `agent: opencode`, which is any of dozens of models at a
+   * ~30x price spread and no instruction for repeating the run. Kept beside `agent` for the
+   * same reason `agent` is kept -- so the record can be read without awaiting a snapshot.
+   *
+   * Survives a rotation unchanged, and must: rotation replaces the SESSION and reuses the
+   * spec, so the replacement is launched from this same argv. A seat whose reported model
+   * changed when its adapter was restarted would be reporting a change that did not happen.
+   */
+  launch: ParticipantLaunch
   session: AgentSession
   events: AgentEvent[]
   /** Compaction generation when this session joined. Degradation is measured against it. */
@@ -1155,11 +1170,14 @@ export class Relay {
    * checkout is a seat that shares the checkout for the rest of the run.
    */
   async #join(spec: ParticipantSpec, rank: Rank, cwd: string = this.#opts.cwd): Promise<void> {
-    const session = await this.#opts.registry.createParticipant(spec, {
-      cwd,
-      watchdogMs: this.#opts.turnWatchdogMs,
-    })
-    const p: RelayParticipant = { id: spec.id, agent: spec.agent, rank, role: spec.role, session, events: [], baselineGeneration: 0, degradationCursor: 0 }
+    // One context object, used twice on purpose. The argv recorded below is composed by the
+    // same function every built-in adapter composes its child's argv with, from the same spec
+    // and the same context -- so the record is the launch rather than a reconstruction of it.
+    // Read AFTER the session exists, so a seat that failed to start fails exactly as before.
+    const ctx = { cwd, watchdogMs: this.#opts.turnWatchdogMs }
+    const session = await this.#opts.registry.createParticipant(spec, ctx)
+    const launch = launchRecordFor(this.#opts.registry.resolve(spec), ctx)
+    const p: RelayParticipant = { id: spec.id, agent: spec.agent, rank, role: spec.role, launch, session, events: [], baselineGeneration: 0, degradationCursor: 0 }
     this.#participants.set(spec.id, p)
     this.#attach(p)
     // The role is named only when it says something the rank has not. At N=1 it repeats it,
@@ -3775,14 +3793,14 @@ export class Relay {
           return (await this.#exchange(p, text)).prose
         },
         startReplacement: async () => {
-          const session = await this.#opts.registry.createParticipant(spec, {
-            cwd: this.#opts.cwd,
-            watchdogMs: this.#opts.turnWatchdogMs,
-          })
+          const ctx = { cwd: this.#opts.cwd, watchdogMs: this.#opts.turnWatchdogMs }
+          const session = await this.#opts.registry.createParticipant(spec, ctx)
           // Same spec, so the same role: a replacement that changed what the seat is FOR
           // would be a different seat wearing the id, and the handoff it just proved was
-          // measured against the outgoing session's job.
-          audition = { id: `${spec.id}~replacement`, agent: spec.agent, rank: 'implementer', role: spec.role, session, events: [], baselineGeneration: 0, degradationCursor: 0 }
+          // measured against the outgoing session's job. Same spec means the same launch as
+          // well, and it is composed rather than copied from the outgoing participant so a
+          // replacement started differently could never be reported as the one it replaced.
+          audition = { id: `${spec.id}~replacement`, agent: spec.agent, rank: 'implementer', role: spec.role, launch: launchRecordFor(this.#opts.registry.resolve(spec), ctx), session, events: [], baselineGeneration: 0, degradationCursor: 0 }
           this.#attach(audition)
           return session
         },

@@ -20,6 +20,7 @@ import {
 } from '../conformance/capabilities.ts'
 import { assertCodexHooksExecutable, CONCLAVE_HOOK_MATCH } from '../deployment/codexHookTrust.ts'
 import { DEFAULT_IDLE_MS, DEFAULT_WATCHDOG_MS } from '../outcomes/watchdog.ts'
+import { effectiveLaunchArgs } from './launch.ts'
 import { AgentRegistry } from './registry.ts'
 import type {
   AgentDefinition,
@@ -65,7 +66,7 @@ export const CLAUDE_AGENT: AgentDefinition = {
       cwd: ctx.cwd,
       role: resolved.role.id,
       inputOwnership: resolved.inputOwnership,
-      args: [...resolved.agent.launch.baseArgs, ...(resolved.spec.args ?? []), ...(ctx.args ?? [])],
+      args: effectiveLaunchArgs(resolved, ctx),
       watchdogMs: ctx.watchdogMs,
       readyTimeoutMs: ctx.readyTimeoutMs,
     })
@@ -112,7 +113,7 @@ export const CODEX_AGENT: AgentDefinition = {
       cwd: ctx.cwd,
       role: resolved.role.id,
       inputOwnership: resolved.inputOwnership,
-      args: [...resolved.agent.launch.baseArgs, ...(resolved.spec.args ?? []), ...(ctx.args ?? [])],
+      args: effectiveLaunchArgs(resolved, ctx),
       watchdogMs: ctx.watchdogMs,
       readyTimeoutMs: ctx.readyTimeoutMs,
     })
@@ -161,7 +162,7 @@ export const OPENCODE_AGENT: AgentDefinition = {
       cwd: ctx.cwd,
       role: resolved.role.id,
       inputOwnership: resolved.inputOwnership,
-      args: [...resolved.agent.launch.baseArgs, ...(resolved.spec.args ?? []), ...(ctx.args ?? [])],
+      args: effectiveLaunchArgs(resolved, ctx),
       watchdogMs: ctx.watchdogMs,
     })
   },
@@ -189,7 +190,7 @@ export const KIMI_AGENT: AgentDefinition = {
       cwd: ctx.cwd,
       role: resolved.role.id,
       inputOwnership: resolved.inputOwnership,
-      args: [...resolved.agent.launch.baseArgs, ...(resolved.spec.args ?? []), ...(ctx.args ?? [])],
+      args: effectiveLaunchArgs(resolved, ctx),
       watchdogMs: ctx.watchdogMs,
     })
   },

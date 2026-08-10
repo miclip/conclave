@@ -76,6 +76,10 @@ function fakeSeat(id: string, rank: string, agent: string, role: string = rank) 
       id,
       rank,
       role,
+      // What the relay composes at join. A stand-in for a seat launched with no arguments,
+      // which is what every seat in this file is: the recorder copies this through and does
+      // not compose it, so the interesting cases live where the composing happens.
+      launch: { args: [] as string[], model: null },
       session: {
         agent,
         async snapshot() {

@@ -398,9 +398,34 @@ const DECLARED: Record<string, string> = {
     'than being unioned or dropped. The console half of the same issue (#65) is not in this ' +
     'file: it renders one pinned row per busy seat, and at N=1 renders none, which ' +
     'src/repl/screen.test.ts and src/repl/session.tty.test.ts cover.',
+  'per-seat launch args and model in status --json and the run report':
+    'Every seat, at every N, now reports how it was LAUNCHED: ' +
+    '`participants[].launch = {args, model}` in both `conclave status --json` and the ' +
+    '`relay --json` report. This one DOES change the default run’s two documents — each gains ' +
+    'a key on every participant — and it is declared for that reason rather than nested away ' +
+    'behind a seat count like the block above. The operator’s reason (#71): `agent: opencode` ' +
+    'identifies nothing. One agent id spans dozens of models at roughly a 30x price spread, so ' +
+    'a finished run can be neither costed by hand nor repeated — `--implementer-args ' +
+    '"-m opencode/kimi-k2.7-code"` reached the launch and was then dropped at `Relay.#join`, ' +
+    'exactly as `spec.role` was before #57. "A field that says nothing at N=1" was the argument ' +
+    'for hiding the `seat` block; this one says the same thing at every N, so hiding it at N=1 ' +
+    'would withhold it from the runs an operator is most likely to be reading. `model` is ' +
+    '`null`, never `""`, when the argv named none — the issue asks for that distinction by ' +
+    'name — and `args` is the whole composed argv, adapter base args included, because that is ' +
+    'what someone would have to type to repeat the run. Composed ONCE, by `launchRecordFor` in ' +
+    'src/registry/launch.ts, which is the same function every built-in adapter now builds its ' +
+    'child’s argv with (src/registry/builtin.ts), so the record IS the launch rather than a ' +
+    'reconstruction of it. NO TOKEN COUNT AND NO COST ACCOMPANIES IT, and that half of #71 is ' +
+    'deferred with its reason: conclave drives the operator’s own CLI on their own ' +
+    'subscription, real usage would mean tapping enterprise analytics or OTEL on their ' +
+    'machine, and scraping whatever one adapter’s transcript happens to expose would produce a ' +
+    'confident partial number for a multi-seat run. What ships is the join key for the billing ' +
+    'export their provider already holds. Every pinned shape below was updated rather than ' +
+    'relaxed, and src/relay/launchRecord.test.ts proves the field carries a real value by ' +
+    'driving both front-ends with --implementer-args.',
 }
 
-test('DECLARED contains exactly the routing, pause-resolution, attribution, ceiling-flag, seat-flag and seat-status entries', () => {
+test('DECLARED contains exactly the routing, pause-resolution, attribution, ceiling-flag, seat-flag, seat-status and launch-record entries', () => {
   assert.deepEqual(Object.keys(DECLARED), [
     'implementer_unanswered -> advisor',
     'status.pause.resolution',
@@ -408,6 +433,7 @@ test('DECLARED contains exactly the routing, pause-resolution, attribution, ceil
     'optional ceiling flags on both front-ends',
     '--implementers on both front-ends',
     'per-seat dispatcher state in status --json',
+    'per-seat launch args and model in status --json and the run report',
   ])
 })
 
@@ -977,10 +1003,28 @@ test('default run works in the run cwd and creates no worktree', async () => {
   // The relay hands that same cwd to each participant adapter: src/relay/relay.ts:1157-1159.
   // The cwd getter simply returns the option: src/relay/relay.ts:1050-1052.
   assert.match(relay, /cwd:\s*process\.cwd\(\)/, 'relay block must start in process.cwd')
+  // Both creation sites now pass a NAMED context object rather than an inline literal, because
+  // the same object composes the launch args that get recorded -- see
+  // DECLARED['per-seat launch args and model ...']. The regex that stood here matched
+  // `createParticipant(spec, { cwd: this.#opts.cwd`, which was in fact the ROTATION
+  // replacement's call and not `#join`'s; both are pinned separately below, at the same
+  // strength and without widening what is claimed. The cwd guarantee for a default run is
+  // proved above by observation anyway -- `seatsFromSessionCli` reads it back from the
+  // registry -- and this is the text-level echo of it.
   assert.match(
     RELAY,
-    /registry\.createParticipant\(spec, \{\s*cwd:\s*this\.#opts\.cwd/s,
-    'participant must be created in the run cwd',
+    /#join\(spec: ParticipantSpec, rank: Rank, cwd: string = this\.#opts\.cwd\)/,
+    "a joining participant's cwd must default to the run cwd",
+  )
+  assert.match(
+    RELAY,
+    /const ctx = \{ cwd, watchdogMs: this\.#opts\.turnWatchdogMs \}\s*const session = await this\.#opts\.registry\.createParticipant\(spec, ctx\)/,
+    'a joining participant must be created in that cwd',
+  )
+  assert.match(
+    RELAY,
+    /const ctx = \{ cwd: this\.#opts\.cwd, watchdogMs: this\.#opts\.turnWatchdogMs \}\s*const session = await this\.#opts\.registry\.createParticipant\(spec, ctx\)/,
+    'a rotation replacement must be created in the run cwd',
   )
 
   // A default run with no subagents must not create any git worktree. The relay only samples
@@ -1157,7 +1201,12 @@ test('the default relay --json report emits exactly these keys at every depth', 
       'deadlines.participants[].silence': 'status',
       'flags[]': 'participant, seq, text',
       outcome: 'detail, reason',
-      'participants[]': 'agent, compactionGeneration, id, rank, role, sessionId, turns',
+      'participants[]': 'agent, compactionGeneration, id, launch, rank, role, sessionId, turns',
+      // The declared addition; see DECLARED['per-seat launch args and model ...']. `args` is
+      // an EMPTY array on a default run — no seat was given a flag — so it contributes no
+      // element path, and `model` is null, which contributes no path either. What is pinned
+      // is that both keys are present and that neither has grown a shape underneath it.
+      'participants[].launch': 'args, model',
       'participants[].turns[]': 'key, state, tools',
       rotation:
         'armed, assessments, candidates, complaintsSeen, degradationsSeen, peakGeneration, rotations',
@@ -1205,8 +1254,9 @@ test('an ended conclave status --json emits exactly these keys at every depth', 
     {
       '': 'abandoned, alive, build, cwd, eventsPath, front, goal, id, logPath, messages, operator, outcome, participants, pid, schema, startedAt, state, updatedAt',
       outcome: 'detail, reason',
-      'participants[]': 'activity, agent, id, rank, role, turns',
+      'participants[]': 'activity, agent, id, launch, rank, role, turns',
       'participants[].activity': 'kind, since',
+      'participants[].launch': 'args, model',
       'participants[].turns[]': 'key, state',
     },
     'the status document must not gain or lose a key at any depth without a decision',
@@ -1233,8 +1283,9 @@ test('an ended conclave status --json emits exactly these keys at every depth', 
  */
 const PAUSED_COMMON = {
   '': 'abandoned, alive, build, cwd, eventsPath, front, goal, id, logPath, messages, operator, participants, pause, pid, schema, startedAt, state, updatedAt',
-  'participants[]': 'activity, agent, id, rank, role, turns',
+  'participants[]': 'activity, agent, id, launch, rank, role, turns',
   'participants[].activity': 'kind, since',
+  'participants[].launch': 'args, model',
   'participants[].turns[]': 'confidence, key, provenance, state',
   'participants[].turns[].provenance[]': 'detail, source',
 } as const
@@ -1306,7 +1357,8 @@ const PAUSED_SUBTREE: Record<PauseReason, Record<string, string>> = {
     // from the merge_blocked override so the common pin applied — would let the block vanish
     // from a seat, or appear on the advisor, with nothing failing. That the two sides are
     // exactly `…, role, turns` and `…, role, seat, turns` is the assertion.
-    'participants[]': 'activity, agent, id, rank, role, turns | activity, agent, id, rank, role, seat, turns',
+    'participants[]':
+      'activity, agent, id, launch, rank, role, turns | activity, agent, id, launch, rank, role, seat, turns',
     // `state`, `dispatched` and `worktree`, and NO `task`: this pause is raised after both
     // seats' turns have been graded and their tasks released, so neither is holding one. A
     // build that started reporting a task here would be reporting a seat as busy at the moment
