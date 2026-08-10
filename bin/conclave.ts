@@ -55,7 +55,7 @@ import { seedCodexTrust } from '../src/deployment/codexHookTrust.ts'
 import { defaultRegistry } from '../src/registry/builtin.ts'
 import type { AgentRegistry } from '../src/registry/registry.ts'
 import { runSession } from '../src/repl/session.ts'
-import { implementerSeatPlan, implementerSpecsFor, Relay } from '../src/relay/relay.ts'
+import { implementerSeatPlan, implementerSpecsFor, Relay, type SeatRequest } from '../src/relay/relay.ts'
 import { formatGuardReportJson, guard } from '../src/workspace/sessionLock.ts'
 
 const USAGE = `conclave <command>
@@ -132,7 +132,8 @@ Commands:
                                    live, so it can gate a commit helper. --json prints the
                                    report as JSON on stdout instead of prose; the exit
                                    code is unchanged.
-  relay "<goal>" [--advisor codex] [--implementer claude] [--implementers "claude,claude"]
+  relay "<goal>" [--advisor codex] [--implementer claude]
+                 [--implementers "claude --model opus-5, claude --model sonnet-5"]
                  [--rounds N] [--settle SECONDS]
                  [--checks "npm test"] [--checks-informational "..."]
                  [--checks-unrelated "..."] [--advisor-args "..."] [--implementer-args "..."]
@@ -155,8 +156,15 @@ Commands:
                                    --operator agent tells the advisor a machine is
                                    answering: escalate readily, but about premises and
                                    ambiguous criteria rather than permission.
-                                   --implementers is the seat LIST, one agent per seat:
-                                   "claude,claude" runs two. The first entry is the seat
+                                   --implementers is the seat LIST, one entry per seat:
+                                   "claude,claude" runs two. An entry may carry that seat's
+                                   OWN launch arguments after the agent --
+                                   "claude --model opus-5, claude --model sonnet-5" runs two
+                                   seats on different models -- which is how seats differ
+                                   from each other without a second flag correlated to this
+                                   one by position. Per-seat arguments are appended after
+                                   --implementer-args, so the seat's own spelling wins.
+                                   The first entry is the seat
                                    --implementer names, so naming both differently is
                                    refused rather than reconciled. Seats are named
                                    implementer, implementer-2, ...; more than one gets a git
@@ -260,7 +268,8 @@ Commands:
                                    included, so a rendering fault can be inspected rather
                                    than screenshotted.
   session ["<goal>"] [--advisor codex] [--implementer claude]
-                   [--implementers "claude,claude"] [--rounds N]
+                   [--implementers "claude --model opus-5, claude --model sonnet-5"]
+                   [--rounds N]
                    [--checks "npm test"] [--checks-informational "..."]
                    [--checks-unrelated "..."] [--advisor-args "..."] [--implementer-args "..."]
                    [--bypass [agent]] [--operator agent] [--settle SECONDS]
@@ -277,7 +286,9 @@ Commands:
                                    --advisor-args / --implementer-args pass extra launch
                                    arguments, e.g. "-m opencode/kimi-k2.6". Required for
                                    any agent that picks its model per invocation.
-                                   --implementers is the seat list, as in relay.
+                                   --implementers is the seat list, as in relay, including
+                                   per-seat launch arguments:
+                                   "claude --model opus-5, claude --model sonnet-5".
                                    --checks are REQUIRED: a replacement that cannot
                                    reproduce one rolls the rotation back.
                                    --checks-informational and --checks-unrelated run and
@@ -906,7 +917,12 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
       console.error(`conclave: ${seatPlan.reason}`)
       return 1
     }
-    const implementerAgents = seatPlan.kind === 'listed' ? seatPlan.agents : [flag('implementer', 'claude')]
+    // One entry per seat, agent and per-seat launch arguments together. A run that named no
+    // list is the one seat `--implementer` names, carrying no arguments of its own -- the
+    // `--implementer-args` it may have been given applies to every seat and is composed below.
+    const seatRequests: SeatRequest[] =
+      seatPlan.kind === 'listed' ? seatPlan.seats : [{ agent: flag('implementer', 'claude'), args: [] }]
+    const implementerAgents = seatRequests.map((s) => s.agent)
     // The lead implementer, which is what every singular reader below wants: registration,
     // the bypass notice, the dry-run plan and `RelayOptions.implementer` itself.
     const implementer = implementerAgents[0]!
@@ -1023,12 +1039,19 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
     // Per AGENT, not per seat: `.conclave/config.json` keys launch arguments by agent, and two
     // seats can be filled by different ones. `--implementer-args` is the operator's own addition
     // and applies to every implementer seat, because there is one flag and it says implementer.
+    // Arguments for ONE seat ride inside its `--implementers` entry instead, and are appended
+    // after these by `implementerSpecsFor` so the more specific spelling is the one that wins.
     const implArgsFor = (agent: string) => [
       ...launchArgsFor(projectConfig, agent),
       ...extraArgs(flag('implementer-args', '')),
     ]
-    const implSpecs = implementerSpecsFor(implementerAgents, implArgsFor)
-    const implArgs = implArgsFor(implementer)
+    const implSpecs = implementerSpecsFor(seatRequests, implArgsFor)
+    // The lead seat's argv as it will actually be launched, read back off the spec rather than
+    // recomposed. Recomposing it from the agent alone would drop that seat's own
+    // `--implementers` arguments, so the dry run would print a plan the real run does not match
+    // -- which is the one thing a dry run must not do. At N=1 with no per-seat arguments this is
+    // byte for byte what `implArgsFor(implementer)` returned.
+    const implArgs = implSpecs[0]!.args ?? []
     const bypassing = [lead, ...implementerAgents].filter(
       (a) => permissionModeFor(projectConfig, a) === 'bypass',
     )
@@ -1354,8 +1377,9 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
       implementers: flag('implementers', ''),
       implementerNamed: args.includes('--implementer'),
     })
-    const implementerAgents =
-      seatPlan.kind === 'listed' ? seatPlan.agents : [flag('implementer', 'claude')]
+    const seatRequests: SeatRequest[] =
+      seatPlan.kind === 'listed' ? seatPlan.seats : [{ agent: flag('implementer', 'claude'), args: [] }]
+    const implementerAgents = seatRequests.map((s) => s.agent)
     const implementer = implementerAgents[0]!
     const rounds = flag('rounds', '8')
     // The same flag `relay` has. Its absence here is what made an agent pick the front-end
@@ -1412,10 +1436,12 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
       ...(goal === undefined ? {} : { goal }),
       lead,
       implementer,
-      // Agents rather than specs: `runSession` owns seat construction, and handing it a spec
-      // list would put `seatIdFor` on both sides of the wire. Absent unless the operator named
+      // Seat REQUESTS rather than specs: `runSession` owns seat construction, and handing it a
+      // spec list would put `seatIdFor` on both sides of the wire. What crosses is what the
+      // operator asked for -- an agent and that seat's own launch arguments -- which is the
+      // smallest thing that cannot lose the pairing on the way. Absent unless the operator named
       // a list, so a default console run passes exactly the options it always passed.
-      ...(seatPlan.kind === 'listed' ? { implementers: implementerAgents } : {}),
+      ...(seatPlan.kind === 'listed' ? { implementers: seatPlan.seats } : {}),
       rounds: Number(rounds),
       checks,
       ...(leadArgs.length > 0 ? { leadArgs } : {}),

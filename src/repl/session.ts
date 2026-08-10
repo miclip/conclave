@@ -38,7 +38,7 @@ import type { AgentEvent } from '../contract/session.ts'
 import { defaultRegistry } from '../registry/builtin.ts'
 import type { CheckSpec } from '../rotation/record.ts'
 import type { AgentRegistry } from '../registry/registry.ts'
-import { implementerSpecsFor, Relay } from '../relay/relay.ts'
+import { implementerSpecsFor, Relay, type SeatRequest } from '../relay/relay.ts'
 import type { RelayMessage } from '../relay/message.ts'
 import type { RunHandle, RunPause } from '../relay/run.ts'
 import { ensureCodexHooksTrusted } from '../deployment/ensureTrust.ts'
@@ -126,20 +126,28 @@ export interface SessionOptions {
   lead: string
   implementer: string
   /**
-   * Every implementer seat's agent, when the operator named the seat list with
-   * `--implementers`. Absent is the default and must stay behaviourless.
+   * Every implementer seat, when the operator named the seat list with `--implementers`: its
+   * agent, and the launch arguments typed for that seat alone. Absent is the default and must
+   * stay behaviourless.
    *
-   * Agents rather than specs, because seat construction belongs to one place: `runSession`
+   * Requests rather than specs, because seat construction belongs to one place: `runSession`
    * builds the specs with `implementerSpecsFor`, exactly as the relay CLI does, so `seatIdFor`
    * is not applied on both sides of this wire and cannot disagree with itself. The first entry
    * is the lead implementer and equals `implementer`; the CLI refuses the invocation where they
    * disagree rather than passing a contradiction through.
    *
+   * `SeatRequest[]` rather than `string[]`, which it was until per-seat launch arguments existed
+   * (#77): the console front-end is the one that hands over a LIST and lets `runSession` build
+   * the specs, so a bare agent list here is a wire on which each seat's own arguments have
+   * nowhere to be. They would have had to travel as a second parallel list, correlated by index
+   * with this one -- and a pairing that exists only as two array positions is one a single
+   * dropped entry silently reassigns.
+   *
    * A console run given none is the run it was before this field existed: no `implementers` key
    * reaches `Relay.start`, so `implementerSeats` returns `[implementer]` by the expression it
    * always used (D1).
    */
-  implementers?: string[] | undefined
+  implementers?: SeatRequest[] | undefined
   /**
    * Extra launch arguments per seat, e.g. `['-m', 'opencode/kimi-k2.6']`.
    *
@@ -507,9 +515,14 @@ export async function runSession(opts: SessionOptions): Promise<number> {
   if (refusals.length > 0) return 1
 
   // The seat list, resolved once and read by everything below that used to read
-  // `opts.implementer` and mean "the implementers". At N=1 it is `[opts.implementer]`, which is
-  // the same single agent those readers had.
-  const implementerAgents = opts.implementers ?? [opts.implementer]
+  // `opts.implementer` and mean "the implementers". At N=1 it is one seat filled by
+  // `opts.implementer` with no arguments of its own, which is the same single agent those
+  // readers had.
+  const seatRequests: SeatRequest[] = opts.implementers ?? [{ agent: opts.implementer, args: [] }]
+  // The agents alone, for the readers that ask what is FILLING the seats -- the banner, the
+  // registration set, the bypass notice. None of them can act on per-seat arguments, and a
+  // launch is not built from this: `implSpecs` below is.
+  const implementerAgents = seatRequests.map((s) => s.agent)
 
   const existing = guard(opts.cwd)
   if (existing.live) {
@@ -599,12 +612,13 @@ export async function runSession(opts: SessionOptions): Promise<number> {
   const leadArgs = [...launchArgsFor(projectConfig, opts.lead), ...(opts.leadArgs ?? [])]
   // Per agent, as in the relay CLI: config-derived arguments are keyed by agent and two seats
   // can be filled by different ones, while `implementerArgs` is the operator's own and applies
-  // to every implementer seat.
+  // to every implementer seat. Arguments belonging to ONE seat arrive on that seat's request
+  // and are appended after these by `implementerSpecsFor`, so the more specific spelling wins.
   const implArgsFor = (agent: string) => [
     ...launchArgsFor(projectConfig, agent),
     ...(opts.implementerArgs ?? []),
   ]
-  const implSpecs = implementerSpecsFor(implementerAgents, implArgsFor)
+  const implSpecs = implementerSpecsFor(seatRequests, implArgsFor)
 
   // Said once, at the top, naming who. A session that never asks permission is a thing
   // the operator should be reminded of while it runs, not something they configured weeks
