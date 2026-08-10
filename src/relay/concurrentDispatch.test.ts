@@ -29,6 +29,7 @@ import test from 'node:test'
 import { AgentRegistry } from '../registry/registry.ts'
 import { NO_DEADLINE_CLOCKS } from '../registry/types.ts'
 import { FakeRotationSession } from '../rotation/fakeSession.ts'
+import type { Ceilings } from './guardrails.ts'
 import { Relay } from './relay.ts'
 
 /** One agent per fake session, so a seat's id and the child behind it stay distinguishable. */
@@ -88,10 +89,11 @@ async function twoSeatRun(
   repo: string,
   advisorReplies: string[],
   maxAdvisorTurns = 8,
+  extra: { ceilings?: Ceilings; seatReplies?: { alpha?: string[]; beta?: string[] } } = {},
 ): Promise<{ relay: Relay; lead: FakeRotationSession; alpha: FakeRotationSession; beta: FakeRotationSession }> {
   const lead = new FakeRotationSession('lead-1', 'lead', advisorReplies)
-  const alpha = new FakeRotationSession('alpha-1', 'alpha', [...SEAT_REPLIES])
-  const beta = new FakeRotationSession('beta-1', 'beta', [...SEAT_REPLIES])
+  const alpha = new FakeRotationSession('alpha-1', 'alpha', extra.seatReplies?.alpha ?? [...SEAT_REPLIES])
+  const beta = new FakeRotationSession('beta-1', 'beta', extra.seatReplies?.beta ?? [...SEAT_REPLIES])
   const relay = await Relay.start({
     registry: registryOf({ lead, alpha, beta }),
     cwd: repo,
@@ -99,8 +101,14 @@ async function twoSeatRun(
     implementer: SEATS[0],
     implementers: [...SEATS],
     maxAdvisorTurns,
+    ...(extra.ceilings ? { ceilings: extra.ceilings } : {}),
   })
   return { relay, lead, alpha, beta }
+}
+
+/** The note the drain exists to make unnecessary. Its absence is half of every drain claim. */
+function lostTurnNotes(relay: Relay): string[] {
+  return relay.log.filter((m) => m.kind === 'note' && /turn\(s\) unfinished/.test(m.text)).map((m) => m.text)
 }
 
 /** Task id to the seat it was dispatched to, in admission order. */
@@ -479,6 +487,182 @@ test('a default run admits one task per reply and never has two in flight', asyn
       ],
       'an unaddressed reply still targets the role, as it always has',
     )
+  } finally {
+    await relay.stop()
+    rmSync(repo, { recursive: true, force: true })
+  }
+})
+
+/**
+ * The queue ceiling is all-or-none across a reply.
+ *
+ * Checked per decision, a reply whose fourth task crossed the ceiling ended the run with three
+ * already admitted — `Task` records nothing would ever dispatch, runtimes stuck at `admitted`
+ * forever, and a seat table that had never heard of them. That is exactly what putting the
+ * check BEFORE the mutation was supposed to buy, defeated by doing it once per decision instead
+ * of once per batch.
+ */
+test('a reply that would cross the queue ceiling admits none of itself', async () => {
+  const repo = tempRepo()
+  const { relay } = await twoSeatRun(
+    repo,
+    ['@seat seat-alpha: First.\n@seat seat-beta: Second.', 'DONE'],
+    8,
+    { ceilings: { maxQueueDepth: 1 } },
+  )
+  try {
+    const outcome = await relay.run('Keep the work moving.')
+    assert.equal(outcome.reason, 'ceiling', 'the ceiling must end the run')
+    assert.deepEqual(relay.tasks(), [], 'a batch that cannot be admitted whole must not be admitted at all')
+    assert.deepEqual(
+      relay.log.filter((m) => m.kind === 'instruction').map((m) => m.text),
+      [],
+      'and nothing may have been delivered to a seat',
+    )
+    assert.deepEqual(relay.seats().map((s) => s.state), ['idle', 'idle'])
+  } finally {
+    await relay.stop()
+    rmSync(repo, { recursive: true, force: true })
+  }
+})
+
+test('the same reply under a ceiling that fits admits all of itself', async () => {
+  // The control. Without it the test above passes on a dispatcher that admits nothing ever.
+  const repo = tempRepo()
+  const { relay } = await twoSeatRun(
+    repo,
+    ['@seat seat-alpha: First.\n@seat seat-beta: Second.', 'DONE', 'DONE'],
+    8,
+    { ceilings: { maxQueueDepth: 2 } },
+  )
+  try {
+    assert.equal((await relay.run('Keep the work moving.')).reason, 'done')
+    assert.deepEqual(
+      relay.tasks().map((e) => [e.runtime.seat, e.runtime.state]),
+      [
+        ['seat-alpha', 'complete'],
+        ['seat-beta', 'complete'],
+      ],
+    )
+  } finally {
+    await relay.stop()
+    rmSync(repo, { recursive: true, force: true })
+  }
+})
+
+/**
+ * An ending stops ADMISSION. It does not abandon the turns already sent.
+ *
+ * Three endings, one property, and the property is D2's: a scope that stops the conclave is not
+ * what any of these conditions carries. `advisor_escalated` is classified as stopping "admission
+ * of new tasks; in-flight seats drain"; a budget and a ceiling bound what a run may START, not
+ * what it may finish. Returning the moment the decision was made applied a conclave-wide scope
+ * to all of them and left a note saying the abandoned reports were never received — which was
+ * true, and was the bug rather than the mitigation.
+ *
+ * Each case puts the ending in the middle of a slow sibling's turn, which is the only moment at
+ * which the difference is observable.
+ */
+for (const kase of [
+  {
+    what: 'the advisor-turn budget',
+    // One advisor turn: the reply that admits both. The budget is therefore exhausted at the
+    // top of the next iteration, while alpha is still working.
+    replies: ['@seat seat-alpha: Slow work.\n@seat seat-beta: Quick work.', 'DONE', 'DONE'],
+    turns: 1,
+    ceilings: undefined,
+    reason: 'budget',
+  },
+  {
+    what: 'a turn ceiling',
+    replies: ['@seat seat-alpha: Slow work.\n@seat seat-beta: Quick work.', 'DONE', 'DONE'],
+    turns: 8,
+    // Reached after the briefings, the goal turn, the two work turns and the advisor turn that
+    // carries the first report back — so it is checked while alpha is still mid-turn.
+    ceilings: { maxTurns: 6 },
+    reason: 'ceiling',
+  },
+  {
+    what: 'an advisor escalation',
+    replies: ['@seat seat-alpha: Slow work.\n@seat seat-beta: Quick work.', 'ESCALATE: I need a human.', 'DONE'],
+    turns: 8,
+    ceilings: undefined,
+    reason: 'escalated',
+  },
+] as const) {
+  test(`${kase.what} stops admission and drains the seat still working`, async () => {
+    const repo = tempRepo()
+    const { relay, alpha } = await twoSeatRun(repo, [...kase.replies], kase.turns, {
+      ...(kase.ceilings ? { ceilings: { ...kase.ceilings } } : {}),
+      seatReplies: { alpha: ['ack', 'ALPHA FINISHED', 'NONE', 'NONE'] },
+    })
+    try {
+      alpha.delayMs = 1500
+      const outcome = await relay.run('Keep the work moving.')
+      assert.equal(outcome.reason, kase.reason, 'the run must end for the reason under test')
+
+      // The seat that was still working finished, and every fact about it was recorded.
+      assert.deepEqual(
+        relay.tasks().map((e) => [e.runtime.seat, e.runtime.state]),
+        [
+          ['seat-alpha', 'complete'],
+          ['seat-beta', 'complete'],
+        ],
+        'a turn already sent must be graded and integrated rather than abandoned',
+      )
+      // And its report reached the advisor, which is the half that makes the work usable.
+      assert.ok(
+        relay.log.some((m) => m.kind === 'report' && m.from === 'seat-alpha' && /ALPHA FINISHED/.test(m.text)),
+        'the drained report must be in the routing log',
+      )
+      assert.deepEqual(lostTurnNotes(relay), [], 'nothing may be recorded as an unfinished turn')
+    } finally {
+      await relay.stop()
+      rmSync(repo, { recursive: true, force: true })
+    }
+  })
+}
+
+/**
+ * A seat-scoped condition stops that seat. It must not take an unrelated one with it.
+ *
+ * `implementer_unanswered` is classified `{kind: 'participant', participantId}` — the narrowest
+ * scope there is. Unattended it ends the run, which is the front-end's rule and not this one's;
+ * what must not happen is the OTHER seat's turn being discarded on the way out. That seat is
+ * answering a different instruction and knows nothing about the question that was asked.
+ */
+test('a seat-scoped halt does not discard an unrelated seat that is still working', async () => {
+  const repo = tempRepo()
+  const { relay, alpha } = await twoSeatRun(
+    repo,
+    ['@seat seat-alpha: Slow work.\n@seat seat-beta: Quick work.', 'DONE', 'DONE'],
+    8,
+    {
+      seatReplies: {
+        alpha: ['ack', 'ALPHA FINISHED', 'NONE', 'NONE'],
+        // The quick seat asks a build-changing question, which halts the run on ITS scope while
+        // the slow seat is still mid-turn.
+        beta: ['ack', 'Started it.\nUNANSWERED: should this go under /v1 or /v2?', 'NONE', 'NONE'],
+      },
+    },
+  )
+  try {
+    alpha.delayMs = 1500
+    const outcome = await relay.run('Keep the work moving.')
+    assert.equal(outcome.reason, 'escalated', 'unattended, the question ends the run')
+    assert.match(outcome.detail ?? '', /UNANSWERED/, 'and it ends on the question that was asked')
+
+    // The blocked seat's own task is left exactly where the halt left it — ungraded, because
+    // the halt happened before grading, which is what it did before any of this changed.
+    const byId = Object.fromEntries(relay.tasks().map((e) => [e.runtime.seat, e.runtime.state]))
+    assert.equal(byId['seat-beta'], 'reported', 'the seat that asked the question stops there')
+    // The unrelated seat finished, was graded and integrated, and its report was routed.
+    assert.equal(byId['seat-alpha'], 'complete', 'the other seat must not be terminated by it')
+    assert.ok(
+      relay.log.some((m) => m.kind === 'report' && m.from === 'seat-alpha' && /ALPHA FINISHED/.test(m.text)),
+      'the unrelated report must have been received',
+    )
+    assert.deepEqual(lostTurnNotes(relay), [], 'and nothing may be recorded as an unfinished turn')
   } finally {
     await relay.stop()
     rmSync(repo, { recursive: true, force: true })

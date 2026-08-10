@@ -584,16 +584,24 @@ export function parseDecisions(
   fallback: TaskTarget,
 ): ParseResult {
   if (instruction === '') return { ok: false, why: 'empty', detail: 'the reply carried no instruction' }
-  // Whole-reply keywords first, and matched exactly as they were before any of this existed: a
-  // reply that ended a run yesterday must end one today.
-  if (/^DONE\b/i.test(instruction)) return { ok: true, decisions: [{ kind: 'done', instruction }] }
-  if (/^ESCALATE\b/i.test(instruction)) {
-    return { ok: true, decisions: [{ kind: 'escalate', instruction }] }
-  }
 
+  // WHICH FORM this is, decided before anything is read for meaning.
+  //
+  // The keyword tests used to run first, which is the same bug in both directions: a reply
+  // beginning `DONE` and continuing with `@seat ...` lines took the whole-reply path and every
+  // directive under it was discarded in silence -- the advisor believed it had ended the run
+  // AND assigned two tasks, and got the first with no sign that the rest had gone. Deciding the
+  // form first is what makes that impossible to express.
   const lines = instruction.split('\n')
   const first = lines.findIndex((l) => DIRECTIVE.test(l))
+
   if (first === -1) {
+    // The unaddressed form, unchanged down to the regexes: a reply that ended a run yesterday
+    // must end one today, and this is the only form a default run's advisor can write.
+    if (/^DONE\b/i.test(instruction)) return { ok: true, decisions: [{ kind: 'done', instruction }] }
+    if (/^ESCALATE\b/i.test(instruction)) {
+      return { ok: true, decisions: [{ kind: 'escalate', instruction }] }
+    }
     // Validated against the run's CONFIGURED seats, not against the free ones: a task for a busy
     // seat is a scheduling wait, and a task for a seat that does not exist is a parse failure.
     if (seatsFor(seats, fallback).length === 0) {
@@ -608,6 +616,26 @@ export function parseDecisions(
     }
     return { ok: true, decisions: [{ kind: 'instruct', instruction, target: fallback }] }
   }
+
+  /** The refusal both keyword checks below produce. One wording, one rule. */
+  const mixed = (line: string): ParseResult => ({
+    ok: false,
+    why: 'mixed_keyword',
+    detail:
+      `${line.trim().split(/\s/)[0]!.toUpperCase()} appears in a reply that also addresses seats. ` +
+      `Ending the run and assigning work are different decisions; send them in different turns.`,
+  })
+
+  // A keyword ABOVE the first directive, which is the case that used to be read as a whole-reply
+  // DONE with the directives under it discarded in silence. Checked before the stray-prose rule
+  // that would otherwise catch it, because "you cannot end the run and assign work in one reply"
+  // is the reason, and "there was text outside a directive" is only how it looked.
+  //
+  // Case-insensitive, which does mean an instruction body opening a line with "Done that
+  // already" is refused and re-asked. That costs an advisor turn and says why; the alternative
+  // costs an assignment nobody is told about.
+  const above = lines.slice(0, first).find((l) => KEYWORD_LINE.test(l.trim()))
+  if (above !== undefined) return mixed(above)
 
   // Anything before the first directive is work addressed to nobody. Not silently attached to
   // the first decision: the advisor that wrote a preamble and the advisor that wrote an
@@ -643,16 +671,11 @@ export function parseDecisions(
         detail: `@${block.kind} ${block.name} was addressed and given no instruction`,
       }
     }
-    const keyword = body.split('\n').find((l) => KEYWORD_LINE.test(l.trim()))
-    if (keyword !== undefined) {
-      return {
-        ok: false,
-        why: 'mixed_keyword',
-        detail:
-          `${keyword.trim().split(/\s/)[0]!.toUpperCase()} appears inside an addressed reply. ` +
-          `Ending the run and assigning work are different decisions; send them in different turns.`,
-      }
-    }
+    // And a keyword inside what a seat would be SENT. Separate from the scan above because a
+    // body starts on the directive's own line -- `@seat x: DONE` is a keyword the line-level
+    // scan cannot see, since that line begins with the directive.
+    const inside = body.split('\n').find((l) => KEYWORD_LINE.test(l.trim()))
+    if (inside !== undefined) return mixed(inside)
     const target: TaskTarget =
       block.kind === 'seat' ? { kind: 'seat', seat: block.name } : { kind: 'role', role: block.name }
     if (seatsFor(seats, target).length === 0) {

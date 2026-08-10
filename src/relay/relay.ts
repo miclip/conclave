@@ -3042,12 +3042,46 @@ export class Relay {
     // `maxAdvisorTurns` bounds these iterations. That is the thing it has always counted --
     // one pass through here has always cost the advisor exactly one turn -- so the bound is
     // named for what it measures rather than for the shape it used to sit inside.
+    /**
+     * The ending this run has settled on, once it has settled on one. Admission stops; the
+     * turns already sent do NOT.
+     *
+     * D2's scopes are the reason this exists rather than a `return`. `advisor_escalated` stops
+     * "admission of new tasks; in-flight seats drain", and a seat-scoped condition stops that
+     * seat and no other — so a run that returned the moment it decided to end was applying a
+     * conclave-wide scope to every condition, whatever the classification on the pause said.
+     * The turns it abandoned had been paid for, their work was on disk, and the only record was
+     * a note saying their reports were never received.
+     *
+     * Two arms because two kinds of ending arrive differently. `end` is a reason this loop
+     * decides for itself and `#end` is deferred until the drain finishes, so `run_end` is the
+     * last thing on the stream. `outcome` is an ending `#halt` already performed — it calls
+     * `#end` itself, so `run_end` is emitted at the halt and the drain's messages follow it on
+     * the routing log. That ordering is imperfect and it is the honest trade: the alternative is
+     * predicting inside the dispatcher whether a halt will end the run.
+     */
+    type Closing =
+      | { kind: 'end'; reason: RunReason; detail?: string }
+      | { kind: 'outcome'; outcome: RunOutcome }
+    let closing: Closing | undefined
+
     try {
-      for (let advisorTurn = 1; ; advisorTurn++) {
+      // Labelled, because several of the sites that set `closing` are inside the admission loop
+      // and a bare `continue` there would go round the inner one.
+      advisor: for (let advisorTurn = 1; ; advisorTurn++) {
+        // The drain is over when nothing is outstanding. Everything below is skipped while
+        // `closing` is set, so this is the only way out of a run that has decided to end.
+        if (closing && outstanding() === 0) {
+          return closing.kind === 'end' ? this.#end(closing.reason, closing.detail) : closing.outcome
+        }
+        if (!closing) {
         // Every ceiling at the dispatch boundary, before anything is admitted or assigned, and
         // never mid-turn. A run cannot be interrupted mid-turn without discarding that turn's
         // work -- the same reason #exchange has no timeout of its own.
-        if (advisorTurn > maxAdvisorTurns) break
+        if (advisorTurn > maxAdvisorTurns) {
+          closing ??= { kind: 'end', reason: 'budget' }
+          continue advisor
+        }
         const ceiling = this.#breachedNow()
         if (ceiling) {
           this.#record({
@@ -3057,8 +3091,12 @@ export class Relay {
             kind: 'note',
             text: ceiling.detail,
           })
-          return this.#end('ceiling', ceiling.detail)
+          closing ??= { kind: 'end', reason: 'ceiling', detail: ceiling.detail }
+          continue advisor
         }
+        // NOT drained, and the one exit that is not. `stop()` is closing the sessions out from
+        // under these turns, so waiting for them is waiting for children that are being taken
+        // away — the `finally` below names what was in flight instead.
         if (this.#stopped) return this.#end('stopped')
 
         if (this.#pauseRequested) {
@@ -3069,7 +3107,10 @@ export class Relay {
             detail: reason,
             evidence: [`advisor turn ${advisorTurn} of ${maxAdvisorTurns}; no turn is in flight`],
           })
-          if (halted) return halted
+          if (halted) {
+            closing ??= { kind: 'outcome', outcome: halted }
+            continue advisor
+          }
         }
 
         // Lifted before anything else looks at the reply: a NOTE line is addressed to the
@@ -3152,7 +3193,10 @@ export class Relay {
             evidence: [...evidence, ...(await this.#livenessEvidence(lead, next.emittedSinceSend))],
             verdictOf: { participant: lead.id, endSeq: next.end.seq },
           })
-          if (halted) return halted
+          if (halted) {
+            closing ??= { kind: 'outcome', outcome: halted }
+            continue advisor
+          }
           // Unattended, `#halt` ends the run. Reaching here means an operator resumed, so the
           // advisor is asked again rather than the empty instruction being sent anyway.
           next = await this.#exchange(
@@ -3236,7 +3280,14 @@ export class Relay {
             detail: instruction,
             evidence: [`the advisor asked for a human rather than issuing an instruction`],
           })
-          if (halted) return halted
+          // D2 gives this condition the scope "admission of new tasks; in-flight seats drain",
+          // and that is exactly what setting `closing` does: nothing more is admitted, and the
+          // seats already working finish, are graded and integrated, and have their reports
+          // routed before the run returns.
+          if (halted) {
+            closing ??= { kind: 'outcome', outcome: halted }
+            continue advisor
+          }
           // Resumed. The advisor said its piece and the human decided otherwise, so it is
           // asked again rather than having its escalation replayed as an instruction.
           next = await this.#exchange(lead, this.#drain(lead.id) || 'The human has seen your escalation and asked you to continue. Give the implementer its next instruction.')
@@ -3246,27 +3297,33 @@ export class Relay {
           // first and dropping the rest would be the dispatcher silently running a quarter of a
           // plan the advisor wrote as one -- and `parseDecisions` is atomic, so a list that got
           // here is a list that validated whole.
+          // The queue ceiling, asked once for the WHOLE batch and before any of it is admitted.
+          //
+          // Projected, because the actual depth at every boundary the loop can check is the
+          // depth before the advisor's decision is applied, and a ceiling that only ever saw
+          // that would never see a queue at all. `+ incoming` rather than `+ 1` is the peak the
+          // batch reaches: admission happens before any dispatch, so all of them are queued at
+          // once, and at N=1 with one decision it is the `+ 1` this always asked.
+          //
+          // ALL OR NONE, and that is the point of moving it out of the loop. Checking per
+          // decision meant a reply whose fourth task crossed the ceiling ended the run with
+          // three tasks already admitted and nothing left running to dispatch them -- records
+          // stuck at `admitted` forever, which is precisely the "leaves nothing behind" property
+          // the check was placed before the mutation to get.
+          const incoming = decisions.decisions.filter((d) => d.kind === 'instruct').length
+          const wouldQueue = this.#breachedNow({
+            queueDepth: queueDepth(this.#queue, this.#taskRuntime) + incoming,
+          })
+          if (wouldQueue) {
+            this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text: wouldQueue.detail })
+            closing ??= { kind: 'end', reason: 'ceiling', detail: wouldQueue.detail }
+            continue advisor
+          }
+
           for (const admitting of decisions.decisions) {
             // Narrowing, not filtering: `done` and `escalate` are handled above and cannot be
             // in a list alongside an instruction.
             if (admitting.kind !== 'instruct') continue
-
-            // The queue ceiling, asked BEFORE the admission it would forbid. The reading is
-            // projected -- what the queue becomes if this task is admitted -- because the actual
-            // depth at every boundary the loop can check is the depth before the advisor's
-            // decision is applied, and a ceiling that only ever saw that would never see a queue
-            // at all.
-            //
-            // Before rather than after so a breach leaves nothing behind: no `Task` record that
-            // nothing will dispatch, and no runtime entry stuck at `admitted` forever. Inside the
-            // loop rather than once for the batch, because the depth this bounds is the depth
-            // after each admission, and a reply carrying five decisions crosses the ceiling on
-            // whichever one crosses it.
-            const wouldQueue = this.#breachedNow({ queueDepth: queueDepth(this.#queue, this.#taskRuntime) + 1 })
-            if (wouldQueue) {
-              this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text: wouldQueue.detail })
-              return this.#end('ceiling', wouldQueue.detail)
-            }
 
             // Admitted before anything is delivered, so the record of what the advisor decided
             // exists whether or not it survives adjudication. Admission logs nothing: the task
@@ -3304,7 +3361,10 @@ export class Relay {
                 evidence: describeConflict(conflict).split('\n'),
                 conflict,
               })
-              if (halted) return halted
+              if (halted) {
+                closing ??= { kind: 'outcome', outcome: halted }
+                continue advisor
+              }
               // Resumed: the human saw both sides and let it through. That decision has to REACH
               // the implementer, or the pause buys a delay and nothing else.
               //
@@ -3333,9 +3393,14 @@ export class Relay {
           const breach = dispatchReady()
           if (breach) {
             this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text: breach.detail })
-            return this.#end('ceiling', breach.detail)
+            closing ??= { kind: 'end', reason: 'ceiling', detail: breach.detail }
+            continue advisor
           }
         }
+        }
+        // Everything above is admission and dispatch, and none of it runs once the run has
+        // decided to end. Everything below is the drain: turns already sent come back, are
+        // graded, integrated and routed, and only then does the loop reach the exit at the top.
 
         // Nothing in flight and nothing dispatchable: the advisor asked for work that no seat can
         // ever take. Thrown rather than worked around, because there is no correct fallback --
@@ -3380,7 +3445,13 @@ export class Relay {
               report.prose,
             ],
           })
-          if (halted) return halted
+          // Seat-scoped, and the scope is honoured now: this ends the run, and the OTHER seats
+          // still finish, are graded and integrated, and have their reports routed. The rest of
+          // THIS completion is skipped exactly as the return skipped it, so N=1 is unchanged.
+          if (halted) {
+            closing ??= { kind: 'outcome', outcome: halted }
+            continue advisor
+          }
         }
 
         // Empty AND unverified is not a report. The turn completed — the hook proved it —
@@ -3432,7 +3503,13 @@ export class Relay {
               ...(await this.#livenessEvidence(seat, report.emittedSinceSend)),
             ],
           })
-          if (halted) return halted
+          // Seat-scoped, and the scope is honoured now: this ends the run, and the OTHER seats
+          // still finish, are graded and integrated, and have their reports routed. The rest of
+          // THIS completion is skipped exactly as the return skipped it, so N=1 is unchanged.
+          if (halted) {
+            closing ??= { kind: 'outcome', outcome: halted }
+            continue advisor
+          }
         }
         this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text: `${seat.id} turn: ${formatVerdict(report.end.verdict)}` })
         this.#attributeArtifacts(seat)
@@ -3504,7 +3581,13 @@ export class Relay {
             ...(pre === undefined ? {} : { superseded: pre }),
           })
           this.#verdictPause = undefined
-          if (halted) return halted
+          // Seat-scoped, and the scope is honoured now: this ends the run, and the OTHER seats
+          // still finish, are graded and integrated, and have their reports routed. The rest of
+          // THIS completion is skipped exactly as the return skipped it, so N=1 is unchanged.
+          if (halted) {
+            closing ??= { kind: 'outcome', outcome: halted }
+            continue advisor
+          }
         }
 
         // §7a. Assessed before the advisor sees the report, so a degraded implementer is
@@ -3539,7 +3622,13 @@ export class Relay {
             detail: boundary.detail,
             evidence: boundary.evidence,
           })
-          if (halted) return halted
+          // Seat-scoped, and the scope is honoured now: this ends the run, and the OTHER seats
+          // still finish, are graded and integrated, and have their reports routed. The rest of
+          // THIS completion is skipped exactly as the return skipped it, so N=1 is unchanged.
+          if (halted) {
+            closing ??= { kind: 'outcome', outcome: halted }
+            continue advisor
+          }
           // Resumed. The operator may have resolved it by hand or may simply want another
           // round, and either way the count starts again -- an escalation on every subsequent
           // boundary would make resuming pointless.
@@ -3555,7 +3644,8 @@ export class Relay {
         const filled = dispatchReady()
         if (filled) {
           this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text: filled.detail })
-          return this.#end('ceiling', filled.detail)
+          closing ??= { kind: 'end', reason: 'ceiling', detail: filled.detail }
+          continue advisor
         }
 
         const leadAside = this.#drain(lead.id)
@@ -3571,15 +3661,17 @@ export class Relay {
       }
       return this.#end('budget')
     } finally {
-      // Turns that were still running when the run ended, named rather than dropped.
+      // Turns still outstanding when the run ended, named rather than dropped.
       //
-      // Every exit from the loop above can happen with siblings in flight -- a ceiling, a
-      // pause the operator did not resume, an escalation, a stop. Their sessions are closed by
-      // `stop()` and their reports are lost, which is a real cost and one no other record
-      // carries: the routing log shows the instruction going out and nothing coming back, and
-      // a reader has no way to tell that from a seat that is still thinking. At N=1 nothing is
-      // ever in flight here, because the one turn the loop is waiting on is the one it just
-      // finished processing.
+      // A backstop now rather than the normal case. Every ending the loop DECIDES on drains
+      // first: `closing` stops admission and the loop keeps processing arrivals until nothing
+      // is outstanding, so a ceiling, a budget, an escalation and a seat-scoped halt all let
+      // the seats already working finish, be graded and integrated, and have their reports
+      // routed. This is reached by the two endings that cannot drain -- `stop()`, which is
+      // closing the sessions out from under those turns, and an exception -- and it exists
+      // because a run that lost a report must say so: the routing log shows the instruction
+      // going out and nothing coming back, and a reader cannot tell that from a seat that is
+      // still thinking.
       if (outstanding() > 0) {
         const lost = [...inflight.keys(), ...arrived.map((c) => c.task.id)]
         this.#record({

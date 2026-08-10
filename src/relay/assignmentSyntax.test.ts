@@ -227,3 +227,50 @@ test('two directives may name the same seat, and both are admitted', () => {
   assert.equal(r.ok, true)
   assert.deepEqual(r.decisions?.map((d) => d.kind === 'instruct' && d.instruction), ['First this.', 'Then this.'])
 })
+
+/**
+ * The keyword forms and the addressed form cannot be combined, whichever comes first.
+ *
+ * `DONE` on the first line used to win outright: the whole-reply keyword tests ran BEFORE the
+ * reply was examined for directives, so `DONE\n@seat a: ...` was a clean end-of-run and every
+ * assignment under it was discarded without a word. The advisor believed it had done both, got
+ * one, and nothing in the log said the rest had gone. `ESCALATE` had the same shape.
+ *
+ * The fix is to decide the FORM first, so this is asserted from both directions: keyword above
+ * the directives, keyword below them, and keyword inside a body -- and, in every case, that the
+ * decisions which would have been admitted are not.
+ */
+test('a keyword above, below or inside an addressed reply fails the whole reply', () => {
+  const cases: [string, string][] = [
+    ['DONE\n@seat implementer: Add the tests.', 'the keyword first, which used to win outright'],
+    ['DONE — the work is finished.\n@seat implementer: Add the tests.', 'with a trailing clause, as an advisor writes it'],
+    ['ESCALATE: is this in scope?\n@role implementer: Add the tests.', 'ESCALATE has the same shape'],
+    ['@seat implementer: Add the tests.\nDONE', 'the keyword last'],
+    ['@seat implementer: DONE', 'the keyword as the whole instruction'],
+    ['@seat implementer: Add the tests.\n@seat implementer-2: ESCALATE: is this in scope?', 'the keyword as a later body'],
+  ]
+  for (const [reply, why] of cases) {
+    const r = parse(reply)
+    assert.equal(r.ok, false, `${why}: ${JSON.stringify(reply)}`)
+    assert.equal(r.why, 'mixed_keyword', why)
+    assert.equal(r.decisions, undefined, 'nothing may be admitted from a reply that mixes the two')
+  }
+})
+
+test('the legacy keyword forms are untouched by that rule', () => {
+  // The N=1 path. No directive anywhere, so the reply is what it has always been -- including
+  // a multi-line DONE, which is the shape the mixed-keyword rule has to be careful not to eat.
+  assert.deepEqual(parse('DONE'), { ok: true, decisions: [{ kind: 'done', instruction: 'DONE' }] })
+  assert.deepEqual(parse('DONE\nThe tests pass and the docs are updated.'), {
+    ok: true,
+    decisions: [{ kind: 'done', instruction: 'DONE\nThe tests pass and the docs are updated.' }],
+  })
+  const esc = parse('ESCALATE: which endpoint?\nBoth are defensible and the goal does not say.')
+  assert.equal(esc.ok, true)
+  assert.equal(esc.decisions?.[0]?.kind, 'escalate')
+  // And an ordinary instruction that merely CONTAINS the word on a later line is an
+  // instruction, because nothing in it addresses a seat.
+  const plain = parse('Add the tests.\nReport DONE when they pass.')
+  assert.equal(plain.ok, true)
+  assert.equal(plain.decisions?.[0]?.kind, 'instruct')
+})
