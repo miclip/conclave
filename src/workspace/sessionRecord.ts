@@ -159,6 +159,23 @@ export interface SessionParticipantStatus {
    */
   role: string
   /**
+   * How this seat was launched: the whole argv, and the model that argv names.
+   *
+   * Present at every N and on every seat, unlike `seat` below, because it says something at
+   * every N: `agent: opencode` is any of dozens of models at a ~30x price spread (#71), so a
+   * poller reading a one-seat run cannot tell an expensive run from a cheap one, nor repeat
+   * either. `model` is `null` when the argv named none -- a fact about the run, and
+   * deliberately not an empty string.
+   *
+   * Structural, like every other type in this file: the relay knows nothing about being
+   * recorded, and importing `ParticipantLaunch` would point the dependency the wrong way.
+   *
+   * There is no token count and no cost here, and there is not going to be one. Conclave
+   * drives the operator's own CLI on the operator's own subscription; what it can honestly
+   * offer is the join key for the billing export their provider already holds.
+   */
+  launch: { args: string[]; model: string | null }
+  /**
    * This seat's turns, from `snapshot()` -- the canonical side of the adapter seam.
    *
    * Required and empty rather than absent before anything has run, for the reason
@@ -611,6 +628,13 @@ export interface RecordableRelay {
     id: string
     rank: string
     role: string
+    /**
+     * The argv this seat was launched with and the model it names, composed once by the
+     * relay at join. Required rather than optional: a stand-in that omitted it would produce
+     * a status document missing a key the real one has, which is the drift this contract is
+     * structural in order to catch.
+     */
+    launch: { args: readonly string[]; model: string | null }
     session: {
       readonly agent: string
       /**
@@ -723,6 +747,10 @@ export function recordSession(
         agent: p.session.agent,
         rank: p.rank,
         role: p.role,
+        // Copied, like everything else this function returns: the status document is written
+        // repeatedly from a live relay, and handing out its own array would let a later reader
+        // of an earlier document see a list that had moved underneath it.
+        launch: { args: [...p.launch.args], model: p.launch.model },
         turns: turns.get(p.id) ?? [],
         ...(seen ? { activity: seen } : {}),
         ...(pending ? { awaitingPermission: { tool: pending.tool } } : {}),
