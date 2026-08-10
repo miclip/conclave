@@ -38,6 +38,7 @@ import {
   writeManifest,
   type WorktreeManifest,
 } from '../workspace/worktrees.ts'
+import { CheckLane } from './checkLane.ts'
 import { failedRequired, integrateSeat, integrationHead, type IntegrationCheckResult } from './integrate.ts'
 import {
   envelope,
@@ -344,6 +345,21 @@ export interface RelayOptions {
   onLog?: (m: RelayMessage) => void
   /** Enables automatic rotation on mechanical degradation. See `RotationConfig`. */
   rotation?: RotationConfig
+  /**
+   * How many check sections may run at once, run-wide. Default 1 (D7).
+   *
+   * The configured checks are run by two stations -- a rotation proving a replacement, and the
+   * merge boundary measuring the tree the seats built together -- and both want the machine.
+   * Serialised by default because check commands contend on machine-global resources: this
+   * project's own suite caps `--test-concurrency` for exactly that reason. Raise it only for a
+   * suite known to be isolated; see `CheckLane`, which also records why a value above 1 cannot
+   * yet change anything.
+   *
+   * Behaviourless at the default on every run that exists today: the two stations are never
+   * live at the same time, so nothing ever queues. It is here so that per-seat rotation lands
+   * against a lane that already exists rather than one written in the same change.
+   */
+  checkConcurrency?: number | undefined
 }
 
 /**
@@ -1042,6 +1058,41 @@ export class Relay {
     // Set here and nowhere else. Whether rotation was configured cannot depend on how far
     // the run got -- see rotationWatch.armed and issue #31.
     this.rotationWatch.armed = opts.rotation !== undefined
+    // In the constructor rather than as a field initialiser, because it reads `opts` and it
+    // records through `#record`: the lane must not exist before the thing it reports to.
+    this.#checkLane = new CheckLane({
+      ...(opts.checkConcurrency === undefined ? {} : { concurrency: opts.checkConcurrency }),
+      // A wait is a fact about scheduling, not a verdict about a seat. It is recorded so that
+      // a run which appears to have stalled at a boundary can be read as queueing rather than
+      // as a hang -- and it says out loud that the seat keeps its task, because "waiting" and
+      // "blocked" are the two words this run reports with and only one of them is a problem.
+      onWait: (claim, holders) => {
+        this.#record({
+          from: 'orchestrator',
+          fromRank: 'human',
+          to: [],
+          kind: 'note',
+          text:
+            `${claim.seat} is waiting for the check lane before its ${claim.station} checks ` +
+            `(held by ${holders.map((h) => `${h.seat}/${h.station}`).join(', ')}). It stays ` +
+            `assigned to ${claim.detail ?? 'its current work'}; nothing is blocked and nothing ` +
+            `needs an answer.`,
+        })
+      },
+    })
+  }
+
+  /**
+   * The run-scoped lane the configured checks run behind.
+   *
+   * Public because it is evidence: `history()` is the only record that a station reached the
+   * lane at all, and a test asserting that two stations do not double-queue has nothing else
+   * to read. Nothing outside the relay should acquire it during a run.
+   */
+  readonly #checkLane: CheckLane
+
+  get checkLane(): CheckLane {
+    return this.#checkLane
   }
 
   static async start(opts: RelayOptions): Promise<Relay> {
@@ -2791,7 +2842,34 @@ export class Relay {
    * seat undispatchable, and raising this onto a decision queue the advisor services, is the
    * seat-block machinery — not built here.
    */
-  #crossBoundary(task: Task, seatId: string): BoundaryOutcome {
+  async #crossBoundary(task: Task, seatId: string): Promise<BoundaryOutcome> {
+    // N=1 takes none of this: no manifest, no merge, no checks against an integration tree
+    // that does not exist -- and so no reason to touch the lane. Guarded before the acquire
+    // rather than inside it, so a default run does not acquire a lane it has no use for.
+    if (!this.#worktrees?.seats.some((s) => s.seatId === seatId)) return { kind: 'clear' }
+    // The WHOLE boundary, not just the checks. `integrateSeat` merges into the integration
+    // checkout and resets the seat worktrees onto the new HEAD, which is precisely the change
+    // a rotation's two captures would read as `repository_diverged`. One acquire, here, at the
+    // outermost point: the checks `integrateSeat` runs for itself must not take the lane a
+    // second time, which is why `integrate.ts` knows nothing about it.
+    //
+    // Outside the boundary's own try/catch on purpose. That catch converts a throw into
+    // `merge_blocked`, and a lane fault is not a claim about anyone's branch.
+    return this.#checkLane.run(
+      { seat: seatId, station: 'integration', detail: task.id },
+      () => this.#mergeAndCheck(task, seatId),
+    )
+  }
+
+  /**
+   * The boundary itself, with the lane already held. See `#crossBoundary`.
+   *
+   * Synchronous, as it has always been: both `integrateSeat` and the checks it runs are
+   * `spawnSync`. That is what makes the lane's protection a real invariant rather than a hope
+   * -- nothing can interleave inside this -- and it is also why a check command freezes every
+   * other seat's I/O for as long as it runs, which is a separate problem this does not fix.
+   */
+  #mergeAndCheck(task: Task, seatId: string): BoundaryOutcome {
     const manifest = this.#worktrees
     if (!manifest) return { kind: 'clear' }
     const tree = manifest.seats.find((s) => s.seatId === seatId)
@@ -3868,7 +3946,7 @@ export class Relay {
         // seat's work is invisible to everyone else until it is committed and merged, so this is
         // where it stops being the seat's and starts being the run's. At N=1 `#worktrees` is
         // undefined and nothing here runs -- one tree, one branch, and no merge to do.
-        const boundary = this.#crossBoundary(task, seat.id)
+        const boundary = await this.#crossBoundary(task, seat.id)
 
         // The integration boundary, and the release it earns -- or the release it does NOT earn.
         // Ahead of the advisor turn rather than after it: a seat whose work is integrated, with
@@ -4026,7 +4104,9 @@ export class Relay {
 
     this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text: `rotating ${impl.id}: ${reason}` })
 
-    const result = await rotate({
+    // Named rather than passed inline only so the lane can wrap the call; the annotation is
+    // what keeps `deps.exchange` and `deps.note` contextually typed once it is not an argument.
+    const rotation: Parameters<typeof rotate>[0] = {
       old: impl.session,
       advisor: advisor.session,
       reason,
@@ -4063,7 +4143,21 @@ export class Relay {
           this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text })
         },
       },
-    })
+    }
+
+    // The whole transfer, behind the lane, and the window is the reason rather than the CPU.
+    // `rotate()` captures the repository, spends a full agent turn proving a replacement
+    // against that capture, and captures again -- a merge landing between the two rolls the
+    // rotation back as `repository_diverged` and names the repository for what was a race.
+    // Holding the lane across the acceptance turn is expensive and is the point: a boundary
+    // that waits is late, a rotation rolled back by a race is work thrown away.
+    //
+    // One acquire, at the outermost point. `rotate()` and `record.ts` know nothing about the
+    // lane, so the checks they run inside this cannot queue for it a second time.
+    const result = await this.#checkLane.run(
+      { seat: impl.id, station: 'rotation', detail: reason },
+      () => rotate(rotation),
+    )
 
     if (result.status === 'rotated' && audition) {
       // Swap the session in place, so the participant id, rank and routing history survive

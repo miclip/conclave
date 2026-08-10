@@ -324,7 +324,7 @@ const DECLARED: Record<string, string> = {
     'Authority routing (#56, D2) sends implementer_unanswered to the advisor before the operator, ' +
     'so a default run interrupts the human less than today. Real change at N=1, an improvement, ' +
     'declared rather than discovered. The pause reason exists at src/relay/run.ts:51 and the halt ' +
-    'that raises it is at src/relay/relay.ts:3710.',
+    'that raises it is at src/relay/relay.ts:3788.',
   'status.pause.resolution':
     'Classifying unresolved conditions on both axes (#56, D2) added `resolution` to every RunPause ' +
     '(src/relay/run.ts:183), so `conclave status --json` on a paused default run now carries ' +
@@ -480,6 +480,37 @@ const DECLARED: Record<string, string> = {
     'was relaxed. That the second station DOES something is proved against real worktrees, ' +
     'real merges and real check commands in src/relay/integrationRed.test.ts and ' +
     'src/relay/integrate.test.ts.',
+  '--check-concurrency on both front-ends, and one lane for both check stations':
+    'The optional flag surface grows by one on each command: --check-concurrency N, how many ' +
+    'of the configured --checks commands may run at once across the whole run. Default 1. The ' +
+    'operator’s reason (#64, D7): check commands contend for machine-global resources, and at ' +
+    'N>1 the two stations that run them — a rotation proving a replacement, and the merge ' +
+    'boundary measuring the tree the seats built together (#80) — were designed without ' +
+    'reference to each other. This project already learned the contention half about its own ' +
+    'suite (`--test-concurrency=4` in package.json). The stronger half is correctness rather ' +
+    'than speed: `rotate()` captures the repository, spends a full agent turn proving a ' +
+    'replacement against that capture, and captures again, and `integrateSeat` merges into the ' +
+    'integration checkout and resets the seat worktrees onto the new HEAD — so a merge landing ' +
+    'inside a rotation’s window rolls a good rotation back as `repository_diverged` and names ' +
+    'the repository for what was a race. So both stations now run behind one run-scoped lane ' +
+    '(src/relay/checkLane.ts), each acquiring ONCE at its outermost point: `#crossBoundary` ' +
+    'wraps the whole boundary including the checks `integrateSeat` runs for itself, and ' +
+    '`rotateImplementer` wraps the whole of `rotate()`. integrate.ts and rotate.ts know nothing ' +
+    'about the lane, which is what stops the same section queueing twice. A seat waiting for ' +
+    'the lane is ASSIGNED: it keeps its task, its seat state stays `integrating`, and nothing ' +
+    'about it is `merge_blocked`, `failed` or a question for a human — a wait is recorded as an ' +
+    'orchestrator note and nothing else. THE DEFAULT RUN DOES NOT CHANGE, and not by a ' +
+    'seat-count branch: at N=1 there is no manifest, so the boundary never reaches the lane, ' +
+    'and with the flag absent no `checkConcurrency` key is passed to Relay.start at all. What ' +
+    'this DOES NOT yet do is stated rather than implied: both check runners are `spawnSync` in ' +
+    'the one orchestrator process, so two check commands cannot overlap in wall-clock time ' +
+    'however many slots the lane hands out, and per-seat rotation does not exist yet ' +
+    '(`rotateImplementer` refuses at N>1) — so today the two stations are never live at once ' +
+    'and nothing ever queues in an unmodified run. The lane is built first on purpose, so ' +
+    'per-seat rotation lands against a serialisation mechanism that already exists and is ' +
+    'already tested, rather than one written in the same change. No assertion in this file was ' +
+    'relaxed. That the lane DOES something is proved against real worktrees and real merges in ' +
+    'src/relay/checkLaneRun.test.ts, and the mechanism itself in src/relay/checkLane.test.ts.',
 }
 
 test('DECLARED contains exactly the routing, pause-resolution, attribution, ceiling-flag, seat-flag, seat-status, launch-record, flag-reader and integration-check entries', () => {
@@ -493,6 +524,7 @@ test('DECLARED contains exactly the routing, pause-resolution, attribution, ceil
     'per-seat launch args and model in status --json and the run report',
     'one flag reader for both front-ends',
     '--checks also gate the merged tree at N>1, and the integration_failed outcome',
+    '--check-concurrency on both front-ends, and one lane for both check stations',
   ])
 })
 
@@ -588,7 +620,7 @@ async function seatsFromSessionCli(): Promise<{ creates: CreateRecord[]; cwd: st
  * The two machine-readable documents a default run actually emits.
  *
  * Both come out of one `relay --json` run in a temporary repository, through the production
- * call sites: the report is what `bin/conclave.ts:1232` prints, and the status record is what
+ * call sites: the report is what `bin/conclave.ts:1259` prints, and the status record is what
  * `recordSession` wrote during that same run, read back by `main(['status', '--json'])` --
  * which resolves the most recent session in `process.cwd()`, so the record has to have been
  * written where an operator would look for it.
@@ -633,7 +665,7 @@ async function defaultRunDocuments(): Promise<{ report: unknown; status: unknown
  * blind to that subtree is claiming more than it checks.
  *
  * Built through the real recorder: `recordSession` is what both front-ends call, and
- * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:854
+ * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:864
  * with the same object -- a `RunPause` the run handle raised, not one written here. Read back
  * through `main(['status', '--json'])`, so the serialisation and the reconciliation against
  * the pid are the production ones.
@@ -771,7 +803,7 @@ async function provokeMergeBlocked(repo: string): Promise<{ relay: Relay; run: R
  * Drive a real relay into one condition and return the pause it raised.
  *
  * The provocations are the ones `resolution.test.ts`'s own `provoke` already uses, deliberately:
- * the same triggers reaching the same single halt site (src/relay/relay.ts:2229), where the
+ * the same triggers reaching the same single halt site (src/relay/relay.ts:2280), where the
  * classification is computed by production `resolutionFor` from the subject the caller passed.
  * Nothing here writes a `RunPause`.
  *
@@ -854,7 +886,7 @@ async function provoke(
  * The status document of a run paused for one given reason.
  *
  * Built through the real recorder: `recordSession` is what both front-ends call, and
- * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:854
+ * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:864
  * with the same object -- a `RunPause` the relay raised, not one written here. Read back
  * through `main(['status', '--json'])`, so the serialisation and the reconciliation against
  * the pid are the production ones.
@@ -874,7 +906,7 @@ async function pausedStatusDocument(reason: PauseReason): Promise<unknown> {
     goal: 'a default goal',
     front: 'session',
     startedAt: Date.now(),
-    // Passed because the console always passes one (src/repl/session.ts:680), so the status
+    // Passed because the console always passes one (src/repl/session.ts:690), so the status
     // documents this file pins differ only in what a pause actually changes.
     logPath: join(repo, '.conclave', 'runs', 'session-test.ndjson'),
     build: 'test',
@@ -1058,9 +1090,9 @@ test('default run works in the run cwd and creates no worktree', async () => {
     assert.equal(c.cwd, fromCli.cwd, `the session CLI must create ${c.id} in the run cwd`)
   }
 
-  // The relay CLI passes process.cwd() as the run cwd: bin/conclave.ts:1145.
-  // The relay hands that same cwd to each participant adapter: src/relay/relay.ts:1244-1250.
-  // The cwd getter simply returns the option: src/relay/relay.ts:1137-1139.
+  // The relay CLI passes process.cwd() as the run cwd: bin/conclave.ts:1169.
+  // The relay hands that same cwd to each participant adapter: src/relay/relay.ts:1295-1301.
+  // The cwd getter simply returns the option: src/relay/relay.ts:1188-1190.
   assert.match(relay, /cwd:\s*process\.cwd\(\)/, 'relay block must start in process.cwd')
   // Both creation sites now pass a NAMED context object rather than an inline literal, because
   // the same object composes the launch args that get recorded -- see
@@ -1088,7 +1120,7 @@ test('default run works in the run cwd and creates no worktree', async () => {
 
   // A default run with no subagents must not create any git worktree. The relay only samples
   // the worktree list for its subagent-use report: src/relay/subagents.ts:68 defines
-  // worktreePaths, and src/relay/relay.ts:1791, :1838 and :3120 read it.
+  // worktreePaths, and src/relay/relay.ts:1842, :1889 and :3198 read it.
   // Prove it by exercising the run in a real temporary repository.
   const repo = mkdtempSync(join(tmpdir(), 'conclave-default-'))
   try {
@@ -1155,7 +1187,10 @@ test('both flag helpers fall back when the flag is absent, and each block reads 
   // see DECLARED['optional ceiling flags on both front-ends'] for the operator's reason.
   // `implementers` is the second such change, declared at
   // DECLARED['--implementers on both front-ends'] -- the flag that adds seats, which D1 says is
-  // the ONLY thing adding seats may do.
+  // the ONLY thing adding seats may do. `check-concurrency` is the third, declared at
+  // DECLARED['--check-concurrency on both front-ends, and one lane for both check stations'] --
+  // how many check commands may run at once, which is a fact about the machine rather than
+  // about the run, and is therefore on both commands.
   const relayFlags = flagsIn(relay)
   const sessionFlags = flagsIn(session)
   assert.deepEqual(
@@ -1163,6 +1198,7 @@ test('both flag helpers fall back when the flag is absent, and each block reads 
     [
       'advisor',
       'advisor-args',
+      'check-concurrency',
       'checks',
       'checks-informational',
       'checks-unrelated',
@@ -1196,6 +1232,7 @@ test('both flag helpers fall back when the flag is absent, and each block reads 
     [
       'advisor',
       'advisor-args',
+      'check-concurrency',
       'checks',
       'checks-informational',
       'checks-unrelated',
