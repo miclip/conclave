@@ -198,7 +198,7 @@ export function resolutionFor(subject: ResolutionSubject, config: ResolutionConf
         // resolved for the seat in `rotationFor` (`src/relay/relay.ts:310`), which is where a
         // per-seat policy may override it (D7) and where the default is written once -- and the
         // two pause sites below it are reachable only WITH rotation configured for that seat
-        // (`src/relay/relay.ts:2786-2792` ends the run instead when there are no checks to
+        // (`src/relay/relay.ts:2827-2833` ends the run instead when there are no checks to
         // reproduce). So this axis records the entitlement the operator has already
         // delegated, and no pause site can reach the `operator` branch today -- an unarmed
         // run ENDS on degradation instead of pausing, which `resolution.test.ts` asserts.
