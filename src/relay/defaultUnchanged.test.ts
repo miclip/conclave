@@ -707,13 +707,20 @@ const DECLARED: Record<string, string> = {
     'gated on the first turn because a later turn has already proved the launch works, and on ' +
     'the child having produced nothing, which is tracked separately from the idle clock: the ' +
     'adapters emit `turn_start` the instant they arm, so `lastActivityAt` cannot tell the two ' +
-    'apart. "Produced nothing" is measured per adapter family and is literal in both: on the ' +
-    'pty adapters it is the absence of any event the CHILD sourced (`turn_start` and this ' +
-    'adapter’s own revisions do not count), and on the run-per-turn adapters it is ZERO parsed ' +
-    'records — plus zero hook deliveries on kimi — rather than empty content fields, because an ' +
-    '`error` record, a `role: "tool"` result, an empty assistant message and an unrecognised ' +
-    'record type all leave `steps`/`textBlocks`/`toolCalls` empty on a child that is talking, ' +
-    'and blaming the model there would talk over the child’s own answer. Nothing else about the verdict moves — same outcome, same confidence, same ' +
+    'apart. "Produced nothing" means NO OUTPUT WHATSOEVER, a claim about bytes rather than ' +
+    'about a structured stream, and it is measured per adapter family: on the pty adapters it ' +
+    'is the absence of any event the CHILD sourced (`turn_start` and this adapter’s own ' +
+    'revisions do not count), and on the run-per-turn adapters it is zero signals of ANY kind — ' +
+    'no parsed record of any type, no hook delivery on kimi, and not one non-empty write to ' +
+    'stderr. NOT empty content fields, which is what it read first and got wrong: an `error` ' +
+    'record, a `role: "tool"` result, an empty assistant message, an unrecognised record type ' +
+    'and a provider failure printed to stderr all leave `steps`/`textBlocks`/`toolCalls` empty ' +
+    'on a child that has already answered, and naming its model there talks over that answer ' +
+    'with speculation. ONE FURTHER REPORT CHANGE FALLS OUT OF THAT, small and observable: a ' +
+    'watchdog-killed turn on either run-per-turn adapter now carries the child’s stderr in its ' +
+    'verdict provenance as a `process` caveat, where that path used to keep the clock and the ' +
+    'signal and discard the one line saying why. Nothing else about a verdict moves — same ' +
+    'outcome, same confidence, same ' +
     'watchdog line first — and a turn that spoke, a later turn, or an adapter that reports no ' +
     'launch state gets the chain it always got, asserted byte for byte in ' +
     'src/outcomes/firstTurnDiagnosis.test.ts. No assertion in this file was relaxed. That both ' +

@@ -159,16 +159,23 @@ interface TurnState {
   toolCalls: { tool: string; failed: boolean; args?: string | undefined }[]
   steps: number
   /**
-   * How many records this turn has taken in from the child, of ANY type.
+   * How many times this turn has heard ANYTHING from the child: a parsed record of any type, or
+   * a non-empty write to stderr.
    *
    * Counted separately from `steps`, `textBlocks` and `toolCalls` because those three are
    * CONTENT, and the question the first-turn diagnosis asks is not "did it do any work" but
    * "did it say anything at all" (#82). An `error` record, a `step_finish`, a record type this
-   * adapter does not recognise -- each is a child that started and is talking, and reading
-   * emptiness off the content fields would blame the launch for a run that had already told us
-   * something else was wrong.
+   * adapter does not recognise, a provider failure written to stderr -- each is a child that
+   * started and is talking, and reading emptiness off the content fields would blame the launch
+   * for a run that had already told us what was wrong.
+   *
+   * STDERR COUNTS, and that is the whole of the acceptance condition: "produced no output
+   * whatsoever" is a claim about bytes, not about the structured stream. A child that prints a
+   * provider error and then hangs has ANSWERED, and hiding that answer behind speculation about
+   * the model is worse than losing the speculation -- which is all that is lost when a harmless
+   * startup warning suppresses it.
    */
-  records: number
+  heard: number
   tokens?: TurnTokens | undefined
   /** Content hash from the last step that reported one. Artifact attribution, free. */
   snapshot?: string | undefined
@@ -271,7 +278,7 @@ export class OpenCodeRunAdapter implements AgentSession {
       textBlocks: [],
       toolCalls: [],
       steps: 0,
-      records: 0,
+      heard: 0,
       startedAt: Date.now(),
     }
     this.#turns.push(turn)
@@ -343,16 +350,18 @@ export class OpenCodeRunAdapter implements AgentSession {
         // thing to look at -- named as a candidate, since validation has already refused the
         // models it could prove wrong and what reaches here is the residue.
         //
-        // `records` rather than the content fields (`steps`, `textBlocks`, `toolCalls`), which
-        // is the difference between "did no work" and "said nothing": a run that announced an
-        // `error` and stalled leaves all three empty while having already told us what went
-        // wrong, and blaming its model would talk over the child's own answer.
-        if (this.#turns.length === 1 && turn.records === 0) {
+        // `heard` rather than the content fields (`steps`, `textBlocks`, `toolCalls`), which is
+        // the difference between "did no work" and "said nothing": a run that announced an
+        // `error`, or wrote one to stderr, and then stalled leaves all three empty while having
+        // already told us what went wrong, and blaming its model would talk over the child's
+        // own answer.
+        if (this.#turns.length === 1 && turn.heard === 0) {
           const model = modelFromArgs(this.#opts.args ?? [])
           turn.provenance.push({
             source: 'orchestrator',
             detail:
-              `the first run produced no records at all, rather than producing some and stalling` +
+              `the first run produced nothing at all -- no records, not a byte of stderr -- ` +
+              `rather than producing some output and stalling` +
               (model === null
                 ? ': its argv named no model, so a configured default chose one'
                 : `: it was launched with model '${model}', which is a candidate cause`),
@@ -365,6 +374,10 @@ export class OpenCodeRunAdapter implements AgentSession {
 
     let stderr = ''
     child.stderr.on('data', (c: Buffer) => {
+      // Counted BEFORE the bound, and outside it: the cap is about how much text is worth
+      // keeping, and whether the child spoke at all is a different question that a full buffer
+      // must not start answering wrongly.
+      if (c.toString('utf8').trim()) turn.heard += 1
       // Bounded: a failing child can be noisy, and this is only ever used as a message.
       if (stderr.length < 8192) stderr += c.toString('utf8')
     })
@@ -406,7 +419,7 @@ export class OpenCodeRunAdapter implements AgentSession {
   #onRecord(turn: TurnState, record: OpenCodeRecord): void {
     // Counted before the switch, so every record counts -- including the ones the switch has no
     // case for. A type this adapter has never seen is still the child speaking.
-    turn.records += 1
+    turn.heard += 1
     // Every record carries it; the first one to arrive is what makes the session resumable.
     if (!this.#sessionId && record.sessionID) this.#sessionId = record.sessionID
 
@@ -550,6 +563,13 @@ export class OpenCodeRunAdapter implements AgentSession {
           // than taken whole because everything else on a killed turn describes what the child
           // was doing before we killed it, which is not evidence about how it ended.
           ...turn.provenance.filter((p) => p.source === 'watchdog' || p.caveat === true),
+          // What the child said before it went quiet. Carried here as well as on the
+          // exited-without-finishing path: a run killed by the watchdog used to report the clock
+          // and the signal and nothing else, so a provider error printed to stderr was discarded
+          // at exactly the moment it was the whole answer.
+          ...(stderr.trim()
+            ? [{ source: 'process' as const, detail: stderr.trim().slice(0, 400), caveat: true }]
+            : []),
           { source: 'process', detail: `signal ${signal}` },
         ],
       }

@@ -150,16 +150,17 @@ interface TurnState {
   /** Tools the child reported as having FAILED. `stream-json` cannot distinguish these. */
   failedTools: Set<string>
   /**
-   * How many signals this turn has taken in from the child -- parsed records of any role, and
-   * hook deliveries.
+   * How many times this turn has heard ANYTHING from the child: a parsed record of any role, a
+   * hook delivery, or a non-empty write to stderr.
    *
    * Counted separately from `textBlocks` and `toolCalls` because those two are CONTENT, and
-   * plenty of real records leave both empty: a `role: 'tool'` result is deliberately not
-   * re-emitted, and an assistant message with neither text nor tool calls is the completion
-   * signal itself. The first-turn diagnosis (#82) asks whether the child said ANYTHING, so it
-   * has to read a counter that no record can pass through unnoticed.
+   * plenty of real signals leave both empty: a `role: 'tool'` result is deliberately not
+   * re-emitted, an assistant message with neither text nor tool calls is the completion signal
+   * itself, and a provider or startup failure arrives on stderr and nowhere else. The
+   * first-turn diagnosis (#82) asks whether the child said ANYTHING, so it reads a counter that
+   * no signal can pass through unnoticed -- "no output whatsoever" is a claim about bytes.
    */
-  received: number
+  heard: number
   startedAt: number
   endedAt?: number | undefined
 }
@@ -298,7 +299,7 @@ export class KimiPrintAdapter implements AgentSession {
       sawFinalAssistant: false,
       announcedStop: false,
       failedTools: new Set(),
-      received: 0,
+      heard: 0,
       startedAt: Date.now(),
     }
     this.#turns.push(turn)
@@ -396,13 +397,13 @@ export class KimiPrintAdapter implements AgentSession {
         // Kimi's model normally comes from the generated config file rather than the argv, so
         // this usually says the argv named none -- which is still the sentence that points at
         // the launch instead of leaving `timed_out` to stand on its own.
-        if (this.#turns.length === 1 && turn.received === 0) {
+        if (this.#turns.length === 1 && turn.heard === 0) {
           const model = modelFromArgs(this.#opts.args ?? [])
           turn.provenance.push({
             source: 'orchestrator',
             detail:
-              `the first run produced no records and no hooks at all, rather than producing some ` +
-              `and stalling` +
+              `the first run produced nothing at all -- no records, no hooks, not a byte of ` +
+              `stderr -- rather than producing some output and stalling` +
               (model === null
                 ? ': its argv named no model, so the provider config file chose one'
                 : `: it was launched with model '${model}', which is a candidate cause`),
@@ -415,6 +416,9 @@ export class KimiPrintAdapter implements AgentSession {
 
     let stderr = ''
     child.stderr.on('data', (c: Buffer) => {
+      // Counted BEFORE the bound, and outside it: whether the child spoke at all must not
+      // depend on how much it had already said.
+      if (c.toString('utf8').trim()) turn.heard += 1
       if (stderr.length < 8192) stderr += c.toString('utf8')
     })
 
@@ -459,7 +463,7 @@ export class KimiPrintAdapter implements AgentSession {
   #onRecord(turn: TurnState, record: KimiRecord): void {
     // Counted before anything is inspected, so a record that produces no event -- a tool result,
     // an empty assistant message, a role this adapter ignores -- still proves the child spoke.
-    turn.received += 1
+    turn.heard += 1
     const at = Date.now()
     if (record.role === 'assistant') {
       const text = textOf(record.content)
@@ -522,7 +526,7 @@ export class KimiPrintAdapter implements AgentSession {
     const live = this.#turns.find((t) => t.state === 'in_progress')
     // A hook is the child too, and on this adapter it is a channel the record stream does not
     // carry: a turn whose only signal was `Stop` has spoken, whatever its stdout did.
-    if (live) live.received += 1
+    if (live) live.heard += 1
     switch (d.event) {
       case 'Stop':
         // The announced terminal signal. Recorded on the turn rather than settled here: the
@@ -608,6 +612,12 @@ export class KimiPrintAdapter implements AgentSession {
         provenance: [
           // The watchdog's own lines, and the diagnosis it wrote beside them.
           ...turn.provenance.filter((p) => p.source === 'watchdog' || p.caveat === true),
+          // What the child said before it went quiet -- on this adapter, the only place a
+          // provider or config failure appears at all. Discarding it on the killed path meant
+          // reporting a clock over the top of the child's own answer.
+          ...(stderr.trim()
+            ? [{ source: 'process' as const, detail: stderr.trim().slice(0, 400), caveat: true }]
+            : []),
           { source: 'process', detail: `signal ${signal}` },
         ],
       }

@@ -196,7 +196,7 @@ test('a binary that is not on PATH is a verdict, not a crash', async () => {
   await s.close()
 })
 
-/** Emits nothing and never exits, so only the watchdog can end the turn. */
+/** Emits nothing on either stream and never exits, so only the watchdog can end the turn. */
 function hangingStub(): string {
   const dir = mkdtempSync(join(tmpdir(), 'kimi-hang-'))
   const command = join(dir, 'kimi-hang')
@@ -204,6 +204,44 @@ function hangingStub(): string {
   chmodSync(command, 0o755)
   return command
 }
+
+/** Writes `err` to stderr, says nothing on stdout, and hangs. */
+function hangingStubOnStderr(err: string): string {
+  const dir = mkdtempSync(join(tmpdir(), 'kimi-hang-err-'))
+  const errPath = join(dir, 'err.txt')
+  writeFileSync(errPath, err)
+  const command = join(dir, 'kimi-hang-err')
+  writeFileSync(command, `#!/bin/sh\ncat ${JSON.stringify(errPath)} >&2\nsleep 30\n`)
+  chmodSync(command, 0o755)
+  return command
+}
+
+test('stderr is output too: a child that printed an error and hung is not blamed on its model', async () => {
+  // On this adapter stderr is where a provider or config failure appears AT ALL -- the structured
+  // stream carries the conversation and nothing else -- so a gate that counted only records and
+  // hooks would name the model on precisely the turn the child had explained itself.
+  const session = await KimiPrintAdapter.start({
+    cwd: REPO,
+    role: 'implementer',
+    command: hangingStubOnStderr('error: no such model on this provider\n'),
+    watchdogMs: 600,
+  })
+  await session.send('go', { kind: 'orchestrator' })
+  const events = await nextTurn(session)
+  assert.deepEqual(events.filter((e) => e.type === 'message' || e.type === 'tool_use'), [])
+  const end = events.find((e) => e.type === 'turn_end') as TurnEndEvent
+  assert.equal(end.verdict.outcome, 'timed_out')
+  assert.equal(
+    end.verdict.provenance.find((p) => p.source === 'orchestrator' && /first run/.test(p.detail)),
+    undefined,
+    'the child spoke, so the launch is not named',
+  )
+  assert.ok(
+    end.verdict.provenance.some((p) => /no such model on this provider/.test(p.detail)),
+    `the child's own answer must survive into the verdict: ${JSON.stringify(end.verdict.provenance)}`,
+  )
+  await session.close()
+})
 
 /** Emits `body` and then never exits, so only the watchdog can end the turn. */
 function hangingStubEmitting(body: string): string {

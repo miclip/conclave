@@ -357,17 +357,23 @@ test('a provider failure the child announced reaches the verdict', async () => {
 })
 
 /**
- * A stand-in that emits `body` and then never exits, so only the watchdog can end the turn.
+ * A stand-in that emits `body` on stdout and `err` on stderr, then never exits, so only the
+ * watchdog can end the turn.
  *
  * Separate from `stub` above rather than a flag on it: everything else in this file is about a
  * child that finishes, and a `sleep` in the common helper would be a trap for the next test.
  */
-function hangingStub(body: string): string {
+function hangingStub(body: string, err = ''): string {
   const dir = mkdtempSync(join(tmpdir(), 'oc-hang-'))
   const payload = join(dir, 'payload.ndjson')
+  const errPath = join(dir, 'err.txt')
   writeFileSync(payload, body)
+  writeFileSync(errPath, err)
   const command = join(dir, 'opencode-hang')
-  writeFileSync(command, `#!/bin/sh\ncat ${JSON.stringify(payload)}\nsleep 30\n`)
+  writeFileSync(
+    command,
+    `#!/bin/sh\ncat ${JSON.stringify(payload)}\ncat ${JSON.stringify(errPath)} >&2\nsleep 30\n`,
+  )
   chmodSync(command, 0o755)
   return command
 }
@@ -427,6 +433,34 @@ test('a record the child sent but this adapter records no CONTENT for still supp
     assert.equal(launchCaveat(end), undefined, `${why}: the child spoke, so the launch is not named`)
     await session.close()
   }
+})
+
+test('stderr is output too: a child that printed an error and hung is not blamed on its model', async () => {
+  // The acceptance condition is "no output whatsoever", which is a claim about BYTES rather than
+  // about the structured stream. A child that names a provider failure on stderr and then hangs
+  // has already answered, and speculating about its model on top of that answer buries the one
+  // line an operator needed. The verdict must carry that line, too -- it used to be discarded on
+  // the killed path, so a watchdog kill reported the clock and the signal and nothing else.
+  const session = await OpenCodeRunAdapter.start({
+    cwd: REPO,
+    role: 'implementer',
+    command: hangingStub('', 'error: provider returned 502 for opencode/not-a-model\n'),
+    args: ['-m', 'opencode/not-a-model'],
+    watchdogMs: 600,
+  })
+  await session.send('go', { kind: 'orchestrator' })
+  const events = await nextTurn(session)
+  // Nothing was parsed and no content event exists: the ONLY thing this child produced is the
+  // stderr line, which is what makes this the case the record counter alone still gets wrong.
+  assert.deepEqual(events.filter((e) => e.type === 'message' || e.type === 'tool_use'), [])
+  const end = events.find((e) => e.type === 'turn_end') as TurnEndEvent
+  assert.equal(end.verdict.outcome, 'timed_out')
+  assert.equal(launchCaveat(end), undefined, 'the child spoke, so the launch is not named')
+  assert.ok(
+    end.verdict.provenance.some((p) => /provider returned 502/.test(p.detail)),
+    `the child's own answer must survive into the verdict: ${JSON.stringify(end.verdict.provenance)}`,
+  )
+  await session.close()
 })
 
 test('a run that produced records and then stalled is not blamed on its model', async () => {
