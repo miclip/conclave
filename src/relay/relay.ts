@@ -2051,7 +2051,48 @@ export class Relay {
     )
   }
 
+  /**
+   * How many exchanges this relay currently has open on each participant, by id.
+   *
+   * The relay's OWN bookkeeping, and deliberately not a reading of an adapter. A session's state
+   * says `running` whether or not a turn is in progress, the transcript settles behind the hook,
+   * and `AgentEvent` has no idle member -- so every way of inferring this from the child is a
+   * guess that is wrong for a window rather than a fact. What this records instead is something
+   * the relay knows for certain because it is the only thing that does it: a send it issued and
+   * has not yet finished reading the answer to.
+   *
+   * A count rather than a set of ids. Nothing nests today, and a set would silently clear the
+   * outer entry the moment something did -- which would hand out permission to rotate over a
+   * live turn, in the exact code that exists to refuse it.
+   */
+  #exchanges = new Map<string, number>()
+
+  /** Whether the relay is mid-exchange with this participant. See `#exchanges`. */
+  #busy(participantId: string): boolean {
+    return (this.#exchanges.get(participantId) ?? 0) > 0
+  }
+
+  /**
+   * One exchange, bracketed so the bookkeeping cannot leak.
+   *
+   * The whole turn is in `#exchangeTurn`; this is only the bracket. Split rather than wrapped in
+   * place so the release sits in a `finally` that no later edit inside a 150-line method can slip
+   * past: a turn that throws -- a transport fault, a watchdog, a session closed underneath it --
+   * must leave the participant rotatable, or one lost turn would make the seat permanently
+   * unrotatable and the refusal would outlive the condition it describes.
+   */
   async #exchange(p: RelayParticipant, text: string): Promise<TurnResult> {
+    this.#exchanges.set(p.id, (this.#exchanges.get(p.id) ?? 0) + 1)
+    try {
+      return await this.#exchangeTurn(p, text)
+    } finally {
+      const left = (this.#exchanges.get(p.id) ?? 1) - 1
+      if (left > 0) this.#exchanges.set(p.id, left)
+      else this.#exchanges.delete(p.id)
+    }
+  }
+
+  async #exchangeTurn(p: RelayParticipant, text: string): Promise<TurnResult> {
     // Counted here, where a turn actually starts, so the ceiling measures work done rather
     // than advisor turns entered -- one advisor turn can drive one turn or several.
     this.#turnsTaken += 1
@@ -4372,6 +4413,45 @@ export class Relay {
           `rotates, and where a pause holds the run.`,
       )
     }
+    // The same refusal read off the relay's own exchange bookkeeping rather than off the
+    // dispatcher's. Not redundant: the grade above answers for work the DISPATCHER placed, and
+    // the relay also exchanges with a seat outside any task -- the opening briefing, a drained
+    // aside, the closing question. None of those has a task id or a verdict to be graded, and
+    // every one of them is a live turn.
+    if (this.#busy(seatId)) {
+      throw new Error(
+        `${seatId} has an exchange in flight, so rotating it now would retire a session in the ` +
+          `middle of a turn the relay is still reading. Rotate when it is idle.`,
+      )
+    }
+
+    // AND THE ADVISOR, which is the half a seat-shaped guard cannot see.
+    //
+    // Rotation's second step asks the advisor to write the handoff, on the advisor's own session.
+    // If the relay is already mid-exchange with it -- routing a report, taking the next
+    // instruction -- that request is a SECOND concurrent send on one session, and both turns are
+    // lost: the transcript interleaves two prompts, `#exchange` slices events from a mark the
+    // other reader is already past, and whichever `turn_end` arrives first is attributed to
+    // whichever call reads it. The handoff would then be assembled from an advisor turn that was
+    // answering something else, and the replacement would be measured against it.
+    //
+    // Refused rather than queued behind the advisor's turn. Waiting would look kinder and would
+    // mean the caller's rotation begins at an unbounded later moment, against a seat whose state
+    // has moved on -- and the transaction's own first act is to quiesce that seat. A caller told
+    // "not now" can ask again; a caller silently parked cannot un-ask.
+    //
+    // This never fires from inside the run: the loop awaits its advisor exchanges one at a time
+    // and rotates from the completion path, where none is open. It is reachable exactly where the
+    // hazard is -- `rotateSeat` is public and does not require a paused run.
+    const advisor = this.participants.find((p) => p.rank === 'advisor')!
+    if (this.#busy(advisor.id)) {
+      throw new Error(
+        `the advisor (${advisor.id}) has a turn in flight, so rotating ${seatId} now would issue ` +
+          `the handoff request as a second concurrent send on that session: two turns would ` +
+          `interleave on one transcript and neither could be attributed. Rotate when the advisor ` +
+          `is idle — the run loop's own rotation point and every pause are.`,
+      )
+    }
     // The policy THIS seat is under: the run's, as amended by its own entry (D7). Resolved
     // before anything is quiesced, because a seat whose policy disarms it must be refused with
     // its session untouched.
@@ -4383,7 +4463,6 @@ export class Relay {
           `Rotating without them would be a transfer nobody demonstrated.`,
       )
     }
-    const advisor = this.participants.find((p) => p.rank === 'advisor')!
     const spec = implementerSeats(this.#opts).find((s) => s.id === seatId)!
     /**
      * This seat's own tree, and what the whole transfer is measured against.

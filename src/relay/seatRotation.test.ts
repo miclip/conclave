@@ -446,6 +446,148 @@ test('a seat with a turn in flight is refused, and the run it was working on is 
   }
 })
 
+test('a rotation requested while the ADVISOR is mid-turn is refused, and touches neither session', async (t) => {
+  // The other half of the same race, and the one no seat-shaped guard can see. Rotation's second
+  // step asks the advisor to write the handoff -- on the advisor's own session. Issued while the
+  // relay is already mid-exchange with it, that is a second concurrent send: two prompts
+  // interleave on one transcript, `#exchange` slices events from a mark the other reader has
+  // passed, and the handoff the replacement is measured against would be assembled from an
+  // advisor turn answering a different question.
+  //
+  // The target seat here is IDLE and its own guards would all pass -- which is the point of
+  // driving it this way. Only the advisor's state makes this unsafe.
+  const repo = tempRepo()
+  const advisor = new FakeRotationSession('advisor', 'codex', ['@seat implementer: Do the thing.', 'DONE', 'DONE'])
+  const one = new FakeRotationSession('one', 'claude', ['ack', 'Did it.', 'NONE'])
+  const two = new FakeRotationSession('two', 'claude', ['ack', 'NONE', 'NONE'])
+  const spare = new FakeRotationSession('spare', 'claude', [ACCEPTED])
+  const creates: CreateRecord[] = []
+  try {
+    const relay = await twoSeatRelay(
+      repo,
+      advisor,
+      [one, two, spare],
+      { checks: ['exit 0'], checkTimeoutMs: 30_000 },
+      creates,
+    )
+    t.after(() => relay.stop())
+
+    // An advisor turn that spans time, so the request lands inside one rather than between two.
+    advisor.delayMs = 80
+    let attempt: Promise<unknown> | undefined
+    advisor.onSend = (message: string) => {
+      // The first advisor turn is its briefing; this fires on the turn that routes the seat's
+      // report, which is an ordinary mid-run advisor exchange.
+      if (!message.includes('Did it.')) return
+      attempt ??= relay.rotateSeat('implementer-2', 'an operator got impatient').then(
+        () => 'rotated',
+        (e: Error) => e,
+      )
+    }
+
+    const outcome = await relay.run('Keep the work moving.')
+
+    const refusal = await attempt
+    assert.ok(refusal instanceof Error, 'a rotation over a live advisor turn must be refused')
+    assert.match(refusal.message, /the advisor \(advisor\) has a turn in flight/)
+    assert.match(refusal.message, /second concurrent send/)
+    // Named the seat it declined to rotate, so the caller is not left guessing which request
+    // this answers when several are in flight.
+    assert.match(refusal.message, /rotating implementer-2/)
+
+    // NEITHER session was touched. The advisor's turn is the one that would have been corrupted,
+    // and the seat's is the one that would have been retired for it.
+    assert.deepEqual(two.transitions, [], 'the target seat was never quiesced')
+    assert.equal(relay.participants.find((p) => p.id === 'implementer-2')!.session, two)
+    assert.equal(relay.participants.find((p) => p.rank === 'advisor')!.session, advisor)
+    assert.equal(advisor.state, 'running')
+    assert.equal(relay.rotationWatch.rotations, 0)
+    assert.equal(creates.filter((c) => c.id === 'implementer-2').length, 1, 'no replacement was created')
+    assert.deepEqual(spare.received, [], 'and none was spoken to')
+    // The advisor was never asked for a handoff, which is the send that would have collided.
+    assert.ok(!advisor.received.some((m) => /## BRIEF|handoff/i.test(m)))
+
+    // And the run finished normally: the refusal belongs to the caller that made it, not to the
+    // run it was made against.
+    assert.equal(outcome.reason, 'done')
+    assert.ok(advisor.received.some((m) => m.includes('Did it.')), 'the advisor turn completed and was read')
+  } finally {
+    rmSync(repo, { recursive: true, force: true })
+  }
+})
+
+test('a rotation that only CONTENDS for the check lane still runs — it queues, it is not refused', async (t) => {
+  // The line the two refusals must not cross. They are about live turns; the check lane is about
+  // a verification window, and a section waiting for it is queued rather than unsafe. A guard
+  // that refused on contention would take away the one case the lane was kept for.
+  //
+  // Constructed through the transaction's own barrier: inside `implementer`'s rotation, with the
+  // lane held and the advisor idle (its handoff turn is already done), a second rotation is
+  // started for the other seat. It must be admitted, wait, and then complete.
+  const repo = tempRepo()
+  const advisor = new FakeRotationSession('advisor', 'codex', [HANDOFF, HANDOFF])
+  const one = new FakeRotationSession('one', 'claude')
+  const two = new FakeRotationSession('two', 'claude')
+  const oneFresh = new FakeRotationSession('one-fresh', 'claude', [ACCEPTED])
+  const twoFresh = new FakeRotationSession('two-fresh', 'claude', [ACCEPTED])
+  let second: Promise<unknown> | undefined
+  let heldDuring: string | undefined
+  try {
+    const relay = await twoSeatRelay(repo, advisor, [one, two, oneFresh, twoFresh], {
+      checks: ['exit 0'],
+      checkTimeoutMs: 30_000,
+      // Only the first seat gets the barrier, so the second rotation does not re-enter it. That
+      // this is expressible at all is the per-seat policy doing its job.
+      seats: {
+        implementer: {
+          hooks: {
+            afterCapture: async () => {
+              heldDuring = `${relay.checkLane.held()?.seat}/${relay.checkLane.held()?.station}`
+              second ??= relay.rotateSeat('implementer-2', 'the second seat too').then(
+                (r) => r.status,
+                (e: Error) => e,
+              )
+              // Let the second call reach the lane and queue before this section continues, so
+              // the wait is a real one rather than an ordering this test asserted into being.
+              await new Promise((r) => setImmediate(r))
+            },
+          },
+        },
+      },
+    })
+    t.after(() => relay.stop())
+
+    const first = await relay.rotateSeat('implementer', 'the first seat')
+    const secondResult = await second
+
+    assert.equal(heldDuring, 'implementer/rotation', 'the barrier really did run with the lane held')
+    assert.equal(first.status, 'rotated')
+    assert.equal(
+      secondResult,
+      'rotated',
+      'a rotation that merely contends for the lane must be admitted and queued, never refused',
+    )
+    // Serialised, and in the order they asked. Overlapping them is what would let a merge move
+    // the tree between a rotation's two captures.
+    assert.deepEqual(
+      relay.checkLane.history().map((h) => `${h.seat}/${h.station}`),
+      ['implementer/rotation', 'implementer-2/rotation'],
+    )
+    // The wait was narrated where an operator would otherwise see an unexplained gap.
+    assert.ok(
+      relay.log.some((m) => /implementer-2's rotation section is waiting for the check lane/.test(m.text)),
+      'a wait of this length that says nothing is the silence the note exists to fill',
+    )
+    assert.ok(relay.log.some((m) => /queued, not blocked/.test(m.text)))
+    // Both seats really were replaced, in their own trees.
+    assert.equal(relay.participants.find((p) => p.id === 'implementer')!.session, oneFresh)
+    assert.equal(relay.participants.find((p) => p.id === 'implementer-2')!.session, twoFresh)
+    assert.equal(relay.rotationWatch.rotations, 2)
+  } finally {
+    rmSync(repo, { recursive: true, force: true })
+  }
+})
+
 test('rotate at a pause replaces the seat the pause is ABOUT, not "the implementer"', async (t) => {
   // The operator's half of #78, and the half a menu can get wrong invisibly. The pause option
   // used to be withheld at N>1 because rotation named no seat; now it is offered and it has to
