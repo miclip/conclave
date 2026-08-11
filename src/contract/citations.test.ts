@@ -74,40 +74,40 @@ const CITED: Record<string, string> = {
   //
   // The three below moved twice over, once for #81 and once for #80's integration work in the
   // same file, and are pinned against the merged tree rather than against either side of it.
-  'bin/conclave.ts:1168': 'cwd: process.cwd(),',
-  'bin/conclave.ts:1255': 'runReport(relay, { goal, outcome, startedAt: runStartedAt, build })',
+  'bin/conclave.ts:1193': 'cwd: process.cwd(),',
+  'bin/conclave.ts:1281': 'runReport(relay, { goal, outcome, startedAt: runStartedAt, build })',
   // One flag for every implementer seat, which is the RUN-WIDE half of the launch args. The
   // per-seat half is no longer missing (#77): it rides inside each `--implementers` entry and
   // is appended after this, so a seat's own spelling wins. This citation still pins what it
   // always pinned -- the flag that applies to all of them.
-  'bin/conclave.ts:1029-1032': "...extraArgs(flag('implementer-args', ''))",
+  'bin/conclave.ts:1043-1046': "...extraArgs(flag('implementer-args', ''))",
   'src/config/project.ts:160-163': 'export function launchArgsFor',
   'src/registry/roles.ts:15': 'export type RoleId = string',
   // The relay.ts citations below moved together when `launch` was added to RelayParticipant
   // and `#join` (#71). Repaired rather than deleted: each still points at the thing it was
   // written about, and the one whose LINE no longer says what it said -- `#join` now passes a
   // named context object rather than an inline literal -- is pinned on the new spelling.
-  'src/relay/relay.ts:1336-1338': 'get cwd(): string',
-  'src/relay/relay.ts:1457-1463': 'createParticipant(spec, ctx)',
-  'src/relay/relay.ts:2004': 'worktreePaths(this.#opts.cwd)',
-  'src/relay/relay.ts:2031': 'NOT ARMED (no checks configured)',
-  'src/relay/relay.ts:2101': 'worktreePaths(this.#opts.cwd)',
-  'src/relay/relay.ts:2503': 'resolutionFor(p.subject, { rotationArmed: armed })',
-  'src/relay/relay.ts:2681-2688': 'No rotation checks are configured',
-  'src/relay/relay.ts:309': "onDegradation ?? 'candidate'",
-  'src/relay/relay.ts:3452': 'worktreePaths(this.#opts.cwd)',
-  'src/relay/relay.ts:3792': "subject: { reason: 'turn_incomplete', participant: lead.id }",
-  'src/relay/relay.ts:4042': "subject: { reason: 'implementer_unanswered', participant: seat.id }",
-  'src/relay/relay.ts:4175': "subject: { reason: 'turn_incomplete', participant: seat.id }",
-  'src/relay/resolution.ts:188': 'export function resolutionFor',
+  'src/relay/relay.ts:1453-1455': 'get cwd(): string',
+  'src/relay/relay.ts:1603-1609': 'createParticipant(spec, ctx)',
+  'src/relay/relay.ts:2150': 'worktreePaths(this.#opts.cwd)',
+  'src/relay/relay.ts:2177': 'NOT ARMED (no checks configured)',
+  'src/relay/relay.ts:2247': 'worktreePaths(this.#opts.cwd)',
+  'src/relay/relay.ts:2649': 'resolutionFor(p.subject, { rotationArmed: armed })',
+  'src/relay/relay.ts:2827-2833': 'No rotation checks are configured',
+  'src/relay/relay.ts:310': "onDegradation ?? 'candidate'",
+  'src/relay/relay.ts:3679': 'worktreePaths(this.#opts.cwd)',
+  'src/relay/relay.ts:4146': "subject: { reason: 'turn_incomplete', participant: lead.id }",
+  'src/relay/relay.ts:4396': "subject: { reason: 'implementer_unanswered', participant: seat.id }",
+  'src/relay/relay.ts:4529': "subject: { reason: 'turn_incomplete', participant: seat.id }",
+  'src/relay/resolution.ts:190': 'export function resolutionFor',
   'src/relay/run.ts:51': "| 'implementer_unanswered'",
   'src/relay/run.ts:169-183': 'reason: PauseReason',
-  'src/relay/run.ts:183': 'resolution: ResolutionRequest',
+  'src/relay/run.ts:193': 'resolution: ResolutionRequest',
   'src/relay/subagents.ts:68': 'export function worktreePaths',
-  'src/repl/session.ts:201-214': 'turnWatchdogMs?: number | undefined',
-  'src/repl/session.ts:541': 'escalates to you rather than being replaced',
-  'src/repl/session.ts:694': 'logPath: runLogPath,',
-  'src/repl/session.ts:868': "recording.set('paused', { pause: run.pause })",
+  'src/repl/session.ts:209-221': 'turnWatchdogMs?: number | undefined',
+  'src/repl/session.ts:548': 'escalates to you rather than being replaced',
+  'src/repl/session.ts:711': 'logPath: runLogPath,',
+  'src/repl/session.ts:885': "recording.set('paused', { pause: run.pause })",
 }
 
 /**

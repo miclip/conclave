@@ -74,6 +74,7 @@ import {
 import { assess, ComplaintLedger, topicOf } from '../rotation/degradation.ts'
 import { rotate, type RotationResult } from '../rotation/rotate.ts'
 import type { CheckSpec } from '../rotation/record.ts'
+import { buildReviewContext, reviewPrompt } from '../rotation/review.ts'
 import { resumeBriefing } from './resume.ts'
 import { breached, type CeilingBreach, type CeilingState, type Ceilings } from './guardrails.ts'
 import {
@@ -382,6 +383,18 @@ export interface RelayOptions {
    * this is the programmatic surface the dispatcher's seat table was already written against.
    */
   implementers?: ParticipantSpec[] | undefined
+  /**
+   * The reviewer seat (#72, D9b). Absent is the default and must stay behaviourless: no
+   * reviewer declared, no review task is ever admitted, and the merge boundary runs exactly
+   * as it does today.
+   *
+   * Rank `implementer` -- joined through the same seats loop as every implementer, at
+   * `spec.role`, so nothing about rank assignment changes for it -- but it is not one of
+   * `implementerSeats()`: `#implementers()` reads `role`, not rank, and a reviewer's role is
+   * `'reviewer'`. It never gets a worktree. It does not write, so there is no tree to isolate
+   * it into, and the diff it reviews is taken against the producing seat's tree, not its own.
+   */
+  reviewer?: ParticipantSpec | undefined
   /**
    * Advisor turns before the relay stops and hands back to the human.
    *
@@ -701,6 +714,26 @@ export function implementerSpecsFor(
 }
 
 /**
+ * The reviewer seat `--reviewer` asked for, or `undefined` if it was not given (#72).
+ *
+ * The one shared builder both front-ends read, for the reason `implementerSeatPlan` and
+ * `implementerSpecsFor` are: two blocks that each parsed `--reviewer` locally would
+ * eventually disagree about what an empty value means. `agent` empty is `undefined` --
+ * D1's "expressible and off" as a return value rather than a branch a caller writes.
+ *
+ * Singular, fixed id `'reviewer'`: unlike `--implementers` there is no list syntax, because
+ * the issue this answers is "one more blind reader", not a pool of them.
+ */
+export function reviewerSpecFor(
+  agent: string,
+  argsFor: (agent: string) => string[],
+): ParticipantSpec | undefined {
+  if (agent === '') return undefined
+  const args = argsFor(agent)
+  return { id: 'reviewer', agent, role: 'reviewer', ...(args.length > 0 ? { args } : {}) }
+}
+
+/**
  * One clock, as one seat will actually run it.
  *
  * Tagged rather than `number | undefined`, because the two ways of having no number are not
@@ -842,6 +875,29 @@ export function splitNotes(prose: string): { notes: string[]; rest: string } {
   return { notes, rest }
 }
 
+/** A reviewer's verdict, read off its report (#72). See `REVIEWER_BRIEFING`. */
+export type ReviewVerdict = { accepted: true } | { accepted: false; reason: string }
+
+/**
+ * Parse a reviewer's reply. Fails closed, the same direction `parseDecisions` does.
+ *
+ * `ACCEPT` must be the whole reply -- an exact match, not merely a line starting with it --
+ * so a reviewer that writes ACCEPT and then explains itself anyway is treated as having
+ * said something else, rather than the explanation being silently dropped. Anything that is
+ * not exactly ACCEPT is a rejection: nothing merges on an ambiguous reply, which is the safe
+ * direction to fail in when the alternative is guessing that unclear prose meant yes.
+ *
+ * `REJECT: <reason>` is read for the reason; a reply that rejects without that exact form
+ * still rejects, using its own full text as the reason, so a reviewer that forgets the
+ * format still blocks the merge rather than being silently ignored.
+ */
+export function parseReviewVerdict(prose: string): ReviewVerdict {
+  if (/^\s*ACCEPT\s*$/i.test(prose)) return { accepted: true }
+  const m = /^[ \t]*REJECT:[ \t]*([\s\S]+)$/im.exec(prose)
+  const reason = m?.[1]?.trim()
+  return { accepted: false, reason: reason && reason.length > 0 ? reason : prose.trim() }
+}
+
 const LEAD_BRIEFING = `You are the ADVISOR on a two-agent coding session, and you are in charge of it.
 
 Another AI model — the implementer — does the actual work in this repository. You cannot
@@ -968,6 +1024,28 @@ One caution about the answer you get back. An agent operator is the same kind of
 are and may share your blind spots, so its reply is not independent confirmation the way a
 human's is. Treat it as another opinion with authority over the goal, not as evidence.`
 
+/**
+ * Added to the advisor's briefing when this run has a REVIEWER seat (#72, D9b).
+ *
+ * Conditional for the same reason `MULTI_SEAT_BRIEFING` is: a default run must never pay in
+ * briefing tokens for a seat it does not have, and a live experiment is pinned against the
+ * unmodified `LEAD_BRIEFING` text (see the comment above `MULTI_SEAT_BRIEFING`).
+ *
+ * Deliberately short, and deliberately not a syntax lesson: review is dispatched by the
+ * orchestrator the moment a seat's work is ready, not by the advisor addressing anything, so
+ * there is no `@seat`/`@role` form to teach here. What the advisor needs is not "how to send
+ * work to the reviewer" but "what a review report means when one arrives", so an accepted or
+ * rejected verdict is not mistaken for an ordinary implementer report.
+ */
+const REVIEWER_BRIEFING_FOR_ADVISOR = `THIS RUN ALSO HAS A REVIEWER SEAT. You do not send it anything: completed
+implementer work is sent to it automatically, before it merges, and you will see its verdict
+as an ordinary report. If it accepts, the work proceeds to the integration checkout exactly
+as it would with no reviewer. If it rejects, a repair task is created automatically and
+dispatched back to the seat that produced the work — you do not need to do anything for that
+to happen either. You will see both the rejection and the repair as ordinary reports. Only a
+SECOND rejection of the same work reaches you, as a pause, because at that point another
+automatic repair is unlikely to change anything.`
+
 const IMPLEMENTER_BRIEFING = `You are the IMPLEMENTER on a two-agent coding session.
 
 Another AI model — the advisor — is steering. It cannot see your tool calls or your code,
@@ -990,6 +1068,33 @@ meanwhile in the same reply. An UNANSWERED line PAUSES the run until the human a
 is not a flag, because the build cannot proceed until the question is settled. Choices about
 how to build remain yours; use FLAG: for every concern that only qualifies the result rather
 than invalidating it.`
+
+/**
+ * What a REVIEWER seat is told instead of `IMPLEMENTER_BRIEFING` (#72, D9b).
+ *
+ * Sent only to a seat whose role is `reviewer` -- a reviewer is rank `implementer` (D5), so
+ * without this it would fall into the `IMPLEMENTER_BRIEFING` loop and be told it writes code,
+ * which is wrong on every count that matters: it has no worktree, is never asked to change
+ * anything, and its report is read as a verdict rather than as work done.
+ *
+ * States the load-bearing rule up front, the same one the module doc of `rotation/review.ts`
+ * argues for: everything it is given is captured mechanically, never written by the seat under
+ * review. `WITHHELD_GOAL_NOTICE` is sent to this seat too, for the reason `LEAD_BRIEFING`
+ * gives its own name to: "a reviewer told what verdict is wanted stops being a reviewer".
+ */
+const REVIEWER_BRIEFING = `You are the REVIEWER on this session. You do not write code and hold no goal.
+
+You will be sent one review at a time: the instruction a seat was given, and what changed in
+its tree, captured directly from git and from the configured checks — never written or
+summarised by that seat. Treat everything in a review as fact, because none of it passed
+through anyone's account of their own work.
+
+Read the diff. Judge it against the instruction it was answering, not against work you would
+have done differently. Reply with exactly ACCEPT and nothing else if it should merge. Reply
+with a line starting REJECT: followed by why, if it should not — be specific enough that the
+seat that produced it can act on your reason without seeing anything else you wrote. A
+rejection becomes a task assigned back to that seat automatically; you do not dispatch it
+yourself.`
 
 /**
  * What the implementer is told INSTEAD of the goal.
@@ -1109,6 +1214,12 @@ export class Relay {
    * on the compliant case as readily as on the violation, which is worse than not having it.
    */
   #worktreesSeen = new Set<string>()
+  /**
+   * `opts.cwd`'s HEAD at run start, used as the review diff base for a seat with no worktree
+   * (#72). At N=1 there is no separate integration checkout to diff a seat's branch against
+   * -- work happens directly in `opts.cwd` -- so this is the closest available "before".
+   */
+  #runStartSha: string | undefined
   /** Turns taken across all participants, which is what a ceiling counts. */
   #turnsTaken = 0
   #participants = new Map<string, RelayParticipant>()
@@ -1238,7 +1349,7 @@ export class Relay {
       throw new Error('a relay needs at least one implementer seat: `implementers` was empty')
     }
     const ids = new Set<string>()
-    for (const spec of [opts.lead, ...seats]) {
+    for (const spec of [opts.lead, ...seats, ...(opts.reviewer ? [opts.reviewer] : [])]) {
       if (ids.has(spec.id)) throw new Error(`duplicate participant id '${spec.id}': seat ids must be unique`)
       ids.add(spec.id)
     }
@@ -1298,6 +1409,11 @@ export class Relay {
         if (tree) ensureWorktreeHookTrigger(tree)
         await relay.#join(spec, 'implementer', tree ? seatCwd(tree) : opts.cwd)
       }
+      // The reviewer, if declared (#72). Rank `implementer` -- D5's job/authority split is
+      // exactly what makes this legal: identical authority to the seats above, a different
+      // job. No worktree: it does not mutate anything, so there is no tree to isolate it
+      // into, and it stays in the integration checkout the same way the advisor does.
+      if (opts.reviewer) await relay.#join(opts.reviewer, 'implementer', opts.cwd)
     } catch (e) {
       // CHILDREN FIRST, and unconditionally. Every session that did start is a live process,
       // and an earlier version of this returned through the unwind's own throw before reaching
@@ -1328,6 +1444,7 @@ export class Relay {
     acquire(opts.cwd, [
       { id: opts.lead.id, agent: opts.lead.agent },
       ...seats.map((s) => ({ id: s.id, agent: s.agent })),
+      ...(opts.reviewer ? [{ id: opts.reviewer.id, agent: opts.reviewer.agent }] : []),
     ])
     return relay
   }
@@ -1365,9 +1482,38 @@ export class Relay {
    * first seat, quietly, and whatever it fed goes on looking right. So the plural answer is the
    * only one this class offers, and the two operations that genuinely need a single seat name
    * one explicitly below.
+   *
+   * Filtered on ROLE rather than rank (#72). The two used to coincide -- every rank
+   * `implementer` seat did implementer work -- but a reviewer is rank `implementer` with a
+   * different job (D5), and every caller of this method means the job: rotation eligibility,
+   * the opening `IMPLEMENTER_BRIEFING` loop, and the closing question all mean "a seat that
+   * writes code", none of them "a seat that shares implementer's authority". `#dispatchSeats`
+   * below is the rank-based answer, for the one caller that needs it.
    */
   #implementers(): RelayParticipant[] {
+    return this.participants.filter((p) => p.role === 'implementer')
+  }
+
+  /**
+   * Every seat the dispatcher may hand a task to: rank `implementer`, whatever the job.
+   *
+   * The rank-based answer `#implementers()` used to be, kept alongside it because `#seatState`
+   * needs a table that includes the reviewer -- a review task is dispatched through the exact
+   * same scheduler as ordinary work, so a seat with nothing to write is still a seat with
+   * something to be assigned.
+   */
+  #dispatchSeats(): RelayParticipant[] {
     return this.participants.filter((p) => p.rank === 'implementer')
+  }
+
+  /**
+   * The reviewer seat, or `undefined` on every run that did not declare one (#72).
+   *
+   * At most one: `RelayOptions.reviewer` is singular, unlike `implementers`, because the
+   * issue that motivates it is answered by one more blind reader, not by a pool of them.
+   */
+  #reviewerSeat(): RelayParticipant | undefined {
+    return this.participants.find((p) => p.role === 'reviewer')
   }
 
   /**
@@ -2906,7 +3052,7 @@ export class Relay {
    * dependency: a rule that only starts running once there is something to test it with is a
    * rule nobody has tested.
    */
-  #admit(instruction: string, target: TaskTarget, origin: number, purpose: TaskPurpose): Task {
+  #admit(instruction: string, target: TaskTarget, origin: number, purpose: TaskPurpose, parent?: string): Task {
     const task: Task = {
       id: `t-${++this.#taskSeq}`,
       seq: this.#taskSeq,
@@ -2917,6 +3063,8 @@ export class Relay {
       // `TaskPurpose`: this is the one fact that lets a blocked seat accept its repair and
       // nothing else.
       purpose,
+      // The original task under review or repair (#72). Absent for `work`/`merge_resolution`.
+      ...(parent === undefined ? {} : { parent }),
       dependsOn: [],
       // Snapshotted at admission, so the conflict question is answered against the restricted
       // messages that existed when the advisor decided rather than against later ones.
@@ -2931,6 +3079,37 @@ export class Relay {
       this.#mark(task, 'ready')
     }
     return task
+  }
+
+  /**
+   * Admit a review task for a completed piece of work (#72). Called from `#runLoop` once a
+   * task's own turn is graded and this run has a reviewer -- never from inside
+   * `#crossBoundary`, which is the whole of "review is a dispatched task, not a hook the
+   * boundary calls".
+   *
+   * `parent` is set to `work.id`: the IMMEDIATE task this review is for, whether that is the
+   * original `work` task or a `review_resolution` repair. See `Task.parent`: a repair whose
+   * own parent is itself a repair is the second rejection, which `resolveReview` in
+   * `#runLoop` reads directly off `work.purpose` rather than climbing a chain.
+   *
+   * The context is built the way a rotation handoff's record is: mechanically, from the
+   * producing seat's own tree, never from that seat's report. See `rotation/review.ts`.
+   */
+  #admitReview(work: Task, seatId: string, reviewer: RelayParticipant): Task {
+    const manifest = this.#worktrees
+    const tree = manifest?.seats.find((s) => s.seatId === seatId)
+    const root = tree ? tree.worktreePath : this.#opts.cwd
+    const base = (tree && manifest ? integrationHead(manifest.integrationRoot) : this.#runStartSha) ?? 'HEAD'
+    const ctx = buildReviewContext({
+      root,
+      base,
+      checks: this.#opts.rotation?.checks ?? [],
+      instruction: work.instruction,
+      ...(this.#opts.rotation?.checkTimeoutMs === undefined
+        ? {}
+        : { checkTimeoutMs: this.#opts.rotation.checkTimeoutMs }),
+    })
+    return this.#admit(reviewPrompt(ctx), { kind: 'role', role: reviewer.role }, work.origin, 'review', work.id)
   }
 
   /**
@@ -3074,6 +3253,40 @@ export class Relay {
     // Stamped even though a blocked seat is not selectable: it becomes the ordering key the
     // moment the block clears, and a seat resuming with an ancient `idleSince` would jump the
     // queue ahead of seats that have genuinely been waiting.
+    seat.idleSince = Date.now()
+    this.#mark(task, 'released')
+  }
+
+  /**
+   * Hold a seat's release pending a reviewer's verdict (#72).
+   *
+   * NOT `#integrate` and NOT `#failBoundary`: neither fact they record has happened yet.
+   * `task`'s own runtime stays exactly where `#reported` left it -- `reported`, no
+   * `integratedAt` -- because nothing has crossed the boundary. Only the seat moves: released
+   * from the task it just finished, but not free, because review is a task this run has not
+   * yet decided to keep. `#crossBoundary` runs later, from `crossAndSettle` in `#runLoop`,
+   * once (and only if) the verdict is ACCEPT.
+   */
+  #awaitReview(seat: SeatExecution): void {
+    seat.current = undefined
+    seat.state = 'review_pending'
+    seat.idleSince = Date.now()
+  }
+
+  /**
+   * The repair a REJECTED review earns: release the seat, but into `review_blocked` rather
+   * than `idle`, so nothing but its named `review_resolution` repair can reach it (#72).
+   *
+   * The counterpart to `#failBoundary`, and deliberately not a call to it: that function's
+   * `merge_blocked` is a claim about GIT, and a review rejection is a claim about neither
+   * seat's tree failing to merge -- it may merge cleanly and still be the wrong change.
+   */
+  #failReview(task: Task, seat: SeatExecution): void {
+    const runtime = this.#taskRuntime.get(task.id)!
+    runtime.state = 'failed'
+    this.#mark(task, 'failed')
+    seat.current = undefined
+    seat.state = 'review_blocked'
     seat.idleSince = Date.now()
     this.#mark(task, 'released')
   }
@@ -3413,6 +3626,8 @@ export class Relay {
   async #runLoop(goal: string, handle: RunHandle | undefined): Promise<RunOutcome> {
     const lead = this.participants.find((p) => p.rank === 'advisor')!
     const seats = this.#implementers()
+    /** Absent on every run that did not declare one (#72); the whole of D1's "expressible and off". */
+    const reviewerSeat = this.#reviewerSeat()
     /** Named, not chosen: whose role an instruction that targets nothing resolves against. */
     const impl = this.#leadImplementer()
 
@@ -3436,6 +3651,15 @@ export class Relay {
         `${IMPLEMENTER_BRIEFING}\n\n${SUBAGENT_BRIEFING}\n\n${WITHHELD_GOAL_NOTICE}\n\n${prior}Acknowledge briefly; do not start work yet.`,
       )
     }
+    // The reviewer's own opening turn, sent `REVIEWER_BRIEFING` instead of
+    // `IMPLEMENTER_BRIEFING` -- it is rank `implementer` but not one of `seats` above, which
+    // is filtered on role precisely so this loop does not tell it it writes code (#72).
+    if (reviewerSeat) {
+      await this.#exchange(
+        reviewerSeat,
+        `${REVIEWER_BRIEFING}\n\n${SUBAGENT_BRIEFING}\n\n${WITHHELD_GOAL_NOTICE}\n\n${prior}Acknowledge briefly; do not start work yet.`,
+      )
+    }
     let next = await this.#exchange(
       lead,
       `${LEAD_BRIEFING}\n\n${SUBAGENT_BRIEFING}\n\n` +
@@ -3443,6 +3667,9 @@ export class Relay {
         // that never hears the syntax never writes it, and the default run's briefing is
         // byte-identical to what it has always been.
         `${seats.length > 1 ? `${MULTI_SEAT_BRIEFING}\n\n` : ''}` +
+        // Only when a reviewer is declared, for the same reason (#72). The default run pays
+        // nothing for this either.
+        `${reviewerSeat ? `${REVIEWER_BRIEFING_FOR_ADVISOR}\n\n` : ''}` +
         `${this.#opts.operator === 'agent' ? `${AGENT_OPERATOR_NOTICE}\n\n` : ''}` +
         `${prior}The goal for this session:\n\n${goal}\n\nGive the implementer its first instruction.`,
     )
@@ -3451,8 +3678,15 @@ export class Relay {
     this.#startedAt = Date.now()
     this.#worktreesAtStart = worktreePaths(this.#opts.cwd)
     this.#worktreesSeen = new Set(this.#worktreesAtStart)
+    // Best-effort and only ever read as a fallback (`#admitReview`): a repo with no commits
+    // yet leaves this `undefined`, and `reviewPrompt`'s caller already treats a missing base
+    // as `HEAD`.
+    if (reviewerSeat) this.#runStartSha = integrationHead(this.#opts.cwd)
+    // Every seat the SCHEDULER may dispatch to -- `#dispatchSeats()`, rank-based, not `seats`
+    // above -- because a review task is dispatched through this exact table and a reviewer
+    // seat absent from it could never be assigned one.
     this.#seatState = new Map(
-      seats.map((p): [string, SeatExecution] => [
+      this.#dispatchSeats().map((p): [string, SeatExecution] => [
         p.id,
         { seat: p.id, role: p.role, state: 'idle', idleSince: this.#startedAt, dispatched: 0 },
       ]),
@@ -3663,6 +3897,126 @@ export class Relay {
       | { kind: 'end'; reason: RunReason; detail?: string }
       | { kind: 'outcome'; outcome: RunOutcome }
     let closing: Closing | undefined
+
+    /**
+     * Cross a task's boundary and act on what came back -- merge, judge the integrated tree,
+     * escalate a repeat conflict. Exactly the logic that used to run unconditionally once a
+     * turn was graded; factored out so a REVIEWED task can reach it too, on ACCEPT, deferred
+     * until then (#72).
+     *
+     * Returns whether the caller must `continue advisor`. A labelled continue cannot cross a
+     * function boundary, so the decision to take it has to come back to the loop that owns
+     * the label rather than being taken here.
+     */
+    const crossAndSettle = async (
+      boundaryTask: Task,
+      seatId: string,
+      boundaryExec: SeatExecution,
+    ): Promise<boolean> => {
+      const boundary = await this.#crossBoundary(boundaryTask, seatId)
+      if (boundary.kind === 'blocked') this.#failBoundary(boundaryTask, boundaryExec)
+      else this.#integrate(boundaryTask, boundaryExec)
+
+      if (boundary.kind === 'integration_red') {
+        if (closing) {
+          this.#record({
+            from: 'orchestrator',
+            fromRank: 'human',
+            to: [],
+            kind: 'note',
+            text:
+              `the integration checkout is red after the final merge (${boundary.contributors
+                .map((c) => c.taskId)
+                .join(' + ')}) and no seat remains to repair it; the run reports it as its outcome`,
+          })
+        } else {
+          this.#tellLeadIntegrationRed(boundary)
+        }
+      }
+
+      if (boundary.kind === 'blocked' && boundary.escalate) {
+        const halted = await this.#halt(handle, {
+          subject: { reason: 'merge_blocked', participant: boundary.seatId },
+          detail: boundary.detail,
+          evidence: boundary.evidence,
+        })
+        if (halted) {
+          closing ??= { kind: 'outcome', outcome: halted }
+          return true
+        }
+        const block = this.#blocked.get(boundary.seatId)
+        if (block) block.attempts = 1
+      }
+      return false
+    }
+
+    /**
+     * Act on a reviewer's verdict for the task named by `reviewTask.parent` (#72).
+     *
+     * ACCEPT crosses that task's boundary for real -- deferred exactly until now, since
+     * nothing before this point knew the work would be kept. REJECT admits the repair
+     * automatically, addressed to the producing seat by name; a repair whose OWN parent is
+     * itself a `review_resolution` task is the second rejection of the same work, and that
+     * escalates instead of trying a third time. See `Task.parent`.
+     *
+     * Returns whether the caller must `continue advisor`, for the reason `crossAndSettle`
+     * does.
+     */
+    const resolveReview = async (reviewTask: Task, prose: string): Promise<boolean> => {
+      const reviewedId = reviewTask.parent!
+      const reviewed = this.#queue.find((t) => t.id === reviewedId)!
+      const producingSeatId = this.#taskRuntime.get(reviewedId)!.seat!
+      const producingExec = this.#seatState.get(producingSeatId)!
+      const verdict = parseReviewVerdict(prose)
+
+      if (verdict.accepted) {
+        this.#record({
+          from: 'orchestrator',
+          fromRank: 'human',
+          to: [],
+          kind: 'note',
+          text: `review accepted ${producingSeatId}'s work for ${reviewedId}`,
+        })
+        return crossAndSettle(reviewed, producingSeatId, producingExec)
+      }
+
+      this.#failReview(reviewed, producingExec)
+      const secondRejection = reviewed.purpose === 'review_resolution'
+      this.#record({
+        from: 'orchestrator',
+        fromRank: 'human',
+        to: [],
+        kind: 'note',
+        text: `review rejected ${producingSeatId}'s work for ${reviewedId}: ${verdict.reason}`,
+      })
+      if (secondRejection) {
+        const halted = await this.#halt(handle, {
+          subject: { reason: 'review_blocked', participant: producingSeatId },
+          detail: `${producingSeatId}'s work was rejected by review a second time: ${verdict.reason}`,
+          evidence: [
+            `the first rejection produced an automatic repair, which was dispatched and returned`,
+            `the repair was rejected again by the same reviewer`,
+            `the work is committed and its tree is retained`,
+          ],
+        })
+        if (halted) {
+          closing ??= { kind: 'outcome', outcome: halted }
+          return true
+        }
+        return false
+      }
+      // The repair, addressed to the producing seat automatically -- review is a task the
+      // scheduler dispatches, so this needs no advisor instruction to reach it, the same way
+      // the review that rejected it needed none to be sent.
+      this.#admit(
+        `Review rejected this work: ${verdict.reason}\n\nOriginal instruction:\n${reviewed.instruction}`,
+        { kind: 'seat', seat: producingSeatId },
+        reviewTask.origin,
+        'review_resolution',
+        reviewedId,
+      )
+      return false
+    }
 
     try {
       // Labelled, because several of the sites that set `closing` are inside the admission loop
@@ -4196,74 +4550,26 @@ export class Relay {
         const rotated = await this.#considerRotation(seat, report.prose, handle)
         if (rotated) return rotated
 
-        // The git side of the same boundary, and only when this run has seat worktrees. The
-        // seat's work is invisible to everyone else until it is committed and merged, so this is
-        // where it stops being the seat's and starts being the run's. At N=1 `#worktrees` is
-        // undefined and nothing here runs -- one tree, one branch, and no merge to do.
-        const boundary = await this.#crossBoundary(task, seat.id)
-
-        // The integration boundary, and the release it earns -- or the release it does NOT earn.
-        // Ahead of the advisor turn rather than after it: a seat whose work is integrated, with
-        // ready work waiting for it, must not idle through an advisor turn to collect it. At N=1
-        // `#crossBoundary` is a no-op and this is always `#integrate`, which is where the seat
-        // simply becomes free again.
+        // The git side of the same boundary -- crossed now, or deferred to a reviewer's
+        // verdict (#72). `crossAndSettle` is the boundary itself, unchanged in what it does;
+        // what is new is that a run with a reviewer does not always call it immediately.
         //
-        // A boundary that did not merge takes the other branch. It must not record `integrated`:
-        // that fact is what dependents are released against, and a conflicted task claiming it
-        // would let work run on a base that never absorbed the thing it depends on.
-        //
-        // `integration_red` takes the SAME branch as a clear boundary, and that is not an
-        // oversight: the merge went in, the work is in the tree, and a dependent released
-        // against it is released against a base that really did absorb it. What is wrong with
-        // the tree is a separate fact, and it is carried by `#integrationRed` rather than by
-        // pretending the merge did not happen.
-        if (boundary.kind === 'blocked') this.#failBoundary(task, exec)
-        else this.#integrate(task, exec)
-
-        // A red integration tree, and the fork the addendum to #80 is about: while the run is
-        // still admitting work there is a seat to repair it, so it becomes a repair the advisor
-        // dispatches; once the run has decided to end there is not, and queueing a task nobody
-        // will ever take would be the silent version of the same failure. Either way
-        // `#integrationRed` stands until a later merge measures the tree green, so an ending
-        // that arrives with it set cannot report success -- see `#end`.
-        if (boundary.kind === 'integration_red') {
-          if (closing) {
-            this.#record({
-              from: 'orchestrator',
-              fromRank: 'human',
-              to: [],
-              kind: 'note',
-              text:
-                `the integration checkout is red after the final merge (${boundary.contributors
-                  .map((c) => c.taskId)
-                  .join(' + ')}) and no seat remains to repair it; the run reports it as its outcome`,
-            })
-          } else {
-            this.#tellLeadIntegrationRed(boundary)
-          }
-        }
-
-        // The second failure against the same integration parent. The repair was dispatched, it
-        // came back, and the merge still will not go -- so another advisor turn is another turn
-        // spent on a question the seat has already failed to answer.
-        if (boundary.kind === 'blocked' && boundary.escalate) {
-          const halted = await this.#halt(handle, {
-            subject: { reason: 'merge_blocked', participant: boundary.seatId },
-            detail: boundary.detail,
-            evidence: boundary.evidence,
-          })
-          // Seat-scoped, and the scope is honoured now: this ends the run, and the OTHER seats
-          // still finish, are graded and integrated, and have their reports routed. The rest of
-          // THIS completion is skipped exactly as the return skipped it, so N=1 is unchanged.
-          if (halted) {
-            closing ??= { kind: 'outcome', outcome: halted }
-            continue advisor
-          }
-          // Resumed. The operator may have resolved it by hand or may simply want another
-          // round, and either way the count starts again -- an escalation on every subsequent
-          // boundary would make resuming pointless.
-          const block = this.#blocked.get(boundary.seatId)
-          if (block) block.attempts = 1
+        // Three cases, and `task.purpose` alone decides which: this completion IS a review
+        // report, in which case the boundary it settles is the REVIEWED task's, not its own;
+        // this completion is reviewable work and a reviewer exists, in which case the
+        // boundary waits; or neither, in which case nothing about this run has changed and
+        // the boundary crosses exactly as it always has.
+        if (task.purpose === 'review') {
+          // The review task's OWN boundary is always trivial -- it never mutates anything, so
+          // there is nothing for `#crossBoundary` to find -- and this is what releases the
+          // reviewer seat. `resolveReview` then acts on the verdict for the task it reviewed.
+          if (await crossAndSettle(task, seat.id, exec)) continue advisor
+          if (await resolveReview(task, report.prose)) continue advisor
+        } else if (reviewerSeat && (task.purpose === 'work' || task.purpose === 'review_resolution')) {
+          this.#awaitReview(exec)
+          this.#admitReview(task, seat.id, reviewerSeat)
+        } else {
+          if (await crossAndSettle(task, seat.id, exec)) continue advisor
         }
 
         // The seat has just been released, so ready work it can take goes to it NOW rather than

@@ -55,7 +55,7 @@ import { seedCodexTrust } from '../src/deployment/codexHookTrust.ts'
 import { defaultRegistry } from '../src/registry/builtin.ts'
 import type { AgentRegistry } from '../src/registry/registry.ts'
 import { runSession } from '../src/repl/session.ts'
-import { implementerSeatPlan, implementerSpecsFor, Relay, type SeatRequest } from '../src/relay/relay.ts'
+import { implementerSeatPlan, implementerSpecsFor, Relay, reviewerSpecFor, type SeatRequest } from '../src/relay/relay.ts'
 import { formatGuardReportJson, guard } from '../src/workspace/sessionLock.ts'
 
 const USAGE = `conclave <command>
@@ -134,6 +134,7 @@ Commands:
                                    code is unchanged.
   relay "<goal>" [--advisor codex] [--implementer claude]
                  [--implementers "claude --model opus-5, claude --model sonnet-5"]
+                 [--reviewer claude] [--reviewer-args "..."]
                  [--rounds N] [--settle SECONDS]
                  [--checks "npm test"] [--checks-informational "..."]
                  [--checks-unrelated "..."] [--advisor-args "..."] [--implementer-args "..."]
@@ -178,6 +179,13 @@ Commands:
                                    no seat left to repair it, so the run ends
                                    integration_failed and exits non-zero. One seat has no
                                    merge, so nothing about it changes.
+                                   --reviewer names an opt-in seat that reads a diff and
+                                   tree the orchestrator builds from a completed seat's own
+                                   worktree -- never that seat's report -- and accepts or
+                                   rejects before the merge. A rejection becomes an
+                                   automatic repair task for the seat that produced the
+                                   work; a second rejection of the same work pauses the run.
+                                   Absent by default: no reviewer, no review step at all.
                                    The goal is linted before anything starts: an ask with
                                    nothing observable in it cannot be graded better than
                                    reasoned_but_unverified however well the work goes.
@@ -260,6 +268,7 @@ Commands:
                                    than screenshotted.
   session ["<goal>"] [--advisor codex] [--implementer claude]
                    [--implementers "claude --model opus-5, claude --model sonnet-5"]
+                   [--reviewer claude] [--reviewer-args "..."]
                    [--rounds N]
                    [--checks "npm test"] [--checks-informational "..."]
                    [--checks-unrelated "..."] [--advisor-args "..."] [--implementer-args "..."]
@@ -279,6 +288,9 @@ Commands:
                                    --implementers is the seat list, as in relay, including
                                    per-seat launch arguments:
                                    "claude --model opus-5, claude --model sonnet-5".
+                                   --reviewer is the same opt-in reviewer seat as relay:
+                                   absent by default, reads a diff and tree built by the
+                                   orchestrator, never a seat's own report.
                                    --checks are REQUIRED: a replacement that cannot
                                    reproduce one rolls the rotation back.
                                    --checks-informational and --checks-unrelated run and
@@ -377,6 +389,8 @@ const RELAY_VALUED_FLAGS: readonly string[] = [
   'operator',
   'record',
   'resume',
+  'reviewer',
+  'reviewer-args',
   'rounds',
   'salvage',
   'settle',
@@ -1031,15 +1045,20 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
       ...extraArgs(flag('implementer-args', '')),
     ]
     const implSpecs = implementerSpecsFor(seatRequests, implArgsFor)
+    // Opt-in and singular (#72). Absent when `--reviewer` was not given -- `reviewerSpecFor`
+    // returns `undefined`, and no `reviewer` key reaches `Relay.start` at all.
+    const reviewerSpec = reviewerSpecFor(flag('reviewer', ''), (agent) => [
+      ...launchArgsFor(projectConfig, agent),
+      ...extraArgs(flag('reviewer-args', '')),
+    ])
     // The lead seat's argv as it will actually be launched, read back off the spec rather than
     // recomposed. Recomposing it from the agent alone would drop that seat's own
     // `--implementers` arguments, so the dry run would print a plan the real run does not match
     // -- which is the one thing a dry run must not do. At N=1 with no per-seat arguments this is
     // byte for byte what `implArgsFor(implementer)` returned.
     const implArgs = implSpecs[0]!.args ?? []
-    const bypassing = [lead, ...implementerAgents].filter(
-      (a) => permissionModeFor(projectConfig, a) === 'bypass',
-    )
+    const allAgents = [lead, ...implementerAgents, ...(reviewerSpec ? [reviewerSpec.agent] : [])]
+    const bypassing = allAgents.filter((a) => permissionModeFor(projectConfig, a) === 'bypass')
     if (bypassing.length > 0) {
       say(`  permission prompts bypassed for ${[...new Set(bypassing)].join(', ')} — per ${CONFIG_RELATIVE}`)
     }
@@ -1051,7 +1070,7 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
     // editing someone's .gitignore, which is why the un-ignored paths are reported instead.
     const registered = await installConfig({
       projectRoot: process.cwd(),
-      agents: [...new Set([lead, ...implementerAgents])].filter((a): a is AgentKind =>
+      agents: [...new Set(allAgents)].filter((a): a is AgentKind =>
         (AGENT_KINDS as string[]).includes(a),
       ),
       diagnose: false,
@@ -1071,7 +1090,7 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
     // run without a human was the one missing the step that removes the need for one.
     await ensureCodexHooksTrusted({
       projectRoot: process.cwd(),
-      agents: [...new Set([lead, ...implementerAgents])].filter((a): a is AgentKind =>
+      agents: [...new Set(allAgents)].filter((a): a is AgentKind =>
         (AGENT_KINDS as string[]).includes(a),
       ),
       say,
@@ -1133,6 +1152,9 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
         ...(seatPlan.kind === 'listed'
           ? { implementers: implSpecs.map((s) => ({ id: s.id, agent: s.agent, args: s.args ?? [] })) }
           : {}),
+        // Opt-in and absent otherwise (#72): a default dry run's document does not gain a
+        // `reviewer` key it never had a reason to carry.
+        ...(reviewerSpec ? { reviewer: { agent: reviewerSpec.agent, args: reviewerSpec.args ?? [] } } : {}),
         checks: checks.map((c) =>
           typeof c === 'string'
             ? { command: c, relevance: 'required' }
@@ -1150,6 +1172,9 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
         for (const s of implSpecs) {
           const label = implSpecs.length === 1 ? 'implementer' : s.id
           say(`  ${label.padEnd(11)}: ${s.agent}${s.args?.length ? ` ${s.args.join(' ')}` : ''}`)
+        }
+        if (reviewerSpec) {
+          say(`  reviewer   : ${reviewerSpec.agent}${reviewerSpec.args?.length ? ` ${reviewerSpec.args.join(' ')}` : ''}`)
         }
         say(
           `  checks:      ${
@@ -1174,6 +1199,7 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
       // it always did. The plural key is spread in only when the operator named a seat list.
       implementer: implSpecs[0]!,
       ...(seatPlan.kind === 'listed' ? { implementers: implSpecs } : {}),
+      ...(reviewerSpec ? { reviewer: reviewerSpec } : {}),
       maxAdvisorTurns: Number(flag('rounds', '4')),
       // Built by `ceilingsFrom` rather than inline, so this command and `session` cannot
       // disagree about what a ceiling flag means. The `flag()` calls stay HERE: the pinned
@@ -1378,6 +1404,8 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
     })
     const leadArgs = extraArgs(flag('advisor-args', '') || flag('lead-args', ''))
     const implementerArgs = extraArgs(flag('implementer-args', ''))
+    const reviewer = flag('reviewer', '')
+    const reviewerArgs = extraArgs(flag('reviewer-args', ''))
     // Both front-ends, together. Wiring a capability into one and not the other is the
     // mistake this codebase has now made six times.
     // Refused BEFORE the bypass is applied, which is this block's point of no return: an
@@ -1411,6 +1439,8 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
       checks,
       ...(leadArgs.length > 0 ? { leadArgs } : {}),
       ...(implementerArgs.length > 0 ? { implementerArgs } : {}),
+      ...(reviewer ? { reviewer } : {}),
+      ...(reviewerArgs.length > 0 ? { reviewerArgs } : {}),
       version: version(),
       ...(turnTimeout ? { turnWatchdogMs: Number(turnTimeout) * 1000 } : {}),
       ...(ceilings ? { ceilings } : {}),

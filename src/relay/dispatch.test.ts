@@ -923,6 +923,54 @@ test('a merge_blocked seat takes a task addressed to it, and no role-targeted wo
   assert.equal(canTake(busy, { target: byName, purpose: 'merge_resolution' }), false)
 })
 
+/**
+ * A `review_blocked` seat, the same rule as `merge_blocked` with `review_resolution` in
+ * place of `merge_resolution` (#72). Mirrors the test above deliberately: the two purposes
+ * are gated by an identical shape, and a divergence between them would be a bug in whichever
+ * one this test does not also cover.
+ */
+test('a review_blocked seat takes a task addressed to it, and no role-targeted work at all', () => {
+  const blocked = seat({ seat: 'impl-a', state: 'review_blocked' })
+  const free = seat({ seat: 'impl-b', state: 'idle', idleSince: 5 })
+  const byRole: TaskTarget = { kind: 'role', role: 'implementer' }
+  const byName: TaskTarget = { kind: 'seat', seat: 'impl-a' }
+
+  assert.equal(canTake(blocked, { target: byRole, purpose: 'work' }), false, 'ordinary work must route past a blocked seat')
+  assert.equal(canTake(blocked, { target: byName, purpose: 'review_resolution' }), true, 'the repair has to be able to reach it')
+  assert.equal(isFree(blocked), false, 'and it is still not FREE — the two questions differ')
+
+  // Addressing alone is not enough, same as merge_resolution.
+  assert.equal(canTake(blocked, { target: byName, purpose: 'work' }), false)
+  // Nor is a `merge_resolution` purpose -- the two blocked-state gates must not cross-unlock
+  // each other, since they answer different questions (a git conflict vs. a review verdict).
+  assert.equal(canTake(blocked, { target: byName, purpose: 'merge_resolution' }), false)
+  // Nor is the purpose enough on its own without the right seat named.
+  assert.equal(canTake(blocked, { target: { kind: 'seat', seat: 'impl-b' }, purpose: 'review_resolution' }), false)
+  assert.equal(canTake(blocked, { target: byRole, purpose: 'review_resolution' }), false)
+  // A free seat is unaffected: purpose gates a BLOCKED seat and nothing else.
+  assert.equal(canTake(free, { target: byRole, purpose: 'work' }), true)
+  assert.equal(canTake(free, { target: { kind: 'seat', seat: 'impl-b' }, purpose: 'review_resolution' }), true)
+
+  // A `merge_blocked` seat must not be reachable by a `review_resolution` task, symmetrically.
+  const mergeBlocked = seat({ seat: 'impl-c', state: 'merge_blocked' })
+  assert.equal(canTake(mergeBlocked, { target: { kind: 'seat', seat: 'impl-c' }, purpose: 'review_resolution' }), false)
+
+  // `review_pending` grants NOTHING: there is no repair to dispatch until a verdict exists,
+  // unlike a blocked seat which at least has a designated way out.
+  const pending = seat({ seat: 'impl-d', state: 'review_pending' })
+  assert.equal(isFree(pending), false)
+  assert.equal(canTake(pending, { target: { kind: 'seat', seat: 'impl-d' }, purpose: 'review_resolution' }), false)
+  assert.equal(canTake(pending, { target: { kind: 'seat', seat: 'impl-d' }, purpose: 'work' }), false)
+
+  assert.equal(seatFor([blocked, free], { target: byRole, purpose: 'work' })?.seat, 'impl-b')
+  assert.equal(seatFor([blocked, free], { target: byName, purpose: 'review_resolution' })?.seat, 'impl-a')
+  assert.equal(seatFor([blocked], { target: byRole, purpose: 'work' }), undefined)
+
+  assert.equal(refuseDispatch(blocked, new Map(), { target: byName, purpose: 'review_resolution' }), undefined)
+  assert.match(refuseDispatch(blocked, new Map(), { target: byRole, purpose: 'work' }) ?? '', /impl-a is review_blocked/)
+  assert.match(refuseDispatch(pending, new Map()) ?? '', /impl-d is review_pending/)
+})
+
 test('a queue scan sends the repair to the blocked seat and ordinary work to its neighbour', () => {
   const repair = task({ id: 't-1', seq: 1, target: { kind: 'seat', seat: 'impl-a' }, purpose: 'merge_resolution' })
   const impostor = task({ id: 't-0', seq: 0, target: { kind: 'seat', seat: 'impl-a' } })

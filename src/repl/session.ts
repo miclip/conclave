@@ -38,7 +38,7 @@ import type { AgentEvent } from '../contract/session.ts'
 import { defaultRegistry } from '../registry/builtin.ts'
 import type { CheckSpec } from '../rotation/record.ts'
 import type { AgentRegistry } from '../registry/registry.ts'
-import { implementerSpecsFor, Relay, type SeatRequest } from '../relay/relay.ts'
+import { implementerSpecsFor, Relay, reviewerSpecFor, type SeatRequest } from '../relay/relay.ts'
 import type { RelayMessage } from '../relay/message.ts'
 import type { RunHandle, RunPause } from '../relay/run.ts'
 import { ensureCodexHooksTrusted } from '../deployment/ensureTrust.ts'
@@ -157,6 +157,13 @@ export interface SessionOptions {
    */
   leadArgs?: string[] | undefined
   implementerArgs?: string[] | undefined
+  /**
+   * The reviewer seat's agent, when `--reviewer` named one (#72). Absent is the default and
+   * must stay behaviourless: no `reviewer` key reaches `Relay.start` at all, built through
+   * the same `reviewerSpecFor` the relay CLI uses.
+   */
+  reviewer?: string | undefined
+  reviewerArgs?: string[] | undefined
   /**
    * The `--rounds` flag, which populates `RelayOptions.maxAdvisorTurns`.
    *
@@ -566,7 +573,9 @@ export async function runSession(opts: SessionOptions): Promise<number> {
   // Only the CLIs this session will actually launch. Both roles can be the same one, and
   // registering the other anyway would write a sidecar nobody reads and then require a
   // trust decision for it before anything reported ready.
-  const agents = [...new Set([opts.lead, ...implementerAgents])].filter(isAgentKind)
+  const agents = [...new Set([opts.lead, ...implementerAgents, ...(opts.reviewer ? [opts.reviewer] : [])])].filter(
+    isAgentKind,
+  )
   const installed = await installConfig({ projectRoot: opts.cwd, agents, diagnose: false })
   const changed = installed.written.filter((w) => w.changed)
   if (changed.length > 0) {
@@ -611,6 +620,10 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     ...(opts.implementerArgs ?? []),
   ]
   const implSpecs = implementerSpecsFor(seatRequests, implArgsFor)
+  const reviewerSpec = reviewerSpecFor(opts.reviewer ?? '', (agent) => [
+    ...launchArgsFor(projectConfig, agent),
+    ...(opts.reviewerArgs ?? []),
+  ])
 
   // Said once, at the top, naming who. A session that never asks permission is a thing
   // the operator should be reminded of while it runs, not something they configured weeks
@@ -623,6 +636,9 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     ...[...new Set(implementerAgents)].map((a) =>
       permissionModeFor(projectConfig, a) === 'bypass' ? `implementer (${a})` : '',
     ),
+    reviewerSpec && permissionModeFor(projectConfig, reviewerSpec.agent) === 'bypass'
+      ? `reviewer (${reviewerSpec.agent})`
+      : '',
   ].filter(Boolean)
   if (bypassing.length > 0) {
     write(yellow(`  permission prompts bypassed for ${bypassing.join(' and ')} — per ${CONFIG_RELATIVE}`))
@@ -658,6 +674,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     // so a default console run reaches `Relay.start` with exactly the options it always did.
     implementer: implSpecs[0]!,
     ...(opts.implementers ? { implementers: implSpecs } : {}),
+    ...(reviewerSpec ? { reviewer: reviewerSpec } : {}),
     maxAdvisorTurns: opts.rounds,
     ...(opts.checks.length > 0 ? { rotation: { checks: opts.checks } } : {}),
     onLog: (m) => {

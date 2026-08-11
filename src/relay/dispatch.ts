@@ -67,6 +67,22 @@ export type TaskPurpose =
   | 'work'
   /** The mechanically designated repair for the seat named in `target`. */
   | 'merge_resolution'
+  /**
+   * Reading a completed seat's diff and tree, dispatched to a seat whose role is `reviewer`
+   * (#72). Designated by the orchestrator the same way `merge_resolution` is -- at
+   * admission, never inferred from prose -- the moment a task purpose `work` or
+   * `review_resolution` clears its own boundary and this run has a reviewer seat. `parent`
+   * names the task under review.
+   */
+  | 'review'
+  /**
+   * The mechanically designated repair for a review REJECTION, assigned back to the seat
+   * that produced the rejected work. Identical in shape to `merge_resolution` -- a task a
+   * blocked seat may take and nothing else may -- but the seat is blocked by a verdict
+   * rather than by git, and `parent` is what makes "a second rejection on the same parent"
+   * answerable as a query over the queue rather than a second piece of mutable state.
+   */
+  | 'review_resolution'
 
 /**
  * What the advisor decided. Immutable from the moment it is admitted.
@@ -90,6 +106,20 @@ export interface Task {
    * be left unstated is a task the blocked-seat rule would have to guess about.
    */
   readonly purpose: TaskPurpose
+  /**
+   * The task this one is FOR, for `review` and `review_resolution` purposes only. Unset for
+   * `work` and `merge_resolution`.
+   *
+   * The IMMEDIATE task -- what a `review` task is reviewing, or what a `review_resolution`
+   * task is repairing -- never a chain climbed to find a root. That is what makes "a second
+   * rejection of the same work" a one-hop question answerable from the queue alone, with no
+   * counter anywhere to increment or reset: a `review_resolution` task whose own `parent` is
+   * ITSELF a `review_resolution` task would be a third attempt, so the run escalates instead
+   * of admitting one, and no task with that shape is ever created. The queue is already the
+   * record of what happened; a second Map saying the same thing is a second place it could
+   * disagree.
+   */
+  readonly parent?: string
   /**
    * Task ids that must reach successful `routed` before this one may be assigned.
    *
@@ -231,6 +261,19 @@ export type SchedulerState =
   | 'integrating'
   | 'rotation_pending'
   | 'merge_blocked'
+  /**
+   * A seat whose completed work is awaiting a reviewer's verdict (#72). Not free, and
+   * unlike `merge_blocked` it takes NOTHING, not even a named repair -- there is nothing to
+   * repair yet, only a verdict to wait for. Entered the moment review is admitted, deliberately
+   * before the reviewer is dispatched: a seat sent new work while its last task's fate is
+   * still open could have that work built on a base the run has not yet decided to keep.
+   */
+  | 'review_pending'
+  /**
+   * A seat whose completed work was REJECTED by review (#72). Takes only the `review_resolution`
+   * task named for it, the same shape `merge_blocked` already enforces for `merge_resolution`.
+   */
+  | 'review_blocked'
 
 /** The mutable execution state of one seat, keyed by participant id. */
 export interface SeatExecution {
@@ -264,16 +307,22 @@ export function isFree(seat: SeatExecution): boolean {
  * this one. Targeting alone was not enough — it let ANY seat-targeted task in, so the moment
  * something other than the relay's own redirection could address a seat, ordinary work would
  * flow onto a blocked one again.
+ *
+ * `review_blocked` is the same rule with `review_resolution` in place of `merge_resolution`
+ * (#72): a seat rejected by review may take only its own named repair. `review_pending` grants
+ * nothing — `isFree` is already false for it and no purpose unlocks it, because there is no
+ * repair to dispatch until a verdict exists.
  */
 export function canTake(seat: SeatExecution, task: Pick<Task, 'target' | 'purpose'>): boolean {
   if (seat.current !== undefined) return false
   if (isFree(seat)) return true
-  return (
-    seat.state === 'merge_blocked' &&
-    task.purpose === 'merge_resolution' &&
-    task.target.kind === 'seat' &&
-    task.target.seat === seat.seat
-  )
+  if (seat.state === 'merge_blocked') {
+    return task.purpose === 'merge_resolution' && task.target.kind === 'seat' && task.target.seat === seat.seat
+  }
+  if (seat.state === 'review_blocked') {
+    return task.purpose === 'review_resolution' && task.target.kind === 'seat' && task.target.seat === seat.seat
+  }
+  return false
 }
 
 /**
