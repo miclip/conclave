@@ -483,10 +483,30 @@ export class ClaudePtyHookAdapter implements AgentSession {
       if (turn && !turn.produced) {
         turn.produced = true
         turn.tracker.observeLaunch({ produced: true })
+      } else if (!turn) {
+        // The child spoke before its own UserPromptSubmit reached us. Hooks are delivered as
+        // independent POSTs that nobody orders, so a CLI that fires a permission request
+        // immediately after submitting a prompt can have the two arrive either way round --
+        // reliably in order on one machine and not on another, which is how this was found:
+        // green on macOS, red on Linux, on the same commit.
+        //
+        // Dropping it is not neutral. It is the difference between "this turn produced
+        // nothing, so the model it was launched with is a suspect" and the opposite, so
+        // losing the race makes conclave blame a model for a turn that spoke (#82).
+        this.#producedBeforeTurn = true
       }
     }
     this.#events.push(e)
   }
+
+  /**
+   * A child-output event arrived with no live turn to attribute it to.
+   *
+   * Consumed by the next turn this session opens, once. Not a queue: what matters is only
+   * whether the child has spoken at all, and a second early event says nothing the first
+   * did not.
+   */
+  #producedBeforeTurn = false
 
   #turnFor(key: string): TurnState | undefined {
     return this.#turns.get(key)
@@ -532,6 +552,11 @@ export class ClaudePtyHookAdapter implements AgentSession {
           endSeq: undefined,
           assistantText: undefined,
           produced: false,
+        }
+        if (this.#producedBeforeTurn) {
+          this.#producedBeforeTurn = false
+          turn.produced = true
+          turn.tracker.observeLaunch({ produced: true })
         }
         this.#turns.set(String(key), turn)
         this.#order.push(String(key))

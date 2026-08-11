@@ -67,13 +67,17 @@ process.stdin.on('data', function (d) {
   if (!prompt.trim()) return
   turns += 1
   const id = 'fake-turn-' + turns
+  // ORCH_FAKE_SPEAK posts BEFORE the submit on purpose. Hooks are independent POSTs that
+  // nobody orders, and a loaded Linux runner delivered them this way round while macOS did
+  // not -- which made the adapter drop the evidence that the child had spoken. Forcing the
+  // order here keeps that reproducible instead of leaving it to the machine.
+  if (process.env.ORCH_FAKE_SPEAK) {
+    post('PermissionRequest', { prompt_id: id, turn_id: id, tool_name: 'Bash', tool_input: { command: 'ls' } })
+  }
   post('UserPromptSubmit', { prompt_id: id, turn_id: id, prompt })
   // ORCH_FAKE_SPEAK: say ONE thing and then go quiet, which is a turn that stopped rather than
   // a child that never started. A PermissionRequest is used because it is the only child-sourced
   // event this stand-in can produce without writing a transcript.
-  if (process.env.ORCH_FAKE_SPEAK) {
-    post('PermissionRequest', { prompt_id: id, turn_id: id, tool_name: 'Bash', tool_input: { command: 'ls' } })
-  }
   if (stopAfter > 0) {
     setTimeout(function () {
       post('Stop', { prompt_id: id, turn_id: id, last_assistant_message: 'done' })
@@ -101,6 +105,21 @@ process.env['PATH'] = `${RUN}:${process.env['PATH'] ?? ''}`
 process.env['ORCH_FAKE_TRANSCRIPT'] = TRANSCRIPT
 
 const WATCHDOG_MS = 400
+
+/**
+ * The deadline for the tests where the child must SPEAK before it goes quiet.
+ *
+ * 400ms is fine for a child that says nothing -- there is nothing to race. It is not fine
+ * when the test's precondition is an event that arrives through the hook, because every hook
+ * event spawns a process, and two spawns against a 400ms deadline is a race that macOS wins
+ * and a loaded Linux runner loses. That is exactly how this file went red on main while
+ * passing on the PR.
+ *
+ * Not a raised wait budget hiding contention -- `session.tty.test.ts` records why that is the
+ * wrong fix. This is the deadline of the thing under test, and the test needs the speech
+ * delivered before it. The margin is against process spawn latency, not against load.
+ */
+const SPOKE_WATCHDOG_MS = 5_000
 
 /** Collect events until `done`, or give up. Returns what it saw either way. */
 async function collect(
@@ -285,7 +304,7 @@ test('claude: a turn that spoke and then went quiet is not blamed on its model',
     cwd: RUN,
     role: 'implementer',
     args: ['--model', 'opus-5'],
-    watchdogMs: WATCHDOG_MS,
+    watchdogMs: SPOKE_WATCHDOG_MS,
     readyTimeoutMs: 20_000,
   })
   try {
