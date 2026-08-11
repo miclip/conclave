@@ -18,6 +18,7 @@ import type {
   InputOwnership,
 } from '../contract/session.ts'
 import { guaranteesFor } from '../contract/session.ts'
+import type { ModelSupport } from './models.ts'
 import type { RoleDefinition, RoleId } from './roles.ts'
 
 /**
@@ -121,6 +122,20 @@ export interface AgentDefinition {
    * believed by someone interpreting a `timed_out` they did not watch happen.
    */
   deadlines: DeadlineSupport
+  /**
+   * How far this adapter can check a model name before launching it (#82). Optional, and the
+   * asymmetry with `deadlines` above is deliberate.
+   *
+   * A missing `deadlines` had to be refused because its absence would be reported as a deadline
+   * the adapter does not run -- silence there invents a guarantee. Silence HERE removes one: a
+   * definition that declares nothing validates nothing and refuses nothing, which is the state
+   * every registration was in before this field existed. Making it required would refuse every
+   * test double and every generated registration in order to add a check whose absence is
+   * already the safe direction. What it costs is that "cannot be asked" and "nobody said" must
+   * stay distinguishable, and they do: `unsupported` is a declared grade and an absent field
+   * reports as `undeclared`.
+   */
+  models?: ModelSupport | undefined
   launch: LaunchSpec
   /** Runs before `create`. Throwing here prevents the session from starting. */
   preflight?: Preflight

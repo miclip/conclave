@@ -87,16 +87,16 @@ const CITED: Record<string, string> = {
   // and `#join` (#71). Repaired rather than deleted: each still points at the thing it was
   // written about, and the one whose LINE no longer says what it said -- `#join` now passes a
   // named context object rather than an inline literal -- is pinned on the new spelling.
-  'src/relay/relay.ts:1453-1455': 'get cwd(): string',
-  'src/relay/relay.ts:1603-1609': 'createParticipant(spec, ctx)',
-  'src/relay/relay.ts:2150': 'worktreePaths(this.#opts.cwd)',
-  'src/relay/relay.ts:2177': 'NOT ARMED (no checks configured)',
-  'src/relay/relay.ts:2247': 'worktreePaths(this.#opts.cwd)',
-  'src/relay/relay.ts:2649': 'resolutionFor(p.subject, { rotationArmed: armed })',
-  'src/relay/relay.ts:2827-2833': 'No rotation checks are configured',
-  'src/relay/relay.ts:310': "onDegradation ?? 'candidate'",
-  'src/relay/relay.ts:3679': 'worktreePaths(this.#opts.cwd)',
-  'src/relay/relay.ts:4146': "subject: { reason: 'turn_incomplete', participant: lead.id }",
+  'src/relay/relay.ts:1496-1498': 'get cwd(): string',
+  'src/relay/relay.ts:1646-1652': 'createParticipant(spec, ctx)',
+  'src/relay/relay.ts:2193': 'worktreePaths(this.#opts.cwd)',
+  'src/relay/relay.ts:2220': 'NOT ARMED (no checks configured)',
+  'src/relay/relay.ts:2290': 'worktreePaths(this.#opts.cwd)',
+  'src/relay/relay.ts:2692': 'resolutionFor(p.subject, { rotationArmed: armed })',
+  'src/relay/relay.ts:2870-2876': 'No rotation checks are configured',
+  'src/relay/relay.ts:311': "onDegradation ?? 'candidate'",
+  'src/relay/relay.ts:3722': 'worktreePaths(this.#opts.cwd)',
+  'src/relay/relay.ts:4189': "subject: { reason: 'turn_incomplete', participant: lead.id }",
   // The five below are what the console's `/continue` liveness guard cites for reading a
   // pause's SCOPE rather than `verdictOf` or a rank scan (`seatsToSampleAtPause` in
   // src/repl/session.ts). Two of them pin the ONLY sites that populate `verdictOf` -- the
@@ -105,16 +105,16 @@ const CITED: Record<string, string> = {
   // conclave-scoped halt the change gives up sampling on, its own liveness evidence, and the
   // send that a resumed `advisor_escalated` pause actually makes -- to the ADVISOR, which is
   // why measuring implementer children there was answering the wrong question.
-  'src/relay/relay.ts:4149': 'verdictOf: { participant: lead.id, endSeq: next.end.seq },',
-  'src/relay/relay.ts:4248': 'The human has seen your escalation and asked you to continue.',
+  'src/relay/relay.ts:4192': 'verdictOf: { participant: lead.id, endSeq: next.end.seq },',
+  'src/relay/relay.ts:4291': 'The human has seen your escalation and asked you to continue.',
   // The workstream a conflicted instruction belongs to, named after the seat when exactly one
   // seat could take it -- the N=1 coincidence a scope reader must not mistake for a seat.
-  'src/relay/relay.ts:4312': "reason: 'authority_conflict', workstream:",
-  'src/relay/relay.ts:4396': "subject: { reason: 'implementer_unanswered', participant: seat.id }",
-  'src/relay/relay.ts:4445': "subject: { reason: 'advisor_escalated' },",
-  'src/relay/relay.ts:4458': '#livenessEvidence(seat, report.emittedSinceSend)',
-  'src/relay/relay.ts:4529': "subject: { reason: 'turn_incomplete', participant: seat.id }",
-  'src/relay/relay.ts:4535': 'verdictOf: { participant: seat.id, endSeq: current.seq },',
+  'src/relay/relay.ts:4355': "reason: 'authority_conflict', workstream:",
+  'src/relay/relay.ts:4439': "subject: { reason: 'implementer_unanswered', participant: seat.id }",
+  'src/relay/relay.ts:4488': "subject: { reason: 'advisor_escalated' },",
+  'src/relay/relay.ts:4501': '#livenessEvidence(seat, report.emittedSinceSend)',
+  'src/relay/relay.ts:4572': "subject: { reason: 'turn_incomplete', participant: seat.id }",
+  'src/relay/relay.ts:4578': 'verdictOf: { participant: seat.id, endSeq: current.seq },',
   'src/relay/resolution.ts:190': 'export function resolutionFor',
   'src/relay/run.ts:51': "| 'implementer_unanswered'",
   'src/relay/run.ts:169-183': 'reason: PauseReason',

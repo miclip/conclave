@@ -24,6 +24,7 @@ import type {
 import { formatVerdict, type Verdict } from '../contract/outcome.ts'
 import { AgentRegistry } from '../registry/registry.ts'
 import { launchRecordFor, type ParticipantLaunch } from '../registry/launch.ts'
+import { refuseUnknownModels } from '../registry/models.ts'
 import type { ParticipantSpec } from '../registry/types.ts'
 import type { RoleId } from '../registry/roles.ts'
 import { acquire, release } from '../workspace/sessionLock.ts'
@@ -1377,7 +1378,49 @@ export class Relay {
         )
       }
     }
+    // Every seat's model, asked of the children before ANY of them is launched (#82). The same
+    // kind of check as the four above -- a configuration that otherwise fails silently, and this
+    // one fails silently for twelve minutes and then reports a watchdog. `createParticipant`
+    // refuses it too, and that is the floor rather than a duplicate: it refuses one seat at a
+    // time, by which point the seats before it have live children, so the whole list is checked
+    // here where the whole list is known.
+    //
+    // `cwd` is the run's for every seat, including seats that will be launched in their own
+    // worktree: a seat's directory does not enter its argv (`effectiveLaunchArgs`), and this
+    // reads nothing else from the context.
+    const modelCtx = { cwd: opts.cwd, watchdogMs: opts.turnWatchdogMs }
+    const modelChecks = await refuseUnknownModels(
+      [opts.lead, ...seats, ...(opts.reviewer ? [opts.reviewer] : [])].flatMap((spec) => {
+        // A spec that does not resolve -- unknown agent, a role that is not a model seat -- is
+        // left to `#join`, which already refuses it with the message written for it. Reporting
+        // an unknown agent from the model checker would answer a question nobody asked.
+        try {
+          const resolved = opts.registry.resolve(spec)
+          return [{ participant: spec.id, agent: resolved.agent, model: launchRecordFor(resolved, modelCtx).model }]
+        } catch {
+          return []
+        }
+      }),
+    )
+
     const relay = new Relay(opts)
+
+    // What could NOT be established, said out loud. The issue asks for this in as many words --
+    // "an agent whose models cannot be enumerated says so rather than guessing" -- and a check
+    // whose negative result is invisible is a check an operator will believe covered them. Only
+    // the seats that named a model and were not judged produce a line; a checked seat is silent,
+    // because a note on every seat is a note nobody reads. A default run names no model at all,
+    // so its log is the log it has always been.
+    for (const check of modelChecks) {
+      if (check.unchecked === undefined) continue
+      relay.#record({
+        from: 'orchestrator',
+        fromRank: 'human',
+        to: [],
+        kind: 'note',
+        text: `${check.participant} model '${check.model}' was NOT verified before launch: ${check.unchecked}`,
+      })
+    }
 
     // Isolation, and only where it is needed. One implementer works in the operator's cwd on
     // the operator's branch with no worktree, no branch and no manifest -- the default run must

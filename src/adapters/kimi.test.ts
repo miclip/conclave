@@ -195,3 +195,32 @@ test('a binary that is not on PATH is a verdict, not a crash', async () => {
   assert.match(end.verdict.provenance[0]!.detail, /not on PATH/)
   await s.close()
 })
+
+/** Emits nothing and never exits, so only the watchdog can end the turn. */
+function hangingStub(): string {
+  const dir = mkdtempSync(join(tmpdir(), 'kimi-hang-'))
+  const command = join(dir, 'kimi-hang')
+  writeFileSync(command, '#!/bin/sh\nsleep 30\n')
+  chmodSync(command, 0o755)
+  return command
+}
+
+test('a first run that produced no messages at all points at the launch (#82)', async () => {
+  // Kimi normally takes its model from the generated config file rather than the argv, so the
+  // usual reading of this is "the argv named no model" -- which is still the sentence that sends
+  // an operator to the launch instead of leaving `timed_out` standing on its own.
+  const session = await KimiPrintAdapter.start({
+    cwd: REPO,
+    role: 'implementer',
+    command: hangingStub(),
+    watchdogMs: 300,
+  })
+  await session.send('go', { kind: 'orchestrator' })
+  const end = (await nextTurn(session)).find((e) => e.type === 'turn_end') as TurnEndEvent
+  assert.equal(end.verdict.outcome, 'timed_out')
+  const said = end.verdict.provenance.find((p) => p.source === 'orchestrator' && /first run/.test(p.detail))
+  assert.ok(said, `the verdict must say the run produced nothing: ${JSON.stringify(end.verdict.provenance)}`)
+  assert.match(said!.detail, /named no model/)
+  assert.equal(said!.caveat, true)
+  await session.close()
+})

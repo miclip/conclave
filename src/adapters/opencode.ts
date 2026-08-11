@@ -71,6 +71,8 @@ import type {
 import { guaranteesFor, turnKey } from '../contract/session.ts'
 import type { Confidence, Provenance, TurnLiveness, Verdict } from '../contract/outcome.ts'
 import { AsyncQueue } from './asyncQueue.ts'
+// The same function the run record reads, so the diagnosis names the model the report does.
+import { modelFromArgs } from '../registry/launch.ts'
 
 /**
  * A record from `--format json`, as it actually arrives.
@@ -323,6 +325,23 @@ export class OpenCodeRunAdapter implements AgentSession {
           source: 'watchdog',
           detail: `no terminal record within ${this.#opts.watchdogMs}ms`,
         })
+        // A FIRST run that produced not one record before the deadline is a different finding
+        // from one that produced records and then stalled, and #82 is that they read the same.
+        // Nothing parsed at all means the child never started work, and the launch is the first
+        // thing to look at -- named as a candidate, since validation has already refused the
+        // models it could prove wrong and what reaches here is the residue.
+        if (this.#turns.length === 1 && turn.steps === 0 && turn.textBlocks.length === 0 && turn.toolCalls.length === 0) {
+          const model = modelFromArgs(this.#opts.args ?? [])
+          turn.provenance.push({
+            source: 'orchestrator',
+            detail:
+              `the first run produced no records at all, rather than producing some and stalling` +
+              (model === null
+                ? ': its argv named no model, so a configured default chose one'
+                : `: it was launched with model '${model}', which is a candidate cause`),
+            caveat: true,
+          })
+        }
         child.kill('SIGTERM')
       }, this.#opts.watchdogMs)
     }
@@ -507,7 +526,10 @@ export class OpenCodeRunAdapter implements AgentSession {
         outcome: watchdogged ? 'timed_out' : 'process_exited',
         confidence: 'proven',
         provenance: [
-          ...turn.provenance.filter((p) => p.source === 'watchdog'),
+          // The watchdog's own lines, and the diagnosis it wrote beside them. Filtered rather
+          // than taken whole because everything else on a killed turn describes what the child
+          // was doing before we killed it, which is not evidence about how it ended.
+          ...turn.provenance.filter((p) => p.source === 'watchdog' || p.caveat === true),
           { source: 'process', detail: `signal ${signal}` },
         ],
       }

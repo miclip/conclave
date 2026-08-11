@@ -7,6 +7,8 @@
  */
 
 import type { AgentSession } from '../contract/session.ts'
+import { launchRecordFor } from './launch.ts'
+import { refuseUnknownModels } from './models.ts'
 import { BUILTIN_ROLES, resolveRole, type RoleDefinition, type RoleId } from './roles.ts'
 import {
   resolveInputPolicy,
@@ -100,6 +102,15 @@ export class AgentRegistry {
           (resolved.agent.unavailableReason ? `: ${resolved.agent.unavailableReason}` : ''),
       )
     }
+    // The model this seat names, asked of the child before it is started (#82). Here as well as
+    // in `Relay.start` for the reason the preflight line below is here: this is the funnel every
+    // caller passes through, rotation's replacement included, and a check that only the
+    // front-ends run is a check the programmatic surface does not have. Costs nothing when the
+    // argv names no model, and nothing twice when the run already asked -- the enumeration is
+    // cached per command for the life of the process.
+    await refuseUnknownModels([
+      { participant: spec.id, agent: resolved.agent, model: launchRecordFor(resolved, ctx).model },
+    ])
     // Preconditions first. An adapter must not be able to skip them by construction.
     if (resolved.agent.preflight) await resolved.agent.preflight(resolved, ctx)
     return resolved.agent.create(resolved, ctx)

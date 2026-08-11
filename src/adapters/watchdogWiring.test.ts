@@ -14,6 +14,12 @@
  *
  * These are NOT gated behind ORCH_LIVE: no agent binary is spawned and no quota is used.
  *
+ * The last two drive the other half of #82: WHY a turn hung. A first turn that produced nothing
+ * whatsoever is a child that never started work, and the model it was launched with is the first
+ * thing to suspect -- so ORCH_FAKE_SPEAK makes the same fake CLI produce one event before going
+ * quiet, and the two verdicts are compared. Without the speaking case, "always blames the model"
+ * would pass.
+ *
  * Delete the `arm()` call in either adapter, or break its callback, and the corresponding
  * hang test fails by never receiving a `turn_end`.
  */
@@ -62,6 +68,12 @@ process.stdin.on('data', function (d) {
   turns += 1
   const id = 'fake-turn-' + turns
   post('UserPromptSubmit', { prompt_id: id, turn_id: id, prompt })
+  // ORCH_FAKE_SPEAK: say ONE thing and then go quiet, which is a turn that stopped rather than
+  // a child that never started. A PermissionRequest is used because it is the only child-sourced
+  // event this stand-in can produce without writing a transcript.
+  if (process.env.ORCH_FAKE_SPEAK) {
+    post('PermissionRequest', { prompt_id: id, turn_id: id, tool_name: 'Bash', tool_input: { command: 'ls' } })
+  }
   if (stopAfter > 0) {
     setTimeout(function () {
       post('Stop', { prompt_id: id, turn_id: id, last_assistant_message: 'done' })
@@ -231,5 +243,83 @@ test('the transcript tailer emits content, never lifecycle', async () => {
       /if \(e\.type === 'turn_start' \|\| e\.type === 'turn_end'\) continue/.test(poller),
       `${adapter} must not re-emit lifecycle events from the transcript`,
     )
+  }
+})
+
+/** The `orchestrator` caveat #82 adds to a deadline verdict, or undefined when it is absent. */
+const launchCaveat = (end: TurnEndEvent | undefined): string | undefined =>
+  end?.verdict.provenance.find((p) => p.source === 'orchestrator' && p.caveat === true && /first turn/.test(p.detail))
+    ?.detail
+
+test('claude: a first turn that produced NOTHING names the model it was launched with', async () => {
+  // The reported failure, in miniature: a model the child will not run, a turn that emits
+  // nothing at all, and a watchdog that until now said only `timed_out (uncertain)`.
+  const session = await ClaudePtyHookAdapter.start({
+    cwd: RUN,
+    role: 'implementer',
+    args: ['--model', 'opus-5'],
+    watchdogMs: WATCHDOG_MS,
+    readyTimeoutMs: 20_000,
+  })
+  try {
+    await session.send('hang please', { kind: 'orchestrator' })
+    const end = endOf(await collect(session, (e) => endOf(e) !== undefined, 10_000))
+    assert.equal(end?.verdict.outcome, 'timed_out')
+    const caveat = launchCaveat(end)
+    assert.ok(caveat, `the verdict must say the turn produced nothing: ${JSON.stringify(end?.verdict.provenance)}`)
+    assert.match(caveat!, /opus-5/, 'the model is named, because it is the thing to check')
+    assert.match(caveat!, /candidate/, 'and named as a candidate: nothing here proves it')
+    // The deadline evidence is unchanged. This is an addition to the chain, not a replacement:
+    // the clock that fired is still the most decisive thing in it.
+    assert.ok(end!.verdict.provenance.some((p) => p.source === 'watchdog'))
+  } finally {
+    await session.close()
+  }
+})
+
+test('claude: a turn that spoke and then went quiet is not blamed on its model', async () => {
+  // The distinction the issue asks for, and the control that stops the test above passing for
+  // the wrong reason. Same CLI, same deadline, same model -- one event of difference.
+  process.env['ORCH_FAKE_SPEAK'] = '1'
+  const session = await ClaudePtyHookAdapter.start({
+    cwd: RUN,
+    role: 'implementer',
+    args: ['--model', 'opus-5'],
+    watchdogMs: WATCHDOG_MS,
+    readyTimeoutMs: 20_000,
+  })
+  try {
+    await session.send('speak then hang', { kind: 'orchestrator' })
+    const events = await collect(session, (e) => endOf(e) !== undefined, 10_000)
+    assert.ok(
+      events.some((e) => e.type === 'permission_requested'),
+      'the fake CLI must actually have spoken, or this proves nothing',
+    )
+    const end = endOf(events)
+    assert.equal(end?.verdict.outcome, 'timed_out', 'it still times out; only the diagnosis differs')
+    assert.equal(launchCaveat(end), undefined, 'a turn that emitted and stopped must not blame the launch')
+  } finally {
+    delete process.env['ORCH_FAKE_SPEAK']
+    await session.close()
+  }
+})
+
+test('codex: a first turn that produced NOTHING names the model it was launched with', async () => {
+  const session = await CodexPtyHookAdapter.start({
+    cwd: RUN,
+    role: 'implementer',
+    // Codex takes its model through `-c model=X` rather than a flag of its own, which is the
+    // spelling `modelFromArgs` has to read for this seat to be diagnosable at all.
+    args: ['-c', 'model=gpt-5-imaginary'],
+    watchdogMs: WATCHDOG_MS,
+    readyTimeoutMs: 20_000,
+  })
+  try {
+    await session.send('hang please', { kind: 'orchestrator' })
+    const end = endOf(await collect(session, (e) => endOf(e) !== undefined, 10_000))
+    assert.equal(end?.verdict.outcome, 'timed_out')
+    assert.match(launchCaveat(end) ?? '', /gpt-5-imaginary/)
+  } finally {
+    await session.close()
   }
 })

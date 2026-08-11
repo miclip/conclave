@@ -21,6 +21,13 @@ import {
 import { assertCodexHooksExecutable, CONCLAVE_HOOK_MATCH } from '../deployment/codexHookTrust.ts'
 import { DEFAULT_IDLE_MS, DEFAULT_WATCHDOG_MS } from '../outcomes/watchdog.ts'
 import { effectiveLaunchArgs } from './launch.ts'
+import {
+  claudeAliasOf,
+  claudeAliases,
+  isClaudeAliasShaped,
+  opencodeModels,
+  type ModelSupport,
+} from './models.ts'
 import { AgentRegistry } from './registry.ts'
 import type {
   AgentDefinition,
@@ -50,11 +57,36 @@ const RUN_PER_TURN_DEADLINES: DeadlineSupport = {
   silence: { supported: false },
 }
 
+/**
+ * Claude Code names its aliases and nothing else, so only aliases are judged.
+ *
+ * Measured on 2.1.227: there is no `claude models` subcommand, `--model` with no value opens an
+ * interactive picker, and `--help` prints the option text quoted in `claudeAliases`. That text
+ * says an alias OR a full model name is accepted and enumerates only the first kind, which is
+ * exactly the graded middle this field exists for -- a full name goes to the child unjudged, and
+ * `--model opus-5`, the spelling that produced #82, is judged and refused.
+ *
+ * The honest limit, stated because it is the risk this grade carries: the help calls its three
+ * aliases an example ("e.g. 'fable', 'opus', or 'sonnet'"), so an alias claude accepts and does
+ * not print here would be refused. The escape hatch needs no flag and no code -- the full model
+ * name is passed through -- and the alternative, treating the one enumeration claude offers as
+ * advisory, would decline to catch the bug that was actually reported.
+ */
+const CLAUDE_MODELS: ModelSupport = {
+  grade: 'aliases_only',
+  ask: { command: 'claude', args: ['--help'], parse: claudeAliases },
+  judges: isClaudeAliasShaped,
+  normalize: claudeAliasOf,
+  noun: 'alias',
+  nounPlural: 'aliases',
+}
+
 export const CLAUDE_AGENT: AgentDefinition = {
   id: 'claude',
   displayName: 'Claude Code',
   capabilities: CLAUDE_CAPABILITIES,
   deadlines: PTY_HOOK_DEADLINES,
+  models: CLAUDE_MODELS,
   launch: {
     command: 'claude',
     // The adapter supplies --settings itself, pointing at a generated hook registration
@@ -73,11 +105,34 @@ export const CLAUDE_AGENT: AgentDefinition = {
   },
 }
 
+/**
+ * Codex cannot be asked, so nothing about a Codex model selection is claimed.
+ *
+ * `codex models` exists and is TTY-gated: run with stdin not a terminal it prints
+ * `Error: stdin is not a terminal` and lists nothing, which is what a preflight check has. Giving
+ * it a pty purely to read a list would mean driving a full-screen picker to scrape it, and a
+ * scrape of a TUI is a model list held in Conclave by another name -- stale the first time the
+ * screen changes, and wrong in the direction that refuses valid input.
+ *
+ * `unsupported` rather than a guess, and the run still starts: a Codex seat with a bad model is
+ * left to the second half of #82, where a first turn that produces nothing at all says the model
+ * may be why.
+ */
+const CODEX_MODELS: ModelSupport = {
+  grade: 'unsupported',
+  noun: 'model',
+  nounPlural: 'models',
+  reason:
+    '`codex models` requires a terminal (`Error: stdin is not a terminal` on 0.147.0), so codex ' +
+    'cannot be asked which models it accepts without driving its picker',
+}
+
 export const CODEX_AGENT: AgentDefinition = {
   id: 'codex',
   displayName: 'Codex CLI',
   capabilities: CODEX_CAPABILITIES,
   deadlines: PTY_HOOK_DEADLINES,
+  models: CODEX_MODELS,
   launch: {
     command: 'codex',
     baseArgs: [
@@ -148,11 +203,29 @@ export const CODEX_PROMPT_ON_APPROVAL_ARGS = [
  * what Conclave can drive: any model OpenCode can reach is reachable through the same
  * adapter, without Conclave ever holding a model API key or speaking to a provider.
  */
+/**
+ * OpenCode enumerates, so an absent name is refused rather than launched.
+ *
+ * `opencode models` prints one `provider/model` per line and exits -- 60 of them on 1.18.15, over
+ * every provider the operator has configured. That makes absence a FACT about this installation
+ * rather than an absence of knowledge, which is the only condition under which a strict refusal
+ * is honest. It is also the agent where the refusal matters most: model selection is the entire
+ * reason OpenCode widens what Conclave can drive, so its `-m provider/model` is the argument most
+ * likely to be typed by hand and mistyped.
+ */
+const OPENCODE_MODELS: ModelSupport = {
+  grade: 'enumerated',
+  ask: { command: 'opencode', args: ['models'], parse: opencodeModels },
+  noun: 'model',
+  nounPlural: 'models',
+}
+
 export const OPENCODE_AGENT: AgentDefinition = {
   id: 'opencode',
   displayName: 'OpenCode',
   capabilities: OPENCODE_CAPABILITIES,
   deadlines: RUN_PER_TURN_DEADLINES,
+  models: OPENCODE_MODELS,
   launch: {
     command: 'opencode',
     baseArgs: [],
@@ -179,11 +252,31 @@ export const OPENCODE_AGENT: AgentDefinition = {
  * at a generated TOML naming an OpenAI-compatible provider. Conclave holds no key: the file
  * is the user's, and the REPL is the integration.
  */
+/**
+ * Kimi has no enumeration, and its model normally is not on the argv at all.
+ *
+ * `kimi models` is not a command (`No such command 'models'` on 1.49.0). The adapter selects the
+ * model through the `--config-file` TOML it generates, naming an OpenAI-compatible provider that
+ * is the operator's own -- so the set of valid names is a property of THEIR endpoint, which no
+ * question to the CLI could answer. `modelFromArgs` already reports `null` for that shape, so in
+ * the ordinary case nothing is checked because nothing was selected; this grade covers the case
+ * where `-m` was passed through anyway.
+ */
+const KIMI_MODELS: ModelSupport = {
+  grade: 'unsupported',
+  noun: 'model',
+  nounPlural: 'models',
+  reason:
+    'kimi has no `models` command (1.49.0) and takes its model from the provider config file the ' +
+    'adapter generates, so the valid names belong to the operator’s endpoint rather than to the CLI',
+}
+
 export const KIMI_AGENT: AgentDefinition = {
   id: 'kimi',
   displayName: 'Kimi CLI',
   capabilities: KIMI_CAPABILITIES,
   deadlines: RUN_PER_TURN_DEADLINES,
+  models: KIMI_MODELS,
   launch: { command: 'kimi', baseArgs: [] },
   async create(resolved: ResolvedParticipant, ctx: CreateParticipantContext): Promise<AgentSession> {
     return KimiPrintAdapter.start({

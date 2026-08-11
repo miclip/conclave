@@ -75,6 +75,8 @@ import type {
 import { guaranteesFor, turnKey } from '../contract/session.ts'
 import type { Confidence, Provenance, TurnLiveness, Verdict } from '../contract/outcome.ts'
 import { AsyncQueue } from './asyncQueue.ts'
+// The same function the run record reads, so the diagnosis names the model the report does.
+import { modelFromArgs } from '../registry/launch.ts'
 
 /** The hook handler each event runs. Shared with the Claude adapter; it posts to loopback. */
 const CLIENT = join(import.meta.dirname, '..', 'hooks', 'client.ts')
@@ -372,6 +374,23 @@ export class KimiPrintAdapter implements AgentSession {
           source: 'watchdog',
           detail: `no terminal message within ${this.#opts.watchdogMs}ms`,
         })
+        // A FIRST run that produced not one message before the deadline is a different finding
+        // from one that produced messages and then stalled, and #82 is that they read the same.
+        // Kimi's model normally comes from the generated config file rather than the argv, so
+        // this usually says the argv named none -- which is still the sentence that points at
+        // the launch instead of leaving `timed_out` to stand on its own.
+        if (this.#turns.length === 1 && turn.textBlocks.length === 0 && turn.toolCalls.length === 0) {
+          const model = modelFromArgs(this.#opts.args ?? [])
+          turn.provenance.push({
+            source: 'orchestrator',
+            detail:
+              `the first run produced no messages at all, rather than producing some and stalling` +
+              (model === null
+                ? ': its argv named no model, so the provider config file chose one'
+                : `: it was launched with model '${model}', which is a candidate cause`),
+            caveat: true,
+          })
+        }
         child.kill('SIGTERM')
       }, this.#opts.watchdogMs)
     }
@@ -563,7 +582,8 @@ export class KimiPrintAdapter implements AgentSession {
         outcome: watchdogged ? 'timed_out' : 'process_exited',
         confidence: 'proven',
         provenance: [
-          ...turn.provenance.filter((p) => p.source === 'watchdog'),
+          // The watchdog's own lines, and the diagnosis it wrote beside them.
+          ...turn.provenance.filter((p) => p.source === 'watchdog' || p.caveat === true),
           { source: 'process', detail: `signal ${signal}` },
         ],
       }

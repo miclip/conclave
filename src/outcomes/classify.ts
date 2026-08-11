@@ -40,6 +40,31 @@ export interface TranscriptState {
   taskComplete: boolean
 }
 
+/**
+ * How the child was started, and whether this turn has heard a word from it.
+ *
+ * Read by exactly one rule -- the deadline -- and it changes no outcome, only what the
+ * provenance says. The distinction it exists to draw (#82): a turn that emitted nothing AT ALL
+ * and a turn that emitted and then went quiet read identically today, and they are different
+ * findings. The second is a turn that stopped. The first is a child that never started, which on
+ * every CLI here is what a rejected model looks like from the outside -- the process is alive,
+ * the prompt is consumed, and nothing is ever produced.
+ */
+export interface LaunchState {
+  /** The model this child's argv named, or `null` when it named none. */
+  model: string | null
+  /**
+   * Whether this is the FIRST turn the session was sent.
+   *
+   * The gate on the whole diagnosis, and not a detail: on a later turn the launch has already
+   * been proved to work, so naming the model there would point an operator at the one thing the
+   * run has evidence AGAINST.
+   */
+  firstTurn: boolean
+  /** True once the child has produced anything whatsoever during this turn. */
+  produced: boolean
+}
+
 export interface Evidence {
   agent: string
   hooks: string[]
@@ -60,6 +85,12 @@ export interface Evidence {
   watchdogSeconds: number
   /** A channel we depend on went away. Says nothing about the turn itself. */
   observationGap: boolean
+  /**
+   * Absent when the adapter does not report it, and absent is the ONLY safe default: a
+   * `firstTurn: false, produced: false` stand-in would be a claim about a session nobody
+   * measured, and it would silence the diagnosis on precisely the adapters that never made it.
+   */
+  launch?: LaunchState | undefined
 }
 
 export function emptyTranscriptState(): TranscriptState {
@@ -261,6 +292,30 @@ export function classify(ev: Evidence): { state: TurnLiveness } & Partial<Verdic
             detail: `${ev.elapsedSeconds.toFixed(0)}s > ${ev.watchdogSeconds.toFixed(0)}s with no Stop`,
           },
     )
+    // A first turn that produced NOTHING is a different finding from a turn that stopped, and
+    // until #82 the two read identically. Named here rather than left to the operator because
+    // the launch is the one thing they can check in seconds and the one thing a silent child
+    // cannot tell them: a CLI given a model it does not have consumes the prompt, says nothing,
+    // and is killed by this clock twelve minutes later.
+    //
+    // A CANDIDATE cause, worded as one. Validation refuses the models it can prove wrong before
+    // the run starts; what reaches here is the residue -- an agent whose models cannot be
+    // enumerated, an entitlement, a provider outage, a name valid for one account and not
+    // another -- so this must not assert what it cannot know.
+    if (ev.launch && ev.launch.firstTurn && !ev.launch.produced) {
+      p.push({
+        source: 'orchestrator',
+        detail:
+          ev.launch.model === null
+            ? 'the first turn produced no output at all, rather than emitting and stopping: the ' +
+              'child never started work. Its argv named no model, so a provider default or a ' +
+              'configuration file chose one'
+            : `the first turn produced no output at all, rather than emitting and stopping: the ` +
+              `child never started work. It was launched with model '${ev.launch.model}', which ` +
+              `is a candidate cause -- a model a CLI rejects looks exactly like this`,
+        caveat: true,
+      })
+    }
     p.push({
       source: 'watchdog',
       detail: 'completion is uncertain; this is not evidence of cancellation',
