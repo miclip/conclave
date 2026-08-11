@@ -166,6 +166,17 @@ export interface ClaudeAdapterOptions {
   inputOwnership?: InputOwnership | undefined
   /** Extra CLI args, e.g. ['--permission-mode', 'default']. */
   args?: string[] | undefined
+  /**
+   * The program to spawn. Defaults to `claude` on PATH.
+   *
+   * Threaded from `AgentDefinition.launch.command` by the registry (#51), and that is the
+   * point of it rather than a convenience: the availability preflight validates
+   * `launch.command`, so an adapter that hardcodes its own filename makes the field a
+   * DIFFERENT command from the one that launches -- an absolute path or a wrapper would be
+   * checked and then not run. A validated field that nothing spawns is worse than no check,
+   * because it reports on a configuration the run does not have.
+   */
+  command?: string | undefined
   readyTimeoutMs?: number | undefined
   /** How long an unmatched turn may run before the watchdog calls it uncertain. */
   watchdogMs?: number | undefined
@@ -303,7 +314,7 @@ export class ClaudePtyHookAdapter implements AgentSession {
     })
 
     this.#pty = await PtyProcess.spawn({
-      file: 'claude',
+      file: this.#opts.command ?? 'claude',
       args: ['--settings', settingsPath, ...(this.#opts.args ?? [])],
       cwd: this.#opts.cwd,
       env,

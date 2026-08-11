@@ -494,7 +494,7 @@ for (const reason of Object.keys(EXPECTED) as RunPause['reason'][]) {
 
 test('an advisor turn that ends badly scopes to the advisor, not to the implementer', async (t) => {
   // The one place the scope is not obvious. `turn_incomplete` is raised for either seat --
-  // `src/relay/relay.ts:4189` for the advisor, `:4572` for the implementer -- and a scope
+  // `src/relay/relay.ts:4213` for the advisor, `:4596` for the implementer -- and a scope
   // read off "the implementer" rather than off the seat would be silently wrong for half of
   // them, in a way no N=1 run with one implementer would ever reveal.
   const dir = repo()
@@ -519,7 +519,7 @@ test('an advisor turn that ends badly scopes to the advisor, not to the implemen
 test('an unarmed run ends on degradation rather than raising a rotation candidate', async (t) => {
   // Which is why the `operator` branch of the derived rotation authority is not reachable
   // from any pause site: without checks the run does not pause on degradation at all, it
-  // ends (`src/relay/relay.ts:2870-2876`). Asserted rather than asserted-in-a-comment,
+  // ends (`src/relay/relay.ts:2894-2900`). Asserted rather than asserted-in-a-comment,
   // because the classification's other branch rests on it.
   const dir = repo()
   const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it.'])

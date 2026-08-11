@@ -324,7 +324,7 @@ const DECLARED: Record<string, string> = {
     'Authority routing (#56, D2) sends implementer_unanswered to the advisor before the operator, ' +
     'so a default run interrupts the human less than today. Real change at N=1, an improvement, ' +
     'declared rather than discovered. The pause reason exists at src/relay/run.ts:51 and the halt ' +
-    'that raises it is at src/relay/relay.ts:4439.',
+    'that raises it is at src/relay/relay.ts:4463.',
   'status.pause.resolution':
     'Classifying unresolved conditions on both axes (#56, D2) added `resolution` to every RunPause ' +
     '(src/relay/run.ts:193), so `conclave status --json` on a paused default run now carries ' +
@@ -606,7 +606,7 @@ const DECLARED: Record<string, string> = {
     'participant and nobody else, and a conclave or workstream scope samples NOBODY. It used to ' +
     'read pause.verdictOf.participant and fall back to scanning participants by rank for ' +
     'implementers — and verdictOf is set at exactly two halt sites, both turn_incomplete ' +
-    '(src/relay/relay.ts:4192, src/relay/relay.ts:4578), so every other pause reached that rank ' +
+    '(src/relay/relay.ts:4216, src/relay/relay.ts:4602), so every other pause reached that rank ' +
     'scan. WHAT CHANGES AT N=1: on the three pauses whose scope names no participant — ' +
     'operator_requested (/pause), advisor_escalated, authority_conflict — the lone implementer ' +
     'child used to be sampled, so a child that measured busy REFUSED the resume and wrote ' +
@@ -615,15 +615,15 @@ const DECLARED: Record<string, string> = {
     'safety guard rather than presented as a pure N>1 fix. The reason it is the right narrowing: ' +
     'the guard exists because continuing SENDS into a child that cannot accept input mid-turn, ' +
     'and on those three pauses the child it measured is not the child being sent to — resuming ' +
-    'advisor_escalated sends to the ADVISOR (src/relay/relay.ts:4291), resuming ' +
+    'advisor_escalated sends to the ADVISOR (src/relay/relay.ts:4315), resuming ' +
     'authority_conflict queues a constraint that is delivered by the dispatcher on the next ' +
     'dispatch to a free seat, and operator_requested is consumed at an advisor-turn boundary ' +
     'whose own evidence line says no turn is in flight. WHAT IS GIVEN UP, named rather than ' +
     'discovered: the advisor_escalated halt raised when a seat’s turn completed and its report ' +
-    'could not be read (src/relay/relay.ts:4488) is conclave-scoped by design, yet the useful ' +
+    'could not be read (src/relay/relay.ts:4512) is conclave-scoped by design, yet the useful ' +
     'question there is whether THAT seat is still writing; at N=1 the rank scan sampled it by ' +
     'coincidence of it being the only implementer, and now nothing does. The pause still carries ' +
-    'that seat’s liveness evidence from the halt site (src/relay/relay.ts:4501), which is what ' +
+    'that seat’s liveness evidence from the halt site (src/relay/relay.ts:4525), which is what ' +
     'the operator actually reads; restoring a refusal there is a change to that halt’s scope, ' +
     'not to the guard. AT N>1 the old behaviour was unsafe in the other direction: a pause about ' +
     'one seat could be refused because a DIFFERENT seat was mid-turn, and the operator was told ' +
@@ -728,9 +728,87 @@ const DECLARED: Record<string, string> = {
     'a model its CLI has, is proved through `main` with the real argv in ' +
     'src/registry/models.test.ts; that the two pty adapters actually populate the diagnosis is ' +
     'proved against real ptys in src/adapters/watchdogWiring.test.ts.',
+  'a seat whose CLI is not installed is refused before anything is created (#51)':
+    'NO FLAG IS ADDED, no status document gains a key, and the pinned sets below are untouched — ' +
+    'and this changes what an existing configuration DOES, which is why it is here. A run seated ' +
+    'on an agent whose command is not on the machine is now refused before `new Relay`, before ' +
+    'the seat worktrees, before every adapter preflight and before any child. #51 is that ' +
+    'failure: an implementer was seated on OpenCode before OpenCode was installed, `resolve()` ' +
+    'reported the agent as available, and the run registered both seats, wrote its hooks, checked ' +
+    'Codex trust, printed the banner and routed the goal — and then the first turn died as ' +
+    '`unknown_abnormal_end`. The adapter classified that correctly and the capabilities table ' +
+    'already documents the grade; the objection was never that the failure is mishandled, it is ' +
+    'that everything before it was work done on the operator’s behalf in a configuration that ' +
+    'could never have run. This is the rule `relay` already applies to being outside a git ' +
+    'repository, whose guard says "before anything is spawned, registered or written", and a ' +
+    'missing CLI is the same shape and cheaper to detect. NOTHING IS SPAWNED to find out, which ' +
+    'is deliberate rather than an optimisation: running the command to see whether it exists ' +
+    'starts a child that may open a terminal UI or act on a default nobody chose — which is ' +
+    'exactly what `codex` did during spike 1. `findExecutable` (src/registry/executables.ts) does ' +
+    'the walk `execvp` does instead — a separated command is a path resolved against the SEAT’s ' +
+    'cwd, anything else is searched along PATH in order, a directory and a file with no ' +
+    'executable bit never match, and on Windows each PATHEXT suffix is tried, because ' +
+    '`npm i -g opencode-ai` puts `opencode.cmd` on PATH and reporting that missing would be worse ' +
+    'than not checking at all. Wrappers pass by construction: nothing reads the file’s contents ' +
+    'or asks what kind of program it is, so a shell shim, a `.cmd` stub and a version manager’s ' +
+    'symlink are all just executable files. WHAT IS NOT CLAIMED is that the file found will run — ' +
+    'absence is a fact, presence only removes one reason to fail — so a found command produces no ' +
+    'output whatsoever and only a missing one produces a refusal. IT RUNS BEFORE THE MODEL CHECK ' +
+    'and the order is load-bearing: enumerating models means spawning the very command in ' +
+    'question, so an absent binary reaching that check is announced as a model that could not be ' +
+    'verified rather than as the missing install it is. THE REQUIREMENT IS DECLARED PER ' +
+    'DEFINITION, `LaunchSpec.executable`, for the reason `AgentDefinition.models` gives — and it ' +
+    'is OPTIONAL for a reason `models` does not have: `LaunchSpec` is required, so every ' +
+    'in-memory double in this suite carries a `command` that is a label rather than a program, ' +
+    'and the declaration is what separates "this definition spawns this file" from "this ' +
+    'definition names a string". Silence removes a check rather than inventing a guarantee, which ' +
+    'is the safe direction and here also the only workable one. Each built-in additionally ' +
+    'carries an INSTALL HINT, quoted into the refusal and never executed by anything, with its ' +
+    'source stated beside it because an install line with no provenance is a claim about someone ' +
+    'else’s machine — all four are read back off the machine these adapters were measured on. ' +
+    'THE DEFAULT RUN DOES NOT CHANGE: `--advisor codex --implementer claude` on a machine with ' +
+    'both installed reaches two `stat` calls and starts, and every guard in this file runs ' +
+    'against agents that declare no requirement and are therefore not checked at all. SCOPE IS ' +
+    'THE SEATED AGENTS ONLY — lead, every implementer, and the reviewer when one is declared — ' +
+    'because `list()` exists to describe agents an operator has not seated, and refusing a run ' +
+    'because an unused registration is uninstalled would make the registry’s breadth a ' +
+    'liability. `createParticipant` enforces the same rule as the programmatic floor, the way it ' +
+    'does for models: `Relay.start` checks the whole list so no seat has a live child when the ' +
+    'refusal lands, and the funnel check covers the callers that never pass through it. THE RULE ' +
+    'THE LOOKUP IS HELD TO, because it was got wrong once on the way in: an EMPTY PATH entry is ' +
+    'the seat’s cwd, which is what `execvp` does with a zero-length element, so `PATH=":/usr/bin"` ' +
+    'with a wrapper in the working directory is a setup that launches and is not refused. It was ' +
+    'skipped first, on the argument that a run which starts only because a binary sits in the ' +
+    'operator’s cwd is not reproducible — a fair objection, and not this check’s to make. ' +
+    'Reproducibility is a different question from "would the OS find this file", and answering the ' +
+    'second with the first produces a refusal of valid input, which is the one failure mode the ' +
+    'model validator beside it already argues is worse than having no validator at all. ' +
+    'ONE FURTHER CHANGE FALLS OUT OF THIS AND IS A REAL CHANGE TO A PROGRAMMATIC SURFACE: ' +
+    '`launch.command` is now the command every built-in actually spawns. It was previously INERT ' +
+    'for all four — the pty adapters hardcoded `PtyProcess.spawn({file: \'claude\'})` and ' +
+    '`{file: \'codex\'}`, and the two run-per-turn adapters had a `command` option their `create` ' +
+    'never passed — so the field could be set to an absolute path or a wrapper and nothing would ' +
+    'read it. That was harmless while nothing read it and became a defect the moment this ' +
+    'preflight did: the check would validate the wrapper and the adapter would then launch ' +
+    'whatever was on PATH, which is a validated field describing a configuration the run does not ' +
+    'have — worse than no check, because it reports on the wrong thing confidently. Both pty ' +
+    'adapters gain an optional `command` defaulting to their bare name, so every direct caller ' +
+    '(the live tests, watchdogWiring) is unchanged, and all four `create` functions now forward ' +
+    '`resolved.agent.launch.command`. THE DEFAULT RUN DOES NOT CHANGE: the built-ins declare the ' +
+    'bare names they always spawned, so the argument threaded through is the string that was ' +
+    'hardcoded. What changes is that an operator or a config layer CAN now point a definition at ' +
+    'a wrapper and have it both accepted and executed, which is proved end to end against the ' +
+    'recorded stdout of a real `opencode run --format json` — the real built-in definition with ' +
+    'one field changed, through the production `create` and the production adapter. ' +
+    '`unavailableReason` is untouched and still means what it ' +
+    'meant: whether conclave has an adapter, not whether the CLI that adapter drives is present. ' +
+    'No assertion in this file was relaxed. Proved in src/registry/executables.test.ts — the ' +
+    'lookup against real files in real directories, and the placement through both real ' +
+    'front-ends and through `Relay.start` with two seats, where the counters that must read zero ' +
+    'are the adapter preflights, the constructed children and the seat worktrees.',
 }
 
-test('DECLARED contains exactly the routing, pause-resolution, attribution, ceiling-flag, seat-flag, seat-status, launch-record, flag-reader, integration-check, per-seat-rotation, reviewer, resume-guard, mixed-liveness and model-validation entries', () => {
+test('DECLARED contains exactly the routing, pause-resolution, attribution, ceiling-flag, seat-flag, seat-status, launch-record, flag-reader, integration-check, per-seat-rotation, reviewer, resume-guard, mixed-liveness, model-validation and executable-preflight entries', () => {
   assert.deepEqual(Object.keys(DECLARED), [
     'implementer_unanswered -> advisor',
     'status.pause.resolution',
@@ -747,6 +825,7 @@ test('DECLARED contains exactly the routing, pause-resolution, attribution, ceil
     "the console's /continue liveness guard samples by pause SCOPE, and no longer by rank",
     'a mixed CPU sample is reported as mixed rather than as a working child (#83)',
     'models are validated before launch, graded per adapter, and a silent first turn names the model',
+    'a seat whose CLI is not installed is refused before anything is created (#51)',
   ])
 })
 
@@ -1095,7 +1174,7 @@ async function provokeReviewBlocked(repo: string): Promise<{ relay: Relay; run: 
  * Drive a real relay into one condition and return the pause it raised.
  *
  * The provocations are the ones `resolution.test.ts`'s own `provoke` already uses, deliberately:
- * the same triggers reaching the same single halt site (src/relay/relay.ts:2692), where the
+ * the same triggers reaching the same single halt site (src/relay/relay.ts:2716), where the
  * classification is computed by production `resolutionFor` from the subject the caller passed.
  * Nothing here writes a `RunPause`.
  *
@@ -1388,8 +1467,8 @@ test('default run works in the run cwd and creates no worktree', async () => {
   }
 
   // The relay CLI passes process.cwd() as the run cwd: bin/conclave.ts:1193.
-  // The relay hands that same cwd to each participant adapter: src/relay/relay.ts:1646-1652.
-  // The cwd getter simply returns the option: src/relay/relay.ts:1496-1498.
+  // The relay hands that same cwd to each participant adapter: src/relay/relay.ts:1670-1676.
+  // The cwd getter simply returns the option: src/relay/relay.ts:1520-1522.
   assert.match(relay, /cwd:\s*process\.cwd\(\)/, 'relay block must start in process.cwd')
   // Both creation sites now pass a NAMED context object rather than an inline literal, because
   // the same object composes the launch args that get recorded -- see
@@ -1432,7 +1511,7 @@ test('default run works in the run cwd and creates no worktree', async () => {
 
   // A default run with no subagents must not create any git worktree. The relay only samples
   // the worktree list for its subagent-use report: src/relay/subagents.ts:68 defines
-  // worktreePaths, and src/relay/relay.ts:2193, :2290 and :3722 read it.
+  // worktreePaths, and src/relay/relay.ts:2217, :2314 and :3746 read it.
   // Prove it by exercising the run in a real temporary repository.
   const repo = mkdtempSync(join(tmpdir(), 'conclave-default-'))
   try {

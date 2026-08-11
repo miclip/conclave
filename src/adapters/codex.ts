@@ -89,6 +89,15 @@ export interface CodexAdapterOptions {
   inputOwnership?: InputOwnership | undefined
   /** Extra CLI args from the participant spec. */
   args?: string[] | undefined
+  /**
+   * The program to spawn. Defaults to `codex` on PATH.
+   *
+   * Threaded from `AgentDefinition.launch.command` by the registry (#51), for the reason
+   * `ClaudeAdapterOptions.command` gives: the availability preflight validates
+   * `launch.command`, and an adapter that hardcodes its own filename would let a wrapper or an
+   * absolute path be checked and then not be the thing that runs.
+   */
+  command?: string | undefined
   readyTimeoutMs?: number | undefined
   watchdogMs?: number | undefined
   /**
@@ -209,7 +218,7 @@ export class CodexPtyHookAdapter implements AgentSession {
     })
 
     this.#pty = await PtyProcess.spawn({
-      file: 'codex',
+      file: this.#opts.command ?? 'codex',
       args: this.#opts.args ?? [],
       cwd: this.#opts.cwd,
       env,

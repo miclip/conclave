@@ -24,6 +24,7 @@ import type {
 import { formatVerdict, type Verdict } from '../contract/outcome.ts'
 import { AgentRegistry } from '../registry/registry.ts'
 import { launchRecordFor, type ParticipantLaunch } from '../registry/launch.ts'
+import { refuseMissingCommands } from '../registry/executables.ts'
 import { refuseUnknownModels } from '../registry/models.ts'
 import type { ParticipantSpec } from '../registry/types.ts'
 import type { RoleId } from '../registry/roles.ts'
@@ -1378,29 +1379,52 @@ export class Relay {
         )
       }
     }
+    // The seats this run actually fills, resolved once and used by both preflight checks below.
+    //
+    // A spec that does not resolve -- unknown agent, a role that is not a model seat -- is left to
+    // `#join`, which already refuses it with the message written for it. Reporting an unknown
+    // agent from the executable or model checker would answer a question nobody asked.
+    //
+    // `cwd` is the run's for every seat, including seats that will be launched in their own
+    // worktree: a seat's directory does not enter its argv (`effectiveLaunchArgs`), and a relative
+    // launch command is written relative to where the operator started the run.
+    const modelCtx = { cwd: opts.cwd, watchdogMs: opts.turnWatchdogMs }
+    const selected = [opts.lead, ...seats, ...(opts.reviewer ? [opts.reviewer] : [])].flatMap((spec) => {
+      try {
+        return [{ participant: spec.id, resolved: opts.registry.resolve(spec) }]
+      } catch {
+        return []
+      }
+    })
+
+    // Every seat's CLI, looked for before ANY of them is launched and before anything at all is
+    // created (#51). FIRST, ahead of the model check: enumerating models means spawning the very
+    // command in question, so an absent binary reaching that check is reported as a model that
+    // could not be verified rather than as the missing install it is.
+    //
+    // Note where this sits -- above `new Relay(opts)`, above `createSeatWorktrees`, above every
+    // `#join` and so above every adapter preflight and hook write. That placement IS the issue:
+    // the failure it prevents was never the first turn dying, it was the registration, the hook
+    // files, the trust check and the routed goal that happened first, on the operator's behalf, in
+    // a configuration that could never have run.
+    //
+    // Only SELECTED agents are checked. A registry may describe an agent nobody seated -- that is
+    // what `list()` is for -- and refusing a run because an agent it does not use is uninstalled
+    // would make the registry's breadth a liability.
+    refuseMissingCommands(selected.map((s) => ({ participant: s.participant, agent: s.resolved.agent, cwd: opts.cwd })))
+
     // Every seat's model, asked of the children before ANY of them is launched (#82). The same
-    // kind of check as the four above -- a configuration that otherwise fails silently, and this
+    // kind of check as the five above -- a configuration that otherwise fails silently, and this
     // one fails silently for twelve minutes and then reports a watchdog. `createParticipant`
     // refuses it too, and that is the floor rather than a duplicate: it refuses one seat at a
     // time, by which point the seats before it have live children, so the whole list is checked
     // here where the whole list is known.
-    //
-    // `cwd` is the run's for every seat, including seats that will be launched in their own
-    // worktree: a seat's directory does not enter its argv (`effectiveLaunchArgs`), and this
-    // reads nothing else from the context.
-    const modelCtx = { cwd: opts.cwd, watchdogMs: opts.turnWatchdogMs }
     const modelChecks = await refuseUnknownModels(
-      [opts.lead, ...seats, ...(opts.reviewer ? [opts.reviewer] : [])].flatMap((spec) => {
-        // A spec that does not resolve -- unknown agent, a role that is not a model seat -- is
-        // left to `#join`, which already refuses it with the message written for it. Reporting
-        // an unknown agent from the model checker would answer a question nobody asked.
-        try {
-          const resolved = opts.registry.resolve(spec)
-          return [{ participant: spec.id, agent: resolved.agent, model: launchRecordFor(resolved, modelCtx).model }]
-        } catch {
-          return []
-        }
-      }),
+      selected.map((s) => ({
+        participant: s.participant,
+        agent: s.resolved.agent,
+        model: launchRecordFor(s.resolved, modelCtx).model,
+      })),
     )
 
     const relay = new Relay(opts)
