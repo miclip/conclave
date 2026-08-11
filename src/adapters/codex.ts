@@ -45,6 +45,9 @@ import { guaranteesFor, turnKey } from '../contract/session.ts'
 import { emptyTranscriptState } from '../outcomes/classify.ts'
 import { TurnVerdictTracker, type VerdictUpdate } from '../outcomes/tracker.ts'
 import { DEFAULT_WATCHDOG_MS, TAIL_INTERVAL_MS, TurnWatchdog } from '../outcomes/watchdog.ts'
+// The same function the run record reads, rather than a second parse of the same argv: what the
+// diagnosis names must be what the report says this seat was launched with.
+import { modelFromArgs } from '../registry/launch.ts'
 import { sanitizedCopy } from '../process/childenv.ts'
 import { PtyProcess } from '../process/pty.ts'
 import { CODEX_PERMISSION_ENCODING, InputQueue } from '../process/input.ts'
@@ -52,6 +55,15 @@ import { HookReceiver } from '../hooks/receiver.ts'
 import type { HookDelivery } from '../hooks/journal.ts'
 import { TranscriptSessionView } from '../transcript/reconcile.ts'
 import { AsyncQueue } from './asyncQueue.ts'
+
+/**
+ * Event types that mean the CHILD produced something.
+ *
+ * The complement is the interesting half: `turn_start` is emitted by this adapter the moment it
+ * arms a clock, and `revision`/`error` are this adapter reporting on itself, so none of them
+ * distinguishes a child that is working from one that has never said a word.
+ */
+const CHILD_OUTPUT = new Set<AgentEvent['type']>(['message', 'tool_use', 'permission_requested'])
 
 interface TurnState {
   key: TurnKey
@@ -61,6 +73,14 @@ interface TurnState {
   /** Seq of the last `turn_end` emitted, so a revision can withdraw it by number. */
   endSeq: number | undefined
   assistantText: string | undefined
+  /**
+   * Whether the CHILD has said anything during this turn (#82).
+   *
+   * Not `lastActivityAt`, which cannot answer this: the adapter emits `turn_start` the instant
+   * it arms, so every turn looks active from its first millisecond. This is set only by output
+   * that came from the child, which is what separates "went quiet" from "never spoke".
+   */
+  produced: boolean
 }
 
 export interface CodexAdapterOptions {
@@ -275,6 +295,15 @@ export class CodexPtyHookAdapter implements AgentSession {
     // `touchAll`, not `touch(e.turnKey)`: the key on an event depends on what produced it,
     // and a transcript-sourced event does not carry the hook key the watchdog is armed under.
     if (e.type !== 'turn_end') this.#watchdog.touchAll()
+    // The child SPOKE, as opposed to the turn merely existing. Recorded once per turn, on the
+    // transition only: this is the hot event path, and a repeat says nothing the first did not.
+    if (CHILD_OUTPUT.has(e.type)) {
+      const turn = this.#latestLiveTurn()
+      if (turn && !turn.produced) {
+        turn.produced = true
+        turn.tracker.observeLaunch({ produced: true })
+      }
+    }
     this.#events.push(e)
   }
 
@@ -286,6 +315,10 @@ export class CodexPtyHookAdapter implements AgentSession {
         inputIsMediated: this.guarantees.inputOwnership === 'mediated',
       },
       watchdogSeconds: (this.#opts.watchdogMs ?? DEFAULT_WATCHDOG_MS) / 1000,
+      // What this child was started with, so a deadline that fires on a turn which never
+      // produced anything can name the model as a candidate cause (#82). `#order` is empty for
+      // exactly one turn per session, which is the only turn the launch is a suspect on.
+      launch: { model: modelFromArgs(this.#opts.args ?? []), firstTurn: this.#order.length === 0, produced: false },
     })
   }
 
@@ -324,6 +357,7 @@ export class CodexPtyHookAdapter implements AgentSession {
           tracker,
           endSeq: undefined,
           assistantText: undefined,
+          produced: false,
         }
         this.#turns.set(String(key), turn)
         this.#order.push(String(key))

@@ -39,6 +39,27 @@
  * here means "not computing", never "dead". The verdict model already has words for how
  * strongly a thing is believed, and inventing a confident answer from a weak signal is the
  * failure this project keeps finding in its own diagnostics.
+ *
+ * ## Three readings, because two of them were one word away from a lie
+ *
+ * `idle` requires EVERY sample below the line, and that asymmetry stays: a process between
+ * bursts of real work must not be called idle, and it was chosen after a run was lost to the
+ * opposite mistake. What was wrong was the other half of the same `if`. Anything that was not
+ * idle was announced as "still working", so `0.3%, 0.2%, 7.2%` with three events over twelve
+ * minutes — a rejected model doing nothing at all — was reported as a live turn, and the
+ * operator was told to wait for work that was never going to arrive (#83).
+ *
+ * "Still working" is an assertion. A mixed sample is not evidence for it, and neither is it
+ * evidence against. So the samples now say one of three things, and the mixed case says so in
+ * those words rather than being rounded up to the confident end. The EVENT COUNT is an input
+ * to that sentence rather than a clause tacked onto it: near-silence alongside a single burst
+ * is the shape of a child that is not making progress, and it is what an operator needs in
+ * order to go and look at the right thing.
+ *
+ * The conservative half is untouched everywhere it decides anything. A mixed reading still
+ * refuses `/continue` and still offers `wait`, because continuing SENDS and a burst may be a
+ * turn. What changed is that the operator is told what was actually measured before they
+ * choose, instead of being handed a verdict the numbers do not support.
  */
 
 import { execFileSync } from 'node:child_process'
@@ -57,6 +78,20 @@ import { execFileSync } from 'node:child_process'
  * happen again is a number chosen by intuition and then described as though it were not.
  */
 export const IDLE_CPU_PERCENT = 3
+
+/**
+ * At or below this many events since the prompt, a child has produced next to nothing.
+ *
+ * Unmeasured, and labelled as such rather than dressed up — which is the lesson of the number
+ * above. A turn that is doing anything emits events continuously: tool calls, chunks of
+ * output, a hook firing. Single digits is "next to nothing" by a wide enough margin that the
+ * exact cut does not have to be right to separate that from a turn in flight.
+ *
+ * It changes WORDING and nothing else. `idle` does not consult it, the `/continue` refusal
+ * does not consult it, and no reading is made less conservative by it. A number chosen by
+ * intuition may inform how a measurement is described; it may not decide.
+ */
+export const QUIET_EVENT_COUNT = 5
 
 export interface ChildLiveness {
   pid: number
@@ -113,21 +148,107 @@ export async function sampleLiveness(
 }
 
 /**
+ * What a set of samples supports — which is not the same as what the child is doing.
+ *
+ * `mixed` is the one that had no name before, and it is the commonest interesting case: a
+ * process between bursts and a process that twitched once look identical from three readings.
+ * Naming it is the whole of #83, because the alternative was to fold it into `working` and
+ * announce a live turn on the strength of one sample.
+ */
+export type LivenessReading = 'gone' | 'not_computing' | 'working' | 'mixed'
+
+/**
+ * Which of the three a reading is.
+ *
+ * Restated from `samples` rather than read off `idle`, so the reading cannot contradict the
+ * numbers printed beside it. It is the same rule: `not_computing` is every sample below the
+ * line, which is exactly what `sampleLiveness` set `idle` on.
+ */
+export function readingOf(l: ChildLiveness): LivenessReading {
+  if (!l.alive) return 'gone'
+  if (l.samples.every((c) => c < IDLE_CPU_PERCENT)) return 'not_computing'
+  if (l.samples.every((c) => c >= IDLE_CPU_PERCENT)) return 'working'
+  return 'mixed'
+}
+
+/**
+ * The headline phrase for each reading a live child can have.
+ *
+ * Constants because two things read them: the sentence below, and `reportsChildOnCpu`, which
+ * the relay uses to decide whether `wait` is a real option at a pause. That used to be a
+ * regex over the prose written in one place and matched in another, so the first reading to
+ * be phrased differently would have silently taken `wait` off the menu — in the mixed case,
+ * where the non-destructive option is worth the most.
+ */
+const PHRASE = {
+  not_computing: 'is alive but not computing',
+  working: 'is still working',
+  /** Mixed, mostly below the line: the shape #83 was raised about. */
+  barely: 'is barely running',
+  /** Mixed, mostly above it: a working child with a gap in the samples. */
+  bursts: 'is working in bursts',
+} as const
+
+/** The phrases that report a child with something on the CPU, mixed included. */
+const ON_CPU = [PHRASE.working, PHRASE.barely, PHRASE.bursts]
+
+/**
+ * Whether an evidence line reports a child that had CPU in at least one sample.
+ *
+ * For callers deciding what to OFFER rather than what to say — the pause menu's `wait`. Reads
+ * the line the operator reads, so the option and the reason for it cannot disagree.
+ */
+export function reportsChildOnCpu(evidence: string): boolean {
+  return ON_CPU.some((phrase) => evidence.includes(`${phrase} (cpu `))
+}
+
+/**
  * The evidence line an operator reads at a pause.
  *
- * Phrased as a measurement, not a verdict. "still running" and "idle" are what was seen;
- * what to do about it stays the operator's call, which is the whole point of a pause.
+ * Phrased as a measurement, not a verdict. The three readings are what was seen; what to do
+ * about it stays the operator's call, which is the whole point of a pause.
+ *
+ * `emittedSinceSend` is `undefined` where no count was taken alongside the sample. That is
+ * not the same as zero, and it used to be spelled as zero by the `/continue` guard, which
+ * samples the child fresh and has no matching count to pair with it — so every refusal said
+ * "nothing at all since the prompt was sent" about a number nobody had looked at. Harmless
+ * while the count was decoration; not harmless now that it is an input.
  */
-export function describeLiveness(l: ChildLiveness, emittedSinceSend: number): string {
+export function describeLiveness(l: ChildLiveness, emittedSinceSend: number | undefined): string {
   if (!l.alive) return `child pid ${l.pid} is gone; the CLI exited without a terminal signal`
   const cpu = l.samples.map((c) => `${c.toFixed(1)}%`).join(', ')
   const since =
-    emittedSinceSend === 0
-      ? 'nothing at all since the prompt was sent'
-      : `${emittedSinceSend} event(s) since the prompt was sent`
-  return l.idle
-    ? `child pid ${l.pid} is alive but not computing (cpu ${cpu}) — ${since}. ` +
-        `Idle is not dead: a CLI waiting on a provider that stopped answering looks like this`
-    : `child pid ${l.pid} is still working (cpu ${cpu}) — ${since}. ` +
-        `Continuing sends into a live turn, which neither CLI accepts`
+    emittedSinceSend === undefined
+      ? 'no output count was taken with this reading'
+      : emittedSinceSend === 0
+        ? 'nothing at all since the prompt was sent'
+        : `${emittedSinceSend} event(s) since the prompt was sent`
+  const head = (phrase: string): string => `child pid ${l.pid} ${phrase} (cpu ${cpu}) — ${since}. `
+  const reading = readingOf(l)
+  if (reading === 'not_computing') {
+    return (
+      head(PHRASE.not_computing) +
+      `Idle is not dead: a CLI waiting on a provider that stopped answering looks like this`
+    )
+  }
+  if (reading === 'working') {
+    return head(PHRASE.working) + `Continuing sends into a live turn, which neither CLI accepts`
+  }
+  const low = l.samples.filter((c) => c < IDLE_CPU_PERCENT).length
+  const high = l.samples.length - low
+  // The output half of the judgement. Near-silence does not make a mixed sample idle -- it
+  // makes "still working" the less likely of the two readings, and says so in those terms.
+  const output =
+    emittedSinceSend === undefined
+      ? `No output count was taken here, so the split is all there is to read.`
+      : emittedSinceSend <= QUIET_EVENT_COUNT
+        ? `With that little output the likelier reading is a child making no progress, though a ` +
+          `sample above the line is not proof of a stall either.`
+        : `Output is still arriving, so the low samples read as gaps between bursts.`
+  return (
+    head(low > high ? PHRASE.barely : PHRASE.bursts) +
+    `The samples disagree: ${low} below ${IDLE_CPU_PERCENT}% and ${high} at or above. ` +
+    `${output} Continuing still sends into whatever produced the high sample, which neither ` +
+    `CLI accepts mid-turn`
+  )
 }

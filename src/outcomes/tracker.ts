@@ -17,7 +17,7 @@
  */
 
 import type { Verdict } from '../contract/outcome.ts'
-import { classify, evidence, type Evidence } from './classify.ts'
+import { classify, evidence, type Evidence, type LaunchState } from './classify.ts'
 
 export interface VerdictUpdate {
   /**
@@ -129,6 +129,20 @@ export class TurnVerdictTracker {
    */
   observeObservationGap(): VerdictUpdate | undefined {
     this.#evidence.observationGap = true
+    return this.#reclassify()
+  }
+
+  /**
+   * Record what the child was launched with, or that it has now said something (#82).
+   *
+   * Merged rather than replaced, like the other patch observers, so an adapter can report the
+   * model at arming time and the first sign of output whenever it arrives. The default it merges
+   * into is the honest one for a caller that reports output without ever reporting a launch:
+   * no model named, not the first turn, so nothing is diagnosed from it.
+   */
+  observeLaunch(patch: Partial<LaunchState>): VerdictUpdate | undefined {
+    const base = this.#evidence.launch ?? { model: null, firstTurn: false, produced: false }
+    this.#evidence.launch = { ...base, ...patch }
     return this.#reclassify()
   }
 

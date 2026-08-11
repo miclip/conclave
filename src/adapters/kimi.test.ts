@@ -195,3 +195,117 @@ test('a binary that is not on PATH is a verdict, not a crash', async () => {
   assert.match(end.verdict.provenance[0]!.detail, /not on PATH/)
   await s.close()
 })
+
+/** Emits nothing on either stream and never exits, so only the watchdog can end the turn. */
+function hangingStub(): string {
+  const dir = mkdtempSync(join(tmpdir(), 'kimi-hang-'))
+  const command = join(dir, 'kimi-hang')
+  writeFileSync(command, '#!/bin/sh\nsleep 30\n')
+  chmodSync(command, 0o755)
+  return command
+}
+
+/** Writes `err` to stderr, says nothing on stdout, and hangs. */
+function hangingStubOnStderr(err: string): string {
+  const dir = mkdtempSync(join(tmpdir(), 'kimi-hang-err-'))
+  const errPath = join(dir, 'err.txt')
+  writeFileSync(errPath, err)
+  const command = join(dir, 'kimi-hang-err')
+  writeFileSync(command, `#!/bin/sh\ncat ${JSON.stringify(errPath)} >&2\nsleep 30\n`)
+  chmodSync(command, 0o755)
+  return command
+}
+
+test('stderr is output too: a child that printed an error and hung is not blamed on its model', async () => {
+  // On this adapter stderr is where a provider or config failure appears AT ALL -- the structured
+  // stream carries the conversation and nothing else -- so a gate that counted only records and
+  // hooks would name the model on precisely the turn the child had explained itself.
+  const session = await KimiPrintAdapter.start({
+    cwd: REPO,
+    role: 'implementer',
+    command: hangingStubOnStderr('error: no such model on this provider\n'),
+    watchdogMs: 600,
+  })
+  await session.send('go', { kind: 'orchestrator' })
+  const events = await nextTurn(session)
+  assert.deepEqual(events.filter((e) => e.type === 'message' || e.type === 'tool_use'), [])
+  const end = events.find((e) => e.type === 'turn_end') as TurnEndEvent
+  assert.equal(end.verdict.outcome, 'timed_out')
+  assert.equal(
+    end.verdict.provenance.find((p) => p.source === 'orchestrator' && /first run/.test(p.detail)),
+    undefined,
+    'the child spoke, so the launch is not named',
+  )
+  assert.ok(
+    end.verdict.provenance.some((p) => /no such model on this provider/.test(p.detail)),
+    `the child's own answer must survive into the verdict: ${JSON.stringify(end.verdict.provenance)}`,
+  )
+  await session.close()
+})
+
+/** Emits `body` and then never exits, so only the watchdog can end the turn. */
+function hangingStubEmitting(body: string): string {
+  const dir = mkdtempSync(join(tmpdir(), 'kimi-hang-say-'))
+  const out = join(dir, 'out.ndjson')
+  writeFileSync(out, body)
+  const command = join(dir, 'kimi-hang-say')
+  writeFileSync(command, `#!/bin/sh\ncat ${JSON.stringify(out)}\nsleep 30\n`)
+  chmodSync(command, 0o755)
+  return command
+}
+
+test('a record carrying no content still suppresses the launch diagnosis (#82)', async () => {
+  // The repair. `textBlocks` and `toolCalls` are CONTENT, and this adapter leaves both empty for
+  // records that plainly came from the child: a `role: "tool"` result is deliberately never
+  // re-emitted, and an assistant message with no text and no calls is the completion signal
+  // itself. Reading emptiness off them called both of those "produced nothing at all".
+  for (const [why, body] of [
+    ['a tool result', '{"role":"tool","tool_call_id":"call_1","content":"ok"}\n'],
+    ['an assistant message with nothing in it', '{"role":"assistant","content":[]}\n'],
+  ] as const) {
+    const session = await KimiPrintAdapter.start({
+      cwd: REPO,
+      role: 'implementer',
+      command: hangingStubEmitting(body),
+      watchdogMs: 600,
+    })
+    await session.send('go', { kind: 'orchestrator' })
+    const events = await nextTurn(session)
+    // The gap this closes, pinned: neither record produces a content event, so `textBlocks` and
+    // `toolCalls` are empty on a child that plainly spoke -- which is exactly what the old check
+    // read, and why it called this silence.
+    assert.deepEqual(
+      events.filter((e) => e.type === 'message' || e.type === 'tool_use'),
+      [],
+      `${why}: this record produces no content event, which is why the old check missed it`,
+    )
+    const end = events.find((e) => e.type === 'turn_end') as TurnEndEvent
+    assert.equal(end.verdict.outcome, 'timed_out', `${why}: it still times out`)
+    assert.equal(
+      end.verdict.provenance.find((p) => p.source === 'orchestrator' && /first run/.test(p.detail)),
+      undefined,
+      `${why}: the child spoke, so the launch is not named`,
+    )
+    await session.close()
+  }
+})
+
+test('a first run that produced no messages at all points at the launch (#82)', async () => {
+  // Kimi normally takes its model from the generated config file rather than the argv, so the
+  // usual reading of this is "the argv named no model" -- which is still the sentence that sends
+  // an operator to the launch instead of leaving `timed_out` standing on its own.
+  const session = await KimiPrintAdapter.start({
+    cwd: REPO,
+    role: 'implementer',
+    command: hangingStub(),
+    watchdogMs: 300,
+  })
+  await session.send('go', { kind: 'orchestrator' })
+  const end = (await nextTurn(session)).find((e) => e.type === 'turn_end') as TurnEndEvent
+  assert.equal(end.verdict.outcome, 'timed_out')
+  const said = end.verdict.provenance.find((p) => p.source === 'orchestrator' && /first run/.test(p.detail))
+  assert.ok(said, `the verdict must say the run produced nothing: ${JSON.stringify(end.verdict.provenance)}`)
+  assert.match(said!.detail, /named no model/)
+  assert.equal(said!.caveat, true)
+  await session.close()
+})

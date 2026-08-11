@@ -74,7 +74,7 @@ Driving conclave from an agent
   Keep stdin OPEN and write commands as lines. Closing it ends the session once its
   current run finishes.
     /continue /rotate /abort        answer a pause
-    /wait [minutes]                 keep waiting, when the child is still working. Records
+    /wait [minutes]                 keep waiting, when the child still has CPU. Records
                                     the decision, sends nothing, leaves the run paused
     /allow /deny                    answer a permission prompt
     /pause /state /log /exit        drive and inspect

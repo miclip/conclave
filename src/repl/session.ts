@@ -107,7 +107,7 @@ export async function withHeartbeat<T>(
     progress.done(label)
   }
 }
-import { describeLiveness, sampleLiveness, type ChildLiveness } from '../outcomes/liveness.ts'
+import { describeLiveness, readingOf, sampleLiveness, type ChildLiveness } from '../outcomes/liveness.ts'
 import { version } from '../version.ts'
 import { guard } from '../workspace/sessionLock.ts'
 import { newSessionId, projectRootFor, recordSession } from '../workspace/sessionRecord.ts'
@@ -427,7 +427,7 @@ function renderPause(p: RunPause, width: number): string {
  *
  * This used to read `pause.verdictOf.participant` instead, and that field is narrower than it
  * looks: it is set at exactly two halt sites, both `turn_incomplete`
- * (`src/relay/relay.ts:4149` and `src/relay/relay.ts:4535`). So FOUR of the five seat-scoped
+ * (`src/relay/relay.ts:4192` and `src/relay/relay.ts:4578`). So FOUR of the five seat-scoped
  * reasons -- `rotation_candidate`, `implementer_unanswered`, `merge_blocked`, `review_blocked`
  * -- named a seat in their scope and were sampled by rank anyway, because the field the guard
  * read was empty. The scope is the field that is always populated, which is the other half of
@@ -441,16 +441,16 @@ function renderPause(p: RunPause, width: number): string {
  * pause never mentioned. The rank fallback's own comment argued it was right "only because
  * there is one of them", which is an argument for deriving the seat from the pause instead of
  * from a rank. Worse than useless on one of them: resuming an `advisor_escalated` pause sends
- * to the ADVISOR (`src/relay/relay.ts:4248`), so the fallback measured children that were not
+ * to the ADVISOR (`src/relay/relay.ts:4291`), so the fallback measured children that were not
  * about to be sent to at all.
  *
  * What that gives up, stated rather than discovered: the `advisor_escalated` halt raised when a
- * seat's turn completed and its report could not be read (`src/relay/relay.ts:4445`) is
+ * seat's turn completed and its report could not be read (`src/relay/relay.ts:4488`) is
  * conclave-scoped by design -- "the reason names who is being asked to take it, and the scope
  * follows the reason" -- yet the thing an operator wants to know there is whether THAT seat's
  * child is still writing. Under the rank fallback that seat was sampled at N=1 by coincidence
  * of being the only implementer. It is not sampled now. The pause still carries its own
- * liveness EVIDENCE from the halt site (`src/relay/relay.ts:4458`), which is what the operator
+ * liveness EVIDENCE from the halt site (`src/relay/relay.ts:4501`), which is what the operator
  * reads;
  * what is gone is a refusal derived from a rank scan. Narrowing that halt's scope, if the
  * refusal is wanted back, is a change to the halt site rather than to this guard.
@@ -923,10 +923,19 @@ export async function runSession(opts: SessionOptions): Promise<number> {
         if (pid === undefined) continue
         const now = await sample(pid)
         if (!now.alive || now.idle) continue
-        const reason = describeLiveness(now, 0)
-        write(yellow('  not continuing: the child is working right now.'))
+        // No output count belongs with this sample. It is taken fresh, here, and the count on
+        // the pause was measured at another moment -- pairing them would date one fact to the
+        // other's clock. This passed `0` before, which rendered as "nothing at all since the
+        // prompt was sent": a claim nobody had checked, and one the reading now consults (#83).
+        const reason = describeLiveness(now, undefined)
+        // The headline follows the READING. The refusal itself does not: a mixed sample still
+        // refuses, because continuing sends and a burst may be a turn. But an operator choosing
+        // whether to force is choosing on this line, and telling them a child with two idle
+        // samples out of three is "working right now" is the assertion #83 is about.
+        const working = readingOf(now) === 'working'
+        write(yellow(`  not continuing: ${working ? 'the child is working right now.' : 'the child is not clearly idle.'}`))
         write(`  ${reason}`)
-        write('  wait for it to finish, or /continue force to send anyway.')
+        write(`  ${working ? 'wait for it to finish' : 'wait and re-read the line above'}, or /continue force to send anyway.`)
         // The run stays paused, so a watcher polling `state` sees no change. Record the
         // refusal so an external reader can see why `/continue` did not move the run.
         if (run.pause) {

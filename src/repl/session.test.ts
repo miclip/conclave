@@ -571,6 +571,18 @@ const IDLE_LIVENESS: ChildLiveness = {
   samples: [0.0, 0.1, 0.0],
   idle: true,
 }
+/**
+ * The reading from #83, verbatim: two samples at rest and one burst.
+ *
+ * Not idle by the conservative rule, and not a working child either — the case the guard used
+ * to describe as "still working" while refusing the resume.
+ */
+const MIXED_LIVENESS: ChildLiveness = {
+  pid: 1,
+  alive: true,
+  samples: [0.3, 0.2, 7.2],
+  idle: false,
+}
 
 async function untilText(what: string, text: () => string, re: RegExp, ms = 5000): Promise<void> {
   const deadline = Date.now() + ms
@@ -1891,12 +1903,78 @@ test('a refusal to continue is recorded on the paused session status', async () 
   await running
 })
 
+test('a mixed sample still refuses the continue, and is not described as a working child', async () => {
+  // Both halves of #83 on the path that acts: the refusal is CONSERVATIVE and stays — one
+  // sample above the line may be a turn, and continuing sends into it — while the sentence the
+  // operator reads before choosing `force` says what was measured instead of asserting a live
+  // turn. The old code refused with "the child is working right now" over 0.3%, 0.2%, 7.2%,
+  // which is how a barely-running child held a run paused on evidence for the opposite.
+  const dir = repo()
+  const impl = slow('impl', 'claude', ['ack', 'Did it, slowly.', 'And again.'])
+  impl.endTurn = { index: 1, verdict: TIMED_OUT, withdraw: 'no_replacement' }
+  impl.childPid = 1
+  const out = collect()
+  const input = new PassThrough()
+  const running = runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'claude',
+    rounds: 6,
+    checks: [],
+    registry: registryOf({
+      codex: [slow('advisor', 'codex', ['Do it.', 'More.', 'DONE'], 300)],
+      claude: [impl],
+    }),
+    liveness: async () => MIXED_LIVENESS,
+    input,
+    output: out.stream,
+  })
+  const until = async (pred: (f: ReturnType<typeof resolveSession>) => boolean, ms = 10_000) => {
+    const t = Date.now()
+    while (Date.now() - t < ms) {
+      const f = resolveSession(dir)
+      if (pred(f)) return f
+      await new Promise((r) => setTimeout(r, 50))
+    }
+    throw new Error(`timed out; console said:\n${out.text().slice(-700)}`)
+  }
+
+  await until((f) => 'session' in f && f.session.status.state === 'paused')
+  await until(
+    (f) =>
+      'session' in f &&
+      f.session.status.pause?.superseded !== undefined &&
+      f.session.status.pause?.superseded?.verdict === undefined,
+  )
+  input.write('/continue\n')
+  const found = await until((f) => 'session' in f && f.session.status.pause?.refusal !== undefined)
+  assert.ok('session' in found)
+  assert.equal(found.session.status.state, 'paused', 'a mixed sample must still refuse the resume')
+  const refusal = found.session.status.pause!.refusal!
+  assert.equal(refusal.liveness.idle, false)
+  assert.deepEqual(refusal.liveness.samples, [0.3, 0.2, 7.2], 'the measured values are still reported')
+  assert.doesNotMatch(refusal.reason, /still working/)
+  assert.match(refusal.reason, /is barely running \(cpu 0\.3%, 0\.2%, 7\.2%\)/)
+  // The guard has no output count to pair with a sample it took just now, and says so rather
+  // than passing the `0` that used to render as "nothing at all since the prompt was sent".
+  assert.match(refusal.reason, /no output count was taken with this reading/)
+  // ...and the console line above it, which is what an operator actually looks at.
+  assert.match(out.text(), /not continuing/)
+  assert.doesNotMatch(out.text(), /the child is working right now/)
+  assert.match(out.text(), /the child is not clearly idle/)
+  assert.match(out.text(), /\/continue force to send anyway/, 'the way past it is still named')
+
+  input.end()
+  await running
+})
+
 // ---------------------------------------------------------------------------------------
 // WHICH children the resume guard samples, and it is the pause's scope that says.
 //
 // The guard used to read `pause.verdictOf.participant` and fall back to a rank scan for every
 // pause that field was empty on -- which is every pause except the two `turn_incomplete` halts,
-// `verdictOf` being set at exactly those (src/relay/relay.ts:4149, src/relay/relay.ts:4535).
+// `verdictOf` being set at exactly those (src/relay/relay.ts:4192, src/relay/relay.ts:4578).
 // So a pause naming ONE seat could refuse a continue because a DIFFERENT seat was mid-turn, and
 // a pause naming no seat at all measured whichever children happened to be implementers.
 //
@@ -1945,7 +2023,7 @@ test('a participant-scoped pause samples that seat and no other, at every reason
   assert.deepEqual(sampled(pauseFor({ reason: 'rotation_candidate', participant: 'implementer-2' })), ['implementer-2'])
   assert.deepEqual(sampled(pauseFor({ reason: 'implementer_unanswered', participant: 'implementer-2' })), ['implementer-2'])
   // The ADVISOR is a participant like any other, and its own bad turn pauses the run
-  // (src/relay/relay.ts:4146). A rank scan for implementers sampled the wrong child here too.
+  // (src/relay/relay.ts:4189). A rank scan for implementers sampled the wrong child here too.
   assert.deepEqual(
     sampled(pauseFor({ reason: 'turn_incomplete', participant: 'advisor' }, { participant: 'advisor', endSeq: 2 })),
     ['advisor'],
@@ -1954,13 +2032,13 @@ test('a participant-scoped pause samples that seat and no other, at every reason
 
 test('a conclave- or workstream-scoped pause samples nobody, with no fall back to rank', () => {
   // Both conclave-scoped reasons. Resuming an `advisor_escalated` pause sends to the ADVISOR
-  // (src/relay/relay.ts:4248), so measuring implementer children was never the question; and
+  // (src/relay/relay.ts:4291), so measuring implementer children was never the question; and
   // `operator_requested` is consumed at an advisor-turn boundary that states no turn is in
   // flight. Neither has anything for this guard to sample.
   assert.deepEqual(sampled(pauseFor({ reason: 'advisor_escalated' })), [])
   assert.deepEqual(sampled(pauseFor({ reason: 'operator_requested' })), [])
   // Workstream scope, and the id deliberately COLLIDES with a seat id -- at N=1 the workstream
-  // is named after the seat carrying the instruction (src/relay/relay.ts:4312), which is exactly
+  // is named after the seat carrying the instruction (src/relay/relay.ts:4355), which is exactly
   // the coincidence a guard could read as "so sample that seat". A workstream is not a seat.
   assert.deepEqual(sampled(pauseFor({ reason: 'authority_conflict', workstream: 'implementer' })), [])
 })
@@ -1976,7 +2054,7 @@ test('a scope naming a seat that is gone samples nobody rather than falling back
 test('a rotation_candidate pause on one seat resumes while the OTHER seat is genuinely mid-turn', async (t) => {
   // The production shape of the N>1 case the rank scan got wrong, and the reason it has to be
   // this shape: `rotation_candidate` carries NO `verdictOf` -- that field is set at two halt
-  // sites, both turn_incomplete (src/relay/relay.ts:4149, src/relay/relay.ts:4535) -- so under
+  // sites, both turn_incomplete (src/relay/relay.ts:4192, src/relay/relay.ts:4578) -- so under
   // the old expression this pause fell through to the rank scan and sampled EVERY implementer.
   // A simpler `turn_incomplete` fixture cannot show that: it populates the field, takes the
   // named-seat branch, and passes against the code being replaced.
@@ -2028,7 +2106,7 @@ test('a rotation_candidate pause on one seat resumes while the OTHER seat is gen
     ],
     rounds: 6,
     // ARMS ROTATION, which is what makes degradation a pause instead of an ended run
-    // (src/relay/relay.ts:2827-2833). A command that exits 0 immediately: what the checks DO is
+    // (src/relay/relay.ts:2870-2876). A command that exits 0 immediately: what the checks DO is
     // not what this test is about, only that a replacement would have something to reproduce.
     checks: ['true'],
     registry: registryOf({

@@ -324,7 +324,7 @@ const DECLARED: Record<string, string> = {
     'Authority routing (#56, D2) sends implementer_unanswered to the advisor before the operator, ' +
     'so a default run interrupts the human less than today. Real change at N=1, an improvement, ' +
     'declared rather than discovered. The pause reason exists at src/relay/run.ts:51 and the halt ' +
-    'that raises it is at src/relay/relay.ts:4396.',
+    'that raises it is at src/relay/relay.ts:4439.',
   'status.pause.resolution':
     'Classifying unresolved conditions on both axes (#56, D2) added `resolution` to every RunPause ' +
     '(src/relay/run.ts:193), so `conclave status --json` on a paused default run now carries ' +
@@ -606,7 +606,7 @@ const DECLARED: Record<string, string> = {
     'participant and nobody else, and a conclave or workstream scope samples NOBODY. It used to ' +
     'read pause.verdictOf.participant and fall back to scanning participants by rank for ' +
     'implementers — and verdictOf is set at exactly two halt sites, both turn_incomplete ' +
-    '(src/relay/relay.ts:4149, src/relay/relay.ts:4535), so every other pause reached that rank ' +
+    '(src/relay/relay.ts:4192, src/relay/relay.ts:4578), so every other pause reached that rank ' +
     'scan. WHAT CHANGES AT N=1: on the three pauses whose scope names no participant — ' +
     'operator_requested (/pause), advisor_escalated, authority_conflict — the lone implementer ' +
     'child used to be sampled, so a child that measured busy REFUSED the resume and wrote ' +
@@ -615,15 +615,15 @@ const DECLARED: Record<string, string> = {
     'safety guard rather than presented as a pure N>1 fix. The reason it is the right narrowing: ' +
     'the guard exists because continuing SENDS into a child that cannot accept input mid-turn, ' +
     'and on those three pauses the child it measured is not the child being sent to — resuming ' +
-    'advisor_escalated sends to the ADVISOR (src/relay/relay.ts:4248), resuming ' +
+    'advisor_escalated sends to the ADVISOR (src/relay/relay.ts:4291), resuming ' +
     'authority_conflict queues a constraint that is delivered by the dispatcher on the next ' +
     'dispatch to a free seat, and operator_requested is consumed at an advisor-turn boundary ' +
     'whose own evidence line says no turn is in flight. WHAT IS GIVEN UP, named rather than ' +
     'discovered: the advisor_escalated halt raised when a seat’s turn completed and its report ' +
-    'could not be read (src/relay/relay.ts:4445) is conclave-scoped by design, yet the useful ' +
+    'could not be read (src/relay/relay.ts:4488) is conclave-scoped by design, yet the useful ' +
     'question there is whether THAT seat is still writing; at N=1 the rank scan sampled it by ' +
     'coincidence of it being the only implementer, and now nothing does. The pause still carries ' +
-    'that seat’s liveness evidence from the halt site (src/relay/relay.ts:4458), which is what ' +
+    'that seat’s liveness evidence from the halt site (src/relay/relay.ts:4501), which is what ' +
     'the operator actually reads; restoring a refusal there is a change to that halt’s scope, ' +
     'not to the guard. AT N>1 the old behaviour was unsafe in the other direction: a pause about ' +
     'one seat could be refused because a DIFFERENT seat was mid-turn, and the operator was told ' +
@@ -633,9 +633,104 @@ const DECLARED: Record<string, string> = {
     'end through a two-seat console run where one advisor reply dispatches to both seats, ' +
     'implementer-2 compacts into a rotation_candidate pause, and /continue resumes it while ' +
     'implementer is provably still mid-turn in the status document’s own seat block.',
+  'a mixed CPU sample is reported as mixed rather than as a working child (#83)':
+    'THE REASON, in one sentence: the liveness output now distinguishes an ALL-LOW measurement ' +
+    'from an ALL-HIGH one and from a MIXED one, and hands all three to the operator as ' +
+    'measurements to judge, because the binary it replaced could only say "idle" or "still ' +
+    'working" and had to round every mixed sample up to the confident end. ' +
+    'NO FLAG IS ADDED, no document gains a key, and NOTHING BECOMES LESS CONSERVATIVE — the ' +
+    'rest of the change is entirely in what a default run SAYS at a pause, which is why it is ' +
+    'declared rather than assumed invisible. `idle` is untouched: every sample below IDLE_CPU_PERCENT ' +
+    'and nothing else, the asymmetry chosen after a run was lost to the opposite mistake. What ' +
+    'was wrong was the other half of the same `if` — anything not idle was announced as "still ' +
+    'working", so 0.3%, 0.2%, 7.2% with three events was a true report of a false thing. ' +
+    'describeLiveness now reads one of three (readingOf: not_computing, working, mixed; gone ' +
+    'when the process is not there), and a mixed reading says which way it leans — "is barely ' +
+    'running" when most samples are below the line, "is working in bursts" when most are above ' +
+    '— with the measured percentages still printed verbatim. THE EVENT COUNT IS NOW AN INPUT ' +
+    'to that sentence rather than a clause after it, against QUIET_EVENT_COUNT (5), a new ' +
+    'exported constant that is unmeasured and documented as unmeasured: it changes wording ' +
+    'only, and `idle`, the /continue refusal and the pause menu are all blind to it. THREE ' +
+    'PROGRAMMATIC SURFACES ARE ADDED, all in src/outcomes/liveness.ts and all read-only over a ' +
+    'ChildLiveness that itself does not change (so pause.refusal.liveness in the status JSON is ' +
+    'the shape it was): LivenessReading, readingOf and reportsChildOnCpu. The last exists ' +
+    'because the relay decided the `wait` option by regex over the operator’s evidence prose ' +
+    '(`/is still working \\(cpu/`), which would have silently dropped `wait` from a mixed pause ' +
+    '— the one reading where the non-destructive option is worth the most; it now asks ' +
+    'liveness.ts, which owns both the phrasing and the matcher. describeLiveness’s second ' +
+    'parameter accepts undefined for "no count was taken with this sample", and the console’s ' +
+    '/continue guard passes it: that guard samples the child fresh and has no matching count, ' +
+    'so the `0` it passed rendered as "nothing at all since the prompt was sent" about a number ' +
+    'nobody had measured — harmless while the count was decoration, not harmless now it is an ' +
+    'input. WHAT A DEFAULT RUN DOES DIFFERENTLY: on a mixed sample the pause evidence and the ' +
+    '/continue refusal read differently, and the console headline is "the child is not clearly ' +
+    'idle" rather than "the child is working right now". THE REFUSAL ITSELF IS UNCHANGED — a ' +
+    'mixed sample still refuses /continue and still requires force, because continuing SENDS ' +
+    'and a burst may be a turn. No assertion in this file was relaxed; one citation moved with ' +
+    'the code it pins (src/repl/session.ts:943). Covered in src/outcomes/liveness.test.ts on ' +
+    'the reported numbers, and end to end through the console’s refusal path in ' +
+    'src/repl/session.test.ts.',
+  'models are validated before launch, graded per adapter, and a silent first turn names the model':
+    'NO FLAG IS ADDED, no status document gains a key, and the pinned sets below are untouched — ' +
+    'and this still changes what an existing configuration DOES, twice, which is why it is here. ' +
+    'FIRST: a run whose argv names a model the child does not have is now REFUSED before any ' +
+    'child is launched, instead of starting and dying at a watchdog. #82 is that failure: ' +
+    '`--implementers "claude --model opus-5, claude --model sonnet-5"` was accepted, both seats ' +
+    'launched, and every turn produced nothing at all until DEFAULT_IDLE_MS killed it — three ' +
+    'turns, twenty-five minutes, and nothing anywhere said the model did not exist. THE MODEL ' +
+    'LIST IS NOT IN CONCLAVE, which is the design and not an omission: a baked list would have ' +
+    'refused `fable` before `fable` shipped, and a validator that refuses valid input gets ' +
+    'switched off. The children are asked instead — `opencode models` enumerates 60, ' +
+    '`claude --help` names its aliases inside the `--model` option text — and where a child ' +
+    'cannot be asked the capability model already has the honest answer: `codex models` needs a ' +
+    'terminal and kimi has no such command, so both are graded `unsupported` with the reason, ' +
+    'and their selections pass through unjudged. The grade is declared beside each definition ' +
+    '(`AgentDefinition.models`) for the reason `DeadlineSupport` gives, and it is OPTIONAL where ' +
+    'deadlines are required, because silence here removes a check rather than inventing a ' +
+    'guarantee. THE DEFAULT RUN DOES NOT CHANGE and does not pay for this: `modelFromArgs` ' +
+    'reports `null` for an argv that names no model, a `null` selection is not checked, and no ' +
+    'subprocess is spawned for it — a default run reaches the ask exactly never. Agent and role ' +
+    'identifiers stay open-ended: nothing here narrows `RoleId`, an agent id, or a full model ' +
+    'name, and only a name the CLI itself enumerates can be refused. A seat that named a model ' +
+    'and could NOT be judged — an unsupported agent, a full model name passed through, a CLI ' +
+    'that could not be asked — writes ONE internal note into the run log saying so and why, ' +
+    'because the issue asks for exactly that ("an agent whose models cannot be enumerated says ' +
+    'so rather than guessing") and a negative result nobody can see is a check an operator will ' +
+    'believe covered them. A seat that WAS judged stays silent, and a default run names no ' +
+    'model, so no default run produces the line. SECOND, and it is a change ' +
+    'to a report an existing consumer reads: a deadline verdict on a session’s FIRST turn that ' +
+    'produced no output whatsoever now carries one extra `orchestrator` provenance entry, ' +
+    'flagged `caveat`, naming the launch model as a CANDIDATE cause. "Emitted nothing" and ' +
+    '"emitted and then went quiet" read identically today and are different findings, and this ' +
+    'is the second half of #82 — the diagnostic half, for the rejections validation cannot ' +
+    'predict (an entitlement, an outage, a name valid for one account and not another). It is ' +
+    'gated on the first turn because a later turn has already proved the launch works, and on ' +
+    'the child having produced nothing, which is tracked separately from the idle clock: the ' +
+    'adapters emit `turn_start` the instant they arm, so `lastActivityAt` cannot tell the two ' +
+    'apart. "Produced nothing" means NO OUTPUT WHATSOEVER, a claim about bytes rather than ' +
+    'about a structured stream, and it is measured per adapter family: on the pty adapters it ' +
+    'is the absence of any event the CHILD sourced (`turn_start` and this adapter’s own ' +
+    'revisions do not count), and on the run-per-turn adapters it is zero signals of ANY kind — ' +
+    'no parsed record of any type, no hook delivery on kimi, and not one non-empty write to ' +
+    'stderr. NOT empty content fields, which is what it read first and got wrong: an `error` ' +
+    'record, a `role: "tool"` result, an empty assistant message, an unrecognised record type ' +
+    'and a provider failure printed to stderr all leave `steps`/`textBlocks`/`toolCalls` empty ' +
+    'on a child that has already answered, and naming its model there talks over that answer ' +
+    'with speculation. ONE FURTHER REPORT CHANGE FALLS OUT OF THAT, small and observable: a ' +
+    'watchdog-killed turn on either run-per-turn adapter now carries the child’s stderr in its ' +
+    'verdict provenance as a `process` caveat, where that path used to keep the clock and the ' +
+    'signal and discard the one line saying why. Nothing else about a verdict moves — same ' +
+    'outcome, same confidence, same ' +
+    'watchdog line first — and a turn that spoke, a later turn, or an adapter that reports no ' +
+    'launch state gets the chain it always got, asserted byte for byte in ' +
+    'src/outcomes/firstTurnDiagnosis.test.ts. No assertion in this file was relaxed. That both ' +
+    'front-ends refuse before constructing any child, and start normally when every seat names ' +
+    'a model its CLI has, is proved through `main` with the real argv in ' +
+    'src/registry/models.test.ts; that the two pty adapters actually populate the diagnosis is ' +
+    'proved against real ptys in src/adapters/watchdogWiring.test.ts.',
 }
 
-test('DECLARED contains exactly the routing, pause-resolution, attribution, ceiling-flag, seat-flag, seat-status, launch-record, flag-reader, integration-check, per-seat-rotation, reviewer and resume-guard entries', () => {
+test('DECLARED contains exactly the routing, pause-resolution, attribution, ceiling-flag, seat-flag, seat-status, launch-record, flag-reader, integration-check, per-seat-rotation, reviewer, resume-guard, mixed-liveness and model-validation entries', () => {
   assert.deepEqual(Object.keys(DECLARED), [
     'implementer_unanswered -> advisor',
     'status.pause.resolution',
@@ -650,6 +745,8 @@ test('DECLARED contains exactly the routing, pause-resolution, attribution, ceil
     'per-seat rotation, per-seat rotation policy, and the unobservable-acceptance stop (#78, #76)',
     '--reviewer on both front-ends, and the review_blocked pause reason',
     "the console's /continue liveness guard samples by pause SCOPE, and no longer by rank",
+    'a mixed CPU sample is reported as mixed rather than as a working child (#83)',
+    'models are validated before launch, graded per adapter, and a silent first turn names the model',
   ])
 })
 
@@ -790,7 +887,7 @@ async function defaultRunDocuments(): Promise<{ report: unknown; status: unknown
  * blind to that subtree is claiming more than it checks.
  *
  * Built through the real recorder: `recordSession` is what both front-ends call, and
- * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:934
+ * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:943
  * with the same object -- a `RunPause` the run handle raised, not one written here. Read back
  * through `main(['status', '--json'])`, so the serialisation and the reconciliation against
  * the pid are the production ones.
@@ -998,7 +1095,7 @@ async function provokeReviewBlocked(repo: string): Promise<{ relay: Relay; run: 
  * Drive a real relay into one condition and return the pause it raised.
  *
  * The provocations are the ones `resolution.test.ts`'s own `provoke` already uses, deliberately:
- * the same triggers reaching the same single halt site (src/relay/relay.ts:2649), where the
+ * the same triggers reaching the same single halt site (src/relay/relay.ts:2692), where the
  * classification is computed by production `resolutionFor` from the subject the caller passed.
  * Nothing here writes a `RunPause`.
  *
@@ -1086,7 +1183,7 @@ async function provoke(
  * The status document of a run paused for one given reason.
  *
  * Built through the real recorder: `recordSession` is what both front-ends call, and
- * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:934
+ * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:943
  * with the same object -- a `RunPause` the relay raised, not one written here. Read back
  * through `main(['status', '--json'])`, so the serialisation and the reconciliation against
  * the pid are the production ones.
@@ -1291,8 +1388,8 @@ test('default run works in the run cwd and creates no worktree', async () => {
   }
 
   // The relay CLI passes process.cwd() as the run cwd: bin/conclave.ts:1193.
-  // The relay hands that same cwd to each participant adapter: src/relay/relay.ts:1603-1609.
-  // The cwd getter simply returns the option: src/relay/relay.ts:1453-1455.
+  // The relay hands that same cwd to each participant adapter: src/relay/relay.ts:1646-1652.
+  // The cwd getter simply returns the option: src/relay/relay.ts:1496-1498.
   assert.match(relay, /cwd:\s*process\.cwd\(\)/, 'relay block must start in process.cwd')
   // Both creation sites now pass a NAMED context object rather than an inline literal, because
   // the same object composes the launch args that get recorded -- see
@@ -1335,7 +1432,7 @@ test('default run works in the run cwd and creates no worktree', async () => {
 
   // A default run with no subagents must not create any git worktree. The relay only samples
   // the worktree list for its subagent-use report: src/relay/subagents.ts:68 defines
-  // worktreePaths, and src/relay/relay.ts:2150, :2247 and :3679 read it.
+  // worktreePaths, and src/relay/relay.ts:2193, :2290 and :3722 read it.
   // Prove it by exercising the run in a real temporary repository.
   const repo = mkdtempSync(join(tmpdir(), 'conclave-default-'))
   try {

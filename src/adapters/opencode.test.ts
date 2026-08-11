@@ -355,3 +355,128 @@ test('a provider failure the child announced reaches the verdict', async () => {
   assert.doesNotMatch(said, /AbortError/)
   await session.close('graceful')
 })
+
+/**
+ * A stand-in that emits `body` on stdout and `err` on stderr, then never exits, so only the
+ * watchdog can end the turn.
+ *
+ * Separate from `stub` above rather than a flag on it: everything else in this file is about a
+ * child that finishes, and a `sleep` in the common helper would be a trap for the next test.
+ */
+function hangingStub(body: string, err = ''): string {
+  const dir = mkdtempSync(join(tmpdir(), 'oc-hang-'))
+  const payload = join(dir, 'payload.ndjson')
+  const errPath = join(dir, 'err.txt')
+  writeFileSync(payload, body)
+  writeFileSync(errPath, err)
+  const command = join(dir, 'opencode-hang')
+  writeFileSync(
+    command,
+    `#!/bin/sh\ncat ${JSON.stringify(payload)}\ncat ${JSON.stringify(errPath)} >&2\nsleep 30\n`,
+  )
+  chmodSync(command, 0o755)
+  return command
+}
+
+/** The `orchestrator` caveat #82 adds to a deadline verdict, or undefined when absent. */
+const launchCaveat = (end: TurnEndEvent): string | undefined =>
+  end.verdict.provenance.find((p) => p.source === 'orchestrator' && /first run/.test(p.detail))?.detail
+
+test('a first run that produced no records at all names the model it was launched with', async () => {
+  // #82's second half on a run-per-turn adapter. This one builds its `timed_out` by hand rather
+  // than through `classify`, so the diagnosis had to be added here too -- and a rule that exists
+  // in one of the two shapes of timeout verdict is a rule an operator cannot rely on.
+  const session = await OpenCodeRunAdapter.start({
+    cwd: REPO,
+    role: 'implementer',
+    command: hangingStub(''),
+    args: ['-m', 'opencode/not-a-model'],
+    watchdogMs: 300,
+  })
+  await session.send('go', { kind: 'orchestrator' })
+  const end = (await nextTurn(session)).find((e) => e.type === 'turn_end') as TurnEndEvent
+  assert.equal(end.verdict.outcome, 'timed_out')
+  assert.match(launchCaveat(end) ?? '', /opencode\/not-a-model/)
+  assert.equal(end.verdict.provenance.find((p) => /not-a-model/.test(p.detail))?.caveat, true)
+  await session.close()
+})
+
+test('a record the child sent but this adapter records no CONTENT for still suppresses the diagnosis', async () => {
+  // The repair. `steps`, `textBlocks` and `toolCalls` all stay empty for an `error` record and
+  // for a type this adapter has no case for -- so reading emptiness off them called a child that
+  // had already announced a provider failure "silent", and named its model as the suspect over
+  // the top of the child's own answer. Both shapes, because they miss the content fields for
+  // different reasons: one is handled and stored somewhere else, one is not handled at all.
+  for (const [why, body] of [
+    ['an announced error', '{"type":"error","error":{"name":"ProviderError","data":{"message":"upstream 502"}}}\n'],
+    ['a record type this adapter does not know', '{"type":"some_future_record","part":{}}\n'],
+  ] as const) {
+    const session = await OpenCodeRunAdapter.start({
+      cwd: REPO,
+      role: 'implementer',
+      command: hangingStub(body),
+      args: ['-m', 'opencode/not-a-model'],
+      watchdogMs: 600,
+    })
+    await session.send('go', { kind: 'orchestrator' })
+    const events = await nextTurn(session)
+    // The gap this closes, pinned: NO content event was emitted for either record, so the three
+    // content fields the check used to read are empty on a child that plainly spoke. Without
+    // this line the test would still pass if the adapter started emitting messages for errors.
+    assert.deepEqual(
+      events.filter((e) => e.type === 'message' || e.type === 'tool_use'),
+      [],
+      `${why}: this record produces no content event, which is why the old check missed it`,
+    )
+    const end = events.find((e) => e.type === 'turn_end') as TurnEndEvent
+    assert.equal(end.verdict.outcome, 'timed_out', `${why}: it still times out`)
+    assert.equal(launchCaveat(end), undefined, `${why}: the child spoke, so the launch is not named`)
+    await session.close()
+  }
+})
+
+test('stderr is output too: a child that printed an error and hung is not blamed on its model', async () => {
+  // The acceptance condition is "no output whatsoever", which is a claim about BYTES rather than
+  // about the structured stream. A child that names a provider failure on stderr and then hangs
+  // has already answered, and speculating about its model on top of that answer buries the one
+  // line an operator needed. The verdict must carry that line, too -- it used to be discarded on
+  // the killed path, so a watchdog kill reported the clock and the signal and nothing else.
+  const session = await OpenCodeRunAdapter.start({
+    cwd: REPO,
+    role: 'implementer',
+    command: hangingStub('', 'error: provider returned 502 for opencode/not-a-model\n'),
+    args: ['-m', 'opencode/not-a-model'],
+    watchdogMs: 600,
+  })
+  await session.send('go', { kind: 'orchestrator' })
+  const events = await nextTurn(session)
+  // Nothing was parsed and no content event exists: the ONLY thing this child produced is the
+  // stderr line, which is what makes this the case the record counter alone still gets wrong.
+  assert.deepEqual(events.filter((e) => e.type === 'message' || e.type === 'tool_use'), [])
+  const end = events.find((e) => e.type === 'turn_end') as TurnEndEvent
+  assert.equal(end.verdict.outcome, 'timed_out')
+  assert.equal(launchCaveat(end), undefined, 'the child spoke, so the launch is not named')
+  assert.ok(
+    end.verdict.provenance.some((p) => /provider returned 502/.test(p.detail)),
+    `the child's own answer must survive into the verdict: ${JSON.stringify(end.verdict.provenance)}`,
+  )
+  await session.close()
+})
+
+test('a run that produced records and then stalled is not blamed on its model', async () => {
+  // The control, and the distinction: identical deadline, identical model, one difference --
+  // this child spoke before it stopped.
+  const session = await OpenCodeRunAdapter.start({
+    cwd: REPO,
+    role: 'implementer',
+    command: hangingStub(readFileSync(FIXTURE, 'utf8').split('\n').slice(0, 3).join('\n') + '\n'),
+    args: ['-m', 'opencode/not-a-model'],
+    watchdogMs: 600,
+  })
+  await session.send('go', { kind: 'orchestrator' })
+  const events = await nextTurn(session)
+  const end = events.find((e) => e.type === 'turn_end') as TurnEndEvent
+  assert.equal(end.verdict.outcome, 'timed_out', 'it still times out; only the diagnosis differs')
+  assert.equal(launchCaveat(end), undefined)
+  await session.close()
+})
