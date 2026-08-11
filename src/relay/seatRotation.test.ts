@@ -316,6 +316,8 @@ test('a seat set to act rotates on degradation while the run’s other seats onl
   const one = new FakeRotationSession('one', 'claude', ['ack', 'Did it.', 'NONE', 'NONE'])
   const two = new FakeRotationSession('two', 'claude', ['ack', 'Did the second thing.', 'NONE'])
   const fresh = new FakeRotationSession('two-fresh', 'claude', [ACCEPTED, 'NONE', 'NONE'])
+  /** The seat table as it stood INSIDE the transaction, which is the only place it can be read. */
+  let during: { state: string; graded: boolean } | undefined
   try {
     const relay = await twoSeatRelay(repo, advisor, [one, two, fresh], {
       checks: ['exit 0'],
@@ -324,6 +326,17 @@ test('a seat set to act rotates on degradation while the run’s other seats onl
       // position. One seat opts into being acted on.
       onDegradation: 'candidate',
       seats: { 'implementer-2': { onDegradation: 'automatic' } },
+      // The transaction's own test barrier, used here to read the dispatcher rather than to
+      // inject a divergence. It is the only vantage point from which "what state was the seat in
+      // while it was being replaced" is observable at all -- afterwards the boundary has
+      // released the seat and the answer is gone.
+      hooks: {
+        afterCapture: async () => {
+          const seat = relay.seats().find((s) => s.seat === 'implementer-2')!
+          const task = relay.tasks().find(({ task: q }) => q.id === seat.current)
+          during = { state: seat.state, graded: task?.runtime.grade !== undefined }
+        },
+      },
     })
     t.after(() => relay.stop())
 
@@ -340,6 +353,93 @@ test('a seat set to act rotates on degradation while the run’s other seats onl
     assert.ok(
       relay.log.some((m) => /^rotating implementer-2/.test(m.text)),
       'and the log names the seat that rotated, not "the implementer"',
+    )
+
+    // The loop's rotation point, measured from inside the transaction. Both halves matter and
+    // both are claims a later reordering could falsify silently:
+    //
+    //   graded    the turn was observed and its verdict resolved BEFORE the session was
+    //             quiesced. This is what makes the loop's own rotation legal under the
+    //             mid-turn refusal in `rotateSeat` -- if this stopped holding, the loop would
+    //             start throwing at itself rather than rotating.
+    //   state     the seat is out of `running` before this and reports `rotation_pending`
+    //             while it happens, so nothing dispatches to a seat whose session is being
+    //             replaced and an operator polling the status is not told it is `integrating`
+    //             for the length of two agent turns.
+    assert.deepEqual(during, { state: 'rotation_pending', graded: true })
+  } finally {
+    rmSync(repo, { recursive: true, force: true })
+  }
+})
+
+test('a seat with a turn in flight is refused, and the run it was working on is undisturbed', async (t) => {
+  // The race, driven through the production path rather than by poking the seat table: the
+  // rotation is requested from OUTSIDE the loop, while the seat is genuinely mid-turn, which is
+  // reachable because `rotateSeat` is public and does not require a paused run.
+  //
+  // Left unrefused this is not a scheduling nicety. `rotate()` quiesces the outgoing session and
+  // then terminates it, and `quiesce()` drains input without waiting for the turn already
+  // running -- so the seat's work would be in flight while its session was retired: no verdict,
+  // no report, and a handoff record captured from a tree that turn was still writing to.
+  const repo = tempRepo()
+  const advisor = new FakeRotationSession('advisor', 'codex', [
+    '@seat implementer-2: Do the second thing.',
+    'DONE',
+    'DONE',
+  ])
+  const one = new FakeRotationSession('one', 'claude', ['ack', 'NONE', 'NONE'])
+  const two = new FakeRotationSession('two', 'claude', ['ack', 'Did the second thing.', 'NONE'])
+  const spare = new FakeRotationSession('two-fresh', 'claude', [ACCEPTED])
+  const creates: CreateRecord[] = []
+  try {
+    const relay = await twoSeatRelay(
+      repo,
+      advisor,
+      [one, two, spare],
+      { checks: ['exit 0'], checkTimeoutMs: 30_000 },
+      creates,
+    )
+    t.after(() => relay.stop())
+
+    // A turn that actually spans time, so the attempt lands in the middle of one rather than in
+    // a gap between two. The request is made from the seat's own send, which is the instant the
+    // dispatcher has marked it `running` with an ungraded task.
+    two.delayMs = 80
+    let attempt: Promise<unknown> | undefined
+    two.onSend = (message: string) => {
+      if (!message.includes('Do the second thing')) return
+      // Settled to a value rather than left rejecting: an unhandled rejection would take the
+      // process down before the assertion below could read it.
+      attempt ??= relay.rotateSeat('implementer-2', 'an operator got impatient').then(
+        () => 'rotated',
+        (e: Error) => e,
+      )
+    }
+
+    const outcome = await relay.run('Keep the work moving.')
+
+    const refusal = await attempt
+    assert.ok(refusal instanceof Error, 'a rotation over a live turn must be refused, not performed')
+    assert.match(refusal.message, /still working on/)
+    assert.match(refusal.message, /has not been observed and graded/)
+    // The refusal names what a caller has to do differently, not just that it said no.
+    assert.match(refusal.message, /does not wait for the turn already running/)
+
+    // Nothing was touched: the session was never quiesced, never retired, and no replacement was
+    // started for it.
+    assert.deepEqual(two.transitions, [], 'the live session must not have been put through a single transition')
+    assert.equal(relay.participants.find((p) => p.id === 'implementer-2')!.session, two)
+    assert.equal(relay.rotationWatch.rotations, 0)
+    assert.equal(creates.filter((c) => c.id === 'implementer-2').length, 1, 'no replacement was created')
+    assert.equal(spare.state, 'running')
+    assert.deepEqual(spare.received, [])
+
+    // And the run carried on through it. A refusal from an out-of-band caller is that caller's
+    // problem: the turn finished, was graded, and its report reached the advisor.
+    assert.equal(outcome.reason, 'done')
+    assert.ok(
+      advisor.received.some((m) => m.includes('Did the second thing')),
+      'the turn the rotation would have destroyed completed and was routed',
     )
   } finally {
     rmSync(repo, { recursive: true, force: true })

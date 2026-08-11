@@ -4333,6 +4333,45 @@ export class Relay {
           `and there is none to replace`,
       )
     }
+    // A TURN IN PROGRESS IS NOT ROTATABLE, and this is checked before anything else because it
+    // is the one refusal that protects a live child rather than a configuration.
+    //
+    // `rotate()` opens by quiescing the outgoing session and closes by terminating it. Quiescing
+    // stops new work reaching a session; it does NOT wait for the turn already running to
+    // finish, and no adapter offers a way to. So a caller that rotates a seat mid-turn retires a
+    // session in the middle of an observed turn: the work is in flight, the verdict is never
+    // graded, the report is lost, and the handoff the replacement is measured against was
+    // captured from a tree the outgoing turn is still writing to.
+    //
+    // The test is the GRADE and not the state name, because the grade is the fact D4 already
+    // makes freedom rest on: a seat is free when its turn ended AND its verdict is graded, and a
+    // `timed_out (uncertain)` seat is neither. Reading `state === 'running'` instead would admit
+    // exactly the seat whose turn ended and whose verdict is still being resolved through
+    // supersession.
+    //
+    // What this deliberately still permits is every rotation that has a reason to happen:
+    //
+    //   - the loop's own point, immediately after `#grade` and before `#crossBoundary`. The seat
+    //     is `integrating` there with its task graded, which is measured rather than assumed --
+    //     see `seatRotation.test.ts`, which asserts the state and the grade from inside the
+    //     transaction.
+    //   - an operator at a pause, which is that same point suspended.
+    //   - an idle, queued or `merge_blocked` seat, none of which holds a running turn.
+    //
+    // Thrown rather than returned as a `rolled_back` result: nothing has begun, so there is no
+    // transaction to roll back, and a caller that has to remember to inspect a status is a
+    // caller that will rotate over a live turn by forgetting to.
+    const exec = this.#seatState.get(seatId)
+    const inFlight = exec?.current
+    if (inFlight !== undefined && this.#taskRuntime.get(inFlight)?.grade === undefined) {
+      throw new Error(
+        `${seatId} is still working on ${inFlight}: its turn has not been observed and graded, so ` +
+          `rotating now would quiesce and retire a session in the middle of a turn. quiesce() ` +
+          `stops new work reaching a session; it does not wait for the turn already running. ` +
+          `Rotate once the turn has ended and its verdict is graded — which is where the run loop ` +
+          `rotates, and where a pause holds the run.`,
+      )
+    }
     // The policy THIS seat is under: the run's, as amended by its own entry (D7). Resolved
     // before anything is quiesced, because a seat whose policy disarms it must be refused with
     // its session untouched.
@@ -4512,9 +4551,15 @@ export class Relay {
   /**
    * Hold the seat in `rotation_pending` for the duration of the transfer.
    *
-   * The seat is already undispatchable at the loop's rotation point -- it is `integrating`,
-   * between its report and its boundary -- so this changes no scheduling decision. What it
-   * changes is what an operator watching `status --json` is told: a seat sitting in
+   * At the loop's rotation point the seat is `integrating` with its task already graded -- it
+   * sits between `#reported`, which flips it out of `running` the moment the report is recorded,
+   * and `#crossBoundary`. So it is undispatchable before this runs and this changes no
+   * scheduling decision. Measured rather than reasoned: `seatRotation.test.ts` reads the seat
+   * table from inside the transaction and asserts both the state and the grade, because "the
+   * seat is not running here" is exactly the kind of claim a later reordering would falsify
+   * silently, and it is what the mid-turn refusal in `rotateSeat` leans on.
+   *
+   * What it changes is what an operator watching `status --json` is told: a seat sitting in
    * `integrating` for two agent turns while its session is replaced is a seat whose state is
    * describing the wrong thing, and `rotation_pending` has been in `SchedulerState` since D4
    * waiting for a production path to construct it. This is that path.
