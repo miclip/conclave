@@ -172,7 +172,7 @@ export interface ResolutionConfig {
    * verification method that makes the decision mechanical: without it the console says a
    * degraded implementer "escalates to you rather than being replaced"
    * (`src/repl/session.ts:541`) and the run reports `rotation: NOT ARMED (no checks
-   * configured)` (`src/relay/relay.ts:1879`).
+   * configured)` (`src/relay/relay.ts:2031`).
    */
   rotationArmed: boolean
 }
@@ -192,10 +192,12 @@ export function resolutionFor(subject: ResolutionSubject, config: ResolutionConf
         reason: subject.reason,
         // Derived from configuration, per D2. Note what this does NOT claim: that a run
         // with checks resolves the candidate without asking. Today it asks either way --
-        // `onDegradation` defaults to `candidate` because the policy is not earned yet
-        // (`src/relay/relay.ts:2467`), and the two pause sites below it are reachable only
-        // WITH rotation configured (`src/relay/relay.ts:2461-2466` ends the run instead when
-        // it is absent). So this axis records the entitlement the operator has already
+        // `onDegradation` defaults to `candidate` because the policy is not earned yet --
+        // resolved for the seat in `rotationFor` (`src/relay/relay.ts:309`), which is where a
+        // per-seat policy may override it (D7) and where the default is written once -- and the
+        // two pause sites below it are reachable only WITH rotation configured for that seat
+        // (`src/relay/relay.ts:2639-2647` ends the run instead when there are no checks to
+        // reproduce). So this axis records the entitlement the operator has already
         // delegated, and no pause site can reach the `operator` branch today -- an unarmed
         // run ENDS on degradation instead of pausing, which `resolution.test.ts` asserts.
         authority: config.rotationArmed ? 'mechanical' : 'operator',

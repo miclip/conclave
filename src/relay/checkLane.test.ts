@@ -1,15 +1,19 @@
 /**
  * The check lane's mechanism, tested directly — which is the whole of what it is kept for.
  *
- * The lane is INERT in production and says so at its own definition: both check runners are
- * `spawnSync` in one process, so checks already serialise without it, and the two stations that
- * would contend cannot be live at the same time until per-seat rotation exists (#78). So there
- * is no run to observe it in, and this file does not pretend otherwise — it drives the class.
+ * Both stations are real since per-seat rotation landed (#78): a merge boundary at N>1, and a
+ * rotation in one seat's tree at any N. What the lane protects is not CPU — both check runners
+ * are `spawnSync` in one process, so the commands already serialise — but the WINDOW a rotation
+ * verifies across, which a merge would otherwise move underneath it. The lane's own definition
+ * carries the argument, including how narrowly a WAIT is reachable: the dispatcher processes one
+ * completion at a time, so the loop cannot overlap its own two stations, and only a rotation
+ * started from outside the loop can queue behind a boundary.
  *
- * That is the condition on keeping it: a mutex retained for a future station has to be a mutex
- * that is known to work, which means acquire, release, release-on-failure and the refusal to
- * acquire twice are each asserted here rather than inferred from a run that cannot exercise
- * them. Everything below is a property of the class; nothing below claims the run does it.
+ * That narrowness is why this file still drives the class directly rather than a run. Acquire,
+ * release, release-on-failure, the refusal to acquire twice and the wait notification are each
+ * asserted here rather than inferred from a run that would exercise them only by luck of
+ * interleaving. Everything below is a property of the class; nothing below claims the run does
+ * it — `checkLaneRun.test.ts` is where a real run's use of the lane is asserted.
  *
  *   node --test src/relay/checkLane.test.ts
  */
@@ -172,7 +176,34 @@ test('two different seats hold and queue independently, which is what the lane i
   assert.deepEqual(
     lane.history().map((r) => `${r.seat}/${r.station}`),
     ['implementer/rotation', 'implementer-2/integration'],
-    'the boundary ran after the rotation rather than inside it — which is the future station ' +
-      'this mechanism is kept for (#78), not something a run can do today',
+    'the boundary ran after the rotation rather than inside it, which is the hazard the lane ' +
+      'exists for: a merge landing inside a rotation’s verification window is read as the ' +
+      'repository diverging',
   )
+})
+
+test('a section that waits is announced, with the claim it is waiting behind', async () => {
+  // The wait is minutes long when it happens — a rotation holds this across a whole agent turn —
+  // and neither station narrates the other, so without this the log has a gap in it with nothing
+  // to explain the gap. Silent by construction: the uncontended case below emits nothing, which
+  // is the condition under which reporting it is honest rather than decorative.
+  const lane = new CheckLane()
+  const waits: string[] = []
+  lane.onWait = (waiting, holder) => waits.push(`${waiting.seat}/${waiting.station} <- ${holder.seat}/${holder.station}`)
+
+  await lane.run(claim('implementer', 'rotation'), () => 'done')
+  assert.deepEqual(waits, [], 'an uncontended section waits for nothing and says nothing')
+
+  const hold = gate()
+  const first = lane.run(claim('implementer', 'rotation'), () => hold.held)
+  const second = lane.run(claim('implementer-2', 'integration'), () => 'merged')
+  await new Promise((r) => setImmediate(r))
+  assert.deepEqual(
+    waits,
+    ['implementer-2/integration <- implementer/rotation'],
+    'announced when the wait BEGINS: a note that arrives when it ends explains a silence after it',
+  )
+  hold.open()
+  await Promise.all([first, second])
+  assert.equal(waits.length, 1, 'and once, not again on admission')
 })

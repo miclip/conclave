@@ -26,6 +26,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 import { AgentRegistry } from '../registry/registry.ts'
 import { NO_DEADLINE_CLOCKS } from '../registry/types.ts'
+import type { CreateParticipantContext, ResolvedParticipant } from '../registry/types.ts'
 import { FakeRotationSession } from '../rotation/fakeSession.ts'
 import { lockPath } from '../workspace/sessionLock.ts'
 import { implementerSeats, Relay } from './relay.ts'
@@ -62,6 +63,83 @@ function registryOf(sessions: Record<string, FakeRotationSession>): AgentRegistr
   }
   return r
 }
+
+/**
+ * The same, for a run that replaces a session: one QUEUE per agent, and where it was created.
+ *
+ * `registryOf` above hands the same object back to every `create`, which is right for the seat
+ * tests it was written for and useless for a rotation -- the "replacement" would be the session
+ * being replaced. The creation record is here for the same reason: a replacement started in the
+ * wrong tree is invisible in every other observable, since the sessions are in-memory doubles
+ * with no cwd of their own.
+ */
+function registryOfQueues(
+  queues: Record<string, FakeRotationSession[]>,
+  records: { id: string; cwd: string; nth: number }[],
+): AgentRegistry {
+  const r = new AgentRegistry()
+  const counts = new Map<string, number>()
+  for (const [agent, sessions] of Object.entries(queues)) {
+    const remaining = [...sessions]
+    r.register({
+      id: agent,
+      displayName: agent,
+      capabilities: {
+        agent,
+        readinessSignal: 'unknown',
+        turnKeySource: 'prompt_id',
+        outcomes: {
+          completed: 'observed',
+          cancelled: 'reasoned_but_unverified',
+          permission_refused: 'reasoned_but_unverified',
+          process_exited: 'reasoned_but_unverified',
+          timed_out: 'reasoned_but_unverified',
+          transport_lost: 'reasoned_but_unverified',
+          unknown_abnormal_end: 'reasoned_but_unverified',
+        },
+      },
+      deadlines: NO_DEADLINE_CLOCKS,
+      launch: { command: agent, baseArgs: [] },
+      async create(resolved: ResolvedParticipant, ctx: CreateParticipantContext) {
+        const next = remaining.shift()
+        if (!next) throw new Error(`no session left for ${agent}`)
+        // Counted by SEAT ID rather than by agent: the replacement carries `<seat>~replacement`
+        // as its participant id while it auditions, and this has to be able to say "the second
+        // session created for seat-alpha" whatever that session was called at the time.
+        const nth = (counts.get(resolved.spec.id.replace('~replacement', '')) ?? 0) + 1
+        counts.set(resolved.spec.id.replace('~replacement', ''), nth)
+        records.push({ id: resolved.spec.id.replace('~replacement', ''), cwd: ctx.cwd, nth })
+        return next
+      },
+    })
+  }
+  return r
+}
+
+/** The advisor's handoff, as `parseHandoff` requires it. */
+const HANDOFF = `## BRIEF
+Keep the work moving.
+
+## STATE
+Half done.
+
+## DECISIONS
+- none
+
+## EVIDENCE
+The implementer says the check passes.
+
+## FILES
+- README.md
+
+## DISAGREEMENT
+- none
+
+## NEXT
+Carry on.`
+
+/** A replacement that ran the check and reports what the arbiter will independently observe. */
+const ACCEPTED = 'CHECK 1: exit 0\n\nRead the files and ran the check. It matches.'
 
 /** A repository to run in: the lock samples `git status`, and the relay lists worktrees. */
 function tempRepo(): string {
@@ -379,21 +457,38 @@ test('rotateImplementer refuses to pick a seat when the run has more than one', 
   }
 })
 
-test('a degraded seat in a multi-seat run is declined in words, not thrown as a transport fault (#78)', async () => {
-  // The refusal above is right, and the run loop used to walk straight into it: with rotation
-  // set to act, `#considerRotation` called `rotateImplementer` the moment any seat looked
-  // degraded, the throw left the loop, and `#loop`'s catch reported the run as
-  // `transport_failed: rotateImplementer names no seat...`. Nothing about the transport was
-  // wrong. An operator reading that would go looking at the child processes for a fault that
-  // is really a missing feature -- per-seat rotation -- and the seat that triggered it is
-  // fine, still running, and never named as still in service.
+test('a degraded seat in a multi-seat run is REPLACED, and its sibling is not disturbed (#78)', async () => {
+  // Three behaviours in one run, because they are one behaviour seen from three sides.
+  //
+  // This test has been rewritten twice, and both earlier versions are worth knowing about. The
+  // first asserted a THROW: `#considerRotation` called `rotateImplementer`, which refuses at
+  // N>1, and `#loop`'s catch reported the run as `transport_failed: rotateImplementer names no
+  // seat...` -- a transport fault for a missing feature, which sends the operator to look at
+  // child processes that are fine (#74). The second asserted the DECLINE that replaced it: the
+  // seat stayed in service and the human was told why, which was correct and was still a run
+  // that could not protect itself.
+  //
+  // #78 is the feature. Rotation names the degraded seat, replaces that seat's session, and
+  // leaves the other seats alone -- so what is asserted here is the rotation happening AND the
+  // sibling being untouched by it. The other seat is the whole point: a rotation is not a
+  // run-wide event.
   const repo = tempRepo()
-  const lead = new FakeRotationSession('lead-1', 'lead', ['@seat seat-alpha: Do the thing.', 'DONE', 'DONE'])
+  const lead = new FakeRotationSession('lead-1', 'lead', [
+    '@seat seat-alpha: Do the thing.',
+    // The handoff turn. The advisor writes the narrative when the transaction asks for it, and
+    // it is scripted here rather than in the run's ordinary replies because that is what it is:
+    // an exchange the rotation initiates, in the middle of an advisor turn.
+    HANDOFF,
+    'DONE',
+    'DONE',
+  ])
   const alpha = new FakeRotationSession('alpha-1', 'alpha', ['ack', 'Did it.', 'NONE', 'NONE'])
+  const alphaNext = new FakeRotationSession('alpha-2', 'alpha', [ACCEPTED, 'NONE', 'NONE'])
   const beta = new FakeRotationSession('beta-1', 'beta', ['ack', 'NONE', 'NONE'])
+  const creates: { id: string; cwd: string; nth: number }[] = []
   try {
     const relay = await Relay.start({
-      registry: registryOf({ lead, alpha, beta }),
+      registry: registryOfQueues({ lead: [lead], alpha: [alpha, alphaNext], beta: [beta] }, creates),
       cwd: repo,
       lead: { id: 'advisor', agent: 'lead', role: 'advisor' },
       implementer: { id: 'seat-alpha', agent: 'alpha', role: 'implementer' },
@@ -417,28 +512,43 @@ test('a degraded seat in a multi-seat run is declined in words, not thrown as a 
         'transport_failed',
         'a policy gap reported as a transport fault sends the operator to the wrong place entirely',
       )
-      // Unattended, so the decision point ends the run rather than suspending it -- the same
-      // way every other unattended halt does. What matters here is that it is a DECISION with
-      // a reason, not an exception with a stack.
-      assert.equal(outcome.reason, 'escalated')
-      assert.match(outcome.detail!, /seat-alpha is degraded/)
-      assert.match(
-        outcome.detail!,
-        /cannot currently be replaced/,
-        'the operator has to be told that the rotation did not happen, not just that something did not',
-      )
-      assert.match(outcome.detail!, /2 implementer seats \(seat-alpha, seat-beta\)/)
-      assert.match(outcome.detail!, /stays in service/)
+      assert.notEqual(outcome.reason, 'escalated', 'a seat that CAN be replaced does not need a human')
 
-      // And it really did stay in service: no session was quiesced, retired or replaced.
-      assert.equal(alpha.state, 'running', 'the degraded seat is not spent on a rotation that cannot happen')
-      assert.equal(beta.state, 'running')
-      assert.equal(relay.rotationWatch.rotations, 0)
-      assert.ok(
-        !relay.log.some((m) => /^rotating /.test(m.text)),
-        'nothing may claim a rotation began: the decline happens before the transaction is entered',
+      // The transfer happened, to the seat that degraded and to no other.
+      assert.equal(relay.rotationWatch.rotations, 1, 'the degraded seat was replaced')
+      assert.equal(alpha.state, 'terminated', 'the degraded session is retired once the replacement proved itself')
+      assert.equal(
+        relay.participants.find((p) => p.id === 'seat-alpha')!.session,
+        alphaNext,
+        'and the seat is now running the replacement, under the same id',
       )
-      // The detector still ran and still saw it. Declining to act is not declining to look.
+      assert.ok(relay.log.some((m) => /^rotating seat-alpha/.test(m.text)))
+
+      // THE SIBLING. Not quiesced, not retired, not replaced, and never spoken to about any of
+      // it: a rotation that touched the other seats would be a run-wide event wearing a seat's
+      // name, and the seat it disturbed would have lost a session for somebody else's problem.
+      assert.equal(beta.state, 'running', 'the other seat keeps its session')
+      assert.equal(relay.participants.find((p) => p.id === 'seat-beta')!.session, beta)
+      assert.deepEqual(beta.transitions, [], 'and was not put through any of the transaction’s states')
+      assert.ok(
+        !beta.received.some((m) => /handoff|CHECK 1/i.test(m)),
+        'nor was it asked to take part in another seat’s transfer',
+      )
+
+      // The replacement was verified in seat-alpha's OWN tree, which is the other half of
+      // "seat-local": a transfer measured in the integration checkout would be measuring work
+      // this seat never did.
+      const tree = relay.worktrees!.seats.find((s) => s.seatId === 'seat-alpha')!.worktreePath
+      assert.ok(
+        relay.log.some((m) => m.text.includes('handoff recorded')),
+        'the record was captured',
+      )
+      assert.equal(
+        creates.find((c) => c.id === 'seat-alpha' && c.nth === 2)?.cwd,
+        tree,
+        'the replacement must be started in the tree of the seat it replaces',
+      )
+      // The detector still ran and still saw it. Acting is not a substitute for looking.
       assert.ok(relay.rotationWatch.degradationsSeen >= 1, 'the degradation was seen and counted')
     } finally {
       await relay.stop()

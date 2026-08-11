@@ -326,7 +326,7 @@ const HELP = `
 
   /pause                 pause at the next advisor-turn boundary
   /continue              resume from a pause
-  /rotate [reason]       replace the implementer, carrying a handoff forward
+  /rotate [reason]       replace the implementer seat this pause is about, carrying a handoff forward
   /abort [reason]        end the run, and stay here for the next one
 
   /allow [who]           answer a participant stopped at a permission prompt
@@ -1418,18 +1418,20 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     if (word === '/rotate') {
       if (!run) return void write(dim('  nothing is running; type a goal to start'))
       if (run.state !== 'paused') return void write('  pause first: /pause, then /rotate')
-      // Refused rather than attempted, naming the seat it would have replaced. Rotation
-      // ALWAYS targets the implementer; offered at a pause caused by the ADVISOR it is inert,
-      // and an operator who picked it from the menu got silence and a spent turn.
+      // Refused rather than attempted, naming the seat it would have replaced. Rotation targets
+      // ONE implementer seat -- since #78 the seat this pause is about, which is why a pause
+      // caused by the ADVISOR does not offer it: an operator who picked it from that menu got
+      // silence and a spent turn.
       if (!run.pause?.options.includes('rotate')) {
-        write('  rotation is not available at this pause. It replaces the IMPLEMENTER, and')
-        write('  needs --checks so a replacement can be verified against what the original did.')
+        write('  rotation is not available at this pause. It replaces the IMPLEMENTER SEAT this')
+        write('  pause is about, and needs --checks so a replacement can be verified against what')
+        write('  the original did.')
         if (run.pause?.verdictOf) {
           write(`  this pause rests on ${run.pause.verdictOf.participant}'s turn.`)
         }
         return
       }
-      write('  rotating the implementer — the advisor writes a handoff, then a replacement must reproduce the record')
+      write('  rotating the seat this pause is about — the advisor writes a handoff, then a replacement must reproduce the record')
       const result = await run.rotateImplementer(rest || undefined)
       if (result.status === 'rotated') {
         write(`  rotated into ${result.replacement.sessionId}; still paused — /continue when ready`)

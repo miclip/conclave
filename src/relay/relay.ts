@@ -220,6 +220,99 @@ export interface RotationConfig {
   checkTimeoutMs?: number
   /** TEST-ONLY. See `RotationDeps.hooks`; never set in production. */
   hooks?: { afterCapture?: () => Promise<void> }
+  /**
+   * Per-seat overrides of everything above, keyed by seat id. Absent is the default.
+   *
+   * D7: rotation policy is a RUN-LEVEL DEFAULT that a seat may override, and the fields above
+   * are that default. This is where a heterogeneous run says what it cannot say once (#77): a
+   * seat running a different agent on a different part of the tree does not necessarily prove
+   * itself with the same commands, and until #78 there was no way to express that because
+   * there was only ever one seat rotation could name.
+   *
+   * A seat that names nothing here is under the run's policy, which is the identity case and
+   * the only case a default run reaches -- `rotationFor` returns the run policy unchanged when
+   * this is absent, so N=1 cannot take a different path through it.
+   *
+   * Keyed by seat id rather than by role or agent, because the seat is what rotation replaces.
+   * A key naming no seat is NOT an error here: `Relay.start` refuses one, where the seat list
+   * is known and the operator can be told which ids exist.
+   */
+  seats?: Record<string, SeatRotation>
+}
+
+/**
+ * One seat's departure from the run's rotation policy. Every field optional; absent inherits.
+ *
+ * Deliberately not `Partial<RotationConfig>`: that would let a seat carry its own `seats` map,
+ * and a policy that can nest is a policy whose effective value depends on how deep a reader
+ * looked. One level, and the run's is the root.
+ */
+export interface SeatRotation {
+  /**
+   * This seat's verification commands, REPLACING the run's rather than adding to them.
+   *
+   * Replacement is the whole point: a seat that names its own checks has said what proving
+   * ITS work means, and concatenating the run's back on would silently reimpose commands the
+   * operator just overrode -- on a seat whose tree may not even be able to run them.
+   *
+   * An empty array is a real setting and means this seat cannot be rotated: there is nothing
+   * for a replacement to reproduce, and rotating on nothing is the transfer nobody demonstrated
+   * that `checks` exists to prevent. Its degradation is still detected, and still reported.
+   */
+  checks?: CheckSpec[]
+  onDegradation?: 'candidate' | 'automatic'
+  files?: string[]
+  checkTimeoutMs?: number
+  /** TEST-ONLY. See `RotationDeps.hooks`; never set in production. */
+  hooks?: { afterCapture?: () => Promise<void> }
+}
+
+/**
+ * The rotation policy one seat is actually under, with the run's defaults already applied.
+ *
+ * A resolved value rather than a pair of objects every reader merges for itself, for the reason
+ * `boundOf` and `implementerSeats` are functions: the rule that reconciles a default with an
+ * override is the whole of the promise, and a rule written at each point of use is a rule that
+ * eventually disagrees with itself. `onDegradation` is defaulted HERE and nowhere else, so
+ * "what happens when a seat degrades" has exactly one answer.
+ */
+export interface EffectiveRotation {
+  checks: CheckSpec[]
+  onDegradation: 'candidate' | 'automatic'
+  files?: string[] | undefined
+  checkTimeoutMs?: number | undefined
+  hooks?: { afterCapture?: () => Promise<void> } | undefined
+}
+
+/**
+ * What rotation policy applies to one seat: the run's, as amended by that seat's own entry.
+ *
+ * `undefined` means rotation was never configured for this run, which is a different fact from
+ * a seat configured with no checks -- the first is a run with no policy, the second is a policy
+ * that says this seat is not rotatable. Both refuse to rotate; only the second was asked for.
+ *
+ * Field by field, and never a deep merge. Arrays replace (see `SeatRotation.checks`), and a
+ * field a seat did not mention takes the run's value, including when the run did not mention
+ * it either.
+ */
+export function rotationFor(
+  cfg: RotationConfig | undefined,
+  seatId: string,
+): EffectiveRotation | undefined {
+  if (!cfg) return undefined
+  const seat = cfg.seats?.[seatId]
+  const files = seat?.files ?? cfg.files
+  const checkTimeoutMs = seat?.checkTimeoutMs ?? cfg.checkTimeoutMs
+  const hooks = seat?.hooks ?? cfg.hooks
+  return {
+    checks: seat?.checks ?? cfg.checks,
+    onDegradation: seat?.onDegradation ?? cfg.onDegradation ?? 'candidate',
+    // Spread rather than assigned, because `exactOptionalPropertyTypes` distinguishes a field
+    // set to `undefined` from a field that is absent, and `rotate()` reads these with `in`.
+    ...(files === undefined ? {} : { files }),
+    ...(checkTimeoutMs === undefined ? {} : { checkTimeoutMs }),
+    ...(hooks === undefined ? {} : { hooks }),
+  }
 }
 
 /**
@@ -1086,9 +1179,33 @@ export class Relay {
   #leadNotices: string[] = []
   /** True while `#loop` owns the participants. `ask` refuses rather than racing it. */
   #looping = false
+  /**
+   * The seat the pause in front of the operator would rotate, or none.
+   *
+   * Written by `#halt` beside the `rotate` option it accompanies, and read by the handle the
+   * operator answers with. Not on `RunPause`: the pause is a document about a condition, and
+   * every reader of it -- the status file, the console, a poller -- would then be carrying a
+   * field that only the handle's own control path has any use for.
+   */
+  #rotationSeat: string | undefined
 
   private constructor(opts: RelayOptions) {
     this.#opts = opts
+    // A wait is minutes long when it happens -- a rotation holds the lane across a whole agent
+    // turn -- and it happens between two stations neither of which narrates the other. Recorded
+    // as an orchestrator note because the alternative is a gap in the log with nothing in it.
+    this.#checkLane.onWait = (waiting, holder) => {
+      this.#record({
+        from: 'orchestrator',
+        fromRank: 'human',
+        to: [],
+        kind: 'note',
+        text:
+          `${waiting.seat}'s ${waiting.station} section is waiting for the check lane, held by ` +
+          `${holder.seat}'s ${holder.station} section. It is queued, not blocked: nothing about ` +
+          `${waiting.seat}'s work has been judged.`,
+      })
+    }
     // Set here and nowhere else. Whether rotation was configured cannot depend on how far
     // the run got -- see rotationWatch.armed and issue #31.
     this.rotationWatch.armed = opts.rotation !== undefined
@@ -1097,12 +1214,10 @@ export class Relay {
   /**
    * The run-scoped lane the configured checks run behind. One slot, not configurable.
    *
-   * INERT: `spawnSync` already serialises every check in this process, and the two stations
-   * that would contend cannot be live at the same time until per-seat rotation lands (#78).
-   * `CheckLane` carries the whole argument, including why it is kept rather than deleted.
-   *
-   * No `onWait` and no note: a seat cannot wait here, and logging for a state nothing
-   * constructs would be a report an operator could never see and could not trust if they did.
+   * Both stations are real since #78: a merge boundary at N>1, and a seat-local rotation at any
+   * N. `spawnSync` already serialises the commands themselves; what this serialises is the
+   * WINDOW a rotation verifies across, which a merge would otherwise move underneath it.
+   * `CheckLane` carries the whole argument, including exactly how reachable a wait is.
    *
    * Public because `history()` is the only record that a station reached the lane at all --
    * "never contended" and "never reached" are otherwise the same silence. Nothing outside the
@@ -1136,6 +1251,20 @@ export class Relay {
           `an untargeted instruction and a rotation name, and a run whose seat list omits it has no ` +
           `answer for either`,
       )
+    }
+    // A per-seat rotation policy for a seat this run does not have is refused here rather than
+    // ignored. It is the same failure as a misspelled flag that parses: the operator has said
+    // what proving THAT seat means, the run starts without it, and the seat it was meant for
+    // quietly stays on the run default -- which is exactly the configuration they were
+    // overriding. Checked where the seat ids are known, so the message can list them.
+    for (const seatId of Object.keys(opts.rotation?.seats ?? {})) {
+      if (!seats.some((s) => s.id === seatId)) {
+        throw new Error(
+          `rotation.seats names '${seatId}', which is not a seat in this run ` +
+            `(${seats.map((s) => s.id).join(', ')}): a per-seat policy for a seat that does not ` +
+            `exist would leave the seat it was meant for on the run default`,
+        )
+      }
     }
     const relay = new Relay(opts)
 
@@ -1252,8 +1381,22 @@ export class Relay {
    * as well, since two participants can share a root at any N.
    */
   #rootOf(participantId: string): string {
-    return this.#worktrees?.seats.find((s) => s.seatId === participantId)?.worktreePath ?? this.#opts.cwd
+    return (
+      this.#rootOverride.get(participantId) ??
+      this.#worktrees?.seats.find((s) => s.seatId === participantId)?.worktreePath ??
+      this.#opts.cwd
+    )
   }
+
+  /**
+   * Roots for participants the worktree manifest does not name.
+   *
+   * One entry ever, and only while it is needed: a rotation's audition works in the tree of the
+   * seat it is auditioning for, and it is not that seat yet -- it holds `<seat>~replacement`
+   * precisely so nothing confuses the two. Empty on every run that never rotates, which is
+   * every default run.
+   */
+  #rootOverride = new Map<string, string>()
 
   /**
    * The seat the required singular option names.
@@ -1875,6 +2018,15 @@ export class Relay {
   /** One line an operator can read to know whether the detector was live and what it saw. */
   rotationSummary(): string {
     const w = this.rotationWatch
+    // The counters cannot say this and would be MISREAD without it: a run that stopped rotating
+    // because no replacement could ever be observed reports the same `0 rotations` as a run that
+    // never needed one (#76). Carried by every armed branch below for the reason the "nothing was
+    // measured" branch exists at all -- saying nothing happened over the top of an event that did
+    // is a stronger falsehood than an ambiguity.
+    const stopped = this.#rotationUnobservable
+      ? `\n  rotation STOPPED after ${this.#rotationUnobservable.seat}: acceptance produced no ` +
+        `observable output, so no replacement could pass and the fix is upstream of rotation`
+      : ''
     if (!w.armed) {
       return `rotation: NOT ARMED (no checks configured) — ${w.assessments} assessments, no rotation possible`
     }
@@ -1889,13 +2041,13 @@ export class Relay {
     if (w.assessments === 0 && w.rotations === 0) {
       return (
         `rotation: armed — 0 assessments, the run ended before any were made ` +
-        `(nothing was measured; this is not a negative result)`
+        `(nothing was measured; this is not a negative result)${stopped}`
       )
     }
     return (
       `rotation: armed — ${w.assessments} assessments, ${w.degradationsSeen} degraded, ` +
       `${w.complaintsSeen} complaints, ${w.candidates} candidates, ${w.rotations} rotations, ` +
-      `peak compaction generation ${w.peakGeneration}`
+      `peak compaction generation ${w.peakGeneration}${stopped}`
     )
   }
 
@@ -2292,10 +2444,21 @@ export class Relay {
     },
   ): Promise<RunOutcome | undefined> {
     const reason: PauseReason = p.subject.reason
+    /**
+     * The seat `rotate` would act on, if it is offered.
+     *
+     * The condition's own subject, because a pause about `implementer-2` that offered to rotate
+     * `implementer` would be a menu describing the API rather than the situation -- the exact
+     * fault the paragraph below is about, one seat over. A pause about no seat at all falls back
+     * to the lead, which at N=1 is the only seat and at N>1 is why `rotatable` refuses.
+     */
+    const target = 'participant' in p.subject ? p.subject.participant : p.verdictOf?.participant
+    const rotationSeat = target ?? this.#opts.implementer.id
     // Rotation checks are the operator pre-delegating rotation authority (D2), and they are
     // read here rather than passed in: a condition that could declare its own authority
-    // would eventually declare the wrong one.
-    const armed = (this.#opts.rotation?.checks.length ?? 0) > 0
+    // would eventually declare the wrong one. Read for the SEAT this pause is about, since a
+    // per-seat policy can arm or disarm one seat without the others (D7, #78).
+    const armed = (rotationFor(this.#opts.rotation, rotationSeat)?.checks.length ?? 0) > 0
     const resolution = resolutionFor(p.subject, { rotationArmed: armed })
     // Every request that reaches here must have somebody routed to answer it. Total today --
     // every authority falls back to the operator -- so this cannot throw and changes nothing.
@@ -2330,12 +2493,18 @@ export class Relay {
     // this rests on, and the relay knows whether rotation is armed.
     const implIds = new Set(this.#implementers().map((x) => x.id))
     const aboutImplementer = p.verdictOf === undefined || implIds.has(p.verdictOf.participant)
-    // And `rotate` only where it names something. `rotateImplementer` takes a reason and no
-    // seat, so at N>1 there is no seat it could mean -- offering it would put back the exact
-    // inert choice the paragraph above is about, one release after taking it out.
-    const rotatable = implIds.size === 1
+    // And `rotate` only where it names something. Since #78 that is a wider set than it was:
+    // rotation replaces a NAMED seat, so a pause about a seat can offer it at any N, and only a
+    // pause that names no seat in a run with several still has no seat it could mean. The latch
+    // takes it away again -- offering a rotation that has already been shown to be unable to
+    // pass is the inert choice this list exists to keep out, and it costs a turn to discover.
+    const rotatable = implIds.has(rotationSeat) && this.#rotationUnobservable === undefined
     const options: PauseOption[] = ['continue', 'constrain', 'abort']
     if (armed && rotatable && aboutImplementer) options.splice(1, 0, 'rotate')
+    // The seat the handle's `rotate` will act on, set alongside the option that offers it. The
+    // handle is built once per run and a pause is per condition, so the target cannot travel on
+    // the closure that made the handle.
+    this.#rotationSeat = rotatable ? rotationSeat : undefined
     // `wait` only where it is the right answer: the child is measurably alive, so the turn
     // is still happening and every other option is destructive. Offering it always would
     // invite waiting on a child that has already exited, which is a decision to sit
@@ -2380,7 +2549,13 @@ export class Relay {
    */
   start(goal: string): RunHandle {
     const handle = new RunHandle({
-      rotate: (reason) => this.rotateImplementer(reason),
+      // The seat the CURRENT pause is about, which is the one the operator is looking at. With
+      // no pause in front of them there is no seat named, and the unnamed form's own rule
+      // applies: the lead at N=1, refused at N>1.
+      rotate: (reason) =>
+        this.#rotationSeat === undefined
+          ? this.rotateImplementer(reason)
+          : this.rotateSeat(this.#rotationSeat, reason),
       constrain: (text, audience) => this.say(text, audience),
       requestStop: () => {
         this.#stopped = true
@@ -2458,13 +2633,20 @@ export class Relay {
     }
 
     const detail = `${impl.id} is degraded: ${verdict.evidence.join('; ')}${verdict.complained ? ' (and said so)' : ' (and did not say so)'}`
-    if (!this.#opts.rotation) {
+    // THIS SEAT'S policy: the run's default as amended by its own entry (D7, #78). A seat whose
+    // override configures no checks is in the same position as a run that configured none --
+    // there is nothing a replacement could reproduce -- so it takes the same branch.
+    const cfg = rotationFor(this.#opts.rotation, impl.id)
+    if (!cfg || cfg.checks.length === 0) {
       // Detection does not depend on configuration; the response does. Rotating with
       // nothing to verify against would be a transfer nobody demonstrated, so this goes to
       // the human instead of proceeding on an unverifiable handoff.
-      return this.#end('escalated', `${detail}. No rotation checks are configured, so this needs a human.`)
+      const why = cfg
+        ? `${impl.id}'s own rotation policy configures no checks, so it cannot be rotated`
+        : `No rotation checks are configured`
+      return this.#end('escalated', `${detail}. ${why}, so this needs a human.`)
     }
-    if ((this.#opts.rotation.onDegradation ?? 'candidate') === 'candidate') {
+    if (cfg.onDegradation === 'candidate') {
       // A candidate, not a verdict. The mechanism is built and the policy is not earned:
       // nothing yet shows that compaction and degradation coincide, so acting on it would be
       // inferring quality from a proxy that has never been checked against quality.
@@ -2499,40 +2681,52 @@ export class Relay {
       return this.#acknowledge(impl, snap.compactionGeneration)
     }
 
-    // Declined here rather than attempted, because `rotateImplementer` takes a reason and no
-    // seat: at N>1 it THROWS, and a throw out of this method is caught by the backstop in
-    // `start()` and reported as `transport_failed` -- a transport fault, for a policy gap. The
-    // operator would read "the run threw" over a run where nothing about the transport was
-    // wrong, and the actual reason (rotation cannot name one of several seats) would appear
-    // nowhere. The pause menu already declines the same thing on the same grounds (`rotatable`
-    // in #halt), so this is that rule applied where the loop rotates by itself.
-    //
-    // Per-seat rotation is the fix and it does not exist yet, so the seat STAYS IN SERVICE and
-    // the human is told. Degraded is not unusable, and ending a run over a proxy that has never
-    // been checked against quality is worse than carrying on with the evidence on the record.
-    const seats = this.#implementers()
-    if (seats.length > 1) {
+    // A fault an earlier rotation proved nothing can get past. Declined WITHOUT attempting,
+    // which is the point of the latch: acceptance needs an observed turn, that turn travels the
+    // transport that is not working, and spending a full transaction -- a quiesce, an advisor
+    // handoff turn, a fresh child, two repository captures -- to be told the same thing again is
+    // the loop #76 is about. The operator was told once, in the terms that name the remedy; this
+    // is recorded rather than re-raised, because a pause every advisor turn on a decision the
+    // human has already been handed teaches them to stop reading pauses.
+    if (this.#rotationUnobservable) {
+      const held = this.#rotationUnobservable
+      this.#record({
+        from: 'orchestrator',
+        fromRank: 'human',
+        to: [],
+        kind: 'note',
+        text:
+          `${detail}. Rotation was NOT attempted: an earlier rotation of ${held.seat} could not be ` +
+          `accepted because the replacement produced no observable output, so no replacement can ` +
+          `pass while that holds and the fix is upstream of rotation. ${impl.id} stays in service.`,
+      })
+      return this.#acknowledge(impl, snap.compactionGeneration)
+    }
+
+    // The seat by name (#78). This used to decline at N>1 -- and before that, to THROW, which
+    // `#loop`'s backstop reported as `transport_failed`: a transport fault, for a policy gap
+    // (#74). Rotation now replaces the degraded seat's session, in that seat's own worktree,
+    // while its siblings keep working; nothing here asks how many seats the run has.
+    const result = await this.rotateSeat(impl.id, detail)
+    if (result.status === 'rotated') return undefined
+    if (result.reason === 'acceptance_unobservable') {
+      // The one rollback that is not an invitation to try again. `rotateSeat` has latched it and
+      // recorded the evidence; this puts it in front of the human with the remedy named, because
+      // an operator told only "rotation failed" will retry, and retrying is the loop.
       const halted = await this.#halt(handle, {
         subject: { reason: 'rotation_candidate', participant: impl.id },
         detail:
-          `${detail}. Rotation is set to act, but this run has ${seats.length} implementer seats ` +
-          `(${seats.map((s) => s.id).join(', ')}) and rotation can only replace "the implementer" ` +
-          `when there is exactly one, so ${impl.id} cannot currently be replaced. It stays in service.`,
+          `rotation could not be accepted and ROTATION IS NOT THE REMEDY: ${result.detail} ` +
+          `${impl.id} is back in service and no further rotation will be attempted this run.`,
         evidence: [
           ...verdict.evidence,
-          `${seats.length} implementer seats (${seats.map((s) => s.id).join(', ')}); rotation names no seat`,
-          `${impl.id} is still in service`,
+          ...(result.evidence ?? []),
+          'the original implementer is back in service',
+          'a replacement cannot demonstrate itself while the transport it would demonstrate over is not working',
         ],
       })
-      // Acknowledged on the way out for the same reason the failed-rotation path below does it:
-      // the evidence has been put in front of a human, and re-raising it on the next advisor
-      // turn -- on the same compaction, every turn, forever -- teaches the operator to stop
-      // reading pauses. A LATER compaction is new evidence and does raise it again.
-      return halted ?? this.#acknowledge(impl, snap.compactionGeneration)
+      return halted ?? this.#acknowledge(impl, (await impl.session.snapshot()).compactionGeneration)
     }
-
-    const result = await this.rotateImplementer(detail)
-    if (result.status === 'rotated') return undefined
     const halted = await this.#halt(handle, {
       subject: { reason: 'rotation_candidate', participant: impl.id },
       detail: `rotation failed (${result.reason}): ${result.detail}`,
@@ -4088,36 +4282,77 @@ export class Relay {
   /**
    * Replace the implementer, carrying the work forward.
    *
-   * The transaction lives in `rotation/rotate.ts`; this supplies the four things it cannot
-   * get for itself: how to talk to a session, how to start a fresh implementer, which
-   * human constraints to replay, and where to write the notes.
+   * The unnamed form, kept because it is what every existing caller has: an operator, a
+   * console, an embedder. It resolves to the seat `RelayOptions.implementer` names -- which at
+   * N=1 is the only seat there is -- and hands the work to `rotateSeat`.
+   *
+   * At N>1 it still REFUSES rather than picking. "The implementer" names nothing there, and
+   * quietly rotating the lead would retire a session whose caller may have meant another one;
+   * `rotateSeat` is the form that says which. This is a throw because it is a programming
+   * error at the call site rather than a condition of the run -- and nothing inside the loop
+   * reaches it any more, which is what #78 is about: `#considerRotation` names the degraded
+   * seat, so the throw that used to surface as `transport_failed` (#74) is unreachable from it.
+   */
+  async rotateImplementer(reason: string): Promise<RotationResult> {
+    const seats = this.#implementers()
+    if (seats.length > 1) {
+      throw new Error(
+        `rotateImplementer names no seat, and this run has ${seats.length} (${seats.map((s) => s.id).join(', ')}). ` +
+          `Rotation replaces one session and carries its work forward, so it needs to be told which: ` +
+          `call rotateSeat(seatId, reason).`,
+      )
+    }
+    return this.rotateSeat(this.#leadImplementer().id, reason)
+  }
+
+  /**
+   * Replace ONE named seat's session, carrying that seat's work forward (#78).
+   *
+   * The transaction lives in `rotation/rotate.ts`; this supplies the things it cannot get for
+   * itself: how to talk to a session, how to start a fresh implementer, which human constraints
+   * to replay, where to write the notes -- and, since #78, WHICH TREE all of that is measured
+   * in. Every step is scoped to the one seat: its session is retired, its record is captured,
+   * its constraints are replayed, and the replacement proves itself in its worktree.
+   *
+   * The other seats are not told and do not stop. A rotation is not a run-wide event (#56's
+   * scope rule: block the smallest scope whose continuation requires the decision), so their
+   * turns carry on in flight while this one proves itself. What they cannot do is cross their
+   * integration boundary in the middle of it -- the dispatcher processes one completion at a
+   * time, and the check lane would serialise them even if it did not.
    *
    * Callable by the human as well as by the run loop. Nothing about it assumes the loop is
    * running -- an operator watching a session degrade should not have to wait for the
    * orchestrator to notice.
    */
-  async rotateImplementer(reason: string): Promise<RotationResult> {
-    const cfg = this.#opts.rotation
-    if (!cfg) {
+  async rotateSeat(seatId: string, reason: string): Promise<RotationResult> {
+    const impl = this.#participants.get(seatId)
+    if (!impl || impl.rank !== 'implementer') {
       throw new Error(
-        'rotation needs verification commands: set `rotation.checks` so a replacement has ' +
-          'something to reproduce. Rotating without them would be a transfer nobody demonstrated.',
+        `'${seatId}' is not an implementer seat in this run ` +
+          `(${this.#implementers().map((s) => s.id).join(', ')}); rotation replaces a seat's session ` +
+          `and there is none to replace`,
       )
     }
-    // Genuinely singular, and refused rather than guessed at. This method takes a reason and no
-    // seat: at N>1 "the implementer" names nothing, and quietly rotating the first seat would
-    // retire a session whose operator asked about another one. Rotating a NAMED seat is a
-    // different method with a different signature, and it does not exist yet.
-    const seats = this.#implementers()
-    if (seats.length > 1) {
+    // The policy THIS seat is under: the run's, as amended by its own entry (D7). Resolved
+    // before anything is quiesced, because a seat whose policy disarms it must be refused with
+    // its session untouched.
+    const cfg = rotationFor(this.#opts.rotation, seatId)
+    if (!cfg || cfg.checks.length === 0) {
       throw new Error(
-        `rotateImplementer names no seat, and this run has ${seats.length} (${seats.map((s) => s.id).join(', ')}). ` +
-          `Rotation replaces one session and carries its work forward, so it needs to be told which.`,
+        `rotation needs verification commands: set \`rotation.checks\` so a replacement has ` +
+          `something to reproduce${cfg ? ` (${seatId}'s own policy configures none)` : ''}. ` +
+          `Rotating without them would be a transfer nobody demonstrated.`,
       )
     }
     const advisor = this.participants.find((p) => p.rank === 'advisor')!
-    const impl = this.#leadImplementer()
-    const spec = this.#opts.implementer
+    const spec = implementerSeats(this.#opts).find((s) => s.id === seatId)!
+    /**
+     * This seat's own tree, and what the whole transfer is measured against.
+     *
+     * At N=1 it is the run cwd, by `#rootOf` rather than by a seat-count branch -- so the
+     * default run's rotation reads exactly the directory it always read.
+     */
+    const root = this.#rootOf(seatId)
     /** The replacement while it is proving itself, before it is anyone's session. */
     let audition: RelayParticipant | undefined
 
@@ -4130,7 +4365,7 @@ export class Relay {
       advisor: advisor.session,
       reason,
       deps: {
-        root: this.#opts.cwd,
+        root,
         exchange: async (session, text) => {
           // The replacement is not in the participant map yet -- it is being auditioned --
           // but it gets the same exchange as everyone else. A second path here would be a
@@ -4139,8 +4374,23 @@ export class Relay {
           if (!p) throw new Error('exchange requested for a session the relay does not hold')
           return (await this.#exchange(p, text)).prose
         },
+        // Asked for only when the replacement produced nothing at all, and answered from what
+        // the relay watched rather than from what the replacement said -- which is the point:
+        // the claim being evidenced is that the transport is not working, and a claim about a
+        // silent child cannot rest on anything the child produced (#76).
+        transportEvidence: (session) => {
+          const p = [...this.participants, audition].find((q) => q?.session === session)
+          return [
+            `${p?.id ?? session.sessionId} emitted ${p?.events.length ?? 0} event(s) since it was started`,
+            `its session state is '${session.state}'`,
+            `the outgoing session ${impl.session.sessionId} is '${impl.session.state}' and was restored`,
+          ]
+        },
         startReplacement: async () => {
-          const ctx = { cwd: this.#opts.cwd, watchdogMs: this.#opts.turnWatchdogMs }
+          // THIS SEAT'S tree, so the replacement is launched where its predecessor worked. A
+          // replacement started in the integration checkout would prove itself against files
+          // the seat it is replacing never wrote to. At N=1 `root` is the run cwd.
+          const ctx = { cwd: root, watchdogMs: this.#opts.turnWatchdogMs }
           const session = await this.#opts.registry.createParticipant(spec, ctx)
           // Same spec, so the same role: a replacement that changed what the seat is FOR
           // would be a different seat wearing the id, and the handoff it just proved was
@@ -4148,6 +4398,12 @@ export class Relay {
           // well, and it is composed rather than copied from the outgoing participant so a
           // replacement started differently could never be reported as the one it replaced.
           audition = { id: `${spec.id}~replacement`, agent: spec.agent, rank: 'implementer', role: spec.role, launch: launchRecordFor(this.#opts.registry.resolve(spec), ctx), session, events: [], baselineGeneration: 0, degradationCursor: 0 }
+          // The audition's id is not the seat's, so the worktree manifest cannot answer for it
+          // and `#rootOf` would fall back to the run cwd -- reporting the integration checkout's
+          // dirty paths as what the acceptance turn changed, and missing everything it actually
+          // wrote. Recorded rather than inferred from the id's shape, because a suffix is a
+          // string and this is a fact.
+          this.#rootOverride.set(audition.id, root)
           this.#attach(audition)
           return session
         },
@@ -4173,10 +4429,14 @@ export class Relay {
     //
     // One acquire, at the outermost point. `rotate()` and `record.ts` know nothing about the
     // lane, so the checks they run inside this cannot queue for it a second time.
-    const result = await this.#checkLane.run(
-      { seat: impl.id, station: 'rotation', detail: reason },
-      () => rotate(rotation),
+    //
+    // Since #78 this is a station that genuinely runs at N>1, which is the configuration that
+    // has boundaries to contend with. See `checkLane.ts` for what is and is not reachable.
+    const result = await this.#rotating(seatId, () =>
+      this.#checkLane.run({ seat: impl.id, station: 'rotation', detail: reason }, () => rotate(rotation)),
     )
+    // The audition either became the seat or is gone; either way its root is no longer anyone's.
+    if (audition) this.#rootOverride.delete(audition.id)
 
     if (result.status === 'rotated' && audition) {
       // Swap the session in place, so the participant id, rank and routing history survive
@@ -4208,6 +4468,10 @@ export class Relay {
       // the readings that happened to be right.
       this.rotationWatch.rotations += 1
       this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text: `${impl.id} rotated into ${result.replacement.sessionId}` })
+      // A replacement proved itself, so whatever made an earlier acceptance unobservable is
+      // not holding now. Cleared on the evidence rather than on a timer: the latch's whole
+      // claim is "no replacement can pass while this holds", and one just did.
+      this.#rotationUnobservable = undefined
     } else if (result.status === 'rolled_back') {
       this.#record({
         from: 'orchestrator',
@@ -4216,8 +4480,58 @@ export class Relay {
         kind: 'note',
         text: `rotation rolled back (${result.reason}): ${result.detail}. ${impl.id} is back in service.`,
       })
+      if (result.reason === 'acceptance_unobservable') {
+        // Latched, and this is the whole of #76's remedy on this side: the rollback was already
+        // correct, and what was missing was that the operator could not tell a bad draw from a
+        // state in which no draw can win. The note above says which case this is; the latch is
+        // what stops the run from asking the same question again every advisor turn and
+        // teaching the reader that rotation notes mean nothing.
+        this.#rotationUnobservable = {
+          seat: impl.id,
+          detail: result.detail,
+          evidence: result.evidence ?? [],
+        }
+        for (const line of this.#rotationUnobservable.evidence) {
+          this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text: `rotation transport evidence: ${line}` })
+        }
+      }
     }
     return result
+  }
+
+  /**
+   * The rotation this run stopped attempting, and why. Unset unless acceptance went unobserved.
+   *
+   * A run-level latch for a run-level fault. The fault it records is one every replacement
+   * inherits -- hook trust, the provider, the CLI -- so scoping it to the seat that happened to
+   * hit it first would let the next seat spend another full transaction rediscovering it (#76).
+   * Cleared by a rotation that succeeds, which is the only evidence that would settle it.
+   */
+  #rotationUnobservable: { seat: string; detail: string; evidence: string[] } | undefined
+
+  /**
+   * Hold the seat in `rotation_pending` for the duration of the transfer.
+   *
+   * The seat is already undispatchable at the loop's rotation point -- it is `integrating`,
+   * between its report and its boundary -- so this changes no scheduling decision. What it
+   * changes is what an operator watching `status --json` is told: a seat sitting in
+   * `integrating` for two agent turns while its session is replaced is a seat whose state is
+   * describing the wrong thing, and `rotation_pending` has been in `SchedulerState` since D4
+   * waiting for a production path to construct it. This is that path.
+   *
+   * The previous state is restored rather than assumed, because the caller may not be the loop:
+   * an operator rotating an idle seat at a pause must get an idle seat back, and the loop's own
+   * `#integrate`/`#failBoundary` overwrite it a moment later either way.
+   */
+  async #rotating<T>(seatId: string, section: () => Promise<T>): Promise<T> {
+    const exec = this.#seatState.get(seatId)
+    const was = exec?.state
+    if (exec) exec.state = 'rotation_pending'
+    try {
+      return await section()
+    } finally {
+      if (exec && was !== undefined) exec.state = was
+    }
   }
 
   async stop(): Promise<void> {

@@ -271,6 +271,52 @@ detector and parts of #61 — whose acceptance criteria named states the code ca
 correction is to ask whether a production path constructs the state *before* writing the
 criterion.
 
+### D7c. Per-seat rotation lands, and the lane's second station is real (#78)
+
+Appended for the reason D7a and D7b were: what was decided is evidence, and a record that
+quietly loses its own errors stops being one. D7b said the two stations cannot be live at the
+same time because "`rotateImplementer` refuses at N>1". That refusal is gone.
+
+Rotation is now **seat-local**: `Relay.rotateSeat(seatId, reason)` retires one seat's session,
+captures that seat's record, verifies the replacement **in that seat's worktree**, and replaces
+the session in place. D7's "`rotate()` gains a root parameter" is what this is — `RotationDeps.root`
+is now the rotating seat's tree, and at N=1 that tree IS the operator's cwd, so the default run
+takes the same path rather than a shorter one. The other seats are not told and do not stop.
+
+`rotateImplementer` keeps its meaning and its refusal: it names no seat, so at N>1 it points the
+caller at `rotateSeat` rather than picking. Nothing in the loop reaches that refusal any more —
+`#considerRotation` names the degraded seat — which closes the #74 path where the throw was
+reported as `transport_failed`.
+
+**The rotation policy is per-seat, and the run's is the default.** `RotationConfig.seats` is a
+map of overrides keyed by seat id, resolved by `rotationFor` field by field: checks REPLACE (a
+seat that named its own has said what proving its work means), everything unmentioned inherits,
+and `onDegradation` defaults to `candidate` in that one place. An override naming a seat the run
+does not have is refused at `Relay.start`. Programmatic only — no flag, the way `implementers`
+is programmatic only. The integration station keeps reading the RUN's checks, because the
+integration checkout is not a seat.
+
+On the lane: both stations now exist in one run, and the doc in `checkLane.ts` states precisely
+what follows. The dispatcher processes one completion at a time, so the *loop* still cannot
+overlap its own two stations; a wait is reachable only from a rotation started outside the loop,
+because `rotateSeat` is public and does not require a paused run. The lane gained an `onWait`
+notification and nothing else — no slot count, and `--check-concurrency` stays withdrawn. D7's
+"a seat waiting for the check lane is `assigned`" remains unbuilt and is now positively wrong to
+build: a seat waiting there is `integrating`, which is what it is doing.
+
+What the rotating seat's own state says did change: it is `rotation_pending` for the duration,
+which is the first production path to construct that `SchedulerState`. It changes no scheduling
+decision — the seat is already undispatchable at that point — and exists so an operator watching
+`status --json` is not told a seat spent two agent turns `integrating`.
+
+**#76 rides with it**, because acceptance is where a seat-local rotation can still fail for a
+reason no seat can fix. Acceptance that produces no observable output at all is
+`acceptance_unobservable` rather than `replacement_could_not_reproduce`: the run says no
+replacement can pass while that holds, names the transport evidence it has, stops attempting
+rotations, drops `rotate` from the pause menu, and carries the fact into the rotation summary.
+The gate is not weakened and the rollback is unchanged — the rollback was always right, and what
+was missing was the operator's ability to tell a bad draw from a state where every draw loses.
+
 ## D8. Ceilings change meaning and stop being optional at N>1
 
 `#turnsTaken` counts every participant's turns and is what `breached()` reads. N seats burn

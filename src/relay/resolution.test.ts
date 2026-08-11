@@ -414,9 +414,17 @@ const EXPECTED: Record<
     // The SEAT, not the conclave: its branch and tree are what cannot proceed, and no other
     // seat's work is waiting on this decision.
     scope: { kind: 'participant', participantId: 'implementer-2' },
-    // No `rotate`. This run has two implementer seats and `rotateImplementer` names none of
-    // them, so offering it would be the inert menu entry the option list exists to prevent.
-    options: ['continue', 'constrain', 'abort'],
+    // `rotate` IS offered now, and the reason it was not is the reason it is. The entry used to
+    // read "this run has two implementer seats and `rotateImplementer` names none of them, so
+    // offering it would be the inert menu entry the option list exists to prevent" -- true while
+    // rotation could only replace "the implementer". Since #78 it replaces a NAMED seat, and
+    // this pause names one: it is scoped to `implementer-2`, which is exactly the seat the
+    // option would act on. The choice is not inert either -- the seat reached this pause by
+    // failing its OWN repair against an unmoved parent, which is the case where "give this seat
+    // a session that has not already tried and failed" is a real thing an operator can want. It
+    // replaces the session and leaves the branch, the tree and the block where they are; nothing
+    // here claims a rotation resolves a conflict.
+    options: ['continue', 'rotate', 'constrain', 'abort'],
   },
   advisor_escalated: {
     authority: 'operator',
@@ -456,7 +464,7 @@ for (const reason of Object.keys(EXPECTED) as RunPause['reason'][]) {
 
 test('an advisor turn that ends badly scopes to the advisor, not to the implementer', async (t) => {
   // The one place the scope is not obvious. `turn_incomplete` is raised for either seat --
-  // `src/relay/relay.ts:3557` for the advisor, `:3940` for the implementer -- and a scope
+  // `src/relay/relay.ts:3751` for the advisor, `:4134` for the implementer -- and a scope
   // read off "the implementer" rather than off the seat would be silently wrong for half of
   // them, in a way no N=1 run with one implementer would ever reveal.
   const dir = repo()
@@ -481,7 +489,7 @@ test('an advisor turn that ends badly scopes to the advisor, not to the implemen
 test('an unarmed run ends on degradation rather than raising a rotation candidate', async (t) => {
   // Which is why the `operator` branch of the derived rotation authority is not reachable
   // from any pause site: without checks the run does not pause on degradation at all, it
-  // ends (`src/relay/relay.ts:2461-2466`). Asserted rather than asserted-in-a-comment,
+  // ends (`src/relay/relay.ts:2639-2647`). Asserted rather than asserted-in-a-comment,
   // because the classification's other branch rests on it.
   const dir = repo()
   const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it.'])
