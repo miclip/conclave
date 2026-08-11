@@ -634,9 +634,13 @@ const DECLARED: Record<string, string> = {
     'implementer-2 compacts into a rotation_candidate pause, and /continue resumes it while ' +
     'implementer is provably still mid-turn in the status document’s own seat block.',
   'a mixed CPU sample is reported as mixed rather than as a working child (#83)':
+    'THE REASON, in one sentence: the liveness output now distinguishes an ALL-LOW measurement ' +
+    'from an ALL-HIGH one and from a MIXED one, and hands all three to the operator as ' +
+    'measurements to judge, because the binary it replaced could only say "idle" or "still ' +
+    'working" and had to round every mixed sample up to the confident end. ' +
     'NO FLAG IS ADDED, no document gains a key, and NOTHING BECOMES LESS CONSERVATIVE — the ' +
-    'change is entirely in what a default run SAYS at a pause, which is why it is declared ' +
-    'rather than assumed invisible. `idle` is untouched: every sample below IDLE_CPU_PERCENT ' +
+    'rest of the change is entirely in what a default run SAYS at a pause, which is why it is ' +
+    'declared rather than assumed invisible. `idle` is untouched: every sample below IDLE_CPU_PERCENT ' +
     'and nothing else, the asymmetry chosen after a run was lost to the opposite mistake. What ' +
     'was wrong was the other half of the same `if` — anything not idle was announced as "still ' +
     'working", so 0.3%, 0.2%, 7.2% with three events was a true report of a false thing. ' +
