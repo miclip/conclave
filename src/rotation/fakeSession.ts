@@ -90,6 +90,49 @@ export class FakeRotationSession implements AgentSession {
   /** Compact when this turn index starts (0-based). Deterministic, unlike a timer. */
   compactOnTurn: number | undefined
   /**
+   * Hold this turn open until `releaseTurn()` instead of ending it, indexed like the two above.
+   *
+   * `delayMs` is the only other way to keep a turn in flight, and it is a race dressed as a
+   * fixture: a test that needs one seat still working while something happens to another seat
+   * has to pick a number bigger than everything that follows, and it is correct only for as
+   * long as that guess holds. One of them was a ten-second turn that had to outlast an
+   * eleven-second pause -- true on the machine it was written on, and an untraceable
+   * intermittent everywhere else.
+   *
+   * The turn STARTS normally: `turn_start` is emitted, tools are emitted, the dispatcher
+   * assigns the seat and marks the task running. Only `turn_end` is withheld, which is exactly
+   * the state a long real turn is in, and `Relay#exchange` polls for that event with no timeout
+   * of its own -- so the hold is bounded by the test and by nothing else.
+   */
+  holdTurn: number | undefined
+  /** The withheld `#endTurn` call, present only while a turn is being held. */
+  #held: (() => void) | undefined
+
+  /**
+   * Whether a turn is being held right now.
+   *
+   * Exported as state rather than left implicit, because it is also the cleanest proof a test
+   * has that the child was sent work and has not been allowed to answer -- `session.state` says
+   * `running` whether or not a turn is in flight, so it cannot say this.
+   */
+  get holding(): boolean {
+    return this.#held !== undefined
+  }
+
+  /**
+   * End the held turn now.
+   *
+   * Throws when nothing is held, deliberately: a release that silently does nothing would let
+   * a test believe it had unblocked a turn that was never blocked -- which is the same test
+   * passing for the wrong reason, one layer down from the race this exists to remove.
+   */
+  releaseTurn(): void {
+    const end = this.#held
+    if (!end) throw new Error(`${this.sessionId} has no held turn to release`)
+    this.#held = undefined
+    end()
+  }
+  /**
    * Narration blocks emitted as `message` deltas during the turn, then a closing report.
    * The two have different audiences and the console must show that; see repl/session.ts.
    */
@@ -166,6 +209,12 @@ export class FakeRotationSession implements AgentSession {
         step * (blocks.length + 1),
       ).unref()
       this.#turns[index]!.prose = report
+    }
+    // Held before the timer is consulted: a turn cannot be both gated and scheduled, and the
+    // gate is the stronger statement of the two.
+    if (this.holdTurn === index) {
+      this.#held = () => this.#endTurn(key, index)
+      return key
     }
     if (this.delayMs > 0) {
       setTimeout(() => this.#endTurn(key, index), this.delayMs).unref()

@@ -24,7 +24,10 @@ import { NO_DEADLINE_CLOCKS } from '../registry/types.ts'
 import type { AgentSession } from '../contract/session.ts'
 import { AgentRegistry } from '../registry/registry.ts'
 import { FakeRotationSession } from '../rotation/fakeSession.ts'
-import { runSession, withHeartbeat } from './session.ts'
+import { runSession, seatsToSampleAtPause, withHeartbeat } from './session.ts'
+import type { ResolutionSubject } from '../relay/resolution.ts'
+import { resolutionFor } from '../relay/resolution.ts'
+import type { RunPause } from '../relay/run.ts'
 
 function repo(): string {
   const dir = mkdtempSync(join(tmpdir(), 'conclave-repl-'))
@@ -1883,6 +1886,273 @@ test('a refusal to continue is recorded on the paused session status', async () 
   // Readable through the JSON rendering, not only in-process.
   const asJson = JSON.parse(formatSessionJson(found.session))
   assert.equal(asJson.pause.refusal.liveness.idle, false)
+
+  input.end()
+  await running
+})
+
+// ---------------------------------------------------------------------------------------
+// WHICH children the resume guard samples, and it is the pause's scope that says.
+//
+// The guard used to read `pause.verdictOf.participant` and fall back to a rank scan for every
+// pause that field was empty on -- which is every pause except the two `turn_incomplete` halts,
+// `verdictOf` being set at exactly those (src/relay/relay.ts:4149, src/relay/relay.ts:4535).
+// So a pause naming ONE seat could refuse a continue because a DIFFERENT seat was mid-turn, and
+// a pause naming no seat at all measured whichever children happened to be implementers.
+//
+// The rule now: a `participant` scope samples that participant and nobody else; a `conclave` or
+// `workstream` scope samples nobody. The unit tests below are over the rule, built from real
+// `resolutionFor` output rather than hand-written scopes -- so a reason whose scope changes in
+// `resolution.ts` changes what these assert -- and the two console tests after them drive the
+// same rule through `/continue` with a child the sampler would have called busy.
+// ---------------------------------------------------------------------------------------
+
+/** A pause as the halt sites build one: the scope derived, never declared. See `resolutionFor`. */
+function pauseFor(subject: ResolutionSubject, verdictOf?: { participant: string; endSeq: number }): RunPause {
+  return {
+    reason: subject.reason,
+    resolution: resolutionFor(subject, { rotationArmed: false }),
+    detail: 'a fixture pause',
+    evidence: [],
+    options: ['continue', 'abort'],
+    ...(verdictOf ? { verdictOf } : {}),
+    atSeq: 1,
+    at: 0,
+  }
+}
+
+/** Two implementer seats and an advisor, which is the shape the rank scan got wrong. */
+const THREE_SEATS = [
+  { id: 'implementer', rank: 'implementer' as const },
+  { id: 'implementer-2', rank: 'implementer' as const },
+  { id: 'advisor', rank: 'advisor' as const },
+]
+
+const sampled = (pause: RunPause | undefined): string[] =>
+  seatsToSampleAtPause(pause, THREE_SEATS).map((p) => p.id)
+
+test('a participant-scoped pause samples that seat and no other, at every reason that carries one', () => {
+  // `turn_incomplete` is the one reason that also sets `verdictOf`, so it is the one case the
+  // old code got right; it is here to pin that the change did not lose it.
+  assert.deepEqual(
+    sampled(pauseFor({ reason: 'turn_incomplete', participant: 'implementer-2' }, { participant: 'implementer-2', endSeq: 4 })),
+    ['implementer-2'],
+  )
+  // The four that name a seat in their SCOPE and set no `verdictOf`. Every one of these used to
+  // be answered by a rank scan, so at N>1 each could refuse on a seat the pause never mentioned.
+  assert.deepEqual(sampled(pauseFor({ reason: 'merge_blocked', participant: 'implementer-2' })), ['implementer-2'])
+  assert.deepEqual(sampled(pauseFor({ reason: 'review_blocked', participant: 'implementer-2' })), ['implementer-2'])
+  assert.deepEqual(sampled(pauseFor({ reason: 'rotation_candidate', participant: 'implementer-2' })), ['implementer-2'])
+  assert.deepEqual(sampled(pauseFor({ reason: 'implementer_unanswered', participant: 'implementer-2' })), ['implementer-2'])
+  // The ADVISOR is a participant like any other, and its own bad turn pauses the run
+  // (src/relay/relay.ts:4146). A rank scan for implementers sampled the wrong child here too.
+  assert.deepEqual(
+    sampled(pauseFor({ reason: 'turn_incomplete', participant: 'advisor' }, { participant: 'advisor', endSeq: 2 })),
+    ['advisor'],
+  )
+})
+
+test('a conclave- or workstream-scoped pause samples nobody, with no fall back to rank', () => {
+  // Both conclave-scoped reasons. Resuming an `advisor_escalated` pause sends to the ADVISOR
+  // (src/relay/relay.ts:4248), so measuring implementer children was never the question; and
+  // `operator_requested` is consumed at an advisor-turn boundary that states no turn is in
+  // flight. Neither has anything for this guard to sample.
+  assert.deepEqual(sampled(pauseFor({ reason: 'advisor_escalated' })), [])
+  assert.deepEqual(sampled(pauseFor({ reason: 'operator_requested' })), [])
+  // Workstream scope, and the id deliberately COLLIDES with a seat id -- at N=1 the workstream
+  // is named after the seat carrying the instruction (src/relay/relay.ts:4312), which is exactly
+  // the coincidence a guard could read as "so sample that seat". A workstream is not a seat.
+  assert.deepEqual(sampled(pauseFor({ reason: 'authority_conflict', workstream: 'implementer' })), [])
+})
+
+test('a scope naming a seat that is gone samples nobody rather than falling back', () => {
+  // A seat rotated out from under the pause, and the same answer as a missing pid: no reading.
+  assert.deepEqual(sampled(pauseFor({ reason: 'merge_blocked', participant: 'implementer-9' })), [])
+  // No pause at all is unreachable from `resumeRun`, which returns unless the run is paused.
+  // Asserted anyway, because the old fallback would have scanned here.
+  assert.deepEqual(sampled(undefined), [])
+})
+
+test('a rotation_candidate pause on one seat resumes while the OTHER seat is genuinely mid-turn', async (t) => {
+  // The production shape of the N>1 case the rank scan got wrong, and the reason it has to be
+  // this shape: `rotation_candidate` carries NO `verdictOf` -- that field is set at two halt
+  // sites, both turn_incomplete (src/relay/relay.ts:4149, src/relay/relay.ts:4535) -- so under
+  // the old expression this pause fell through to the rank scan and sampled EVERY implementer.
+  // A simpler `turn_incomplete` fixture cannot show that: it populates the field, takes the
+  // named-seat branch, and passes against the code being replaced.
+  //
+  // So: two seats, real concurrent dispatch, one instruction each from one advisor reply.
+  // `implementer`'s work turn is HELD OPEN by this test for as long as it needs, rather than
+  // running against a clock. `implementer-2` compacts on its work turn, which is what `assess`
+  // reads as degradation (src/rotation/degradation.ts), and with checks configured a degraded
+  // seat is a rotation CANDIDATE that pauses rather than a run that ends. The pause names
+  // `implementer-2`; the child that measures busy is `implementer`, the seat the pause is not
+  // about.
+  const dir = repo()
+  // Two seats mean linked worktrees, and those are cut from a COMMIT -- so the console refuses
+  // to start with anything uncommitted (`requireCleanBase`). Starting the console installs hook
+  // files for the agents it was named, which land untracked in this fixture, so they are
+  // ignored and committed before the run rather than tripping a guard this test is not about.
+  writeFileSync(join(dir, '.gitignore'), '.conclave/\n.claude/\n.codex/\n')
+  execFileSync('git', ['add', '.'], { cwd: dir })
+  execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'ignore agent hook files'], { cwd: dir })
+  // One reply, two seats, addressed by the ids the console constructs -- `seatIdFor(0)` and
+  // `(1)`. The only way to put two seats to work from one advisor turn, and the same form
+  // src/repl/session.tty.test.ts drives its two-seat console with.
+  const assignment = '@seat implementer: rebuild the parser\n@seat implementer-2: rewrite the docs'
+  // Its work turn is HELD open until this test releases it, rather than given a delay long
+  // enough to outlast the pause. A timer would make the assertions below true only for as long
+  // as the guess held; the gate makes "this seat is still inside its turn" a fact the test
+  // controls. Turn 0 is the briefing and ends normally; turn 1 is the dispatched work.
+  const busySeat = new FakeRotationSession('alpha', 'alpha', ['ack', 'Did it.', 'NONE', 'NONE'])
+  busySeat.holdTurn = 1
+  busySeat.childPid = 11
+  const degrading = slow('beta', 'beta', ['ack', 'Rewrote the docs.', 'NONE', 'NONE'], 300)
+  degrading.childPid = 22
+  // Turn 0 is the briefing, so turn 1 is the first turn that does work. Compaction there is
+  // the whole degradation signal -- the prose says nothing about being spent, so this seat is
+  // degraded on evidence rather than on its own complaint.
+  degrading.compactOnTurn = 1
+  const out = collect()
+  const input = new PassThrough()
+  const asked: number[] = []
+  const running = runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'alpha',
+    // Distinct agents, one per seat, so which fake is which seat is not a matter of queue order.
+    implementers: [
+      { agent: 'alpha', args: [] },
+      { agent: 'beta', args: [] },
+    ],
+    rounds: 6,
+    // ARMS ROTATION, which is what makes degradation a pause instead of an ended run
+    // (src/relay/relay.ts:2827-2833). A command that exits 0 immediately: what the checks DO is
+    // not what this test is about, only that a replacement would have something to reproduce.
+    checks: ['true'],
+    registry: registryOf({
+      codex: [slow('advisor', 'codex', [assignment, 'DONE', 'DONE', 'DONE'], 300)],
+      alpha: [busySeat],
+      beta: [degrading],
+    }),
+    liveness: async (pid) => {
+      asked.push(pid)
+      // The busy child is the seat the pause is NOT about. If the guard samples by rank it
+      // finds this one and refuses; if it samples by scope it never asks.
+      return pid === 11 ? BUSY_LIVENESS : IDLE_LIVENESS
+    },
+    input,
+    output: out.stream,
+  })
+  // WHATEVER happens below, the held turn is released and the console is closed. A held turn is
+  // the one fixture in this file that cannot be left behind: an assertion that throws before the
+  // release would leave a turn nothing is ever going to finish and a session promise nobody
+  // settles, so the failure stops being a failing test and becomes a hung suite -- which is what
+  // the first version of this test did when it was run against the mutation it exists to catch.
+  t.after(async () => {
+    if (busySeat.holding) busySeat.releaseTurn()
+    input.end()
+    await running
+  })
+  const until = async (pred: (f: ReturnType<typeof resolveSession>) => boolean, ms = 30_000) => {
+    const started = Date.now()
+    while (Date.now() - started < ms) {
+      const f = resolveSession(dir)
+      if (pred(f)) return f
+      await new Promise((r) => setTimeout(r, 50))
+    }
+    throw new Error(`timed out; console said:\n${out.text().slice(-1200)}`)
+  }
+
+  const paused = await until(
+    (f) => 'session' in f && f.session.status.state === 'paused' && f.session.status.pause?.reason === 'rotation_candidate',
+  )
+  assert.ok('session' in paused)
+  const pause = paused.session.status.pause!
+  assert.deepEqual(
+    pause.resolution.scope,
+    { kind: 'participant', participantId: 'implementer-2' },
+    'the pause must be scoped to the degraded seat',
+  )
+  assert.equal(pause.verdictOf, undefined, 'and it must carry no verdictOf -- which is why the old fallback fired here')
+
+  // The other seat is in flight according to the DISPATCHER, read out of the status document
+  // rather than inferred from the sampler this test is measuring. `running` with a task id is
+  // the scheduler saying it sent work and has not seen it come back (`SeatExecution`).
+  const other = paused.session.status.participants.find((p) => p.id === 'implementer')
+  assert.ok(other?.seat, 'the two-seat status document must carry a seat block')
+  assert.equal(other.seat.state, 'running', 'the other seat must be mid-turn, not idle')
+  // The task block exists ONLY between dispatch and release, so its presence is half the proof
+  // on its own; `state: 'running'` is the other half — the instruction was sent and no report
+  // has come back. Both are asserted rather than either alone.
+  assert.match(other.seat.task?.instruction ?? '', /rebuild the parser/, 'holding the task it was dispatched')
+  assert.equal(other.seat.task?.state, 'running', 'and that task must be in flight, not reported')
+  // The child's side of the same fact, and the reason it is not a timing accident: two sends --
+  // its briefing and this instruction -- and its second turn is being HELD, so no `turn_end` for
+  // it can exist until this test allows one. Deliberately NOT asserted through `session.state`,
+  // which reads `running` whether or not a turn is in flight.
+  assert.equal(busySeat.received.length, 2, 'the busy seat was sent work it has not answered')
+  assert.equal(busySeat.holding, true, 'and its turn is held open, not merely slow')
+
+  input.write('/continue\n')
+  await until((f) => 'session' in f && f.session.status.state === 'running')
+  assert.doesNotMatch(out.text(), /not continuing/, 'a busy seat the pause is not about must not refuse')
+  assert.deepEqual(asked, [22], 'only the seat the pause names may be sampled')
+
+  // Everything this test is about has been observed. The release and the shutdown are in
+  // `t.after` above rather than here, so they run on the failing path too.
+})
+
+test('an operator-requested pause samples nobody, even with a busy implementer child', async () => {
+  // Conclave scope: the operator stopped the run and the operator is starting it again, and no
+  // participant is named. The rank scan used to sample the implementer here, so a child that
+  // measured busy refused the resumption of a pause that was never about it -- and resuming
+  // this pause sends nothing, it drops back into the advisor turn boundary it was taken at.
+  const dir = repo()
+  const impl = slow('impl', 'claude', ['ack', 'Did it.', 'Again.'], 300)
+  impl.childPid = 7
+  const out = collect()
+  const input = new PassThrough()
+  let asked = 0
+  const running = runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'claude',
+    rounds: 6,
+    checks: [],
+    registry: registryOf({
+      codex: [slow('advisor', 'codex', ['Do it.', 'More.', 'DONE'], 300)],
+      claude: [impl],
+    }),
+    liveness: async () => {
+      asked++
+      return BUSY_LIVENESS
+    },
+    input,
+    output: out.stream,
+  })
+  const until = async (pred: (f: ReturnType<typeof resolveSession>) => boolean, ms = 10_000) => {
+    const t = Date.now()
+    while (Date.now() - t < ms) {
+      const f = resolveSession(dir)
+      if (pred(f)) return f
+      await new Promise((r) => setTimeout(r, 50))
+    }
+    throw new Error(`timed out; console said:\n${out.text().slice(-700)}`)
+  }
+
+  await new Promise((r) => setTimeout(r, 500))
+  input.write('/pause\n')
+  const paused = await until((f) => 'session' in f && f.session.status.state === 'paused')
+  assert.ok('session' in paused)
+  assert.deepEqual(paused.session.status.pause!.resolution.scope, { kind: 'conclave' })
+
+  input.write('/continue\n')
+  await until((f) => 'session' in f && f.session.status.state === 'running')
+  assert.equal(asked, 0, 'a pause that names no participant has nothing to sample')
+  assert.doesNotMatch(out.text(), /not continuing/, 'and nothing to refuse on')
 
   input.end()
   await running

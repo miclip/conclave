@@ -417,6 +417,59 @@ function renderPause(p: RunPause, width: number): string {
   return lines.join('\n')
 }
 
+/**
+ * Which children `/continue` samples for liveness, read off the pause's SCOPE.
+ *
+ * The scope is the pause's own answer to "what does this stop" (`src/relay/resolution.ts:190`),
+ * and it is the only field here entitled to name a seat: a `participant` scope names the one
+ * seat whose continuation would require making the unresolved decision, so that seat is the
+ * whole question and every other seat is somebody else's turn.
+ *
+ * This used to read `pause.verdictOf.participant` instead, and that field is narrower than it
+ * looks: it is set at exactly two halt sites, both `turn_incomplete`
+ * (`src/relay/relay.ts:4149` and `src/relay/relay.ts:4535`). So FOUR of the five seat-scoped
+ * reasons -- `rotation_candidate`, `implementer_unanswered`, `merge_blocked`, `review_blocked`
+ * -- named a seat in their scope and were sampled by rank anyway, because the field the guard
+ * read was empty. The scope is the field that is always populated, which is the other half of
+ * the reason for reading it.
+ *
+ * There is NO fallback, and that is the change. A `conclave` or `workstream` scope samples
+ * NOBODY rather than scanning for participants by rank. A rank scan answers a question nobody
+ * asked: it takes a pause that is about the run, or about one workstream, and re-points it at
+ * whichever children happen to be implementers -- so at N>1 an unrelated seat mid-turn refuses
+ * a resumption that has nothing to do with it, and the operator is told to wait for a seat the
+ * pause never mentioned. The rank fallback's own comment argued it was right "only because
+ * there is one of them", which is an argument for deriving the seat from the pause instead of
+ * from a rank. Worse than useless on one of them: resuming an `advisor_escalated` pause sends
+ * to the ADVISOR (`src/relay/relay.ts:4248`), so the fallback measured children that were not
+ * about to be sent to at all.
+ *
+ * What that gives up, stated rather than discovered: the `advisor_escalated` halt raised when a
+ * seat's turn completed and its report could not be read (`src/relay/relay.ts:4445`) is
+ * conclave-scoped by design -- "the reason names who is being asked to take it, and the scope
+ * follows the reason" -- yet the thing an operator wants to know there is whether THAT seat's
+ * child is still writing. Under the rank fallback that seat was sampled at N=1 by coincidence
+ * of being the only implementer. It is not sampled now. The pause still carries its own
+ * liveness EVIDENCE from the halt site (`src/relay/relay.ts:4458`), which is what the operator
+ * reads;
+ * what is gone is a refusal derived from a rank scan. Narrowing that halt's scope, if the
+ * refusal is wanted back, is a change to the halt site rather than to this guard.
+ *
+ * Generic over the participant so the rule can be tested without constructing one.
+ */
+export function seatsToSampleAtPause<T extends { id: string }>(
+  pause: RunPause | undefined,
+  participants: readonly T[],
+): T[] {
+  // No pause is no question. Unreachable from `resumeRun`, which returns unless the run is
+  // paused, and an empty sample is the honest answer rather than a rank scan's guess.
+  const scope = pause?.resolution.scope
+  if (scope?.kind !== 'participant') return []
+  // Filter rather than find: an id that matches nothing -- a seat rotated out from under the
+  // pause -- samples nothing, which is what "no reading" means everywhere else in this guard.
+  return participants.filter((p) => p.id === scope.participantId)
+}
+
 export async function runSession(opts: SessionOptions): Promise<number> {
   const target = opts.output ?? process.stdout
   const tee = opts.record ? createWriteStream(opts.record) : undefined
@@ -856,14 +909,10 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     // the evidence model has already cleared. A withdrawal with no replacement verdict still
     // leaves the original concern in place, so sampling runs there.
     //
-    // When the pause names a seat, that seat is the whole question. When it does not, the
-    // question is about the run rather than about one child, so EVERY implementer seat is
-    // sampled and any one of them working refuses the continue. The `find` that stood here
-    // took the first implementer by rank, which is the right seat only because there is one
-    // of them -- at N>1 it would clear a resume while another seat was mid-turn, and
-    // continuing SENDS, which is the exact destructive case this guard exists for.
-    const seat = run.pause?.verdictOf?.participant
-    const children = relay.participants.filter((x) => (seat ? x.id === seat : x.rank === 'implementer'))
+    // Which children to sample is the pause's own question, answered by its scope rather than
+    // by a rank scan here -- see `seatsToSampleAtPause`, which is where that argument is
+    // written down and where the removed rank fallback is accounted for.
+    const children = seatsToSampleAtPause(run.pause, relay.participants)
     const supersededCompleted = run.pause?.superseded?.verdict?.outcome === 'completed'
     if (!runOpts.force && !supersededCompleted) {
       const sample = opts.liveness ?? sampleLiveness
