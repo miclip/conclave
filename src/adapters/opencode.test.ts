@@ -395,6 +395,40 @@ test('a first run that produced no records at all names the model it was launche
   await session.close()
 })
 
+test('a record the child sent but this adapter records no CONTENT for still suppresses the diagnosis', async () => {
+  // The repair. `steps`, `textBlocks` and `toolCalls` all stay empty for an `error` record and
+  // for a type this adapter has no case for -- so reading emptiness off them called a child that
+  // had already announced a provider failure "silent", and named its model as the suspect over
+  // the top of the child's own answer. Both shapes, because they miss the content fields for
+  // different reasons: one is handled and stored somewhere else, one is not handled at all.
+  for (const [why, body] of [
+    ['an announced error', '{"type":"error","error":{"name":"ProviderError","data":{"message":"upstream 502"}}}\n'],
+    ['a record type this adapter does not know', '{"type":"some_future_record","part":{}}\n'],
+  ] as const) {
+    const session = await OpenCodeRunAdapter.start({
+      cwd: REPO,
+      role: 'implementer',
+      command: hangingStub(body),
+      args: ['-m', 'opencode/not-a-model'],
+      watchdogMs: 600,
+    })
+    await session.send('go', { kind: 'orchestrator' })
+    const events = await nextTurn(session)
+    // The gap this closes, pinned: NO content event was emitted for either record, so the three
+    // content fields the check used to read are empty on a child that plainly spoke. Without
+    // this line the test would still pass if the adapter started emitting messages for errors.
+    assert.deepEqual(
+      events.filter((e) => e.type === 'message' || e.type === 'tool_use'),
+      [],
+      `${why}: this record produces no content event, which is why the old check missed it`,
+    )
+    const end = events.find((e) => e.type === 'turn_end') as TurnEndEvent
+    assert.equal(end.verdict.outcome, 'timed_out', `${why}: it still times out`)
+    assert.equal(launchCaveat(end), undefined, `${why}: the child spoke, so the launch is not named`)
+    await session.close()
+  }
+})
+
 test('a run that produced records and then stalled is not blamed on its model', async () => {
   // The control, and the distinction: identical deadline, identical model, one difference --
   // this child spoke before it stopped.

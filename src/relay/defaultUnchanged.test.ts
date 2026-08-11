@@ -707,7 +707,13 @@ const DECLARED: Record<string, string> = {
     'gated on the first turn because a later turn has already proved the launch works, and on ' +
     'the child having produced nothing, which is tracked separately from the idle clock: the ' +
     'adapters emit `turn_start` the instant they arm, so `lastActivityAt` cannot tell the two ' +
-    'apart. Nothing else about the verdict moves — same outcome, same confidence, same ' +
+    'apart. "Produced nothing" is measured per adapter family and is literal in both: on the ' +
+    'pty adapters it is the absence of any event the CHILD sourced (`turn_start` and this ' +
+    'adapter’s own revisions do not count), and on the run-per-turn adapters it is ZERO parsed ' +
+    'records — plus zero hook deliveries on kimi — rather than empty content fields, because an ' +
+    '`error` record, a `role: "tool"` result, an empty assistant message and an unrecognised ' +
+    'record type all leave `steps`/`textBlocks`/`toolCalls` empty on a child that is talking, ' +
+    'and blaming the model there would talk over the child’s own answer. Nothing else about the verdict moves — same outcome, same confidence, same ' +
     'watchdog line first — and a turn that spoke, a later turn, or an adapter that reports no ' +
     'launch state gets the chain it always got, asserted byte for byte in ' +
     'src/outcomes/firstTurnDiagnosis.test.ts. No assertion in this file was relaxed. That both ' +

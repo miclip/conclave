@@ -158,6 +158,17 @@ interface TurnState {
   textBlocks: string[]
   toolCalls: { tool: string; failed: boolean; args?: string | undefined }[]
   steps: number
+  /**
+   * How many records this turn has taken in from the child, of ANY type.
+   *
+   * Counted separately from `steps`, `textBlocks` and `toolCalls` because those three are
+   * CONTENT, and the question the first-turn diagnosis asks is not "did it do any work" but
+   * "did it say anything at all" (#82). An `error` record, a `step_finish`, a record type this
+   * adapter does not recognise -- each is a child that started and is talking, and reading
+   * emptiness off the content fields would blame the launch for a run that had already told us
+   * something else was wrong.
+   */
+  records: number
   tokens?: TurnTokens | undefined
   /** Content hash from the last step that reported one. Artifact attribution, free. */
   snapshot?: string | undefined
@@ -260,6 +271,7 @@ export class OpenCodeRunAdapter implements AgentSession {
       textBlocks: [],
       toolCalls: [],
       steps: 0,
+      records: 0,
       startedAt: Date.now(),
     }
     this.#turns.push(turn)
@@ -327,10 +339,15 @@ export class OpenCodeRunAdapter implements AgentSession {
         })
         // A FIRST run that produced not one record before the deadline is a different finding
         // from one that produced records and then stalled, and #82 is that they read the same.
-        // Nothing parsed at all means the child never started work, and the launch is the first
+        // Nothing parsed AT ALL means the child never started work, and the launch is the first
         // thing to look at -- named as a candidate, since validation has already refused the
         // models it could prove wrong and what reaches here is the residue.
-        if (this.#turns.length === 1 && turn.steps === 0 && turn.textBlocks.length === 0 && turn.toolCalls.length === 0) {
+        //
+        // `records` rather than the content fields (`steps`, `textBlocks`, `toolCalls`), which
+        // is the difference between "did no work" and "said nothing": a run that announced an
+        // `error` and stalled leaves all three empty while having already told us what went
+        // wrong, and blaming its model would talk over the child's own answer.
+        if (this.#turns.length === 1 && turn.records === 0) {
           const model = modelFromArgs(this.#opts.args ?? [])
           turn.provenance.push({
             source: 'orchestrator',
@@ -387,6 +404,9 @@ export class OpenCodeRunAdapter implements AgentSession {
   }
 
   #onRecord(turn: TurnState, record: OpenCodeRecord): void {
+    // Counted before the switch, so every record counts -- including the ones the switch has no
+    // case for. A type this adapter has never seen is still the child speaking.
+    turn.records += 1
     // Every record carries it; the first one to arrive is what makes the session resumable.
     if (!this.#sessionId && record.sessionID) this.#sessionId = record.sessionID
 

@@ -149,6 +149,17 @@ interface TurnState {
   announcedStop: boolean
   /** Tools the child reported as having FAILED. `stream-json` cannot distinguish these. */
   failedTools: Set<string>
+  /**
+   * How many signals this turn has taken in from the child -- parsed records of any role, and
+   * hook deliveries.
+   *
+   * Counted separately from `textBlocks` and `toolCalls` because those two are CONTENT, and
+   * plenty of real records leave both empty: a `role: 'tool'` result is deliberately not
+   * re-emitted, and an assistant message with neither text nor tool calls is the completion
+   * signal itself. The first-turn diagnosis (#82) asks whether the child said ANYTHING, so it
+   * has to read a counter that no record can pass through unnoticed.
+   */
+  received: number
   startedAt: number
   endedAt?: number | undefined
 }
@@ -287,6 +298,7 @@ export class KimiPrintAdapter implements AgentSession {
       sawFinalAssistant: false,
       announcedStop: false,
       failedTools: new Set(),
+      received: 0,
       startedAt: Date.now(),
     }
     this.#turns.push(turn)
@@ -374,17 +386,23 @@ export class KimiPrintAdapter implements AgentSession {
           source: 'watchdog',
           detail: `no terminal message within ${this.#opts.watchdogMs}ms`,
         })
-        // A FIRST run that produced not one message before the deadline is a different finding
-        // from one that produced messages and then stalled, and #82 is that they read the same.
+        // A FIRST run that produced not one signal before the deadline is a different finding
+        // from one that produced some and then stalled, and #82 is that they read the same.
+        // `received` rather than the content fields, and the difference is not academic: a
+        // `role: 'tool'` result is deliberately never re-emitted and an assistant message with
+        // no text and no calls is the completion signal itself, so both leave `textBlocks` and
+        // `toolCalls` empty on a child that is plainly talking.
+        //
         // Kimi's model normally comes from the generated config file rather than the argv, so
         // this usually says the argv named none -- which is still the sentence that points at
         // the launch instead of leaving `timed_out` to stand on its own.
-        if (this.#turns.length === 1 && turn.textBlocks.length === 0 && turn.toolCalls.length === 0) {
+        if (this.#turns.length === 1 && turn.received === 0) {
           const model = modelFromArgs(this.#opts.args ?? [])
           turn.provenance.push({
             source: 'orchestrator',
             detail:
-              `the first run produced no messages at all, rather than producing some and stalling` +
+              `the first run produced no records and no hooks at all, rather than producing some ` +
+              `and stalling` +
               (model === null
                 ? ': its argv named no model, so the provider config file chose one'
                 : `: it was launched with model '${model}', which is a candidate cause`),
@@ -439,6 +457,9 @@ export class KimiPrintAdapter implements AgentSession {
   }
 
   #onRecord(turn: TurnState, record: KimiRecord): void {
+    // Counted before anything is inspected, so a record that produces no event -- a tool result,
+    // an empty assistant message, a role this adapter ignores -- still proves the child spoke.
+    turn.received += 1
     const at = Date.now()
     if (record.role === 'assistant') {
       const text = textOf(record.content)
@@ -499,6 +520,9 @@ export class KimiPrintAdapter implements AgentSession {
     if (sid && !this.#sessionId) this.#sessionId = sid
 
     const live = this.#turns.find((t) => t.state === 'in_progress')
+    // A hook is the child too, and on this adapter it is a channel the record stream does not
+    // carry: a turn whose only signal was `Stop` has spoken, whatever its stdout did.
+    if (live) live.received += 1
     switch (d.event) {
       case 'Stop':
         // The announced terminal signal. Recorded on the turn rather than settled here: the
