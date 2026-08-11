@@ -18,6 +18,7 @@ import type {
   InputOwnership,
 } from '../contract/session.ts'
 import { guaranteesFor } from '../contract/session.ts'
+import type { ExecutableRequirement } from './executables.ts'
 import type { ModelSupport } from './models.ts'
 import type { RoleDefinition, RoleId } from './roles.ts'
 
@@ -33,6 +34,16 @@ import type { RoleDefinition, RoleId } from './roles.ts'
 export interface LaunchSpec {
   command: string
   baseArgs: string[]
+  /**
+   * That `command` is a real executable which must be present before a seat starts (#51).
+   *
+   * Optional, and its ABSENCE is what lets a definition carry a `command` that is a label -- every
+   * in-memory double in this repository does, because `LaunchSpec` is required and there is no
+   * program behind `fake-lead`. Declaring it is the statement "this definition spawns this file",
+   * which is the only thing that makes checking for the file meaningful. See
+   * `ExecutableRequirement` for why silence removing a check is the safe direction here.
+   */
+  executable?: ExecutableRequirement | undefined
   /** Documented reasons for each suppression flag, keyed by what it suppresses. */
   suppresses?: Record<string, string> | undefined
   /** Preconditions the adapter cannot fix itself, e.g. Codex hook trust. */

@@ -7,6 +7,7 @@
  */
 
 import type { AgentSession } from '../contract/session.ts'
+import { refuseMissingCommands } from './executables.ts'
 import { launchRecordFor } from './launch.ts'
 import { refuseUnknownModels } from './models.ts'
 import { BUILTIN_ROLES, resolveRole, type RoleDefinition, type RoleId } from './roles.ts'
@@ -102,6 +103,12 @@ export class AgentRegistry {
           (resolved.agent.unavailableReason ? `: ${resolved.agent.unavailableReason}` : ''),
       )
     }
+    // The CLI this seat launches, looked for before anything is spawned, registered or written
+    // (#51). FIRST of the two checks, and the order is load-bearing: asking a CLI to enumerate its
+    // models when the CLI is not installed produces a failed spawn, which `checkModelSelection`
+    // correctly reports as "could not be established" -- so a missing binary would otherwise be
+    // announced as an unverifiable model. The cheaper and more specific question goes first.
+    refuseMissingCommands([{ participant: spec.id, agent: resolved.agent, cwd: ctx.cwd }])
     // The model this seat names, asked of the child before it is started (#82). Here as well as
     // in `Relay.start` for the reason the preflight line below is here: this is the funnel every
     // caller passes through, rotation's replacement included, and a check that only the

@@ -37,6 +37,21 @@ import type {
 } from './types.ts'
 
 /**
+ * Where each `executable.install` hint below came from.
+ *
+ * Every one of the four is the install that produced the COPY THESE ADAPTERS WERE MEASURED
+ * AGAINST, read back off that machine rather than transcribed from a vendor page: `@openai/codex@0.147.0`
+ * and `opencode-ai@1.18.15` are npm globals, `kimi` is a `uv` tool shim naming
+ * `~/.local/share/uv/tools/kimi-cli`, and `claude` is the native binary the install script places
+ * in `~/.local/bin`. The provenance is stated because a hint is a line an operator will paste, and
+ * an install command with no source is a claim about someone else's machine.
+ *
+ * A hint is NEVER run by anything -- it is quoted into a refusal and nothing else. If one of these
+ * goes stale the cost is a wrong suggestion beside a correct diagnosis, not a wrong diagnosis.
+ */
+const INSTALL_HINT_SOURCE = 'the install these adapters were measured against'
+
+/**
  * The pty+hook adapters. Both drive `TurnWatchdog`, which owns a timer per armed turn and
  * runs the silence clock alongside the absolute one, defaulting both when unasked.
  */
@@ -92,10 +107,12 @@ export const CLAUDE_AGENT: AgentDefinition = {
     // The adapter supplies --settings itself, pointing at a generated hook registration
     // rather than mutating the user's configuration.
     baseArgs: [],
+    executable: { install: 'curl -fsSL https://claude.ai/install.sh | bash', installFrom: INSTALL_HINT_SOURCE },
   },
   async create(resolved: ResolvedParticipant, ctx: CreateParticipantContext): Promise<AgentSession> {
     return ClaudePtyHookAdapter.start({
       cwd: ctx.cwd,
+      command: resolved.agent.launch.command,
       role: resolved.role.id,
       inputOwnership: resolved.inputOwnership,
       args: effectiveLaunchArgs(resolved, ctx),
@@ -135,6 +152,7 @@ export const CODEX_AGENT: AgentDefinition = {
   models: CODEX_MODELS,
   launch: {
     command: 'codex',
+    executable: { install: 'npm install -g @openai/codex', installFrom: INSTALL_HINT_SOURCE },
     baseArgs: [
       '-c', 'check_for_update_on_startup=false',
       '-c', 'disable_paste_burst=true',
@@ -166,6 +184,7 @@ export const CODEX_AGENT: AgentDefinition = {
   async create(resolved: ResolvedParticipant, ctx: CreateParticipantContext): Promise<AgentSession> {
     return CodexPtyHookAdapter.start({
       cwd: ctx.cwd,
+      command: resolved.agent.launch.command,
       role: resolved.role.id,
       inputOwnership: resolved.inputOwnership,
       args: effectiveLaunchArgs(resolved, ctx),
@@ -229,10 +248,12 @@ export const OPENCODE_AGENT: AgentDefinition = {
   launch: {
     command: 'opencode',
     baseArgs: [],
+    executable: { install: 'npm install -g opencode-ai', installFrom: INSTALL_HINT_SOURCE },
   },
   async create(resolved: ResolvedParticipant, ctx: CreateParticipantContext): Promise<AgentSession> {
     return OpenCodeRunAdapter.start({
       cwd: ctx.cwd,
+      command: resolved.agent.launch.command,
       role: resolved.role.id,
       inputOwnership: resolved.inputOwnership,
       args: effectiveLaunchArgs(resolved, ctx),
@@ -277,10 +298,15 @@ export const KIMI_AGENT: AgentDefinition = {
   capabilities: KIMI_CAPABILITIES,
   deadlines: RUN_PER_TURN_DEADLINES,
   models: KIMI_MODELS,
-  launch: { command: 'kimi', baseArgs: [] },
+  launch: {
+    command: 'kimi',
+    baseArgs: [],
+    executable: { install: 'uv tool install kimi-cli', installFrom: INSTALL_HINT_SOURCE },
+  },
   async create(resolved: ResolvedParticipant, ctx: CreateParticipantContext): Promise<AgentSession> {
     return KimiPrintAdapter.start({
       cwd: ctx.cwd,
+      command: resolved.agent.launch.command,
       role: resolved.role.id,
       inputOwnership: resolved.inputOwnership,
       args: effectiveLaunchArgs(resolved, ctx),
