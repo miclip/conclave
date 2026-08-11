@@ -625,6 +625,67 @@ test('a second rotation of the SAME seat is refused before anything happens, and
   }
 })
 
+test('a rotation that fails releases the seat, so the next one is not refused by a stale claim', async (t) => {
+  // The other half of the same-seat guard, and the half that fails SILENTLY if it is wrong: a
+  // claim that outlived its transaction would make the seat permanently unrotatable, and the
+  // refusal would go on describing a rotation that ended long ago. That is worse than the race
+  // the guard prevents, because the race needs two callers and this needs only one unlucky one.
+  //
+  // Both ways out of the transaction are exercised, because they leave by different doors: a
+  // throw from `rotate()` before anything is negotiated, and an ordinary rolled-back result.
+  // Each step passing IS the assertion that the step before it released the seat.
+  const repo = tempRepo()
+  const advisor = new FakeRotationSession('advisor', 'codex', ['this is not a handoff', HANDOFF])
+  const impl = new FakeRotationSession('impl', 'claude')
+  const fresh = new FakeRotationSession('fresh', 'claude', [ACCEPTED])
+  try {
+    const relay = await Relay.start({
+      registry: registryOf({ codex: [advisor], claude: [impl, fresh] }),
+      cwd: repo,
+      lead: { id: 'advisor', agent: 'codex', role: 'advisor' },
+      implementer: { id: 'implementer', agent: 'claude', role: 'implementer' },
+      maxAdvisorTurns: 2,
+      rotation: { checks: ['exit 0'], checkTimeoutMs: 30_000 },
+    })
+    t.after(() => relay.stop())
+
+    // 1. A THROW out of the transaction. Rotation refuses a session that is not running, which
+    //    happens after the seat has been claimed and inside the lane.
+    await impl.quiesce()
+    await assert.rejects(
+      () => relay.rotateSeat('implementer', 'while quiesced'),
+      /cannot rotate a session in state 'quiesced'/,
+      'the throw must be the transaction’s own, not a stale claim from an earlier call',
+    )
+    await impl.unquiesce()
+
+    // 2. A ROLLBACK. The advisor cannot produce a handoff, so nothing is started and the
+    //    original is restored — the ordinary failure, and the seat must survive it rotatable.
+    const rolled = await relay.rotateSeat('implementer', 'with an unusable handoff')
+    assert.equal(rolled.status, 'rolled_back')
+    if (rolled.status !== 'rolled_back') return
+    assert.equal(rolled.reason, 'handoff_incomplete')
+    assert.equal(impl.state, 'running', 'restored')
+
+    // 3. And the seat is still rotatable, which is only true if both failures released it. A
+    //    stale claim would refuse this with `is already being rotated` naming a reason from a
+    //    transaction that ended two steps ago.
+    const rotated = await relay.rotateSeat('implementer', 'and now for the real one')
+    assert.equal(rotated.status, 'rotated', 'a failed rotation must not strand the seat')
+    assert.equal(relay.participants.find((p) => p.rank === 'implementer')!.session, fresh)
+    assert.equal(relay.rotationWatch.rotations, 1)
+    // The lane is likewise clear: every section released, including the one that threw.
+    assert.equal(relay.checkLane.held(), undefined)
+    assert.deepEqual(
+      relay.checkLane.history().map((h) => `${h.seat}/${h.station}`),
+      ['implementer/rotation', 'implementer/rotation', 'implementer/rotation'],
+      'three sections reached the lane and three released it',
+    )
+  } finally {
+    rmSync(repo, { recursive: true, force: true })
+  }
+})
+
 test('a rotation that only CONTENDS for the check lane still runs — it queues, it is not refused', async (t) => {
   // The line the two refusals must not cross. They are about live turns; the check lane is about
   // a verification window, and a section waiting for it is queued rather than unsafe. A guard
