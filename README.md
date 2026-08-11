@@ -516,21 +516,9 @@ Live suites spawn real sessions and consume quota, so they are opt-in: `test:liv
 
 No orchestrator model and no summariser. The dispatcher is code.
 
-The live adapter suites have never run. Everything here rests on tests against fakes plus
-supervised real runs, including the concurrent ones. That is evidence and it is not the same
-as automated live coverage.
-
-Model names are not validated. Pass an alias the CLI rejects and you get a child that stays
-alive, emits nothing, and dies at the watchdog twelve minutes later.
-
-No cost or token accounting, deliberately. Conclave drives your CLI on your subscription, so
-spend stays with your account — and a partial count scraped from one adapter's transcript
-would be a confident wrong number for a multi-seat run. The record names the model and launch
-args per seat, which is the join key for doing that accounting yourself.
-
-Concurrency buys less in a single package than it looks like it should. Two seats on
-conceptually independent issues still collide, because both have to touch the same
-declaration files. Separate services in separate languages would contend far less.
+No cost or token accounting. Conclave drives your CLI on your subscription, so spend stays
+with your account. The record names the model and launch args per seat, which is the join key
+if you want to do that accounting yourself.
 
 OpenCode is newer than the other two and graded accordingly: `completed` is observed from a
 recorded run, and every other outcome is claimed no higher than `reasoned_but_unverified`.
