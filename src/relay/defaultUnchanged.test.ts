@@ -598,9 +598,44 @@ const DECLARED: Record<string, string> = {
     '(REVIEWER_BRIEFING_FOR_ADVISOR), proved absent-by-default and present-when-declared the ' +
     'same way MULTI_SEAT_BRIEFING is, in the mutation-tested test immediately above this one. ' +
     'No assertion in this file was relaxed.',
+  "the console's /continue liveness guard samples by pause SCOPE, and no longer by rank":
+    'NO FLAG IS ADDED and no document gains a key, which is why this entry exists: the change is ' +
+    'invisible to every guard in this file and it does change what a DEFAULT console run does. ' +
+    'The `/continue` guard that samples a child before resuming (seatsToSampleAtPause in ' +
+    'src/repl/session.ts) now reads pause.resolution.scope: a participant scope samples that ' +
+    'participant and nobody else, and a conclave or workstream scope samples NOBODY. It used to ' +
+    'read pause.verdictOf.participant and fall back to scanning participants by rank for ' +
+    'implementers — and verdictOf is set at exactly two halt sites, both turn_incomplete ' +
+    '(src/relay/relay.ts:4149, src/relay/relay.ts:4535), so every other pause reached that rank ' +
+    'scan. WHAT CHANGES AT N=1: on the three pauses whose scope names no participant — ' +
+    'operator_requested (/pause), advisor_escalated, authority_conflict — the lone implementer ' +
+    'child used to be sampled, so a child that measured busy REFUSED the resume and wrote ' +
+    'pause.refusal into the status document. It is not sampled now, so that refusal cannot be ' +
+    'raised for those three reasons and /continue proceeds. Declared as a real narrowing of a ' +
+    'safety guard rather than presented as a pure N>1 fix. The reason it is the right narrowing: ' +
+    'the guard exists because continuing SENDS into a child that cannot accept input mid-turn, ' +
+    'and on those three pauses the child it measured is not the child being sent to — resuming ' +
+    'advisor_escalated sends to the ADVISOR (src/relay/relay.ts:4248), resuming ' +
+    'authority_conflict queues a constraint that is delivered by the dispatcher on the next ' +
+    'dispatch to a free seat, and operator_requested is consumed at an advisor-turn boundary ' +
+    'whose own evidence line says no turn is in flight. WHAT IS GIVEN UP, named rather than ' +
+    'discovered: the advisor_escalated halt raised when a seat’s turn completed and its report ' +
+    'could not be read (src/relay/relay.ts:4445) is conclave-scoped by design, yet the useful ' +
+    'question there is whether THAT seat is still writing; at N=1 the rank scan sampled it by ' +
+    'coincidence of it being the only implementer, and now nothing does. The pause still carries ' +
+    'that seat’s liveness evidence from the halt site (src/relay/relay.ts:4458), which is what ' +
+    'the operator actually reads; restoring a refusal there is a change to that halt’s scope, ' +
+    'not to the guard. AT N>1 the old behaviour was unsafe in the other direction: a pause about ' +
+    'one seat could be refused because a DIFFERENT seat was mid-turn, and the operator was told ' +
+    'to wait for a seat the pause never mentioned. No assertion in this file was relaxed: the ' +
+    'six pinned pause documents do not carry a refusal (none of them attempts a resume), and the ' +
+    'rule is covered directly in src/repl/session.test.ts — over every reason’s scope, and end to ' +
+    'end through a two-seat console run where one advisor reply dispatches to both seats, ' +
+    'implementer-2 compacts into a rotation_candidate pause, and /continue resumes it while ' +
+    'implementer is provably still mid-turn in the status document’s own seat block.',
 }
 
-test('DECLARED contains exactly the routing, pause-resolution, attribution, ceiling-flag, seat-flag, seat-status, launch-record, flag-reader, integration-check, per-seat-rotation and reviewer entries', () => {
+test('DECLARED contains exactly the routing, pause-resolution, attribution, ceiling-flag, seat-flag, seat-status, launch-record, flag-reader, integration-check, per-seat-rotation, reviewer and resume-guard entries', () => {
   assert.deepEqual(Object.keys(DECLARED), [
     'implementer_unanswered -> advisor',
     'status.pause.resolution',
@@ -614,6 +649,7 @@ test('DECLARED contains exactly the routing, pause-resolution, attribution, ceil
     'the check lane is retained INERT, and --check-concurrency was withdrawn',
     'per-seat rotation, per-seat rotation policy, and the unobservable-acceptance stop (#78, #76)',
     '--reviewer on both front-ends, and the review_blocked pause reason',
+    "the console's /continue liveness guard samples by pause SCOPE, and no longer by rank",
   ])
 })
 
@@ -754,7 +790,7 @@ async function defaultRunDocuments(): Promise<{ report: unknown; status: unknown
  * blind to that subtree is claiming more than it checks.
  *
  * Built through the real recorder: `recordSession` is what both front-ends call, and
- * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:885
+ * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:934
  * with the same object -- a `RunPause` the run handle raised, not one written here. Read back
  * through `main(['status', '--json'])`, so the serialisation and the reconciliation against
  * the pid are the production ones.
@@ -1050,7 +1086,7 @@ async function provoke(
  * The status document of a run paused for one given reason.
  *
  * Built through the real recorder: `recordSession` is what both front-ends call, and
- * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:885
+ * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:934
  * with the same object -- a `RunPause` the relay raised, not one written here. Read back
  * through `main(['status', '--json'])`, so the serialisation and the reconciliation against
  * the pid are the production ones.
@@ -1070,7 +1106,7 @@ async function pausedStatusDocument(reason: PauseReason): Promise<unknown> {
     goal: 'a default goal',
     front: 'session',
     startedAt: Date.now(),
-    // Passed because the console always passes one (src/repl/session.ts:711), so the status
+    // Passed because the console always passes one (src/repl/session.ts:764), so the status
     // documents this file pins differ only in what a pause actually changes.
     logPath: join(repo, '.conclave', 'runs', 'session-test.ndjson'),
     build: 'test',

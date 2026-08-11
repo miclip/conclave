@@ -97,17 +97,37 @@ const CITED: Record<string, string> = {
   'src/relay/relay.ts:310': "onDegradation ?? 'candidate'",
   'src/relay/relay.ts:3679': 'worktreePaths(this.#opts.cwd)',
   'src/relay/relay.ts:4146': "subject: { reason: 'turn_incomplete', participant: lead.id }",
+  // The five below are what the console's `/continue` liveness guard cites for reading a
+  // pause's SCOPE rather than `verdictOf` or a rank scan (`seatsToSampleAtPause` in
+  // src/repl/session.ts). Two of them pin the ONLY sites that populate `verdictOf` -- the
+  // claim the guard's comment rests on is "exactly two, both turn_incomplete", and a third
+  // one appearing elsewhere would leave that sentence quietly false. The other three pin the
+  // conclave-scoped halt the change gives up sampling on, its own liveness evidence, and the
+  // send that a resumed `advisor_escalated` pause actually makes -- to the ADVISOR, which is
+  // why measuring implementer children there was answering the wrong question.
+  'src/relay/relay.ts:4149': 'verdictOf: { participant: lead.id, endSeq: next.end.seq },',
+  'src/relay/relay.ts:4248': 'The human has seen your escalation and asked you to continue.',
+  // The workstream a conflicted instruction belongs to, named after the seat when exactly one
+  // seat could take it -- the N=1 coincidence a scope reader must not mistake for a seat.
+  'src/relay/relay.ts:4312': "reason: 'authority_conflict', workstream:",
   'src/relay/relay.ts:4396': "subject: { reason: 'implementer_unanswered', participant: seat.id }",
+  'src/relay/relay.ts:4445': "subject: { reason: 'advisor_escalated' },",
+  'src/relay/relay.ts:4458': '#livenessEvidence(seat, report.emittedSinceSend)',
   'src/relay/relay.ts:4529': "subject: { reason: 'turn_incomplete', participant: seat.id }",
+  'src/relay/relay.ts:4535': 'verdictOf: { participant: seat.id, endSeq: current.seq },',
   'src/relay/resolution.ts:190': 'export function resolutionFor',
   'src/relay/run.ts:51': "| 'implementer_unanswered'",
   'src/relay/run.ts:169-183': 'reason: PauseReason',
   'src/relay/run.ts:193': 'resolution: ResolutionRequest',
   'src/relay/subagents.ts:68': 'export function worktreePaths',
   'src/repl/session.ts:209-221': 'turnWatchdogMs?: number | undefined',
-  'src/repl/session.ts:548': 'escalates to you rather than being replaced',
-  'src/repl/session.ts:711': 'logPath: runLogPath,',
-  'src/repl/session.ts:885': "recording.set('paused', { pause: run.pause })",
+  // The three below moved by the same edit that added `seatsToSampleAtPause` above
+  // `runSession`: it inserts a documented function into the middle of the file, so every
+  // citation past it shifts. Repaired against this tree rather than deleted -- each still
+  // points at the line it was written about.
+  'src/repl/session.ts:601': 'escalates to you rather than being replaced',
+  'src/repl/session.ts:764': 'logPath: runLogPath,',
+  'src/repl/session.ts:934': "recording.set('paused', { pause: run.pause })",
 }
 
 /**
