@@ -1,7 +1,7 @@
 /**
- * One lane per run for the commands that measure a tree. INERT TODAY, and kept on purpose.
+ * One lane per run for the commands that measure a tree. The second station has now landed.
  *
- * ## Read this before believing the lane does anything
+ * ## What this is for, and what it is not for
  *
  * #64 asked for the configured checks to be serialised across seats behind a run-scoped mutex,
  * on the grounds that `npm test` in four worktrees at once means four test runners and direct
@@ -12,46 +12,56 @@
  * `runIntegrationChecks` in `src/relay/integrate.ts`, cited by symbol because a line number
  * here would rot the first time either moves -- in the one orchestrator process. A synchronous
  * spawn blocks the whole process for the duration of the command, so there is never more than
- * one check running, and **serialisation is already guaranteed by the synchronous call rather
- * than by this or any other mutex**. There is no contention to prevent.
+ * one check running, and **CPU serialisation is already guaranteed by the synchronous call
+ * rather than by this or any other mutex**. That is not what this protects.
  *
- * It is narrower still than that. The two stations that run checks cannot even be live at the
- * same time: at N=1 there is no merge boundary, and at N>1 `rotateImplementer` refuses, so no
- * rotation runs. So this lane is never contended in any configuration the code can reach, no
- * seat can ever wait for it, and nothing an operator can observe changes because it exists.
+ * What it protects is a WINDOW, and the hazard is correctness rather than contention. A
+ * rotation's verification window is not an instant: `rotate()` captures the repository, spends
+ * a full agent turn proving a replacement against that capture, and captures AGAIN, rolling the
+ * transfer back as `repository_diverged` if the two disagree. `integrateSeat` merges into the
+ * integration checkout and then `reset --hard`s the seat worktrees onto the new HEAD, which is
+ * exactly the change those two captures would read as divergence. A good rotation rolled back
+ * because someone else's work merged while it was proving itself would name the repository for
+ * what was a race. That is why the lane is held across the whole window rather than around each
+ * `spawnSync`.
  *
- * ## Why it is kept anyway
+ * ## What changed with #78, stated narrowly
  *
- * The second station is per-seat rotation (#78). When it lands, `rotate()` will run in a seat's
- * own tree while other seats' boundaries merge into the integration checkout -- and the hazard
- * then is not CPU contention but correctness. A rotation's verification window is not an
- * instant: `rotate()` captures the repository, spends a full agent turn proving a replacement
- * against that capture, and captures AGAIN, rolling the transfer back as `repository_diverged`
- * if the two disagree. `integrateSeat` merges into the integration checkout and then
- * `reset --hard`s the seat worktrees onto the new HEAD, which is exactly the change those two
- * captures would read as divergence. A good rotation would be rolled back because someone
- * else's work merged while it was proving itself, and the recorded reason would name the
- * repository for what was a race.
+ * This module used to say the lane was INERT, and it was: at N=1 there is no merge boundary, and
+ * at N>1 rotation refused outright, so the two stations could not both exist in one run. Per-seat
+ * rotation removes that -- `rotateSeat` runs the transaction in one seat's worktree at any N, so
+ * a run that merges is now also a run that can rotate, and both stations reach this lane.
  *
- * That is what this mutex is for, and it is the reason it is held across the WHOLE window
- * rather than around each `spawnSync`. It is retained now because a mechanism that is correct
- * and directly unit-tested is cheaper to keep than to rebuild, NOT because it is doing work
- * today. Nothing here should be read as behaviour #64 currently exercises.
+ * Being live in the same run is not the same as being live at the same instant, and the
+ * difference is worth writing down rather than glossing:
+ *
+ *   - The dispatcher processes ONE completion at a time. `#considerRotation` and
+ *     `#crossBoundary` are awaited in that serial path, so a rotation the LOOP starts cannot
+ *     overlap a boundary the loop starts. Between them the lane is uncontended and its
+ *     `history()` simply records both stations passing through.
+ *   - A rotation started from OUTSIDE the loop can overlap one: `Relay.rotateSeat` is public and
+ *     does not require a paused run. That is the case a wait is reachable from. The console is
+ *     not it -- `/rotate` refuses unless the run is already paused, and a paused loop is not
+ *     merging anything.
+ *
+ * So the wait below is reachable rather than hypothetical, and it is still rare. It is narrated
+ * for the reason it is rare: a rotation holds this across a full agent turn, so a boundary that
+ * queues behind one waits minutes, and an unexplained gap in the log is the failure this project
+ * keeps naming in its own diagnostics.
  *
  * What is NOT here, deliberately: a slot count. One slot, fixed. A `--check-concurrency` flag
  * was built and removed on the operator's ruling -- a control that is accepted and plumbed and
  * cannot have any effect is worse than an absent one, because someone will set it and believe
- * something changed. Making the lane observable would mean building an asynchronous check
- * runner or a second station for it to serialise against, which is building the problem in
- * order to keep the solution; #78 is where that station comes from.
+ * something changed. Nothing about #78 revives it: the reason to serialise is a shared tree, and
+ * a second slot would be permission to race for it.
  *
- * ## Waiting would not be blocking
+ * ## Waiting is not blocking
  *
- * If a wait ever becomes reachable, it is not a verdict about a seat: `merge_blocked` means git
- * refused a merge and `failed` means a boundary did not complete, and a queue position is
- * neither. This module therefore changes no scheduler state at all, and does not narrate
- * itself -- a seat cannot wait here yet, and logging for a state nothing constructs is the
- * same mistake as a flag for a control nobody has.
+ * A queue position is not a verdict about a seat: `merge_blocked` means git refused a merge and
+ * `failed` means a boundary did not complete. This module therefore still changes no scheduler
+ * state -- a seat waiting here is `integrating`, which is exactly what it is doing, and D7's
+ * "waiting seats are `assigned`" remains unbuilt because no seat waits before its work is
+ * integrated. It reports the wait and decides nothing.
  *
  *   node --test src/relay/checkLane.test.ts
  */
@@ -69,6 +79,16 @@ export interface LaneClaim {
 }
 
 export class CheckLane {
+  /**
+   * Told when a section actually waits, with the claim it waited behind.
+   *
+   * Optional, and silent by construction: nothing is emitted unless a section really queued, so
+   * a run in which the lane is never contended produces exactly the log it produced before. That
+   * is the condition under which reporting this is honest rather than decorative -- the note
+   * describes an event, not a possibility.
+   */
+  onWait: ((waiting: LaneClaim, holder: LaneClaim) => void) | undefined
+
   /**
    * The live section, or none. One slot, so this is the whole of the lane's state.
    *
@@ -129,6 +149,9 @@ export class CheckLane {
     const hold: LaneClaim = { ...claim }
 
     if (this.#holder) {
+      // Announced before the wait rather than after it. A note that arrives when the wait ENDS
+      // is a note that arrives after the silence it was meant to explain.
+      this.onWait?.({ ...hold }, { ...this.#holder })
       await new Promise<void>((resolve) => this.#queue.push({ claim: hold, admit: resolve }))
       // The slot was handed straight to this claim by `#release`, which already installed it.
       // Installing it here is what would let a claim arriving during the handover jump the

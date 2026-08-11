@@ -14,10 +14,13 @@
  *             nothing there.
  *
  * What is NOT here, and was: a test that held the lane from outside the run so a boundary would
- * queue behind it. It asserted a state no production path constructs -- checks are `spawnSync`,
- * so they already serialise, and the second station that could contend does not exist until
- * per-seat rotation (#78). Manufacturing the wait to observe it was testing the fixture. See
- * `CheckLane` for the whole argument and for why the mechanism is kept regardless.
+ * queue behind it. It asserted a state no production path constructed -- checks are `spawnSync`,
+ * so they already serialise, and the second station did not exist. Per-seat rotation (#78) has
+ * since added it, and a wait is now reachable: `Relay.rotateSeat` can be called while the loop is
+ * running, and the rotation holds this lane across a whole agent turn. It is still not reachable
+ * from the LOOP, which processes one completion at a time, so manufacturing the interleaving here
+ * would be testing the fixture again -- the wait itself is asserted against the class in
+ * `checkLane.test.ts`. See `CheckLane` for exactly what is and is not reachable.
  *
  *   node --test src/relay/checkLaneRun.test.ts
  */

@@ -324,7 +324,7 @@ const DECLARED: Record<string, string> = {
     'Authority routing (#56, D2) sends implementer_unanswered to the advisor before the operator, ' +
     'so a default run interrupts the human less than today. Real change at N=1, an improvement, ' +
     'declared rather than discovered. The pause reason exists at src/relay/run.ts:51 and the halt ' +
-    'that raises it is at src/relay/relay.ts:4161.',
+    'that raises it is at src/relay/relay.ts:4355.',
   'status.pause.resolution':
     'Classifying unresolved conditions on both axes (#56, D2) added `resolution` to every RunPause ' +
     '(src/relay/run.ts:193), so `conclave status --json` on a paused default run now carries ' +
@@ -528,6 +528,37 @@ const DECLARED: Record<string, string> = {
     'the lane exactly once, which is what would deadlock it — is driven through real worktrees ' +
     'and real merges in src/relay/checkLaneRun.test.ts. No assertion in this file was relaxed, ' +
     'and none was added: this entry is the whole of the footprint.',
+  'per-seat rotation, per-seat rotation policy, and the unobservable-acceptance stop (#78, #76)':
+    'NO FLAG IS ADDED and no status document changes, which is most of why this entry exists: ' +
+    'the whole of #78 lands on the PROGRAMMATIC surface, the way `implementers` did. Rotation ' +
+    'gains Relay.rotateSeat(seatId, reason) and RotationConfig gains a `seats` map of per-seat ' +
+    'overrides (D7: the run policy is a default a seat may amend); neither front-end sets ' +
+    'either, so `--checks` still means one policy for the whole run and a default run is under ' +
+    'exactly the policy it was. THREE THINGS IN THIS FILE MOVED, all of them localized, and ' +
+    'none of them relaxed. (1) The pinned rotation-replacement cwd regex: the replacement is ' +
+    'now created in `root`, the rotating seat’s own tree, because a replacement verified in the ' +
+    'integration checkout would be measured against work its predecessor never did. At N=1 that ' +
+    'root IS the run cwd — `#rootOf` answers `this.#opts.cwd` when there is no worktree ' +
+    'manifest, which is not a seat-count branch — so the pin was replaced by three: the ' +
+    'replacement is created in `root`, `root` comes from `#rootOf(seatId)`, and `#rootOf` falls ' +
+    'back to the run cwd. The behavioural half of the guarantee is unchanged and still ' +
+    'OBSERVED, by `seatsFromSessionCli` reading the cwd back off the registry. (2) The check ' +
+    'lane entry above says the lane cannot contend until #78 adds a second live station; #78 is ' +
+    'here, so src/relay/checkLane.ts now says what is and is not reachable — both stations are ' +
+    'real, the dispatcher still processes one completion at a time so the LOOP cannot overlap ' +
+    'them, and a wait is reachable only from a rotation started outside the loop. The lane ' +
+    'gained an `onWait` notification, which is silent unless a section actually queues: no ' +
+    'wait, no note, and no default run reaches it. No slot count, and --check-concurrency stays ' +
+    'withdrawn. (3) A merge_blocked pause in a MULTI-SEAT run now offers `rotate`, asserted in ' +
+    'src/relay/resolution.test.ts with the reason: the menu lists only options that would do ' +
+    'something, and rotation can now name that seat. No pause in a default run changes — at N=1 ' +
+    'the same conditions offered `rotate` before and offer it now. What #76 adds is a REASON ' +
+    'rather than an option: acceptance that produces no observable output is ' +
+    '`acceptance_unobservable` instead of `replacement_could_not_reproduce`, the run says ' +
+    'rotation is not the remedy and stops attempting it, and rotationSummary gains a line only ' +
+    'when that has happened. RunReason is untouched, the status JSON rotation keys are ' +
+    'untouched, and rotationWatch gained no counter. Proved against real worktrees, real merges ' +
+    'and a real replacement in src/relay/seatRotation.test.ts and src/relay/implementerSeats.test.ts.',
   '--reviewer on both front-ends, and the review_blocked pause reason':
     'The optional flag surface grows by two on each command: --reviewer and --reviewer-args, ' +
     'an opt-in named seat at rank implementer and role reviewer (#72, D9b, D5). Declared for ' +
@@ -545,21 +576,20 @@ const DECLARED: Record<string, string> = {
     'RANK, because a reviewer is rank implementer with a different job (D5) and every existing ' +
     'caller — rotation eligibility, the opening implementer briefing, the closing question — ' +
     'means the job. At N=1 with no reviewer every rank-implementer participant is still ' +
-    'role-implementer, so this is a no-op for the default run; #dispatchSeats() (rank-based) ' +
-    'is the new accessor for the one caller that needs every seat the scheduler may address, ' +
-    '#seatState construction. A REJECTED review produces an automatic repair task, addressed ' +
-    'to the producing seat by the relay itself — not the advisor — with Task.parent naming ' +
-    'the immediate task it repairs; a repair whose own parent is itself a repair is the second ' +
-    'rejection of the same work, which is what a new PauseReason, review_blocked, escalates ' +
-    'rather than repairing a third time. Its pause shape is pinned below (provokeReviewBlocked), ' +
-    'mirroring merge_blocked, and it is unreachable without a reviewer seat for the same reason ' +
-    'merge_blocked is unreachable without a second implementer seat. The advisor is briefed ' +
-    'about the reviewer only when one is declared (REVIEWER_BRIEFING_FOR_ADVISOR), proved ' +
-    'absent-by-default and present-when-declared the same way MULTI_SEAT_BRIEFING is, in the ' +
-    'mutation-tested test immediately above this one. No assertion in this file was relaxed.',
+    'role-implementer, so this is a no-op for the default run. A REJECTED review produces an ' +
+    'automatic repair task, addressed to the producing seat by the relay itself — not the ' +
+    'advisor — with Task.parent naming the immediate task it repairs; a repair whose own parent ' +
+    'is itself a repair is the second rejection of the same work, which is what a new ' +
+    'PauseReason, review_blocked, escalates rather than repairing a third time. Its pause shape ' +
+    'is pinned below (provokeReviewBlocked), mirroring merge_blocked, and it is unreachable ' +
+    'without a reviewer seat for the same reason merge_blocked is unreachable without a second ' +
+    'implementer seat. The advisor is briefed about the reviewer only when one is declared ' +
+    '(REVIEWER_BRIEFING_FOR_ADVISOR), proved absent-by-default and present-when-declared the ' +
+    'same way MULTI_SEAT_BRIEFING is, in the mutation-tested test immediately above this one. ' +
+    'No assertion in this file was relaxed.',
 }
 
-test('DECLARED contains exactly the routing, pause-resolution, attribution, ceiling-flag, seat-flag, seat-status, launch-record, flag-reader, integration-check and reviewer entries', () => {
+test('DECLARED contains exactly the routing, pause-resolution, attribution, ceiling-flag, seat-flag, seat-status, launch-record, flag-reader, integration-check, per-seat-rotation and reviewer entries', () => {
   assert.deepEqual(Object.keys(DECLARED), [
     'implementer_unanswered -> advisor',
     'status.pause.resolution',
@@ -571,6 +601,7 @@ test('DECLARED contains exactly the routing, pause-resolution, attribution, ceil
     'one flag reader for both front-ends',
     '--checks also gate the merged tree at N>1, and the integration_failed outcome',
     'the check lane is retained INERT, and --check-concurrency was withdrawn',
+    'per-seat rotation, per-seat rotation policy, and the unobservable-acceptance stop (#78, #76)',
     '--reviewer on both front-ends, and the review_blocked pause reason',
   ])
 })
@@ -920,7 +951,7 @@ async function provokeReviewBlocked(repo: string): Promise<{ relay: Relay; run: 
  * Drive a real relay into one condition and return the pause it raised.
  *
  * The provocations are the ones `resolution.test.ts`'s own `provoke` already uses, deliberately:
- * the same triggers reaching the same single halt site (src/relay/relay.ts:2445), where the
+ * the same triggers reaching the same single halt site (src/relay/relay.ts:2608), where the
  * classification is computed by production `resolutionFor` from the subject the caller passed.
  * Nothing here writes a `RunPause`.
  *
@@ -1213,8 +1244,8 @@ test('default run works in the run cwd and creates no worktree', async () => {
   }
 
   // The relay CLI passes process.cwd() as the run cwd: bin/conclave.ts:1193.
-  // The relay hands that same cwd to each participant adapter: src/relay/relay.ts:1460-1466.
-  // The cwd getter simply returns the option: src/relay/relay.ts:1324-1326.
+  // The relay hands that same cwd to each participant adapter: src/relay/relay.ts:1603-1609.
+  // The cwd getter simply returns the option: src/relay/relay.ts:1453-1455.
   assert.match(relay, /cwd:\s*process\.cwd\(\)/, 'relay block must start in process.cwd')
   // Both creation sites now pass a NAMED context object rather than an inline literal, because
   // the same object composes the launch args that get recorded -- see
@@ -1234,15 +1265,30 @@ test('default run works in the run cwd and creates no worktree', async () => {
     /const ctx = \{ cwd, watchdogMs: this\.#opts\.turnWatchdogMs \}\s*const session = await this\.#opts\.registry\.createParticipant\(spec, ctx\)/,
     'a joining participant must be created in that cwd',
   )
+  // The rotation replacement's cwd is now the ROTATING SEAT'S root rather than the run's, which
+  // at N=1 is the same directory reached by the same expression every other read of a root uses
+  // (`#rootOf`, whose no-worktree answer is `this.#opts.cwd`). Pinned at the same strength and
+  // in two parts, because the claim now has two halves: the replacement is created in `root`,
+  // and `root` is the seat's. See DECLARED['per-seat rotation ...'].
   assert.match(
     RELAY,
-    /const ctx = \{ cwd: this\.#opts\.cwd, watchdogMs: this\.#opts\.turnWatchdogMs \}\s*const session = await this\.#opts\.registry\.createParticipant\(spec, ctx\)/,
-    'a rotation replacement must be created in the run cwd',
+    /const ctx = \{ cwd: root, watchdogMs: this\.#opts\.turnWatchdogMs \}\s*const session = await this\.#opts\.registry\.createParticipant\(spec, ctx\)/,
+    'a rotation replacement must be created in the rotating seat’s own root',
+  )
+  assert.match(
+    RELAY,
+    /const root = this\.#rootOf\(seatId\)/,
+    'and that root must be the seat’s, which at N=1 is the run cwd',
+  )
+  assert.match(
+    RELAY,
+    /this\.#worktrees\?\.seats\.find\(\(s\) => s\.seatId === participantId\)\?\.worktreePath \?\?\s*this\.#opts\.cwd/,
+    'a run with no seat worktrees answers the run cwd for every participant',
   )
 
   // A default run with no subagents must not create any git worktree. The relay only samples
   // the worktree list for its subagent-use report: src/relay/subagents.ts:68 defines
-  // worktreePaths, and src/relay/relay.ts:2007, :2054 and :3444 read it.
+  // worktreePaths, and src/relay/relay.ts:2150, :2206 and :3638 read it.
   // Prove it by exercising the run in a real temporary repository.
   const repo = mkdtempSync(join(tmpdir(), 'conclave-default-'))
   try {
