@@ -127,7 +127,9 @@ const CITED: Record<string, string> = {
   // points at the line it was written about.
   'src/repl/session.ts:601': 'escalates to you rather than being replaced',
   'src/repl/session.ts:764': 'logPath: runLogPath,',
-  'src/repl/session.ts:934': "recording.set('paused', { pause: run.pause })",
+  // Moved by #83's edit to the `/continue` refusal, nine lines above it in the same block.
+  // Repaired rather than deleted: the call it pins is the one the console still makes.
+  'src/repl/session.ts:943': "recording.set('paused', { pause: run.pause })",
 }
 
 /**
