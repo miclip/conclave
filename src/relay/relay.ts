@@ -1389,13 +1389,24 @@ export class Relay {
     // worktree: a seat's directory does not enter its argv (`effectiveLaunchArgs`), and a relative
     // launch command is written relative to where the operator started the run.
     const modelCtx = { cwd: opts.cwd, watchdogMs: opts.turnWatchdogMs }
-    const selected = [opts.lead, ...seats, ...(opts.reviewer ? [opts.reviewer] : [])].flatMap((spec) => {
+    const specs = [opts.lead, ...seats, ...(opts.reviewer ? [opts.reviewer] : [])]
+    const selected = specs.flatMap((spec) => {
       try {
         return [{ participant: spec.id, resolved: opts.registry.resolve(spec) }]
       } catch {
         return []
       }
     })
+    // A configuration that does not RESOLVE is refused for that, and neither preflight below runs.
+    //
+    // Dropping the unresolvable spec is not enough on its own, and CI proved it: `conclave session
+    // --lead nope` resolves no lead and a default implementer, and on a machine with neither CLI
+    // installed the executable check refused the IMPLEMENTER's missing `claude` -- so the operator
+    // was told to install something while the thing actually wrong with their command line, an
+    // agent named `nope`, went unmentioned. The developer machine hid it by having `claude` on
+    // PATH. Both checks describe seats this run would fill; when the seating itself is invalid,
+    // there is no such run to describe, and `#join` refuses it with the message written for it.
+    const checkable = selected.length === specs.length ? selected : []
 
     // Every seat's CLI, looked for before ANY of them is launched and before anything at all is
     // created (#51). FIRST, ahead of the model check: enumerating models means spawning the very
@@ -1411,7 +1422,7 @@ export class Relay {
     // Only SELECTED agents are checked. A registry may describe an agent nobody seated -- that is
     // what `list()` is for -- and refusing a run because an agent it does not use is uninstalled
     // would make the registry's breadth a liability.
-    refuseMissingCommands(selected.map((s) => ({ participant: s.participant, agent: s.resolved.agent, cwd: opts.cwd })))
+    refuseMissingCommands(checkable.map((s) => ({ participant: s.participant, agent: s.resolved.agent, cwd: opts.cwd })))
 
     // Every seat's model, asked of the children before ANY of them is launched (#82). The same
     // kind of check as the five above -- a configuration that otherwise fails silently, and this
@@ -1420,7 +1431,7 @@ export class Relay {
     // time, by which point the seats before it have live children, so the whole list is checked
     // here where the whole list is known.
     const modelChecks = await refuseUnknownModels(
-      selected.map((s) => ({
+      checkable.map((s) => ({
         participant: s.participant,
         agent: s.resolved.agent,
         model: launchRecordFor(s.resolved, modelCtx).model,

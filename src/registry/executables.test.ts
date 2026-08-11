@@ -635,6 +635,32 @@ for (const front of ['relay', 'session'] as const) {
     }
   })
 
+  test(`${front} refuses an unknown agent for BEING unknown, not for its neighbour's missing CLI`, async () => {
+    // CI caught this and the developer machine could not have: `conclave session --lead nope`
+    // resolves no lead and a default implementer, and where neither CLI is installed the
+    // executable check refused the IMPLEMENTER's missing binary -- so the operator was told to
+    // install something while the actual mistake, an agent named `nope`, went unmentioned. Here
+    // the seat that DOES resolve is the one with the absent command, which is the arrangement
+    // that produced the wrong message.
+    const { side, error, repo } = await runFrontEnd(front, { present: ABSENT }, [
+      '--advisor',
+      'nope',
+      '--implementer',
+      'present',
+    ])
+    try {
+      assert.ok(error, 'the run must not start')
+      assert.match(error!.message, /nope/, 'the unknown agent is what the operator is told about')
+      assert.ok(
+        !new RegExp(ABSENT).test(error!.message),
+        'and not about installing a CLI for a seating that could never have been filled',
+      )
+      assert.deepEqual(side.creates, [])
+    } finally {
+      rmSync(repo, { recursive: true, force: true })
+    }
+  })
+
   test(`${front} starts a run whose seats all name an installed CLI`, async () => {
     const { side, error, repo } = await runFrontEnd(
       front,
