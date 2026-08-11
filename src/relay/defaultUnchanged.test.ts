@@ -558,7 +558,18 @@ const DECLARED: Record<string, string> = {
     'rotation is not the remedy and stops attempting it, and rotationSummary gains a line only ' +
     'when that has happened. RunReason is untouched, the status JSON rotation keys are ' +
     'untouched, and rotationWatch gained no counter. Proved against real worktrees, real merges ' +
-    'and a real replacement in src/relay/seatRotation.test.ts and src/relay/implementerSeats.test.ts.',
+    'and a real replacement in src/relay/seatRotation.test.ts and src/relay/implementerSeats.test.ts. ' +
+    'ONE PRE-EXISTING PROGRAMMATIC SURFACE DOES CHANGE, and it changes by refusing: rotateSeat — ' +
+    'and so rotateImplementer, which delegates to it — now throws rather than proceeding when the ' +
+    'target seat has an ungraded task or an exchange in flight, when the ADVISOR has an exchange ' +
+    'in flight (rotation asks it for the handoff, and a concurrent send interleaves two turns on ' +
+    'one transcript), or when that seat is already being rotated. Each of those would previously ' +
+    'have quiesced and retired a session mid-turn or run two transactions over one seat. The ' +
+    'relay tracks both facts itself — an in-flight exchange count per participant and a rotation ' +
+    'claim per seat — rather than reading a session, because a session says `running` either way. ' +
+    'NO DEFAULT RUN REACHES ANY OF THESE: the loop rotates from the completion path, after the ' +
+    'grade and with no advisor exchange open, and the console refuses /rotate unless the run is ' +
+    'already paused. They are reachable from an out-of-band caller, which is what they are for.',
 }
 
 test('DECLARED contains exactly the routing, pause-resolution, attribution, ceiling-flag, seat-flag, seat-status, launch-record, flag-reader and integration-check entries', () => {

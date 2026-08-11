@@ -318,6 +318,8 @@ test('a seat set to act rotates on degradation while the run’s other seats onl
   const fresh = new FakeRotationSession('two-fresh', 'claude', [ACCEPTED, 'NONE', 'NONE'])
   /** The seat table as it stood INSIDE the transaction, which is the only place it can be read. */
   let during: { state: string; graded: boolean } | undefined
+  /** A same-seat rotation attempted from outside while the LOOP's own one is in progress. */
+  let concurrent: Promise<unknown> | undefined
   try {
     const relay = await twoSeatRelay(repo, advisor, [one, two, fresh], {
       checks: ['exit 0'],
@@ -335,6 +337,14 @@ test('a seat set to act rotates on degradation while the run’s other seats onl
           const seat = relay.seats().find((s) => s.seat === 'implementer-2')!
           const task = relay.tasks().find(({ task: q }) => q.id === seat.current)
           during = { state: seat.state, graded: task?.runtime.grade !== undefined }
+          // The same-seat guard against a SCHEDULED seat: this one has a seat-table entry, a
+          // task and a graded verdict, and the rotation in progress is the loop's own. An
+          // operator reaching in here is the reachable version of the collision.
+          concurrent ??= relay.rotateSeat('implementer-2', 'an operator reaching in mid-rotation').then(
+            (r) => r.status,
+            (e: Error) => e,
+          )
+          await new Promise((r) => setImmediate(r))
         },
       },
     })
@@ -367,6 +377,19 @@ test('a seat set to act rotates on degradation while the run’s other seats onl
     //             replaced and an operator polling the status is not told it is `integrating`
     //             for the length of two agent turns.
     assert.deepEqual(during, { state: 'rotation_pending', graded: true })
+
+    // And the same-seat guard holds for a scheduled seat, against the loop's own transaction:
+    // refused outright, so the loop's rotation is the one that completed and the operator's
+    // second request left no trace in the record.
+    const refusal = await concurrent
+    assert.ok(refusal instanceof Error, 'a second rotation of a seat already rotating must be refused')
+    assert.match(refusal.message, /implementer-2 is already being rotated/)
+    assert.equal(
+      relay.log.filter((m) => /^rotating implementer-2:/.test(m.text)).length,
+      1,
+      'one transaction announced, because one transaction happened',
+    )
+    assert.ok(!relay.log.some((m) => m.text.includes('reaching in mid-rotation')))
   } finally {
     rmSync(repo, { recursive: true, force: true })
   }
@@ -511,6 +534,92 @@ test('a rotation requested while the ADVISOR is mid-turn is refused, and touches
     // run it was made against.
     assert.equal(outcome.reason, 'done')
     assert.ok(advisor.received.some((m) => m.includes('Did it.')), 'the advisor turn completed and was read')
+  } finally {
+    rmSync(repo, { recursive: true, force: true })
+  }
+})
+
+test('a second rotation of the SAME seat is refused before anything happens, and the first completes', async (t) => {
+  // N=1, outside any run: no seat table, no task, no dispatcher — which is the configuration the
+  // guard has to hold in, because it is where an operator rotates by hand and where every
+  // dispatcher-shaped check has nothing to read.
+  //
+  // The check lane does eventually refuse this pair, and that is not sufficient. By the time the
+  // lane is reached the second transaction has written its `rotating` note, quiesced a session
+  // the first is already replacing, and asked the advisor for a second handoff describing a state
+  // that is being handed over as it reads it. What the lane then says — "its rotation section
+  // would wait for itself" — describes a mutex to an operator who asked to replace a seat twice.
+  const repo = tempRepo()
+  const advisor = new FakeRotationSession('advisor', 'codex', [HANDOFF, HANDOFF])
+  const impl = new FakeRotationSession('impl', 'claude')
+  const fresh = new FakeRotationSession('fresh', 'claude', [ACCEPTED])
+  const spare = new FakeRotationSession('spare', 'claude', [ACCEPTED])
+  const creates: CreateRecord[] = []
+  let second: Promise<unknown> | undefined
+  try {
+    const relay = await Relay.start({
+      registry: registryOf({ codex: [advisor], claude: [impl, fresh, spare] }, creates),
+      cwd: repo,
+      lead: { id: 'advisor', agent: 'codex', role: 'advisor' },
+      implementer: { id: 'implementer', agent: 'claude', role: 'implementer' },
+      maxAdvisorTurns: 2,
+      rotation: {
+        checks: ['exit 0'],
+        checkTimeoutMs: 30_000,
+        // Fired from inside the first transaction: the lane is held, the note is written, the
+        // handoff has been taken and the record captured. Anything the second call touched would
+        // be touching a transfer already in progress.
+        hooks: {
+          afterCapture: async () => {
+            second ??= relay.rotateSeat('implementer', 'a second operator, or the same one twice').then(
+              (r) => r.status,
+              (e: Error) => e,
+            )
+            await new Promise((r) => setImmediate(r))
+          },
+        },
+      },
+    })
+    t.after(() => relay.stop())
+
+    const first = await relay.rotateSeat('implementer', 'the first transaction')
+    const refusal = await second
+
+    assert.ok(refusal instanceof Error, 'the second call must be refused, not queued behind the first')
+    assert.match(refusal.message, /implementer is already being rotated \(the first transaction\)/)
+    // It names what the caller should do about it, and carries the first caller's reason so a
+    // second operator can see what they are waiting for rather than only that they may not go.
+    assert.match(refusal.message, /Wait for the rotation in progress/)
+    // NOT the lane's re-entrancy error, which is the mechanism talking rather than the request
+    // being answered.
+    assert.doesNotMatch(refusal.message, /wait for itself|check lane/)
+
+    // The first transaction completed, undisturbed.
+    assert.equal(first.status, 'rotated')
+    assert.equal(relay.participants.find((p) => p.rank === 'implementer')!.session, fresh)
+    assert.equal(impl.state, 'terminated')
+
+    // And the second had NO effects: nothing was recorded for it, no session was created or
+    // spoken to for it, and it never reached the lane.
+    assert.equal(
+      relay.log.filter((m) => /^rotating implementer:/.test(m.text)).length,
+      1,
+      'a refused rotation must not announce itself',
+    )
+    assert.ok(
+      !relay.log.some((m) => m.text.includes('a second operator')),
+      'and its reason must appear nowhere in the record',
+    )
+    assert.equal(creates.filter((c) => c.id === 'implementer').length, 2, 'the seat and ONE replacement')
+    assert.equal(spare.state, 'running')
+    assert.deepEqual(spare.received, [])
+    assert.equal(advisor.received.filter((m) => m.includes('HANDOFF')).length, 0)
+    assert.deepEqual(
+      relay.checkLane.history().map((h) => `${h.seat}/${h.station}`),
+      ['implementer/rotation'],
+      'one section, so the second never acquired the lane at all',
+    )
+    assert.equal(relay.rotationWatch.rotations, 1)
   } finally {
     rmSync(repo, { recursive: true, force: true })
   }
