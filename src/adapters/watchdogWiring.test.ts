@@ -102,6 +102,21 @@ process.env['ORCH_FAKE_TRANSCRIPT'] = TRANSCRIPT
 
 const WATCHDOG_MS = 400
 
+/**
+ * The deadline for the tests where the child must SPEAK before it goes quiet.
+ *
+ * 400ms is fine for a child that says nothing -- there is nothing to race. It is not fine
+ * when the test's precondition is an event that arrives through the hook, because every hook
+ * event spawns a process, and two spawns against a 400ms deadline is a race that macOS wins
+ * and a loaded Linux runner loses. That is exactly how this file went red on main while
+ * passing on the PR.
+ *
+ * Not a raised wait budget hiding contention -- `session.tty.test.ts` records why that is the
+ * wrong fix. This is the deadline of the thing under test, and the test needs the speech
+ * delivered before it. The margin is against process spawn latency, not against load.
+ */
+const SPOKE_WATCHDOG_MS = 5_000
+
 /** Collect events until `done`, or give up. Returns what it saw either way. */
 async function collect(
   session: { events(): AsyncIterable<AgentEvent> },
@@ -285,7 +300,7 @@ test('claude: a turn that spoke and then went quiet is not blamed on its model',
     cwd: RUN,
     role: 'implementer',
     args: ['--model', 'opus-5'],
-    watchdogMs: WATCHDOG_MS,
+    watchdogMs: SPOKE_WATCHDOG_MS,
     readyTimeoutMs: 20_000,
   })
   try {
