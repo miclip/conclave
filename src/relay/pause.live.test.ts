@@ -159,7 +159,30 @@ test('a real session survives a human-scale pause and resumes without drift', { 
     { only: 'implementer' },
   )
   await run.continue()
-  const outcome = await run.result()
+
+  // Drive whatever else the resumed run raises, rather than assuming the resume was the last
+  // decision. This test's own probe guarantees at least one more: the constraint above is
+  // RESTRICTED to the implementer, so when the advisor -- which never saw it -- next instructs
+  // something touching `two.txt`, `authority_conflict` fires by design. That is the feature
+  // working, and `result()` alone throws on it because nothing is attending.
+  //
+  // The operator's answer here is `continue`: the aside asked for the write, the advisor is
+  // not being overruled maliciously, and adjudicating is exactly what a human would do. What
+  // matters to this test is that the session's MEMORY survived the hold, which the report at
+  // the end proves either way.
+  const seen: string[] = []
+  let settled = await run.settled()
+  while (settled.kind === 'paused') {
+    seen.push(settled.pause.reason)
+    assert.ok(
+      seen.length <= 4,
+      `the resumed run kept pausing and never ended: ${seen.join(', ')}`,
+    )
+    await run.continue()
+    settled = await run.settled()
+  }
+  const outcome = settled.outcome
+  if (seen.length > 0) console.log(`    [resume] answered ${seen.length} pause(s): ${seen.join(', ')}`)
 
   assert.notEqual(outcome.reason, 'escalated', `the resumed run escalated: ${outcome.detail}`)
 
