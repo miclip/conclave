@@ -4680,6 +4680,32 @@ export class Relay {
           `and there is none to replace`,
       )
     }
+    // ALREADY ROTATING, and this comes first because it is the most specific true thing that
+    // can be said about the request.
+    //
+    // A second transaction against a seat that is mid-rotation would quiesce a session the first
+    // has already committed to replacing, ask the advisor for a second handoff describing a state
+    // that is being handed over as it reads it, and start a second replacement for one seat --
+    // and then one of the two would promote its audition over the other's. The check lane does
+    // eventually refuse the pair, because both take it for the same seat, but it refuses too late
+    // and in the wrong words: too late because the `rotating <seat>` note is written, the session
+    // is quiesced and the advisor has been asked before the lane is reached, and in the wrong
+    // words because "its rotation section would wait for itself" describes a mutex to an operator
+    // who asked to replace a seat twice.
+    //
+    // Relay-owned and keyed by seat id alone, so it holds where the dispatcher's bookkeeping does
+    // not exist: at N=1, before any run has started, and for an operator rotating from a pause.
+    // The reason the first caller gave is carried so the second is told what it is waiting for
+    // rather than merely that it may not proceed.
+    const rotating = this.#rotationsInFlight.get(seatId)
+    if (rotating !== undefined) {
+      throw new Error(
+        `${seatId} is already being rotated (${rotating}). A second transaction would quiesce a ` +
+          `session the first has already committed to replacing and start a second replacement ` +
+          `for one seat. Wait for the rotation in progress: it either promotes a replacement or ` +
+          `restores the original, and either way this seat has a session at the end of it.`,
+      )
+    }
     // A TURN IN PROGRESS IS NOT ROTATABLE, and this is checked before anything else because it
     // is the one refusal that protects a live child rather than a configuration.
     //
@@ -4769,6 +4795,43 @@ export class Relay {
           `Rotating without them would be a transfer nobody demonstrated.`,
       )
     }
+    // Claimed HERE: past every refusal, and before the first thing a second caller could
+    // observe or collide with -- the `rotating` note, the quiesce, the advisor's handoff turn,
+    // the lane. Released in the `finally` below whatever the transaction returns or throws, so a
+    // rotation that fails leaves the seat rotatable again; a latch that outlived its transaction
+    // would be a seat nobody could ever replace, which is worse than the race it prevents.
+    this.#rotationsInFlight.set(seatId, reason)
+    try {
+      return await this.#rotateSeatTransaction(impl, advisor, cfg, reason)
+    } finally {
+      this.#rotationsInFlight.delete(seatId)
+    }
+  }
+
+  /**
+   * Seats with a rotation transaction open, and the reason each was given for it.
+   *
+   * Relay-owned, like `#exchanges`, and for the same reason: the sessions cannot answer this.
+   * Mid-transaction the outgoing session is `quiesced` or `rotating` -- but so is a session
+   * whose rotation has already failed and is being restored, and the audition is not in the
+   * participant map at all, so nothing about the child processes distinguishes "a rotation is
+   * running" from "a rotation just ended".
+   */
+  #rotationsInFlight = new Map<string, string>()
+
+  /**
+   * The transaction itself, with the seat claimed. See `rotateSeat` for every refusal above it.
+   *
+   * Split out so the claim's release sits in a `finally` that no later edit inside this method
+   * can slip past -- the same shape as `#exchange`/`#exchangeTurn`, and for the same reason.
+   */
+  async #rotateSeatTransaction(
+    impl: RelayParticipant,
+    advisor: RelayParticipant,
+    cfg: EffectiveRotation,
+    reason: string,
+  ): Promise<RotationResult> {
+    const seatId = impl.id
     const spec = implementerSeats(this.#opts).find((s) => s.id === seatId)!
     /**
      * This seat's own tree, and what the whole transfer is measured against.
