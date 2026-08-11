@@ -49,7 +49,7 @@ import {
   type Visibility,
 } from './message.ts'
 import { RelayEventStream, type ObserveOptions, type RelayEvent, type RunReason } from './observe.ts'
-import { describeLiveness, sampleLiveness } from '../outcomes/liveness.ts'
+import { describeLiveness, reportsChildOnCpu, sampleLiveness } from '../outcomes/liveness.ts'
 import {
   RunHandle,
   type PauseOption,
@@ -2698,8 +2698,8 @@ export class Relay {
     // indefinitely on something that will never arrive.
     //
     // The evidence carrying the liveness reading is the same one the operator reads, so the
-    // option and the reason for it cannot disagree.
-    if (p.evidence.some((e) => /is still working \(cpu/.test(e))) options.splice(1, 0, 'wait')
+    // option and the reason cannot disagree; `reportsChildOnCpu` says which readings count (#83).
+    if (p.evidence.some(reportsChildOnCpu)) options.splice(1, 0, 'wait')
 
     const deciding = handle.pauseAt({
       reason,

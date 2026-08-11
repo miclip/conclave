@@ -633,6 +633,39 @@ const DECLARED: Record<string, string> = {
     'end through a two-seat console run where one advisor reply dispatches to both seats, ' +
     'implementer-2 compacts into a rotation_candidate pause, and /continue resumes it while ' +
     'implementer is provably still mid-turn in the status document’s own seat block.',
+  'a mixed CPU sample is reported as mixed rather than as a working child (#83)':
+    'NO FLAG IS ADDED, no document gains a key, and NOTHING BECOMES LESS CONSERVATIVE — the ' +
+    'change is entirely in what a default run SAYS at a pause, which is why it is declared ' +
+    'rather than assumed invisible. `idle` is untouched: every sample below IDLE_CPU_PERCENT ' +
+    'and nothing else, the asymmetry chosen after a run was lost to the opposite mistake. What ' +
+    'was wrong was the other half of the same `if` — anything not idle was announced as "still ' +
+    'working", so 0.3%, 0.2%, 7.2% with three events was a true report of a false thing. ' +
+    'describeLiveness now reads one of three (readingOf: not_computing, working, mixed; gone ' +
+    'when the process is not there), and a mixed reading says which way it leans — "is barely ' +
+    'running" when most samples are below the line, "is working in bursts" when most are above ' +
+    '— with the measured percentages still printed verbatim. THE EVENT COUNT IS NOW AN INPUT ' +
+    'to that sentence rather than a clause after it, against QUIET_EVENT_COUNT (5), a new ' +
+    'exported constant that is unmeasured and documented as unmeasured: it changes wording ' +
+    'only, and `idle`, the /continue refusal and the pause menu are all blind to it. THREE ' +
+    'PROGRAMMATIC SURFACES ARE ADDED, all in src/outcomes/liveness.ts and all read-only over a ' +
+    'ChildLiveness that itself does not change (so pause.refusal.liveness in the status JSON is ' +
+    'the shape it was): LivenessReading, readingOf and reportsChildOnCpu. The last exists ' +
+    'because the relay decided the `wait` option by regex over the operator’s evidence prose ' +
+    '(`/is still working \\(cpu/`), which would have silently dropped `wait` from a mixed pause ' +
+    '— the one reading where the non-destructive option is worth the most; it now asks ' +
+    'liveness.ts, which owns both the phrasing and the matcher. describeLiveness’s second ' +
+    'parameter accepts undefined for "no count was taken with this sample", and the console’s ' +
+    '/continue guard passes it: that guard samples the child fresh and has no matching count, ' +
+    'so the `0` it passed rendered as "nothing at all since the prompt was sent" about a number ' +
+    'nobody had measured — harmless while the count was decoration, not harmless now it is an ' +
+    'input. WHAT A DEFAULT RUN DOES DIFFERENTLY: on a mixed sample the pause evidence and the ' +
+    '/continue refusal read differently, and the console headline is "the child is not clearly ' +
+    'idle" rather than "the child is working right now". THE REFUSAL ITSELF IS UNCHANGED — a ' +
+    'mixed sample still refuses /continue and still requires force, because continuing SENDS ' +
+    'and a burst may be a turn. No assertion in this file was relaxed; one citation moved with ' +
+    'the code it pins (src/repl/session.ts:943). Covered in src/outcomes/liveness.test.ts on ' +
+    'the reported numbers, and end to end through the console’s refusal path in ' +
+    'src/repl/session.test.ts.',
 }
 
 test('DECLARED contains exactly the routing, pause-resolution, attribution, ceiling-flag, seat-flag, seat-status, launch-record, flag-reader, integration-check, per-seat-rotation, reviewer and resume-guard entries', () => {
@@ -650,6 +683,7 @@ test('DECLARED contains exactly the routing, pause-resolution, attribution, ceil
     'per-seat rotation, per-seat rotation policy, and the unobservable-acceptance stop (#78, #76)',
     '--reviewer on both front-ends, and the review_blocked pause reason',
     "the console's /continue liveness guard samples by pause SCOPE, and no longer by rank",
+    'a mixed CPU sample is reported as mixed rather than as a working child (#83)',
   ])
 })
 
@@ -790,7 +824,7 @@ async function defaultRunDocuments(): Promise<{ report: unknown; status: unknown
  * blind to that subtree is claiming more than it checks.
  *
  * Built through the real recorder: `recordSession` is what both front-ends call, and
- * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:934
+ * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:943
  * with the same object -- a `RunPause` the run handle raised, not one written here. Read back
  * through `main(['status', '--json'])`, so the serialisation and the reconciliation against
  * the pid are the production ones.
@@ -1086,7 +1120,7 @@ async function provoke(
  * The status document of a run paused for one given reason.
  *
  * Built through the real recorder: `recordSession` is what both front-ends call, and
- * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:934
+ * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:943
  * with the same object -- a `RunPause` the relay raised, not one written here. Read back
  * through `main(['status', '--json'])`, so the serialisation and the reconciliation against
  * the pid are the production ones.

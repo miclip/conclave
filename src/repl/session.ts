@@ -107,7 +107,7 @@ export async function withHeartbeat<T>(
     progress.done(label)
   }
 }
-import { describeLiveness, sampleLiveness, type ChildLiveness } from '../outcomes/liveness.ts'
+import { describeLiveness, readingOf, sampleLiveness, type ChildLiveness } from '../outcomes/liveness.ts'
 import { version } from '../version.ts'
 import { guard } from '../workspace/sessionLock.ts'
 import { newSessionId, projectRootFor, recordSession } from '../workspace/sessionRecord.ts'
@@ -923,10 +923,19 @@ export async function runSession(opts: SessionOptions): Promise<number> {
         if (pid === undefined) continue
         const now = await sample(pid)
         if (!now.alive || now.idle) continue
-        const reason = describeLiveness(now, 0)
-        write(yellow('  not continuing: the child is working right now.'))
+        // No output count belongs with this sample. It is taken fresh, here, and the count on
+        // the pause was measured at another moment -- pairing them would date one fact to the
+        // other's clock. This passed `0` before, which rendered as "nothing at all since the
+        // prompt was sent": a claim nobody had checked, and one the reading now consults (#83).
+        const reason = describeLiveness(now, undefined)
+        // The headline follows the READING. The refusal itself does not: a mixed sample still
+        // refuses, because continuing sends and a burst may be a turn. But an operator choosing
+        // whether to force is choosing on this line, and telling them a child with two idle
+        // samples out of three is "working right now" is the assertion #83 is about.
+        const working = readingOf(now) === 'working'
+        write(yellow(`  not continuing: ${working ? 'the child is working right now.' : 'the child is not clearly idle.'}`))
         write(`  ${reason}`)
-        write('  wait for it to finish, or /continue force to send anyway.')
+        write(`  ${working ? 'wait for it to finish' : 'wait and re-read the line above'}, or /continue force to send anyway.`)
         // The run stays paused, so a watcher polling `state` sees no change. Record the
         // refusal so an external reader can see why `/continue` did not move the run.
         if (run.pause) {

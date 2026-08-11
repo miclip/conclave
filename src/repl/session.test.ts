@@ -571,6 +571,18 @@ const IDLE_LIVENESS: ChildLiveness = {
   samples: [0.0, 0.1, 0.0],
   idle: true,
 }
+/**
+ * The reading from #83, verbatim: two samples at rest and one burst.
+ *
+ * Not idle by the conservative rule, and not a working child either — the case the guard used
+ * to describe as "still working" while refusing the resume.
+ */
+const MIXED_LIVENESS: ChildLiveness = {
+  pid: 1,
+  alive: true,
+  samples: [0.3, 0.2, 7.2],
+  idle: false,
+}
 
 async function untilText(what: string, text: () => string, re: RegExp, ms = 5000): Promise<void> {
   const deadline = Date.now() + ms
@@ -1886,6 +1898,72 @@ test('a refusal to continue is recorded on the paused session status', async () 
   // Readable through the JSON rendering, not only in-process.
   const asJson = JSON.parse(formatSessionJson(found.session))
   assert.equal(asJson.pause.refusal.liveness.idle, false)
+
+  input.end()
+  await running
+})
+
+test('a mixed sample still refuses the continue, and is not described as a working child', async () => {
+  // Both halves of #83 on the path that acts: the refusal is CONSERVATIVE and stays — one
+  // sample above the line may be a turn, and continuing sends into it — while the sentence the
+  // operator reads before choosing `force` says what was measured instead of asserting a live
+  // turn. The old code refused with "the child is working right now" over 0.3%, 0.2%, 7.2%,
+  // which is how a barely-running child held a run paused on evidence for the opposite.
+  const dir = repo()
+  const impl = slow('impl', 'claude', ['ack', 'Did it, slowly.', 'And again.'])
+  impl.endTurn = { index: 1, verdict: TIMED_OUT, withdraw: 'no_replacement' }
+  impl.childPid = 1
+  const out = collect()
+  const input = new PassThrough()
+  const running = runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'claude',
+    rounds: 6,
+    checks: [],
+    registry: registryOf({
+      codex: [slow('advisor', 'codex', ['Do it.', 'More.', 'DONE'], 300)],
+      claude: [impl],
+    }),
+    liveness: async () => MIXED_LIVENESS,
+    input,
+    output: out.stream,
+  })
+  const until = async (pred: (f: ReturnType<typeof resolveSession>) => boolean, ms = 10_000) => {
+    const t = Date.now()
+    while (Date.now() - t < ms) {
+      const f = resolveSession(dir)
+      if (pred(f)) return f
+      await new Promise((r) => setTimeout(r, 50))
+    }
+    throw new Error(`timed out; console said:\n${out.text().slice(-700)}`)
+  }
+
+  await until((f) => 'session' in f && f.session.status.state === 'paused')
+  await until(
+    (f) =>
+      'session' in f &&
+      f.session.status.pause?.superseded !== undefined &&
+      f.session.status.pause?.superseded?.verdict === undefined,
+  )
+  input.write('/continue\n')
+  const found = await until((f) => 'session' in f && f.session.status.pause?.refusal !== undefined)
+  assert.ok('session' in found)
+  assert.equal(found.session.status.state, 'paused', 'a mixed sample must still refuse the resume')
+  const refusal = found.session.status.pause!.refusal!
+  assert.equal(refusal.liveness.idle, false)
+  assert.deepEqual(refusal.liveness.samples, [0.3, 0.2, 7.2], 'the measured values are still reported')
+  assert.doesNotMatch(refusal.reason, /still working/)
+  assert.match(refusal.reason, /is barely running \(cpu 0\.3%, 0\.2%, 7\.2%\)/)
+  // The guard has no output count to pair with a sample it took just now, and says so rather
+  // than passing the `0` that used to render as "nothing at all since the prompt was sent".
+  assert.match(refusal.reason, /no output count was taken with this reading/)
+  // ...and the console line above it, which is what an operator actually looks at.
+  assert.match(out.text(), /not continuing/)
+  assert.doesNotMatch(out.text(), /the child is working right now/)
+  assert.match(out.text(), /the child is not clearly idle/)
+  assert.match(out.text(), /\/continue force to send anyway/, 'the way past it is still named')
 
   input.end()
   await running
