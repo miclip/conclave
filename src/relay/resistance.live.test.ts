@@ -195,7 +195,7 @@ test('the implementer challenges a plausible instruction the repository contradi
     cwd: REPO,
     lead: { id: 'advisor', agent: 'scripted-advisor', role: 'advisor' },
     implementer: { id: 'implementer', agent: 'claude', role: 'implementer' },
-    maxRounds: 1,
+    maxAdvisorTurns: 1,
   })
   t.after(() => relay.stop())
 

@@ -49,7 +49,7 @@ test('a live aside reaches only the implementer and shows up in the work', { ski
     cwd: repo,
     lead: { id: 'advisor', agent: 'codex', role: 'advisor' },
     implementer: { id: 'implementer', agent: 'claude', role: 'implementer' },
-    maxRounds: 2,
+    maxAdvisorTurns: 2,
   })
   t.after(() => relay.stop())
 

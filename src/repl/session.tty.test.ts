@@ -28,7 +28,7 @@ import { Progress } from './render.ts'
 const REPO = join(import.meta.dirname, '..', '..')
 
 /** A driver that runs the console over fakes slow enough to type at. */
-function driver(dir: string, goal: string | null = 'Keep the work moving.'): string {
+function driver(dir: string, goal: string | null = 'Keep the work moving.', quiet: boolean = false): string {
   const path = join(dir, 'driver.mjs')
   const goalArg = goal === null ? 'undefined' : JSON.stringify(goal)
   writeFileSync(
@@ -61,7 +61,7 @@ for (const [agent, session] of [['codex', slow('advisor', 'codex', ['Do it.', 'M
   })
 }
 // Emit activity on a timer, so something lands while a line is half-typed.
-setInterval(() => impl.emit({ type: 'tool_use', tool: 'Read', input: {}, seq: 99, at: Date.now(), provisional: true }), 700).unref()
+${quiet ? '' : `setInterval(() => impl.emit({ type: 'tool_use', tool: 'Read', input: {}, seq: 99, at: Date.now(), provisional: true }), 700).unref()`}
 
 const code = await runSession({
   cwd: ${JSON.stringify(dir)}, goal: ${goalArg},
@@ -73,10 +73,71 @@ process.exit(code)
   return path
 }
 
-function repo(): string {
+/**
+ * The same console with TWO implementer seats, both slow enough to be caught working.
+ *
+ * A separate driver rather than a parameter on the one above: this run needs an advisor that
+ * addresses seats BY NAME — the only way to put two of them to work from one reply — and a
+ * seat list, and threading both through the single-seat driver would leave every existing test
+ * carrying arguments about a case it is not about.
+ */
+function twoSeatDriver(dir: string): string {
+  // OUTSIDE the repository, unlike the single-seat driver. Two seats take linked worktrees, and
+  // that refuses to start over an unclean base -- so a driver written into the checkout is a
+  // stray untracked file that stops the very run it starts.
+  const path = join(mkdtempSync(join(tmpdir(), 'conclave-tty-driver-')), 'two-seat-driver.mjs')
+  writeFileSync(
+    path,
+    `
+import { runSession } from ${JSON.stringify(join(REPO, 'src/repl/session.ts'))}
+import { AgentRegistry } from ${JSON.stringify(join(REPO, 'src/registry/registry.ts'))}
+import { FakeRotationSession } from ${JSON.stringify(join(REPO, 'src/rotation/fakeSession.ts'))}
+import { NO_DEADLINE_CLOCKS } from ${JSON.stringify(join(REPO, 'src/registry/types.ts'))}
+
+const caps = {
+  readinessSignal: 'unknown', turnKeySource: 'prompt_id',
+  outcomes: { completed: 'observed', cancelled: 'reasoned_but_unverified',
+    permission_refused: 'reasoned_but_unverified', process_exited: 'reasoned_but_unverified',
+    timed_out: 'reasoned_but_unverified', transport_lost: 'reasoned_but_unverified',
+    unknown_abnormal_end: 'reasoned_but_unverified' },
+}
+const slow = (id, agent, replies, ms) => {
+  const s = new FakeRotationSession(id, agent, replies)
+  s.delayMs = ms
+  return s
+}
+// One reply, two seats, addressed by the ids the console constructs: seatIdFor(0) and (1).
+const assignment = '@seat implementer: rebuild the parser\\n@seat implementer-2: rewrite the docs'
+const sessions = {
+  codex: slow('advisor', 'codex', [assignment, 'DONE', 'DONE', 'DONE'], 300),
+  alpha: slow('alpha', 'alpha', ['ack', 'Did it.', 'NONE', 'NONE'], 6000),
+  beta: slow('beta', 'beta', ['ack', 'Did that too.', 'NONE', 'NONE'], 6000),
+}
+const registry = new AgentRegistry()
+for (const [agent, session] of Object.entries(sessions)) {
+  registry.register({
+    id: agent, displayName: agent, capabilities: { ...caps, agent },
+    deadlines: NO_DEADLINE_CLOCKS,
+    launch: { command: agent, baseArgs: [] }, async create() { return session },
+  })
+}
+
+const code = await runSession({
+  cwd: ${JSON.stringify(dir)}, goal: 'Keep the work moving.',
+  lead: 'codex', implementer: 'alpha',
+  implementers: [{ agent: 'alpha', args: [] }, { agent: 'beta', args: [] }],
+  rounds: 6, checks: [], registry,
+})
+process.exit(code)
+`,
+  )
+  return path
+}
+
+function repo(gitignore = '.conclave/\n'): string {
   const dir = mkdtempSync(join(tmpdir(), 'conclave-tty-'))
   execFileSync('git', ['init', '-q'], { cwd: dir })
-  writeFileSync(join(dir, '.gitignore'), '.conclave/\n')
+  writeFileSync(join(dir, '.gitignore'), gitignore)
   execFileSync('git', ['add', '.'], { cwd: dir })
   execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'i'], { cwd: dir })
   return dir
@@ -89,9 +150,16 @@ function repo(): string {
  * survived, and node could not exit — so one broken expectation hung the whole suite past
  * every per-test timeout. A test that cannot fail cleanly is worse than no test.
  */
-async function spawnConsole(dir: string, t?: { after: (fn: () => void) => void }, goal: string | null = 'Keep the work moving.') {
+async function spawnConsole(
+  dir: string,
+  t?: { after: (fn: () => void) => void },
+  goal: string | null = 'Keep the work moving.',
+  quiet: boolean = false,
+  /** Which driver to run. The one-seat console, unless a test needs a differently-shaped run. */
+  script: (dir: string) => string = (d) => driver(d, goal, quiet),
+) {
   const { default: pty } = await import('node-pty')
-  const p = pty.spawn(process.execPath, [driver(dir, goal)], {
+  const p = pty.spawn(process.execPath, [script(dir)], {
     name: 'xterm-256color',
     cols: 100,
     rows: 30,
@@ -362,7 +430,7 @@ test('the box is pinned below the transcript, and progress lives only in it', as
   // in the stream whether it landed in the box, above it, or was overwritten a frame later.
   // Replaying the escapes into a grid answers where it actually IS.
   const dir = repo()
-  const c = await spawnConsole(dir, t)
+  const c = await spawnConsole(dir, t, undefined, true)
   assert.ok(await c.until((s) => /─{20,}/.test(s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '')), 20_000))
   c.type('typing here')
   await new Promise((r) => setTimeout(r, 1500))
@@ -449,7 +517,7 @@ test('the banner stays visible and the first post-open transcript line is close 
   // after Screen.open() is the no-goal prompt; the rule printed before it is the last startup
   // line. The gap between them must be small, not the entire empty scroll region.
   const dir = repo()
-  const c = await spawnConsole(dir, t, null)
+  const c = await spawnConsole(dir, t, null, true)
   const rows = 30
   const cols = 100
   const plain = (s: string) => s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '')
@@ -546,6 +614,89 @@ test('the box is drawn under the newest line, and nothing is scrolled to make ro
     c.text(),
     /\x1b\[\d*[TL]/,
     'the console scrolled or inserted lines, which moves text the operator was reading',
+  )
+  c.proc.kill()
+})
+
+test('two working seats get a row each above the box, and come off the status rule', async (t) => {
+  // The console half of #65. With one seat the status rule holds the worker — `⠋ implementer
+  // 5s · Bash` inlaid into the rule — and that arrangement does not survive a second seat: the
+  // rule is ONE row, so two names, two clocks and two tool names either overflow the terminal
+  // or wrap onto a row the box never reserved, which is the transcript's row.
+  //
+  // So the seats move onto rows of their own, one each, and this asserts both halves: they are
+  // THERE, distinguishable, each naming its own task, and they are no longer on the rule.
+  //
+  // Reconstructed from the grid rather than searched in the byte stream. A seat name appears in
+  // the stream from the moment the run brief is printed; what is being claimed here is that at
+  // this instant it is on a pinned row, which only a replayed screen can answer.
+  // `.codex/` as well: the console registers its sidecar hooks in the checkout at startup, and
+  // seat worktrees refuse to be created over anything uncommitted -- including that.
+  const dir = repo('.conclave/\n.codex/\n')
+  const c = await spawnConsole(dir, t, undefined, true, twoSeatDriver)
+  const rows = 30
+  const cols = 100
+
+  // Both seats dispatched from the one advisor reply, and both still working: the fakes take
+  // six seconds a turn, so this instant is several seconds wide rather than a race.
+  const bothWorking = (s: string): boolean => {
+    const grid = renderGrid(s, rows, cols).map((r) => r.join('').trimEnd())
+    return (
+      grid.some((line) => /implementer\b.*rebuild the parser/.test(line)) &&
+      grid.some((line) => /implementer-2\b.*rewrite the docs/.test(line))
+    )
+  }
+  assert.ok(
+    await c.until(bothWorking, 40_000),
+    `both seats should have a pinned row naming their own task. screen was:\n${renderGrid(c.text(), rows, cols)
+      .map((r) => r.join('').trimEnd())
+      .filter(Boolean)
+      .join('\n')}`,
+  )
+
+  const grid = renderGrid(c.text(), rows, cols).map((r) => r.join('').trimEnd())
+  const alphaRow = grid.findIndex((line) => /implementer\b.*rebuild the parser/.test(line))
+  const betaRow = grid.findIndex((line) => /implementer-2\b.*rewrite the docs/.test(line))
+  assert.notEqual(alphaRow, betaRow, 'two seats are two rows: one row holding both is the thing being replaced')
+
+  // The rule that carries the status is the one directly below the seat rows, and it must not
+  // be naming them as well. Two copies of the same fact is what the pinned box exists to end,
+  // and the copy on the rule is the one that wraps.
+  const ruleRow = grid.findIndex((line, i) => i > Math.max(alphaRow, betaRow) && /─{20,}/.test(line))
+  assert.ok(ruleRow > 0, 'the box rule should sit below the seat rows')
+  assert.doesNotMatch(
+    grid[ruleRow]!,
+    /implementer/,
+    'a seat with a row of its own must not also be inlaid into the status rule',
+  )
+  // Adjacent, in that order: seats, then the rule, then the input. A gap would mean the box
+  // reserved rows it did not draw into, which is a row of transcript painted blank.
+  assert.equal(Math.max(alphaRow, betaRow) + 1, ruleRow, 'the seat rows sit directly on top of the box')
+  c.proc.kill()
+})
+
+test('a one-seat console reserves the four rows it always did, even while the seat is working', async (t) => {
+  // D1's identity case for the pinned box, asserted in the one unit that cannot be argued
+  // with: the size of the scrolling region. A default console reserves four rows — rule,
+  // input, rule, hint — and `ESC[1;26r` on a 30-row terminal is that fact in bytes.
+  //
+  // This exists because the seat rows are the kind of feature that "obviously" costs nothing
+  // at N=1 and silently does: with one seat there IS a seat, it IS busy for most of the run,
+  // and a row rendered for it would push the transcript up by one and name the implementer
+  // twice — once on its own row and once on the status rule beside it. Removing the N=1 guard
+  // in `seatRows` passed the entire console suite before this test existed.
+  const dir = repo()
+  const c = await spawnConsole(dir, t, undefined, true)
+  assert.ok(
+    await c.until((s) => s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '').includes('Did it.'), 40_000),
+    'the implementer must have taken a whole turn, so the box was drawn while it was working',
+  )
+  const regions = [...c.text().matchAll(/\x1b\[1;(\d+)r/g)].map((m) => Number(m[1]))
+  assert.ok(regions.length > 0, 'the console must set a scrolling region')
+  assert.deepEqual(
+    [...new Set(regions)],
+    [26],
+    'a default console box is four rows from first draw to last: anything else moved the transcript',
   )
   c.proc.kill()
 })

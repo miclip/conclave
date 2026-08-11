@@ -50,7 +50,7 @@ test('one configured check yields exactly one claim, and it matches the arbiter'
     cwd: repo,
     lead: { id: 'advisor', agent: 'codex', role: 'advisor' },
     implementer: { id: 'implementer', agent: 'claude', role: 'implementer' },
-    maxRounds: 3,
+    maxAdvisorTurns: 3,
     rotation: { checks: [CHECK], checkTimeoutMs: 60_000 },
   })
   t.after(() => relay.stop())

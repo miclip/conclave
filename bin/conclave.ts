@@ -21,11 +21,12 @@ import {
   setPermissionMode,
 } from '../src/config/project.ts'
 import { formatConfigShow, formatConfigShowJson, showConfig } from '../src/config/show.ts'
+import { flagReader, missingValueMessage } from '../src/config/cliFlags.ts'
 import type { CheckSpec } from '../src/rotation/record.ts'
 import type { ProjectConfig } from '../src/config/project.ts'
 import { runReport } from '../src/relay/report.ts'
 import { RunLogWriter, readRunLog, runLogExists } from '../src/relay/resume.ts'
-import { preflightRefusals } from '../src/relay/guardrails.ts'
+import { ceilingsFrom, preflightRefusals } from '../src/relay/guardrails.ts'
 import { ensureCodexHooksTrusted } from '../src/deployment/ensureTrust.ts'
 import type { ReadSession } from '../src/workspace/sessionRecord.ts'
 import { execFileSync, spawn } from 'node:child_process'
@@ -47,12 +48,14 @@ import {
 } from '../src/workspace/sessionView.ts'
 import { formatGoalFindings, lintGoal } from '../src/relay/goalLint.ts'
 import { version } from '../src/version.ts'
-import { closeSync, existsSync, mkdirSync, openSync, readSync, statSync } from 'node:fs'
+import { closeSync, existsSync, mkdirSync, openSync, readSync, realpathSync, statSync } from 'node:fs'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { seedCodexTrust } from '../src/deployment/codexHookTrust.ts'
 import { defaultRegistry } from '../src/registry/builtin.ts'
+import type { AgentRegistry } from '../src/registry/registry.ts'
 import { runSession } from '../src/repl/session.ts'
-import { Relay } from '../src/relay/relay.ts'
+import { implementerSeatPlan, implementerSpecsFor, Relay, reviewerSpecFor, type SeatRequest } from '../src/relay/relay.ts'
 import { formatGuardReportJson, guard } from '../src/workspace/sessionLock.ts'
 
 const USAGE = `conclave <command>
@@ -129,12 +132,16 @@ Commands:
                                    live, so it can gate a commit helper. --json prints the
                                    report as JSON on stdout instead of prose; the exit
                                    code is unchanged.
-  relay "<goal>" [--advisor codex] [--implementer claude] [--rounds N] [--settle SECONDS]
+  relay "<goal>" [--advisor codex] [--implementer claude]
+                 [--implementers "claude --model opus-5, claude --model sonnet-5"]
+                 [--reviewer claude] [--reviewer-args "..."]
+                 [--rounds N] [--settle SECONDS]
                  [--checks "npm test"] [--checks-informational "..."]
                  [--checks-unrelated "..."] [--advisor-args "..."] [--implementer-args "..."]
                  [--salvage SECONDS] [--json] [--resume <log>] [--record <path>] [--dry-run]
                  [--force]
-                 [--max-turns N] [--max-minutes N] [--strict-goal] [--operator agent]
+                 [--max-turns N] [--max-minutes N] [--max-queue-depth N]
+                 [--max-concurrent-seats N] [--strict-goal] [--operator agent]
                  [--bypass [agent]] [--detach] [--turn-timeout SECONDS]
                                    Run a two-agent session unattended and print the
                                    routing log. --json prints a structured record of the
@@ -149,6 +156,36 @@ Commands:
                                    --operator agent tells the advisor a machine is
                                    answering: escalate readily, but about premises and
                                    ambiguous criteria rather than permission.
+                                   --implementers is the seat LIST, one entry per seat:
+                                   "claude,claude" runs two. An entry may carry that seat's
+                                   OWN launch arguments after the agent --
+                                   "claude --model opus-5, claude --model sonnet-5" runs two
+                                   seats on different models -- which is how seats differ
+                                   from each other without a second flag correlated to this
+                                   one by position. Per-seat arguments are appended after
+                                   --implementer-args, so the seat's own spelling wins.
+                                   The first entry is the seat
+                                   --implementer names, so naming both differently is
+                                   refused rather than reconciled. Seats are named
+                                   implementer, implementer-2, ...; more than one gets a git
+                                   worktree each and refuses to start on a dirty checkout.
+                                   With more than one seat, --checks ALSO run against the
+                                   merged tree after every merge including the last. Nothing
+                                   else looks at it: git reports conflicts, and per-seat
+                                   checks run in one seat's own tree, so every seat can pass
+                                   while the tree they produce together fails. A failure
+                                   mid-run becomes a repair naming both contributing tasks
+                                   rather than blaming a seat; after the final merge there is
+                                   no seat left to repair it, so the run ends
+                                   integration_failed and exits non-zero. One seat has no
+                                   merge, so nothing about it changes.
+                                   --reviewer names an opt-in seat that reads a diff and
+                                   tree the orchestrator builds from a completed seat's own
+                                   worktree -- never that seat's report -- and accepts or
+                                   rejects before the merge. A rejection becomes an
+                                   automatic repair task for the seat that produced the
+                                   work; a second rejection of the same work pauses the run.
+                                   Absent by default: no reviewer, no review step at all.
                                    The goal is linted before anything starts: an ask with
                                    nothing observable in it cannot be graded better than
                                    reasoned_but_unverified however well the work goes.
@@ -160,8 +197,15 @@ Commands:
                                    --dry-run resolves everything and starts nothing.
                                    --max-turns / --max-minutes stop a run that is still
                                    going, exit non-zero, and put the intended length into
-                                   the record. Refuses to start outside a git repository
-                                   unless --force.
+                                   the record. --max-queue-depth bounds admitted work
+                                   waiting for a seat and --max-concurrent-seats bounds
+                                   seats working at once; both read the dispatcher at a
+                                   turn boundary, and both permit the number they are
+                                   given, stopping only above it. Every ceiling is
+                                   optional and absent means no limit, so a run given
+                                   none is bounded only by --rounds as before.
+                                   All four are on session too. Refuses to start outside
+                                   a git repository unless --force.
                                    --settle bounds how long a turn's transcript is given to
                                    catch up with the hook that says the turn ended. If it
                                    catches up with NOTHING, --salvage (default 90s) is how
@@ -222,12 +266,16 @@ Commands:
                                    minutes. --record tees every byte, escape codes
                                    included, so a rendering fault can be inspected rather
                                    than screenshotted.
-  session ["<goal>"] [--advisor codex] [--implementer claude] [--rounds N]
+  session ["<goal>"] [--advisor codex] [--implementer claude]
+                   [--implementers "claude --model opus-5, claude --model sonnet-5"]
+                   [--reviewer claude] [--reviewer-args "..."]
+                   [--rounds N]
                    [--checks "npm test"] [--checks-informational "..."]
                    [--checks-unrelated "..."] [--advisor-args "..."] [--implementer-args "..."]
                    [--bypass [agent]] [--operator agent] [--settle SECONDS]
                    [--salvage SECONDS] [--record <path>] [--resume <log>] [--force]
-                   [--turn-timeout SECONDS]
+                   [--turn-timeout SECONDS] [--max-turns N] [--max-minutes N]
+                   [--max-queue-depth N] [--max-concurrent-seats N]
                                    The same session, interactively. The goal is optional:
                                    without one the console waits and the first thing you
                                    type starts the run. Pauses become decision
@@ -237,6 +285,12 @@ Commands:
                                    --advisor-args / --implementer-args pass extra launch
                                    arguments, e.g. "-m opencode/kimi-k2.6". Required for
                                    any agent that picks its model per invocation.
+                                   --implementers is the seat list, as in relay, including
+                                   per-seat launch arguments:
+                                   "claude --model opus-5, claude --model sonnet-5".
+                                   --reviewer is the same opt-in reviewer seat as relay:
+                                   absent by default, reads a diff and tree built by the
+                                   orchestrator, never a seat's own report.
                                    --checks are REQUIRED: a replacement that cannot
                                    reproduce one rolls the rotation back.
                                    --checks-informational and --checks-unrelated run and
@@ -244,6 +298,9 @@ Commands:
                                    that do not exercise the transferred work.
                                    --checks enables rotation; without it a degraded
                                    implementer escalates rather than rotating unverified.
+                                   With more than one seat they also run against the MERGED
+                                   tree after every merge, as in relay: a clean merge is not
+                                   a correct merge.
                                    --operator agent as in relay. Prefer THIS command for an
                                    agent driver: a pause here is held open as a decision
                                    point, where relay ends the run at every one of them.
@@ -259,6 +316,11 @@ Commands:
                                    run that hits a pause is held open for you, where relay
                                    would end again at the first one.
                                    --settle / --salvage / --turn-timeout as in relay.
+                                   --max-turns / --max-minutes / --max-queue-depth /
+                                   --max-concurrent-seats as in relay. Worth setting when
+                                   driving with --operator agent: nobody is watching that
+                                   run, and without a ceiling nothing but --rounds bounds
+                                   it. Absent means no limit, as before.
                                    --record tees every byte written to the terminal,
                                    escape codes included, so a rendering fault can be
                                    inspected rather than screenshotted.
@@ -290,6 +352,55 @@ function agentsFromFlags(flags: string[]): { agents?: AgentKind[] } {
 function extraArgs(raw: string): string[] {
   return raw.split(/\s+/).map((a) => a.trim()).filter(Boolean)
 }
+
+/**
+ * Every flag `relay` reads a VALUE for, and every flag `session` does.
+ *
+ * Two lists rather than one, and they are meant to be read side by side: the difference between
+ * them IS the divergence between the front-ends, expressed as data instead of as two blocks of
+ * parsing that have to be compared by eye. Today it is one entry (`--detached-id`, which is how
+ * a detached child adopts the id its parent printed and has nothing to say to a console), and
+ * `frontEndParity.test.ts` fails on any other difference that is not declared there.
+ *
+ * Boolean flags are absent by design. `--json`, `--force`, `--detach`, `--dry-run` and
+ * `--strict-goal` are read with `includes`, take no value, and are legitimately followed by
+ * another flag -- putting one here would turn `--force --json` into a missing value.
+ *
+ * Declared rather than derived from the call sites, because the missing-value check runs over
+ * the whole argv BEFORE the first read (see `flagReader`), and a check that only knew about
+ * flags something had already read could not refuse before the command started work.
+ */
+const RELAY_VALUED_FLAGS: readonly string[] = [
+  'advisor',
+  'advisor-args',
+  'checks',
+  'checks-informational',
+  'checks-unrelated',
+  'detached-id',
+  'implementer',
+  'implementer-args',
+  'implementers',
+  'lead',
+  'lead-args',
+  'max-concurrent-seats',
+  'max-minutes',
+  'max-queue-depth',
+  'max-turns',
+  'operator',
+  'record',
+  'resume',
+  'reviewer',
+  'reviewer-args',
+  'rounds',
+  'salvage',
+  'settle',
+  'turn-timeout',
+]
+
+const SESSION_VALUED_FLAGS: readonly string[] = RELAY_VALUED_FLAGS.filter((f) => f !== 'detached-id')
+
+/** Read by `frontEndParity.test.ts`, which compares the two surfaces as data. */
+export const VALUED_FLAGS = { relay: RELAY_VALUED_FLAGS, session: SESSION_VALUED_FLAGS } as const
 
 /**
  * Verification commands with their declared relevance.
@@ -567,7 +678,39 @@ async function streamEvents(found: ReadSession, follow: boolean): Promise<number
   }
 }
 
-async function main(argv: string[]): Promise<number> {
+/**
+ * Injected for testing. Production passes nothing and builds the default registry.
+ *
+ * The console has had this seam since it was written -- `SessionOptions.registry`, "injected
+ * for testing" -- and `relay` had none, so the participants the unattended front-end actually
+ * constructs were reachable from no test at all. What stood in for one was a test that read
+ * THIS FILE as text and matched an `id:` out of it (#55), which passes whether or not the
+ * call it parsed is the call that runs.
+ */
+export interface MainOverrides {
+  /**
+   * Replaces `defaultRegistry()` for BOTH front-ends.
+   *
+   * It reached `relay` only, which left the `session` block below in exactly the position
+   * `relay` was in before this seam existed: the participants the console CLI constructs
+   * were reachable from no test, and what stood in for one was a regex over this file
+   * (#69). `runSession` has had `SessionOptions.registry` all along -- the console tests
+   * called it directly and skipped the argv parsing, which is the half that breaks.
+   */
+  registry?: AgentRegistry
+  /**
+   * The console's streams. Production passes nothing and the session attaches to the
+   * process's own; see `SessionOptions.input`/`output`.
+   *
+   * Required for the registry override to be usable here at all: an in-process
+   * `main(['session', ...])` with no streams draws a live console over the test
+   * reporter's stdout and reads its stdin.
+   */
+  input?: NodeJS.ReadableStream
+  output?: NodeJS.WritableStream
+}
+
+export async function main(argv: string[], overrides: MainOverrides = {}): Promise<number> {
   const [command, sub, ...rest] = argv
 
   // Before dispatch, for every command rather than per-command. `relay` grew its own help
@@ -738,11 +881,18 @@ async function main(argv: string[]): Promise<number> {
       )
       return 1
     }
-    const flag = (name: string, fallback: string) => {
-      const i = rest.indexOf(`--${name}`)
-      return i >= 0 ? (rest[i + 1] ?? fallback) : fallback
+    // The same reader the console builds, over the same rules. Both commands used to carry a
+    // helper of their own and the two disagreed about what a value is (#81); see `flagReader`.
+    const flag = flagReader(rest, RELAY_VALUED_FLAGS)
+    // Before anything is read, resolved or written, and in the same place on both front-ends.
+    // A flag whose value went missing is an invocation that does not mean what was typed, and
+    // relay is the command whose runs nobody is watching: reading `--json` as the round count
+    // and starting anyway is a run that has to be found and killed rather than retyped.
+    if (flag.missing !== undefined) {
+      console.error(missingValueMessage(flag.missing, 'relay'))
+      return 1
     }
-    const registry = defaultRegistry()
+    const registry = overrides.registry ?? defaultRegistry()
     // Everything a human would read goes to STDERR under --json, so stdout carries the
     // report and nothing else. A consumer that had to strip log lines out of a JSON stream
     // is a consumer that will eventually strip the wrong one.
@@ -753,7 +903,28 @@ async function main(argv: string[]): Promise<number> {
     // RelayOptions FIELD name leaking into the CLI, and it is kept as an alias so existing
     // scripts do not break.
     const lead = flag('advisor', '') || flag('lead', 'codex')
-    const implementer = flag('implementer', 'claude')
+    // `--implementers` is the seat LIST and `--implementer` is its first entry, so the two are
+    // read together by one shared builder rather than separately here. A run given neither
+    // passes no `implementers` key at all -- see SeatPlan; the default run must not acquire a
+    // seat list it did not ask for (D1).
+    const seatPlan = implementerSeatPlan({
+      implementer: flag('implementer', 'claude'),
+      implementers: flag('implementers', ''),
+      implementerNamed: rest.includes('--implementer'),
+    })
+    if (seatPlan.kind === 'refused') {
+      console.error(`conclave: ${seatPlan.reason}`)
+      return 1
+    }
+    // One entry per seat, agent and per-seat launch arguments together. A run that named no
+    // list is the one seat `--implementer` names, carrying no arguments of its own -- the
+    // `--implementer-args` it may have been given applies to every seat and is composed below.
+    const seatRequests: SeatRequest[] =
+      seatPlan.kind === 'listed' ? seatPlan.seats : [{ agent: flag('implementer', 'claude'), args: [] }]
+    const implementerAgents = seatRequests.map((s) => s.agent)
+    // The lead implementer, which is what every singular reader below wants: registration,
+    // the bypass notice, the dry-run plan and `RelayOptions.implementer` itself.
+    const implementer = implementerAgents[0]!
     const checks = parseChecks(
       flag('checks', ''),
       flag('checks-informational', ''),
@@ -864,11 +1035,30 @@ async function main(argv: string[]): Promise<number> {
     const projectConfig = withBypass(readProjectConfig(process.cwd()), bypass)
     // Config-derived args first, then per-invocation ones, so an explicit flag wins.
     const leadArgs = [...launchArgsFor(projectConfig, lead), ...extraArgs(flag('advisor-args', '') || flag('lead-args', ''))]
-    const implArgs = [
-      ...launchArgsFor(projectConfig, implementer),
+    // Per AGENT, not per seat: `.conclave/config.json` keys launch arguments by agent, and two
+    // seats can be filled by different ones. `--implementer-args` is the operator's own addition
+    // and applies to every implementer seat, because there is one flag and it says implementer.
+    // Arguments for ONE seat ride inside its `--implementers` entry instead, and are appended
+    // after these by `implementerSpecsFor` so the more specific spelling is the one that wins.
+    const implArgsFor = (agent: string) => [
+      ...launchArgsFor(projectConfig, agent),
       ...extraArgs(flag('implementer-args', '')),
     ]
-    const bypassing = [lead, implementer].filter((a) => permissionModeFor(projectConfig, a) === 'bypass')
+    const implSpecs = implementerSpecsFor(seatRequests, implArgsFor)
+    // Opt-in and singular (#72). Absent when `--reviewer` was not given -- `reviewerSpecFor`
+    // returns `undefined`, and no `reviewer` key reaches `Relay.start` at all.
+    const reviewerSpec = reviewerSpecFor(flag('reviewer', ''), (agent) => [
+      ...launchArgsFor(projectConfig, agent),
+      ...extraArgs(flag('reviewer-args', '')),
+    ])
+    // The lead seat's argv as it will actually be launched, read back off the spec rather than
+    // recomposed. Recomposing it from the agent alone would drop that seat's own
+    // `--implementers` arguments, so the dry run would print a plan the real run does not match
+    // -- which is the one thing a dry run must not do. At N=1 with no per-seat arguments this is
+    // byte for byte what `implArgsFor(implementer)` returned.
+    const implArgs = implSpecs[0]!.args ?? []
+    const allAgents = [lead, ...implementerAgents, ...(reviewerSpec ? [reviewerSpec.agent] : [])]
+    const bypassing = allAgents.filter((a) => permissionModeFor(projectConfig, a) === 'bypass')
     if (bypassing.length > 0) {
       say(`  permission prompts bypassed for ${[...new Set(bypassing)].join(', ')} — per ${CONFIG_RELATIVE}`)
     }
@@ -880,7 +1070,7 @@ async function main(argv: string[]): Promise<number> {
     // editing someone's .gitignore, which is why the un-ignored paths are reported instead.
     const registered = await installConfig({
       projectRoot: process.cwd(),
-      agents: [...new Set([lead, implementer])].filter((a): a is AgentKind =>
+      agents: [...new Set(allAgents)].filter((a): a is AgentKind =>
         (AGENT_KINDS as string[]).includes(a),
       ),
       diagnose: false,
@@ -900,7 +1090,9 @@ async function main(argv: string[]): Promise<number> {
     // run without a human was the one missing the step that removes the need for one.
     await ensureCodexHooksTrusted({
       projectRoot: process.cwd(),
-      agents: [lead, implementer].filter((a): a is AgentKind => (AGENT_KINDS as string[]).includes(a)),
+      agents: [...new Set(allAgents)].filter((a): a is AgentKind =>
+        (AGENT_KINDS as string[]).includes(a),
+      ),
       say,
       // Appended rather than redrawn: this is the unattended form, its output is usually a
       // file, and a spinner in a log is noise. It still says something, because a silent
@@ -953,6 +1145,16 @@ async function main(argv: string[]): Promise<number> {
         goal,
         advisor: { agent: lead, args: leadArgs },
         implementer: { agent: implementer, args: implArgs },
+        // Only when the operator named a seat list. A default dry run's document is what it
+        // has always been -- one `implementer` key naming one agent -- and a `seats` array
+        // that appeared on every plan would change what an existing reader parses to say
+        // nothing it did not already know.
+        ...(seatPlan.kind === 'listed'
+          ? { implementers: implSpecs.map((s) => ({ id: s.id, agent: s.agent, args: s.args ?? [] })) }
+          : {}),
+        // Opt-in and absent otherwise (#72): a default dry run's document does not gain a
+        // `reviewer` key it never had a reason to carry.
+        ...(reviewerSpec ? { reviewer: { agent: reviewerSpec.agent, args: reviewerSpec.args ?? [] } } : {}),
         checks: checks.map((c) =>
           typeof c === 'string'
             ? { command: c, relevance: 'required' }
@@ -965,7 +1167,15 @@ async function main(argv: string[]): Promise<number> {
         say('dry run — nothing was started')
         say(`  cwd:         ${plan.cwd}`)
         say(`  advisor:     ${lead}${leadArgs.length ? ` ${leadArgs.join(' ')}` : ''}`)
-        say(`  implementer: ${implementer}${implArgs.length ? ` ${implArgs.join(' ')}` : ''}`)
+        // One line per seat when the operator named a list, so the prose says the same thing
+        // the JSON does. At N=1 it is the line it has always been.
+        for (const s of implSpecs) {
+          const label = implSpecs.length === 1 ? 'implementer' : s.id
+          say(`  ${label.padEnd(11)}: ${s.agent}${s.args?.length ? ` ${s.args.join(' ')}` : ''}`)
+        }
+        if (reviewerSpec) {
+          say(`  reviewer   : ${reviewerSpec.agent}${reviewerSpec.args?.length ? ` ${reviewerSpec.args.join(' ')}` : ''}`)
+        }
         say(
           `  checks:      ${
             plan.checks.length
@@ -984,23 +1194,26 @@ async function main(argv: string[]): Promise<number> {
       ...(prior.length > 0 ? { resume: prior } : {}),
       ...(flag('operator', '') === 'agent' ? { operator: 'agent' as const } : {}),
       lead: { id: 'advisor', agent: lead, role: 'advisor', ...(leadArgs.length > 0 ? { args: leadArgs } : {}) },
-      implementer: {
-        id: 'implementer',
-        agent: implementer,
-        role: 'implementer',
-        ...(implArgs.length > 0 ? { args: implArgs } : {}),
-      },
-      maxRounds: Number(flag('rounds', '4')),
-      ...(flag('max-turns', '') || flag('max-minutes', '')
-        ? {
-            ceilings: {
-              ...(flag('max-turns', '') ? { maxTurns: Number(flag('max-turns', '')) } : {}),
-              ...(flag('max-minutes', '')
-                ? { maxDurationMs: Number(flag('max-minutes', '')) * 60_000 }
-                : {}),
-            },
-          }
-        : {}),
+      // `implSpecs[0]` IS the seat this used to build by hand: `seatIdFor(0)` is 'implementer'
+      // and the args are the same list, so a default invocation hands `Relay.start` the object
+      // it always did. The plural key is spread in only when the operator named a seat list.
+      implementer: implSpecs[0]!,
+      ...(seatPlan.kind === 'listed' ? { implementers: implSpecs } : {}),
+      ...(reviewerSpec ? { reviewer: reviewerSpec } : {}),
+      maxAdvisorTurns: Number(flag('rounds', '4')),
+      // Built by `ceilingsFrom` rather than inline, so this command and `session` cannot
+      // disagree about what a ceiling flag means. The `flag()` calls stay HERE: the pinned
+      // flag sets read this block, and a flag parsed out of their sight leaves the guarded
+      // surface without anyone deciding to remove it.
+      ...(() => {
+        const ceilings = ceilingsFrom({
+          maxTurns: flag('max-turns', ''),
+          maxMinutes: flag('max-minutes', ''),
+          maxQueueDepth: flag('max-queue-depth', ''),
+          maxConcurrentSeats: flag('max-concurrent-seats', ''),
+        })
+        return ceilings ? { ceilings } : {}
+      })(),
       // Without these, degradation has nothing to verify a replacement against, so the run
       // ESCALATES and ends rather than rotating. An unattended form that cannot rotate
       // cannot exercise the mechanism it exists to run unattended.
@@ -1068,7 +1281,14 @@ async function main(argv: string[]): Promise<number> {
         console.log(JSON.stringify(await runReport(relay, { goal, outcome, startedAt: runStartedAt, build }), null, 2))
       }
       say(`\n=== relay ended: ${outcome.reason}${outcome.detail ? ` — ${outcome.detail}` : ''}`)
-      failed = outcome.reason === 'transport_failed' || outcome.reason === 'ceiling'
+      // `integration_failed` joins the two endings that already exit non-zero: the run
+      // finished and left a tree that does not pass its own checks (#80). An unattended
+      // caller — CI, a wrapper script, an agent operator — decides on the exit code, and a
+      // zero there is the whole failure the issue is about, one layer out.
+      failed =
+        outcome.reason === 'transport_failed' ||
+        outcome.reason === 'ceiling' ||
+        outcome.reason === 'integration_failed'
     } catch (err) {
       // Belt and braces. The relay converts transport failures into outcomes now, so this
       // should be unreachable -- but the operator's record must not depend on that being
@@ -1130,16 +1350,17 @@ async function main(argv: string[]): Promise<number> {
         )
       }
     }
-    let bad: string | undefined
-    const flag = (name: string, fallback: string) => {
-      const i = args.indexOf(`--${name}`)
-      if (i < 0) return fallback
-      const value = args[i + 1]
-      if (value === undefined || value.startsWith('--')) {
-        bad = name
-        return fallback
-      }
-      return value
+    // The same reader `relay` builds, over the same rules. The console's own helper refused
+    // every value beginning with `--`, including the ones that are argv for a child CLI, so
+    // `--implementer-args "--model x"` was refused here and launched there (#81).
+    const flag = flagReader(args, SESSION_VALUED_FLAGS)
+    // Refused BEFORE the bypass is applied, as the seat-plan contradiction below is and for the
+    // same reason: an invocation that is not going to start a session must not leave a
+    // permission mode written into the operator's project on its way out. It used to be checked
+    // after, which it could not help being -- `bad` was only known once every read had happened.
+    if (flag.missing !== undefined) {
+      console.error(missingValueMessage(flag.missing, 'session'))
+      return 1
     }
     const checks = parseChecks(
       flag('checks', ''),
@@ -1147,7 +1368,18 @@ async function main(argv: string[]): Promise<number> {
       flag('checks-unrelated', ''),
     )
     const lead = flag('advisor', '') || flag('lead', 'codex')
-    const implementer = flag('implementer', 'claude')
+    // Both front-ends, together, through the same builder. See the relay block above: this is
+    // the ninth capability that would otherwise have been wired into one command and not the
+    // other, and the seat count is not one an operator should have to discover empirically.
+    const seatPlan = implementerSeatPlan({
+      implementer: flag('implementer', 'claude'),
+      implementers: flag('implementers', ''),
+      implementerNamed: args.includes('--implementer'),
+    })
+    const seatRequests: SeatRequest[] =
+      seatPlan.kind === 'listed' ? seatPlan.seats : [{ agent: flag('implementer', 'claude'), args: [] }]
+    const implementerAgents = seatRequests.map((s) => s.agent)
+    const implementer = implementerAgents[0]!
     const rounds = flag('rounds', '8')
     // The same flag `relay` has. Its absence here is what made an agent pick the front-end
     // that cannot hold a pause -- see SessionOptions.operator.
@@ -1161,22 +1393,31 @@ async function main(argv: string[]): Promise<number> {
     const record = flag('record', '')
     const resume = flag('resume', '')
     const turnTimeout = flag('turn-timeout', '')
+    // Ceilings, console-side for the first time. `--operator agent` already makes this an
+    // unattended run, and an unattended run with no ceiling of any kind is the live gap this
+    // closes -- not a provision for N>1. Same builder as `relay`, so the two cannot drift.
+    const ceilings = ceilingsFrom({
+      maxTurns: flag('max-turns', ''),
+      maxMinutes: flag('max-minutes', ''),
+      maxQueueDepth: flag('max-queue-depth', ''),
+      maxConcurrentSeats: flag('max-concurrent-seats', ''),
+    })
     const leadArgs = extraArgs(flag('advisor-args', '') || flag('lead-args', ''))
     const implementerArgs = extraArgs(flag('implementer-args', ''))
+    const reviewer = flag('reviewer', '')
+    const reviewerArgs = extraArgs(flag('reviewer-args', ''))
     // Both front-ends, together. Wiring a capability into one and not the other is the
     // mistake this codebase has now made six times.
+    // Refused BEFORE the bypass is applied, which is this block's point of no return: an
+    // invocation that is not going to start a session must not leave a permission mode written
+    // into the operator's project on its way out.
+    if (seatPlan.kind === 'refused') {
+      console.error(`conclave: ${seatPlan.reason}`)
+      return 1
+    }
     // The console applies and persists together: unlike `relay` there is no dry run and no
     // preflight refusal, so the point of no return is here.
     if (!applyBypassFlag(args, (l) => console.log(l))) return 1
-    if (bad) {
-      console.error(
-        `--${bad} was given without a value.\n\n` +
-          `If you used \`npm run session -- ...\`, npm mangles quoted arguments containing\n` +
-          `spaces. Call the binary directly instead:\n\n` +
-          `  node bin/conclave.ts session "<goal>" --checks "npm test"\n`,
-      )
-      return 1
-    }
     return runSession({
       cwd: process.cwd(),
       ...(operator ? { operator } : {}),
@@ -1188,12 +1429,32 @@ async function main(argv: string[]): Promise<number> {
       ...(goal === undefined ? {} : { goal }),
       lead,
       implementer,
+      // Seat REQUESTS rather than specs: `runSession` owns seat construction, and handing it a
+      // spec list would put `seatIdFor` on both sides of the wire. What crosses is what the
+      // operator asked for -- an agent and that seat's own launch arguments -- which is the
+      // smallest thing that cannot lose the pairing on the way. Absent unless the operator named
+      // a list, so a default console run passes exactly the options it always passed.
+      ...(seatPlan.kind === 'listed' ? { implementers: seatPlan.seats } : {}),
       rounds: Number(rounds),
       checks,
       ...(leadArgs.length > 0 ? { leadArgs } : {}),
       ...(implementerArgs.length > 0 ? { implementerArgs } : {}),
+      ...(reviewer ? { reviewer } : {}),
+      ...(reviewerArgs.length > 0 ? { reviewerArgs } : {}),
       version: version(),
       ...(turnTimeout ? { turnWatchdogMs: Number(turnTimeout) * 1000 } : {}),
+      ...(ceilings ? { ceilings } : {}),
+      // Testing seams, and nothing production passes. Wiring one into `relay` and not here
+      // is the mistake this codebase keeps making, and this time it made the console CLI
+      // itself untestable rather than a flag unreachable.
+      //
+      // Assigned rather than conditionally spread, which is why the three fields are
+      // declared `| undefined` on SessionOptions: a spread is not excess-property checked,
+      // so `{ registy: ... }` inside one compiles and drops the seam without a word. These
+      // keys are now the compiler's problem rather than a reviewer's.
+      registry: overrides.registry,
+      input: overrides.input,
+      output: overrides.output,
     })
   }
 
@@ -1219,10 +1480,33 @@ async function main(argv: string[]): Promise<number> {
   return 1
 }
 
-main(process.argv.slice(2)).then(
-  (code) => process.exit(code),
-  (err) => {
-    console.error(`conclave: ${err instanceof Error ? err.message : String(err)}`)
-    process.exit(1)
-  },
-)
+/**
+ * Only when this file IS the program.
+ *
+ * `main` is exported so the default-run guard can drive the real `relay` command instead of
+ * reading this file as text. Without this check, importing it would run the importer's argv
+ * as a command -- under `node --test` that is a file path, so every test file would try to
+ * start a session and exit the process.
+ *
+ * Through realpath on both sides because an npm-installed `conclave` is a symlink into this
+ * file, and comparing the link to its target would take the CLI out of service entirely.
+ */
+function invokedDirectly(): boolean {
+  const entry = process.argv[1]
+  if (entry === undefined) return false
+  try {
+    return realpathSync(entry) === realpathSync(fileURLToPath(import.meta.url))
+  } catch {
+    return false
+  }
+}
+
+if (invokedDirectly()) {
+  main(process.argv.slice(2)).then(
+    (code) => process.exit(code),
+    (err) => {
+      console.error(`conclave: ${err instanceof Error ? err.message : String(err)}`)
+      process.exit(1)
+    },
+  )
+}

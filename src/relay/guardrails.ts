@@ -74,18 +74,90 @@ export function preflightRefusals(cwd: string, opts: { force?: boolean } = {}): 
   return out
 }
 
+/**
+ * The ceilings a run can be given. Every field is optional, and absent means NO LIMIT.
+ *
+ * "Absent is behaviourless" is load-bearing rather than a convenience. A default that bounds a
+ * run which is unbounded today would change what an existing invocation does without anyone
+ * asking for it, and a ceiling nobody set is exactly the ceiling nobody would think to raise.
+ *
+ * ## Two kinds of quantity, and they do not compare the same way
+ *
+ * `maxTurns` and `maxDurationMs` are CONSUMABLES: an allowance the run spends and cannot get
+ * back. Reaching the number means the allowance is gone, so they breach on `>=`.
+ *
+ * `maxQueueDepth` and `maxConcurrentSeats` are GAUGES: an instantaneous reading of how much is
+ * outstanding right now, which goes up and down. `maxConcurrentSeats: 2` has to permit two
+ * seats -- a ceiling that stopped the run at the number it was told to allow would be read as
+ * a bug by anyone who set it -- so they breach on `>`, when the reading EXCEEDS the ceiling.
+ *
+ * The asymmetry is deliberate and is the one thing about this type worth reading twice.
+ */
 export interface Ceilings {
-  /** Wall-clock ceiling in milliseconds. Absent means no limit. */
+  /** Wall-clock ceiling in milliseconds. Absent means no limit. Consumable: breaches on `>=`. */
   maxDurationMs?: number | undefined
-  /** Total turns across all participants. Absent means no limit. */
+  /** Total turns across all participants. Absent means no limit. Consumable: breaches on `>=`. */
   maxTurns?: number | undefined
+  /**
+   * The most admitted work that may be waiting for a seat at once. Absent means no limit.
+   *
+   * A gauge, so it breaches on `>`. Counts tasks the advisor's decisions have admitted but
+   * which no seat has taken yet -- `admitted` and `ready` in `TaskState` terms. Work already
+   * running is not queued and is not counted here; `maxConcurrentSeats` is that question.
+   */
+  maxQueueDepth?: number | undefined
+  /**
+   * The most seats that may be working at once. Absent means no limit.
+   *
+   * A gauge, so it breaches on `>`. Counts seats holding a task that has been assigned and has
+   * not yet reported. A seat in the integration boundary is deliberately NOT counted: it is
+   * occupied but no agent is running on it, and a concurrency ceiling is about work in flight.
+   */
+  maxConcurrentSeats?: number | undefined
+}
+
+/** What the run looked like when the ceilings were checked. Every field is a real reading. */
+export interface CeilingState {
+  elapsedMs: number
+  turns: number
+  queueDepth: number
+  concurrentSeats: number
 }
 
 export interface CeilingBreach {
-  kind: 'duration' | 'turns'
+  kind: 'duration' | 'turns' | 'queue_depth' | 'concurrent_seats'
   limit: number
   reached: number
   detail: string
+}
+
+/**
+ * Build `Ceilings` from raw flag strings, or `undefined` if none were given.
+ *
+ * Shared by both front-ends ON PURPOSE. `--turn-timeout` reaching only the console (#36) and
+ * `--record` reaching neither (#69) were both a value parsed in one command block and built
+ * into options in that same block, where the other copy could differ or fail to exist. Each
+ * block still calls `flag()` itself -- the pinned flag sets read the block, and a flag parsed
+ * out of sight of them is a flag that silently leaves the guarded surface -- but what happens
+ * to the parsed value afterwards is written once, here, so the two cannot disagree about it.
+ *
+ * Returning `undefined` rather than `{}` for "none given" keeps absent behaviourless at the
+ * option level too: `ceilings: {}` is a run with a ceilings object that limits nothing, which
+ * reads in a status document as though someone configured one.
+ */
+export function ceilingsFrom(raw: {
+  maxTurns?: string | undefined
+  maxMinutes?: string | undefined
+  maxQueueDepth?: string | undefined
+  maxConcurrentSeats?: string | undefined
+}): Ceilings | undefined {
+  const ceilings: Ceilings = {
+    ...(raw.maxTurns ? { maxTurns: Number(raw.maxTurns) } : {}),
+    ...(raw.maxMinutes ? { maxDurationMs: Number(raw.maxMinutes) * 60_000 } : {}),
+    ...(raw.maxQueueDepth ? { maxQueueDepth: Number(raw.maxQueueDepth) } : {}),
+    ...(raw.maxConcurrentSeats ? { maxConcurrentSeats: Number(raw.maxConcurrentSeats) } : {}),
+  }
+  return Object.keys(ceilings).length > 0 ? ceilings : undefined
 }
 
 /**
@@ -97,10 +169,7 @@ export interface CeilingBreach {
  * report says the elapsed figure rather than the limit, because a reader comparing the two
  * needs both.
  */
-export function breached(
-  ceilings: Ceilings,
-  now: { elapsedMs: number; turns: number },
-): CeilingBreach | undefined {
+export function breached(ceilings: Ceilings, now: CeilingState): CeilingBreach | undefined {
   if (ceilings.maxTurns !== undefined && now.turns >= ceilings.maxTurns) {
     return {
       kind: 'turns',
@@ -116,6 +185,28 @@ export function breached(
       limit: ceilings.maxDurationMs,
       reached: now.elapsedMs,
       detail: `time ceiling reached: ${s(now.elapsedMs)} elapsed of a maximum ${s(ceilings.maxDurationMs)}`,
+    }
+  }
+  // The gauges, on `>` rather than `>=`. See `Ceilings`: these read what is outstanding right
+  // now, and a run told to allow N must be allowed to reach N.
+  if (ceilings.maxQueueDepth !== undefined && now.queueDepth > ceilings.maxQueueDepth) {
+    return {
+      kind: 'queue_depth',
+      limit: ceilings.maxQueueDepth,
+      reached: now.queueDepth,
+      detail:
+        `queue ceiling exceeded: ${now.queueDepth} task(s) waiting for a seat, ` +
+        `above a maximum of ${ceilings.maxQueueDepth}`,
+    }
+  }
+  if (ceilings.maxConcurrentSeats !== undefined && now.concurrentSeats > ceilings.maxConcurrentSeats) {
+    return {
+      kind: 'concurrent_seats',
+      limit: ceilings.maxConcurrentSeats,
+      reached: now.concurrentSeats,
+      detail:
+        `concurrency ceiling exceeded: ${now.concurrentSeats} seat(s) working, ` +
+        `above a maximum of ${ceilings.maxConcurrentSeats}`,
     }
   }
   return undefined

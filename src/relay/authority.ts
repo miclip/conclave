@@ -52,6 +52,55 @@ import type { RelayMessage } from './message.ts'
 export type AttributionSupport = 'named_path' | 'text_match'
 
 /**
+ * How well the ACTOR is evidenced — a different question from `AttributionSupport`.
+ *
+ * Support asks how strongly a path is tied to the message; this asks how strongly it is tied
+ * to the participant. The two are independent and both are needed: a `named_path` in a shared
+ * checkout still cannot rule out a second writer, and a path found in a seat's own linked
+ * worktree names its author whatever the tool inputs looked like.
+ *
+ * The vocabulary is the conformance report's, deliberately (`src/conformance/capabilities.ts`).
+ * This codebase already has one word for "seen to happen" and one for "argued from evidence
+ * that does not exclude the alternative", and a second pair would just be the same distinction
+ * spelled differently.
+ */
+export type AttributionConfidence =
+  /**
+   * A linked worktree only one seat writes in. The tree itself names the actor: nothing else
+   * has that directory, so a path that appeared in it appeared because that seat wrote it.
+   */
+  | 'observed'
+  /**
+   * A shared root. `git status` says the path changed and the participant's own tool inputs
+   * name it, which is real evidence and does not exclude a second writer in the same
+   * directory — the operator, or another participant. This is what N=1 has always produced.
+   */
+  | 'reasoned_but_unverified'
+
+/**
+ * One attributed path, with both evidence dimensions and the seat it was read from.
+ *
+ * A LIST rather than a map keyed by path, and that is the point at N>1: two seats working in
+ * two worktrees can each create `notes.md`, and those are two different files by two different
+ * actors. Keyed by path they collapse into one entry whose seat is whichever was written last,
+ * which is worse than not recording the seat at all.
+ */
+export interface AttributedArtifact {
+  /** As `git status` reported it, relative to the root it was found in. */
+  path: string
+  support: AttributionSupport
+  /**
+   * The seat whose isolated worktree this was read from, or `null` for a shared root.
+   *
+   * `null` rather than absent. A key that vanishes when it has nothing to say forces a reader
+   * to tell "no seat" from "this build does not report seats", which is the ambiguity the
+   * report's own rules are written against.
+   */
+  seat: string | null
+  confidence: AttributionConfidence
+}
+
+/**
  * Whether a path was NAMED by a tool input or merely found inside one.
  *
  * A complete JSON string value equal to the path, or to a path ending in it, is the tool
@@ -96,8 +145,23 @@ export interface RestrictedOrigin {
   excluded: string[]
   /** Identifiers and paths named in it, which later instructions may refer to. */
   tokens: string[]
-  /** Repository paths that appeared after it was delivered, attributed to it. */
+  /**
+   * Repository paths that appeared after it was delivered, attributed to it.
+   *
+   * Deduplicated by path, and therefore lossy the moment two seats have their own trees. It
+   * stays because it is what every existing reader — the pause text, the status document, the
+   * report — was written against, and because at N=1 it is exactly `attributions` with one
+   * field. `attributions` is the record; this is the view.
+   */
   artifacts: string[]
+  /**
+   * Every attribution, with the seat and both evidence dimensions. The full-fidelity record.
+   *
+   * Present and empty rather than absent when nothing was attributed, for the reason the
+   * report gives about `flags`: a field that disappears when it has nothing to say makes a
+   * reader distinguish "nothing attributed" from "this build does not attribute".
+   */
+  attributions: AttributedArtifact[]
   /**
    * How strongly each attributed path is supported.
    *
@@ -279,6 +343,28 @@ export function attributable(candidates: string[], evidence: string[]): string[]
   })
 }
 
+/**
+ * The evidence that can speak for one ROOT: informed participants working in it, and no others.
+ *
+ * An excluded participant could not have acted on the message — that rule predates roots. This
+ * adds the second half: an informed participant working in a DIFFERENT tree cannot have caused
+ * a path in this one, so its tool inputs are not corroboration for a candidate found here.
+ *
+ * A function rather than an inline filter because it is currently UNREACHABLE through the
+ * relay: `Audience` addresses exactly one participant, so a restricted message has one informed
+ * id and one root, and the filter never removes anything. It is the correct rule and it becomes
+ * load-bearing the moment a message can be addressed to two participants — so it lives here,
+ * where it can be exercised directly, rather than as a line nothing can test.
+ */
+export function evidenceForRoot(
+  informed: readonly string[],
+  rootOf: (id: string) => string,
+  root: string,
+  since: (id: string) => string[],
+): string[] {
+  return informed.filter((id) => rootOf(id) === root).flatMap((id) => since(id))
+}
+
 /** Build an origin record from a restricted message as it is sent. */
 export function originOf(m: RelayMessage): RestrictedOrigin {
   return {
@@ -289,7 +375,38 @@ export function originOf(m: RelayMessage): RestrictedOrigin {
     excluded: [...m.excluded],
     tokens: extractTokens(m.text),
     artifacts: [],
+    attributions: [],
     artifactSupport: {},
+  }
+}
+
+/**
+ * Record one attribution, and keep the derived views in step.
+ *
+ * One function so the relationship between the record and the two legacy fields lives in a
+ * single place. Identity is (seat, path), not path: the same relative path in two isolated
+ * worktrees is two files, and merging them would report one seat's work under another's name.
+ *
+ * `support` is upgraded in place when a later turn produces better evidence for the same
+ * entry — `named_path` beats `text_match`, never the other way round, so a substring hit
+ * cannot demote a tool that named the file.
+ */
+export function recordAttribution(
+  origin: RestrictedOrigin,
+  entry: { path: string; support: AttributionSupport; seat: string | null },
+): void {
+  const confidence: AttributionConfidence = entry.seat === null ? 'reasoned_but_unverified' : 'observed'
+  const existing = origin.attributions.find((a) => a.path === entry.path && a.seat === entry.seat)
+  if (existing) {
+    if (entry.support === 'named_path') existing.support = 'named_path'
+  } else {
+    origin.attributions.push({ path: entry.path, support: entry.support, seat: entry.seat, confidence })
+  }
+  if (!origin.artifacts.includes(entry.path)) origin.artifacts.push(entry.path)
+  // The derived map keeps its old meaning — the best support seen for this path anywhere —
+  // which is what it already meant when there was only one root for it to mean it in.
+  if (origin.artifactSupport[entry.path] !== 'named_path') {
+    origin.artifactSupport[entry.path] = entry.support
   }
 }
 
@@ -308,9 +425,12 @@ export function describeConflict(c: AuthorityConflict): string {
   if (c.origin.artifacts.length > 0) {
     // The support level travels with the path. A reader deciding whether to trust an
     // attribution needs to know whether a tool named the file or a substring matched.
+    // Per attribution rather than per path, and the seat is named when one is known: at N>1
+    // "notes.md was changed" is not actionable when two seats each have a notes.md, and the
+    // operator adjudicating this needs to know whose tree it is in.
     lines.push(
-      `  changes attributed to it: ${c.origin.artifacts
-        .map((a) => `${a} [${c.origin.artifactSupport[a] ?? 'text_match'}]`)
+      `  changes attributed to it: ${c.origin.attributions
+        .map((a) => `${a.seat ? `${a.seat}:` : ''}${a.path} [${a.support}, ${a.confidence}]`)
         .join(', ')}`,
     )
   }

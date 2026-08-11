@@ -23,8 +23,23 @@ import type {
 } from '../contract/session.ts'
 import { formatVerdict, type Verdict } from '../contract/outcome.ts'
 import { AgentRegistry } from '../registry/registry.ts'
+import { launchRecordFor, type ParticipantLaunch } from '../registry/launch.ts'
 import type { ParticipantSpec } from '../registry/types.ts'
+import type { RoleId } from '../registry/roles.ts'
 import { acquire, release } from '../workspace/sessionLock.ts'
+import {
+  cleanupSeatWorktrees,
+  createSeatWorktrees,
+  ensureWorktreeHookTrigger,
+  nextRunId,
+  recoveryLines,
+  seatCwd,
+  unwindSeatWorktrees,
+  writeManifest,
+  type WorktreeManifest,
+} from '../workspace/worktrees.ts'
+import { CheckLane } from './checkLane.ts'
+import { failedRequired, integrateSeat, integrationHead, type IntegrationCheckResult } from './integrate.ts'
 import {
   envelope,
   type Audience,
@@ -43,8 +58,11 @@ import {
   type RunOutcome,
   type RunPause,
 } from './run.ts'
+import { actorFor, resolutionFor, type ResolutionSubject } from './resolution.ts'
 import {
   attributable,
+  evidenceForRoot,
+  recordAttribution,
   supportFor,
   describeConflict,
   detectConflict,
@@ -56,8 +74,27 @@ import {
 import { assess, ComplaintLedger, topicOf } from '../rotation/degradation.ts'
 import { rotate, type RotationResult } from '../rotation/rotate.ts'
 import type { CheckSpec } from '../rotation/record.ts'
+import { buildReviewContext, reviewPrompt } from '../rotation/review.ts'
 import { resumeBriefing } from './resume.ts'
-import { breached, type Ceilings } from './guardrails.ts'
+import { breached, type CeilingBreach, type CeilingState, type Ceilings } from './guardrails.ts'
+import {
+  cancelledByFailedDependencies,
+  concurrentSeats,
+  dependenciesMet,
+  nextDispatch,
+  queueDepth,
+  parseDecisions,
+  recordCompletion,
+  refuseDispatch,
+  seatsFor,
+  type SeatExecution,
+  type Task,
+  type TaskEvent,
+  type TaskPurpose,
+  type TaskGrade,
+  type TaskRuntime,
+  type TaskTarget,
+} from './dispatch.ts'
 import { isSubagentTool, worktreePaths } from './subagents.ts'
 import type { ClockSupport } from '../registry/types.ts'
 
@@ -82,6 +119,34 @@ export interface RelayParticipant {
    */
   agent: string
   rank: Rank
+  /**
+   * What this seat is FOR, as distinct from what it may overrule.
+   *
+   * `RoleId` is open on purpose (`src/registry/roles.ts:15`) — project configuration assigns
+   * agents to roles, so a role a build has never heard of has to be a validation error with a
+   * message rather than a compile error in someone else's checkout. `ParticipantSpec` has
+   * carried it all along and `#join` used to read `spec.agent` and drop it, which is why
+   * "named implementers" looked blocked on the rank type when it never was.
+   *
+   * `Rank` stays closed and is not this. It is an AUTHORITY ordering feeding `outranks()`;
+   * three implementers are different in job and identical in authority, and widening it would
+   * force an invented ordering among peers into the header `envelope()` renders.
+   */
+  role: RoleId
+  /**
+   * What this seat was started with, and which model that names.
+   *
+   * `ParticipantSpec.args` reached the launch and was then dropped here, the same way
+   * `role` was before it (#71): a run could be started with `-m opencode/kimi-k2.7-code`
+   * and the record would say only `agent: opencode`, which is any of dozens of models at a
+   * ~30x price spread and no instruction for repeating the run. Kept beside `agent` for the
+   * same reason `agent` is kept -- so the record can be read without awaiting a snapshot.
+   *
+   * Survives a rotation unchanged, and must: rotation replaces the SESSION and reuses the
+   * spec, so the replacement is launched from this same argv. A seat whose reported model
+   * changed when its adapter was restarted would be reporting a change that did not happen.
+   */
+  launch: ParticipantLaunch
   session: AgentSession
   events: AgentEvent[]
   /** Compaction generation when this session joined. Degradation is measured against it. */
@@ -90,19 +155,25 @@ export interface RelayParticipant {
    * Index into `events` at which the current session began.
    *
    * Rotation keeps the routing history and the event list, so without a cursor the
-   * retired session's compaction events would be re-read every round and the replacement
+   * retired session's compaction events would be re-read on every advisor turn and the replacement
    * would be judged degraded from the moment it started.
    */
   degradationCursor: number
 }
 
 /**
- * What a replacement must reproduce.
+ * What a replacement must reproduce -- and, since #80, what the merged tree must pass.
  *
  * Rotation without verification commands would be a transfer nobody demonstrated, which
  * is the thing §7a exists to prevent -- so leaving this unset does not disable the
  * *detection* of degradation, only the automatic response to it. A degraded implementer
  * with nothing to verify against escalates to the human instead.
+ *
+ * The name is now narrower than the field's use, and that is deliberate rather than
+ * unnoticed: renaming it would break every existing programmatic caller for a change that
+ * ADDS a reader, and `--checks` is the spelling operators and scripts already have. What is
+ * true is written here instead -- these commands are the run's statement of what "working"
+ * means, and two stations read it.
  */
 export interface RotationConfig {
   /**
@@ -111,6 +182,19 @@ export interface RotationConfig {
    * A bare string is `required`: a mismatch rolls the rotation back. Pass
    * `{command, relevance}` for a check that should be run and reported without gating the
    * transfer. Relevance is declared HERE, by the orchestrator, and never by a participant.
+   *
+   * ALSO run against the integration checkout after every merge, including the last (#80).
+   * Same commands, same relevance vocabulary, a different tree and a different question: a
+   * rotation asks whether a replacement reproduces what the original did, and the merge
+   * boundary asks whether the tree the seats built TOGETHER works. Two seats can each be
+   * green in their own worktree and merge cleanly into a tree that does not build, which is
+   * what a real two-seat run produced and what no other station could see.
+   *
+   * This changes what an existing N>1 configuration does -- these commands run more often,
+   * and a failure now means one of two things depending on where it happened. It changes
+   * nothing at N=1, where there is no merge to check. The alternative considered and
+   * rejected was a second option to arm separately; see `integrate.ts`, which records both
+   * the original objection to reusing this field and why the objection was overruled.
    */
   checks: CheckSpec[]
   /**
@@ -137,6 +221,99 @@ export interface RotationConfig {
   checkTimeoutMs?: number
   /** TEST-ONLY. See `RotationDeps.hooks`; never set in production. */
   hooks?: { afterCapture?: () => Promise<void> }
+  /**
+   * Per-seat overrides of everything above, keyed by seat id. Absent is the default.
+   *
+   * D7: rotation policy is a RUN-LEVEL DEFAULT that a seat may override, and the fields above
+   * are that default. This is where a heterogeneous run says what it cannot say once (#77): a
+   * seat running a different agent on a different part of the tree does not necessarily prove
+   * itself with the same commands, and until #78 there was no way to express that because
+   * there was only ever one seat rotation could name.
+   *
+   * A seat that names nothing here is under the run's policy, which is the identity case and
+   * the only case a default run reaches -- `rotationFor` returns the run policy unchanged when
+   * this is absent, so N=1 cannot take a different path through it.
+   *
+   * Keyed by seat id rather than by role or agent, because the seat is what rotation replaces.
+   * A key naming no seat is NOT an error here: `Relay.start` refuses one, where the seat list
+   * is known and the operator can be told which ids exist.
+   */
+  seats?: Record<string, SeatRotation>
+}
+
+/**
+ * One seat's departure from the run's rotation policy. Every field optional; absent inherits.
+ *
+ * Deliberately not `Partial<RotationConfig>`: that would let a seat carry its own `seats` map,
+ * and a policy that can nest is a policy whose effective value depends on how deep a reader
+ * looked. One level, and the run's is the root.
+ */
+export interface SeatRotation {
+  /**
+   * This seat's verification commands, REPLACING the run's rather than adding to them.
+   *
+   * Replacement is the whole point: a seat that names its own checks has said what proving
+   * ITS work means, and concatenating the run's back on would silently reimpose commands the
+   * operator just overrode -- on a seat whose tree may not even be able to run them.
+   *
+   * An empty array is a real setting and means this seat cannot be rotated: there is nothing
+   * for a replacement to reproduce, and rotating on nothing is the transfer nobody demonstrated
+   * that `checks` exists to prevent. Its degradation is still detected, and still reported.
+   */
+  checks?: CheckSpec[]
+  onDegradation?: 'candidate' | 'automatic'
+  files?: string[]
+  checkTimeoutMs?: number
+  /** TEST-ONLY. See `RotationDeps.hooks`; never set in production. */
+  hooks?: { afterCapture?: () => Promise<void> }
+}
+
+/**
+ * The rotation policy one seat is actually under, with the run's defaults already applied.
+ *
+ * A resolved value rather than a pair of objects every reader merges for itself, for the reason
+ * `boundOf` and `implementerSeats` are functions: the rule that reconciles a default with an
+ * override is the whole of the promise, and a rule written at each point of use is a rule that
+ * eventually disagrees with itself. `onDegradation` is defaulted HERE and nowhere else, so
+ * "what happens when a seat degrades" has exactly one answer.
+ */
+export interface EffectiveRotation {
+  checks: CheckSpec[]
+  onDegradation: 'candidate' | 'automatic'
+  files?: string[] | undefined
+  checkTimeoutMs?: number | undefined
+  hooks?: { afterCapture?: () => Promise<void> } | undefined
+}
+
+/**
+ * What rotation policy applies to one seat: the run's, as amended by that seat's own entry.
+ *
+ * `undefined` means rotation was never configured for this run, which is a different fact from
+ * a seat configured with no checks -- the first is a run with no policy, the second is a policy
+ * that says this seat is not rotatable. Both refuse to rotate; only the second was asked for.
+ *
+ * Field by field, and never a deep merge. Arrays replace (see `SeatRotation.checks`), and a
+ * field a seat did not mention takes the run's value, including when the run did not mention
+ * it either.
+ */
+export function rotationFor(
+  cfg: RotationConfig | undefined,
+  seatId: string,
+): EffectiveRotation | undefined {
+  if (!cfg) return undefined
+  const seat = cfg.seats?.[seatId]
+  const files = seat?.files ?? cfg.files
+  const checkTimeoutMs = seat?.checkTimeoutMs ?? cfg.checkTimeoutMs
+  const hooks = seat?.hooks ?? cfg.hooks
+  return {
+    checks: seat?.checks ?? cfg.checks,
+    onDegradation: seat?.onDegradation ?? cfg.onDegradation ?? 'candidate',
+    // Spread rather than assigned, because `exactOptionalPropertyTypes` distinguishes a field
+    // set to `undefined` from a field that is absent, and `rotate()` reads these with `in`.
+    ...(files === undefined ? {} : { files }),
+    ...(checkTimeoutMs === undefined ? {} : { checkTimeoutMs }),
+    ...(hooks === undefined ? {} : { hooks }),
+  }
 }
 
 /**
@@ -171,10 +348,10 @@ export interface RelayOptions {
   /**
    * Wall-clock and turn ceilings, checked at turn boundaries.
    *
-   * Distinct from `maxRounds`, which bounds the ADVISOR/IMPLEMENTER exchange structure. A
+   * Distinct from `maxAdvisorTurns`, which bounds how many times the advisor gets to steer. A
    * ceiling bounds the run as a resource: it is what stops a run that is progressing but has
-   * been progressing for two hours, which `maxRounds` cannot express because a single round
-   * can contain an arbitrarily long turn.
+   * been progressing for two hours, which `maxAdvisorTurns` cannot express because a single
+   * advisor turn can dispatch work that takes arbitrarily long.
    *
    * Also a recording device. The rotation experiments need "it ran for two hours" to be a
    * deliberate setting rather than an accident, and a ceiling that must be raised on purpose
@@ -183,8 +360,68 @@ export interface RelayOptions {
   ceilings?: Ceilings | undefined
   /** The advisor. Steers, and cannot see the implementer's tools. */
   lead: ParticipantSpec
+  /**
+   * The implementer. Still required, and still the whole answer for a default run.
+   *
+   * At N>1 it keeps a specific job rather than becoming decoration: it names the LEAD
+   * implementer -- the seat whose role an untargeted instruction resolves against, and the
+   * seat `rotateImplementer` means when nothing names one. That is why `implementers`, when
+   * given, must contain it (see `Relay.start`): a singular field nothing reads would be a trap,
+   * and every operation that is genuinely singular needs a seat it can name without choosing.
+   */
   implementer: ParticipantSpec
-  /** Exchanges before the relay stops and hands back to the human. */
+  /**
+   * Every implementer seat, when a run has more than one.
+   *
+   * Absent is the default and must stay behaviourless: the effective seat list is
+   * `implementers ?? [implementer]` (see `implementerSeats`), so a caller that never heard of
+   * this field gets exactly the run it got before -- one seat, joined in the same order, with
+   * the same routing log. That is D1's identity case stated as an option rather than as a
+   * branch: nothing downstream asks how many seats there are, it asks the seat list.
+   *
+   * Neither front-end sets it. There is no flag for it and adding one is a separate decision;
+   * this is the programmatic surface the dispatcher's seat table was already written against.
+   */
+  implementers?: ParticipantSpec[] | undefined
+  /**
+   * The reviewer seat (#72, D9b). Absent is the default and must stay behaviourless: no
+   * reviewer declared, no review task is ever admitted, and the merge boundary runs exactly
+   * as it does today.
+   *
+   * Rank `implementer` -- joined through the same seats loop as every implementer, at
+   * `spec.role`, so nothing about rank assignment changes for it -- but it is not one of
+   * `implementerSeats()`: `#implementers()` reads `role`, not rank, and a reviewer's role is
+   * `'reviewer'`. It never gets a worktree. It does not write, so there is no tree to isolate
+   * it into, and the diff it reviews is taken against the producing seat's tree, not its own.
+   */
+  reviewer?: ParticipantSpec | undefined
+  /**
+   * Advisor turns before the relay stops and hands back to the human.
+   *
+   * One advisor turn is one pass of the dispatcher: the advisor's standing reply is read as
+   * assignment decisions, at most one task is admitted, and that task runs to a graded verdict
+   * and a released seat before the advisor is asked again. Counting advisor turns is what the
+   * bound has always measured; it is named for that now rather than for the exchange shape it
+   * used to be described by.
+   */
+  maxAdvisorTurns?: number
+  /**
+   * @deprecated The former name of `maxAdvisorTurns`. Use that instead.
+   *
+   * PROGRAMMATIC COMPATIBILITY ONLY. It exists so an existing caller that constructs
+   * `RelayOptions` directly -- a test, a script, an embedder -- keeps working across the
+   * rename instead of failing to compile. Neither front-end reads it: `--rounds` feeds
+   * `maxAdvisorTurns` in `bin/conclave.ts` and in `src/repl/session.ts`, and that must stay
+   * true, because the alias is the compatibility shim and not the supported path.
+   *
+   * `maxAdvisorTurns` wins when both are given. Deliberately not an error: a caller that
+   * sets both has almost certainly added the new name over an old one it did not notice, and
+   * the new name is the one it meant. The precedence is pinned by a test rather than left to
+   * be rediscovered from `??` -- see `advisorTurns.test.ts`.
+   *
+   * Nothing in the product should grow a reader for this. When the last external caller is
+   * gone, this field goes with it, and `boundOf` below is the one place that has to change.
+   */
   maxRounds?: number
   /**
    * Per-turn deadline, handed to each adapter's watchdog rather than kept here.
@@ -214,6 +451,286 @@ export interface RelayOptions {
   onLog?: (m: RelayMessage) => void
   /** Enables automatic rotation on mechanical degradation. See `RotationConfig`. */
   rotation?: RotationConfig
+}
+
+/**
+ * What the git boundary decided about one seat.
+ *
+ * Returned rather than acted on inside `#crossBoundary`, because the seat is still `integrating`
+ * when the merge runs and marking it blocked there would be overwritten by the release that
+ * follows. The caller owns the ordering; this owns the judgement.
+ */
+type BoundaryOutcome =
+  /** Merged, empty, or not a worktree run at all — the seat carries on normally. */
+  | { kind: 'clear' }
+  | { kind: 'blocked'; seatId: string; escalate: boolean; detail: string; evidence: string[] }
+  /**
+   * The merge went in and the integrated tree fails its configured checks (#80).
+   *
+   * NOT `blocked`, and the difference is the whole of what this issue is about. A blocked
+   * merge is one seat's problem in one seat's tree: git said so, the work is on a branch that
+   * will not go in, and the seat that produced it is the seat that repairs it. This is the
+   * opposite shape -- every merge succeeded, every seat's own tree was green, and what is red
+   * is the combination. So no seat is marked, no seat is blocked, and the task that happened
+   * to be merged last is not the task at fault. The seat is released exactly as a clear
+   * boundary releases it.
+   */
+  | {
+      kind: 'integration_red'
+      /** The tasks whose combination is red, newest last. Never one seat's name alone. */
+      contributors: MergeContribution[]
+      failures: IntegrationCheckResult[]
+    }
+
+/** One merge that is in the integration checkout, and whose work is therefore in the tree. */
+interface MergeContribution {
+  taskId: string
+  seatId: string
+  integrationSha: string
+}
+
+/**
+ * One completed turn, as `#exchange` hands it back.
+ *
+ * Named rather than inline because a turn is now a value that OUTLIVES the call that produced
+ * it: with several seats in flight, a completed turn waits in an arrival queue until the
+ * dispatcher gets to it, and a queue of anonymous object literals is a queue nobody can read.
+ */
+export interface TurnResult {
+  /** The report, or the narration it was rebuilt from. Never the interstitial prose alone. */
+  prose: string
+  /** The `turn_end` this turn settled on, BEFORE supersession is resolved. */
+  end: TurnEndEvent
+  /** Whether the transcript settle window was exhausted with the turn still in progress. */
+  unsettled: boolean
+  emittedSinceSend: number
+  /** Paths that became dirty in this participant's own root during the turn. */
+  changedDuringTurn: string[]
+}
+
+/**
+ * One turn that has come back, waiting for the dispatcher to get to it.
+ *
+ * The `error` arm is why this is a union rather than a record with an optional field: a turn
+ * that threw has no report, and a reader that could ask for `report` on a failed completion
+ * would eventually do so. Errors travel as VALUES here because the alternative is an unhandled
+ * rejection: with several turns in flight, the one that throws is not the one anything is
+ * awaiting, and a rejection nobody is holding takes the process down rather than the run.
+ */
+type Completion =
+  | { task: Task; seat: RelayParticipant; exec: SeatExecution; report: TurnResult }
+  | { task: Task; seat: RelayParticipant; exec: SeatExecution; error: unknown }
+
+/** The default when a caller names no bound, in one place so the two fields cannot disagree. */
+export const DEFAULT_ADVISOR_TURNS = 6
+
+/**
+ * How many advisor turns this run gets.
+ *
+ * A function rather than a `??` chain at the point of use, so the deprecated alias is read in
+ * exactly one place. That matters more than the line it saves: the resolution rule is the
+ * whole content of the compatibility promise, and a rule written inline is a rule that gets
+ * written a second time somewhere else and quietly disagrees with itself. Deleting the alias
+ * later means deleting one clause here.
+ */
+export function boundOf(opts: Pick<RelayOptions, 'maxAdvisorTurns' | 'maxRounds'>): number {
+  return opts.maxAdvisorTurns ?? opts.maxRounds ?? DEFAULT_ADVISOR_TURNS
+}
+
+/**
+ * The implementer seats this run actually has, in configured order.
+ *
+ * A function for the same reason `boundOf` is one: the rule that reconciles the plural option
+ * with the singular one is the whole of the compatibility promise, and a `??` written at each
+ * point of use is a rule that eventually disagrees with itself. One reader, so "what are the
+ * seats" has exactly one answer and the N=1 identity cannot rot.
+ *
+ * Order is configured order, and it is load-bearing at join time only: seats are joined in this
+ * order, which at N=1 is the order the default run has always had. Nothing else reads the
+ * position -- scheduling reads the seat table, and the lead implementer is named by id.
+ */
+export function implementerSeats(
+  opts: Pick<RelayOptions, 'implementer' | 'implementers'>,
+): ParticipantSpec[] {
+  return opts.implementers ?? [opts.implementer]
+}
+
+/**
+ * The id of the Nth implementer seat, counting from zero.
+ *
+ * The first seat is `implementer` at EVERY N, and that is the whole content of the function.
+ * That id is in every message header, every routing log line, the run report, the session lock
+ * and `status --json` today, and `RelayOptions.implementer` names it by hand -- so a scheme that
+ * renamed it once a second seat appeared would change all of those for an operator who asked
+ * only for a second seat. Later seats are numbered from two, the way an operator counts them,
+ * which is also the pair (`implementer`, `implementer-2`) the merge and attribution tests were
+ * already written against.
+ *
+ * Not operator-supplied. D6 wants seat ids the operator chooses, and choosing them means
+ * sanitising them into a path and a ref name (`sanitize` in `src/workspace/worktrees.ts`);
+ * that is a decision with its own failure modes and it is not this one.
+ */
+export function seatIdFor(index: number): string {
+  return index === 0 ? 'implementer' : `implementer-${index + 1}`
+}
+
+/**
+ * What `--implementer` and `--implementers` between them asked for.
+ *
+ * `default` is the absent case and it must stay literally absent: the front-end passes no
+ * `implementers` key at all, so `implementerSeats` returns `[implementer]` by the same
+ * expression it always did. `listed` is the operator naming the seat list themselves, whether
+ * that list has one entry or four.
+ */
+export type SeatPlan =
+  | { kind: 'default' }
+  | { kind: 'listed'; seats: SeatRequest[] }
+  | { kind: 'refused'; reason: string }
+
+/**
+ * One seat as the operator asked for it: an agent, and the launch arguments meant for THAT seat.
+ *
+ * The agent and its arguments travel together because the alternative was two flags read
+ * positionally -- `--implementers a,b --implementers-args "x;y"` -- where the correlation
+ * between the two lists exists only in the operator's head and in the order they typed them. A
+ * shell that eats one entry of one list silently shifts every argument onto the wrong seat, and
+ * the run starts: seat two is launched with seat three's model and nothing anywhere says so.
+ * Heterogeneous seats (#77) are the point of the feature, so getting the pairing wrong is not a
+ * cosmetic failure -- it is the feature doing the opposite of what it was asked.
+ *
+ * `args` is always present and may be empty, rather than optional. A seat that named no
+ * arguments and a seat whose arguments were dropped somewhere read identically once the field
+ * can be absent, and this is the field the whole syntax exists to carry.
+ */
+export interface SeatRequest {
+  agent: string
+  /** Launch arguments typed for this seat alone, empty when the entry named only an agent. */
+  args: string[]
+}
+
+/**
+ * Read the two seat flags together, or refuse the invocation.
+ *
+ * One reader for both front-ends, for the reason `ceilingsFrom` is one: two blocks that each
+ * parsed a comma list would eventually disagree about a trailing comma, and the operator would
+ * discover it by getting a different number of seats from `relay` than from `session`.
+ *
+ * The refusals are the interesting part, and both are cases where the alternative is a run that
+ * starts wrong rather than one that fails:
+ *
+ *   - an empty or flag-shaped entry -- `--implementers claude,` or `--implementers --json` --
+ *     is a shell that ate an argument, and silently dropping it starts a run with fewer seats
+ *     than the operator typed.
+ *   - `--implementer x --implementers y,z` names two different agents for the SAME seat, since
+ *     the first entry of the list IS the seat `--implementer` names (`seatIdFor(0)`). Picking
+ *     one would ignore a flag the operator typed on purpose; there is no third seat to put the
+ *     loser in.
+ *
+ * `--implementer claude --implementers claude,claude` is not a conflict and is accepted: the
+ * operator restated the lead seat and then added one.
+ *
+ * ENTRY SYNTAX. An entry is an agent optionally followed by that seat's launch arguments,
+ * separated by whitespace, and entries are separated by commas:
+ *
+ *   --implementers "claude --model opus-5, claude --model sonnet-5"
+ *
+ * The comma is the seat boundary and the first token of each entry is the agent; everything
+ * after it belongs to that seat and to no other. The split is whitespace, the same naive rule
+ * `extraArgs` applies to `--implementer-args`, and deliberately not a shell parser: an argument
+ * needing quotes belongs in `.conclave/config.json`, which is keyed by agent and has a file's
+ * worth of room. The cost, stated rather than discovered: an argument containing a COMMA cannot
+ * be written here, because the comma is read as the next seat.
+ *
+ * Only the agent is checked for flag shape. `--implementers "claude --model x"` is an entry
+ * whose arguments legitimately begin with a dash, while `--implementers ",claude"` or an entry
+ * whose FIRST token is flag-shaped is still a shell that ate an argument -- so the refusal that
+ * catches a lost entry survives, and the one that would have caught the new syntax is gone.
+ */
+export function implementerSeatPlan(raw: {
+  /** What `--implementer` resolved to, its default included. */
+  implementer: string
+  /** The raw `--implementers` value, empty when the flag was not given. */
+  implementers: string
+  /** Whether `--implementer` was actually typed, as opposed to falling back. */
+  implementerNamed: boolean
+}): SeatPlan {
+  const listed = raw.implementers.trim()
+  if (listed === '') return { kind: 'default' }
+  const seats: SeatRequest[] = []
+  for (const entry of listed.split(',')) {
+    const [agent, ...args] = entry.trim().split(/\s+/).filter(Boolean)
+    if (agent === undefined || agent.startsWith('-')) {
+      const detail =
+        agent === undefined ? 'an empty entry' : `an entry whose agent looks like a flag ("${agent}")`
+      return {
+        kind: 'refused',
+        reason:
+          `--implementers "${raw.implementers}" has ${detail}. It is a comma-separated list of ` +
+          `seats, each an agent followed by that seat's own launch arguments: ` +
+          `--implementers "claude,claude" or --implementers "claude --model opus-5, claude --model sonnet-5".`,
+      }
+    }
+    seats.push({ agent, args })
+  }
+  if (raw.implementerNamed && seats[0]!.agent !== raw.implementer) {
+    return {
+      kind: 'refused',
+      reason:
+        `--implementer ${raw.implementer} and --implementers "${raw.implementers}" name different agents ` +
+        `for the same seat. The first entry of --implementers IS the seat --implementer names ` +
+        `('${seatIdFor(0)}'), so drop one or make them agree.`,
+    }
+  }
+  return { kind: 'listed', seats }
+}
+
+/**
+ * One `ParticipantSpec` per seat, ids assigned by `seatIdFor` and args resolved per agent.
+ *
+ * `argsFor` is a callback rather than a list because launch arguments are a property of the
+ * AGENT -- `.conclave/config.json` keys them that way -- and two seats can be filled by
+ * different ones. At N=1 this returns exactly the object both front-ends built inline before it
+ * existed, which is what keeps the default run's spec unchanged.
+ *
+ * Three sources, composed in that order: what the project configured for the agent, what
+ * `argsFor` adds for every implementer seat (`--implementer-args`), and last the arguments the
+ * operator typed for THIS seat. Last wins, which is the rule the child CLIs themselves apply to
+ * a repeated flag, so a seat that names its own `--model` overrides the one the run set for all
+ * of them rather than being overridden by it.
+ */
+export function implementerSpecsFor(
+  seats: readonly SeatRequest[],
+  argsFor: (agent: string) => string[],
+): ParticipantSpec[] {
+  return seats.map((seat, i) => {
+    const args = [...argsFor(seat.agent), ...seat.args]
+    return {
+      id: seatIdFor(i),
+      agent: seat.agent,
+      role: 'implementer',
+      ...(args.length > 0 ? { args } : {}),
+    }
+  })
+}
+
+/**
+ * The reviewer seat `--reviewer` asked for, or `undefined` if it was not given (#72).
+ *
+ * The one shared builder both front-ends read, for the reason `implementerSeatPlan` and
+ * `implementerSpecsFor` are: two blocks that each parsed `--reviewer` locally would
+ * eventually disagree about what an empty value means. `agent` empty is `undefined` --
+ * D1's "expressible and off" as a return value rather than a branch a caller writes.
+ *
+ * Singular, fixed id `'reviewer'`: unlike `--implementers` there is no list syntax, because
+ * the issue this answers is "one more blind reader", not a pool of them.
+ */
+export function reviewerSpecFor(
+  agent: string,
+  argsFor: (agent: string) => string[],
+): ParticipantSpec | undefined {
+  if (agent === '') return undefined
+  const args = argsFor(agent)
+  return { id: 'reviewer', agent, role: 'reviewer', ...(args.length > 0 ? { args } : {}) }
 }
 
 /**
@@ -358,6 +875,29 @@ export function splitNotes(prose: string): { notes: string[]; rest: string } {
   return { notes, rest }
 }
 
+/** A reviewer's verdict, read off its report (#72). See `REVIEWER_BRIEFING`. */
+export type ReviewVerdict = { accepted: true } | { accepted: false; reason: string }
+
+/**
+ * Parse a reviewer's reply. Fails closed, the same direction `parseDecisions` does.
+ *
+ * `ACCEPT` must be the whole reply -- an exact match, not merely a line starting with it --
+ * so a reviewer that writes ACCEPT and then explains itself anyway is treated as having
+ * said something else, rather than the explanation being silently dropped. Anything that is
+ * not exactly ACCEPT is a rejection: nothing merges on an ambiguous reply, which is the safe
+ * direction to fail in when the alternative is guessing that unclear prose meant yes.
+ *
+ * `REJECT: <reason>` is read for the reason; a reply that rejects without that exact form
+ * still rejects, using its own full text as the reason, so a reviewer that forgets the
+ * format still blocks the merge rather than being silently ignored.
+ */
+export function parseReviewVerdict(prose: string): ReviewVerdict {
+  if (/^\s*ACCEPT\s*$/i.test(prose)) return { accepted: true }
+  const m = /^[ \t]*REJECT:[ \t]*([\s\S]+)$/im.exec(prose)
+  const reason = m?.[1]?.trim()
+  return { accepted: false, reason: reason && reason.length > 0 ? reason : prose.trim() }
+}
+
 const LEAD_BRIEFING = `You are the ADVISOR on a two-agent coding session, and you are in charge of it.
 
 Another AI model — the implementer — does the actual work in this repository. You cannot
@@ -399,6 +939,57 @@ rest of your reply is still the instruction. Reserve ESCALATE for when you actua
 answer before you can continue.`
 
 /**
+ * Added to the advisor's briefing when the run has MORE THAN ONE implementer seat.
+ *
+ * Conditional, and that is the whole reason it is a separate constant. `LEAD_BRIEFING` says
+ * "give it one concrete instruction at a time" and a default run must keep being told exactly
+ * that: a live experiment is running against the unmodified briefing and its pre-registration
+ * says not to change it mid-study (spikes/experiments/04-complaint-as-signal.md), and D1 says
+ * the default run must not pay for a feature it did not ask for. An advisor that never hears
+ * about the syntax never writes it, and `parseDecisions` treats a reply without a directive
+ * exactly as it always has.
+ *
+ * What it teaches is the syntax and the two rules that make it safe to fail closed on: the
+ * whole reply is refused if any part of it is malformed, and a seat that is blocked takes only
+ * its own repair. Both are stated as consequences the advisor can avoid rather than as
+ * implementation notes, because an advisor that does not know a reply was rejected simply
+ * writes the same reply again.
+ */
+const MULTI_SEAT_BRIEFING = `THIS RUN HAS MORE THAN ONE IMPLEMENTER SEAT, so you must say who each instruction is for.
+
+Address every instruction with a line that starts either
+
+  @seat <seat-id>: <the instruction>
+
+to name one specific seat, or
+
+  @role <role>: <the instruction>
+
+to name a job and let the dispatcher pick the longest-idle seat that does it. The instruction
+runs from the colon to the next such line, so it can be several lines long. You may put several
+in one reply and they are dispatched CONCURRENTLY to different seats:
+
+  @seat implementer: Add the parser tests for the new syntax.
+  @seat implementer-2: Sweep docs/ for references to the old flag name.
+
+Two seats given work in one reply work at the same time. Their reports come back to you one at
+a time, in the order they finish, not in the order you wrote them — so a report answering your
+second instruction may arrive before one answering your first. Read what each report is about
+rather than assuming which it answers.
+
+The whole reply is rejected if ANY part of it is wrong: a seat id or role that does not exist,
+text outside a directive, a directive with no instruction after it, or DONE/ESCALATE mixed in
+with assignments. Nothing is admitted and you are asked again. So do not write a preamble, and
+send DONE or ESCALATE on their own, as a reply that assigns nothing.
+
+DONE while a seat is still working does not end the run: you will be given the outstanding
+report first and asked again.
+
+If a seat's work fails to merge you are told so, and that seat then takes NOTHING except the
+repair. Address the repair to it BY NAME with @seat — an untargeted instruction will go to a
+different free seat, and the blocked one stays blocked until you name it.`
+
+/**
  * Added to the advisor's briefing when the operator is an AGENT rather than a human.
  *
  * `LEAD_BRIEFING` tells the advisor that asking is cheaper than guessing, and then leaves the
@@ -433,6 +1024,28 @@ One caution about the answer you get back. An agent operator is the same kind of
 are and may share your blind spots, so its reply is not independent confirmation the way a
 human's is. Treat it as another opinion with authority over the goal, not as evidence.`
 
+/**
+ * Added to the advisor's briefing when this run has a REVIEWER seat (#72, D9b).
+ *
+ * Conditional for the same reason `MULTI_SEAT_BRIEFING` is: a default run must never pay in
+ * briefing tokens for a seat it does not have, and a live experiment is pinned against the
+ * unmodified `LEAD_BRIEFING` text (see the comment above `MULTI_SEAT_BRIEFING`).
+ *
+ * Deliberately short, and deliberately not a syntax lesson: review is dispatched by the
+ * orchestrator the moment a seat's work is ready, not by the advisor addressing anything, so
+ * there is no `@seat`/`@role` form to teach here. What the advisor needs is not "how to send
+ * work to the reviewer" but "what a review report means when one arrives", so an accepted or
+ * rejected verdict is not mistaken for an ordinary implementer report.
+ */
+const REVIEWER_BRIEFING_FOR_ADVISOR = `THIS RUN ALSO HAS A REVIEWER SEAT. You do not send it anything: completed
+implementer work is sent to it automatically, before it merges, and you will see its verdict
+as an ordinary report. If it accepts, the work proceeds to the integration checkout exactly
+as it would with no reviewer. If it rejects, a repair task is created automatically and
+dispatched back to the seat that produced the work — you do not need to do anything for that
+to happen either. You will see both the rejection and the repair as ordinary reports. Only a
+SECOND rejection of the same work reaches you, as a pause, because at that point another
+automatic repair is unlikely to change anything.`
+
 const IMPLEMENTER_BRIEFING = `You are the IMPLEMENTER on a two-agent coding session.
 
 Another AI model — the advisor — is steering. It cannot see your tool calls or your code,
@@ -455,6 +1068,33 @@ meanwhile in the same reply. An UNANSWERED line PAUSES the run until the human a
 is not a flag, because the build cannot proceed until the question is settled. Choices about
 how to build remain yours; use FLAG: for every concern that only qualifies the result rather
 than invalidating it.`
+
+/**
+ * What a REVIEWER seat is told instead of `IMPLEMENTER_BRIEFING` (#72, D9b).
+ *
+ * Sent only to a seat whose role is `reviewer` -- a reviewer is rank `implementer` (D5), so
+ * without this it would fall into the `IMPLEMENTER_BRIEFING` loop and be told it writes code,
+ * which is wrong on every count that matters: it has no worktree, is never asked to change
+ * anything, and its report is read as a verdict rather than as work done.
+ *
+ * States the load-bearing rule up front, the same one the module doc of `rotation/review.ts`
+ * argues for: everything it is given is captured mechanically, never written by the seat under
+ * review. `WITHHELD_GOAL_NOTICE` is sent to this seat too, for the reason `LEAD_BRIEFING`
+ * gives its own name to: "a reviewer told what verdict is wanted stops being a reviewer".
+ */
+const REVIEWER_BRIEFING = `You are the REVIEWER on this session. You do not write code and hold no goal.
+
+You will be sent one review at a time: the instruction a seat was given, and what changed in
+its tree, captured directly from git and from the configured checks — never written or
+summarised by that seat. Treat everything in a review as fact, because none of it passed
+through anyone's account of their own work.
+
+Read the diff. Judge it against the instruction it was answering, not against work you would
+have done differently. Reply with exactly ACCEPT and nothing else if it should merge. Reply
+with a line starting REJECT: followed by why, if it should not — be specific enough that the
+seat that produced it can act on your reason without seeing anything else you wrote. A
+rejection becomes a task assigned back to that seat automatically; you do not dispatch it
+yourself.`
 
 /**
  * What the implementer is told INSTEAD of the goal.
@@ -574,39 +1214,237 @@ export class Relay {
    * on the compliant case as readily as on the violation, which is worse than not having it.
    */
   #worktreesSeen = new Set<string>()
+  /**
+   * `opts.cwd`'s HEAD at run start, used as the review diff base for a seat with no worktree
+   * (#72). At N=1 there is no separate integration checkout to diff a seat's branch against
+   * -- work happens directly in `opts.cwd` -- so this is the closest available "before".
+   */
+  #runStartSha: string | undefined
   /** Turns taken across all participants, which is what a ceiling counts. */
   #turnsTaken = 0
   #participants = new Map<string, RelayParticipant>()
   #seq = 0
   #opts: RelayOptions
   #stopped = false
-  /** Set by `RunHandle.requestPause()`; consumed at the next round boundary. */
+  /** Set by `RunHandle.requestPause()`; consumed at the next advisor-turn boundary. */
   #pauseRequested: string | undefined
   /** The pause currently in front of a human, when it rests on a verdict. See `#trackSupersession`. */
   #verdictPause: VerdictPause | undefined
   #stream = new RelayEventStream()
   #ended = false
+  /**
+   * The seat worktrees this run created, or `undefined` at N=1.
+   *
+   * `undefined` is the load-bearing value: it is what makes a default run touch none of this
+   * code rather than run a one-element version of it. Every read is `?.`-guarded for that
+   * reason, and none of them asks how many seats there are.
+   */
+  #worktrees: WorktreeManifest | undefined
+  /**
+   * Seats whose merge failed, keyed by seat id, in the order they blocked.
+   *
+   * `parent` is the integration HEAD the failed merge was attempted against, and it is what
+   * makes a repeat distinguishable from a fresh conflict: a second failure against a MOVED
+   * parent is new information and gets its own repair round, while a second failure against
+   * the same one means the repair did not repair and nothing another turn could change has
+   * changed. Insertion order is the queue order, so the oldest block is repaired first.
+   */
+  #blocked = new Map<string, { parent: string; paths: string[]; attempts: number }>()
+  /**
+   * Every merge that reached the integration checkout, oldest first.
+   *
+   * Kept because a red tree has to be attributed to a COMBINATION, and the combination is not
+   * readable from the merge that happened to be last: that one merged cleanly, its seat's tree
+   * was green, and blaming it would be the same error as blaming the other half. What can be
+   * said honestly is which tasks are in the tree, so that is what is recorded and what the
+   * repair instruction names.
+   *
+   * Empty on every run without seat worktrees, which is every default run.
+   */
+  #merges: MergeContribution[] = []
+  /**
+   * The integration checks that were red when they last ran, and are not known to be green.
+   *
+   * Cleared ONLY by a later merge whose checks pass -- not by a repair being dispatched, not
+   * by a seat reporting that it fixed it, and not by the advisor saying the work is done. The
+   * tree is what it is; a claim about it is not a measurement of it. This is what `#end` reads
+   * to refuse to report success over a tree that does not build (#80).
+   */
+  #integrationRed: { contributors: MergeContribution[]; failures: IntegrationCheckResult[] } | undefined
+  /**
+   * Index into `#merges` of the last merge whose checks passed, or `undefined` if none has.
+   *
+   * The fixed point a red result is attributed from: the tree was measured working there, so
+   * the tasks merged up to and including it are not implicated by a failure that appeared
+   * later. Everything from it onward is.
+   */
+  #lastGreenMerge: number | undefined
+  /**
+   * Mechanical facts the advisor must have before it writes its next instruction.
+   *
+   * Deliberately NOT `#pending`. That queue is human messages, and the DONE guard reads it to
+   * decide that the human outranks an advisor calling the work finished — putting orchestrator
+   * bookkeeping in there would make a merge conflict masquerade as an operator instruction.
+   * These are prefixed and unenveloped: nobody should read them as participant speech.
+   */
+  #leadNotices: string[] = []
   /** True while `#loop` owns the participants. `ask` refuses rather than racing it. */
   #looping = false
+  /**
+   * The seat the pause in front of the operator would rotate, or none.
+   *
+   * Written by `#halt` beside the `rotate` option it accompanies, and read by the handle the
+   * operator answers with. Not on `RunPause`: the pause is a document about a condition, and
+   * every reader of it -- the status file, the console, a poller -- would then be carrying a
+   * field that only the handle's own control path has any use for.
+   */
+  #rotationSeat: string | undefined
 
   private constructor(opts: RelayOptions) {
     this.#opts = opts
+    // A wait is minutes long when it happens -- a rotation holds the lane across a whole agent
+    // turn -- and it happens between two stations neither of which narrates the other. Recorded
+    // as an orchestrator note because the alternative is a gap in the log with nothing in it.
+    this.#checkLane.onWait = (waiting, holder) => {
+      this.#record({
+        from: 'orchestrator',
+        fromRank: 'human',
+        to: [],
+        kind: 'note',
+        text:
+          `${waiting.seat}'s ${waiting.station} section is waiting for the check lane, held by ` +
+          `${holder.seat}'s ${holder.station} section. It is queued, not blocked: nothing about ` +
+          `${waiting.seat}'s work has been judged.`,
+      })
+    }
     // Set here and nowhere else. Whether rotation was configured cannot depend on how far
     // the run got -- see rotationWatch.armed and issue #31.
     this.rotationWatch.armed = opts.rotation !== undefined
   }
 
+  /**
+   * The run-scoped lane the configured checks run behind. One slot, not configurable.
+   *
+   * Both stations are real since #78: a merge boundary at N>1, and a seat-local rotation at any
+   * N. `spawnSync` already serialises the commands themselves; what this serialises is the
+   * WINDOW a rotation verifies across, which a merge would otherwise move underneath it.
+   * `CheckLane` carries the whole argument, including exactly how reachable a wait is.
+   *
+   * Public because `history()` is the only record that a station reached the lane at all --
+   * "never contended" and "never reached" are otherwise the same silence. Nothing outside the
+   * relay should acquire it during a run.
+   */
+  readonly #checkLane = new CheckLane()
+
+  get checkLane(): CheckLane {
+    return this.#checkLane
+  }
+
   static async start(opts: RelayOptions): Promise<Relay> {
+    const seats = implementerSeats(opts)
+    // Checked before anything is launched, because every one of these fails SILENTLY later.
+    // `#join` keys the participant map by id, so a duplicate id would overwrite a seat that
+    // already has a live child -- leaving a process nothing routes to and nothing closes.
+    if (seats.length === 0) {
+      throw new Error('a relay needs at least one implementer seat: `implementers` was empty')
+    }
+    const ids = new Set<string>()
+    for (const spec of [opts.lead, ...seats, ...(opts.reviewer ? [opts.reviewer] : [])]) {
+      if (ids.has(spec.id)) throw new Error(`duplicate participant id '${spec.id}': seat ids must be unique`)
+      ids.add(spec.id)
+    }
+    // The singular option must be one of the seats. It is not a formality: `untargeted` and
+    // `rotateImplementer` both name it, so an `implementers` list that omits it would leave
+    // those two reading a spec no participant was created from.
+    if (!seats.some((s) => s.id === opts.implementer.id)) {
+      throw new Error(
+        `implementers must include the lead implementer '${opts.implementer.id}': it is the seat ` +
+          `an untargeted instruction and a rotation name, and a run whose seat list omits it has no ` +
+          `answer for either`,
+      )
+    }
+    // A per-seat rotation policy for a seat this run does not have is refused here rather than
+    // ignored. It is the same failure as a misspelled flag that parses: the operator has said
+    // what proving THAT seat means, the run starts without it, and the seat it was meant for
+    // quietly stays on the run default -- which is exactly the configuration they were
+    // overriding. Checked where the seat ids are known, so the message can list them.
+    for (const seatId of Object.keys(opts.rotation?.seats ?? {})) {
+      if (!seats.some((s) => s.id === seatId)) {
+        throw new Error(
+          `rotation.seats names '${seatId}', which is not a seat in this run ` +
+            `(${seats.map((s) => s.id).join(', ')}): a per-seat policy for a seat that does not ` +
+            `exist would leave the seat it was meant for on the run default`,
+        )
+      }
+    }
     const relay = new Relay(opts)
+
+    // Isolation, and only where it is needed. One implementer works in the operator's cwd on
+    // the operator's branch with no worktree, no branch and no manifest -- the default run must
+    // not pay for an isolation it does not need, and D1 makes that the identity case rather
+    // than a fast path. Every call below is inside this branch for that reason.
+    //
+    // Created BEFORE any implementer is launched, all of them or none: an adapter's cwd is
+    // fixed at launch, so a tree that appears afterwards is a tree its seat can never move
+    // into. `createSeatWorktrees` refuses a dirty integration checkout first, which is the
+    // refusal the whole scheme rests on.
+    if (seats.length > 1) {
+      const runId = nextRunId(opts.cwd, Date.now(), process.pid)
+      relay.#worktrees = createSeatWorktrees({
+        repoRoot: opts.cwd,
+        runId,
+        seatIds: seats.map((s) => s.id),
+      })
+    }
+
     // Sequential rather than parallel: two CLIs negotiating terminals and hook trust at
-    // once produces interleaved failures that are miserable to attribute.
-    await relay.#join(opts.lead, 'advisor')
-    await relay.#join(opts.implementer, 'implementer')
+    // once produces interleaved failures that are miserable to attribute. That argument does
+    // not weaken with more seats, so the loop stays sequential too.
+    try {
+      await relay.#join(opts.lead, 'advisor')
+      for (const spec of seats) {
+        // The advisor stays in the integration checkout at every N. It reads committed state
+        // and steers; it is not one of the writers this isolates from each other.
+        const tree = relay.#worktrees?.seats.find((s) => s.seatId === spec.id)
+        if (tree) ensureWorktreeHookTrigger(tree)
+        await relay.#join(spec, 'implementer', tree ? seatCwd(tree) : opts.cwd)
+      }
+      // The reviewer, if declared (#72). Rank `implementer` -- D5's job/authority split is
+      // exactly what makes this legal: identical authority to the seats above, a different
+      // job. No worktree: it does not mutate anything, so there is no tree to isolate it
+      // into, and it stays in the integration checkout the same way the advisor does.
+      if (opts.reviewer) await relay.#join(opts.reviewer, 'implementer', opts.cwd)
+    } catch (e) {
+      // CHILDREN FIRST, and unconditionally. Every session that did start is a live process,
+      // and an earlier version of this returned through the unwind's own throw before reaching
+      // them -- so the one case that leaves a tree behind was also the one case that leaked
+      // every child that had already launched. Closing is best-effort because the startup
+      // failure is the thing being reported and a teardown error must not replace it.
+      for (const p of relay.participants) {
+        try {
+          await p.session.close('graceful')
+        } catch {
+          /* already gone, or never fully there. The original failure is what matters. */
+        }
+      }
+      // Then the trees, which are only safe to read once nothing is writing to them. Unwound
+      // narrowly: only the trees this start created, only while they are still clean, and
+      // never with `--force` -- anything else is retained and named, because a tree that is
+      // not obviously ours to delete is not ours to delete.
+      if (relay.#worktrees) {
+        const lines = recoveryLines(unwindSeatWorktrees(relay.#worktrees))
+        if (lines.length > 0) throw new Error(`${(e as Error).message}\n${lines.join('\n')}`)
+      }
+      throw e
+    }
     // Records what the tree looked like before the participants touched it, so the
-    // operator's own tooling can refuse to sweep their work into an unrelated commit.
+    // operator's own tooling can refuse to sweep their work into an unrelated commit. Every
+    // seat is listed: the lock names who is working in this checkout, and a seat missing from
+    // it is a writer the guard cannot attribute a change to.
     acquire(opts.cwd, [
       { id: opts.lead.id, agent: opts.lead.agent },
-      { id: opts.implementer.id, agent: opts.implementer.agent },
+      ...seats.map((s) => ({ id: s.id, agent: s.agent })),
+      ...(opts.reviewer ? [{ id: opts.reviewer.id, agent: opts.reviewer.agent }] : []),
     ])
     return relay
   }
@@ -616,6 +1454,17 @@ export class Relay {
     return this.#opts.cwd
   }
 
+  /**
+   * The seat worktrees, or `undefined` when the run has none — which is every default run.
+   *
+   * Read-only on purpose. The manifest on disk is the record; this is a view of it for a
+   * caller that already holds the relay, and a second writer would put the file and the
+   * object into a disagreement no reader could settle.
+   */
+  get worktrees(): WorktreeManifest | undefined {
+    return this.#worktrees
+  }
+
   /** Who answers escalations. Default `'human'`; see RelayOptions.operator. */
   get operator(): 'human' | 'agent' {
     return this.#opts.operator ?? 'human'
@@ -623,6 +1472,91 @@ export class Relay {
 
   get participants(): RelayParticipant[] {
     return [...this.#participants.values()]
+  }
+
+  /**
+   * Every implementer seat, in join order.
+   *
+   * The replacement for `participants.find((p) => p.rank === 'implementer')`, which was correct
+   * only because there was one. A `find` over a rank does not fail at N>1 -- it returns the
+   * first seat, quietly, and whatever it fed goes on looking right. So the plural answer is the
+   * only one this class offers, and the two operations that genuinely need a single seat name
+   * one explicitly below.
+   *
+   * Filtered on ROLE rather than rank (#72). The two used to coincide -- every rank
+   * `implementer` seat did implementer work -- but a reviewer is rank `implementer` with a
+   * different job (D5), and every caller of this method means the job: rotation eligibility,
+   * the opening `IMPLEMENTER_BRIEFING` loop, and the closing question all mean "a seat that
+   * writes code", none of them "a seat that shares implementer's authority". `#dispatchSeats`
+   * below is the rank-based answer, for the one caller that needs it.
+   */
+  #implementers(): RelayParticipant[] {
+    return this.participants.filter((p) => p.role === 'implementer')
+  }
+
+  /**
+   * Every seat the dispatcher may hand a task to: rank `implementer`, whatever the job.
+   *
+   * The rank-based answer `#implementers()` used to be, kept alongside it because `#seatState`
+   * needs a table that includes the reviewer -- a review task is dispatched through the exact
+   * same scheduler as ordinary work, so a seat with nothing to write is still a seat with
+   * something to be assigned.
+   */
+  #dispatchSeats(): RelayParticipant[] {
+    return this.participants.filter((p) => p.rank === 'implementer')
+  }
+
+  /**
+   * The reviewer seat, or `undefined` on every run that did not declare one (#72).
+   *
+   * At most one: `RelayOptions.reviewer` is singular, unlike `implementers`, because the
+   * issue that motivates it is answered by one more blind reader, not by a pool of them.
+   */
+  #reviewerSeat(): RelayParticipant | undefined {
+    return this.participants.find((p) => p.role === 'reviewer')
+  }
+
+  /**
+   * The working root a participant's changes appear in.
+   *
+   * Modelled on the ROOT, never on the seat count. At N=1 every participant answers
+   * `opts.cwd`, so every read below groups exactly as it always did and the default run is
+   * byte-for-byte what it was; at N>1 each linked implementer answers its own worktree and the
+   * advisor still answers the integration checkout. Nothing here asks how many seats there are
+   * -- an `if (seats.length === 1)` would be D1's wrong abstraction, and wrong on its own terms
+   * as well, since two participants can share a root at any N.
+   */
+  #rootOf(participantId: string): string {
+    return (
+      this.#rootOverride.get(participantId) ??
+      this.#worktrees?.seats.find((s) => s.seatId === participantId)?.worktreePath ??
+      this.#opts.cwd
+    )
+  }
+
+  /**
+   * Roots for participants the worktree manifest does not name.
+   *
+   * One entry ever, and only while it is needed: a rotation's audition works in the tree of the
+   * seat it is auditioning for, and it is not that seat yet -- it holds `<seat>~replacement`
+   * precisely so nothing confuses the two. Empty on every run that never rotates, which is
+   * every default run.
+   */
+  #rootOverride = new Map<string, string>()
+
+  /**
+   * The seat the required singular option names.
+   *
+   * Not "the first implementer": `RelayOptions.implementer` is a spec the caller wrote, and
+   * `Relay.start` has already refused a seat list that omits it, so this is a lookup by id and
+   * cannot pick between seats. At N=1 it is the only seat there is.
+   */
+  #leadImplementer(): RelayParticipant {
+    const p = this.#participants.get(this.#opts.implementer.id)
+    // Unreachable through `start`, which validates it. Thrown rather than `!`-asserted because
+    // the alternative is a `undefined.role` several frames away from the cause.
+    if (!p) throw new Error(`the lead implementer '${this.#opts.implementer.id}' is not a participant`)
+    return p
   }
 
   /**
@@ -657,15 +1591,31 @@ export class Relay {
     }
   }
 
-  async #join(spec: ParticipantSpec, rank: Rank): Promise<void> {
-    const session = await this.#opts.registry.createParticipant(spec, {
-      cwd: this.#opts.cwd,
-      watchdogMs: this.#opts.turnWatchdogMs,
-    })
-    const p: RelayParticipant = { id: spec.id, agent: spec.agent, rank, session, events: [], baselineGeneration: 0, degradationCursor: 0 }
+  /**
+   * `cwd` is where this participant's adapter is launched, and it is fixed at launch.
+   *
+   * Defaulting to the run cwd is the whole of the N=1 case and the whole of the advisor's case
+   * at any N: the integration checkout is where they belong. An implementer seat at N>1 is
+   * handed its own linked worktree instead, and it has to be handed it HERE -- an adapter's
+   * working directory cannot be changed afterwards, so a session started in the shared
+   * checkout is a seat that shares the checkout for the rest of the run.
+   */
+  async #join(spec: ParticipantSpec, rank: Rank, cwd: string = this.#opts.cwd): Promise<void> {
+    // One context object, used twice on purpose. The argv recorded below is composed by the
+    // same function every built-in adapter composes its child's argv with, from the same spec
+    // and the same context -- so the record is the launch rather than a reconstruction of it.
+    // Read AFTER the session exists, so a seat that failed to start fails exactly as before.
+    const ctx = { cwd, watchdogMs: this.#opts.turnWatchdogMs }
+    const session = await this.#opts.registry.createParticipant(spec, ctx)
+    const launch = launchRecordFor(this.#opts.registry.resolve(spec), ctx)
+    const p: RelayParticipant = { id: spec.id, agent: spec.agent, rank, role: spec.role, launch, session, events: [], baselineGeneration: 0, degradationCursor: 0 }
     this.#participants.set(spec.id, p)
     this.#attach(p)
-    this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text: `${spec.id} joined as ${rank} (${spec.agent})` })
+    // The role is named only when it says something the rank has not. At N=1 it repeats it,
+    // and the join note is the line an operator reads at startup -- so the default run's log
+    // is the same log it has always been.
+    const as = spec.role === rank ? `${rank}` : `${rank} in role ${spec.role}`
+    this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text: `${spec.id} joined as ${as} (${spec.agent})` })
   }
 
   /**
@@ -893,14 +1843,62 @@ export class Relay {
     return this.#stream.droppedAfterClose
   }
 
-  /** Terminal, and emitted exactly once however the run and `stop()` interleave. */
+  /**
+   * Terminal, and emitted exactly once however the run and `stop()` interleave.
+   *
+   * One filter sits in front of it: a run whose integration checkout is red does not report
+   * an outcome that reads as success (#80). Here rather than at the call sites because there
+   * are eleven of them and the guarantee has to hold at all of them -- a red tree that reached
+   * `done` down one path and `integration_failed` down another would be the same silent
+   * failure with an extra step. `done` and `budget` are the two endings that claim the work
+   * finished, so those are REPLACED; every other reason already says something went wrong and
+   * keeps saying it, with the tree's state appended so nothing is lost either way.
+   */
   #end(reason: RunReason, detail?: string): { reason: RunReason; detail?: string } {
+    const note = this.#integrationRedNote()
+    if (note) {
+      if (reason === 'done' || reason === 'budget') reason = 'integration_failed'
+      detail = detail === undefined ? note : `${detail}. ${note}`
+    }
     if (!this.#ended) {
       this.#ended = true
       this.#stream.emit({ type: 'run_end', reason, detail })
       this.#stream.close()
     }
     return detail === undefined ? { reason } : { reason, detail }
+  }
+
+  /**
+   * What an outcome has to say about the tree, or nothing when the tree is not known to be red.
+   *
+   * One sentence, built in one place, so `#end` and the drain's return say the same thing and
+   * a reader can tell they are the same claim rather than two independent descriptions.
+   */
+  #integrationRedNote(): string | undefined {
+    const red = this.#integrationRed
+    if (!red) return undefined
+    const tasks = red.contributors.map((c) => `${c.taskId} (${c.seatId})`).join(' + ')
+    const failing = red.failures
+      .map((f) => `\`${f.command}\` exited ${f.exitCode ?? 'without a status'}`)
+      .join(', ')
+    return (
+      `the integration checkout fails its configured checks — ${failing} — after merging ${tasks}; ` +
+      `each seat's own work was green in its own tree and no merge conflicted`
+    )
+  }
+
+  /**
+   * An outcome `#halt` already emitted, amended if the drain that followed it left a red tree.
+   *
+   * The ordering here is the honest limitation recorded on `Closing`: a halt calls `#end`
+   * itself, so `run_end` is on the stream before the seats still in flight have merged. What
+   * the CALLER gets back can still be true, and a run that ends holding a tree that does not
+   * build must say so in every place it says anything.
+   */
+  #redAware(outcome: RunOutcome): RunOutcome {
+    const note = this.#integrationRedNote()
+    if (!note || outcome.detail?.includes(note)) return outcome
+    return { reason: outcome.reason, detail: outcome.detail === undefined ? note : `${outcome.detail}. ${note}` }
   }
 
   /**
@@ -1166,6 +2164,15 @@ export class Relay {
   /** One line an operator can read to know whether the detector was live and what it saw. */
   rotationSummary(): string {
     const w = this.rotationWatch
+    // The counters cannot say this and would be MISREAD without it: a run that stopped rotating
+    // because no replacement could ever be observed reports the same `0 rotations` as a run that
+    // never needed one (#76). Carried by every armed branch below for the reason the "nothing was
+    // measured" branch exists at all -- saying nothing happened over the top of an event that did
+    // is a stronger falsehood than an ambiguity.
+    const stopped = this.#rotationUnobservable
+      ? `\n  rotation STOPPED after ${this.#rotationUnobservable.seat}: acceptance produced no ` +
+        `observable output, so no replacement could pass and the fix is upstream of rotation`
+      : ''
     if (!w.armed) {
       return `rotation: NOT ARMED (no checks configured) — ${w.assessments} assessments, no rotation possible`
     }
@@ -1180,22 +2187,60 @@ export class Relay {
     if (w.assessments === 0 && w.rotations === 0) {
       return (
         `rotation: armed — 0 assessments, the run ended before any were made ` +
-        `(nothing was measured; this is not a negative result)`
+        `(nothing was measured; this is not a negative result)${stopped}`
       )
     }
     return (
       `rotation: armed — ${w.assessments} assessments, ${w.degradationsSeen} degraded, ` +
       `${w.complaintsSeen} complaints, ${w.candidates} candidates, ${w.rotations} rotations, ` +
-      `peak compaction generation ${w.peakGeneration}`
+      `peak compaction generation ${w.peakGeneration}${stopped}`
     )
   }
 
-  async #exchange(
-    p: RelayParticipant,
-    text: string,
-  ): Promise<{ prose: string; end: TurnEndEvent; unsettled: boolean; emittedSinceSend: number; changedDuringTurn: string[] }> {
+  /**
+   * How many exchanges this relay currently has open on each participant, by id.
+   *
+   * The relay's OWN bookkeeping, and deliberately not a reading of an adapter. A session's state
+   * says `running` whether or not a turn is in progress, the transcript settles behind the hook,
+   * and `AgentEvent` has no idle member -- so every way of inferring this from the child is a
+   * guess that is wrong for a window rather than a fact. What this records instead is something
+   * the relay knows for certain because it is the only thing that does it: a send it issued and
+   * has not yet finished reading the answer to.
+   *
+   * A count rather than a set of ids. Nothing nests today, and a set would silently clear the
+   * outer entry the moment something did -- which would hand out permission to rotate over a
+   * live turn, in the exact code that exists to refuse it.
+   */
+  #exchanges = new Map<string, number>()
+
+  /** Whether the relay is mid-exchange with this participant. See `#exchanges`. */
+  #busy(participantId: string): boolean {
+    return (this.#exchanges.get(participantId) ?? 0) > 0
+  }
+
+  /**
+   * One exchange, bracketed so the bookkeeping cannot leak.
+   *
+   * The whole turn is in `#exchangeTurn`; this is only the bracket. Split rather than wrapped in
+   * place so the release sits in a `finally` that no later edit inside a 150-line method can slip
+   * past: a turn that throws -- a transport fault, a watchdog, a session closed underneath it --
+   * must leave the participant rotatable, or one lost turn would make the seat permanently
+   * unrotatable and the refusal would outlive the condition it describes.
+   */
+  async #exchange(p: RelayParticipant, text: string): Promise<TurnResult> {
+    this.#exchanges.set(p.id, (this.#exchanges.get(p.id) ?? 0) + 1)
+    try {
+      return await this.#exchangeTurn(p, text)
+    } finally {
+      const left = (this.#exchanges.get(p.id) ?? 1) - 1
+      if (left > 0) this.#exchanges.set(p.id, left)
+      else this.#exchanges.delete(p.id)
+    }
+  }
+
+  async #exchangeTurn(p: RelayParticipant, text: string): Promise<TurnResult> {
     // Counted here, where a turn actually starts, so the ceiling measures work done rather
-    // than rounds entered -- a round can contain one turn or several.
+    // than advisor turns entered -- one advisor turn can drive one turn or several.
     this.#turnsTaken += 1
     // Sampled per turn: a worktree created and removed inside one turn is still evidence the
     // rule was followed, and only a repeated sample can see it.
@@ -1205,7 +2250,12 @@ export class Relay {
     // would have described: an escalation that says "the report came back empty" and one
     // that says "the report came back empty; 3 files changed on disk" ask very different
     // things of whoever reads it (#39).
-    const treeBeforeTurn = new Set(dirtyPaths(this.#opts.cwd))
+    // THIS participant's root, not the run's. The diff exists to say what this turn changed,
+    // and at N>1 the integration checkout is not where this turn's work lands -- reading it
+    // would report another seat's merge as this seat's turn, and would miss everything this
+    // seat actually wrote. At N=1 the two are the same directory.
+    const turnRoot = this.#rootOf(p.id)
+    const treeBeforeTurn = new Set(dirtyPaths(turnRoot))
     await p.session.send(text, { kind: 'peer_relay' })
 
     // No timeout of its own. The adapter's watchdog guarantees a terminal verdict for a
@@ -1339,7 +2389,7 @@ export class Relay {
     for (const text of extractFlags(prose)) {
       this.flags.push({ participant: p.id, text, seq: this.log.length })
     }
-    return { prose, end, unsettled, emittedSinceSend: p.events.length - before, changedDuringTurn: dirtyPaths(this.#opts.cwd).filter((f) => !treeBeforeTurn.has(f)) }
+    return { prose, end, unsettled, emittedSinceSend: p.events.length - before, changedDuringTurn: dirtyPaths(turnRoot).filter((f) => !treeBeforeTurn.has(f)) }
   }
 
   /**
@@ -1397,15 +2447,33 @@ export class Relay {
    * could not see it.
    */
   readonly restrictedOrigins: RestrictedOrigin[] = []
-  #treeAtOrigin: string[] | undefined
+  /**
+   * What each ROOT looked like when the last restricted message was delivered, keyed by root.
+   *
+   * A map rather than one list, because at N>1 there is no single tree for "the tree at the
+   * origin" to mean. Participants that share a root share one entry -- which is every
+   * participant at N=1, so the map has exactly one key there and holds exactly the list the
+   * single field used to hold.
+   *
+   * Only the roots of the INFORMED recipients are snapshotted. A root nobody was told about is
+   * a root whose changes cannot have come from this message, and taking the snapshot anyway
+   * would be scanning another seat's tree for artifacts that are not its business.
+   */
+  #treeAtOrigin: Map<string, string[]> | undefined
 
   say(text: string, audience: Audience = 'all', kind: MessageKind = 'constraint'): RelayMessage {
     const to = this.#resolve(audience)
     const m = this.#record({ from: 'human', fromRank: 'human', to, kind, text })
     if (m.visibility === 'restricted') {
       this.restrictedOrigins.push(originOf(m))
-      // Snapshot the tree so paths appearing after this message can be attributed to it.
-      this.#treeAtOrigin = dirtyPaths(this.#opts.cwd)
+      // Snapshot each root a recipient works in, so paths appearing after this message can be
+      // attributed to it. One entry per DISTINCT root: two participants in the same checkout
+      // are looking at the same tree, and diffing it twice would say so twice.
+      this.#treeAtOrigin = new Map()
+      for (const id of to) {
+        const root = this.#rootOf(id)
+        if (!this.#treeAtOrigin.has(root)) this.#treeAtOrigin.set(root, dirtyPaths(root))
+      }
       // And mark where each recipient's evidence stands, so attribution reads only the
       // tool calls made AFTER the message — work done before it cannot have come from it.
       for (const id of to) this.#evidenceAtOrigin.set(id, (this.#evidence.get(id) ?? []).length)
@@ -1452,7 +2520,7 @@ export class Relay {
   /**
    * Run the session. Returns why it stopped.
    *
-   * The relay itself decides nothing beyond the round budget: DONE and ESCALATE are the
+   * The relay itself decides nothing beyond the advisor-turn budget: DONE and ESCALATE are the
    * advisor's calls, and both hand back to the human rather than being acted on. §7a's
    * rotation and termination authority is not implemented here.
    */
@@ -1490,21 +2558,49 @@ export class Relay {
     }
   }
 
-  #attributeArtifacts(): void {
+  /**
+   * What the last restricted message can be shown to have caused, in ONE participant's tree.
+   *
+   * The reporter is passed in rather than assumed, and everything below is scoped to the root
+   * that reporter works in:
+   *
+   *   - the CANDIDATES come from that root and no other. Diffing the integration checkout for a
+   *     seat's artifacts would attribute another seat's merge to this seat's aside, and would
+   *     miss everything the seat actually wrote, since uncommitted work in a linked worktree is
+   *     invisible everywhere else.
+   *   - the EVIDENCE comes only from informed participants sharing that root. An excluded
+   *     participant could not have acted on the message -- that rule is unchanged -- and an
+   *     informed one working in a DIFFERENT tree cannot have caused a path in this one.
+   *   - the SEAT is recorded when the root is a seat's own worktree, because then the tree
+   *     itself names the actor. On a shared root it is `null` and the confidence stays what it
+   *     has always been.
+   *
+   * At N=1 every participant shares `opts.cwd`, so the candidate set and the evidence set are
+   * the ones this produced before there were roots to distinguish, and every attribution is
+   * `seat: null` / `reasoned_but_unverified`. Nothing about the default run is upgraded: a
+   * shared checkout does not learn who wrote a file because the code got more careful.
+   */
+  #attributeArtifacts(reporter: RelayParticipant): void {
     const origin = this.restrictedOrigins.at(-1)
     if (!origin || !this.#treeAtOrigin) return
-    const before = new Set(this.#treeAtOrigin)
-    const candidates = dirtyPaths(this.#opts.cwd).filter((p) => !before.has(p))
+    const root = this.#rootOf(reporter.id)
+    const snapshot = this.#treeAtOrigin.get(root)
+    // No snapshot for this root means nobody working here was told, so there is no baseline to
+    // diff against and nothing here can be traced to the message.
+    if (!snapshot) return
+    const before = new Set(snapshot)
+    const candidates = dirtyPaths(root).filter((p) => !before.has(p))
     if (candidates.length === 0) return
 
-    // Only the participants that were told. One kept from the aside cannot have acted on
-    // it, so its tool calls are not evidence of what the aside caused.
-    const evidence = origin.informed.flatMap((id) =>
-      (this.#evidence.get(id) ?? []).slice(this.#evidenceAtOrigin.get(id) ?? 0),
+    const evidence = evidenceForRoot(
+      origin.informed,
+      (id) => this.#rootOf(id),
+      root,
+      (id) => (this.#evidence.get(id) ?? []).slice(this.#evidenceAtOrigin.get(id) ?? 0),
     )
+    const seat = root === this.#opts.cwd ? null : reporter.id
     for (const path of attributable(candidates, evidence)) {
-      origin.artifactSupport[path] = supportFor(path, evidence)
-      if (!origin.artifacts.includes(path)) origin.artifacts.push(path)
+      recordAttribution(origin, { path, support: supportFor(path, evidence), seat })
     }
   }
 
@@ -1519,7 +2615,14 @@ export class Relay {
   async #halt(
     handle: RunHandle | undefined,
     p: {
-      reason: PauseReason
+      /**
+       * The condition and the evidence its scope is computed from -- not its reason alone.
+       *
+       * A caller says what its condition is ABOUT; `resolutionFor` says who may resolve it
+       * and what it stops. Taking the reason from here rather than as a separate field is
+       * what makes it impossible for a pause's reason and its classification to disagree.
+       */
+      subject: ResolutionSubject
       detail: string
       evidence: string[]
       conflict?: AuthorityConflict
@@ -1527,7 +2630,30 @@ export class Relay {
       superseded?: PauseSupersession
     },
   ): Promise<RunOutcome | undefined> {
-    this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text: `paused (${p.reason}): ${p.detail}` })
+    const reason: PauseReason = p.subject.reason
+    /**
+     * The seat `rotate` would act on, if it is offered.
+     *
+     * The condition's own subject, because a pause about `implementer-2` that offered to rotate
+     * `implementer` would be a menu describing the API rather than the situation -- the exact
+     * fault the paragraph below is about, one seat over. A pause about no seat at all falls back
+     * to the lead, which at N=1 is the only seat and at N>1 is why `rotatable` refuses.
+     */
+    const target = 'participant' in p.subject ? p.subject.participant : p.verdictOf?.participant
+    const rotationSeat = target ?? this.#opts.implementer.id
+    // Rotation checks are the operator pre-delegating rotation authority (D2), and they are
+    // read here rather than passed in: a condition that could declare its own authority
+    // would eventually declare the wrong one. Read for the SEAT this pause is about, since a
+    // per-seat policy can arm or disarm one seat without the others (D7, #78).
+    const armed = (rotationFor(this.#opts.rotation, rotationSeat)?.checks.length ?? 0) > 0
+    const resolution = resolutionFor(p.subject, { rotationArmed: armed })
+    // Every request that reaches here must have somebody routed to answer it. Total today --
+    // every authority falls back to the operator -- so this cannot throw and changes nothing.
+    // It is here rather than with the routing it guards because this is the one place every
+    // pause passes through, and because the day a `mechanical` authority is wired to a
+    // resolver that does not exist, the alternative to throwing is silence.
+    actorFor(resolution)
+    this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text: `paused (${reason}): ${p.detail}` })
     if (!handle) {
       return this.#end(
         'escalated',
@@ -1552,11 +2678,20 @@ export class Relay {
     //
     // Everything needed was already on the pause: `verdictOf` names the seat whose verdict
     // this rests on, and the relay knows whether rotation is armed.
-    const implId = this.participants.find((x) => x.rank === 'implementer')?.id
-    const armed = (this.#opts.rotation?.checks.length ?? 0) > 0
-    const aboutImplementer = p.verdictOf === undefined || p.verdictOf.participant === implId
+    const implIds = new Set(this.#implementers().map((x) => x.id))
+    const aboutImplementer = p.verdictOf === undefined || implIds.has(p.verdictOf.participant)
+    // And `rotate` only where it names something. Since #78 that is a wider set than it was:
+    // rotation replaces a NAMED seat, so a pause about a seat can offer it at any N, and only a
+    // pause that names no seat in a run with several still has no seat it could mean. The latch
+    // takes it away again -- offering a rotation that has already been shown to be unable to
+    // pass is the inert choice this list exists to keep out, and it costs a turn to discover.
+    const rotatable = implIds.has(rotationSeat) && this.#rotationUnobservable === undefined
     const options: PauseOption[] = ['continue', 'constrain', 'abort']
-    if (armed && aboutImplementer) options.splice(1, 0, 'rotate')
+    if (armed && rotatable && aboutImplementer) options.splice(1, 0, 'rotate')
+    // The seat the handle's `rotate` will act on, set alongside the option that offers it. The
+    // handle is built once per run and a pause is per condition, so the target cannot travel on
+    // the closure that made the handle.
+    this.#rotationSeat = rotatable ? rotationSeat : undefined
     // `wait` only where it is the right answer: the child is measurably alive, so the turn
     // is still happening and every other option is destructive. Offering it always would
     // invite waiting on a child that has already exited, which is a decision to sit
@@ -1567,7 +2702,8 @@ export class Relay {
     if (p.evidence.some((e) => /is still working \(cpu/.test(e))) options.splice(1, 0, 'wait')
 
     const deciding = handle.pauseAt({
-      reason: p.reason,
+      reason,
+      resolution,
       detail: p.detail,
       evidence: p.evidence,
       options,
@@ -1587,7 +2723,7 @@ export class Relay {
     // Before the note, so the two events bracket the suspension itself as tightly as the
     // loop can see it; the note is the log's account of the same moment.
     this.#stream.emit({ type: 'resume', pause })
-    this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text: `resumed from ${p.reason}` })
+    this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text: `resumed from ${reason}` })
     return undefined
   }
 
@@ -1600,7 +2736,13 @@ export class Relay {
    */
   start(goal: string): RunHandle {
     const handle = new RunHandle({
-      rotate: (reason) => this.rotateImplementer(reason),
+      // The seat the CURRENT pause is about, which is the one the operator is looking at. With
+      // no pause in front of them there is no seat named, and the unnamed form's own rule
+      // applies: the lead at N=1, refused at N>1.
+      rotate: (reason) =>
+        this.#rotationSeat === undefined
+          ? this.rotateImplementer(reason)
+          : this.rotateSeat(this.#rotationSeat, reason),
       constrain: (text, audience) => this.say(text, audience),
       requestStop: () => {
         this.#stopped = true
@@ -1621,7 +2763,7 @@ export class Relay {
   /**
    * Should this implementer be replaced?
    *
-   * Called every round, because a session may compact without saying so and a session
+   * Called every advisor turn, because a session may compact without saying so and a session
    * that says so may not have. Returns a run-ending verdict when the answer needs a human,
    * and `undefined` when the run should carry on -- either because nothing is wrong or
    * because the rotation succeeded and there is now a fresh implementer to carry on with.
@@ -1678,13 +2820,20 @@ export class Relay {
     }
 
     const detail = `${impl.id} is degraded: ${verdict.evidence.join('; ')}${verdict.complained ? ' (and said so)' : ' (and did not say so)'}`
-    if (!this.#opts.rotation) {
+    // THIS SEAT'S policy: the run's default as amended by its own entry (D7, #78). A seat whose
+    // override configures no checks is in the same position as a run that configured none --
+    // there is nothing a replacement could reproduce -- so it takes the same branch.
+    const cfg = rotationFor(this.#opts.rotation, impl.id)
+    if (!cfg || cfg.checks.length === 0) {
       // Detection does not depend on configuration; the response does. Rotating with
       // nothing to verify against would be a transfer nobody demonstrated, so this goes to
       // the human instead of proceeding on an unverifiable handoff.
-      return this.#end('escalated', `${detail}. No rotation checks are configured, so this needs a human.`)
+      const why = cfg
+        ? `${impl.id}'s own rotation policy configures no checks, so it cannot be rotated`
+        : `No rotation checks are configured`
+      return this.#end('escalated', `${detail}. ${why}, so this needs a human.`)
     }
-    if ((this.#opts.rotation.onDegradation ?? 'candidate') === 'candidate') {
+    if (cfg.onDegradation === 'candidate') {
       // A candidate, not a verdict. The mechanism is built and the policy is not earned:
       // nothing yet shows that compaction and degradation coincide, so acting on it would be
       // inferring quality from a proxy that has never been checked against quality.
@@ -1702,7 +2851,7 @@ export class Relay {
       this.rotationWatch.candidates += 1
       if (handle) {
         const halted = await this.#halt(handle, {
-          reason: 'rotation_candidate',
+          subject: { reason: 'rotation_candidate', participant: impl.id },
           detail: `${detail}. Recorded as a rotation candidate, not acted on.`,
           evidence: verdict.evidence,
         })
@@ -1719,10 +2868,54 @@ export class Relay {
       return this.#acknowledge(impl, snap.compactionGeneration)
     }
 
-    const result = await this.rotateImplementer(detail)
+    // A fault an earlier rotation proved nothing can get past. Declined WITHOUT attempting,
+    // which is the point of the latch: acceptance needs an observed turn, that turn travels the
+    // transport that is not working, and spending a full transaction -- a quiesce, an advisor
+    // handoff turn, a fresh child, two repository captures -- to be told the same thing again is
+    // the loop #76 is about. The operator was told once, in the terms that name the remedy; this
+    // is recorded rather than re-raised, because a pause every advisor turn on a decision the
+    // human has already been handed teaches them to stop reading pauses.
+    if (this.#rotationUnobservable) {
+      const held = this.#rotationUnobservable
+      this.#record({
+        from: 'orchestrator',
+        fromRank: 'human',
+        to: [],
+        kind: 'note',
+        text:
+          `${detail}. Rotation was NOT attempted: an earlier rotation of ${held.seat} could not be ` +
+          `accepted because the replacement produced no observable output, so no replacement can ` +
+          `pass while that holds and the fix is upstream of rotation. ${impl.id} stays in service.`,
+      })
+      return this.#acknowledge(impl, snap.compactionGeneration)
+    }
+
+    // The seat by name (#78). This used to decline at N>1 -- and before that, to THROW, which
+    // `#loop`'s backstop reported as `transport_failed`: a transport fault, for a policy gap
+    // (#74). Rotation now replaces the degraded seat's session, in that seat's own worktree,
+    // while its siblings keep working; nothing here asks how many seats the run has.
+    const result = await this.rotateSeat(impl.id, detail)
     if (result.status === 'rotated') return undefined
+    if (result.reason === 'acceptance_unobservable') {
+      // The one rollback that is not an invitation to try again. `rotateSeat` has latched it and
+      // recorded the evidence; this puts it in front of the human with the remedy named, because
+      // an operator told only "rotation failed" will retry, and retrying is the loop.
+      const halted = await this.#halt(handle, {
+        subject: { reason: 'rotation_candidate', participant: impl.id },
+        detail:
+          `rotation could not be accepted and ROTATION IS NOT THE REMEDY: ${result.detail} ` +
+          `${impl.id} is back in service and no further rotation will be attempted this run.`,
+        evidence: [
+          ...verdict.evidence,
+          ...(result.evidence ?? []),
+          'the original implementer is back in service',
+          'a replacement cannot demonstrate itself while the transport it would demonstrate over is not working',
+        ],
+      })
+      return halted ?? this.#acknowledge(impl, (await impl.session.snapshot()).compactionGeneration)
+    }
     const halted = await this.#halt(handle, {
-      reason: 'rotation_candidate',
+      subject: { reason: 'rotation_candidate', participant: impl.id },
       detail: `rotation failed (${result.reason}): ${result.detail}`,
       evidence: [...verdict.evidence, 'the original implementer is back in service'],
     })
@@ -1732,7 +2925,7 @@ export class Relay {
   /**
    * The human saw this evidence and chose to carry on. Stop re-raising it.
    *
-   * Without this, declining a candidate pauses again on the very next round, on the same
+   * Without this, declining a candidate pauses again on the very next advisor turn, on the same
    * compaction, forever -- the operator either abandons the feature or stops reading the
    * pauses, and the second is worse. Moving the baseline means a *later* compaction is new
    * evidence and does pause again, which is the distinction that makes the signal worth
@@ -1786,9 +2979,657 @@ export class Relay {
     }
   }
 
+  /**
+   * The task queue: immutable records of what the advisor decided, in admission order.
+   *
+   * Append-only, and never edited after admission. Anything that would be an edit is instead a
+   * new record or a change to `#taskRuntime`, which references it. See `dispatch.ts` for why
+   * the two are separate structures and why only this class touches either.
+   */
+  #queue: Task[] = []
+  /** What happened to each task, keyed by `Task.id`. */
+  #taskRuntime = new Map<string, TaskRuntime>()
+  /**
+   * Per-seat execution state, keyed by participant id.
+   *
+   * Built from the seats work can be dispatched TO. The advisor is not one of them at any N --
+   * it is the seat that decides what the others do, which is a fact about rank rather than
+   * about how many implementers there are (D5). Keyed by id rather than holding the
+   * participant, so it survives a rotation: `rotateImplementer` swaps the SESSION in place and
+   * keeps the id, precisely so existing references stay valid.
+   */
+  #seatState = new Map<string, SeatExecution>()
+  #taskSeq = 0
+  /**
+   * A monotonic counter stamped on every dispatcher transition.
+   *
+   * Wall clock cannot answer "was the next task assigned before the previous verdict was
+   * graded?" -- two transitions in the same millisecond are indistinguishable, and that is
+   * exactly the pair a scheduling change reorders without anyone noticing. This can.
+   *
+   * Deliberately NOT a `#record` note. D4 asks each transition to write one so the routing log
+   * explains the schedule as well as the traffic, and that is right the day seats run
+   * concurrently -- but at N=1 it would add messages to a log whose numbering is asserted
+   * contiguous, for a schedule that has exactly one shape. The marks carry the same ordering
+   * evidence without changing what a default run records.
+   */
+  #ordinal = 0
+
+  /**
+   * The dispatcher's account of this run: what was admitted, and what became of it.
+   *
+   * Deep copies, sharing nothing with the originals. The queue and the runtime are Relay's
+   * alone (D4), and a caller holding a live reference is the second writer the rule exists to
+   * prevent -- `readonly` on `Task` stops the compiler and stops nothing at runtime, and a
+   * shallow copy leaves `target`, `dependsOn`, `restrictedOrigins`, the marks and the verdict's
+   * provenance all pointing at the objects the dispatcher is still scheduling against.
+   *
+   * `structuredClone` rather than a copy written out field by field, deliberately: a hand-rolled
+   * copy shares every nested field added after it was written, and it fails silently the day
+   * `TaskRuntime` grows one. This cannot.
+   */
+  tasks(): { task: Task; runtime: TaskRuntime }[] {
+    return this.#queue.map((task) => ({
+      task: structuredClone(task),
+      runtime: structuredClone(this.#taskRuntime.get(task.id)!),
+    }))
+  }
+
+  /** Per-seat execution state, copied the same way and for the same reason. */
+  seats(): SeatExecution[] {
+    return [...this.#seatState.values()].map((s) => structuredClone(s))
+  }
+
+  #mark(task: Task, event: TaskEvent): void {
+    this.#taskRuntime.get(task.id)!.marks.push({ event, ordinal: ++this.#ordinal })
+  }
+
+  /**
+   * Admit a task. The advisor PROPOSES; the dispatcher validates and admits, and this is the
+   * only place a `Task` record comes into existence.
+   *
+   * The dependency check runs even though nothing the advisor can currently write carries a
+   * dependency: a rule that only starts running once there is something to test it with is a
+   * rule nobody has tested.
+   */
+  #admit(instruction: string, target: TaskTarget, origin: number, purpose: TaskPurpose, parent?: string): Task {
+    const task: Task = {
+      id: `t-${++this.#taskSeq}`,
+      seq: this.#taskSeq,
+      origin,
+      instruction,
+      target,
+      // Designated at admission by whoever routed it, never inferred from the prose. See
+      // `TaskPurpose`: this is the one fact that lets a blocked seat accept its repair and
+      // nothing else.
+      purpose,
+      // The original task under review or repair (#72). Absent for `work`/`merge_resolution`.
+      ...(parent === undefined ? {} : { parent }),
+      dependsOn: [],
+      // Snapshotted at admission, so the conflict question is answered against the restricted
+      // messages that existed when the advisor decided rather than against later ones.
+      restrictedOrigins: this.restrictedOrigins.map((o) => o.seq),
+      admittedAt: Date.now(),
+    }
+    this.#queue.push(task)
+    this.#taskRuntime.set(task.id, { state: 'admitted', marks: [] })
+    this.#mark(task, 'admitted')
+    if (dependenciesMet(task, this.#taskRuntime)) {
+      this.#taskRuntime.get(task.id)!.state = 'ready'
+      this.#mark(task, 'ready')
+    }
+    return task
+  }
+
+  /**
+   * Admit a review task for a completed piece of work (#72). Called from `#runLoop` once a
+   * task's own turn is graded and this run has a reviewer -- never from inside
+   * `#crossBoundary`, which is the whole of "review is a dispatched task, not a hook the
+   * boundary calls".
+   *
+   * `parent` is set to `work.id`: the IMMEDIATE task this review is for, whether that is the
+   * original `work` task or a `review_resolution` repair. See `Task.parent`: a repair whose
+   * own parent is itself a repair is the second rejection, which `resolveReview` in
+   * `#runLoop` reads directly off `work.purpose` rather than climbing a chain.
+   *
+   * The context is built the way a rotation handoff's record is: mechanically, from the
+   * producing seat's own tree, never from that seat's report. See `rotation/review.ts`.
+   */
+  #admitReview(work: Task, seatId: string, reviewer: RelayParticipant): Task {
+    const manifest = this.#worktrees
+    const tree = manifest?.seats.find((s) => s.seatId === seatId)
+    const root = tree ? tree.worktreePath : this.#opts.cwd
+    const base = (tree && manifest ? integrationHead(manifest.integrationRoot) : this.#runStartSha) ?? 'HEAD'
+    const ctx = buildReviewContext({
+      root,
+      base,
+      checks: this.#opts.rotation?.checks ?? [],
+      instruction: work.instruction,
+      ...(this.#opts.rotation?.checkTimeoutMs === undefined
+        ? {}
+        : { checkTimeoutMs: this.#opts.rotation.checkTimeoutMs }),
+    })
+    return this.#admit(reviewPrompt(ctx), { kind: 'role', role: reviewer.role }, work.origin, 'review', work.id)
+  }
+
+  /**
+   * Cancel every queued task whose dependency failed, and everything behind it.
+   *
+   * A no-op today in the only way that matters: nothing the advisor can write carries a
+   * dependency, so `dependsOn` is empty on every admitted task and the sweep condemns
+   * nothing. It is wired now rather than with the feature that needs it because the rule it
+   * enforces is what makes dependencies SAFE to create -- a queue that can hold a task
+   * nothing will ever run is the thing that must not exist BEFORE the first edge is written,
+   * not after.
+   *
+   * `cancelledBy` records the causal task id rather than the bare fact, so an operator
+   * reading `tasks()` afterwards is told which failure took this work out rather than being
+   * left to reconstruct it from the marks.
+   */
+  #cancelUnrunnable(): void {
+    for (const { task, cancelledBy } of cancelledByFailedDependencies(this.#queue, this.#taskRuntime)) {
+      const runtime = this.#taskRuntime.get(task.id)!
+      runtime.state = 'cancelled'
+      runtime.cancelledBy = cancelledBy
+      this.#mark(task, 'cancelled')
+    }
+  }
+
+  /**
+   * Hand a ready task to a seat, and refuse if that seat is not free.
+   *
+   * The ungraded refusal is the one this exists for. A seat is free when its turn ended AND its
+   * verdict is graded (D4): a `timed_out (uncertain)` seat must not be handed more work, and
+   * freeing it at `turn_end` would do exactly that while looking like a scheduling decision
+   * somebody made. Enforced here rather than left to the order of the calls, because a
+   * two-stage release is precisely the kind of ordering a later change collapses by accident.
+   *
+   * Admission is deliberately NOT guarded this way. A queue may hold work for a busy seat --
+   * that is a scheduling wait, and refusing it would reintroduce lockstep at the front door.
+   */
+  #assign(task: Task, seat: SeatExecution): void {
+    // The task's own target, so this asks exactly what `seatFor` asked. A resolution task
+    // named at a `merge_blocked` seat is a legal dispatch and must not be refused here.
+    const refusal = refuseDispatch(seat, this.#taskRuntime, task)
+    if (refusal) throw new Error(`dispatcher refused ${task.id}: ${refusal}`)
+    const runtime = this.#taskRuntime.get(task.id)!
+    runtime.state = 'assigned'
+    runtime.seat = seat.seat
+    seat.current = task.id
+    seat.state = 'running'
+    seat.dispatched += 1
+    this.#mark(task, 'assigned')
+  }
+
+  /** The turn is sent. This is the point `#exchange` counts against the turn ceiling. */
+  #sending(task: Task): void {
+    const runtime = this.#taskRuntime.get(task.id)!
+    runtime.state = 'running'
+    runtime.sentAt = Date.now()
+    this.#mark(task, 'sent')
+  }
+
+  /**
+   * The turn ended, settled, and its report was recorded.
+   *
+   * The seat becomes `integrating`: not running, and not available. The report being ready and
+   * the tree being ready are different facts, and at N>1 handing this seat new work here would
+   * write into a tree the boundary flow is still committing.
+   */
+  #reported(task: Task, seat: SeatExecution, reportSeq: number, unsettled: boolean): void {
+    const runtime = this.#taskRuntime.get(task.id)!
+    runtime.endedAt = Date.now()
+    runtime.unsettled = unsettled
+    runtime.reportSeq = reportSeq
+    runtime.state = 'reported'
+    seat.state = 'integrating'
+    this.#mark(task, 'ended')
+    this.#mark(task, 'reported')
+  }
+
+  /**
+   * The verdict, resolved through supersession and judged. No seat is freed without one.
+   *
+   * `end` is the event the verdict was READ FROM -- the replacement when a late revision
+   * withdrew the original. Recorded here rather than when the turn ended, because until this
+   * point there is no answer to which event that is, and a field holding the withdrawn one in
+   * the meantime would say something the relay had already stopped believing.
+   */
+  #grade(task: Task, end: TurnEndEvent, grade: TaskGrade): void {
+    const runtime = this.#taskRuntime.get(task.id)!
+    runtime.end = end
+    runtime.grade = grade
+    this.#mark(task, 'graded')
+  }
+
+  /**
+   * The integration boundary, and the release it earns.
+   *
+   * At N=1 there is nothing to commit: one tree, and it is the operator's cwd (D1). A
+   * no-change boundary passes straight through rather than being treated as an error -- most
+   * tasks at any N change no files, and requiring a commit to free a seat would deadlock every
+   * read-only one.
+   */
+  #integrate(task: Task, seat: SeatExecution): void {
+    const runtime = this.#taskRuntime.get(task.id)!
+    if (runtime.grade === undefined) {
+      throw new Error(`dispatcher cannot free ${seat.seat}: ${task.id} has no graded verdict`)
+    }
+    recordCompletion(runtime, 'integrated', Date.now())
+    this.#mark(task, 'integrated')
+    seat.current = undefined
+    seat.state = 'idle'
+    seat.idleSince = Date.now()
+    this.#mark(task, 'released')
+  }
+
+  /**
+   * The boundary that did not happen: release the seat, and record that it did not.
+   *
+   * The counterpart to `#integrate`, and it exists because the two used to be one. Every
+   * boundary went through `#integrate` whatever the merge did, so a task whose merge
+   * CONFLICTED still recorded `integratedAt` and could derive `complete` — a queue in which
+   * "this work is in the integration checkout" was true of work that provably was not, and the
+   * dependency rules are written against exactly that fact. A dependent of a conflicted task
+   * would have been released to run against a base that never absorbed it.
+   *
+   * So: no `recordCompletion`, which is what leaves `integratedAt` unset and keeps `complete`
+   * underivable, and an explicit `failed` mark so the transition is in the record rather than
+   * inferred from an absence. The seat is released from its task — the turn really did end —
+   * but into `merge_blocked` rather than `idle`, so nothing but its own repair can reach it.
+   *
+   * `routed` may still land afterwards and must: the advisor did hear the report, and
+   * `recordCompletion` already refuses to move a `failed` task off its state.
+   */
+  #failBoundary(task: Task, seat: SeatExecution): void {
+    const runtime = this.#taskRuntime.get(task.id)!
+    if (runtime.grade === undefined) {
+      throw new Error(`dispatcher cannot free ${seat.seat}: ${task.id} has no graded verdict`)
+    }
+    runtime.state = 'failed'
+    this.#mark(task, 'failed')
+    seat.current = undefined
+    seat.state = 'merge_blocked'
+    // Stamped even though a blocked seat is not selectable: it becomes the ordering key the
+    // moment the block clears, and a seat resuming with an ancient `idleSince` would jump the
+    // queue ahead of seats that have genuinely been waiting.
+    seat.idleSince = Date.now()
+    this.#mark(task, 'released')
+  }
+
+  /**
+   * Hold a seat's release pending a reviewer's verdict (#72).
+   *
+   * NOT `#integrate` and NOT `#failBoundary`: neither fact they record has happened yet.
+   * `task`'s own runtime stays exactly where `#reported` left it -- `reported`, no
+   * `integratedAt` -- because nothing has crossed the boundary. Only the seat moves: released
+   * from the task it just finished, but not free, because review is a task this run has not
+   * yet decided to keep. `#crossBoundary` runs later, from `crossAndSettle` in `#runLoop`,
+   * once (and only if) the verdict is ACCEPT.
+   */
+  #awaitReview(seat: SeatExecution): void {
+    seat.current = undefined
+    seat.state = 'review_pending'
+    seat.idleSince = Date.now()
+  }
+
+  /**
+   * The repair a REJECTED review earns: release the seat, but into `review_blocked` rather
+   * than `idle`, so nothing but its named `review_resolution` repair can reach it (#72).
+   *
+   * The counterpart to `#failBoundary`, and deliberately not a call to it: that function's
+   * `merge_blocked` is a claim about GIT, and a review rejection is a claim about neither
+   * seat's tree failing to merge -- it may merge cleanly and still be the wrong change.
+   */
+  #failReview(task: Task, seat: SeatExecution): void {
+    const runtime = this.#taskRuntime.get(task.id)!
+    runtime.state = 'failed'
+    this.#mark(task, 'failed')
+    seat.current = undefined
+    seat.state = 'review_blocked'
+    seat.idleSince = Date.now()
+    this.#mark(task, 'released')
+  }
+
+  /**
+   * Commit this seat's work and merge it into the integration checkout.
+   *
+   * A no-op without seat worktrees, which is every default run — the guard is the `undefined`
+   * manifest and not a seat count, so N=1 does not take a shorter path through this code, it
+   * takes none of it.
+   *
+   * Every outcome is recorded as an orchestrator note, because a merge is a change to the
+   * operator's own checkout made by something they are not watching, and a boundary that
+   * moved their HEAD without saying so is indistinguishable from one that did nothing.
+   *
+   * A conflict does NOT stop the run and does not pause it. Only that seat is marked; its
+   * branch and tree are untouched, its work is committed and intact, and resolution is work
+   * the advisor has to dispatch back to that seat. Blocking every other seat on one seat's
+   * conflict would be lockstep again, reached from a different direction. Making the blocked
+   * seat undispatchable, and raising this onto a decision queue the advisor services, is the
+   * seat-block machinery — not built here.
+   */
+  async #crossBoundary(task: Task, seatId: string): Promise<BoundaryOutcome> {
+    // N=1 takes none of this: no manifest, no merge, no checks against an integration tree
+    // that does not exist -- and so no reason to touch the lane. Guarded before the acquire
+    // rather than inside it, so a default run does not acquire a lane it has no use for.
+    if (!this.#worktrees?.seats.some((s) => s.seatId === seatId)) return { kind: 'clear' }
+    // The WHOLE boundary, not just the checks. `integrateSeat` merges into the integration
+    // checkout and resets the seat worktrees onto the new HEAD, which is precisely the change
+    // a rotation's two captures would read as `repository_diverged`. One acquire, here, at the
+    // outermost point: the checks `integrateSeat` runs for itself must not take the lane a
+    // second time, which is why `integrate.ts` knows nothing about it.
+    //
+    // Outside the boundary's own try/catch on purpose. That catch converts a throw into
+    // `merge_blocked`, and a lane fault is not a claim about anyone's branch.
+    return this.#checkLane.run(
+      { seat: seatId, station: 'integration', detail: task.id },
+      () => this.#mergeAndCheck(task, seatId),
+    )
+  }
+
+  /**
+   * The boundary itself, with the lane already held. See `#crossBoundary`.
+   *
+   * Synchronous, as it has always been: both `integrateSeat` and the checks it runs are
+   * `spawnSync`. That is what makes the lane's protection a real invariant rather than a hope
+   * -- nothing can interleave inside this -- and it is also why a check command freezes every
+   * other seat's I/O for as long as it runs, which is a separate problem this does not fix.
+   */
+  #mergeAndCheck(task: Task, seatId: string): BoundaryOutcome {
+    const manifest = this.#worktrees
+    if (!manifest) return { kind: 'clear' }
+    const tree = manifest.seats.find((s) => s.seatId === seatId)
+    if (!tree) return { kind: 'clear' }
+    const note = (text: string): void => {
+      this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text })
+    }
+    try {
+      const result = integrateSeat(
+        manifest,
+        tree,
+        {
+          taskId: task.id,
+          seq: task.seq,
+          advisorTurn: task.origin,
+        },
+        // The run's already-configured checks, against the tree the merge just produced. No
+        // second option to arm: an operator who has said what "working" means for this
+        // project has said it, and a station that needs saying twice is a station that will
+        // not be armed on the run that needs it (#80).
+        {
+          checks: this.#opts.rotation?.checks,
+          checkTimeoutMs: this.#opts.rotation?.checkTimeoutMs,
+        },
+      )
+      if (result.status !== 'blocked') {
+        if (result.status === 'nothing_to_merge') {
+          note(`${seatId} changed nothing for ${task.id}; nothing to integrate`)
+        } else {
+          note(`${seatId}'s work for ${task.id} merged into ${manifest.integrationRoot} at ${result.integrationSha.slice(0, 12)}`)
+          for (const n of result.notes) note(n)
+        }
+        // A boundary that got through IS the repair, whatever the instruction that produced it
+        // was called. Nothing else clears a block: not a turn, not an advisor saying so.
+        if (this.#blocked.delete(seatId)) {
+          const cleared = `${seatId}'s merge conflict is resolved and its work is in the integration checkout. It takes ordinary work again.`
+          note(cleared)
+          this.#tellLead(cleared)
+        }
+        if (result.status === 'merged') {
+          const red = this.#judgeIntegration(task, seatId, result.integrationSha, result.checks, note)
+          if (red) return red
+        }
+        return { kind: 'clear' }
+      }
+
+      const prior = this.#blocked.get(seatId)
+      const repeat = prior !== undefined && prior.parent === result.parent
+      this.#blocked.set(seatId, {
+        parent: result.parent,
+        paths: result.paths,
+        attempts: repeat ? prior.attempts + 1 : 1,
+      })
+      const conflicting = result.paths.length > 0 ? ` Conflicting: ${result.paths.join(', ')}.` : ''
+      note(
+        `${seatId}'s work for ${task.id} could not be merged and the integration checkout was ` +
+          `left as it was. Its work is committed on ${tree.branch} and nothing has been discarded.` +
+          `${conflicting} ${result.detail}`,
+      )
+      if (!repeat) {
+        // The advisor is told because resolution is WORK, and work is dispatched. It is told in
+        // the terms it has to act in: the conflict is the seat's to resolve, in the seat's own
+        // tree, and the next instruction goes there whether or not the advisor names it.
+        this.#tellLead(
+          `${seatId}'s work is committed on ${tree.branch} but will not merge into the integration ` +
+            `checkout.${conflicting} It is blocked and takes no other work until this clears. Your next ` +
+            `instruction goes to ${seatId}: tell it to merge the current integration HEAD into its own ` +
+            `branch, resolve the conflict IN ITS OWN WORKTREE, verify whatever you think that needs, and ` +
+            `report. Nothing has been lost and no other seat is affected.${this.#addressBlocked(seatId)}`,
+        )
+      }
+      return {
+        kind: 'blocked',
+        seatId,
+        escalate: repeat,
+        detail:
+          `${seatId}'s branch ${tree.branch} still will not merge into ${result.parent.slice(0, 12)} ` +
+          `after a resolution turn.${conflicting}`,
+        evidence: [
+          `attempt ${repeat ? prior.attempts + 1 : 1} against the same integration parent ${result.parent.slice(0, 12)}`,
+          `the work is committed on ${tree.branch} and its worktree ${tree.worktreePath} is retained`,
+          `no other seat is blocked by this`,
+        ],
+      }
+    } catch (e) {
+      // The run does not die on a boundary it could not complete. But it does not shrug either:
+      // this used to return `clear`, which released the seat for ordinary work on the strength
+      // of a boundary that THREW -- the one case in which nothing is known about whether the
+      // work merged, whether the tree is mid-merge, or whether the manifest was written. An
+      // unknown boundary is treated exactly as a failed one, because the safe reading of "I
+      // could not tell" is not "it was fine".
+      const detail = (e as Error).message
+      note(`${seatId}'s boundary for ${task.id} did not complete: ${detail}`)
+      // Best-effort, and its failure is not fatal: the tree is retained either way by the
+      // cleanup rules, and a manifest that could not be written is one more thing the operator
+      // is told about rather than a reason to lose the seat state.
+      try {
+        tree.mergeState = 'merge_blocked'
+        writeManifest(manifest)
+      } catch (writeError) {
+        note(`${seatId}'s manifest could not be updated: ${(writeError as Error).message}`)
+      }
+      // The same repeat rule as a conflict. `parent` is read best-effort, because a boundary
+      // that threw may have been git failing in the first place; an unreadable HEAD is its own
+      // value, so two unreadable attempts in a row still count as a repeat.
+      const parent = integrationHead(manifest.integrationRoot) ?? 'unreadable'
+      const prior = this.#blocked.get(seatId)
+      const repeat = prior !== undefined && prior.parent === parent
+      this.#blocked.set(seatId, { parent, paths: [], attempts: repeat ? prior.attempts + 1 : 1 })
+      if (!repeat) {
+        this.#tellLead(
+          `${seatId}'s work could not be integrated: the boundary itself failed (${detail}). Its work is ` +
+            `on ${tree.branch} and nothing has been discarded. It is blocked and takes no other work ` +
+            `until this clears. Your next instruction goes to ${seatId}: tell it to get its branch into ` +
+            `a state that merges cleanly, working IN ITS OWN WORKTREE, and report.${this.#addressBlocked(seatId)}`,
+        )
+      }
+      return {
+        kind: 'blocked',
+        seatId,
+        escalate: repeat,
+        detail: `${seatId}'s boundary for ${task.id} failed again: ${detail}`,
+        evidence: [
+          `attempt ${repeat ? prior.attempts + 1 : 1} against integration parent ${parent.slice(0, 12)}`,
+          `the boundary raised an error rather than reporting a conflict, so what merged is unknown`,
+          `${tree.worktreePath} is retained and its branch ${tree.branch} is untouched`,
+        ],
+      }
+    }
+  }
+
+  /**
+   * What the configured checks said about the tree this merge produced (#80).
+   *
+   * Called once per merge that actually went in, and it is the only place the run learns
+   * anything about the INTEGRATION result. Everything before it -- git reporting no conflict,
+   * every seat's own checks passing in every seat's own tree -- is compatible with a tree that
+   * does not build, which is what the first real two-seat run produced.
+   *
+   * Returns the red outcome, or `undefined` when the tree is green or unchecked. The caller
+   * decides what a red one costs; this decides only what is true.
+   */
+  #judgeIntegration(
+    task: Task,
+    seatId: string,
+    integrationSha: string,
+    checks: IntegrationCheckResult[],
+    note: (text: string) => void,
+  ): BoundaryOutcome | undefined {
+    const merge: MergeContribution = { taskId: task.id, seatId, integrationSha }
+    this.#merges.push(merge)
+    // Unchecked is not green, and it is not red either. A run with no integration checks
+    // configured says nothing about its tree, and saying nothing is the honest answer.
+    if (checks.length === 0) return undefined
+
+    // Reported whatever their relevance, because an operator reading the log is entitled to
+    // see a check that did not pass even when it was declared not to decide anything.
+    for (const c of checks.filter((c) => c.exitCode !== 0)) {
+      note(
+        `integration check \`${c.command}\` exited ${c.exitCode ?? 'without a status'} ` +
+          `[${c.relevance}] after ${task.id} merged at ${integrationSha.slice(0, 12)}`,
+      )
+    }
+
+    const failures = failedRequired(checks)
+    if (failures.length === 0) {
+      // Green, and this is the ONLY thing that clears a red tree. A repair that was dispatched
+      // and a seat that reports success are both claims; this is the measurement.
+      if (this.#integrationRed) {
+        const cleared = `the integration checkout passes its checks again at ${integrationSha.slice(0, 12)}.`
+        note(cleared)
+        this.#tellLead(cleared)
+      }
+      this.#integrationRed = undefined
+      this.#lastGreenMerge = this.#merges.length - 1
+      return undefined
+    }
+
+    // The combination, not the last merge. Everything from the last merge that was GREEN
+    // through this one is in the tree and is part of what is red; before that green point the
+    // tree was measured working, so those tasks are not implicated by this failure.
+    const from = this.#lastGreenMerge ?? 0
+    const contributors = this.#merges.slice(from)
+    this.#integrationRed = { contributors, failures }
+    return { kind: 'integration_red', contributors, failures }
+  }
+
+  /**
+   * How the advisor is told a merge produced a red tree, and what it is asked to do about it.
+   *
+   * Deliberately NOT the `merge_blocked` wording one function up, and the difference is the
+   * point of #80. That notice says "your next instruction goes to THIS seat, this is its
+   * conflict, in its own worktree" -- correct for a conflict, wrong here. Neither seat did
+   * anything wrong, so the repair cannot be assigned by fault; it names both tasks, says the
+   * failure belongs to their combination, and leaves the choice of seat to the advisor, which
+   * is the only participant that can see both halves.
+   */
+  #tellLeadIntegrationRed(red: { contributors: MergeContribution[]; failures: IntegrationCheckResult[] }): void {
+    const tasks = red.contributors.map((c) => `${c.taskId} (${c.seatId})`).join(' + ')
+    const failing = red.failures
+      .map((f) => `\`${f.command}\` exited ${f.exitCode ?? 'without a status'}:\n${f.output || '(no output)'}`)
+      .join('\n\n')
+    this.#tellLead(
+      `The integration checkout now fails its configured checks. Every merge was clean and every ` +
+        `seat's own work was green in its own tree; what is red is the COMBINATION of ${tasks}. ` +
+        `No seat is blocked and no seat is at fault, so this is not assigned for you: dispatch a ` +
+        `repair task for it, to whichever seat you judge best placed, and say in the instruction ` +
+        `that the seat must read BOTH halves — the defect exists in neither of them alone. Naming ` +
+        `one seat as the cause would be a guess.\n\n${failing}`,
+    )
+  }
+
+  /**
+   * How to address a blocked seat, appended to the notice that says one is blocked.
+   *
+   * Empty at N=1, which is what keeps the single-seat notice byte-identical: with one seat
+   * there is nothing to disambiguate, the untargeted redirect puts the next instruction on it
+   * regardless, and telling an advisor that was never taught `@seat` to use it would be
+   * instructions for a syntax it has not been given.
+   *
+   * At N>1 it is the difference between a block that clears and one that does not. The
+   * untargeted redirect deliberately no longer fires while another seat is free -- that was
+   * starvation -- so an advisor that does not name the seat sends the repair somewhere else and
+   * the block persists with nothing reporting why.
+   */
+  #addressBlocked(seatId: string): string {
+    return this.#seatState.size > 1
+      ? ` Address it BY NAME — reply with a line beginning "@seat ${seatId}:" — because an ` +
+        `untargeted instruction now goes to a different free seat and leaves this one blocked.`
+      : ''
+  }
+
+  /** Queue a mechanical fact for the advisor's next prompt. See `#leadNotices`. */
+  #tellLead(text: string): void {
+    this.#leadNotices.push(`[ORCHESTRATOR — mechanical, not a participant speaking]\n\n${text}`)
+  }
+
+  #drainLeadNotices(): string {
+    const notices = this.#leadNotices
+    this.#leadNotices = []
+    return notices.join('\n\n')
+  }
+
+  /**
+   * The report reached the advisor.
+   *
+   * Independent of integration, and a task reaches the two in either order: the advisor must
+   * not wait on a merge to hear what a seat found, and a seat whose integration succeeded must
+   * not idle through an advisor turn to collect its next task.
+   */
+  #routed(task: Task): void {
+    recordCompletion(this.#taskRuntime.get(task.id)!, 'routed', Date.now())
+    this.#mark(task, 'routed')
+  }
+
+  /**
+   * The run as the ceilings see it, read from the live dispatcher rather than reconstructed.
+   *
+   * One reader, so the two check points below cannot disagree about what "queue depth" meant
+   * at each of them. The counts come from `dispatch.ts` for the same reason the transitions
+   * do: this class owns the objects, that module owns what their states mean.
+   */
+  #ceilingState(): CeilingState {
+    return {
+      elapsedMs: Date.now() - this.#startedAt,
+      turns: this.#turnsTaken,
+      queueDepth: queueDepth(this.#queue, this.#taskRuntime),
+      concurrentSeats: concurrentSeats([...this.#seatState.values()]),
+    }
+  }
+
+  /**
+   * `undefined` when no ceilings were configured, so absent stays exactly behaviourless.
+   *
+   * `projection` overrides individual readings to ask what the state WOULD be. Ceilings are
+   * checked before the mutation they would forbid (D8), not after it, so the check that stops
+   * an admission asks about the queue that admission would produce -- and when it stops the
+   * run, the task was never admitted and the seat was never marked running. A check placed
+   * after the mutation leaves a task nothing will dispatch and a seat nothing will free, which
+   * is a dispatcher state no reader could interpret and no resume could continue from.
+   */
+  #breachedNow(projection: Partial<CeilingState> = {}): CeilingBreach | undefined {
+    if (!this.#opts.ceilings) return undefined
+    return breached(this.#opts.ceilings, { ...this.#ceilingState(), ...projection })
+  }
+
   async #runLoop(goal: string, handle: RunHandle | undefined): Promise<RunOutcome> {
     const lead = this.participants.find((p) => p.rank === 'advisor')!
-    const impl = this.participants.find((p) => p.rank === 'implementer')!
+    const seats = this.#implementers()
+    /** Absent on every run that did not declare one (#72); the whole of D1's "expressible and off". */
+    const reviewerSeat = this.#reviewerSeat()
+    /** Named, not chosen: whose role an instruction that targets nothing resolves against. */
+    const impl = this.#leadImplementer()
 
     // `to` is the whole of it. `#record` derives `restricted` and `excluded` from the gap
     // between recipients and participants, so a goal the implementer does not get is
@@ -1800,373 +3641,986 @@ export class Relay {
     // that re-issues an instruction the log shows as completed is the failure this prevents.
     const prior = this.#opts.resume?.length ? `${resumeBriefing(this.#opts.resume)}\n\n` : ''
 
-    await this.#exchange(
-      impl,
-      `${IMPLEMENTER_BRIEFING}\n\n${SUBAGENT_BRIEFING}\n\n${WITHHELD_GOAL_NOTICE}\n\n${prior}Acknowledge briefly; do not start work yet.`,
-    )
+    // Every seat, sequentially and in join order. A seat that was never briefed does not know
+    // it is in a relay, what it may not assume about the goal, or what the subagent rule is --
+    // and it would find out only by receiving its first instruction cold, which is not a
+    // failure anything reports. At N=1 this is the one exchange it has always been.
+    for (const seat of seats) {
+      await this.#exchange(
+        seat,
+        `${IMPLEMENTER_BRIEFING}\n\n${SUBAGENT_BRIEFING}\n\n${WITHHELD_GOAL_NOTICE}\n\n${prior}Acknowledge briefly; do not start work yet.`,
+      )
+    }
+    // The reviewer's own opening turn, sent `REVIEWER_BRIEFING` instead of
+    // `IMPLEMENTER_BRIEFING` -- it is rank `implementer` but not one of `seats` above, which
+    // is filtered on role precisely so this loop does not tell it it writes code (#72).
+    if (reviewerSeat) {
+      await this.#exchange(
+        reviewerSeat,
+        `${REVIEWER_BRIEFING}\n\n${SUBAGENT_BRIEFING}\n\n${WITHHELD_GOAL_NOTICE}\n\n${prior}Acknowledge briefly; do not start work yet.`,
+      )
+    }
     let next = await this.#exchange(
       lead,
       `${LEAD_BRIEFING}\n\n${SUBAGENT_BRIEFING}\n\n` +
+        // Only when there is more than one seat to address. See MULTI_SEAT_BRIEFING: an advisor
+        // that never hears the syntax never writes it, and the default run's briefing is
+        // byte-identical to what it has always been.
+        `${seats.length > 1 ? `${MULTI_SEAT_BRIEFING}\n\n` : ''}` +
+        // Only when a reviewer is declared, for the same reason (#72). The default run pays
+        // nothing for this either.
+        `${reviewerSeat ? `${REVIEWER_BRIEFING_FOR_ADVISOR}\n\n` : ''}` +
         `${this.#opts.operator === 'agent' ? `${AGENT_OPERATOR_NOTICE}\n\n` : ''}` +
         `${prior}The goal for this session:\n\n${goal}\n\nGive the implementer its first instruction.`,
     )
 
-    const maxRounds = this.#opts.maxRounds ?? 6
+    const maxAdvisorTurns = boundOf(this.#opts)
     this.#startedAt = Date.now()
     this.#worktreesAtStart = worktreePaths(this.#opts.cwd)
     this.#worktreesSeen = new Set(this.#worktreesAtStart)
-    for (let round = 1; round <= maxRounds; round++) {
-      // At the boundary rather than on a timer. A run cannot be interrupted mid-turn without
-      // discarding that turn's work -- the same reason #exchange has no timeout of its own.
-      const ceiling = this.#opts.ceilings
-        ? breached(this.#opts.ceilings, {
-            elapsedMs: Date.now() - this.#startedAt,
-            turns: this.#turnsTaken,
-          })
-        : undefined
-      if (ceiling) {
-        this.#record({
-          from: 'orchestrator',
-          fromRank: 'human',
-          to: [],
-          kind: 'note',
-          text: ceiling.detail,
-        })
-        return this.#end('ceiling', ceiling.detail)
-      }
-      if (this.#stopped) return this.#end('stopped')
+    // Best-effort and only ever read as a fallback (`#admitReview`): a repo with no commits
+    // yet leaves this `undefined`, and `reviewPrompt`'s caller already treats a missing base
+    // as `HEAD`.
+    if (reviewerSeat) this.#runStartSha = integrationHead(this.#opts.cwd)
+    // Every seat the SCHEDULER may dispatch to -- `#dispatchSeats()`, rank-based, not `seats`
+    // above -- because a review task is dispatched through this exact table and a reviewer
+    // seat absent from it could never be assigned one.
+    this.#seatState = new Map(
+      this.#dispatchSeats().map((p): [string, SeatExecution] => [
+        p.id,
+        { seat: p.id, role: p.role, state: 'idle', idleSince: this.#startedAt, dispatched: 0 },
+      ]),
+    )
+    // The target for an instruction that names none, which is every instruction the advisor can
+    // currently write: there is no target syntax in its briefing, and inventing one here would
+    // change what the advisor is asked to produce rather than how the relay schedules it. The
+    // ROLE rather than the seat id, because the rule that resolves it -- longest-idle seat
+    // filling the role -- is the same rule at any N, and at N=1 it has exactly one answer.
+    //
+    // The LEAD implementer's role, read off the option the caller wrote rather than off
+    // whichever seat a rank scan returned first. At N>1 with seats in different roles those
+    // two are different answers, and only one of them is something a caller decided.
+    const untargeted: TaskTarget = { kind: 'role', role: impl.role }
+    /**
+     * Where an instruction that names no target actually goes.
+     *
+     * The role — unless EVERY seat that could fill it is blocked, in which case the oldest
+     * block, by name, because there is nothing else the work could reach.
+     *
+     * The condition used to be "any seat is blocked", which at N=1 is the same question and at
+     * N>1 is starvation: one seat failing to merge redirected every subsequent untargeted
+     * instruction onto it, so the free seats sat idle while the blocked one collected work it
+     * is not allowed to do — and `canTake` would have refused all of it anyway, leaving the
+     * queue holding tasks nothing could dispatch. A blocked seat is now reached the way the
+     * advisor is told to reach it: BY NAME, with `@seat`, which `#purposeFor` designates as
+     * that seat's repair.
+     *
+     * At N=1 the two conditions cannot differ. The one compatible seat being blocked is both
+     * "a seat is blocked" and "every seat is blocked", so the single-seat repair path is the
+     * one it has always been: the redirect, the designation, and the instruction that arrives.
+     *
+     * Oldest block first: `#blocked` is insertion-ordered, and only blocks on seats this target
+     * could have reached are considered.
+     */
+    const untargetedTarget = (): TaskTarget => {
+      const compatible = seatsFor([...this.#seatState.values()], untargeted)
+      const stuck = [...this.#blocked.keys()].find((id) => compatible.some((s) => s.seat === id))
+      const allBlocked = compatible.every((s) => s.state === 'merge_blocked')
+      return allBlocked && stuck !== undefined ? { kind: 'seat', seat: stuck } : untargeted
+    }
 
-      if (this.#pauseRequested) {
-        const reason = this.#pauseRequested
-        this.#pauseRequested = undefined
-        const halted = await this.#halt(handle, {
-          reason: 'operator_requested',
-          detail: reason,
-          evidence: [`round ${round} of ${maxRounds}; no turn is in flight`],
-        })
-        if (halted) return halted
-      }
+    /**
+     * What a task admitted at this target is FOR.
+     *
+     * `merge_resolution` for anything that names a blocked seat, and `work` for everything
+     * else. Still a fact about ROUTING rather than a reading of the instruction: the seat table
+     * says the seat is blocked, and the reply named that seat. Nothing here parses prose, which
+     * is the property `TaskPurpose` exists to keep — an advisor that happened to write "resolve
+     * the conflict" in ordinary work must not slip onto a blocked seat, and one that wrote a
+     * repair in different words must not be locked out of its own.
+     *
+     * Read off `#seatState` rather than `#blocked` deliberately: `canTake` decides whether the
+     * dispatch is legal from the seat table, and a designation taken from a different structure
+     * could disagree with the check that acts on it.
+     */
+    const purposeFor = (target: TaskTarget): TaskPurpose =>
+      target.kind === 'seat' && this.#seatState.get(target.seat)?.state === 'merge_blocked'
+        ? 'merge_resolution'
+        : 'work'
 
-      // Lifted before anything else looks at the reply: a NOTE line is addressed to the
-      // human, so it must not reach the implementer as part of the instruction, and it must
-      // not make an otherwise-empty reply look like a real instruction either.
-      const { notes, rest: withoutNotes } = splitNotes(next.prose)
-      for (const note of notes) {
-        this.#record({ from: lead.id, fromRank: 'advisor', to: [], kind: 'note', text: note })
-      }
+    /**
+     * Turns that have been sent and not yet come back, keyed by task id.
+     *
+     * The stored promise NEVER rejects: a turn that throws pushes its error onto `arrived` and
+     * is re-raised when the dispatcher gets to it. An unhandled rejection here would be a
+     * process-level crash raised from whichever seat happened to fail first, rather than the
+     * run outcome the caller is waiting on.
+     */
+    const inflight = new Map<string, Promise<void>>()
+    /**
+     * Completed turns in the order they were OBSERVED, which is the order they are processed.
+     *
+     * An array rather than `Promise.race` alone. Racing tells you that SOMETHING finished; with
+     * two already-settled promises it resolves in argument order, which is admission order
+     * wearing a disguise. The push below happens inside each turn's own continuation, so this
+     * list is arrival order by construction, and `Promise.race` is used only to wait.
+     */
+    const arrived: Completion[] = []
+    /**
+     * Turns this run still owes an answer to: sent and not back, or back and not yet processed.
+     *
+     * Both, and the second is not pedantry. A turn that has arrived has left `inflight` and has
+     * NOT been graded, integrated or routed — so a check that asked only about `inflight` would
+     * see a run with two finished reports sitting in the queue as a run with nothing
+     * outstanding, end it, and lose them. It did exactly that before this existed.
+     */
+    const outstanding = (): number => inflight.size + arrived.length
 
-      let instruction = withoutNotes.trim()
-
-      // A reply that was ONLY notes is not a failure to instruct -- it is the advisor using
-      // the channel that was just given to it. Halting there would end a run because the
-      // advisor said something useful, so it is asked once for the instruction that goes with
-      // the note. Bounded: this happens inside the round, and the guard below still catches a
-      // second empty reply.
-      if (instruction === '' && notes.length > 0 && next.end.verdict.outcome === 'completed') {
-        next = await this.#exchange(
-          lead,
-          this.#drain(lead.id) ||
-            'Your note is recorded for the operator. Now give the implementer its next ' +
-              'instruction, or reply exactly DONE.',
+    /**
+     * Send one admitted task to the seat it was assigned, and do not wait for it.
+     *
+     * The report is recorded HERE, the moment the turn comes back, rather than when the
+     * dispatcher gets round to it. `#record` stamps `seq` from one global counter at the moment
+     * of recording, so that sequence is the run's real order — a report held back until its
+     * predecessor had been through an advisor turn would be stamped after instructions that
+     * were written later than it arrived, and the routing log would disagree with the run it
+     * describes.
+     */
+    const launch = (task: Task, exec: SeatExecution): void => {
+      const seat = this.#participants.get(exec.seat)!
+      this.#record({ from: lead.id, fromRank: 'advisor', to: [seat.id], kind: 'instruction', text: task.instruction })
+      const aside = this.#drain(seat.id)
+      this.#sending(task)
+      const work = (async (): Promise<Completion> => {
+        const report = await this.#exchange(
+          seat,
+          [aside, envelope({ from: lead.id, fromRank: 'advisor', fromRole: lead.role, kind: 'instruction', text: task.instruction })]
+            .filter(Boolean)
+            .join('\n\n'),
         )
-        const second = splitNotes(next.prose)
-        for (const note of second.notes) {
-          this.#record({ from: lead.id, fromRank: 'advisor', to: [], kind: 'note', text: note })
-        }
-        next = { ...next, prose: second.rest }
-        // Recomputed, not left stale: everything below -- the DONE check, the guard, the
-        // routing -- reads `instruction`, and after a re-ask the old value is a different
-        // turn's reply.
-        instruction = second.rest.trim()
-      }
-
-      // An advisor turn that ended badly, or produced nothing at all, must not be forwarded.
-      //
-      // The `turn_incomplete` guard below covers the IMPLEMENTER only, so an advisor whose
-      // turn errored was relayed as an empty instruction: the implementer received a routing
-      // header with no body, asked for a resend, and the run churned rounds toward its budget
-      // instead of failing with the real reason. Observed live when Codex returned
-      // `usage_limit_exceeded` -- the workspace was out of credits (issue #35).
-      //
-      // Two conditions, because they fail differently. A bad verdict carries a reason worth
-      // reporting; an empty body on a clean verdict does not, and is the minimum bar either
-      // way -- there is no circumstance in which relaying nothing is the right move.
-      if (next.end.verdict.outcome !== 'completed' || instruction === '') {
-        const why =
-          next.end.verdict.outcome !== 'completed'
-            ? `${lead.id} turn ended ${formatVerdict(next.end.verdict)}`
-            : `${lead.id} produced no instruction`
-        const evidence = next.end.verdict.provenance.map((v) => `${v.source}: ${v.detail}`)
-        this.#record({
-          from: 'orchestrator',
-          fromRank: 'human',
-          to: [],
-          kind: 'note',
-          text: [why, ...evidence].join(' — '),
+        const recorded = this.#record({
+          from: seat.id,
+          fromRank: 'implementer',
+          to: [lead.id],
+          kind: 'report',
+          text: report.prose,
+          ...(report.unsettled ? { unsettled: true } : {}),
         })
-        const halted = await this.#halt(handle, {
-          reason: 'turn_incomplete',
-          detail: why,
-          evidence: [...evidence, ...(await this.#livenessEvidence(lead, next.emittedSinceSend))],
-          verdictOf: { participant: lead.id, endSeq: next.end.seq },
-        })
-        if (halted) return halted
-        // Unattended, `#halt` ends the run. Reaching here means an operator resumed, so the
-        // advisor is asked again rather than the empty instruction being sent anyway.
-        next = await this.#exchange(
-          lead,
-          this.#drain(lead.id) ||
-            'Your previous turn produced no instruction. Give the implementer its next one.',
-        )
-        continue
-      }
+        // The seat is now `integrating`: not running, and not available. Its verdict has not
+        // been graded yet, and until it has, nothing can be dispatched to it.
+        this.#reported(task, exec, recorded.seq, report.unsettled)
+        return { task, seat, exec, report }
+      })()
+      inflight.set(
+        task.id,
+        work
+          .then(
+            (c) => void arrived.push(c),
+            (error: unknown) => void arrived.push({ task, seat, exec, error }),
+          )
+          .finally(() => void inflight.delete(task.id)),
+      )
+    }
 
-      if (/^DONE\b/i.test(instruction)) {
-        // §7a, first paragraph: "The advisor can end the session; the human outranks that
-        // and can send them back to work." Returning here regardless let the advisor
-        // terminate an outstanding human instruction out of existence -- the human message
-        // is queued for the next exchange, and if the advisor ends the session there is no
-        // next exchange. That inverts the rank order the whole design rests on.
+    /**
+     * Send everything the queue can send right now, and return the ceiling that stopped it.
+     *
+     * Called twice per iteration and for different reasons: after admission, so a reply naming
+     * two seats puts both to work in the same advisor turn; and again after a seat is released,
+     * so a freed seat with ready work does not idle through an advisor turn to collect it.
+     *
+     * The concurrency ceiling has two readings here and the difference is deliberate. When
+     * nothing is in flight, a breach means NOTHING can run and the run ends, which is what a
+     * ceiling has always done and is exactly the N=1 behaviour (`concurrentSeats` is 0 at every
+     * boundary the loop checks, so only `--max-concurrent-seats 0` breaches, and ending is the
+     * only honest answer to "no seat may work"). When something IS in flight the same breach
+     * means only "not yet": the limit is on simultaneity, so honouring it by leaving the task
+     * ready IS obeying it, and ending a run that is progressing would be the ceiling doing
+     * something nobody asked it to.
+     */
+    const dispatchReady = (): CeilingBreach | undefined => {
+      for (;;) {
+        // Before choosing anything, take out the work that can never run. A dependent of a
+        // failed or cancelled task is not waiting -- `dependenciesMet` reads a persistent fact,
+        // so its dependency keeps having failed and it can never become ready. Left in the
+        // queue it is invisible: no seat holds it, nothing is outstanding, and the run reports
+        // healthy while making no progress.
         //
-        // Found by the first live pause run: the drift probe was injected at the pause and
-        // never delivered, because the advisor considered the task finished.
-        const outstanding = this.participants.filter((p) => (this.#pending.get(p.id) ?? []).length > 0)
-        if (outstanding.length > 0) {
+        // Here rather than at the call sites: there are two of them now, and a sweep at one of
+        // them is a sweep somebody has to remember at the other. This is the one place that
+        // asks the queue what to do next, so it is the one place the question has to be asked
+        // of a queue that holds nothing unrunnable.
+        this.#cancelUnrunnable()
+        const d = nextDispatch(this.#queue, this.#taskRuntime, [...this.#seatState.values()])
+        if (!d) return undefined
+        const wouldRun = this.#breachedNow({
+          concurrentSeats: concurrentSeats([...this.#seatState.values()]) + 1,
+        })
+        if (wouldRun) return inflight.size > 0 ? undefined : wouldRun
+        this.#assign(d.task, d.seat)
+        launch(d.task, d.seat)
+      }
+    }
+
+    // The dispatcher. One iteration is one ADVISOR TURN: the advisor's standing reply is read
+    // as assignment decisions, every decision in it is admitted, everything the seat table can
+    // take is sent, and then the FIRST turn to come back is processed and routed — while its
+    // siblings are still running.
+    //
+    // At N=1 this produces exactly the turns the exchange loop it replaced produced, in the
+    // same order and with the same routing log: one reply carries one instruction, one seat can
+    // take it, and the set of things in flight is always that one task, so "the first to come
+    // back" and "the one that was sent" are the same turn (D1). Nothing here counts seats.
+    //
+    // `maxAdvisorTurns` bounds these iterations. That is the thing it has always counted --
+    // one pass through here has always cost the advisor exactly one turn -- so the bound is
+    // named for what it measures rather than for the shape it used to sit inside.
+    /**
+     * The ending this run has settled on, once it has settled on one. Admission stops; the
+     * turns already sent do NOT.
+     *
+     * D2's scopes are the reason this exists rather than a `return`. `advisor_escalated` stops
+     * "admission of new tasks; in-flight seats drain", and a seat-scoped condition stops that
+     * seat and no other — so a run that returned the moment it decided to end was applying a
+     * conclave-wide scope to every condition, whatever the classification on the pause said.
+     * The turns it abandoned had been paid for, their work was on disk, and the only record was
+     * a note saying their reports were never received.
+     *
+     * Two arms because two kinds of ending arrive differently. `end` is a reason this loop
+     * decides for itself and `#end` is deferred until the drain finishes, so `run_end` is the
+     * last thing on the stream. `outcome` is an ending `#halt` already performed — it calls
+     * `#end` itself, so `run_end` is emitted at the halt and the drain's messages follow it on
+     * the routing log. That ordering is imperfect and it is the honest trade: the alternative is
+     * predicting inside the dispatcher whether a halt will end the run.
+     */
+    type Closing =
+      | { kind: 'end'; reason: RunReason; detail?: string }
+      | { kind: 'outcome'; outcome: RunOutcome }
+    let closing: Closing | undefined
+
+    /**
+     * Cross a task's boundary and act on what came back -- merge, judge the integrated tree,
+     * escalate a repeat conflict. Exactly the logic that used to run unconditionally once a
+     * turn was graded; factored out so a REVIEWED task can reach it too, on ACCEPT, deferred
+     * until then (#72).
+     *
+     * Returns whether the caller must `continue advisor`. A labelled continue cannot cross a
+     * function boundary, so the decision to take it has to come back to the loop that owns
+     * the label rather than being taken here.
+     */
+    const crossAndSettle = async (
+      boundaryTask: Task,
+      seatId: string,
+      boundaryExec: SeatExecution,
+    ): Promise<boolean> => {
+      const boundary = await this.#crossBoundary(boundaryTask, seatId)
+      if (boundary.kind === 'blocked') this.#failBoundary(boundaryTask, boundaryExec)
+      else this.#integrate(boundaryTask, boundaryExec)
+
+      if (boundary.kind === 'integration_red') {
+        if (closing) {
           this.#record({
             from: 'orchestrator',
             fromRank: 'human',
             to: [],
             kind: 'note',
             text:
-              `advisor reported the work complete, but the human has an outstanding instruction for ` +
-              `${outstanding.map((p) => p.id).join(', ')} — the human outranks the advisor, so the ` +
-              `session continues rather than ending`,
+              `the integration checkout is red after the final merge (${boundary.contributors
+                .map((c) => c.taskId)
+                .join(' + ')}) and no seat remains to repair it; the run reports it as its outcome`,
           })
-          if ((this.#pending.get(impl.id) ?? []).length > 0) {
-            const extra = await this.#exchange(impl, this.#drain(impl.id))
-            this.#record({ from: impl.id, fromRank: 'implementer', to: [lead.id], kind: 'report', text: extra.prose })
-            next = await this.#exchange(
-              lead,
-              [this.#drain(lead.id), envelope({ from: impl.id, fromRank: 'implementer', kind: 'report', text: extra.prose })]
-                .filter(Boolean)
-                .join('\n\n'),
-            )
-          } else {
-            next = await this.#exchange(lead, this.#drain(lead.id))
+        } else {
+          this.#tellLeadIntegrationRed(boundary)
+        }
+      }
+
+      if (boundary.kind === 'blocked' && boundary.escalate) {
+        const halted = await this.#halt(handle, {
+          subject: { reason: 'merge_blocked', participant: boundary.seatId },
+          detail: boundary.detail,
+          evidence: boundary.evidence,
+        })
+        if (halted) {
+          closing ??= { kind: 'outcome', outcome: halted }
+          return true
+        }
+        const block = this.#blocked.get(boundary.seatId)
+        if (block) block.attempts = 1
+      }
+      return false
+    }
+
+    /**
+     * Act on a reviewer's verdict for the task named by `reviewTask.parent` (#72).
+     *
+     * ACCEPT crosses that task's boundary for real -- deferred exactly until now, since
+     * nothing before this point knew the work would be kept. REJECT admits the repair
+     * automatically, addressed to the producing seat by name; a repair whose OWN parent is
+     * itself a `review_resolution` task is the second rejection of the same work, and that
+     * escalates instead of trying a third time. See `Task.parent`.
+     *
+     * Returns whether the caller must `continue advisor`, for the reason `crossAndSettle`
+     * does.
+     */
+    const resolveReview = async (reviewTask: Task, prose: string): Promise<boolean> => {
+      const reviewedId = reviewTask.parent!
+      const reviewed = this.#queue.find((t) => t.id === reviewedId)!
+      const producingSeatId = this.#taskRuntime.get(reviewedId)!.seat!
+      const producingExec = this.#seatState.get(producingSeatId)!
+      const verdict = parseReviewVerdict(prose)
+
+      if (verdict.accepted) {
+        this.#record({
+          from: 'orchestrator',
+          fromRank: 'human',
+          to: [],
+          kind: 'note',
+          text: `review accepted ${producingSeatId}'s work for ${reviewedId}`,
+        })
+        return crossAndSettle(reviewed, producingSeatId, producingExec)
+      }
+
+      this.#failReview(reviewed, producingExec)
+      const secondRejection = reviewed.purpose === 'review_resolution'
+      this.#record({
+        from: 'orchestrator',
+        fromRank: 'human',
+        to: [],
+        kind: 'note',
+        text: `review rejected ${producingSeatId}'s work for ${reviewedId}: ${verdict.reason}`,
+      })
+      if (secondRejection) {
+        const halted = await this.#halt(handle, {
+          subject: { reason: 'review_blocked', participant: producingSeatId },
+          detail: `${producingSeatId}'s work was rejected by review a second time: ${verdict.reason}`,
+          evidence: [
+            `the first rejection produced an automatic repair, which was dispatched and returned`,
+            `the repair was rejected again by the same reviewer`,
+            `the work is committed and its tree is retained`,
+          ],
+        })
+        if (halted) {
+          closing ??= { kind: 'outcome', outcome: halted }
+          return true
+        }
+        return false
+      }
+      // The repair, addressed to the producing seat automatically -- review is a task the
+      // scheduler dispatches, so this needs no advisor instruction to reach it, the same way
+      // the review that rejected it needed none to be sent.
+      this.#admit(
+        `Review rejected this work: ${verdict.reason}\n\nOriginal instruction:\n${reviewed.instruction}`,
+        { kind: 'seat', seat: producingSeatId },
+        reviewTask.origin,
+        'review_resolution',
+        reviewedId,
+      )
+      return false
+    }
+
+    try {
+      // Labelled, because several of the sites that set `closing` are inside the admission loop
+      // and a bare `continue` there would go round the inner one.
+      advisor: for (let advisorTurn = 1; ; advisorTurn++) {
+        // The drain is over when nothing is outstanding. Everything below is skipped while
+        // `closing` is set, so this is the only way out of a run that has decided to end.
+        if (closing && outstanding() === 0) {
+          return closing.kind === 'end'
+            ? this.#end(closing.reason, closing.detail)
+            : this.#redAware(closing.outcome)
+        }
+        if (!closing) {
+        // Every ceiling at the dispatch boundary, before anything is admitted or assigned, and
+        // never mid-turn. A run cannot be interrupted mid-turn without discarding that turn's
+        // work -- the same reason #exchange has no timeout of its own.
+        if (advisorTurn > maxAdvisorTurns) {
+          closing ??= { kind: 'end', reason: 'budget' }
+          continue advisor
+        }
+        const ceiling = this.#breachedNow()
+        if (ceiling) {
+          this.#record({
+            from: 'orchestrator',
+            fromRank: 'human',
+            to: [],
+            kind: 'note',
+            text: ceiling.detail,
+          })
+          closing ??= { kind: 'end', reason: 'ceiling', detail: ceiling.detail }
+          continue advisor
+        }
+        // NOT drained, and the one exit that is not. `stop()` is closing the sessions out from
+        // under these turns, so waiting for them is waiting for children that are being taken
+        // away — the `finally` below names what was in flight instead.
+        if (this.#stopped) return this.#end('stopped')
+
+        if (this.#pauseRequested) {
+          const reason = this.#pauseRequested
+          this.#pauseRequested = undefined
+          const halted = await this.#halt(handle, {
+            subject: { reason: 'operator_requested' },
+            detail: reason,
+            evidence: [`advisor turn ${advisorTurn} of ${maxAdvisorTurns}; no turn is in flight`],
+          })
+          if (halted) {
+            closing ??= { kind: 'outcome', outcome: halted }
+            continue advisor
           }
-          // Bounded by the round budget like everything else, so a human who keeps talking
-          // extends the session rather than making it unstoppable.
+        }
+
+        // Lifted before anything else looks at the reply: a NOTE line is addressed to the
+        // human, so it must not reach the implementer as part of the instruction, and it must
+        // not make an otherwise-empty reply look like a real instruction either.
+        const { notes, rest: withoutNotes } = splitNotes(next.prose)
+        for (const note of notes) {
+          this.#record({ from: lead.id, fromRank: 'advisor', to: [], kind: 'note', text: note })
+        }
+
+        let instruction = withoutNotes.trim()
+
+        // A reply that was ONLY notes is not a failure to instruct -- it is the advisor using
+        // the channel that was just given to it. Halting there would end a run because the
+        // advisor said something useful, so it is asked once for the instruction that goes with
+        // the note. Bounded: this happens inside the advisor turn, and the guard below still catches a
+        // second empty reply.
+        if (instruction === '' && notes.length > 0 && next.end.verdict.outcome === 'completed') {
+          next = await this.#exchange(
+            lead,
+            this.#drain(lead.id) ||
+              'Your note is recorded for the operator. Now give the implementer its next ' +
+                'instruction, or reply exactly DONE.',
+          )
+          const second = splitNotes(next.prose)
+          for (const note of second.notes) {
+            this.#record({ from: lead.id, fromRank: 'advisor', to: [], kind: 'note', text: note })
+          }
+          next = { ...next, prose: second.rest }
+          // Recomputed, not left stale: everything below -- the DONE check, the guard, the
+          // routing -- reads `instruction`, and after a re-ask the old value is a different
+          // turn's reply.
+          instruction = second.rest.trim()
+        }
+
+        // The reply, read as assignment decisions. Fails closed: a reply that does not parse
+        // cleanly -- including one naming a seat id or role the run does not have -- is treated
+        // exactly as an empty instruction is treated today, by the guard immediately below.
+        // Guessing at an ambiguous reply would let a parser invent work nobody authorised, and
+        // guessing at an unrecognised target would let it invent a seat.
+        const decisions = parseDecisions(instruction, [...this.#seatState.values()], untargetedTarget())
+
+        // An advisor turn that ended badly, or produced nothing that can be admitted, must not be
+        // forwarded.
+        //
+        // The `turn_incomplete` guard below covers the IMPLEMENTER only, so an advisor whose
+        // turn errored was relayed as an empty instruction: the implementer received a routing
+        // header with no body, asked for a resend, and the run churned advisor turns toward its budget
+        // instead of failing with the real reason. Observed live when Codex returned
+        // `usage_limit_exceeded` -- the workspace was out of credits (issue #35).
+        //
+        // Two conditions, because they fail differently. A bad verdict carries a reason worth
+        // reporting; an empty body on a clean verdict does not, and is the minimum bar either
+        // way -- there is no circumstance in which relaying nothing is the right move.
+        if (next.end.verdict.outcome !== 'completed' || !decisions.ok) {
+          const why =
+            next.end.verdict.outcome !== 'completed'
+              ? `${lead.id} turn ended ${formatVerdict(next.end.verdict)}`
+              : // EVERY parse failure, not just the empty reply: one sentence, and it is the one
+                // an empty instruction has always produced. D4 says an unparseable reply is
+                // treated exactly as an empty instruction is treated today, and a second wording
+                // would be a divergence in the operator-visible path -- the kind the guards can
+                // only pin as an exact string. `ParseFailure` still carries `why` and `detail`
+                // for whenever surfacing them is a change somebody declares on purpose.
+                `${lead.id} produced no instruction`
+          const evidence = next.end.verdict.provenance.map((v) => `${v.source}: ${v.detail}`)
+          this.#record({
+            from: 'orchestrator',
+            fromRank: 'human',
+            to: [],
+            kind: 'note',
+            text: [why, ...evidence].join(' — '),
+          })
+          const halted = await this.#halt(handle, {
+            // The ADVISOR's turn. The scope is the seat whose turn ended badly, which is not
+            // always the implementer -- and reading it off `verdictOf` would tie the axis to a
+            // field that only exists on the verdict-backed pauses.
+            subject: { reason: 'turn_incomplete', participant: lead.id },
+            detail: why,
+            evidence: [...evidence, ...(await this.#livenessEvidence(lead, next.emittedSinceSend))],
+            verdictOf: { participant: lead.id, endSeq: next.end.seq },
+          })
+          if (halted) {
+            closing ??= { kind: 'outcome', outcome: halted }
+            continue advisor
+          }
+          // Unattended, `#halt` ends the run. Reaching here means an operator resumed, so the
+          // advisor is asked again rather than the empty instruction being sent anyway.
+          next = await this.#exchange(
+            lead,
+            this.#drain(lead.id) ||
+              'Your previous turn produced no instruction. Give the implementer its next one.',
+          )
           continue
         }
-        this.#record({ from: lead.id, fromRank: 'advisor', to: [], kind: 'note', text: `advisor reports the work complete: ${instruction}` })
-        await this.#closingQuestion(impl)
-        return this.#end('done', instruction)
-      }
-      if (/^ESCALATE\b/i.test(instruction)) {
-        this.#record({ from: lead.id, fromRank: 'advisor', to: [], kind: 'note', text: instruction })
-        const halted = await this.#halt(handle, {
-          reason: 'advisor_escalated',
-          detail: instruction,
-          evidence: [`the advisor asked for a human rather than issuing an instruction`],
-        })
-        if (halted) return halted
-        // Resumed. The advisor said its piece and the human decided otherwise, so it is
-        // asked again rather than having its escalation replayed as an instruction.
-        next = await this.#exchange(lead, this.#drain(lead.id) || 'The human has seen your escalation and asked you to continue. Give the implementer its next instruction.')
-        continue
-      }
 
-      // BEFORE delivery, not after. The point of the pause is that the human adjudicates
-      // while the instruction is still a proposal.
-      const conflict = detectConflict(instruction, this.restrictedOrigins)
-      if (conflict && !this.#adjudicated.has(`${conflict.origin.seq}:${instruction}`)) {
-        this.#adjudicated.add(`${conflict.origin.seq}:${instruction}`)
-        const halted = await this.#halt(handle, {
-          reason: 'authority_conflict',
-          detail:
-            `the advisor's instruction would reverse work traceable to your restricted ` +
-            `message #${conflict.origin.seq} (matched: ${conflict.matched.join(', ')})`,
-          evidence: describeConflict(conflict).split('\n'),
-          conflict,
-        })
-        if (halted) return halted
-        // Resumed: the human saw both sides and let it through. That decision has to REACH
-        // the implementer, or the pause buys a delay and nothing else.
+        // DONE and ESCALATE are whole-reply decisions and `parseDecisions` guarantees each
+        // arrives alone -- a reply that mixed one with an assignment is a `mixed_keyword`
+        // failure handled above, so reading the first decision here cannot be dropping work.
+        const decision = decisions.decisions[0]!
+
+        // A run with seats still working is not finished, whatever the advisor thinks. The
+        // outstanding report is handed over first and the advisor is asked again, which is the
+        // same shape as the human-outranks-DONE rule below: DONE is a proposal to end, and a
+        // fact that contradicts it wins. Ending here instead would discard a turn that has
+        // already been paid for, and would send the closing question to a seat mid-turn.
         //
-        // Found live. Adjudicated, delivered, and the implementer still declined --
-        // correctly, on the standing rule it was given: "proceed unless a human overrules",
-        // and a human had already overruled by asking for the file. Its words:
-        //
-        //   > What I won't do is delete it while the conflict is unacknowledged.
-        //   > [...] You tell me the human's instruction was already accounted for and
-        //   > you're overriding it deliberately with that knowledge -- I'll comply.
-        //
-        // It named the missing message. Continuing past the conflict IS the human
-        // accounting for it; the implementer simply had no way to know.
-        this.#adjudicate(impl.id, conflict.origin.seq)
-      }
+        // At N=1 unreachable: the only turn in flight is the one just processed.
+        if (decision.kind === 'done' && outstanding() > 0) {
+          this.#record({
+            from: 'orchestrator',
+            fromRank: 'human',
+            to: [],
+            kind: 'note',
+            text:
+              `advisor reported the work complete while ${outstanding()} seat turn(s) are still outstanding — ` +
+              `their reports come first, and it is asked again after each one`,
+          })
+        } else if (decision.kind === 'done') {
+          // §7a, first paragraph: "The advisor can end the session; the human outranks that
+          // and can send them back to work." Returning here regardless let the advisor
+          // terminate an outstanding human instruction out of existence -- the human message
+          // is queued for the next exchange, and if the advisor ends the session there is no
+          // next exchange. That inverts the rank order the whole design rests on.
+          //
+          // Found by the first live pause run: the drift probe was injected at the pause and
+          // never delivered, because the advisor considered the task finished.
+          const outstanding = this.participants.filter((p) => (this.#pending.get(p.id) ?? []).length > 0)
+          if (outstanding.length > 0) {
+            this.#record({
+              from: 'orchestrator',
+              fromRank: 'human',
+              to: [],
+              kind: 'note',
+              text:
+                `advisor reported the work complete, but the human has an outstanding instruction for ` +
+                `${outstanding.map((p) => p.id).join(', ')} — the human outranks the advisor, so the ` +
+                `session continues rather than ending`,
+            })
+            // Every seat holding a human message, not just one. `outstanding` above already
+            // counts them all -- it is what decided the session continues -- so draining a
+            // single seat would name several in the note and then answer for one, leaving the
+            // rest queued behind an advisor that has been told the work is done.
+            const answers: string[] = []
+            for (const seat of seats) {
+              if ((this.#pending.get(seat.id) ?? []).length === 0) continue
+              const extra = await this.#exchange(seat, this.#drain(seat.id))
+              this.#record({ from: seat.id, fromRank: 'implementer', to: [lead.id], kind: 'report', text: extra.prose })
+              answers.push(envelope({ from: seat.id, fromRank: 'implementer', fromRole: seat.role, kind: 'report', text: extra.prose }))
+            }
+            next = await this.#exchange(lead, [this.#drain(lead.id), ...answers].filter(Boolean).join('\n\n'))
+            // Bounded by the advisor-turn budget like everything else, so a human who keeps talking
+            // extends the session rather than making it unstoppable.
+            continue
+          }
+          this.#record({ from: lead.id, fromRank: 'advisor', to: [], kind: 'note', text: `advisor reports the work complete: ${instruction}` })
+          // Asked of every seat, in join order. The guarantee is "the implementer's last word",
+          // and a seat that worked and was never asked is exactly the silent loss this exists to
+          // prevent -- `#closingQuestion` already returns immediately for a seat that never
+          // worked, so at N=1 nothing about this changed.
+          for (const seat of seats) await this.#closingQuestion(seat)
+          return this.#end('done', instruction)
+        } else if (decision.kind === 'escalate') {
+          this.#record({ from: lead.id, fromRank: 'advisor', to: [], kind: 'note', text: instruction })
+          const halted = await this.#halt(handle, {
+            subject: { reason: 'advisor_escalated' },
+            detail: instruction,
+            evidence: [`the advisor asked for a human rather than issuing an instruction`],
+          })
+          // D2 gives this condition the scope "admission of new tasks; in-flight seats drain",
+          // and that is exactly what setting `closing` does: nothing more is admitted, and the
+          // seats already working finish, are graded and integrated, and have their reports
+          // routed before the run returns.
+          if (halted) {
+            closing ??= { kind: 'outcome', outcome: halted }
+            continue advisor
+          }
+          // Resumed. The advisor said its piece and the human decided otherwise, so it is
+          // asked again rather than having its escalation replayed as an instruction.
+          next = await this.#exchange(lead, this.#drain(lead.id) || 'The human has seen your escalation and asked you to continue. Give the implementer its next instruction.')
+          continue
+        } else {
+          // EVERY decision the reply carried, admitted in the order it was written. Taking the
+          // first and dropping the rest would be the dispatcher silently running a quarter of a
+          // plan the advisor wrote as one -- and `parseDecisions` is atomic, so a list that got
+          // here is a list that validated whole.
+          // The queue ceiling, asked once for the WHOLE batch and before any of it is admitted.
+          //
+          // Projected, because the actual depth at every boundary the loop can check is the
+          // depth before the advisor's decision is applied, and a ceiling that only ever saw
+          // that would never see a queue at all. `+ incoming` rather than `+ 1` is the peak the
+          // batch reaches: admission happens before any dispatch, so all of them are queued at
+          // once, and at N=1 with one decision it is the `+ 1` this always asked.
+          //
+          // ALL OR NONE, and that is the point of moving it out of the loop. Checking per
+          // decision meant a reply whose fourth task crossed the ceiling ended the run with
+          // three tasks already admitted and nothing left running to dispatch them -- records
+          // stuck at `admitted` forever, which is precisely the "leaves nothing behind" property
+          // the check was placed before the mutation to get.
+          const incoming = decisions.decisions.filter((d) => d.kind === 'instruct').length
+          const wouldQueue = this.#breachedNow({
+            queueDepth: queueDepth(this.#queue, this.#taskRuntime) + incoming,
+          })
+          if (wouldQueue) {
+            this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text: wouldQueue.detail })
+            closing ??= { kind: 'end', reason: 'ceiling', detail: wouldQueue.detail }
+            continue advisor
+          }
 
-      this.#record({ from: lead.id, fromRank: 'advisor', to: [impl.id], kind: 'instruction', text: instruction })
-      const aside = this.#drain(impl.id)
-      const report = await this.#exchange(
-        impl,
-        [aside, envelope({ from: lead.id, fromRank: 'advisor', kind: 'instruction', text: instruction })]
-          .filter(Boolean)
-          .join('\n\n'),
-      )
-      this.#record({
-        from: impl.id,
-        fromRank: 'implementer',
-        to: [lead.id],
-        kind: 'report',
-        text: report.prose,
-        ...(report.unsettled ? { unsettled: true } : {}),
-      })
+          for (const admitting of decisions.decisions) {
+            // Narrowing, not filtering: `done` and `escalate` are handled above and cannot be
+            // in a list alongside an instruction.
+            if (admitting.kind !== 'instruct') continue
 
-      // A build-changing scope question is not a report the advisor can act on. The
-      // implementer is the one that would choose an answer by continuing, so the loop stops
-      // and records both the question and what has been done so far. This is the distinction
-      // the briefing draws between a FLAG: (a result-qualifying concern) and an UNANSWERED:
-      // line (something that has to be settled before the build can proceed).
-      const questions = extractUnanswered(report.prose)
-      if (questions.length > 0) {
-        const question = questions[0]!
-        const done = report.prose.replace(UNANSWERED_MARKER, '').trim().replace(/\n{3,}/g, '\n\n')
-        const halted = await this.#halt(handle, {
-          reason: 'implementer_unanswered',
-          detail: `UNANSWERED: ${question}\n\nDone so far: ${done || '(nothing recorded)'}`,
-          evidence: [
-            `${impl.id} asked a build-changing scope question that the instruction did not settle`,
-            report.prose,
-          ],
+            // Admitted before anything is delivered, so the record of what the advisor decided
+            // exists whether or not it survives adjudication. Admission logs nothing: the task
+            // record is the dispatcher's account of the schedule, and the routing log stays the
+            // account of what actually moved between participants.
+            const task = this.#admit(admitting.instruction, admitting.target, next.end.seq, purposeFor(admitting.target))
+
+            // BEFORE delivery, not after. The point of the pause is that the human adjudicates
+            // while the instruction is still a proposal. Once per admission rather than once per
+            // dispatch, which is why the task carries the restricted origins it was judged against.
+            //
+            // Keyed by the TASK's instruction rather than by the whole reply: at N=1 those are
+            // the same string, and at N>1 a reply carrying two instructions has two adjudications
+            // to make and one key would collapse them into whichever came first.
+            const conflict = detectConflict(task.instruction, this.restrictedOrigins)
+            if (conflict && !this.#adjudicated.has(`${conflict.origin.seq}:${task.instruction}`)) {
+              this.#adjudicated.add(`${conflict.origin.seq}:${task.instruction}`)
+              // Who this task can actually land on, read off its own target rather than off a rank
+              // scan. At N=1 that is the one seat, so both the workstream name and the delivery
+              // below are the values they have always been.
+              const targeted = seatsFor([...this.#seatState.values()], task.target)
+              const halted = await this.#halt(handle, {
+                // The workstream carrying the instruction under adjudication. At N=1 there is one,
+                // and it is the implementer's -- the seat id names it because at this size they
+                // are the same thing (D1), not because a workstream is a seat. #57's task graph is
+                // what gives them separate names.
+                //
+                // When the target resolves to more than one seat there is no seat that names it, and
+                // picking one would be the guess this whole audit is against -- so the TASK names it.
+                // A task id is a workstream identity that does not have to pretend to be a seat.
+                subject: { reason: 'authority_conflict', workstream: targeted.length === 1 ? targeted[0]!.seat : task.id },
+                detail:
+                  `the advisor's instruction would reverse work traceable to your restricted ` +
+                  `message #${conflict.origin.seq} (matched: ${conflict.matched.join(', ')})`,
+                evidence: describeConflict(conflict).split('\n'),
+                conflict,
+              })
+              if (halted) {
+                closing ??= { kind: 'outcome', outcome: halted }
+                continue advisor
+              }
+              // Resumed: the human saw both sides and let it through. That decision has to REACH
+              // the implementer, or the pause buys a delay and nothing else.
+              //
+              // Found live. Adjudicated, delivered, and the implementer still declined --
+              // correctly, on the standing rule it was given: "proceed unless a human overrules",
+              // and a human had already overruled by asking for the file. Its words:
+              //
+              //   > What I won't do is delete it while the conflict is unacknowledged.
+              //   > [...] You tell me the human's instruction was already accounted for and
+              //   > you're overriding it deliberately with that knowledge -- I'll comply.
+              //
+              // It named the missing message. Continuing past the conflict IS the human
+              // accounting for it; the implementer simply had no way to know.
+              //
+              // Delivered to every seat this task could be dispatched to, because which one takes it
+              // is not decided until below and the adjudication has to be waiting wherever it lands.
+              // The lead implementer used to be told regardless of who the task was for, which at
+              // N=1 is the same seat and at N>1 is the wrong one.
+              for (const seat of targeted) this.#adjudicate(seat.seat, conflict.origin.seq)
+            }
+          }
+
+          // Everything the seat table can take, sent now and not awaited. At N=1 that is the one
+          // task just admitted going to the one seat that can take it; at N>1 a reply naming two
+          // seats puts both to work before either has replied, which is the whole point.
+          const breach = dispatchReady()
+          if (breach) {
+            this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text: breach.detail })
+            closing ??= { kind: 'end', reason: 'ceiling', detail: breach.detail }
+            continue advisor
+          }
+        }
+        }
+        // Everything above is admission and dispatch, and none of it runs once the run has
+        // decided to end. Everything below is the drain: turns already sent come back, are
+        // graded, integrated and routed, and only then does the loop reach the exit at the top.
+
+        // Nothing in flight and nothing dispatchable: the advisor asked for work that no seat can
+        // ever take. Thrown rather than worked around, because there is no correct fallback --
+        // waiting for a seat that nothing will free is a run that reports healthy forever.
+        // `#loop` turns this into an outcome, so the operator gets the sentence rather than a
+        // hang. Unreachable at N=1, where the seat that just reported is free again by here.
+        if (outstanding() === 0) {
+          const waiting = this.#queue.filter((t) => {
+            const s = this.#taskRuntime.get(t.id)?.state
+            return s === 'ready' || s === 'admitted'
+          })
+          throw new Error(
+            `dispatcher has no free seat for ${waiting.map((t) => `${t.id} targeting ${t.target.kind === 'seat' ? t.target.seat : `role ${t.target.role}`}`).join(', ') || 'any admitted task'}`,
+          )
+        }
+
+        // The first turn to come back, whichever seat it was on, and nothing else waited for.
+        // `arrived` is arrival order by construction; the race is only how this sleeps until
+        // there is something in it.
+        while (arrived.length === 0) await Promise.race([...inflight.values()])
+        const completion = arrived.shift()!
+        // Re-raised HERE rather than where it happened, so a turn that threw ends the run
+        // through the same path a serial one always did instead of surfacing as an unhandled
+        // rejection from whichever seat happened to fail first.
+        if ('error' in completion) throw completion.error
+        const { task, seat, exec, report } = completion
+
+        // A build-changing scope question is not a report the advisor can act on. The
+        // implementer is the one that would choose an answer by continuing, so the loop stops
+        // and records both the question and what has been done so far. This is the distinction
+        // the briefing draws between a FLAG: (a result-qualifying concern) and an UNANSWERED:
+        // line (something that has to be settled before the build can proceed).
+        const questions = extractUnanswered(report.prose)
+        if (questions.length > 0) {
+          const question = questions[0]!
+          const done = report.prose.replace(UNANSWERED_MARKER, '').trim().replace(/\n{3,}/g, '\n\n')
+          const halted = await this.#halt(handle, {
+            subject: { reason: 'implementer_unanswered', participant: seat.id },
+            detail: `UNANSWERED: ${question}\n\nDone so far: ${done || '(nothing recorded)'}`,
+            evidence: [
+              `${seat.id} asked a build-changing scope question that the instruction did not settle`,
+              report.prose,
+            ],
+          })
+          // Seat-scoped, and the scope is honoured now: this ends the run, and the OTHER seats
+          // still finish, are graded and integrated, and have their reports routed. The rest of
+          // THIS completion is skipped exactly as the return skipped it, so N=1 is unchanged.
+          if (halted) {
+            closing ??= { kind: 'outcome', outcome: halted }
+            continue advisor
+          }
+        }
+
+        // Empty AND unverified is not a report. The turn completed — the hook proved it —
+        // but the relay read the transcript before it settled and got nothing, so what would
+        // be routed is a blank the advisor then reasons from. Observed live: an implementer
+        // did the work, and its review findings reached the advisor as an empty message.
+        //
+        // Escalates rather than routes. A participant that says nothing has either failed or
+        // been truncated, and neither should advance the loop silently. An empty body that
+        // DID settle is left alone: that is a participant genuinely saying nothing, which is
+        // a different fault and not one this can diagnose.
+        if (report.unsettled && report.prose.trim() === '') {
+          // Stated as what was LOST, not as what the transcript did. The first version read
+          // as a routing detail -- "the transcript had not settled" -- when what it means is
+          // that a completed turn's entire account of its work was discarded. Those are
+          // different things to someone deciding whether to resume or restart, and the files
+          // are the part that says which (#39).
+          const changed = report.changedDuringTurn
+          // Two phrasings, because the diff can only see paths that BECAME dirty. A file this
+          // turn edited again, having been edited in an earlier one, is indistinguishable from
+          // a file left alone -- so an empty diff must not be reported as "nothing happened".
+          // A reader who trusts a false negative here restarts work that was already done.
+          // The seat's own root, for the same reason the turn diff uses it: "how many paths are
+          // dirty" is being offered as context for THIS seat's missing report, and counting the
+          // integration checkout would answer a question nobody asked.
+          const dirtyNow = dirtyPaths(this.#rootOf(seat.id)).length
+          const lost =
+            changed.length > 0
+              ? `${changed.length} path(s) changed on disk during it: ${changed.slice(0, 8).join(', ')}` +
+                `${changed.length > 8 ? `, and ${changed.length - 8} more` : ''}`
+              : `no new paths appeared during it, though ${dirtyNow} are dirty in the tree — ` +
+                `a file this turn edited again looks the same as one it never touched`
+          const halted = await this.#halt(handle, {
+            // `advisor_escalated` although it is the implementer's report that was lost: the
+            // reason names who is being asked to take it, and the scope follows the reason.
+            subject: { reason: 'advisor_escalated' },
+            detail:
+              `${seat.id}'s turn completed and its report could not be read, so there is ` +
+              `nothing to route — ${lost}. The work is on disk; what is missing is the ` +
+              `account of it, and a resume from this log starts with that turn saying nothing.`,
+            evidence: [
+              `turn_end was proven by the hook; the transcript never produced a body`,
+              `waited the settle window, then a further salvage window, and it stayed empty`,
+              `raising --settle may help — see transcriptSettleMs and transcriptSalvageMs`,
+              // Wired here too, and it was not. Liveness went into the two `turn_incomplete`
+              // paths only, so a live run's three pauses carried it once -- and the two that
+              // missed out were these, where "the report could not be read" is exactly when
+              // knowing whether the child is still writing changes what the operator does.
+              ...(await this.#livenessEvidence(seat, report.emittedSinceSend)),
+            ],
+          })
+          // Seat-scoped, and the scope is honoured now: this ends the run, and the OTHER seats
+          // still finish, are graded and integrated, and have their reports routed. The rest of
+          // THIS completion is skipped exactly as the return skipped it, so N=1 is unchanged.
+          if (halted) {
+            closing ??= { kind: 'outcome', outcome: halted }
+            continue advisor
+          }
+        }
+        this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text: `${seat.id} turn: ${formatVerdict(report.end.verdict)}` })
+        this.#attributeArtifacts(seat)
+
+        // The verdict may already be stale by the time we read it. `#exchange` settles on the
+        // FIRST `turn_end`, and the late signal that withdraws it can land during the
+        // transcript settle window that follows — the same window that is there because a
+        // late `Stop` is expected. Pausing on a verdict the system has already retracted asks
+        // the human to adjudicate nothing at all, so the current one is used instead.
+        const already = supersessionOf(seat.events, report.end)
+        const current = already?.replacement ?? report.end
+        if (already) {
+          this.#record({
+            from: 'orchestrator',
+            fromRank: 'human',
+            to: [],
+            kind: 'note',
+            text:
+              `${seat.id}'s ${report.end.verdict.outcome} verdict was withdrawn (${already.revision.reason})` +
+              (already.replacement
+                ? ` and replaced with ${formatVerdict(already.replacement.verdict)}`
+                : ` with no replacement`),
+          })
+        }
+        // A withdrawal with no replacement leaves the pause resting on a verdict that is
+        // already retracted, so it says so from the moment it is raised.
+        const pre: PauseSupersession | undefined =
+          already && !already.replacement
+            ? {
+                at: Date.now(),
+                note:
+                  `the ${report.end.verdict.outcome} verdict this pause was raised on had already been ` +
+                  `withdrawn (${already.revision.reason}) with no replacement`,
+              }
+            : undefined
+
+        // GRADED. The verdict has been resolved through supersession and judged, which is the
+        // fact a seat's freedom rests on: a `timed_out (uncertain)` seat must not be handed more
+        // work, and a seat freed on `turn_end` alone would be. Everything below this line may
+        // halt the run; nothing below it may dispatch until `#integrate` has run.
+        this.#grade(task, current, {
+          outcome: current.verdict.outcome,
+          superseded: already !== undefined,
         })
-        if (halted) return halted
-      }
 
-      // Empty AND unverified is not a report. The turn completed — the hook proved it —
-      // but the relay read the transcript before it settled and got nothing, so what would
-      // be routed is a blank the advisor then reasons from. Observed live: an implementer
-      // did the work, and its review findings reached the advisor as an empty message.
+        // A turn that did not complete is the human's call, not the advisor's. Escalating
+        // here rather than relaying the partial prose keeps the advisor from steering on a
+        // report that never finished being written.
+        if (current.verdict.outcome !== 'completed') {
+          // Registered before the halt, so a revision arriving while the human reads the
+          // pause can be matched to it; cleared after, so it cannot amend the next one.
+          if (handle) {
+            this.#verdictPause = {
+              handle,
+              participant: seat.id,
+              endSeq: current.seq,
+              outcome: current.verdict.outcome,
+              withdrawn: pre !== undefined,
+            }
+          }
+          const halted = await this.#halt(handle, {
+            subject: { reason: 'turn_incomplete', participant: seat.id },
+            detail: `${seat.id} turn ended ${formatVerdict(current.verdict)}`,
+            evidence: [
+              ...current.verdict.provenance.map((p) => `${p.source}: ${p.detail}`),
+              ...(await this.#livenessEvidence(seat, report.emittedSinceSend)),
+            ],
+            verdictOf: { participant: seat.id, endSeq: current.seq },
+            ...(pre === undefined ? {} : { superseded: pre }),
+          })
+          this.#verdictPause = undefined
+          // Seat-scoped, and the scope is honoured now: this ends the run, and the OTHER seats
+          // still finish, are graded and integrated, and have their reports routed. The rest of
+          // THIS completion is skipped exactly as the return skipped it, so N=1 is unchanged.
+          if (halted) {
+            closing ??= { kind: 'outcome', outcome: halted }
+            continue advisor
+          }
+        }
+
+        // §7a. Assessed before the advisor sees the report, so a degraded implementer is
+        // replaced rather than issued another instruction it cannot act on well.
+        const rotated = await this.#considerRotation(seat, report.prose, handle)
+        if (rotated) return rotated
+
+        // The git side of the same boundary -- crossed now, or deferred to a reviewer's
+        // verdict (#72). `crossAndSettle` is the boundary itself, unchanged in what it does;
+        // what is new is that a run with a reviewer does not always call it immediately.
+        //
+        // Three cases, and `task.purpose` alone decides which: this completion IS a review
+        // report, in which case the boundary it settles is the REVIEWED task's, not its own;
+        // this completion is reviewable work and a reviewer exists, in which case the
+        // boundary waits; or neither, in which case nothing about this run has changed and
+        // the boundary crosses exactly as it always has.
+        if (task.purpose === 'review') {
+          // The review task's OWN boundary is always trivial -- it never mutates anything, so
+          // there is nothing for `#crossBoundary` to find -- and this is what releases the
+          // reviewer seat. `resolveReview` then acts on the verdict for the task it reviewed.
+          if (await crossAndSettle(task, seat.id, exec)) continue advisor
+          if (await resolveReview(task, report.prose)) continue advisor
+        } else if (reviewerSeat && (task.purpose === 'work' || task.purpose === 'review_resolution')) {
+          this.#awaitReview(exec)
+          this.#admitReview(task, seat.id, reviewerSeat)
+        } else {
+          if (await crossAndSettle(task, seat.id, exec)) continue advisor
+        }
+
+        // The seat has just been released, so ready work it can take goes to it NOW rather than
+        // after the advisor has been asked and answered. A seat idling through an advisor turn
+        // to collect work already sitting in the queue is the lockstep this design exists to
+        // remove, reached from the other end. At N=1 the queue is empty here -- one reply
+        // admits one task and it was dispatched immediately -- so nothing happens.
+        const filled = dispatchReady()
+        if (filled) {
+          this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text: filled.detail })
+          closing ??= { kind: 'end', reason: 'ceiling', detail: filled.detail }
+          continue advisor
+        }
+
+        const leadAside = this.#drain(lead.id)
+        next = await this.#exchange(
+          lead,
+          [leadAside, this.#drainLeadNotices(), envelope({ from: seat.id, fromRank: 'implementer', fromRole: seat.role, kind: 'report', text: report.prose })]
+            .filter(Boolean)
+            .join('\n\n'),
+        )
+        // The report has reached the advisor. Independent of integration above, and recorded
+        // separately: at N>1 a task reaches the two in either order.
+        this.#routed(task)
+      }
+      return this.#end('budget')
+    } finally {
+      // Turns still outstanding when the run ended, named rather than dropped.
       //
-      // Escalates rather than routes. A participant that says nothing has either failed or
-      // been truncated, and neither should advance the loop silently. An empty body that
-      // DID settle is left alone: that is a participant genuinely saying nothing, which is
-      // a different fault and not one this can diagnose.
-      if (report.unsettled && report.prose.trim() === '') {
-        // Stated as what was LOST, not as what the transcript did. The first version read
-        // as a routing detail -- "the transcript had not settled" -- when what it means is
-        // that a completed turn's entire account of its work was discarded. Those are
-        // different things to someone deciding whether to resume or restart, and the files
-        // are the part that says which (#39).
-        const changed = report.changedDuringTurn
-        // Two phrasings, because the diff can only see paths that BECAME dirty. A file this
-        // turn edited again, having been edited in an earlier one, is indistinguishable from
-        // a file left alone -- so an empty diff must not be reported as "nothing happened".
-        // A reader who trusts a false negative here restarts work that was already done.
-        const dirtyNow = dirtyPaths(this.#opts.cwd).length
-        const lost =
-          changed.length > 0
-            ? `${changed.length} path(s) changed on disk during it: ${changed.slice(0, 8).join(', ')}` +
-              `${changed.length > 8 ? `, and ${changed.length - 8} more` : ''}`
-            : `no new paths appeared during it, though ${dirtyNow} are dirty in the tree — ` +
-              `a file this turn edited again looks the same as one it never touched`
-        const halted = await this.#halt(handle, {
-          reason: 'advisor_escalated',
-          detail:
-            `${impl.id}'s turn completed and its report could not be read, so there is ` +
-            `nothing to route — ${lost}. The work is on disk; what is missing is the ` +
-            `account of it, and a resume from this log starts with that turn saying nothing.`,
-          evidence: [
-            `turn_end was proven by the hook; the transcript never produced a body`,
-            `waited the settle window, then a further salvage window, and it stayed empty`,
-            `raising --settle may help — see transcriptSettleMs and transcriptSalvageMs`,
-            // Wired here too, and it was not. Liveness went into the two `turn_incomplete`
-            // paths only, so a live run's three pauses carried it once -- and the two that
-            // missed out were these, where "the report could not be read" is exactly when
-            // knowing whether the child is still writing changes what the operator does.
-            ...(await this.#livenessEvidence(impl, report.emittedSinceSend)),
-          ],
-        })
-        if (halted) return halted
-      }
-      this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text: `${impl.id} turn: ${formatVerdict(report.end.verdict)}` })
-      this.#attributeArtifacts()
-
-      // The verdict may already be stale by the time we read it. `#exchange` settles on the
-      // FIRST `turn_end`, and the late signal that withdraws it can land during the
-      // transcript settle window that follows — the same window that is there because a
-      // late `Stop` is expected. Pausing on a verdict the system has already retracted asks
-      // the human to adjudicate nothing at all, so the current one is used instead.
-      const already = supersessionOf(impl.events, report.end)
-      const current = already?.replacement ?? report.end
-      if (already) {
+      // A backstop now rather than the normal case. Every ending the loop DECIDES on drains
+      // first: `closing` stops admission and the loop keeps processing arrivals until nothing
+      // is outstanding, so a ceiling, a budget, an escalation and a seat-scoped halt all let
+      // the seats already working finish, be graded and integrated, and have their reports
+      // routed. This is reached by the two endings that cannot drain -- `stop()`, which is
+      // closing the sessions out from under those turns, and an exception -- and it exists
+      // because a run that lost a report must say so: the routing log shows the instruction
+      // going out and nothing coming back, and a reader cannot tell that from a seat that is
+      // still thinking.
+      if (outstanding() > 0) {
+        const lost = [...inflight.keys(), ...arrived.map((c) => c.task.id)]
         this.#record({
           from: 'orchestrator',
           fromRank: 'human',
           to: [],
           kind: 'note',
           text:
-            `${impl.id}'s ${report.end.verdict.outcome} verdict was withdrawn (${already.revision.reason})` +
-            (already.replacement
-              ? ` and replaced with ${formatVerdict(already.replacement.verdict)}`
-              : ` with no replacement`),
+            `the run ended with ${lost.length} seat turn(s) unfinished: ${lost.join(', ')} — ` +
+            `their reports never reached the advisor`,
         })
       }
-      // A withdrawal with no replacement leaves the pause resting on a verdict that is
-      // already retracted, so it says so from the moment it is raised.
-      const pre: PauseSupersession | undefined =
-        already && !already.replacement
-          ? {
-              at: Date.now(),
-              note:
-                `the ${report.end.verdict.outcome} verdict this pause was raised on had already been ` +
-                `withdrawn (${already.revision.reason}) with no replacement`,
-            }
-          : undefined
-
-      // A turn that did not complete is the human's call, not the advisor's. Escalating
-      // here rather than relaying the partial prose keeps the advisor from steering on a
-      // report that never finished being written.
-      if (current.verdict.outcome !== 'completed') {
-        // Registered before the halt, so a revision arriving while the human reads the
-        // pause can be matched to it; cleared after, so it cannot amend the next one.
-        if (handle) {
-          this.#verdictPause = {
-            handle,
-            participant: impl.id,
-            endSeq: current.seq,
-            outcome: current.verdict.outcome,
-            withdrawn: pre !== undefined,
-          }
-        }
-        const halted = await this.#halt(handle, {
-          reason: 'turn_incomplete',
-          detail: `${impl.id} turn ended ${formatVerdict(current.verdict)}`,
-          evidence: [
-            ...current.verdict.provenance.map((p) => `${p.source}: ${p.detail}`),
-            ...(await this.#livenessEvidence(impl, report.emittedSinceSend)),
-          ],
-          verdictOf: { participant: impl.id, endSeq: current.seq },
-          ...(pre === undefined ? {} : { superseded: pre }),
-        })
-        this.#verdictPause = undefined
-        if (halted) return halted
-      }
-
-      // §7a. Assessed before the advisor sees the report, so a degraded implementer is
-      // replaced rather than issued another instruction it cannot act on well.
-      const rotated = await this.#considerRotation(impl, report.prose, handle)
-      if (rotated) return rotated
-
-      const leadAside = this.#drain(lead.id)
-      next = await this.#exchange(
-        lead,
-        [leadAside, envelope({ from: impl.id, fromRank: 'implementer', kind: 'report', text: report.prose })]
-          .filter(Boolean)
-          .join('\n\n'),
-      )
     }
-    return this.#end('budget')
   }
 
   /** Unbacked complaints, per participant per topic. Feeds stall detection (§7). */
@@ -2175,36 +4629,230 @@ export class Relay {
   /**
    * Replace the implementer, carrying the work forward.
    *
-   * The transaction lives in `rotation/rotate.ts`; this supplies the four things it cannot
-   * get for itself: how to talk to a session, how to start a fresh implementer, which
-   * human constraints to replay, and where to write the notes.
+   * The unnamed form, kept because it is what every existing caller has: an operator, a
+   * console, an embedder. It resolves to the seat `RelayOptions.implementer` names -- which at
+   * N=1 is the only seat there is -- and hands the work to `rotateSeat`.
+   *
+   * At N>1 it still REFUSES rather than picking. "The implementer" names nothing there, and
+   * quietly rotating the lead would retire a session whose caller may have meant another one;
+   * `rotateSeat` is the form that says which. This is a throw because it is a programming
+   * error at the call site rather than a condition of the run -- and nothing inside the loop
+   * reaches it any more, which is what #78 is about: `#considerRotation` names the degraded
+   * seat, so the throw that used to surface as `transport_failed` (#74) is unreachable from it.
+   */
+  async rotateImplementer(reason: string): Promise<RotationResult> {
+    const seats = this.#implementers()
+    if (seats.length > 1) {
+      throw new Error(
+        `rotateImplementer names no seat, and this run has ${seats.length} (${seats.map((s) => s.id).join(', ')}). ` +
+          `Rotation replaces one session and carries its work forward, so it needs to be told which: ` +
+          `call rotateSeat(seatId, reason).`,
+      )
+    }
+    return this.rotateSeat(this.#leadImplementer().id, reason)
+  }
+
+  /**
+   * Replace ONE named seat's session, carrying that seat's work forward (#78).
+   *
+   * The transaction lives in `rotation/rotate.ts`; this supplies the things it cannot get for
+   * itself: how to talk to a session, how to start a fresh implementer, which human constraints
+   * to replay, where to write the notes -- and, since #78, WHICH TREE all of that is measured
+   * in. Every step is scoped to the one seat: its session is retired, its record is captured,
+   * its constraints are replayed, and the replacement proves itself in its worktree.
+   *
+   * The other seats are not told and do not stop. A rotation is not a run-wide event (#56's
+   * scope rule: block the smallest scope whose continuation requires the decision), so their
+   * turns carry on in flight while this one proves itself. What they cannot do is cross their
+   * integration boundary in the middle of it -- the dispatcher processes one completion at a
+   * time, and the check lane would serialise them even if it did not.
    *
    * Callable by the human as well as by the run loop. Nothing about it assumes the loop is
    * running -- an operator watching a session degrade should not have to wait for the
    * orchestrator to notice.
    */
-  async rotateImplementer(reason: string): Promise<RotationResult> {
-    const cfg = this.#opts.rotation
-    if (!cfg) {
+  async rotateSeat(seatId: string, reason: string): Promise<RotationResult> {
+    const impl = this.#participants.get(seatId)
+    if (!impl || impl.rank !== 'implementer') {
       throw new Error(
-        'rotation needs verification commands: set `rotation.checks` so a replacement has ' +
-          'something to reproduce. Rotating without them would be a transfer nobody demonstrated.',
+        `'${seatId}' is not an implementer seat in this run ` +
+          `(${this.#implementers().map((s) => s.id).join(', ')}); rotation replaces a seat's session ` +
+          `and there is none to replace`,
       )
     }
+    // ALREADY ROTATING, and this comes first because it is the most specific true thing that
+    // can be said about the request.
+    //
+    // A second transaction against a seat that is mid-rotation would quiesce a session the first
+    // has already committed to replacing, ask the advisor for a second handoff describing a state
+    // that is being handed over as it reads it, and start a second replacement for one seat --
+    // and then one of the two would promote its audition over the other's. The check lane does
+    // eventually refuse the pair, because both take it for the same seat, but it refuses too late
+    // and in the wrong words: too late because the `rotating <seat>` note is written, the session
+    // is quiesced and the advisor has been asked before the lane is reached, and in the wrong
+    // words because "its rotation section would wait for itself" describes a mutex to an operator
+    // who asked to replace a seat twice.
+    //
+    // Relay-owned and keyed by seat id alone, so it holds where the dispatcher's bookkeeping does
+    // not exist: at N=1, before any run has started, and for an operator rotating from a pause.
+    // The reason the first caller gave is carried so the second is told what it is waiting for
+    // rather than merely that it may not proceed.
+    const rotating = this.#rotationsInFlight.get(seatId)
+    if (rotating !== undefined) {
+      throw new Error(
+        `${seatId} is already being rotated (${rotating}). A second transaction would quiesce a ` +
+          `session the first has already committed to replacing and start a second replacement ` +
+          `for one seat. Wait for the rotation in progress: it either promotes a replacement or ` +
+          `restores the original, and either way this seat has a session at the end of it.`,
+      )
+    }
+    // A TURN IN PROGRESS IS NOT ROTATABLE, and this is checked before anything else because it
+    // is the one refusal that protects a live child rather than a configuration.
+    //
+    // `rotate()` opens by quiescing the outgoing session and closes by terminating it. Quiescing
+    // stops new work reaching a session; it does NOT wait for the turn already running to
+    // finish, and no adapter offers a way to. So a caller that rotates a seat mid-turn retires a
+    // session in the middle of an observed turn: the work is in flight, the verdict is never
+    // graded, the report is lost, and the handoff the replacement is measured against was
+    // captured from a tree the outgoing turn is still writing to.
+    //
+    // The test is the GRADE and not the state name, because the grade is the fact D4 already
+    // makes freedom rest on: a seat is free when its turn ended AND its verdict is graded, and a
+    // `timed_out (uncertain)` seat is neither. Reading `state === 'running'` instead would admit
+    // exactly the seat whose turn ended and whose verdict is still being resolved through
+    // supersession.
+    //
+    // What this deliberately still permits is every rotation that has a reason to happen:
+    //
+    //   - the loop's own point, immediately after `#grade` and before `#crossBoundary`. The seat
+    //     is `integrating` there with its task graded, which is measured rather than assumed --
+    //     see `seatRotation.test.ts`, which asserts the state and the grade from inside the
+    //     transaction.
+    //   - an operator at a pause, which is that same point suspended.
+    //   - an idle, queued or `merge_blocked` seat, none of which holds a running turn.
+    //
+    // Thrown rather than returned as a `rolled_back` result: nothing has begun, so there is no
+    // transaction to roll back, and a caller that has to remember to inspect a status is a
+    // caller that will rotate over a live turn by forgetting to.
+    const exec = this.#seatState.get(seatId)
+    const inFlight = exec?.current
+    if (inFlight !== undefined && this.#taskRuntime.get(inFlight)?.grade === undefined) {
+      throw new Error(
+        `${seatId} is still working on ${inFlight}: its turn has not been observed and graded, so ` +
+          `rotating now would quiesce and retire a session in the middle of a turn. quiesce() ` +
+          `stops new work reaching a session; it does not wait for the turn already running. ` +
+          `Rotate once the turn has ended and its verdict is graded — which is where the run loop ` +
+          `rotates, and where a pause holds the run.`,
+      )
+    }
+    // The same refusal read off the relay's own exchange bookkeeping rather than off the
+    // dispatcher's. Not redundant: the grade above answers for work the DISPATCHER placed, and
+    // the relay also exchanges with a seat outside any task -- the opening briefing, a drained
+    // aside, the closing question. None of those has a task id or a verdict to be graded, and
+    // every one of them is a live turn.
+    if (this.#busy(seatId)) {
+      throw new Error(
+        `${seatId} has an exchange in flight, so rotating it now would retire a session in the ` +
+          `middle of a turn the relay is still reading. Rotate when it is idle.`,
+      )
+    }
+
+    // AND THE ADVISOR, which is the half a seat-shaped guard cannot see.
+    //
+    // Rotation's second step asks the advisor to write the handoff, on the advisor's own session.
+    // If the relay is already mid-exchange with it -- routing a report, taking the next
+    // instruction -- that request is a SECOND concurrent send on one session, and both turns are
+    // lost: the transcript interleaves two prompts, `#exchange` slices events from a mark the
+    // other reader is already past, and whichever `turn_end` arrives first is attributed to
+    // whichever call reads it. The handoff would then be assembled from an advisor turn that was
+    // answering something else, and the replacement would be measured against it.
+    //
+    // Refused rather than queued behind the advisor's turn. Waiting would look kinder and would
+    // mean the caller's rotation begins at an unbounded later moment, against a seat whose state
+    // has moved on -- and the transaction's own first act is to quiesce that seat. A caller told
+    // "not now" can ask again; a caller silently parked cannot un-ask.
+    //
+    // This never fires from inside the run: the loop awaits its advisor exchanges one at a time
+    // and rotates from the completion path, where none is open. It is reachable exactly where the
+    // hazard is -- `rotateSeat` is public and does not require a paused run.
     const advisor = this.participants.find((p) => p.rank === 'advisor')!
-    const impl = this.participants.find((p) => p.rank === 'implementer')!
-    const spec = this.#opts.implementer
+    if (this.#busy(advisor.id)) {
+      throw new Error(
+        `the advisor (${advisor.id}) has a turn in flight, so rotating ${seatId} now would issue ` +
+          `the handoff request as a second concurrent send on that session: two turns would ` +
+          `interleave on one transcript and neither could be attributed. Rotate when the advisor ` +
+          `is idle — the run loop's own rotation point and every pause are.`,
+      )
+    }
+    // The policy THIS seat is under: the run's, as amended by its own entry (D7). Resolved
+    // before anything is quiesced, because a seat whose policy disarms it must be refused with
+    // its session untouched.
+    const cfg = rotationFor(this.#opts.rotation, seatId)
+    if (!cfg || cfg.checks.length === 0) {
+      throw new Error(
+        `rotation needs verification commands: set \`rotation.checks\` so a replacement has ` +
+          `something to reproduce${cfg ? ` (${seatId}'s own policy configures none)` : ''}. ` +
+          `Rotating without them would be a transfer nobody demonstrated.`,
+      )
+    }
+    // Claimed HERE: past every refusal, and before the first thing a second caller could
+    // observe or collide with -- the `rotating` note, the quiesce, the advisor's handoff turn,
+    // the lane. Released in the `finally` below whatever the transaction returns or throws, so a
+    // rotation that fails leaves the seat rotatable again; a latch that outlived its transaction
+    // would be a seat nobody could ever replace, which is worse than the race it prevents.
+    this.#rotationsInFlight.set(seatId, reason)
+    try {
+      return await this.#rotateSeatTransaction(impl, advisor, cfg, reason)
+    } finally {
+      this.#rotationsInFlight.delete(seatId)
+    }
+  }
+
+  /**
+   * Seats with a rotation transaction open, and the reason each was given for it.
+   *
+   * Relay-owned, like `#exchanges`, and for the same reason: the sessions cannot answer this.
+   * Mid-transaction the outgoing session is `quiesced` or `rotating` -- but so is a session
+   * whose rotation has already failed and is being restored, and the audition is not in the
+   * participant map at all, so nothing about the child processes distinguishes "a rotation is
+   * running" from "a rotation just ended".
+   */
+  #rotationsInFlight = new Map<string, string>()
+
+  /**
+   * The transaction itself, with the seat claimed. See `rotateSeat` for every refusal above it.
+   *
+   * Split out so the claim's release sits in a `finally` that no later edit inside this method
+   * can slip past -- the same shape as `#exchange`/`#exchangeTurn`, and for the same reason.
+   */
+  async #rotateSeatTransaction(
+    impl: RelayParticipant,
+    advisor: RelayParticipant,
+    cfg: EffectiveRotation,
+    reason: string,
+  ): Promise<RotationResult> {
+    const seatId = impl.id
+    const spec = implementerSeats(this.#opts).find((s) => s.id === seatId)!
+    /**
+     * This seat's own tree, and what the whole transfer is measured against.
+     *
+     * At N=1 it is the run cwd, by `#rootOf` rather than by a seat-count branch -- so the
+     * default run's rotation reads exactly the directory it always read.
+     */
+    const root = this.#rootOf(seatId)
     /** The replacement while it is proving itself, before it is anyone's session. */
     let audition: RelayParticipant | undefined
 
     this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text: `rotating ${impl.id}: ${reason}` })
 
-    const result = await rotate({
+    // Named rather than passed inline only so the lane can wrap the call; the annotation is
+    // what keeps `deps.exchange` and `deps.note` contextually typed once it is not an argument.
+    const rotation: Parameters<typeof rotate>[0] = {
       old: impl.session,
       advisor: advisor.session,
       reason,
       deps: {
-        root: this.#opts.cwd,
+        root,
         exchange: async (session, text) => {
           // The replacement is not in the participant map yet -- it is being auditioned --
           // but it gets the same exchange as everyone else. A second path here would be a
@@ -2213,12 +4861,36 @@ export class Relay {
           if (!p) throw new Error('exchange requested for a session the relay does not hold')
           return (await this.#exchange(p, text)).prose
         },
+        // Asked for only when the replacement produced nothing at all, and answered from what
+        // the relay watched rather than from what the replacement said -- which is the point:
+        // the claim being evidenced is that the transport is not working, and a claim about a
+        // silent child cannot rest on anything the child produced (#76).
+        transportEvidence: (session) => {
+          const p = [...this.participants, audition].find((q) => q?.session === session)
+          return [
+            `${p?.id ?? session.sessionId} emitted ${p?.events.length ?? 0} event(s) since it was started`,
+            `its session state is '${session.state}'`,
+            `the outgoing session ${impl.session.sessionId} is '${impl.session.state}' and was restored`,
+          ]
+        },
         startReplacement: async () => {
-          const session = await this.#opts.registry.createParticipant(spec, {
-            cwd: this.#opts.cwd,
-            watchdogMs: this.#opts.turnWatchdogMs,
-          })
-          audition = { id: `${spec.id}~replacement`, agent: spec.agent, rank: 'implementer', session, events: [], baselineGeneration: 0, degradationCursor: 0 }
+          // THIS SEAT'S tree, so the replacement is launched where its predecessor worked. A
+          // replacement started in the integration checkout would prove itself against files
+          // the seat it is replacing never wrote to. At N=1 `root` is the run cwd.
+          const ctx = { cwd: root, watchdogMs: this.#opts.turnWatchdogMs }
+          const session = await this.#opts.registry.createParticipant(spec, ctx)
+          // Same spec, so the same role: a replacement that changed what the seat is FOR
+          // would be a different seat wearing the id, and the handoff it just proved was
+          // measured against the outgoing session's job. Same spec means the same launch as
+          // well, and it is composed rather than copied from the outgoing participant so a
+          // replacement started differently could never be reported as the one it replaced.
+          audition = { id: `${spec.id}~replacement`, agent: spec.agent, rank: 'implementer', role: spec.role, launch: launchRecordFor(this.#opts.registry.resolve(spec), ctx), session, events: [], baselineGeneration: 0, degradationCursor: 0 }
+          // The audition's id is not the seat's, so the worktree manifest cannot answer for it
+          // and `#rootOf` would fall back to the run cwd -- reporting the integration checkout's
+          // dirty paths as what the acceptance turn changed, and missing everything it actually
+          // wrote. Recorded rather than inferred from the id's shape, because a suffix is a
+          // string and this is a fact.
+          this.#rootOverride.set(audition.id, root)
           this.#attach(audition)
           return session
         },
@@ -2233,7 +4905,25 @@ export class Relay {
           this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text })
         },
       },
-    })
+    }
+
+    // The whole transfer, behind the lane, and the window is the reason rather than the CPU.
+    // `rotate()` captures the repository, spends a full agent turn proving a replacement
+    // against that capture, and captures again -- a merge landing between the two rolls the
+    // rotation back as `repository_diverged` and names the repository for what was a race.
+    // Holding the lane across the acceptance turn is expensive and is the point: a boundary
+    // that waits is late, a rotation rolled back by a race is work thrown away.
+    //
+    // One acquire, at the outermost point. `rotate()` and `record.ts` know nothing about the
+    // lane, so the checks they run inside this cannot queue for it a second time.
+    //
+    // Since #78 this is a station that genuinely runs at N>1, which is the configuration that
+    // has boundaries to contend with. See `checkLane.ts` for what is and is not reachable.
+    const result = await this.#rotating(seatId, () =>
+      this.#checkLane.run({ seat: impl.id, station: 'rotation', detail: reason }, () => rotate(rotation)),
+    )
+    // The audition either became the seat or is gone; either way its root is no longer anyone's.
+    if (audition) this.#rootOverride.delete(audition.id)
 
     if (result.status === 'rotated' && audition) {
       // Swap the session in place, so the participant id, rank and routing history survive
@@ -2265,6 +4955,10 @@ export class Relay {
       // the readings that happened to be right.
       this.rotationWatch.rotations += 1
       this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text: `${impl.id} rotated into ${result.replacement.sessionId}` })
+      // A replacement proved itself, so whatever made an earlier acceptance unobservable is
+      // not holding now. Cleared on the evidence rather than on a timer: the latch's whole
+      // claim is "no replacement can pass while this holds", and one just did.
+      this.#rotationUnobservable = undefined
     } else if (result.status === 'rolled_back') {
       this.#record({
         from: 'orchestrator',
@@ -2273,8 +4967,64 @@ export class Relay {
         kind: 'note',
         text: `rotation rolled back (${result.reason}): ${result.detail}. ${impl.id} is back in service.`,
       })
+      if (result.reason === 'acceptance_unobservable') {
+        // Latched, and this is the whole of #76's remedy on this side: the rollback was already
+        // correct, and what was missing was that the operator could not tell a bad draw from a
+        // state in which no draw can win. The note above says which case this is; the latch is
+        // what stops the run from asking the same question again every advisor turn and
+        // teaching the reader that rotation notes mean nothing.
+        this.#rotationUnobservable = {
+          seat: impl.id,
+          detail: result.detail,
+          evidence: result.evidence ?? [],
+        }
+        for (const line of this.#rotationUnobservable.evidence) {
+          this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text: `rotation transport evidence: ${line}` })
+        }
+      }
     }
     return result
+  }
+
+  /**
+   * The rotation this run stopped attempting, and why. Unset unless acceptance went unobserved.
+   *
+   * A run-level latch for a run-level fault. The fault it records is one every replacement
+   * inherits -- hook trust, the provider, the CLI -- so scoping it to the seat that happened to
+   * hit it first would let the next seat spend another full transaction rediscovering it (#76).
+   * Cleared by a rotation that succeeds, which is the only evidence that would settle it.
+   */
+  #rotationUnobservable: { seat: string; detail: string; evidence: string[] } | undefined
+
+  /**
+   * Hold the seat in `rotation_pending` for the duration of the transfer.
+   *
+   * At the loop's rotation point the seat is `integrating` with its task already graded -- it
+   * sits between `#reported`, which flips it out of `running` the moment the report is recorded,
+   * and `#crossBoundary`. So it is undispatchable before this runs and this changes no
+   * scheduling decision. Measured rather than reasoned: `seatRotation.test.ts` reads the seat
+   * table from inside the transaction and asserts both the state and the grade, because "the
+   * seat is not running here" is exactly the kind of claim a later reordering would falsify
+   * silently, and it is what the mid-turn refusal in `rotateSeat` leans on.
+   *
+   * What it changes is what an operator watching `status --json` is told: a seat sitting in
+   * `integrating` for two agent turns while its session is replaced is a seat whose state is
+   * describing the wrong thing, and `rotation_pending` has been in `SchedulerState` since D4
+   * waiting for a production path to construct it. This is that path.
+   *
+   * The previous state is restored rather than assumed, because the caller may not be the loop:
+   * an operator rotating an idle seat at a pause must get an idle seat back, and the loop's own
+   * `#integrate`/`#failBoundary` overwrite it a moment later either way.
+   */
+  async #rotating<T>(seatId: string, section: () => Promise<T>): Promise<T> {
+    const exec = this.#seatState.get(seatId)
+    const was = exec?.state
+    if (exec) exec.state = 'rotation_pending'
+    try {
+      return await section()
+    } finally {
+      if (exec && was !== undefined) exec.state = was
+    }
   }
 
   async stop(): Promise<void> {
@@ -2283,6 +5033,46 @@ export class Relay {
     // outcome. Only a relay stopped without ever finishing a run reports 'stopped'.
     this.#end('stopped')
     for (const p of this.participants) await p.session.close('graceful')
+    // Between closing the sessions and releasing the claim, in that order and for a reason.
+    // Cleanup reads each seat's tree, so it must happen after the writers are gone; and
+    // releasing the claim while a seat worktree still holds uncommitted work would report the
+    // run cleanly finished with work stranded outside the integration checkout.
+    this.#cleanupWorktrees()
     release(this.#opts.cwd)
+  }
+
+  /**
+   * Remove the trees that are safe to remove, and account for every one that is not.
+   *
+   * "Safe" is narrow and deliberately so: merged, clean, present, and with nothing on its
+   * branch the integration checkout lacks. Everything else is RETAINED with its path, its
+   * branch, and the commands to inspect, merge or discard it — the same posture `guard()`
+   * takes towards a lock left by a dead pid, which tells the operator what to run once they
+   * have accounted for the files rather than clearing it for them.
+   *
+   * The recovery lines go into the routing log rather than to stdout: `stop()` can be called
+   * from a console that owns the screen, and a print from here would land in the middle of
+   * whatever it was drawing.
+   */
+  #cleanupWorktrees(): void {
+    const manifest = this.#worktrees
+    if (!manifest) return
+    try {
+      const report = cleanupSeatWorktrees(manifest)
+      for (const line of recoveryLines(report)) {
+        this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text: line })
+      }
+    } catch (e) {
+      this.#record({
+        from: 'orchestrator',
+        fromRank: 'human',
+        to: [],
+        kind: 'note',
+        text:
+          `seat worktree cleanup did not complete: ${(e as Error).message}. ` +
+          `The trees under ${manifest.integrationRoot}/.conclave/worktrees/${manifest.runId} are ` +
+          `still there and the manifest names what each one holds.`,
+      })
+    }
   }
 }

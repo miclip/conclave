@@ -1,16 +1,26 @@
 # Conclave
 
-A REPL over coding-agent CLIs. One advises, one implements, a human steers.
+A REPL over coding-agent CLIs. One advises, one or more implement, a human steers.
 
 The children are the real Claude Code, Codex, OpenCode and Kimi CLIs, unmodified. Their harness,
 auth and usage accounting are the same as when you type at them yourself. Conclave never
 speaks to a model API and never holds a model API key.
 
-Two seats, four agents to fill them with. OpenCode and Kimi both select their model per
+Four agents, and any of them in any seat. OpenCode and Kimi both select their model per
 invocation, so any model they can reach — including open-weight ones — can take a seat
-without Conclave learning anything about that model.
+without Conclave learning anything about that model. Seats carry their own launch args, so
+two seats can run different agents, or the same agent on different models:
 
-Supervised use. There is no orchestrator model, no summariser, and no third seat.
+```
+--implementers "claude --model opus, opencode -m opencode/kimi-k2.7-code"
+```
+
+One advisor and one implementer is the default and is unchanged by any of that. Extra seats
+are opt-in, and what they turn on — worktrees, a merge boundary, a clean-base refusal —
+turns on with them, not before.
+
+Supervised or unattended. There is no orchestrator model and no summariser: the dispatcher
+is code, not an agent.
 
 ![The conclave console: a goal routed to the advisor, the advisor instructing the implementer, the implementer narrating to the human and reporting to the advisor](docs/images/console.png)
 
@@ -50,6 +60,20 @@ model Conclave has never heard of:
 conclave relay "<goal>" --advisor codex --implementer opencode \
   --implementer-args "-m opencode/kimi-k2.6"
 ```
+
+`--implementer-args` says implementer, so it applies to every implementer seat. A run with
+more than one seat gives each its own agent and its own launch arguments in a single flag,
+one entry per seat:
+
+```sh
+conclave relay "<goal>" --advisor codex \
+  --implementers "claude --model opus-5, opencode -m opencode/kimi-k2.7-code"
+```
+
+The comma is the seat boundary and the first word of each entry is the agent; everything
+after it belongs to that seat alone, and is applied after `--implementer-args` so the seat's
+own spelling wins. Seats are named `implementer`, `implementer-2`, … An argument containing a
+comma cannot be written here — put it in `.conclave/config.json`, which is keyed by agent.
 
 That is a different MODEL in the same harness, which is not the same thing as a different
 REPL — the OpenCode system prompt, tool set and agent loop still apply. `kimi` is the Kimi
@@ -169,6 +193,17 @@ reported without gating the transfer, because a check can reproduce faithfully a
 nothing about the work being handed over. Relevance is declared by you, never by a
 participant: a replacement that classified its own checks would be grading its own transfer.
 
+With more than one seat, those same checks are **also** run against the merged tree after
+every merge including the last. Nothing else looks at the integration result: git reports
+textual conflicts, and the per-seat checks run in each seat's own tree, so every seat can pass
+while the tree they produce together fails — which is what
+[#80](https://github.com/miclip/conclave/issues/80) is: three tasks, no conflict on any merge,
+a red result. A failure while the run is still going becomes a repair naming both contributing
+tasks rather than blaming a seat, because the defect exists in neither half. A failure after
+the final merge has no seat left to repair it, so the run ends `integration_failed` and exits
+non-zero instead of reporting success on a tree that does not build. One seat has no merge, so
+nothing about a single-seat run changes.
+
 The goal is optional. Start with none and the first thing you type becomes it.
 
 ### At the console
@@ -248,6 +283,15 @@ Two models with different training and different harness prompts have different 
 spots. The advisor answers architectural questions while the implementer holds the
 implementation context, and never accumulates that context itself.
 
+Different *models*, specifically. Two instances of one model, given no shared context, still
+share their priors — this project has watched two of them make the same wrong call about the
+same code independently, and a third model in the advisor seat is what caught it. Fresh
+context decorrelates reasoning; it does not decorrelate training.
+
+That is also the argument for putting the expensive model where the judgement is rather than
+where the volume is. The implementer reads files, runs suites and edits; the advisor reads a
+report and writes an instruction. Those are not the same token bill.
+
 It is not a coding agent, and not an API harness. The children are the real CLIs: Claude
 Code and Codex on subscription auth, OpenCode and Kimi on whatever credential each of them
 wants.
@@ -270,6 +314,20 @@ The reasoning is in [`DESIGN-BRIEF.md`](DESIGN-BRIEF.md).
   branches proven live, rollback included.
 - Subagents, which both participants may use as they judge. A subagent that modifies
   anything works in its own git worktree.
+- Concurrent implementers. Seats run at the same time, each in its own worktree, dispatched
+  by a task queue rather than by rounds — so a seat that finishes in four minutes does not
+  wait for one taking forty. Completed work merges into the integration tree; a conflict
+  becomes a repair task on the seat that produced it rather than a question for you, and
+  that seat's work stays on its own branch throughout.
+- Checks against the *integration* tree, not only per seat. Two seats can produce work that
+  merges without conflict and fails together — one moves lines the other's new test cited.
+  A failure after a mid-run merge is a repair task naming both contributing tasks; after the
+  final merge it is a reported outcome, because no seat is left to fix it.
+- Seat-local rotation. A degraded seat is replaced without disturbing the others, verified
+  in its own worktree, and an acceptance failure with no observable output at all stops
+  retrying rather than rolling back repeatedly.
+- A reviewer seat, opt-in with `--reviewer`. Rank implementer, so its rejection creates work
+  rather than authority. It reads the diff and the tree, never the producing seat's summary.
 - The advisor can tell you something without stopping the run. A line beginning `NOTE:` is
   recorded for you and withheld from the implementer, while the rest of the reply is still
   the instruction. `ESCALATE` remains for when it actually needs an answer before continuing.
@@ -349,6 +407,25 @@ say "I am finished thinking" other than closing stdin. That is one run per proce
 terminal the session outlives the run and waits for the next goal.
 
 ### Worktrees
+
+With more than one implementer, each seat gets its own linked worktree and its own branch,
+and its process is launched with that directory as its cwd — so isolation is a property of
+the setup rather than a request in a briefing. A manifest records the base sha and merge
+state per seat, so a crash leaves something better than a directory that may or may not be
+anyone's. Merged trees are removed at the end; blocked, dirty or unmerged ones are kept with
+recovery commands printed, because deleting work because a run ended badly is unrecoverable.
+
+A concurrent run refuses to start against a dirty tree, untracked files included. Naming a
+file and then omitting it would give the seats a base that differs from yours, which is the
+divergence the rule exists to prevent.
+
+**One implementer creates no worktrees at all.** The seat works in your checkout, on your
+branch, and the merge is a no-op — so an ordinary run still shows its work in your own
+`git status`. A guard compares the observable surface of a default run against a declared
+baseline, recursively, and fails if it drifts.
+
+The rest of this section is about how the CLIs register hooks across checkouts, which is a
+separate matter and applies whether or not seats are involved.
 
 Claude's registration is per-checkout, so linked worktrees are independent. Codex's is not:
 it resolves project configuration from the **main** worktree, so one sidecar serves every
@@ -437,8 +514,11 @@ Live suites spawn real sessions and consume quota, so they are opt-in: `test:liv
 
 ## Not built
 
-No orchestrator model, no summariser, no third seat. The anti-spiral ladder is a round
-budget and stall metrics, not the full escalation.
+No orchestrator model and no summariser. The dispatcher is code.
+
+No cost or token accounting. Conclave drives your CLI on your subscription, so spend stays
+with your account. The record names the model and launch args per seat, which is the join key
+if you want to do that accounting yourself.
 
 OpenCode is newer than the other two and graded accordingly: `completed` is observed from a
 recorded run, and every other outcome is claimed no higher than `reasoned_but_unverified`.

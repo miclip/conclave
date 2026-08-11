@@ -277,6 +277,58 @@ test('an exchange that throws mid-acceptance does not strand the original in `ro
   if (r.status !== 'rolled_back') return
   assert.ok(r.detail.includes('transport lost'))
   assert.equal(old.state, 'running')
+  // And it is reported as what it is (#76). A send that never completed produced no observed
+  // turn, so the gate was not FAILED, it could not be applied -- and telling the operator their
+  // replacement could not reproduce the state invites a retry that will do the same thing.
+  assert.equal(r.reason, 'acceptance_unobservable')
+  assert.match(r.detail, /NO replacement can pass/)
+})
+
+test('a replacement that answers with nothing at all is unobservable, not unable to reproduce', async () => {
+  // The other half of the same distinction, and the one a live run actually produced: the
+  // exchange RETURNS, and there is nothing in it. A transcript that yields no prose after a
+  // completed turn is what a wedged transport looks like from inside the transaction.
+  const dir = repo()
+  const old = new FakeRotationSession('old', 'claude')
+  const mute = new FakeRotationSession('mute', 'claude') // no scripted replies: every turn is empty
+
+  const r = await rotate({
+    old,
+    advisor: new FakeRotationSession('advisor', 'codex', [HANDOFF]),
+    reason: 'context exhausted',
+    deps: deps(dir, mute, { transportEvidence: () => ['mute emitted 0 event(s) since it was started'] }),
+  })
+
+  assert.equal(r.status, 'rolled_back')
+  if (r.status !== 'rolled_back') return
+  assert.equal(r.reason, 'acceptance_unobservable')
+  assert.match(r.detail, /no prose at all/)
+  assert.match(r.detail, /upstream of rotation/)
+  assert.deepEqual(r.evidence, ['mute emitted 0 event(s) since it was started'])
+  // The gate is not weakened by any of this: the original is back, and nothing was swapped.
+  assert.equal(old.state, 'running')
+  assert.equal(mute.closedAs, 'abandoned')
+})
+
+test('a replacement that answers wrongly is still `replacement_could_not_reproduce`', async () => {
+  // The distinction only means something if the other side of it survives. A replacement that
+  // SPOKE and got the exit code wrong is a bad draw, and retrying it may well help -- which is
+  // the advice the unobservable reason must not be allowed to swallow.
+  const dir = repo()
+  const old = new FakeRotationSession('old', 'claude')
+  const wrong = new FakeRotationSession('wrong', 'claude', ['CHECK 1: exit 1\n\nI ran it and it failed.'])
+
+  const r = await rotate({
+    old,
+    advisor: new FakeRotationSession('advisor', 'codex', [HANDOFF]),
+    reason: 'context exhausted',
+    deps: deps(dir, wrong),
+  })
+
+  assert.equal(r.status, 'rolled_back')
+  if (r.status !== 'rolled_back') return
+  assert.equal(r.reason, 'replacement_could_not_reproduce')
+  assert.equal(r.evidence, undefined, 'transport evidence belongs only to the claim that rests on it')
 })
 
 test('human constraints are replayed separately, at human rank, before the handoff', async () => {

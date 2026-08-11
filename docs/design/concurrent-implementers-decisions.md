@@ -81,34 +81,6 @@ interactive latency — rather than the model.
 | `turn_incomplete` | mechanical | that participant |
 | `rotation_candidate` | derived (D3) | that participant |
 
-### The table above is the END STATE, not what the first commit does
-
-Caught by an advisor mid-implementation, and it is a contradiction in this document rather
-than a misreading of it.
-
-D2 says `RunPause` exists only when an operator-authority request meets interactive latency,
-and the table then classifies `turn_incomplete` as mechanical and armed `rotation_candidate`
-as mechanical. **Both of those raise pauses today.** Implemented literally, the first commit
-would silently delete two decision points an operator has now — which D1 forbids, and D1
-outranks D2.
-
-So the classification and the routing land separately:
-
-- **#56 introduces the metadata only.** Compute authority and scope for all six reasons,
-  record them, assert them, and leave every existing pause exactly where it is. A test
-  asserts each of the six still produces the pause it produces today, so the metadata cannot
-  quietly begin changing behaviour later without a failure.
-- **Routing consequences are gated behind the work that makes them safe.** A `mechanical`
-  classification is not permission to stop pausing: nothing in the control plane can yet
-  RESOLVE `turn_incomplete`, and that promotion path is D3's work. Removing the pause before
-  building the resolution does not make the condition mechanical — it drops it on the floor.
-- The one DECLARED exception, `implementer_unanswered` routing to the advisor, is a routing
-  change and lands with the routing work, not with the classification.
-
-The general rule this is an instance of: **classifying a condition is not the same as acting
-on the classification**, and the design's tables describe where it is going rather than what
-any one commit should do.
-
 ### Both axes are derived, not declared
 
 **Authority** is computed from configuration and evidence. The product already does this:
@@ -221,6 +193,130 @@ for suites known to be isolated. A seat waiting for the check lane is `assigned`
 `rotate()` (`rotation/rotate.ts:171`) gains a root parameter; the plumbing exists —
 `record.ts:139` and `:160` already `spawnSync` with `cwd: root`.
 
+### D7a. Per-seat checks are not enough: the integration tree needs its own station (#80)
+
+Added after the first real two-seat run, which is the only reason it is stated as an amendment
+rather than as part of D7: three tasks merged with no git conflict at all and the resulting
+tree failed two tests. Both failures were cross-seat. Each seat's work was correct, each
+seat's own tree was green, every merge was clean, and the result was broken.
+
+D7 is right about what it covers and blind past it. Per-seat checks verify a rotation
+candidate against that seat's work, in that seat's tree — which is exactly why every seat can
+pass while the tree they produce together fails. D6 designs the merge boundary around
+*textual* conflict, which git reports. **Concurrency creates a class of conflict git cannot
+see, and no station in the design was positioned to catch it.**
+
+So the **already-configured** `--checks` run against the **integration checkout, after every
+merge including the last**. A separate option was built first and then removed: the argument
+against reusing `rotation.checks` — that it changes what an existing configuration does, how
+often those commands run and what a failure means — is true and was overruled, because an
+opt-in station leaves exactly the run that failed unprotected unless someone discovers the new
+flag and duplicates configuration they have already supplied. An operator who has said
+`--checks "npm test"` has already said what "working" means for this project; asking them to
+say it twice is a second chance to say it zero times.
+
+The cost is recorded rather than argued away: at N>1 those commands now run once per merge as
+well as at a rotation, and a failure means one of two things depending on where it happened.
+At N=1 nothing changes, and not by a seat-count branch — there is no merge, so the boundary
+this runs in is not reached.
+
+Two things follow that D6's conflict rule cannot supply:
+
+- **Neither seat is at fault**, so "assign the repair to the producing seat" has no answer.
+  The failure belongs to the *pair*, so the repair names **both contributing tasks**, no seat
+  is marked, and which seat takes it is the advisor's decision — it is the only participant
+  that can see both halves.
+- **The final merge has no seat left to repair it.** While a seat is still working the failure
+  is self-limiting: the first run recovered only because a seat happened to still be active in
+  a tree someone else's merge had just broken, which is luck of timing rather than a mechanism.
+  When the last merge lands and nothing is left working, a queued task is a task nobody will
+  take — so a red tree at the end is an **outcome the run reports** (`integration_failed`, and
+  a non-zero exit), never a task it queues.
+
+This does not replace the argument for #72's reviewer seat; it sharpens it. A reviewer reading
+the *integrated* diff is the only station that can catch a defect that exists in neither half
+before the checks do. This one catches it after, mechanically, which is what a run with nobody
+watching needs.
+
+### D7b. The contention D7 serialises against does not exist, and the flag was withdrawn (#64)
+
+Appended rather than rewritten, for the reason D7a is: what was decided is evidence, and a
+decision record that quietly loses its own errors stops being one.
+
+**D7's premise is false in this codebase.** It reasons that `npm test` in four worktrees means
+four test runners contending for the machine. But both check runners are `spawnSync` —
+`runCheck` in `src/rotation/record.ts` and `runIntegrationChecks` in `src/relay/integrate.ts` —
+in the one orchestrator process. A synchronous spawn blocks the process for the whole command,
+so there is never more than one check running: **serialisation is already guaranteed by the
+call, not by any mutex.** It is narrower still, because the two stations cannot be live at the
+same time — there is no merge boundary at N=1, and `rotateImplementer` refuses at N>1.
+
+So of D7's three asks, one was already true and two are not built:
+
+- `--check-concurrency` — **built and removed before shipping.** A control that is accepted and
+  plumbed and cannot have an effect is worse than an absent one: someone sets it and believes
+  something changed.
+- "a seat waiting for the check lane is `assigned`" — **not built.** No production path
+  constructs a waiting seat, and a `SchedulerState` value for a state nothing reaches was
+  reverted along with the test that manufactured one in order to observe it.
+- the run-scoped mutex itself — **kept, inert, and unit-tested** (`src/relay/checkLane.ts`).
+  One slot, not configurable, wrapping each station once at its outermost point. It is retained
+  as the mechanism that will make **per-seat rotation (#78)** safe, where the hazard is not CPU
+  contention but a merge moving the tree between a rotation's two captures and being reported
+  as `repository_diverged`. Building an asynchronous runner so the lane had something to
+  serialise today would be building the problem in order to keep the solution.
+
+The operator's own note on filing it: this is the third goal on this branch — with #60's
+detector and parts of #61 — whose acceptance criteria named states the code cannot reach. The
+correction is to ask whether a production path constructs the state *before* writing the
+criterion.
+
+### D7c. Per-seat rotation lands, and the lane's second station is real (#78)
+
+Appended for the reason D7a and D7b were: what was decided is evidence, and a record that
+quietly loses its own errors stops being one. D7b said the two stations cannot be live at the
+same time because "`rotateImplementer` refuses at N>1". That refusal is gone.
+
+Rotation is now **seat-local**: `Relay.rotateSeat(seatId, reason)` retires one seat's session,
+captures that seat's record, verifies the replacement **in that seat's worktree**, and replaces
+the session in place. D7's "`rotate()` gains a root parameter" is what this is — `RotationDeps.root`
+is now the rotating seat's tree, and at N=1 that tree IS the operator's cwd, so the default run
+takes the same path rather than a shorter one. The other seats are not told and do not stop.
+
+`rotateImplementer` keeps its meaning and its refusal: it names no seat, so at N>1 it points the
+caller at `rotateSeat` rather than picking. Nothing in the loop reaches that refusal any more —
+`#considerRotation` names the degraded seat — which closes the #74 path where the throw was
+reported as `transport_failed`.
+
+**The rotation policy is per-seat, and the run's is the default.** `RotationConfig.seats` is a
+map of overrides keyed by seat id, resolved by `rotationFor` field by field: checks REPLACE (a
+seat that named its own has said what proving its work means), everything unmentioned inherits,
+and `onDegradation` defaults to `candidate` in that one place. An override naming a seat the run
+does not have is refused at `Relay.start`. Programmatic only — no flag, the way `implementers`
+is programmatic only. The integration station keeps reading the RUN's checks, because the
+integration checkout is not a seat.
+
+On the lane: both stations now exist in one run, and the doc in `checkLane.ts` states precisely
+what follows. The dispatcher processes one completion at a time, so the *loop* still cannot
+overlap its own two stations; a wait is reachable only from a rotation started outside the loop,
+because `rotateSeat` is public and does not require a paused run. The lane gained an `onWait`
+notification and nothing else — no slot count, and `--check-concurrency` stays withdrawn. D7's
+"a seat waiting for the check lane is `assigned`" remains unbuilt and is now positively wrong to
+build: a seat waiting there is `integrating`, which is what it is doing.
+
+What the rotating seat's own state says did change: it is `rotation_pending` for the duration,
+which is the first production path to construct that `SchedulerState`. It changes no scheduling
+decision — the seat is already undispatchable at that point — and exists so an operator watching
+`status --json` is not told a seat spent two agent turns `integrating`.
+
+**#76 rides with it**, because acceptance is where a seat-local rotation can still fail for a
+reason no seat can fix. Acceptance that produces no observable output at all is
+`acceptance_unobservable` rather than `replacement_could_not_reproduce`: the run says no
+replacement can pass while that holds, names the transport evidence it has, stops attempting
+rotations, drops `rotate` from the pause menu, and carries the fact into the rotation summary.
+The gate is not weakened and the rollback is unchanged — the rollback was always right, and what
+was missing was the operator's ability to tell a bad draw from a state where every draw loses.
+
 ## D8. Ceilings change meaning and stop being optional at N>1
 
 `#turnsTaken` counts every participant's turns and is what `breached()` reads. N seats burn
@@ -252,47 +348,72 @@ One constraint from the descending box: the box's height determines `#floor`, an
 pushes the transcript up when `#contentRow` falls below it. With N seats that path runs
 constantly instead of rarely, and it has one unit test.
 
-## D9b. A reviewer seat, because the advisor cannot see the code
+### D9b. A reviewer seat: rank `implementer`, role `reviewer`, dispatched like `merge_resolution` (#72)
 
-The advisor judges from reports — it cannot see the implementer's tools, by design. So it
-catches reasoning errors and reported errors, and cannot catch an error the implementer never
-mentions. That bound is real and no amount of advisor capability removes it.
+Appended rather than folded into D5/D6, for the reason D7a and D7b are: what was decided is
+evidence, and #72's own comment thread corrected itself twice before landing here — first
+proposing review as a generic role slotted into the merge boundary, then a mandatory pipeline
+stage, before settling on the shape below. The corrections are worth keeping visible.
 
-Concurrent seats remove it, because a seat can be given the role of reading what another seat
-WROTE rather than what it said. This is a better argument for the feature than the throughput
-one #42 leads with: it converts a class of undetectable error into a detectable one.
+**`--reviewer` is a first-class named seat, not a generic role.** Rank `implementer`, role
+`reviewer` — D5's job/authority split is exactly what makes this legal: identical authority to
+every implementer seat, a different job. Naming it rather than leaving it an arbitrary role
+string is what lets the advisor's briefing teach anything about it at all; a role the operator
+might not have used cannot appear in fixed prose.
 
-**The load-bearing condition: the reviewer reads the diff and the tree, never the producer's
-summary.** A reviewer fed the producer's report inherits exactly the defect it exists to
-catch. Observed in dogfooding: an implementer produced correct, well-covered code and
-reported a test failure in a script that does not exist, in a suite that was clean. The code
-was right and the story about it was wrong, and only reading the tree distinguishes those.
+**No reviewer declared, no review.** `RelayOptions.reviewer` is optional and singular. Absent,
+no `reviewer` key reaches `Relay.start`, no review task is ever admitted, and the merge
+boundary runs exactly as D6 already specifies — proved as a `DEFAULT_UNCHANGED` guard entry
+the same way every other opt-in surface is.
 
-**It slots into the merge boundary already designed in D6**, and needs no new machinery: seat
-completes, checks run in its own tree, review runs against the diff, then merge to integration.
-A rejection becomes a new task with `parent` set, assigned back to the producing seat —
-identical to the conflict handling D6 already specifies. The reviewer never needs write access.
+**Review is a task purpose, dispatched through the existing scheduler — never a hook the
+boundary calls.** Two new `TaskPurpose` values, `review` and `review_resolution`, admitted
+through the same `#admit` every other task is, and two new `SchedulerState` values,
+`review_pending` and `review_blocked`, gating dispatch through `canTake` exactly as
+`merge_blocked`/`merge_resolution` already do. Concretely: once a task purpose `work` or
+`review_resolution` clears grading, and this run has a reviewer, its boundary crossing
+(`#crossBoundary`) is DEFERRED rather than skipped — the producing seat moves to
+`review_pending`, and a `review` task is admitted, targeted at the reviewer's role. The
+boundary itself is unmodified code, called later, from the review's own resolution rather than
+from the completion that triggered it.
 
-**Rank `implementer`, role `reviewer`.** This is what D5's split is for. A reviewer must not
-outrank a producer: its rejection creates WORK, which the dispatcher admits, and authority
-stays with the advisor. If review required widening `Rank`, the model would be wrong.
+**The reviewer's context is built the way a rotation handoff's mechanical half is — never from
+the producing seat's report.** `rotation/review.ts` reuses `capture()` from `record.ts`
+outright: the same file-digest-and-check capture rotation already takes independently of any
+participant's account of its own work, with one addition rotation never needed — an actual
+diff, because a replacement reproduces a STATE and a reviewer judges a CHANGE. The advisor's
+instruction to the producing seat is included; that seat's own report is not, and nothing in
+the reviewer's prompt has room for one.
 
-**It does not replace human review.** It is a gate before one, and it changes what reaches a
-human: a diff that has already been read by something that cannot be fooled by its author's
-description of it.
+**Rejection is a child task, `parent` set, assigned back to the producing seat — by the relay,
+not by the advisor.** Unlike a merge conflict, which the advisor must address by name because
+D4 says the advisor proposes and the dispatcher only validates, a review verdict is not
+something any advisor instruction produced — it arrives from a task the relay itself admitted.
+So the repair is admitted the same way: automatically, targeted `{kind: 'seat', seat:
+producingSeatId}`, purpose `review_resolution`, `Task.parent` naming the IMMEDIATE task it
+repairs. The advisor sees both the rejection and the repair as ordinary reports; it is told
+this happens automatically (`REVIEWER_BRIEFING_FOR_ADVISOR`, appended to `LEAD_BRIEFING`
+exactly the way `MULTI_SEAT_BRIEFING` is — only when a reviewer exists) so a report from the
+reviewer is not mistaken for one from an implementer.
 
-### Consequence for cost
+**A second rejection of the same work escalates rather than repairing a third time.** No
+counter, no second Map: a `review_resolution` task whose OWN `parent` is itself a
+`review_resolution` task is the second rejection, read directly off `parent.purpose` at
+resolution time. It raises a new `PauseReason`, `review_blocked`, classified in
+`resolution.ts` identically to `merge_blocked` — operator authority, scope the seat, not the
+conclave.
 
-It inverts the obvious allocation. Review is read-heavy but BOUNDED — one diff — where
-production is unbounded. So the frontier spend belongs on the reviewer rather than the
-advisor: same money, but positioned where it can see the code instead of only the story about
-the code.
+**Rank stays closed at three.** Nothing here widens `'human' | 'advisor' | 'implementer'`; a
+reviewer's authority is a producer's authority, and its rejection creates work rather than
+outranking anyone.
 
-    advisor      mid-tier; judgement-heavy, low token volume
-    producers    cheap, numerous, high token volume
-    reviewer     frontier; bounded input, gates the merge
-
-Unmeasured, and it stays that way until #71 records which model a seat ran.
+**One casualty, declared rather than discovered.** `#implementers()` used to read `rank`; every
+caller meant `role`, and the two coincided until a reviewer could be rank `implementer` with a
+different job. It now reads `role`, and `#dispatchSeats()` (rank-based) is the new accessor for
+the one caller that genuinely wants every seat the scheduler may address — `#seatState`
+construction, which must include the reviewer. At N=1 with no reviewer the two answer the same
+set, so the default run is unaffected; see `DECLARED['--reviewer on both front-ends, and the
+review_blocked pause reason']` in `defaultUnchanged.test.ts`.
 
 ## D10. One branch, no incremental merges to main
 

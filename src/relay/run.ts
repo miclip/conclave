@@ -16,7 +16,7 @@
  *   await run.rotateImplementer()
  *   await run.continue()
  *
- * The loop suspends at the pause point holding everything it had — the round counter, the
+ * The loop suspends at the pause point holding everything it had — the advisor-turn counter, the
  * advisor's last instruction, the implementer's report — and picks up from there. Rotation
  * is safe at exactly that moment and nowhere else: no turn is in flight, so replacing the
  * implementer cannot race a send.
@@ -32,6 +32,7 @@ import type { RunReason } from './observe.ts'
 import type { Verdict } from '../contract/outcome.ts'
 import type { ChildLiveness } from '../outcomes/liveness.ts'
 import type { RotationResult } from '../rotation/rotate.ts'
+import type { ResolutionRequest } from './resolution.ts'
 
 export type RunState = 'running' | 'paused' | 'ended'
 
@@ -59,7 +60,34 @@ export type PauseReason =
    */
   | 'authority_conflict'
   /**
-   * The operator asked to stop at the next round boundary.
+   * A seat's work could not be merged, and the seat could not repair it either.
+   *
+   * NOT raised by the first conflict. A conflict is ordinary at N>1 and is handled inside the
+   * run: the merge is aborted, that one seat is marked `merge_blocked`, and the advisor is
+   * asked for an instruction that resolves it in the seat's own worktree. Every other seat
+   * keeps working, because blocking a run on one seat's conflict is lockstep reached from a
+   * different direction.
+   *
+   * This is the SECOND failure against the same integration parent — the repair was dispatched,
+   * came back, and the merge still will not go. Nothing has changed that another turn could
+   * change, so continuing would spend the advisor's budget re-asking a question the seat has
+   * already failed to answer. The work is committed on the seat's branch and its tree is
+   * retained; what the operator gets is a decision point rather than a run that quietly stops
+   * making progress.
+   */
+  | 'merge_blocked'
+  /**
+   * A reviewer rejected a seat's work twice against the same original task (#72).
+   *
+   * NOT raised by the first rejection: that becomes an ordinary `review_resolution` task,
+   * dispatched back to the seat automatically, exactly as a merge conflict's repair is. This
+   * is the SECOND rejection of the SAME work -- nothing has changed that another repair turn
+   * could change, so the operator gets a decision point instead of a run that quietly keeps
+   * dispatching repairs a reviewer keeps refusing.
+   */
+  | 'review_blocked'
+  /**
+   * The operator asked to stop at the next advisor-turn boundary.
    *
    * Not in the original set, and added for a reason worth recording: without it the only
    * way to reach a pause is to wait for the orchestrator to raise one, so "does a real
@@ -149,6 +177,20 @@ export interface PauseContinueRefusal {
 
 export interface RunPause {
   reason: PauseReason
+  /**
+   * The condition this pause is the EFFECT of, classified on both axes (#56, D2).
+   *
+   * Computed at the halt site from the reason and the run's configuration, never stored or
+   * declared by the condition itself -- see `resolution.ts`. Recorded rather than acted on:
+   * a request whose authority is `mechanical` or `advisor` still produces this pause today,
+   * because nothing exists yet that could resolve one, and dropping the pause first would
+   * lose the decision point rather than automate it.
+   *
+   * `reason` above is the same value as `resolution.reason`; both are kept because this
+   * field is the whole classification and the loose one is what every existing reader,
+   * status file and rendering is written against.
+   */
+  resolution: ResolutionRequest
   detail: string
   /**
    * Why the orchestrator believes what it believes, in the project's provenance idiom.
@@ -192,9 +234,9 @@ export type Decision = { kind: 'continue' } | { kind: 'abort'; detail: string }
 export interface RunControl {
   rotate(reason: string): Promise<RotationResult>
   constrain(text: string, audience: Audience): RelayMessage
-  /** Ask the loop to stop at its next round boundary. */
+  /** Ask the loop to stop at its next advisor-turn boundary. */
   requestStop(): void
-  /** Ask the loop to pause at its next round boundary. */
+  /** Ask the loop to pause at its next advisor-turn boundary. */
   requestPause(reason: string): void
 }
 
@@ -308,7 +350,7 @@ export class RunHandle {
   }
 
   /**
-   * Ask the run to pause at its next round boundary.
+   * Ask the run to pause at its next advisor-turn boundary.
    *
    * Not immediate, and cannot be: neither child CLI ingests input mid-turn (§5c), so the
    * earliest safe point is after the turn in flight ends. Returns the pause once it is

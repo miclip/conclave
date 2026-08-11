@@ -11,6 +11,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 import type { Confidence, Provenance } from '../contract/outcome.ts'
 import { RelayEventStream } from '../relay/observe.ts'
+import { resolutionFor } from '../relay/resolution.ts'
 import {
   listSessions,
   newSessionId,
@@ -54,7 +55,7 @@ function graded(key: string): FakeTurn {
  * defect it exists to reproduce is a slow read of an early transcript landing after a fast
  * read of a later one.
  */
-function fakeSeat(id: string, rank: string, agent: string) {
+function fakeSeat(id: string, rank: string, agent: string, role: string = rank) {
   const state = {
     turns: [] as FakeTurn[],
     fail: false,
@@ -74,6 +75,11 @@ function fakeSeat(id: string, rank: string, agent: string) {
     seat: {
       id,
       rank,
+      role,
+      // What the relay composes at join. A stand-in for a seat launched with no arguments,
+      // which is what every seat in this file is: the recorder copies this through and does
+      // not compose it, so the interesting cases live where the composing happens.
+      launch: { args: [] as string[], model: null },
       session: {
         agent,
         async snapshot() {
@@ -97,7 +103,7 @@ function fakeRelay(): RecordableRelay & {
   stream: RelayEventStream
   pending: { id: string; tool: string }[]
   messages: unknown[]
-  seats: Record<string, ReturnType<typeof fakeSeat>['state']>
+  transcripts: Record<string, ReturnType<typeof fakeSeat>['state']>
 } {
   const stream = new RelayEventStream()
   const pending: { id: string; tool: string }[] = []
@@ -108,7 +114,10 @@ function fakeRelay(): RecordableRelay & {
     stream,
     pending,
     messages,
-    seats: { advisor: advisor.state, implementer: implementer.state },
+    // Named `transcripts` rather than `seats`: `RecordableRelay.seats()` is the dispatcher's
+    // per-seat state, and a stand-in whose `seats` was a map of scripted transcripts would
+    // satisfy the structural type by accident and mean something else entirely.
+    transcripts: { advisor: advisor.state, implementer: implementer.state },
     cwd: '/tmp/project',
     operator: 'human',
     participants: [advisor.seat, implementer.seat],
@@ -251,6 +260,7 @@ test('an outcome survives a later state change; a pause does not', async () => {
   })
   const pause = {
     reason: 'operator_requested' as const,
+    resolution: resolutionFor({ reason: 'operator_requested' }, { rotationArmed: false }),
     detail: 'asked to stop',
     evidence: ['the operator typed /pause'],
     options: ['continue' as const],
@@ -328,7 +338,7 @@ test('a turn reaches the status file with its grade, not just its state', async 
   const before = readSession(root, 'turns')?.status.participants ?? []
   assert.deepEqual(before.map((p) => p.turns), [[], []])
 
-  relay.seats.implementer!.turns = [graded('impl-turn-0')]
+  relay.transcripts.implementer!.turns = [graded('impl-turn-0')]
   await recording.refresh()
 
   const seat = readSession(root, 'turns')?.status.participants.find((p) => p.id === 'implementer')
@@ -356,7 +366,7 @@ test('a turn ending refreshes the record without waiting for a lifecycle change'
     startedAt: Date.now(),
     build: 'test-build',
   })
-  relay.seats.implementer!.turns = [graded('impl-turn-0')]
+  relay.transcripts.implementer!.turns = [graded('impl-turn-0')]
   // A long run reports `running` once and then nothing until it is over. If turns were only
   // read at the end, the record would be empty for exactly as long as anyone wanted it.
   relay.stream.emit({
@@ -397,14 +407,14 @@ test('a slow snapshot cannot overwrite the turns a newer one already wrote', asy
   // The first read sees one turn and takes 120ms to say so; the second sees two and is
   // instant. Run concurrently and unordered, the first would land last and the record would
   // lose a turn it had already reported.
-  relay.seats.implementer!.script = [
+  relay.transcripts.implementer!.script = [
     { turns: [graded('impl-turn-0')], delayMs: 120 },
     { turns: [graded('impl-turn-0'), graded('impl-turn-1')] },
   ]
   const slow = recording.refresh()
   const quick = recording.refresh()
   await Promise.all([slow, quick])
-  assert.ok(relay.seats.implementer!.snapshots >= 2, 'both refreshes must actually have read')
+  assert.ok(relay.transcripts.implementer!.snapshots >= 2, 'both refreshes must actually have read')
 
   const seat = readSession(root, 'stale')?.status.participants.find((p) => p.id === 'implementer')
   assert.equal(seat?.turns.length, 2, 'the newer snapshot must win regardless of which returned first')
@@ -433,8 +443,8 @@ test('close() takes a last snapshot, so graded turns survive the ended state', a
   recording.set('ended', { outcome: { reason: 'done', detail: 'DONE' } })
   // Graded only after the front-end has already said `ended` — which is the real order:
   // the console reports the state on teardown and the verdict is in the transcript by then.
-  relay.seats.advisor!.turns = [graded('advisor-turn-0')]
-  relay.seats.implementer!.turns = [graded('impl-turn-0'), graded('impl-turn-1')]
+  relay.transcripts.advisor!.turns = [graded('advisor-turn-0')]
+  relay.transcripts.implementer!.turns = [graded('impl-turn-0'), graded('impl-turn-1')]
   relay.stream.close()
   await recording.close()
 
@@ -460,11 +470,11 @@ test('a snapshot that fails keeps the turns already recorded, rather than blanki
     startedAt: Date.now(),
     build: 'test-build',
   })
-  relay.seats.implementer!.turns = [graded('impl-turn-0')]
+  relay.transcripts.implementer!.turns = [graded('impl-turn-0')]
   await recording.refresh()
   // The final refresh runs after `relay.stop()`, when a session may already be terminated
   // and its transcript unreadable. Losing the turns there loses them when they matter most.
-  relay.seats.implementer!.fail = true
+  relay.transcripts.implementer!.fail = true
   relay.stream.close()
   await recording.close()
 

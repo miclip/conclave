@@ -70,6 +70,25 @@ export const BUILTIN_ROLES: Record<RoleId, RoleDefinition> = {
     defaultInputOwnership: 'mediated',
     isModel: false,
   },
+  /**
+   * Rank `implementer`, role `reviewer` (#72, D9b). A named seat rather than an open role:
+   * the briefing can only teach what it knows exists, and "you have a reviewer" is
+   * something an advisor can be told to act on where an arbitrary role string is not.
+   *
+   * Reads the diff and tree the orchestrator builds from a completed seat's own worktree --
+   * never that seat's report -- and never mutates anything itself.
+   */
+  reviewer: {
+    id: 'reviewer',
+    displayName: 'Reviewer',
+    description:
+      'Reads the diff and tree of a completed seat, never its report. Accepts or rejects; ' +
+      'a rejection becomes a repair task assigned back to the seat that produced the work.',
+    contextPolicy: 'thin',
+    mutatesWorkspace: false,
+    defaultInputOwnership: 'mediated',
+    isModel: true,
+  },
 }
 
 export function resolveRole(id: RoleId, roles: Record<RoleId, RoleDefinition> = BUILTIN_ROLES): RoleDefinition {

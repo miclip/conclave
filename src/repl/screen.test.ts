@@ -12,11 +12,12 @@ import { test } from 'node:test'
 
 import type { Suggestion } from './complete.ts'
 import { Screen } from './screen.ts'
+import { displayWidth } from './width.ts'
 
 const ESC = '\x1b['
 const strip = (s: string) => s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '')
 
-async function harness(suggestion?: Suggestion, pending?: () => string[]) {
+async function harness(suggestion?: Suggestion, pending?: () => string[], seats?: () => string[]) {
   const input = new PassThrough()
   const written: string[] = []
   const output = Object.assign(new PassThrough(), {
@@ -36,6 +37,7 @@ async function harness(suggestion?: Suggestion, pending?: () => string[]) {
     prompt: () => '› ',
     ...(suggestion ? { suggest: () => suggestion } : {}),
     ...(pending ? { pending } : {}),
+    ...(seats ? { seats } : {}),
   })
   await screen.open()
 
@@ -55,6 +57,8 @@ async function harness(suggestion?: Suggestion, pending?: () => string[]) {
     },
     /** Everything written since the harness was made, escape codes intact. */
     raw: () => written.join(''),
+    /** The most recent frame alone: one `draw()`, so its rows and its cursor agree. */
+    frame: () => written.at(-1) ?? '',
     /** Which item is reverse-videoed, if any. */
     selected: () => /\x1b\[7m ([^\x1b]+) \x1b\[0m/.exec(written.at(-1) ?? '')?.[1],
     /** Change the terminal height and emit a resize event. */
@@ -186,6 +190,123 @@ test('a long queue stops at a fixed height and says how much it is hiding', asyn
   const h = await harness(undefined, () => ['a', 'b', 'c', 'd', 'e'])
   h.screen.draw()
   assert.match(h.raw(), /3 more queued — \/queue/)
+})
+
+test('every busy seat gets a row of its own, above the queue', async () => {
+  // The alternative — several seats inlaid into the one status rule — is a line that has to
+  // fit the terminal, and four seats do not. A wrapped rule takes a row the box never
+  // reserved, which lands on the transcript.
+  let busy = ['seat-alpha 12s  t-3 · rebuild the parser', 'seat-beta 4s  t-4 · rewrite the docs']
+  const h = await harness(undefined, () => ['→ advisor  a queued line'], () => busy)
+  h.screen.draw()
+  const frame = h.raw()
+  assert.match(frame, /seat-alpha 12s {2}t-3 · rebuild the parser/)
+  assert.match(frame, /seat-beta 4s {2}t-4 · rewrite the docs/)
+  // Above the queue, not below it: the queue sits directly on the box because it is about
+  // what was just typed, and the seats are the ambient state behind it.
+  const at = (s: string) => strip(h.raw()).indexOf(s)
+  assert.ok(at('seat-alpha') < at('a queued line'), 'seat rows belong above the pending queue')
+
+  // And the cursor still lands on the input row, which every seat row above it pushes down.
+  // Miscounting here does not misplace a row — it puts the operator's typing on top of one,
+  // and the box looks right until somebody types.
+  const last = h.frame()
+  const promptRow = [...last.matchAll(/\x1b\[(\d+);1H\x1b\[2K(.?)/g)].find((m) => m[2] === '›')?.[1]
+  assert.ok(promptRow, 'the input row must have been drawn')
+  const cursorRow = [...last.matchAll(/\x1b\[(\d+);(\d+)H/g)].at(-1)?.[1]
+  assert.equal(cursorRow, promptRow, 'the cursor must sit on the input row, not on a seat’s')
+})
+
+test('more busy seats than rows stops at a fixed height and says where to read the rest', async () => {
+  // The count alone would tell the operator they are missing something without telling them
+  // how to stop missing it. `/state` prints every seat with its task and its branch.
+  const h = await harness(undefined, undefined, () => ['alpha', 'beta', 'gamma', 'delta', 'epsilon'])
+  h.screen.draw()
+  assert.match(h.raw(), /3 more working — \/state/)
+  // And the cap is a cap: the two it does show, the overflow row, and nothing else.
+  assert.match(h.raw(), /alpha/)
+  assert.match(h.raw(), /beta/)
+  assert.doesNotMatch(h.raw(), /epsilon/, 'a box that grew with the seat count would eat the transcript')
+})
+
+test('exactly as many seats as rows are all shown, with nothing claiming to be hidden', async () => {
+  // The boundary, and it is the one an off-by-one lands on: a cap that fires at the limit
+  // rather than past it drops a seat that fits and reports `1 more working` over a row it had
+  // the space to draw. Neither the two-seat nor the five-seat case above can see that.
+  const h = await harness(undefined, undefined, () => ['alpha', 'beta', 'gamma'])
+  h.screen.draw()
+  const frame = strip(h.frame())
+  for (const seat of ['alpha', 'beta', 'gamma']) assert.match(frame, new RegExp(seat), `${seat} fits and must be drawn`)
+  assert.doesNotMatch(frame, /more working/, 'nothing is hidden, so nothing may say it is')
+})
+
+test('an over-wide seat row is clipped to one row rather than wrapping onto the next seat', async () => {
+  // The box reserved exactly one row for this seat. A row that wraps is drawn into the row
+  // below it, which belongs to another seat — so the terminal shows one seat's instruction
+  // over another seat's name, and every row under it is off by one.
+  //
+  // Clipping is measured in VISIBLE columns: the seat id carries a colour, and escapes occupy
+  // no columns. A slice taken against `.length` would cut the row short and, worse, could cut
+  // a colour sequence in half and leave the rest of the box wearing it.
+  const wide = `\x1b[36mseat-alpha\x1b[0m ${'x'.repeat(200)}`
+  const h = await harness(undefined, undefined, () => [wide])
+  h.screen.draw()
+  const drawn = [...h.frame().matchAll(/\x1b\[\d+;1H\x1b\[2K([^\x1b]*(?:\x1b\[[0-9;]*m[^\x1b]*)*)/g)]
+    .map((m) => m[1]!)
+    .find((row) => row.includes('seat-alpha'))
+  assert.ok(drawn, 'the seat row must have been drawn')
+  // EXACTLY the width, not merely within it. A clip that counted the colour escapes as
+  // columns would also fit — by throwing away nine columns of the instruction it was given
+  // room to show — and "fits" cannot tell that from a correct cut.
+  assert.equal(displayWidth(drawn), 80, 'a seat row must use its row and not overflow it')
+  assert.match(strip(drawn), /…$/, 'and must say it was cut rather than simply stopping')
+  assert.ok(drawn.includes('\x1b[36m'), 'the colour it carries must survive the clip')
+  assert.doesNotMatch(drawn, /\x1b\[[0-9;]*$/, 'and no escape may be cut in half')
+})
+
+test('busy seats grow the box, and growing it pushes the transcript up rather than over', async () => {
+  // The half of the change that is not about text. The box reserves rows from the BOTTOM of
+  // the screen, so two extra rows lower the floor by two — and the content already sitting on
+  // those two rows is content a participant just wrote. Growing without scrolling it up first
+  // paints the box over the last thing said, which is the failure #54 was.
+  let busy: string[] = []
+  const h = await harness(undefined, undefined, () => busy)
+  const regions = () => [...h.raw().matchAll(/\x1b\[1;(\d+)r/g)].map((m) => Number(m[1]))
+  /** Every push: save cursor, jump to the OLD floor, newline per overflowing row, restore. */
+  const pushes = () => [...h.raw().matchAll(/\x1b\[s\x1b\[(\d+);1H(\n+)\x1b\[u/g)].map((m) => [Number(m[1]), m[2]!.length])
+
+  h.screen.draw()
+  assert.equal(regions().at(-1), 20, 'a 24-row terminal with a four-row box scrolls the top 20')
+  // The harness answers no cursor query, so the box starts anchored at the floor: `#contentRow`
+  // is 20, which is BELOW the floor of 18 that two more rows will create. That is the state the
+  // push exists for, and a test that started with a descending box would never reach it.
+  assert.deepEqual(pushes(), [], 'nothing has grown yet, so nothing has been pushed')
+
+  busy = ['seat-alpha  t-3', 'seat-beta  t-4']
+  h.screen.draw()
+  assert.equal(regions().at(-1), 18, 'two seat rows cost exactly two rows of scrolling region')
+  assert.deepEqual(
+    pushes(),
+    [[20, 2]],
+    'the two rows the box took must be scrolled up from the OLD floor, one newline each',
+  )
+
+  busy = ['seat-alpha  t-3', 'seat-beta  t-4', 'seat-gamma  t-5']
+  h.screen.draw()
+  assert.equal(regions().at(-1), 17, 'a third seat takes a third row')
+  assert.deepEqual(
+    pushes(),
+    [
+      [20, 2],
+      [18, 1],
+    ],
+    'growing again pushes again, by the one further row it took, from the floor it grew from',
+  )
+
+  busy = []
+  h.screen.draw()
+  assert.equal(regions().at(-1), 20, 'and the rows come back when the seats go idle')
+  assert.equal(pushes().length, 2, 'shrinking pushes nothing: those rows are the box giving screen back')
 })
 
 

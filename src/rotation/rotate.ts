@@ -23,6 +23,21 @@
  *
  * A replacement that reports a mismatch has performed a *successful* transfer of the thing
  * that matters. The failure case is one that reports agreement it did not observe.
+ *
+ * ## One seat, and one tree
+ *
+ * Nothing here knows how many seats a run has. It is handed a session, an advisor, and a
+ * `root` -- and that root is ONE SEAT'S working tree, which is what makes the transaction
+ * seat-local at any N (#78). The relay decides which seat; this decides whether the transfer
+ * holds. The N=1 case is the identity case rather than a branch: there is one tree, it is the
+ * operator's cwd, and this file cannot tell the difference.
+ *
+ * ## A gate that cannot be applied is not a gate that was failed
+ *
+ * Acceptance can fail two ways and they are not the same fact (#76). A replacement that
+ * answers and does not reproduce is a bad draw. A replacement that produces nothing observable
+ * at all means the transport acceptance depends on is not working, and no replacement can pass
+ * while that holds -- so those two get different reasons, and the second names what it saw.
  */
 
 import type { AgentSession } from '../contract/session.ts'
@@ -46,11 +61,38 @@ import {
 } from './record.ts'
 
 export interface RotationDeps {
+  /**
+   * The working tree this rotation is scoped to.
+   *
+   * ONE SEAT'S tree, not the run's. Everything mechanical about a transfer is read from here
+   * -- HEAD, the named files, and the checks -- so at N>1 this is the worktree the rotating
+   * seat has been working in, and the replacement is verified against the work that seat
+   * actually did (D7, #78). At N=1 the seat's tree IS the operator's cwd and this is that
+   * directory, which is why nothing about the transaction had to change for the singular case.
+   *
+   * Reading the integration checkout instead would compare a replacement against a tree its
+   * predecessor never wrote to: every file digest would match trivially, and the checks would
+   * measure somebody else's merged work.
+   */
   root: string
   /** Deliver prose to a session and resolve with its reply. Supplied by the relay. */
   exchange(session: AgentSession, text: string): Promise<string>
   /** Start a fresh implementer. Called only after the handoff parses. */
   startReplacement(): Promise<AgentSession>
+  /**
+   * What the orchestrator can say about the replacement's transport, asked for only when the
+   * replacement produced nothing at all.
+   *
+   * The distinction in #76 is between "this replacement did not meet the bar" and "nothing
+   * could have met it", and the second is a claim about the transport rather than about the
+   * model. This is the evidence behind that claim -- how many events the session emitted, what
+   * state it is in -- and it comes from the relay because `rotate()` sees one string and cannot
+   * tell an empty reply from a child that never spoke.
+   *
+   * Optional: a caller that has no transport to describe (the tests' fake exchange) simply
+   * says less, and the classification is unchanged.
+   */
+  transportEvidence?: (session: AgentSession) => string[]
   /**
    * Verification commands. The handoff is only as strong as what these actually check.
    *
@@ -129,6 +171,24 @@ export type FailureReason =
   | 'repository_diverged'
   /** The replacement did not report in a comparable form, or reported what is not so. */
   | 'replacement_could_not_reproduce'
+  /**
+   * The replacement produced NO observable output at all, so the gate could not be applied.
+   *
+   * Split out of `replacement_could_not_reproduce` because the two invite opposite responses
+   * and used to be reported identically (#76). The acceptance gate requires an observed turn,
+   * and that turn travels the same transport as everything else -- so a transport fault
+   * disables the mechanism meant to route around a fault, and every replacement inherits it.
+   *
+   *   observable output, gate not met  -- this replacement did not do it; another might
+   *   no observable output at all      -- no replacement can pass while this holds
+   *
+   * The rollback is right either way, and that was never the bug. The bug was that the
+   * operator could not tell which one they were in, so the second looked like the first and
+   * invited a retry, and the retry looked the same again. A caller that acts on this reason
+   * should stop rotating and say so, because the fix is upstream of rotation entirely: hook
+   * trust, the provider, or the CLI.
+   */
+  | 'acceptance_unobservable'
 
 export type RotationResult =
   | {
@@ -145,6 +205,16 @@ export type RotationResult =
       restored: AgentSession
       handoff?: Handoff
       acceptance?: Acceptance
+      /**
+       * What was observed of the replacement's transport, on the reason that rests on it.
+       *
+       * Only `acceptance_unobservable` carries this, and it carries it because that reason is
+       * an assertion about something nobody can see afterwards: the session is closed by the
+       * time the caller reads the result. A verdict of "no replacement can pass" that does not
+       * say what it observed is the verdict this project keeps finding in itself -- true, and
+       * missing the fact that would let anyone act on it.
+       */
+      evidence?: string[]
     }
 
 /**
@@ -166,6 +236,43 @@ async function rollback(
       deps.note?.(`replacement teardown failed after rollback: ${(err as Error).message}`)
     }
   }
+}
+
+/**
+ * One turn asked of the replacement, and whether anything came back.
+ *
+ * `silent` is not a failure of the reply's CONTENT -- that is the acceptance comparison's
+ * business, further down. It is the absence of a reply at all: the send threw, or it returned
+ * and the turn produced nothing. Both mean the same thing about the transport, and both mean
+ * the gate has nothing to apply itself to.
+ */
+type ReplacementTurn = { kind: 'observed'; prose: string } | { kind: 'silent'; detail: string }
+
+/**
+ * Talk to the replacement, and keep "it said nothing" separate from "it said the wrong thing".
+ *
+ * Every exchange with the replacement goes through here, including the constraint replays: a
+ * transport that cannot deliver a constraint will not deliver the acceptance turn either, and
+ * discovering that one turn later would report it as a failure to reproduce (#76).
+ *
+ * The throw is caught rather than left to the outer handler on purpose. That handler covers
+ * everything in the acceptance block -- including `capture()`, which shells out and can fail
+ * for reasons that have nothing to do with a child process -- so classifying every throw in it
+ * as a transport fault would be the same over-claim in the opposite direction.
+ */
+async function ask(
+  replacement: AgentSession,
+  text: string,
+  deps: RotationDeps,
+): Promise<ReplacementTurn> {
+  let prose: string
+  try {
+    prose = await deps.exchange(replacement, text)
+  } catch (err) {
+    return { kind: 'silent', detail: `the exchange did not complete: ${(err as Error).message}` }
+  }
+  if (prose.trim() === '') return { kind: 'silent', detail: 'the turn came back with no prose at all' }
+  return { kind: 'observed', prose }
 }
 
 export async function rotate(opts: {
@@ -240,17 +347,48 @@ export async function rotate(opts: {
   await old.beginRotation()
 
   try {
+    /**
+     * The replacement never spoke. Roll back, and say which of #76's two cases this is.
+     *
+     * Written once and used from both call sites below, because the whole point of the
+     * distinction is that it is stated in the same words wherever it is reached -- an operator
+     * who has to compare two phrasings to work out whether they are being told the same thing
+     * is being told nothing.
+     */
+    const unobservable = async (turn: { detail: string }): Promise<RotationResult> => {
+      await rollback(old, replacement, deps)
+      return {
+        status: 'rolled_back',
+        reason: 'acceptance_unobservable',
+        detail:
+          `the replacement produced no observable output: ${turn.detail}. Acceptance requires an ` +
+          `observed turn, and that turn travels the same transport as everything else — so while ` +
+          `this holds NO replacement can pass and rotation is not the remedy. The fault is ` +
+          `upstream of rotation: hook trust, the provider, or the CLI itself.`,
+        restored: old,
+        handoff,
+        evidence: deps.transportEvidence?.(replacement) ?? [],
+      }
+    }
+
     // Constraints go first and separately, so they arrive at human rank rather than as
     // advisor prose. Folded into the handoff they would quietly become a suggestion.
     for (const c of handoff.constraints) {
-      await deps.exchange(
+      const ack = await ask(
         replacement,
         envelope({ from: c.from, fromRank: c.fromRank, kind: c.kind, text: c.text }),
+        deps,
       )
+      // Only silence is read here. A constraint is not answered with anything the transaction
+      // grades -- it is delivered -- so any reply at all is enough to show the transport works,
+      // and the acceptance turn below is where content starts to matter.
+      if (ack.kind === 'silent') return unobservable(ack)
     }
 
     // 4. Verification. The replacement demonstrates rather than acknowledges.
-    const prose = await deps.exchange(replacement, acceptancePrompt(handoff))
+    const turn = await ask(replacement, acceptancePrompt(handoff), deps)
+    if (turn.kind === 'silent') return unobservable(turn)
+    const prose = turn.prose
     const claimed = parseClaimedChecks(prose)
 
     const observed = capture({

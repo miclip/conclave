@@ -22,7 +22,7 @@
  */
 
 import type { Suggestion } from './complete.ts'
-import { rowsUsed } from './width.ts'
+import { clipToWidth, rowsUsed } from './width.ts'
 import { emitKeypressEvents } from 'node:readline'
 
 export interface Key {
@@ -76,10 +76,33 @@ export interface ScreenOptions {
    * nothing to say about it.
    */
   pending?: () => string[]
+  /**
+   * One row per implementer seat that is working, shown ABOVE the pending queue.
+   *
+   * Rows rather than more text on the status rule, which is where this used to have to go.
+   * The rule inlays ONE line — `── ⠋ implementer 5s · Grep ────` — and it is the right shape
+   * for one worker and the wrong one for several: four seats put four names, four clocks and
+   * four tool names on a row that has to fit the terminal, so it wraps, and a wrapped rule
+   * occupies a row the box did not reserve and paints over the transcript.
+   *
+   * Empty at N=1, where the rule holds the one worker exactly as it always has.
+   */
+  seats?: () => string[]
 }
 
 /** Pinned rows spent on the queue before it starts crowding the transcript. */
 const MAX_PENDING_ROWS = 3
+
+/**
+ * Pinned rows spent on working seats before the box starts crowding the transcript.
+ *
+ * The same cap as the queue and for the same reason: a run may have more seats than the
+ * terminal has rows to spare, and a box that grew with the seat count would eat the
+ * transcript it exists to annotate. Deliberately NOT a per-seat column budget — sharing one
+ * row between four seats gives each a fifth of the width and truncates the only part that
+ * differs between them, which is worse than saying plainly that some are not shown.
+ */
+const MAX_SEAT_ROWS = 3
 
 /** Rows the candidate list may wrap onto before it admits it is showing a prefix. */
 const MAX_MENU_ROWS = 3
@@ -361,6 +384,21 @@ export class Screen {
   }
 
   /**
+   * The working-seat rows, capped the same way, and naming where the rest can be read.
+   *
+   * `/state` rather than a count alone, and rather than a command invented for the message:
+   * an overflow line that says only how many are hidden tells the operator they are missing
+   * something and not how to stop missing it. `/state` prints every seat with its task and
+   * its branch, which is the whole state this row is a summary of.
+   */
+  #seatRows(): string[] {
+    const all = this.#o.seats?.() ?? []
+    if (all.length <= MAX_SEAT_ROWS) return all
+    const shown = all.slice(0, MAX_SEAT_ROWS - 1)
+    return [...shown, `${all.length - shown.length} more working — /state`]
+  }
+
+  /**
    * The candidate rows, wrapped to the width, or the hint row when no menu is open.
    *
    * Wrapping rather than truncating, because a fixed cap of eight items hid `/exit` — the
@@ -432,8 +470,12 @@ export class Screen {
   draw(): void {
     if (!this.#open) return
     const queued = this.#pendingRows()
+    const working = this.#seatRows()
     const menuRows = this.#menuRows()
-    this.#resize(this.#base + queued.length + menuRows.length - 1)
+    // Every variable-height band is counted here, and this is the only place any of them is:
+    // the box's height and the rows it paints are computed from the same three arrays in the
+    // same draw, so a band can never be drawn into a row the region was not shrunk to free.
+    this.#resize(this.#base + queued.length + working.length + menuRows.length - 1)
     const w = this.columns
     const top = this.#boxTop
     this.#drawnTop = top
@@ -453,7 +495,19 @@ export class Screen {
       const clipped = text.length > w ? `${text.slice(0, Math.max(1, w - 1))}…` : text
       return `\x1b[2;3m${clipped}\x1b[0m`
     })
-    const rows = [...waiting, head, `${prompt}${this.#line}`, rule, ...menuRows]
+    // Clipped to the width one row at a time, and NOT dimmed here: a seat row carries its own
+    // colour for the seat id, which is what tells two of them apart at a glance, and wrapping
+    // the whole row in an attribute would flatten that. Clipping matters more than for the
+    // queue — the box reserved exactly one row for each of these, so a row that wrapped would
+    // be drawn into the row below it, which is another seat's.
+    //
+    // Measured in COLUMNS by `clipToWidth`, not in characters. The hand-rolled version here
+    // charged the row for its own colour codes and cut it nine columns short of the width it
+    // had been given; a version that charged nothing for a CJK ideograph would cut it long,
+    // which is the wrap this row cannot survive. Both are the same mistake in opposite
+    // directions, and `width.ts` is where that arithmetic already lives.
+    const seatRows = working.map((t) => clipToWidth(`  ${t}`, w))
+    const rows = [...seatRows, ...waiting, head, `${prompt}${this.#line}`, rule, ...menuRows]
     let out = `${ESC}s`
     rows.forEach((text, i) => {
       out += `${ESC}${top + i};1H${ESC}2K${text}`
@@ -464,7 +518,9 @@ export class Screen {
     const bottom = top + this.#height - 1
     if (bottom < this.rows) out += `${ESC}${bottom + 1};1H${ESC}0J`
     // Cursor into the input row, after the prompt and the typed text.
-    out += `${ESC}${top + waiting.length + 1};${visible(prompt) + this.#cursor + 1}H`
+    // Counted past BOTH bands above the rule. The input row is the rule's row plus one, and
+    // the rule's row moves down by every seat row as well as by every queued one.
+    out += `${ESC}${top + seatRows.length + waiting.length + 1};${visible(prompt) + this.#cursor + 1}H`
     this.#out.write(out)
   }
 

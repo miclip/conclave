@@ -26,7 +26,7 @@
 
 import { describeTool } from '../relay/subagents.ts'
 import { formatGoalFindings, lintGoal } from '../relay/goalLint.ts'
-import { preflightRefusals } from '../relay/guardrails.ts'
+import { preflightRefusals, type Ceilings } from '../relay/guardrails.ts'
 import { createWriteStream, existsSync, realpathSync } from 'node:fs'
 import { basename, join, relative } from 'node:path'
 import { Writable } from 'node:stream'
@@ -38,7 +38,7 @@ import type { AgentEvent } from '../contract/session.ts'
 import { defaultRegistry } from '../registry/builtin.ts'
 import type { CheckSpec } from '../rotation/record.ts'
 import type { AgentRegistry } from '../registry/registry.ts'
-import { Relay } from '../relay/relay.ts'
+import { implementerSpecsFor, Relay, reviewerSpecFor, type SeatRequest } from '../relay/relay.ts'
 import type { RelayMessage } from '../relay/message.ts'
 import type { RunHandle, RunPause } from '../relay/run.ts'
 import { ensureCodexHooksTrusted } from '../deployment/ensureTrust.ts'
@@ -126,6 +126,29 @@ export interface SessionOptions {
   lead: string
   implementer: string
   /**
+   * Every implementer seat, when the operator named the seat list with `--implementers`: its
+   * agent, and the launch arguments typed for that seat alone. Absent is the default and must
+   * stay behaviourless.
+   *
+   * Requests rather than specs, because seat construction belongs to one place: `runSession`
+   * builds the specs with `implementerSpecsFor`, exactly as the relay CLI does, so `seatIdFor`
+   * is not applied on both sides of this wire and cannot disagree with itself. The first entry
+   * is the lead implementer and equals `implementer`; the CLI refuses the invocation where they
+   * disagree rather than passing a contradiction through.
+   *
+   * `SeatRequest[]` rather than `string[]`, which it was until per-seat launch arguments existed
+   * (#77): the console front-end is the one that hands over a LIST and lets `runSession` build
+   * the specs, so a bare agent list here is a wire on which each seat's own arguments have
+   * nowhere to be. They would have had to travel as a second parallel list, correlated by index
+   * with this one -- and a pairing that exists only as two array positions is one a single
+   * dropped entry silently reassigns.
+   *
+   * A console run given none is the run it was before this field existed: no `implementers` key
+   * reaches `Relay.start`, so `implementerSeats` returns `[implementer]` by the expression it
+   * always used (D1).
+   */
+  implementers?: SeatRequest[] | undefined
+  /**
    * Extra launch arguments per seat, e.g. `['-m', 'opencode/kimi-k2.6']`.
    *
    * Required rather than cosmetic for any agent that selects its model per invocation: an
@@ -134,10 +157,27 @@ export interface SessionOptions {
    */
   leadArgs?: string[] | undefined
   implementerArgs?: string[] | undefined
+  /**
+   * The reviewer seat's agent, when `--reviewer` named one (#72). Absent is the default and
+   * must stay behaviourless: no `reviewer` key reaches `Relay.start` at all, built through
+   * the same `reviewerSpecFor` the relay CLI uses.
+   */
+  reviewer?: string | undefined
+  reviewerArgs?: string[] | undefined
+  /**
+   * The `--rounds` flag, which populates `RelayOptions.maxAdvisorTurns`.
+   *
+   * The flag keeps its spelling because operators and scripts already type it; only the relay
+   * option it feeds was renamed, and the value means the same thing on both sides of that wire.
+   */
   rounds: number
   /**
    * Verification commands. A bare string is `required`; pass `{command, relevance}` for a
    * check that should run and be reported without gating a transfer.
+   *
+   * Two stations read them (#80): what a replacement must reproduce, and — with more than
+   * one seat — what the MERGED tree must pass after every merge. One console run with one
+   * seat is unaffected by the second, which has no merge to check.
    */
   checks: CheckSpec[]
   /**
@@ -180,6 +220,20 @@ export interface SessionOptions {
    */
   turnWatchdogMs?: number | undefined
   /**
+   * Resource ceilings for the run: wall clock, total turns, queue depth, concurrent seats.
+   *
+   * Console-side for the first time, and on today's merits rather than N>1's. `--operator
+   * agent` already makes a console run unattended, and an unattended console run had no
+   * ceiling of ANY kind -- the assumption that the console could rely on a human noticing a
+   * run had gone long stopped being true the day that flag shipped, not at some future N.
+   *
+   * Passed to `Relay.start` unchanged. No default, no clamping, no console-specific
+   * reinterpretation: a ceiling that meant something different depending on which command
+   * started the run would be worse than not having one, because the operator would have to
+   * know which. A session given none behaves exactly as it did before this existed.
+   */
+  ceilings?: Ceilings | undefined
+  /**
    * How long a turn's transcript is given to catch up with the hook that ended it, and how
    * much longer an EMPTY report buys before it is treated as lost. See `Relay#exchange`.
    *
@@ -208,11 +262,19 @@ export interface SessionOptions {
    * This is the messages, which is what a resume needs.
    */
   runLog?: string | undefined
-  /** Streams for testing; defaults to the process's own. */
-  input?: NodeJS.ReadableStream
-  output?: NodeJS.WritableStream
+  /**
+   * Streams for testing; defaults to the process's own.
+   *
+   * Explicitly `| undefined`, like most of this interface, so a caller can pass the field
+   * through unconditionally. Under `exactOptionalPropertyTypes` the alternative is a
+   * conditional spread at every call site -- and a spread is not excess-property checked,
+   * so a mistyped key in one compiles and is silently dropped. That is how
+   * `turnWatchdogMs` above went unwired for its whole life.
+   */
+  input?: NodeJS.ReadableStream | undefined
+  output?: NodeJS.WritableStream | undefined
   /** Injected for testing. Production uses the built-in registry. */
-  registry?: AgentRegistry
+  registry?: AgentRegistry | undefined
   /**
    * Injected for testing the console's child-liveness guard.
    *
@@ -269,9 +331,9 @@ const HELP = `
   open the file themselves, and @path means the same to their own CLIs — so the
   reference survives being forwarded, which inlined text would not.
 
-  /pause                 pause at the next round boundary
+  /pause                 pause at the next advisor-turn boundary
   /continue              resume from a pause
-  /rotate [reason]       replace the implementer, carrying a handoff forward
+  /rotate [reason]       replace the implementer seat this pause is about, carrying a handoff forward
   /abort [reason]        end the run, and stay here for the next one
 
   /allow [who]           answer a participant stopped at a permission prompt
@@ -451,6 +513,16 @@ export async function runSession(opts: SessionOptions): Promise<number> {
   }
   if (refusals.length > 0) return 1
 
+  // The seat list, resolved once and read by everything below that used to read
+  // `opts.implementer` and mean "the implementers". At N=1 it is one seat filled by
+  // `opts.implementer` with no arguments of its own, which is the same single agent those
+  // readers had.
+  const seatRequests: SeatRequest[] = opts.implementers ?? [{ agent: opts.implementer, args: [] }]
+  // The agents alone, for the readers that ask what is FILLING the seats -- the banner, the
+  // registration set, the bypass notice. None of them can act on per-seat arguments, and a
+  // launch is not built from this: `implSpecs` below is.
+  const implementerAgents = seatRequests.map((s) => s.agent)
+
   const existing = guard(opts.cwd)
   if (existing.live) {
     write(`refusing to start: ${existing.messages.join('\n')}`)
@@ -461,7 +533,10 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     banner({
       version: opts.version ?? '0.0.0',
       advisor: opts.lead,
-      implementer: opts.implementer,
+      // Every seat's agent, comma-joined. At N=1 that is the single string it has always been;
+      // at N>1 a banner naming only the first seat would be the run under-reporting itself in
+      // the first thing the operator reads.
+      implementer: implementerAgents.join(', '),
       cwd: opts.cwd,
       checks: opts.checks,
     }),
@@ -498,7 +573,9 @@ export async function runSession(opts: SessionOptions): Promise<number> {
   // Only the CLIs this session will actually launch. Both roles can be the same one, and
   // registering the other anyway would write a sidecar nobody reads and then require a
   // trust decision for it before anything reported ready.
-  const agents = [...new Set([opts.lead, opts.implementer])].filter(isAgentKind)
+  const agents = [...new Set([opts.lead, ...implementerAgents, ...(opts.reviewer ? [opts.reviewer] : [])])].filter(
+    isAgentKind,
+  )
   const installed = await installConfig({ projectRoot: opts.cwd, agents, diagnose: false })
   const changed = installed.written.filter((w) => w.changed)
   if (changed.length > 0) {
@@ -534,17 +611,34 @@ export async function runSession(opts: SessionOptions): Promise<number> {
   const projectConfig = readProjectConfig(opts.cwd)
   // Config-derived first, then per-invocation, so an explicit flag wins.
   const leadArgs = [...launchArgsFor(projectConfig, opts.lead), ...(opts.leadArgs ?? [])]
-  const implArgs = [
-    ...launchArgsFor(projectConfig, opts.implementer),
+  // Per agent, as in the relay CLI: config-derived arguments are keyed by agent and two seats
+  // can be filled by different ones, while `implementerArgs` is the operator's own and applies
+  // to every implementer seat. Arguments belonging to ONE seat arrive on that seat's request
+  // and are appended after these by `implementerSpecsFor`, so the more specific spelling wins.
+  const implArgsFor = (agent: string) => [
+    ...launchArgsFor(projectConfig, agent),
     ...(opts.implementerArgs ?? []),
   ]
+  const implSpecs = implementerSpecsFor(seatRequests, implArgsFor)
+  const reviewerSpec = reviewerSpecFor(opts.reviewer ?? '', (agent) => [
+    ...launchArgsFor(projectConfig, agent),
+    ...(opts.reviewerArgs ?? []),
+  ])
 
   // Said once, at the top, naming who. A session that never asks permission is a thing
   // the operator should be reminded of while it runs, not something they configured weeks
   // ago in a file they are not looking at.
   const bypassing = [
     permissionModeFor(projectConfig, opts.lead) === 'bypass' ? `advisor (${opts.lead})` : '',
-    permissionModeFor(projectConfig, opts.implementer) === 'bypass' ? `implementer (${opts.implementer})` : '',
+    // Every distinct implementer agent, because a bypass is configured per agent and a seat
+    // whose agent never asks permission is a thing the operator should be told about whether or
+    // not it happens to be the first seat.
+    ...[...new Set(implementerAgents)].map((a) =>
+      permissionModeFor(projectConfig, a) === 'bypass' ? `implementer (${a})` : '',
+    ),
+    reviewerSpec && permissionModeFor(projectConfig, reviewerSpec.agent) === 'bypass'
+      ? `reviewer (${reviewerSpec.agent})`
+      : '',
   ].filter(Boolean)
   if (bypassing.length > 0) {
     write(yellow(`  permission prompts bypassed for ${bypassing.join(' and ')} — per ${CONFIG_RELATIVE}`))
@@ -572,14 +666,16 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     ...(opts.transcriptSettleMs ? { transcriptSettleMs: opts.transcriptSettleMs } : {}),
     ...(opts.transcriptSalvageMs ? { transcriptSalvageMs: opts.transcriptSalvageMs } : {}),
     ...(opts.turnWatchdogMs ? { turnWatchdogMs: opts.turnWatchdogMs } : {}),
+    // Unchanged, deliberately. See `SessionOptions.ceilings`.
+    ...(opts.ceilings ? { ceilings: opts.ceilings } : {}),
     lead: { id: 'advisor', agent: opts.lead, role: 'advisor', ...(leadArgs.length > 0 ? { args: leadArgs } : {}) },
-    implementer: {
-      id: 'implementer',
-      agent: opts.implementer,
-      role: 'implementer',
-      ...(implArgs.length > 0 ? { args: implArgs } : {}),
-    },
-    maxRounds: opts.rounds,
+    // `implSpecs[0]` is the object this built by hand: `seatIdFor(0)` is 'implementer' and the
+    // args are the same list. The plural key is spread in only when the operator named a list,
+    // so a default console run reaches `Relay.start` with exactly the options it always did.
+    implementer: implSpecs[0]!,
+    ...(opts.implementers ? { implementers: implSpecs } : {}),
+    ...(reviewerSpec ? { reviewer: reviewerSpec } : {}),
+    maxAdvisorTurns: opts.rounds,
     ...(opts.checks.length > 0 ? { rotation: { checks: opts.checks } } : {}),
     onLog: (m) => {
       // A message the operator just typed is already on screen twice over: the pinned row
@@ -759,14 +855,25 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     // longer tells us anything we need to know, so sampling it would only stall a resumption
     // the evidence model has already cleared. A withdrawal with no replacement verdict still
     // leaves the original concern in place, so sampling runs there.
+    //
+    // When the pause names a seat, that seat is the whole question. When it does not, the
+    // question is about the run rather than about one child, so EVERY implementer seat is
+    // sampled and any one of them working refuses the continue. The `find` that stood here
+    // took the first implementer by rank, which is the right seat only because there is one
+    // of them -- at N>1 it would clear a resume while another seat was mid-turn, and
+    // continuing SENDS, which is the exact destructive case this guard exists for.
     const seat = run.pause?.verdictOf?.participant
-    const child = relay.participants.find((x) => (seat ? x.id === seat : x.rank === 'implementer'))
-    const pid = child?.session.childPid
+    const children = relay.participants.filter((x) => (seat ? x.id === seat : x.rank === 'implementer'))
     const supersededCompleted = run.pause?.superseded?.verdict?.outcome === 'completed'
-    if (pid !== undefined && !runOpts.force && !supersededCompleted) {
+    if (!runOpts.force && !supersededCompleted) {
       const sample = opts.liveness ?? sampleLiveness
-      const now = await sample(pid)
-      if (now.alive && !now.idle) {
+      for (const child of children) {
+        const pid = child.session.childPid
+        // No pid is no reading, not a reading of idle: an adapter that does not expose one
+        // leaves this guard with nothing to say about that seat.
+        if (pid === undefined) continue
+        const now = await sample(pid)
+        if (!now.alive || now.idle) continue
         const reason = describeLiveness(now, 0)
         write(yellow('  not continuing: the child is working right now.'))
         write(`  ${reason}`)
@@ -936,6 +1043,49 @@ export async function runSession(opts: SessionOptions): Promise<number> {
   }
 
   /**
+   * Whether this run has seats to tell apart.
+   *
+   * Read off the DISPATCHER rather than off `opts.implementers`, so it answers the same
+   * question the status file answers and answers it from the same place. A console told by
+   * its own flags that it has two seats, while the dispatcher had one, would draw a row for
+   * a seat nothing could ever be dispatched to.
+   */
+  const multiSeat = (): boolean => relay.seats().length > 1
+
+  /**
+   * One row per implementer seat with a task in flight.
+   *
+   * EMPTY AT N=1, which is what keeps the default console byte-identical: with one seat the
+   * status rule already names it, its elapsed time and its current tool, and a second row
+   * saying the same thing is the "three places reporting the queue" failure this box was
+   * built to end. At N>1 the rule cannot do the job — see `ScreenOptions.seats` — so the
+   * seats move off it and onto rows of their own, one each.
+   *
+   * Busy rather than every seat. An idle seat is not a thing the operator is waiting on, and
+   * a row that says `seat-beta idle` costs a row of transcript to report an absence. `/state`
+   * lists them all, which is what the overflow line points at.
+   *
+   * Each row carries the seat, how long its turn has been running, and what it was asked to
+   * do — first line only, because the instruction is prose and the row is a row. The screen
+   * clips whatever still does not fit.
+   */
+  function seatRows(): string[] {
+    if (!multiSeat()) return []
+    const queue = new Map(relay.tasks().map((e) => [e.task.id, e]))
+    const rows: string[] = []
+    for (const s of relay.seats()) {
+      if (s.current === undefined) continue
+      const entry = queue.get(s.current)
+      const startedAt = entry?.runtime.sentAt ?? turnStartedAt.get(s.seat)
+      const elapsed = startedAt === undefined ? '' : ` ${dim(elapsedSince(startedAt))}`
+      const head = entry?.task.instruction.split('\n')[0] ?? ''
+      const what = head ? `  ${dim(`${s.current} · ${head}`)}` : `  ${dim(s.current)}`
+      rows.push(`${speakerColor(s.seat, 'implementer')(s.seat)}${elapsed}${what}`)
+    }
+    return rows
+  }
+
+  /**
    * Ask one participant something with no run in flight, and wait for the answer.
    *
    * A run ending does not end the session: both participants are still alive, holding
@@ -1008,7 +1158,15 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     // invisible while only one could ever be shown and becomes a lie once both are: two
     // names in the same colour is the one thing that would stop the operator telling the
     // advisor's work from the implementer's at a glance.
-    const active = progress.line((p) => speakerColor(p, p === 'advisor' ? 'advisor' : 'implementer')(p))
+    // At N>1 the seats have rows of their own directly above the box, so they come OFF the
+    // rule — otherwise every busy seat is named twice, and the rule, which is one line inlaid
+    // into one row, is the copy that wraps and paints over the transcript. The advisor stays
+    // here at every N: it has no seat, no row, and nowhere else to be reported.
+    //
+    // At N=1 no filter is passed at all, so this is the call it has always been.
+    const seatIds = multiSeat() ? new Set(relay.seats().map((s) => s.seat)) : undefined
+    const colour = (p: string) => speakerColor(p, p === 'advisor' ? 'advisor' : 'implementer')(p)
+    const active = seatIds ? progress.line(colour, (p) => !seatIds.has(p)) : progress.line(colour)
     // Names the other door too. "Type a goal to start" was the only one offered, which is
     // why a question for one participant looked impossible rather than merely unqueued.
     const idle = !run && !active ? dim('type a goal to start, or >advisor / >implementer to ask') : ''
@@ -1063,6 +1221,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
       onLine: (raw) => submit(raw),
       suggest: (line, cursor) => suggest(line, cursor, opts.cwd, COMMANDS),
       pending: pendingRows,
+      seats: seatRows,
       onInterrupt: () => onInterrupt(),
     })
     await screen.open()
@@ -1173,6 +1332,19 @@ export async function runSession(opts: SessionOptions): Promise<number> {
       for (const p of relay.participants) {
         write(`  ${p.id} (${p.rank}): session ${p.session.state}, ${p.events.length} events`)
       }
+      // The full seat state, which is what the box's overflow row points here for. Nothing at
+      // N=1: with one seat the lines above already are the whole answer, and this command's
+      // output on a default run must not change.
+      if (multiSeat()) {
+        const queue = new Map(relay.tasks().map((e) => [e.task.id, e]))
+        for (const s of relay.seats()) {
+          const entry = s.current === undefined ? undefined : queue.get(s.current)
+          const task = entry ? `${entry.task.id} · ${entry.task.instruction.split('\n')[0]}` : 'no task'
+          const tree = relay.worktrees?.seats.find((w) => w.seatId === s.seat)
+          const branch = tree ? `, ${tree.branch}` : ''
+          write(`  ${s.seat}: ${s.state}${branch} — ${task}`)
+        }
+      }
       return
     }
 
@@ -1213,7 +1385,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     if (word === '/pause') {
       if (!run) return void write(dim('  nothing is running; type a goal to start'))
       if (run.state === 'paused') return void write('  already paused')
-      write('  pausing at the next round boundary — a turn in flight has to finish first')
+      write('  pausing at the next advisor-turn boundary — a turn in flight has to finish first')
       void run.requestPause('the operator asked to pause')
       return
     }
@@ -1263,18 +1435,20 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     if (word === '/rotate') {
       if (!run) return void write(dim('  nothing is running; type a goal to start'))
       if (run.state !== 'paused') return void write('  pause first: /pause, then /rotate')
-      // Refused rather than attempted, naming the seat it would have replaced. Rotation
-      // ALWAYS targets the implementer; offered at a pause caused by the ADVISOR it is inert,
-      // and an operator who picked it from the menu got silence and a spent turn.
+      // Refused rather than attempted, naming the seat it would have replaced. Rotation targets
+      // ONE implementer seat -- since #78 the seat this pause is about, which is why a pause
+      // caused by the ADVISOR does not offer it: an operator who picked it from that menu got
+      // silence and a spent turn.
       if (!run.pause?.options.includes('rotate')) {
-        write('  rotation is not available at this pause. It replaces the IMPLEMENTER, and')
-        write('  needs --checks so a replacement can be verified against what the original did.')
+        write('  rotation is not available at this pause. It replaces the IMPLEMENTER SEAT this')
+        write('  pause is about, and needs --checks so a replacement can be verified against what')
+        write('  the original did.')
         if (run.pause?.verdictOf) {
           write(`  this pause rests on ${run.pause.verdictOf.participant}'s turn.`)
         }
         return
       }
-      write('  rotating the implementer — the advisor writes a handoff, then a replacement must reproduce the record')
+      write('  rotating the seat this pause is about — the advisor writes a handoff, then a replacement must reproduce the record')
       const result = await run.rotateImplementer(rest || undefined)
       if (result.status === 'rotated') {
         write(`  rotated into ${result.replacement.sessionId}; still paused — /continue when ready`)

@@ -66,9 +66,9 @@ test('an advisor reversal of an aside pauses before the implementer ever sees it
   })
 
   // Inject the aside from `onLog`, which fires synchronously inside `#record`, rather than
-  // by polling. A scripted advisor replies instantly, so the loop reaches the next round's
+  // by polling. A scripted advisor replies instantly, so the loop reaches the next advisor turn's
   // drain in microseconds after the first report is recorded — a 250ms poller loses that
-  // race every time, and the first run of this test queued the aside one round too late,
+  // race every time, and the first run of this test queued the aside one advisor turn too late,
   // after the pause point, so it was never delivered at all.
   let aside: RelayMessage | undefined
   let relay: Relay
@@ -77,7 +77,7 @@ test('an advisor reversal of an aside pauses before the implementer ever sees it
     cwd: repo,
     lead: { id: 'advisor', agent: 'scripted-advisor', role: 'advisor' },
     implementer: { id: 'implementer', agent: 'claude', role: 'implementer' },
-    maxRounds: 5,
+    maxAdvisorTurns: 5,
     onLog: (m) => {
       if (m.kind !== 'report' || aside) return
       aside = relay.say(

@@ -28,6 +28,7 @@
  */
 
 import type { Confidence, Provenance } from '../contract/outcome.ts'
+import type { ParticipantLaunch } from '../registry/launch.ts'
 import type { RunOutcome } from './run.ts'
 import type { Relay, RunDeadlines } from './relay.ts'
 
@@ -54,6 +55,30 @@ export interface ReportedParticipant {
   id: string
   agent: string
   rank: string
+  /**
+   * What the seat was for. Beside `rank` because they answer different questions and a reader
+   * auditing a finished run cannot recover either from the other: rank says who deferred to
+   * whom, role says which of the seats this was. At N=1 they agree, and the field is present
+   * and equal to `implementer` rather than absent — the same rule `turns` follows above, for
+   * the same reason. A field that vanishes when it has nothing to say makes a reader
+   * distinguish "no role" from "this build does not report roles".
+   */
+  role: string
+  /**
+   * What this seat was launched with, and the model that argv names.
+   *
+   * `agent` alone does not identify what ran. One `agent: opencode` can be any of dozens of
+   * models across a ~30x price spread (#71), so a reader could neither cost the run nor
+   * repeat it. Copied from the relay's participant rather than recomputed here, per the rule
+   * at the top of this file: the relay composed that argv when it launched the seat.
+   *
+   * `model` is `null` when the argv named none, and NOT an empty string — see
+   * `modelFromArgs`. There is no token count and no cost anywhere in this report, and that
+   * is a decision rather than an omission: conclave drives the operator's own CLI on the
+   * operator's own subscription, and the honest thing it can offer is the join key for the
+   * billing export their provider already has.
+   */
+  launch: ParticipantLaunch
   sessionId: string
   turns: ReportedTurn[]
   /** Times the transcript was rewritten under this session. Rotation's mechanical trigger. */
@@ -129,7 +154,20 @@ export interface RunReport {
     seq: number
     informed: string[]
     excluded: string[]
-    artifacts: { path: string; support: string }[]
+    /**
+     * One entry per attributed path PER SEAT, not per path.
+     *
+     * `support` is how well the path is tied to the message; `confidence` is how well it is
+     * tied to the actor, and `seat` is that actor when a linked worktree names one. Two
+     * dimensions because they answer different questions and a run can be strong on one and
+     * weak on the other -- a `named_path` in a shared checkout still cannot exclude a second
+     * writer, and a path found in a seat's own tree names its author whatever the tool inputs
+     * looked like.
+     *
+     * At N=1 every entry is `seat: null` / `reasoned_but_unverified`, which is exactly the
+     * claim this made before the fields existed. Nothing is upgraded by them.
+     */
+    artifacts: { path: string; support: string; seat: string | null; confidence: string }[]
   }[]
 }
 
@@ -156,6 +194,10 @@ export async function runReport(relay: Relay, input: ReportInput): Promise<RunRe
       id: p.id,
       agent: snap.agent,
       rank: p.rank,
+      role: p.role,
+      // Copied, and the array with it: the report is handed to a caller that may keep it, and
+      // a shared array would let a reader of a finished run see a list the relay still owns.
+      launch: { args: [...p.launch.args], model: p.launch.model },
       sessionId: snap.sessionId,
       compactionGeneration: snap.compactionGeneration,
       turns: snap.turns.map((t) => ({
@@ -204,11 +246,14 @@ export async function runReport(relay: Relay, input: ReportInput): Promise<RunRe
       seq: o.seq,
       informed: o.informed,
       excluded: o.excluded,
-      artifacts: o.artifacts.map((path) => ({
-        path,
-        // Defaulted rather than optional: a consumer that had to handle a missing support
-        // level would have to invent a default anyway, and would pick a different one.
-        support: o.artifactSupport[path] ?? 'text_match',
+      // Read off `attributions`, which is the record, rather than off the deduplicated
+      // `artifacts` view: two seats can each create the same relative path in their own
+      // worktrees, and a per-path view reports one of them under the other's name.
+      artifacts: o.attributions.map((a) => ({
+        path: a.path,
+        support: a.support,
+        seat: a.seat,
+        confidence: a.confidence,
       })),
     })),
   }
