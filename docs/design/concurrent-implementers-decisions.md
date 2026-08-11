@@ -302,6 +302,73 @@ One constraint from the descending box: the box's height determines `#floor`, an
 pushes the transcript up when `#contentRow` falls below it. With N seats that path runs
 constantly instead of rarely, and it has one unit test.
 
+### D9b. A reviewer seat: rank `implementer`, role `reviewer`, dispatched like `merge_resolution` (#72)
+
+Appended rather than folded into D5/D6, for the reason D7a and D7b are: what was decided is
+evidence, and #72's own comment thread corrected itself twice before landing here — first
+proposing review as a generic role slotted into the merge boundary, then a mandatory pipeline
+stage, before settling on the shape below. The corrections are worth keeping visible.
+
+**`--reviewer` is a first-class named seat, not a generic role.** Rank `implementer`, role
+`reviewer` — D5's job/authority split is exactly what makes this legal: identical authority to
+every implementer seat, a different job. Naming it rather than leaving it an arbitrary role
+string is what lets the advisor's briefing teach anything about it at all; a role the operator
+might not have used cannot appear in fixed prose.
+
+**No reviewer declared, no review.** `RelayOptions.reviewer` is optional and singular. Absent,
+no `reviewer` key reaches `Relay.start`, no review task is ever admitted, and the merge
+boundary runs exactly as D6 already specifies — proved as a `DEFAULT_UNCHANGED` guard entry
+the same way every other opt-in surface is.
+
+**Review is a task purpose, dispatched through the existing scheduler — never a hook the
+boundary calls.** Two new `TaskPurpose` values, `review` and `review_resolution`, admitted
+through the same `#admit` every other task is, and two new `SchedulerState` values,
+`review_pending` and `review_blocked`, gating dispatch through `canTake` exactly as
+`merge_blocked`/`merge_resolution` already do. Concretely: once a task purpose `work` or
+`review_resolution` clears grading, and this run has a reviewer, its boundary crossing
+(`#crossBoundary`) is DEFERRED rather than skipped — the producing seat moves to
+`review_pending`, and a `review` task is admitted, targeted at the reviewer's role. The
+boundary itself is unmodified code, called later, from the review's own resolution rather than
+from the completion that triggered it.
+
+**The reviewer's context is built the way a rotation handoff's mechanical half is — never from
+the producing seat's report.** `rotation/review.ts` reuses `capture()` from `record.ts`
+outright: the same file-digest-and-check capture rotation already takes independently of any
+participant's account of its own work, with one addition rotation never needed — an actual
+diff, because a replacement reproduces a STATE and a reviewer judges a CHANGE. The advisor's
+instruction to the producing seat is included; that seat's own report is not, and nothing in
+the reviewer's prompt has room for one.
+
+**Rejection is a child task, `parent` set, assigned back to the producing seat — by the relay,
+not by the advisor.** Unlike a merge conflict, which the advisor must address by name because
+D4 says the advisor proposes and the dispatcher only validates, a review verdict is not
+something any advisor instruction produced — it arrives from a task the relay itself admitted.
+So the repair is admitted the same way: automatically, targeted `{kind: 'seat', seat:
+producingSeatId}`, purpose `review_resolution`, `Task.parent` naming the IMMEDIATE task it
+repairs. The advisor sees both the rejection and the repair as ordinary reports; it is told
+this happens automatically (`REVIEWER_BRIEFING_FOR_ADVISOR`, appended to `LEAD_BRIEFING`
+exactly the way `MULTI_SEAT_BRIEFING` is — only when a reviewer exists) so a report from the
+reviewer is not mistaken for one from an implementer.
+
+**A second rejection of the same work escalates rather than repairing a third time.** No
+counter, no second Map: a `review_resolution` task whose OWN `parent` is itself a
+`review_resolution` task is the second rejection, read directly off `parent.purpose` at
+resolution time. It raises a new `PauseReason`, `review_blocked`, classified in
+`resolution.ts` identically to `merge_blocked` — operator authority, scope the seat, not the
+conclave.
+
+**Rank stays closed at three.** Nothing here widens `'human' | 'advisor' | 'implementer'`; a
+reviewer's authority is a producer's authority, and its rejection creates work rather than
+outranking anyone.
+
+**One casualty, declared rather than discovered.** `#implementers()` used to read `rank`; every
+caller meant `role`, and the two coincided until a reviewer could be rank `implementer` with a
+different job. It now reads `role`, and `#dispatchSeats()` (rank-based) is the new accessor for
+the one caller that genuinely wants every seat the scheduler may address — `#seatState`
+construction, which must include the reviewer. At N=1 with no reviewer the two answer the same
+set, so the default run is unaffected; see `DECLARED['--reviewer on both front-ends, and the
+review_blocked pause reason']` in `defaultUnchanged.test.ts`.
+
 ## D10. One branch, no incremental merges to main
 
 All of it lands on a single long-lived branch, `concurrent-implementers`. Nothing merges to

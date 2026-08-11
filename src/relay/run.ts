@@ -77,6 +77,16 @@ export type PauseReason =
    */
   | 'merge_blocked'
   /**
+   * A reviewer rejected a seat's work twice against the same original task (#72).
+   *
+   * NOT raised by the first rejection: that becomes an ordinary `review_resolution` task,
+   * dispatched back to the seat automatically, exactly as a merge conflict's repair is. This
+   * is the SECOND rejection of the SAME work -- nothing has changed that another repair turn
+   * could change, so the operator gets a decision point instead of a run that quietly keeps
+   * dispatching repairs a reviewer keeps refusing.
+   */
+  | 'review_blocked'
+  /**
    * The operator asked to stop at the next advisor-turn boundary.
    *
    * Not in the original set, and added for a reason worth recording: without it the only

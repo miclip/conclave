@@ -92,6 +92,8 @@ export type ResolutionSubject =
   | { reason: 'authority_conflict'; workstream: string }
   /** The seat whose branch will not merge, after its own repair attempt failed. */
   | { reason: 'merge_blocked'; participant: string }
+  /** The seat whose work was rejected twice by review against the same original task. */
+  | { reason: 'review_blocked'; participant: string }
   | { reason: 'advisor_escalated' }
   | { reason: 'operator_requested' }
 
@@ -171,8 +173,8 @@ export interface ResolutionConfig {
    * `--checks` IS the operator pre-delegating rotation authority, by supplying the
    * verification method that makes the decision mechanical: without it the console says a
    * degraded implementer "escalates to you rather than being replaced"
-   * (`src/repl/session.ts:541`) and the run reports `rotation: NOT ARMED (no checks
-   * configured)` (`src/relay/relay.ts:1879`).
+   * (`src/repl/session.ts:548`) and the run reports `rotation: NOT ARMED (no checks
+   * configured)` (`src/relay/relay.ts:2025`).
    */
   rotationArmed: boolean
 }
@@ -193,8 +195,8 @@ export function resolutionFor(subject: ResolutionSubject, config: ResolutionConf
         // Derived from configuration, per D2. Note what this does NOT claim: that a run
         // with checks resolves the candidate without asking. Today it asks either way --
         // `onDegradation` defaults to `candidate` because the policy is not earned yet
-        // (`src/relay/relay.ts:2467`), and the two pause sites below it are reachable only
-        // WITH rotation configured (`src/relay/relay.ts:2461-2466` ends the run instead when
+        // (`src/relay/relay.ts:2613`), and the two pause sites below it are reachable only
+        // WITH rotation configured (`src/relay/relay.ts:2607-2611` ends the run instead when
         // it is absent). So this axis records the entitlement the operator has already
         // delegated, and no pause site can reach the `operator` branch today -- an unarmed
         // run ENDS on degradation instead of pausing, which `resolution.test.ts` asserts.
@@ -233,6 +235,17 @@ export function resolutionFor(subject: ResolutionSubject, config: ResolutionConf
       // conclave -- its branch and tree are what cannot proceed, and every other seat's work
       // is unaffected by this decision. That the run happens to stop while the operator
       // answers is a property of how pauses are delivered today, not of what is blocked.
+      return {
+        reason: subject.reason,
+        authority: 'operator',
+        scope: { kind: 'participant', participantId: subject.participant },
+      }
+    case 'review_blocked':
+      // Same shape as `merge_blocked` and for the same reason: a repair was dispatched
+      // automatically, came back, and the reviewer rejected it again. What is left is a real
+      // disagreement between what the seat produced and what the reviewer will accept, which
+      // needs a human rather than a third automatic repair. Scope is the SEAT: its work is
+      // what cannot proceed, and every other seat's work is unaffected.
       return {
         reason: subject.reason,
         authority: 'operator',

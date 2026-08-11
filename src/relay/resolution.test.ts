@@ -375,6 +375,26 @@ async function provoke(t: TestContext, reason: RunPause['reason']): Promise<Prov
       assert.ok(pause)
       return { pause, run, relay, advisor, impl }
     }
+    case 'review_blocked': {
+      // One implementer, one reviewer (#72). The reviewer rejects the same work twice; no
+      // advisor instruction ever addresses it, since review is dispatched automatically.
+      advisor = new FakeRotationSession('advisor', 'codex', ['Write the answer.', 'DONE', 'DONE', 'DONE', 'DONE'])
+      impl = new FakeRotationSession('impl', 'claude', ['ack', 'Wrote it.', 'Wrote it again.'])
+      const reviewer = new FakeRotationSession('reviewer', 'claude', [
+        'ack',
+        'REJECT: not good enough.',
+        'REJECT: still not good enough.',
+      ])
+      const relay = await relayOf(dir, advisor, [impl, reviewer], {
+        reviewer: { id: 'reviewer', agent: 'claude', role: 'reviewer' },
+        maxAdvisorTurns: 6,
+      })
+      t.after(() => relay.stop())
+      const run = relay.start('Keep the work moving.')
+      const pause = await run.untilPause()
+      assert.ok(pause)
+      return { pause, run, relay, advisor, impl }
+    }
   }
 }
 
@@ -428,6 +448,16 @@ const EXPECTED: Record<
     scope: { kind: 'conclave' },
     options: ['continue', 'rotate', 'constrain', 'abort'],
   },
+  review_blocked: {
+    authority: 'operator',
+    // The SEAT, not the conclave: its work is what cannot proceed, and no other seat is
+    // waiting on this decision.
+    scope: { kind: 'participant', participantId: 'implementer' },
+    // Unlike `merge_blocked` above: this run has exactly ONE implementer seat -- the
+    // reviewer does not count (#72, `#implementers()` is role-scoped) -- so `rotate` is a
+    // live option rather than the inert menu entry a second implementer seat would make it.
+    options: ['continue', 'rotate', 'constrain', 'abort'],
+  },
 }
 
 for (const reason of Object.keys(EXPECTED) as RunPause['reason'][]) {
@@ -456,7 +486,7 @@ for (const reason of Object.keys(EXPECTED) as RunPause['reason'][]) {
 
 test('an advisor turn that ends badly scopes to the advisor, not to the implementer', async (t) => {
   // The one place the scope is not obvious. `turn_incomplete` is raised for either seat --
-  // `src/relay/relay.ts:3557` for the advisor, `:3940` for the implementer -- and a scope
+  // `src/relay/relay.ts:3911` for the advisor, `:4294` for the implementer -- and a scope
   // read off "the implementer" rather than off the seat would be silently wrong for half of
   // them, in a way no N=1 run with one implementer would ever reveal.
   const dir = repo()
@@ -481,7 +511,7 @@ test('an advisor turn that ends badly scopes to the advisor, not to the implemen
 test('an unarmed run ends on degradation rather than raising a rotation candidate', async (t) => {
   // Which is why the `operator` branch of the derived rotation authority is not reachable
   // from any pause site: without checks the run does not pause on degradation at all, it
-  // ends (`src/relay/relay.ts:2461-2466`). Asserted rather than asserted-in-a-comment,
+  // ends (`src/relay/relay.ts:2607-2611`). Asserted rather than asserted-in-a-comment,
   // because the classification's other branch rests on it.
   const dir = repo()
   const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it.'])

@@ -324,13 +324,13 @@ const DECLARED: Record<string, string> = {
     'Authority routing (#56, D2) sends implementer_unanswered to the advisor before the operator, ' +
     'so a default run interrupts the human less than today. Real change at N=1, an improvement, ' +
     'declared rather than discovered. The pause reason exists at src/relay/run.ts:51 and the halt ' +
-    'that raises it is at src/relay/relay.ts:3807.',
+    'that raises it is at src/relay/relay.ts:4161.',
   'status.pause.resolution':
     'Classifying unresolved conditions on both axes (#56, D2) added `resolution` to every RunPause ' +
-    '(src/relay/run.ts:183), so `conclave status --json` on a paused default run now carries ' +
+    '(src/relay/run.ts:193), so `conclave status --json` on a paused default run now carries ' +
     'pause.resolution = {reason, authority, scope} and pause.resolution.scope = {kind}. Additive and ' +
     'recorded rather than acted on: authority and scope are computed at the halt site from the reason ' +
-    'and the run configuration (src/relay/resolution.ts:188), and a request whose authority is ' +
+    'and the run configuration (src/relay/resolution.ts:190), and a request whose authority is ' +
     'mechanical or advisor still produces the same pause today, because nothing exists yet that could ' +
     'resolve one and dropping the pause first would lose the decision point rather than automate it. ' +
     '`reason` is deliberately duplicated between pause.reason and pause.resolution.reason: the loose ' +
@@ -528,9 +528,38 @@ const DECLARED: Record<string, string> = {
     'the lane exactly once, which is what would deadlock it — is driven through real worktrees ' +
     'and real merges in src/relay/checkLaneRun.test.ts. No assertion in this file was relaxed, ' +
     'and none was added: this entry is the whole of the footprint.',
+  '--reviewer on both front-ends, and the review_blocked pause reason':
+    'The optional flag surface grows by two on each command: --reviewer and --reviewer-args, ' +
+    'an opt-in named seat at rank implementer and role reviewer (#72, D9b, D5). Declared for ' +
+    'the same reason "--implementers on both front-ends" is: the argument for D1 ("adding ' +
+    'seats brings new arguments and nothing else") is the thing being written down, not a ' +
+    'change to the default run. THE DEFAULT RUN DOES NOT CHANGE: with --reviewer absent, no ' +
+    'reviewer key reaches Relay.start on either front-end (reviewerSpecFor returns undefined ' +
+    'for an empty agent string), no review task is ever admitted, and the merge boundary runs ' +
+    'exactly as it did before this issue — every pinned shape and flag set below is untouched ' +
+    'by a default invocation of either command. Review is modelled as a TASK PURPOSE (review, ' +
+    'review_resolution) dispatched through the same scheduler merge_resolution already uses, ' +
+    'never as a hook #crossBoundary calls: a completed seat’s boundary is deferred, not ' +
+    'skipped, until a declared reviewer accepts or rejects it — proved end to end with real ' +
+    'worktrees in src/relay/review.test.ts. #implementers() is now read off ROLE rather than ' +
+    'RANK, because a reviewer is rank implementer with a different job (D5) and every existing ' +
+    'caller — rotation eligibility, the opening implementer briefing, the closing question — ' +
+    'means the job. At N=1 with no reviewer every rank-implementer participant is still ' +
+    'role-implementer, so this is a no-op for the default run; #dispatchSeats() (rank-based) ' +
+    'is the new accessor for the one caller that needs every seat the scheduler may address, ' +
+    '#seatState construction. A REJECTED review produces an automatic repair task, addressed ' +
+    'to the producing seat by the relay itself — not the advisor — with Task.parent naming ' +
+    'the immediate task it repairs; a repair whose own parent is itself a repair is the second ' +
+    'rejection of the same work, which is what a new PauseReason, review_blocked, escalates ' +
+    'rather than repairing a third time. Its pause shape is pinned below (provokeReviewBlocked), ' +
+    'mirroring merge_blocked, and it is unreachable without a reviewer seat for the same reason ' +
+    'merge_blocked is unreachable without a second implementer seat. The advisor is briefed ' +
+    'about the reviewer only when one is declared (REVIEWER_BRIEFING_FOR_ADVISOR), proved ' +
+    'absent-by-default and present-when-declared the same way MULTI_SEAT_BRIEFING is, in the ' +
+    'mutation-tested test immediately above this one. No assertion in this file was relaxed.',
 }
 
-test('DECLARED contains exactly the routing, pause-resolution, attribution, ceiling-flag, seat-flag, seat-status, launch-record, flag-reader and integration-check entries', () => {
+test('DECLARED contains exactly the routing, pause-resolution, attribution, ceiling-flag, seat-flag, seat-status, launch-record, flag-reader, integration-check and reviewer entries', () => {
   assert.deepEqual(Object.keys(DECLARED), [
     'implementer_unanswered -> advisor',
     'status.pause.resolution',
@@ -542,6 +571,7 @@ test('DECLARED contains exactly the routing, pause-resolution, attribution, ceil
     'one flag reader for both front-ends',
     '--checks also gate the merged tree at N>1, and the integration_failed outcome',
     'the check lane is retained INERT, and --check-concurrency was withdrawn',
+    '--reviewer on both front-ends, and the review_blocked pause reason',
   ])
 })
 
@@ -637,7 +667,7 @@ async function seatsFromSessionCli(): Promise<{ creates: CreateRecord[]; cwd: st
  * The two machine-readable documents a default run actually emits.
  *
  * Both come out of one `relay --json` run in a temporary repository, through the production
- * call sites: the report is what `bin/conclave.ts:1255` prints, and the status record is what
+ * call sites: the report is what `bin/conclave.ts:1281` prints, and the status record is what
  * `recordSession` wrote during that same run, read back by `main(['status', '--json'])` --
  * which resolves the most recent session in `process.cwd()`, so the record has to have been
  * written where an operator would look for it.
@@ -682,7 +712,7 @@ async function defaultRunDocuments(): Promise<{ report: unknown; status: unknown
  * blind to that subtree is claiming more than it checks.
  *
  * Built through the real recorder: `recordSession` is what both front-ends call, and
- * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:868
+ * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:885
  * with the same object -- a `RunPause` the run handle raised, not one written here. Read back
  * through `main(['status', '--json'])`, so the serialisation and the reconciliation against
  * the pid are the production ones.
@@ -817,10 +847,80 @@ async function provokeMergeBlocked(repo: string): Promise<{ relay: Relay; run: R
 }
 
 /**
+ * A reviewer rejecting the same work twice, driven to escalation (#72).
+ *
+ * One implementer, one reviewer. The implementer's work is reviewed automatically -- no
+ * advisor instruction addresses the reviewer, matching D9b's "not a hook the boundary
+ * calls, but not an advisor decision either". The first rejection produces an automatic
+ * repair; the repair is reviewed too and rejected again, which is what escalates: the
+ * repair's own `parent` is the ORIGINAL task, and its `purpose` is `review_resolution`,
+ * which is what `resolveReview` in `relay.ts` reads to tell a first rejection from a second.
+ */
+async function provokeReviewBlocked(repo: string): Promise<{ relay: Relay; run: RunHandle; pause: RunPause }> {
+  execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: repo })
+  execFileSync('git', ['config', 'user.name', 'Test'], { cwd: repo })
+
+  const advisor = new FakeRotationSession('advisor', 'codex', ['Write the answer.', 'DONE', 'DONE', 'DONE', 'DONE'])
+  const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Wrote it.', 'Wrote it again.'])
+  const reviewer = new FakeRotationSession('reviewer', 'claude', [
+    'ack',
+    'REJECT: not good enough.',
+    'REJECT: still not good enough.',
+  ])
+
+  const registry = new AgentRegistry()
+  for (const [agent, sessions] of [
+    ['codex', [advisor]],
+    ['claude', [impl, reviewer]],
+  ] as const) {
+    const remaining = [...sessions]
+    registry.register({
+      id: agent,
+      displayName: agent,
+      capabilities: {
+        agent,
+        readinessSignal: 'unknown',
+        turnKeySource: 'prompt_id',
+        outcomes: {
+          completed: 'observed',
+          cancelled: 'reasoned_but_unverified',
+          permission_refused: 'reasoned_but_unverified',
+          process_exited: 'reasoned_but_unverified',
+          timed_out: 'reasoned_but_unverified',
+          transport_lost: 'reasoned_but_unverified',
+          unknown_abnormal_end: 'reasoned_but_unverified',
+        },
+      },
+      deadlines: NO_DEADLINE_CLOCKS,
+      launch: { command: agent, baseArgs: [] },
+      async create() {
+        const next = remaining.shift()
+        if (!next) throw new Error(`no session left for ${agent}`)
+        return next
+      },
+    })
+  }
+
+  const relay = await Relay.start({
+    registry,
+    cwd: repo,
+    lead: { id: 'advisor', agent: 'codex', role: 'advisor' },
+    implementer: { id: 'implementer', agent: 'claude', role: 'implementer' },
+    reviewer: { id: 'reviewer', agent: 'claude', role: 'reviewer' },
+    maxAdvisorTurns: 6,
+  })
+
+  const run = relay.start('Keep the work moving.')
+  const pause = await run.untilPause()
+  assert.ok(pause, 'the relay must raise a review_blocked pause for its status document to exist')
+  return { relay, run, pause }
+}
+
+/**
  * Drive a real relay into one condition and return the pause it raised.
  *
  * The provocations are the ones `resolution.test.ts`'s own `provoke` already uses, deliberately:
- * the same triggers reaching the same single halt site (src/relay/relay.ts:2299), where the
+ * the same triggers reaching the same single halt site (src/relay/relay.ts:2445), where the
  * classification is computed by production `resolutionFor` from the subject the caller passed.
  * Nothing here writes a `RunPause`.
  *
@@ -837,6 +937,9 @@ async function provoke(
   // separately rather than being squeezed into the table below, and the run is otherwise
   // ordinary: no flags, no overrides beyond the seat list.
   if (reason === 'merge_blocked') return provokeMergeBlocked(repo)
+  // Same reason, same shape: this needs a reviewer seat, which a default run cannot reach
+  // in principle either (#72).
+  if (reason === 'review_blocked') return provokeReviewBlocked(repo)
 
   const armed = reason === 'rotation_candidate'
   const scripts: Record<PauseReason, { advisor: string[]; impl: string[] }> = {
@@ -864,6 +967,8 @@ async function provoke(
     // `PauseReason` on purpose — a reason that appears here and nowhere else is a reason
     // somebody has to come and finish.
     merge_blocked: { advisor: [], impl: [] },
+    // Same reason as `merge_blocked` above: needs a reviewer seat, provoked in its own branch.
+    review_blocked: { advisor: [], impl: [] },
     operator_requested: {
       advisor: ['Do the first thing.', 'Do the second thing.', 'DONE'],
       impl: ['ack', 'Did the first thing.', 'Did the second thing.', 'NONE'],
@@ -903,7 +1008,7 @@ async function provoke(
  * The status document of a run paused for one given reason.
  *
  * Built through the real recorder: `recordSession` is what both front-ends call, and
- * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:868
+ * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:885
  * with the same object -- a `RunPause` the relay raised, not one written here. Read back
  * through `main(['status', '--json'])`, so the serialisation and the reconciliation against
  * the pid are the production ones.
@@ -923,7 +1028,7 @@ async function pausedStatusDocument(reason: PauseReason): Promise<unknown> {
     goal: 'a default goal',
     front: 'session',
     startedAt: Date.now(),
-    // Passed because the console always passes one (src/repl/session.ts:694), so the status
+    // Passed because the console always passes one (src/repl/session.ts:711), so the status
     // documents this file pins differ only in what a pause actually changes.
     logPath: join(repo, '.conclave', 'runs', 'session-test.ndjson'),
     build: 'test',
@@ -1107,9 +1212,9 @@ test('default run works in the run cwd and creates no worktree', async () => {
     assert.equal(c.cwd, fromCli.cwd, `the session CLI must create ${c.id} in the run cwd`)
   }
 
-  // The relay CLI passes process.cwd() as the run cwd: bin/conclave.ts:1168.
-  // The relay hands that same cwd to each participant adapter: src/relay/relay.ts:1314-1320.
-  // The cwd getter simply returns the option: src/relay/relay.ts:1207-1209.
+  // The relay CLI passes process.cwd() as the run cwd: bin/conclave.ts:1193.
+  // The relay hands that same cwd to each participant adapter: src/relay/relay.ts:1460-1466.
+  // The cwd getter simply returns the option: src/relay/relay.ts:1324-1326.
   assert.match(relay, /cwd:\s*process\.cwd\(\)/, 'relay block must start in process.cwd')
   // Both creation sites now pass a NAMED context object rather than an inline literal, because
   // the same object composes the launch args that get recorded -- see
@@ -1137,7 +1242,7 @@ test('default run works in the run cwd and creates no worktree', async () => {
 
   // A default run with no subagents must not create any git worktree. The relay only samples
   // the worktree list for its subagent-use report: src/relay/subagents.ts:68 defines
-  // worktreePaths, and src/relay/relay.ts:1861, :1908 and :3217 read it.
+  // worktreePaths, and src/relay/relay.ts:2007, :2054 and :3444 read it.
   // Prove it by exercising the run in a real temporary repository.
   const repo = mkdtempSync(join(tmpdir(), 'conclave-default-'))
   try {
@@ -1231,6 +1336,8 @@ test('both flag helpers fall back when the flag is absent, and each block reads 
       'operator',
       'record',
       'resume',
+      'reviewer',
+      'reviewer-args',
       'rounds',
       'salvage',
       'settle',
@@ -1260,6 +1367,8 @@ test('both flag helpers fall back when the flag is absent, and each block reads 
       'operator',
       'record',
       'resume',
+      'reviewer',
+      'reviewer-args',
       'rounds',
       'salvage',
       'settle',
@@ -1284,7 +1393,7 @@ const runDocuments = (): Promise<{ report: unknown; status: unknown }> =>
  *     field added inside any of them was invisible -- which is precisely where per-seat
  *     features land.
  *   - A declared field is not an emitted one. `turnWatchdogMs` was declared and dropped for
- *     its whole life (src/repl/session.ts:201-214), and a text-level pin cannot tell the
+ *     its whole life (src/repl/session.ts:209-221), and a text-level pin cannot tell the
  *     difference.
  *   - An emitted field need not be declared anywhere this test was reading. A key spread in
  *     from another type, or written by a builder that widens its return, appears in the JSON
@@ -1474,6 +1583,16 @@ const PAUSED_SUBTREE: Record<PauseReason, Record<string, string>> = {
     // which is the state this corpus cannot reach because a paused run has no turn in flight.
     'participants[].seat': 'dispatched, state, worktree',
     'participants[].seat.worktree': 'branch, path',
+  },
+  // Needs a reviewer seat, provoked in its own branch (#72) -- same reason `merge_blocked`
+  // above is not a default run either.
+  review_blocked: {
+    pause: 'at, atSeq, detail, evidence, options, reason, resolution',
+    'pause.resolution': 'authority, reason, scope',
+    'pause.resolution.scope': 'kind, participantId',
+    'participants[]':
+      'activity, agent, id, launch, rank, role, turns | activity, agent, id, launch, rank, role, seat, turns',
+    'participants[].seat': 'dispatched, state',
   },
 }
 
