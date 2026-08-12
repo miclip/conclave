@@ -138,3 +138,43 @@ test('a checkout reached through a symlink still reports its own commit', () => 
   assert.match(v, /^7\.8\.9 \([0-9a-f]+\)$/, `symlinked checkout version must be "version (commit)", got: ${v}`)
   assert.ok(v.includes(commit), `symlinked checkout must include the real commit ${commit}: ${v}`)
 })
+
+/**
+ * The documented install commands pin a tag, and both went stale -- the README's for three
+ * releases, the installer's own usage line for far longer.
+ *
+ * WHAT THE STALENESS DOES, stated precisely because the obvious reading is wrong and was
+ * believed here first: the pin selects which SCRIPT is fetched, not which version is
+ * installed. `latest_release` resolves the newest tag at run time, so the README's "installs
+ * the newest tagged release" is true no matter how old the URL is. What a stale pin actually
+ * gets you is an old INSTALLER -- the one that sorted tags with `sort -V`, or checked for
+ * Node after writing to disk instead of before. It fixes itself on the next run and it is not
+ * a broken install; it is a fix to this script that the reader does not receive, which is
+ * why this is a guard rather than an alarm.
+ *
+ * Pinned rather than `main` on purpose: a script fetched from a moving branch is a different
+ * script every time and cannot be reviewed before it is piped to a shell. So the pin stays and
+ * the version bump has to carry it -- which is what this asserts, in the release commit where
+ * it costs one edit, rather than in a reader's terminal where it costs nothing visible at all
+ * and is therefore never reported.
+ *
+ * NOT asserted: the `CONCLAVE_REF=` example, which names an OLD tag deliberately -- it
+ * demonstrates installing something other than the newest, so pinning it to the current
+ * version would remove the only thing it illustrates.
+ *
+ * `package.json` is the reference because it is what the release commit edits and what
+ * `conclave version` reports. The tag is that version with a `v`.
+ */
+test('every documented install command pins the version this checkout is', () => {
+  const version = JSON.parse(readFileSync(join(REPO, 'package.json'), 'utf8')).version
+  const sources = ['README.md', 'scripts/install.sh']
+
+  for (const source of sources) {
+    const text = readFileSync(join(REPO, source), 'utf8')
+    const pins = [...text.matchAll(/conclave\/(v[\d.]+)\/scripts\/install\.sh/g)].map((m) => m[1])
+    assert.ok(pins.length > 0, `${source} must carry the one-line installer; it is how the install is documented`)
+    for (const pin of pins) {
+      assert.equal(pin, `v${version}`, `${source} fetches the installer from ${pin}, but this is ${version}`)
+    }
+  }
+})
