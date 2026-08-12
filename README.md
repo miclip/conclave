@@ -398,8 +398,8 @@ conclave status --json                       # state: paused, with reason, evide
 
 A pause suspends the run with everything it had — the round counter, the last instruction,
 the report — and the process stays alive. Commands arrive on stdin as lines: `/continue`,
-`/rotate`, `/abort`, `/allow`, `/deny`, or a message addressed with `@advisor` /
-`@implementer`. Nothing needs to be scraped off the console; `status` carries the pause as
+`/rotate`, `/abort`, `/allow`, `/deny`, or a message addressed with `>advisor` /
+`>implementer`. Nothing needs to be scraped off the console; `status` carries the pause as
 data, including the options you may answer with.
 
 Every message is recorded to `.conclave/runs/` as it happens, and `--resume <log>` replays

@@ -78,7 +78,7 @@ Driving conclave from an agent
                                     the decision, sends nothing, leaves the run paused
     /allow /deny                    answer a permission prompt
     /pause /state /log /exit        drive and inspect
-    @advisor ... / @implementer ... send a message to one seat
+    >advisor ... / >implementer ... send a message to one seat
     anything else                   the goal, if none has been given yet
 
   Observe from another process, without scraping the console:
@@ -190,6 +190,12 @@ Commands:
                                    nothing observable in it cannot be graded better than
                                    reasoned_but_unverified however well the work goes.
                                    Warnings by default, --strict-goal to refuse.
+                                   So is the seating: a seat whose CLI is not installed, or
+                                   which names a model its CLI does not have, is refused
+                                   before anything is spawned, registered or written, rather
+                                   than dying on the first turn as an abnormal exit. Only
+                                   the agents this run seats are checked, so a Claude-only
+                                   run does not ask you to install Codex.
                                    --bypass writes "permissions": "bypass" into
                                    .conclave/config.json, for this run and future ones.
                                    Name an agent to scope it. The models then run commands
@@ -280,7 +286,7 @@ Commands:
                                    without one the console waits and the first thing you
                                    type starts the run. Pauses become decision
                                    points you resolve: /continue, /rotate, /abort, or a
-                                   line of text addressed with @advisor / @implementer.
+                                   line of text addressed with >advisor / >implementer.
                                    Shows participant activity while a turn is running.
                                    --advisor-args / --implementer-args pass extra launch
                                    arguments, e.g. "-m opencode/kimi-k2.6". Required for
@@ -309,7 +315,16 @@ Commands:
                                    so nothing has to be scraped off the console.
                                    Refuses to start outside a git repository unless --force,
                                    as relay does: attribution and rotation both diff the
-                                   tree, and so does undo.
+                                   tree, and so does undo. More than one seat additionally
+                                   gets a git worktree each and refuses to start on a dirty
+                                   checkout, naming what is in the way -- the seats branch
+                                   from the integration tree, so uncommitted work in it is
+                                   a base nobody can reproduce. One seat has no worktree
+                                   and no such refusal.
+                                   A seat whose CLI is not installed, or which names a model
+                                   its CLI does not have, is refused before anything is
+                                   spawned, registered or written -- and only the agents this
+                                   run seats are checked.
                                    Every message is recorded to .conclave/runs/ as it
                                    happens, and --resume replays that log into both seats.
                                    Prefer resuming HERE rather than into relay: a resumed
