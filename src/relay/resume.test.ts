@@ -93,3 +93,40 @@ test('a log that fits carries no truncation notice', () => {
   const b = resumeBriefing([msg(1, 'short')])
   assert.doesNotMatch(b, /dropped to fit/)
 })
+
+/**
+ * The failure this pair is written from is on disk, not imagined: an oath-lang run whose
+ * seq 19 is a `report` with `unsettled: true` and a zero-length body, and whose seq 20 halt
+ * says in as many words "a resume from this log starts with that turn saying nothing" (#94).
+ */
+test('a lost report is replayed as missing information, not as a turn that said nothing', () => {
+  const brief = resumeBriefing([msg(19, '', { unsettled: true })])
+
+  assert.ok(!/\[19\] implementer -> advisor\s*$/.test(brief), 'an empty body must not be replayed as a blank')
+  assert.match(brief, /no readable account of itself/)
+  // The distinction the briefing exists to protect. Its own opening tells the reader to treat
+  // what follows as established and not to redo work it shows as done -- so a turn whose
+  // account was LOST must not read as a turn that reported nothing, or the resumed
+  // participant concludes the work was never done and does it again.
+  assert.match(brief, /may be on disk/)
+  assert.match(brief, /not as a turn that did nothing/)
+})
+
+test('an unsettled body that HAS text is replayed in full, and qualified rather than cut', () => {
+  // The salvaged case from the same run (seq 13-14): narration rebuilt from 10 streamed
+  // messages. It is real content and the only thing wrong with it is that it is not the
+  // closing statement, so withholding it would discard the turn a second time.
+  const brief = resumeBriefing([msg(14, 'Falsifier settled; moving to the real implementation.', { unsettled: true })])
+
+  assert.match(brief, /Falsifier settled; moving to the real implementation\./)
+  assert.match(brief, /may be incomplete/)
+})
+
+test('a settled report is replayed exactly as it was, with nothing added', () => {
+  // The guard on the two above: a qualification that appeared on ordinary reports would put a
+  // hedge on every message in the log and teach the reader to skip it.
+  const brief = resumeBriefing([msg(5, 'The work is done and the tests pass.')])
+
+  assert.match(brief, /\[5\] implementer -> advisor\nThe work is done and the tests pass\./)
+  assert.ok(!/unverified|incomplete|no readable account/.test(brief), 'a settled report must carry no qualification')
+})
