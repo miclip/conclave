@@ -367,11 +367,21 @@ test('degradation with no checks configured escalates rather than rotating blind
   old.compact()
   const outcome = await relay.run('Keep the work moving.')
 
-  // Detection does not depend on configuration; only the automatic response does.
-  assert.equal(outcome.reason, 'escalated')
-  assert.ok(outcome.detail!.includes('degraded'))
-  assert.ok(outcome.detail!.includes('needs a human'))
-  assert.equal(old.state, 'running')
+  // Detection does not depend on configuration; only the RESPONSE does, and the response is
+  // no longer to end (#96). Unattended and unarmed, the candidate is recorded and the run
+  // carries on -- the same treatment the armed unattended run already got, for the same
+  // reason: ending is the most drastic action available, not the neutral thing to do while
+  // there is nobody to ask.
+  assert.notEqual(outcome.reason, 'escalated', 'a compaction must not end an unattended run')
+  assert.equal(old.state, 'running', 'and must never rotate blind: there is nothing to verify against')
+
+  // Recorded rather than silent. This is the whole justification for not ending -- if the
+  // candidate left no trace, "carries on" would mean the operator never learns it happened.
+  assert.equal(relay.rotationWatch.candidates, 1)
+  assert.ok(
+    relay.log.some((m) => /rotation candidate recorded, run continues \(unattended/.test(m.text) && /degraded/.test(m.text)),
+    `the log must record the candidate:\n${relay.log.map((m) => m.text).join('\n---\n')}`,
+  )
 })
 
 test('the replacement is not judged degraded by the retired session’s compaction', async (t) => {
