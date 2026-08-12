@@ -202,7 +202,7 @@ export function resolutionFor(subject: ResolutionSubject, config: ResolutionConf
         // The `operator` branch is REACHABLE, and it was not until #96. An unarmed run used to
         // end on degradation rather than pause, so the one configuration this branch describes
         // was the one that never produced a pause to describe -- the classification was honest
-        // and unreachable at the same time. The unarmed run now pauses (`src/relay/relay.ts:2943-2946`), which
+        // and unreachable at the same time. The unarmed run now pauses (`src/relay/relay.ts:2966-2969`), which
         // is what makes the derivation mean anything: with checks the candidate is mechanical
         // because a replacement could reproduce them, and without checks it is the operator's
         // because nothing else can settle it.

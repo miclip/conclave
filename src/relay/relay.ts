@@ -2918,7 +2918,30 @@ export class Relay {
       return undefined
     }
 
-    const detail = `${impl.id} is degraded: ${verdict.evidence.join('; ')}${verdict.complained ? ' (and said so)' : ' (and did not say so)'}`
+    // The evidence is observed; the conclusion drawn from it is not. `detectDegradation` reports
+    // COMPACTION -- parsed from the transcript, mechanically checkable. Whether a compacted seat
+    // then does worse work is #10, and #10 is still open. Rendering every verdict as
+    // "<seat> is degraded" asserted that unanswered thing as fact, in the one place an operator
+    // is being asked to decide on it, and did so fifteen lines above a comment saying the link is
+    // unestablished (#98). It reached further than a pause: `rotateSeat` below takes this same
+    // string as the recorded REASON for a rotation, so the claim outlived the run that made it.
+    //
+    // So: say what was seen, name what is not known, and leave the weighing to the reader. The
+    // decision offered is unchanged -- what changes is that it is no longer offered under a
+    // finding the run has no means to support.
+    //
+    // Switched on `reason` rather than assuming compaction, because a degradation signal that is
+    // not compaction must not inherit compaction's wording, nor its caveat, by default.
+    const compacted = verdict.reason === 'degraded' || verdict.reason === 'corroborated'
+    const said = verdict.complained ? 'and said so' : 'and did not say so'
+    // No trailing period: every caller below continues the sentence.
+    const detail =
+      `${impl.id} ${compacted ? 'compacted' : 'showed a degradation signal'} ${said}: ` +
+      `${verdict.evidence.join('; ')}` +
+      (compacted
+        ? ` — whether compaction predicts degraded work is unestablished (#10), so this is a ` +
+          `candidate on what was observed and not a finding about the quality of its work`
+        : '')
     // THIS SEAT'S policy: the run's default as amended by its own entry (D7, #78). A seat whose
     // override configures no checks is in the same position as a run that configured none --
     // there is nothing a replacement could reproduce -- so it takes the same branch.

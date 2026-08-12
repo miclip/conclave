@@ -494,7 +494,7 @@ for (const reason of Object.keys(EXPECTED) as RunPause['reason'][]) {
 
 test('an advisor turn that ends badly scopes to the advisor, not to the implementer', async (t) => {
   // The one place the scope is not obvious. `turn_incomplete` is raised for either seat --
-  // `src/relay/relay.ts:4281` for the advisor, `:4664` for the implementer -- and a scope
+  // `src/relay/relay.ts:4304` for the advisor, `:4687` for the implementer -- and a scope
   // read off "the implementer" rather than off the seat would be silently wrong for half of
   // them, in a way no N=1 run with one implementer would ever reveal.
   const dir = repo()
@@ -559,6 +559,27 @@ test('an unarmed run PAUSES on degradation, and the pause is the operator\'s to 
   assert.ok(!pause.options.includes('rotate'), `rotate must not be offered without checks: ${pause.options}`)
   assert.match(pause.detail ?? '', /No rotation checks are configured/)
   assert.match(pause.detail ?? '', /--checks/, 'the pause must name what would widen the choice next time')
+
+  // What the pause CLAIMS, not just what it offers (#98). The detail used to open
+  // "implementer is degraded", which states as fact the one thing #10 exists because nobody has
+  // established -- and stated it in the place where an operator is being asked to act on it,
+  // fifteen lines above relay.ts's own comment saying the link is unproven. The same string is
+  // handed to `rotateSeat` as a rotation's recorded reason, so the claim outlived the run.
+  //
+  // Pinned as three separate assertions because they fail for three different reasons: the
+  // conclusion coming back, the observation going missing, and the caveat being dropped. One
+  // regex over the whole sentence would go red for all three and say which for none.
+  const detail = pause.detail ?? ''
+  assert.ok(
+    !/is degraded/.test(detail),
+    `the pause must not assert degradation as fact: ${detail}`,
+  )
+  assert.match(detail, /compacted/, 'the pause must say what was actually observed')
+  assert.match(
+    detail,
+    /unestablished \(#10\)/,
+    'the pause must name the open question it is asking the operator to weigh',
+  )
 
   // And it resumes: the whole point is that a compaction is survivable.
   await run.continue()
