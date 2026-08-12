@@ -2462,6 +2462,27 @@ export class Relay {
             `${p.id}'s transcript yielded no report, so the one below was rebuilt from the ` +
             `${streamed.length} message(s) streamed during the turn — narration, not its closing statement`,
         })
+      } else {
+        // The stage that says nothing used to be the one with nothing to say (#94). A salvage
+        // that SUCCEEDS explains its own provenance; a salvage that finds nothing recorded
+        // no line at all, so an operator saw two notes about waiting and then silence, and
+        // had to infer from an absent third note that a third stage existed. Observed on
+        // oath-lang: seq 11-14 salvaged from 10 streamed messages and said so, seq 17-19 hit
+        // this branch and the run went quiet.
+        //
+        // It is also the fact that separates the two ways this ends. "The transcript could
+        // not be read" and "there was nothing to read" call for different actions -- raise
+        // --settle, or go and look at what the child actually did -- and only this branch
+        // knows which one happened.
+        this.#record({
+          from: 'orchestrator',
+          fromRank: 'human',
+          to: [],
+          kind: 'note',
+          text:
+            `${p.id}'s transcript yielded no report and nothing was streamed during the turn, ` +
+            `so there is nothing to rebuild one from`,
+        })
       }
     }
     for (const text of extractFlags(prose)) {

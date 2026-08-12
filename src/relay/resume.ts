@@ -98,12 +98,42 @@ const BUDGET = 24_000
  * is where the unfinished work is — and the notice says how many went, so a participant that
  * needs the beginning knows to ask rather than assuming it saw everything.
  */
+/**
+ * One message as the resumed participants read it, with `unsettled` honoured (#94).
+ *
+ * The marker was already ON the message -- `RelayMessage.unsettled` exists precisely so that
+ * "anything consuming the routing log rather than watching the console" is not told an
+ * unverified body is an ordinary one. This function was that consumer, and it dropped the
+ * field: an empty unsettled report rendered as a header with nothing under it, which is
+ * indistinguishable from a participant that genuinely said nothing, and reads as established
+ * fact under a briefing whose own first line is "treat it as established".
+ *
+ * Observed on oath-lang. The halt that followed the lost report predicted this in as many
+ * words -- "a resume from this log starts with that turn saying nothing" -- and it did.
+ *
+ * A qualification rather than a redaction: an unsettled body that HAS text is still replayed
+ * in full, because it is real narration and the only thing wrong with it is that it is not
+ * the closing statement. What changes is that the reader is told which one they have.
+ */
+function bodyOf(m: RelayMessage): string {
+  const text = m.text.trim()
+  if (!m.unsettled) return text
+  if (text === '') {
+    return (
+      '(this turn produced no readable account of itself: the transcript never settled and ' +
+      'nothing was streamed. The turn DID complete and its work may be on disk -- treat the ' +
+      'absence as missing information, not as a turn that did nothing.)'
+    )
+  }
+  return `(unverified: read from a transcript that had not settled, so this may be incomplete)\n${text}`
+}
+
 export function resumeBriefing(messages: RelayMessage[], budget = BUDGET): string {
   const rendered = messages
     .filter((m) => m.visibility !== 'internal')
     .map((m) => {
       const to = m.to.length > 0 ? m.to.join(', ') : '(recorded only)'
-      return `[${m.seq}] ${m.from} -> ${to}\n${m.text.trim()}`
+      return `[${m.seq}] ${m.from} -> ${to}\n${bodyOf(m)}`
     })
 
   const kept: string[] = []

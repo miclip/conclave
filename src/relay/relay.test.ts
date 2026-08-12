@@ -1208,3 +1208,37 @@ test('a completed turn whose transcript yields nothing is rebuilt from what it w
     `the log must say the report was reconstructed:\n${relay.log.map((m) => m.text).join('\n---\n')}`,
   )
 })
+
+test('a turn that streamed nothing either says so, rather than going quiet (#94)', async () => {
+  // The branch beside the one above, and it recorded no line at all. Observed on oath-lang:
+  // one run salvaged from 10 streamed messages and explained itself, then hit this case and
+  // went silent -- so the operator saw two notes about waiting and then nothing, and had to
+  // infer from an ABSENT third note that a third stage existed. The quietest moment was the
+  // one that most needed a sentence.
+  const impl = new FakeSession('claude', 'impl', ['ack', 'IGNORED', 'NONE'])
+  impl.lagTranscript('never arrives', 60_000, { silent: true })
+  // No streamNarration: nothing was seen, so there is nothing to rebuild from.
+
+  const relay = await Relay.start({
+    registry: registryWith({ codex: new FakeSession('codex', 'advisor', ['Do it.', 'DONE']), claude: impl }),
+    cwd: process.cwd(),
+    lead: { id: 'advisor', agent: 'codex', role: 'advisor' },
+    implementer: { id: 'implementer', agent: 'claude', role: 'implementer' },
+    maxAdvisorTurns: 2,
+    transcriptSettleMs: 100,
+    transcriptSalvageMs: 150,
+  })
+  await relay.run('Keep the work moving.')
+  await relay.stop()
+
+  assert.ok(
+    relay.log.some((m) => /nothing was streamed during the turn, so there is nothing to rebuild one from/.test(m.text)),
+    `the log must say the salvage found nothing:\n${relay.log.map((m) => m.text).join('\n---\n')}`,
+  )
+  // The two outcomes must stay distinguishable. This branch is reached only when there was
+  // nothing to rebuild from, so claiming a rebuild here would describe work that did not happen.
+  assert.ok(
+    !relay.log.some((m) => /rebuilt from the/.test(m.text)),
+    'a salvage that found nothing must not claim to have rebuilt anything',
+  )
+})
