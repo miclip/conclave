@@ -47,7 +47,7 @@ nothing that could be run, compared or observed, so the outcome cannot be graded
 | `opencode` | OpenCode | `run --format json` on stdout | none |
 | `kimi` | Kimi CLI (needs a provider; access waitlisted — see below) | `--print --output-format stream-json` | none |
 
-Any of the three can take either seat. Assign them per participant:
+Any of the four can take either seat. Assign them per participant:
 
 ```sh
 conclave relay "<goal>" --advisor codex --implementer claude
@@ -116,7 +116,7 @@ mediate permissions — `--print` auto-approves for the invocation, so
 Node 24 or newer.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/miclip/conclave/v0.2.12/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/miclip/conclave/v0.3.1/scripts/install.sh | sh
 ```
 
 Installs the newest tagged release into `~/.local/share/conclave`, compiles `node-pty`, and
@@ -358,6 +358,11 @@ The goal is linted before anything starts — an ask with nothing observable in 
 graded better than `reasoned_but_unverified` however well the work goes, and a goal is the
 last artefact you can fix for free. Warnings by default; `--strict-goal` refuses.
 
+So is the seating. A seat whose CLI is not installed, or which names a model its CLI does not
+have, is refused before anything is spawned, registered or written — not twelve minutes later
+as a watchdog, and not on the first turn as an abnormal exit. Only the agents this run seats
+are checked.
+
 `--dry-run` resolves configuration, checks and arguments and starts nothing, and `relay`
 refuses to run outside a git repository unless you pass `--force` — attribution and rotation
 both diff the tree, so neither means anything without one. `--max-turns` and `--max-minutes`
@@ -520,7 +525,8 @@ No cost or token accounting. Conclave drives your CLI on your subscription, so s
 with your account. The record names the model and launch args per seat, which is the join key
 if you want to do that accounting yourself.
 
-OpenCode is newer than the other two and graded accordingly: `completed` is observed from a
+OpenCode is less well understood than Claude Code and Codex, and graded accordingly:
+`completed` is observed from a
 recorded run, and every other outcome is claimed no higher than `reasoned_but_unverified`.
 It also cannot mediate permissions — `opencode run` has no dialog to answer, so approval is
 settled by configuration before the process starts and `decidePermission` refuses rather
@@ -554,6 +560,18 @@ for (;;) {
 }
 ```
 
+A registered agent's `launch.command` is the program that spawns, so a seat can be pointed at
+a wrapper or a pinned build rather than whatever is first on `PATH`:
+
+```ts
+const registry = new AgentRegistry().register({
+  ...OPENCODE_AGENT,
+  launch: { ...OPENCODE_AGENT.launch, command: '/opt/wrappers/opencode' },
+})
+```
+
+The availability check above resolves that same string, so what is validated is what runs.
+
 ## Layout
 
 | path | what it is |
@@ -581,7 +599,17 @@ Each spike has a `FINDINGS.md` recording what was measured. Open work is in
 Node 24+ and Python 3 for the spike tooling. One runtime dependency, `node-pty`.
 
 You need whichever CLIs you actually seat, installed and authenticated: `claude`, `codex`,
-`opencode`, `kimi`. Claude Code and Codex need Conclave's hook registration, which
+`opencode`, `kimi`. **Only the ones you seat** — a Claude-only run does not ask you to install
+Codex.
+
+A missing one is refused before the run starts, naming the seat, the command and how to
+install it. It used to register both seats, write its hooks, check Codex trust and route the
+goal first, and then die on the first turn as `unknown_abnormal_end` — accurate, and no help
+at all in working out that the binary was never there. Nothing is spawned to find out; the
+lookup is the walk `execvp` does, so a wrapper script or a version manager's shim is honoured
+rather than second-guessed.
+
+Claude Code and Codex need Conclave's hook registration, which
 `conclave config install` writes and a session installs for you; Codex additionally
 requires those hooks to be trusted. OpenCode needs neither — it reports its own lifecycle
 on stdout, so there is nothing to register and nothing to trust.
