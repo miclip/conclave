@@ -494,7 +494,7 @@ for (const reason of Object.keys(EXPECTED) as RunPause['reason'][]) {
 
 test('an advisor turn that ends badly scopes to the advisor, not to the implementer', async (t) => {
   // The one place the scope is not obvious. `turn_incomplete` is raised for either seat --
-  // `src/relay/relay.ts:4245` for the advisor, `:4628` for the implementer -- and a scope
+  // `src/relay/relay.ts:4281` for the advisor, `:4664` for the implementer -- and a scope
   // read off "the implementer" rather than off the seat would be silently wrong for half of
   // them, in a way no N=1 run with one implementer would ever reveal.
   const dir = repo()
@@ -516,11 +516,18 @@ test('an advisor turn that ends badly scopes to the advisor, not to the implemen
   await run.abort()
 })
 
-test('an unarmed run ends on degradation rather than raising a rotation candidate', async (t) => {
-  // Which is why the `operator` branch of the derived rotation authority is not reachable
-  // from any pause site: without checks the run does not pause on degradation at all, it
-  // ends (`src/relay/relay.ts:2926-2932`). Asserted rather than asserted-in-a-comment,
-  // because the classification's other branch rests on it.
+test('an unarmed run PAUSES on degradation, and the pause is the operator\'s to resolve', async (t) => {
+  // This asserted the opposite until #96, and the old behaviour is what the assertion was
+  // protecting: an unarmed run ENDED on degradation, so the `operator` branch of the derived
+  // authority described a configuration that could never produce a pause. The classification
+  // was honest and unreachable at once.
+  //
+  // Ending was the wrong response to "cannot rotate". Rotation needs checks to reproduce, so
+  // an unarmed run genuinely cannot rotate -- but ending is the most drastic action available,
+  // taken here on the weakest evidence there is (#10: nothing shows compaction and degradation
+  // coincide) and in the configuration with the least means to check. Observed on oath-lang: a
+  // healthy seat compacted mid-work and the run ended, telling a human it needed them while
+  // that human was at the console.
   const dir = repo()
   const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it.'])
   // Built without the `rotation` key rather than with an undefined one: `--checks` absent
@@ -540,9 +547,23 @@ test('an unarmed run ends on degradation rather than raising a rotation candidat
   const run = relay.start('Keep the work moving.')
   impl.compact()
   const settled = await run.settled()
-  assert.equal(settled.kind, 'ended', 'an unarmed run has no rotation candidate pause to raise')
-  assert.equal(settled.outcome.reason, 'escalated')
-  assert.match(settled.outcome.detail ?? '', /No rotation checks are configured/)
+
+  assert.equal(settled.kind, 'paused', 'an unarmed run must ask rather than end')
+  const pause = settled.pause
+  assert.equal(pause.reason, 'rotation_candidate')
+  // The derivation, now reachable: no checks means nothing mechanical can settle it.
+  assert.equal(pause.resolution.authority, 'operator')
+  assert.deepEqual(pause.resolution.scope, { kind: 'participant', participantId: 'implementer' })
+  // Rotation is NOT offered, because it is the one thing an unarmed run cannot do. A menu
+  // listing it would be the failure #66 and #76 are both about: an option that no-ops.
+  assert.ok(!pause.options.includes('rotate'), `rotate must not be offered without checks: ${pause.options}`)
+  assert.match(pause.detail ?? '', /No rotation checks are configured/)
+  assert.match(pause.detail ?? '', /--checks/, 'the pause must name what would widen the choice next time')
+
+  // And it resumes: the whole point is that a compaction is survivable.
+  await run.continue()
+  const after = await run.settled()
+  assert.equal(after.kind, 'ended', `the run continues past the compaction: ${JSON.stringify(after)}`)
 })
 
 test('an advisor-authority condition is not routed to the advisor', async (t) => {

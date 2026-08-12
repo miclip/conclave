@@ -2925,12 +2925,48 @@ export class Relay {
     const cfg = rotationFor(this.#opts.rotation, impl.id)
     if (!cfg || cfg.checks.length === 0) {
       // Detection does not depend on configuration; the response does. Rotating with
-      // nothing to verify against would be a transfer nobody demonstrated, so this goes to
-      // the human instead of proceeding on an unverifiable handoff.
+      // nothing to verify against would be a transfer nobody demonstrated, so an unarmed run
+      // cannot rotate. That is an argument against ROTATING, and it used to be read as an
+      // argument for ENDING (#96).
+      //
+      // Ending here inverted the relationship between confidence and severity. The branch
+      // below already says it, about the armed case: "ending a run is the most drastic action
+      // available, not a neutral one", and nothing yet shows compaction and degradation
+      // coincide (#10) -- so this branch acted hardest on the weakest evidence, and did it
+      // where there was least means to check. Observed on oath-lang: a healthy implementer
+      // compacted normally, mid-work with 220 insertions and a new test file on disk, and the
+      // run was ended under a message that correctly said a human was needed -- while the
+      // human was sitting at the console it never asked.
+      //
+      // An ATTENDED run asks, exactly as the armed one does. The pause carries the fact that
+      // makes this pause different: rotation is not among the options, so the decision is to
+      // continue or to stop, and arming --checks is what would widen it next time.
       const why = cfg
         ? `${impl.id}'s own rotation policy configures no checks, so it cannot be rotated`
         : `No rotation checks are configured`
-      return this.#end('escalated', `${detail}. ${why}, so this needs a human.`)
+      this.rotationWatch.candidates += 1
+      if (handle) {
+        const halted = await this.#halt(handle, {
+          subject: { reason: 'rotation_candidate', participant: impl.id },
+          detail: `${detail}. ${why}, so this cannot be adjudicated — continue, or stop and re-run with --checks.`,
+          evidence: verdict.evidence,
+        })
+        if (halted) return halted
+      } else {
+        // Unattended, and it carries on for the same reason the armed unattended run does:
+        // there is nobody to ask, and ending is not the neutral thing to do while waiting.
+        this.#record({
+          from: 'orchestrator',
+          fromRank: 'human',
+          to: [],
+          kind: 'note',
+          text: `rotation candidate recorded, run continues (unattended, ${cfg ? 'seat has' : 'run has'} no checks to adjudicate with): ${detail}`,
+        })
+      }
+      // Baseline moved either way, so one compaction is raised once. Without this the same
+      // generation re-raises on every subsequent turn, which on an unarmed run is now a
+      // repeating pause rather than a single fatal one -- a worse failure than the one fixed.
+      return this.#acknowledge(impl, snap.compactionGeneration)
     }
     if (cfg.onDegradation === 'candidate') {
       // A candidate, not a verdict. The mechanism is built and the policy is not earned:

@@ -324,7 +324,7 @@ const DECLARED: Record<string, string> = {
     'Authority routing (#56, D2) sends implementer_unanswered to the advisor before the operator, ' +
     'so a default run interrupts the human less than today. Real change at N=1, an improvement, ' +
     'declared rather than discovered. The pause reason exists at src/relay/run.ts:51 and the halt ' +
-    'that raises it is at src/relay/relay.ts:4495.',
+    'that raises it is at src/relay/relay.ts:4531.',
   'status.pause.resolution':
     'Classifying unresolved conditions on both axes (#56, D2) added `resolution` to every RunPause ' +
     '(src/relay/run.ts:193), so `conclave status --json` on a paused default run now carries ' +
@@ -606,7 +606,7 @@ const DECLARED: Record<string, string> = {
     'participant and nobody else, and a conclave or workstream scope samples NOBODY. It used to ' +
     'read pause.verdictOf.participant and fall back to scanning participants by rank for ' +
     'implementers — and verdictOf is set at exactly two halt sites, both turn_incomplete ' +
-    '(src/relay/relay.ts:4248, src/relay/relay.ts:4634), so every other pause reached that rank ' +
+    '(src/relay/relay.ts:4284, src/relay/relay.ts:4670), so every other pause reached that rank ' +
     'scan. WHAT CHANGES AT N=1: on the three pauses whose scope names no participant — ' +
     'operator_requested (/pause), advisor_escalated, authority_conflict — the lone implementer ' +
     'child used to be sampled, so a child that measured busy REFUSED the resume and wrote ' +
@@ -615,15 +615,15 @@ const DECLARED: Record<string, string> = {
     'safety guard rather than presented as a pure N>1 fix. The reason it is the right narrowing: ' +
     'the guard exists because continuing SENDS into a child that cannot accept input mid-turn, ' +
     'and on those three pauses the child it measured is not the child being sent to — resuming ' +
-    'advisor_escalated sends to the ADVISOR (src/relay/relay.ts:4347), resuming ' +
+    'advisor_escalated sends to the ADVISOR (src/relay/relay.ts:4383), resuming ' +
     'authority_conflict queues a constraint that is delivered by the dispatcher on the next ' +
     'dispatch to a free seat, and operator_requested is consumed at an advisor-turn boundary ' +
     'whose own evidence line says no turn is in flight. WHAT IS GIVEN UP, named rather than ' +
     'discovered: the advisor_escalated halt raised when a seat’s turn completed and its report ' +
-    'could not be read (src/relay/relay.ts:4544) is conclave-scoped by design, yet the useful ' +
+    'could not be read (src/relay/relay.ts:4580) is conclave-scoped by design, yet the useful ' +
     'question there is whether THAT seat is still writing; at N=1 the rank scan sampled it by ' +
     'coincidence of it being the only implementer, and now nothing does. The pause still carries ' +
-    'that seat’s liveness evidence from the halt site (src/relay/relay.ts:4557), which is what ' +
+    'that seat’s liveness evidence from the halt site (src/relay/relay.ts:4593), which is what ' +
     'the operator actually reads; restoring a refusal there is a change to that halt’s scope, ' +
     'not to the guard. AT N>1 the old behaviour was unsafe in the other direction: a pause about ' +
     'one seat could be refused because a DIFFERENT seat was mid-turn, and the operator was told ' +
@@ -728,6 +728,36 @@ const DECLARED: Record<string, string> = {
     'a model its CLI has, is proved through `main` with the real argv in ' +
     'src/registry/models.test.ts; that the two pty adapters actually populate the diagnosis is ' +
     'proved against real ptys in src/adapters/watchdogWiring.test.ts.',
+  'an unarmed run survives a compaction instead of ending on it (#96)':
+    'A REAL CHANGE AT N=1, and to the most ordinary configuration there is: `--advisor codex ' +
+    '--implementer claude` with no --checks. Such a run used to END when the implementer ' +
+    'compacted -- outcome `escalated`, detail "No rotation checks are configured, so this needs ' +
+    'a human" -- and it now raises a rotation_candidate pause instead, resolvable with ' +
+    '/continue, or records a note and carries on when nobody is attending. Observed on ' +
+    'oath-lang: a healthy seat, mid-work with 220 insertions and a new test file on disk, ' +
+    'compacted normally and the run ended, telling a human it needed them while that human was ' +
+    'at the console it never asked. WHY ENDING WAS WRONG, and it is not the claim that ' +
+    'compaction is harmless: rotation needs checks to reproduce, so an unarmed run genuinely ' +
+    'cannot rotate -- but that is an argument against ROTATING, and it was read as an argument ' +
+    'for ENDING. The armed branch twenty lines below already made the case and had it accepted: ' +
+    '"ending a run is the most drastic action available, not a neutral one", and "recorded, not ' +
+    'acted on" has to mean recorded and not acted on. The unarmed branch acted HARDEST on the ' +
+    'weakest evidence -- #10 is open, nothing yet shows compaction and degradation coincide -- ' +
+    'in the configuration with the least means to check. Confidence and severity were inverted. ' +
+    'WHAT DOES NOT CHANGE: detection. The seat is still assessed, the candidate still counts ' +
+    'toward rotationWatch.candidates and the summary, and a run WITH checks behaves exactly as ' +
+    'before. Rotation is still impossible without checks and is still not offered in the pause ' +
+    'options, because an option that no-ops is the failure #66 and #76 both describe; the pause ' +
+    'names --checks as what would widen the choice next time. The baseline is acknowledged on ' +
+    'both paths, so one compaction is raised once -- without that the fix would trade a single ' +
+    'fatal pause for one that repeats every turn, which is worse. ONE CONSEQUENCE FOR THE ' +
+    'RESOLUTION MODEL, and it is the classification becoming honest rather than a new rule: the ' +
+    '`operator` branch of the derived rotation authority (D2) is now REACHABLE. It describes an ' +
+    'unarmed candidate -- nothing mechanical can settle it, so it is the operator\u2019s -- and ' +
+    'until now the one configuration it described was the one that never produced a pause to ' +
+    'describe. Proved in src/relay/resolution.test.ts, which asserted the ending and now asserts ' +
+    'the pause, its authority, its scope, the absence of rotate from its options, and that the ' +
+    'run continues past the compaction.',
   'a seat whose CLI is not installed is refused before anything is created (#51)':
     'NO FLAG IS ADDED, no status document gains a key, and the pinned sets below are untouched — ' +
     'and this changes what an existing configuration DOES, which is why it is here. A run seated ' +
@@ -816,7 +846,7 @@ const DECLARED: Record<string, string> = {
     'are the adapter preflights, the constructed children and the seat worktrees.',
 }
 
-test('DECLARED contains exactly the routing, pause-resolution, attribution, ceiling-flag, seat-flag, seat-status, launch-record, flag-reader, integration-check, per-seat-rotation, reviewer, resume-guard, mixed-liveness, model-validation and executable-preflight entries', () => {
+test('DECLARED contains exactly the routing, pause-resolution, attribution, ceiling-flag, seat-flag, seat-status, launch-record, flag-reader, integration-check, per-seat-rotation, reviewer, resume-guard, mixed-liveness, model-validation, executable-preflight and compaction-survival entries', () => {
   assert.deepEqual(Object.keys(DECLARED), [
     'implementer_unanswered -> advisor',
     'status.pause.resolution',
@@ -833,6 +863,7 @@ test('DECLARED contains exactly the routing, pause-resolution, attribution, ceil
     "the console's /continue liveness guard samples by pause SCOPE, and no longer by rank",
     'a mixed CPU sample is reported as mixed rather than as a working child (#83)',
     'models are validated before launch, graded per adapter, and a silent first turn names the model',
+    'an unarmed run survives a compaction instead of ending on it (#96)',
     'a seat whose CLI is not installed is refused before anything is created (#51)',
   ])
 })
@@ -1519,7 +1550,7 @@ test('default run works in the run cwd and creates no worktree', async () => {
 
   // A default run with no subagents must not create any git worktree. The relay only samples
   // the worktree list for its subagent-use report: src/relay/subagents.ts:68 defines
-  // worktreePaths, and src/relay/relay.ts:2228, :2325 and :3778 read it.
+  // worktreePaths, and src/relay/relay.ts:2228, :2325 and :3814 read it.
   // Prove it by exercising the run in a real temporary repository.
   const repo = mkdtempSync(join(tmpdir(), 'conclave-default-'))
   try {

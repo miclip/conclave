@@ -196,12 +196,16 @@ export function resolutionFor(subject: ResolutionSubject, config: ResolutionConf
         // with checks resolves the candidate without asking. Today it asks either way --
         // `onDegradation` defaults to `candidate` because the policy is not earned yet --
         // resolved for the seat in `rotationFor` (`src/relay/relay.ts:312`), which is where a
-        // per-seat policy may override it (D7) and where the default is written once -- and the
-        // two pause sites below it are reachable only WITH rotation configured for that seat
-        // (`src/relay/relay.ts:2926-2932` ends the run instead when there are no checks to
-        // reproduce). So this axis records the entitlement the operator has already
-        // delegated, and no pause site can reach the `operator` branch today -- an unarmed
-        // run ENDS on degradation instead of pausing, which `resolution.test.ts` asserts.
+        // per-seat policy may override it (D7) and where the default is written once. So this
+        // axis records the entitlement the operator has already delegated.
+        //
+        // The `operator` branch is REACHABLE, and it was not until #96. An unarmed run used to
+        // end on degradation rather than pause, so the one configuration this branch describes
+        // was the one that never produced a pause to describe -- the classification was honest
+        // and unreachable at the same time. The unarmed run now pauses (`src/relay/relay.ts:2943-2946`), which
+        // is what makes the derivation mean anything: with checks the candidate is mechanical
+        // because a replacement could reproduce them, and without checks it is the operator's
+        // because nothing else can settle it.
         authority: config.rotationArmed ? 'mechanical' : 'operator',
         scope: { kind: 'participant', participantId: subject.participant },
       }
