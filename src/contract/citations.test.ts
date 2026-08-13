@@ -87,16 +87,16 @@ const CITED: Record<string, string> = {
   // and `#join` (#71). Repaired rather than deleted: each still points at the thing it was
   // written about, and the one whose LINE no longer says what it said -- `#join` now passes a
   // named context object rather than an inline literal -- is pinned on the new spelling.
-  'src/relay/relay.ts:1531-1533': 'get cwd(): string',
-  'src/relay/relay.ts:1681-1687': 'createParticipant(spec, ctx)',
-  'src/relay/relay.ts:2228': 'worktreePaths(this.#opts.cwd)',
-  'src/relay/relay.ts:2255': 'NOT ARMED (no checks configured)',
-  'src/relay/relay.ts:2325': 'worktreePaths(this.#opts.cwd)',
-  'src/relay/relay.ts:2748': 'resolutionFor(p.subject, { rotationArmed: armed })',
-  'src/relay/relay.ts:2966-2969': 'No rotation checks are configured',
-  'src/relay/relay.ts:312': "onDegradation ?? 'candidate'",
-  'src/relay/relay.ts:3837': 'worktreePaths(this.#opts.cwd)',
-  'src/relay/relay.ts:4304': "subject: { reason: 'turn_incomplete', participant: lead.id }",
+  'src/relay/relay.ts:1574-1576': 'get cwd(): string',
+  'src/relay/relay.ts:1726-1732': 'createParticipant(spec, ctx)',
+  'src/relay/relay.ts:2273': 'worktreePaths(this.#opts.cwd)',
+  'src/relay/relay.ts:2300': 'NOT ARMED (no checks configured)',
+  'src/relay/relay.ts:2390': 'worktreePaths(this.#opts.cwd)',
+  'src/relay/relay.ts:2837': 'resolutionFor(p.subject, { rotationArmed: armed })',
+  'src/relay/relay.ts:3246-3248': 'No rotation checks are configured',
+  'src/relay/relay.ts:323': "onDegradation ?? 'candidate'",
+  'src/relay/relay.ts:4116': 'worktreePaths(this.#opts.cwd)',
+  'src/relay/relay.ts:4583': "subject: { reason: 'turn_incomplete', participant: lead.id }",
   // The five below are what the console's `/continue` liveness guard cites for reading a
   // pause's SCOPE rather than `verdictOf` or a rank scan (`seatsToSampleAtPause` in
   // src/repl/session.ts). Two of them pin the ONLY sites that populate `verdictOf` -- the
@@ -105,22 +105,38 @@ const CITED: Record<string, string> = {
   // conclave-scoped halt the change gives up sampling on, its own liveness evidence, and the
   // send that a resumed `advisor_escalated` pause actually makes -- to the ADVISOR, which is
   // why measuring implementer children there was answering the wrong question.
-  'src/relay/relay.ts:4307': 'verdictOf: { participant: lead.id, endSeq: next.end.seq },',
-  'src/relay/relay.ts:4406': 'The human has seen your escalation and asked you to continue.',
+  'src/relay/relay.ts:4587': 'verdictOf: { participant: lead.id, endSeq: next.end.seq },',
+  'src/relay/relay.ts:4686': 'The human has seen your escalation and asked you to continue.',
   // The workstream a conflicted instruction belongs to, named after the seat when exactly one
   // seat could take it -- the N=1 coincidence a scope reader must not mistake for a seat.
-  'src/relay/relay.ts:4470': "reason: 'authority_conflict', workstream:",
-  'src/relay/relay.ts:4554': "subject: { reason: 'implementer_unanswered', participant: seat.id }",
-  'src/relay/relay.ts:4603': "subject: { reason: 'advisor_escalated' },",
-  'src/relay/relay.ts:4616': '#livenessEvidence(seat, report.emittedSinceSend)',
-  'src/relay/relay.ts:4687': "subject: { reason: 'turn_incomplete', participant: seat.id }",
-  'src/relay/relay.ts:4693': 'verdictOf: { participant: seat.id, endSeq: current.seq },',
+  'src/relay/relay.ts:4750': "reason: 'authority_conflict', workstream:",
+  'src/relay/relay.ts:4834': "subject: { reason: 'implementer_unanswered', participant: seat.id }",
+  'src/relay/relay.ts:4883': "subject: { reason: 'advisor_escalated' },",
+  // Repaired rather than deleted, and it now pins a DESCRIPTOR rather than a call: #101 moved
+  // the measurement inside `#halt`, so the halt site says which seat to measure and no longer
+  // builds the sentence itself. The claim the citation supports is unchanged -- this halt does
+  // carry liveness evidence -- so the pointer moved with the thing it points at.
+  //
+  // Weaker than the pins around it, and worth saying: the same descriptor appears at the
+  // `turn_incomplete` halt below, so only a shift of exactly the distance between the two would
+  // slip past. There is nothing unique on the line to pin instead.
+  'src/relay/relay.ts:4897': 'liveness: { participant: seat, emittedBefore: report.emittedBefore },',
+  'src/relay/relay.ts:4967': "subject: { reason: 'turn_incomplete', participant: seat.id }",
+  'src/relay/relay.ts:4971': 'verdictOf: { participant: seat.id, endSeq: current.seq },',
   'src/relay/resolution.ts:190': 'export function resolutionFor',
   'src/relay/run.ts:51': "| 'implementer_unanswered'",
-  'src/relay/run.ts:169-183': 'reason: PauseReason',
-  'src/relay/run.ts:193': 'resolution: ResolutionRequest',
+  'src/relay/run.ts:209-223': 'reason: PauseReason',
+  'src/relay/run.ts:237': 'resolution: ResolutionRequest',
+  // The pause is amended IN PLACE while it is held. #101's report read a repeated status as a
+  // second pause replaying the first one's samples; this is the line that says it cannot be
+  // one, because there is only ever the one object.
+  'src/relay/run.ts:517': 'this.#pause.superseded = info',
   'src/relay/subagents.ts:68': 'export function worktreePaths',
   'src/repl/session.ts:209-221': 'turnWatchdogMs?: number | undefined',
+  // The console's liveness seam, cited by the relay's own copy of it (#101). Two front-ends
+  // needing the same injection is not duplication to be noticed later -- it is the shape the
+  // relay deliberately copied, and the citation is what keeps the two spellings together.
+  'src/repl/session.ts:284': 'liveness?: (pid: number) => Promise<ChildLiveness>',
   // The three below moved by the same edit that added `seatsToSampleAtPause` above
   // `runSession`: it inserts a documented function into the middle of the file, so every
   // citation past it shifts. Repaired against this tree rather than deleted -- each still
@@ -130,6 +146,11 @@ const CITED: Record<string, string> = {
   // Moved by #83's edit to the `/continue` refusal, nine lines above it in the same block.
   // Repaired rather than deleted: the call it pins is the one the console still makes.
   'src/repl/session.ts:988': "recording.set('paused', { pause: run.pause })",
+  // Why an in-place amendment to a pause needs an event behind it. Cited by both halves of
+  // #101's refresh -- the module that explains the mechanism and the loop that uses it --
+  // because the argument was already written here, for `/wait`, and restating it in two more
+  // places is how three copies of a reason drift apart.
+  'src/repl/session.ts:1615': 'so an in-place change like `superseded` reaches the file on the next one',
 }
 
 /**

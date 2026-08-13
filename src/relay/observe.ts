@@ -162,12 +162,33 @@ export interface RelaySupersedeEvent extends RelayEventBase {
   pause: RunPause
 }
 
+/**
+ * A paused run re-measured the child its liveness evidence is about.
+ *
+ * Carries the pause, whose `evidence` line and `liveness` block have just been rewritten in
+ * place. Emitted for the same reason `supersede` is: the run STAYS PAUSED across it, so `state`
+ * does not move and a watcher polling state alone sees nothing -- and here the thing that
+ * changed is the only fact the operator's decision rests on.
+ *
+ * It is also what gets the new reading onto disk. The session recorder rewrites `status.json`
+ * from the live pause object on every event it sees, and a pause is exactly when no other event
+ * is coming (#101).
+ *
+ * Additive, under the compatibility rule below: a consumer that does not know this type ignores
+ * it and reads the same `pause` block it always did, one refresh behind.
+ */
+export interface RelayLivenessEvent extends RelayEventBase {
+  type: 'liveness'
+  pause: RunPause
+}
+
 export type RelayEvent =
   | RelayMessageEvent
   | RelayActivityEvent
   | RelayPauseEvent
   | RelayResumeEvent
   | RelaySupersedeEvent
+  | RelayLivenessEvent
   | RelayRunEndEvent
 
 /** Distributes over the union; a plain Omit would collapse it to the common keys. */

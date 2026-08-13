@@ -15,6 +15,14 @@ import {
   type ChildLiveness,
 } from './liveness.ts'
 
+/**
+ * A fixed measurement time, so the provenance sentence #101 adds is assertable.
+ *
+ * A real `Date.now()` here would make every line under test carry a stamp nothing could check,
+ * which is one step from not checking the stamp at all -- and the stamp is the fix.
+ */
+const MEASURED_AT = Date.UTC(2026, 7, 13, 21, 4, 11)
+
 test('a process doing nothing reads as idle, and a busy one does not', async () => {
   // Two real processes rather than a stub, because the thing under test is whether `ps`
   // says what we think it says — which is exactly the assumption a stub would enshrine.
@@ -58,14 +66,14 @@ test('the evidence line says what was measured, never what it means', async () =
   // A child at 0% CPU may be waiting on a provider that stopped answering, so "idle" must
   // not read as "dead" — inventing a confident answer from a weak signal is the failure this
   // project keeps finding in its own diagnostics.
-  const idle = describeLiveness({ pid: 1, alive: true, samples: [0, 0, 0], idle: true }, 0)
+  const idle = describeLiveness({ pid: 1, alive: true, samples: [0, 0, 0], idle: true, measuredAt: MEASURED_AT }, 0)
   assert.match(idle, /alive but not computing/)
   assert.match(idle, /Idle is not dead/)
   assert.match(idle, /nothing at all since the prompt/)
 
   // ...and a busy one names the consequence of continuing, which is the choice that cost a
   // real run.
-  const busy = describeLiveness({ pid: 2, alive: true, samples: [42.5], idle: false }, 7)
+  const busy = describeLiveness({ pid: 2, alive: true, samples: [42.5], idle: false, measuredAt: MEASURED_AT }, 7)
   assert.match(busy, /still working/)
   assert.match(busy, /7 event\(s\) since the prompt/)
   assert.match(busy, /neither CLI accepts/)
@@ -77,6 +85,7 @@ const reading = (samples: number[]): ChildLiveness => ({
   alive: true,
   samples,
   idle: samples.every((c) => c < 3),
+  measuredAt: MEASURED_AT,
 })
 
 test('the conservative idle rule is unchanged: one sample above the line is not idle', () => {
@@ -86,7 +95,7 @@ test('the conservative idle rule is unchanged: one sample above the line is not 
   assert.equal(readingOf(reading([0.3, 0.2, 2.9])), 'not_computing')
   assert.equal(readingOf(reading([0.3, 0.2, 3.0])), 'mixed', 'at the line is not below it')
   assert.equal(readingOf(reading([12.5, 15.0, 11.0])), 'working')
-  assert.equal(readingOf({ pid: 1, alive: false, samples: [], idle: false }), 'gone')
+  assert.equal(readingOf({ pid: 1, alive: false, samples: [], idle: false, measuredAt: MEASURED_AT }), 'gone')
 })
 
 test('the sample from #83 is not asserted to be a live turn', () => {
@@ -132,6 +141,52 @@ test('no output count is said to be no output count, and not to be zero', () => 
   assert.doesNotMatch(line, /likelier reading/, 'no count is no basis for leaning either way')
 })
 
+test('every reading says when it was measured, including the one that found nothing', () => {
+  // The half of #101 that stands on its own. An operator can discount a measurement they can
+  // see the age of; they cannot discount one that looks current, and every line in this file
+  // used to look current forever.
+  const stamp = '2026-08-13T21:04:11Z'
+  for (const line of [
+    describeLiveness(reading([0.1, 0.2, 0.1]), 0),
+    describeLiveness(reading([12.5, 15.0, 11.0]), 40),
+    describeLiveness(reading([0.3, 0.2, 7.2]), 3),
+    describeLiveness({ pid: 1, alive: false, samples: [], idle: false, measuredAt: MEASURED_AT }, 3),
+  ]) {
+    assert.match(line, new RegExp(`Measured ${stamp}`), `no measurement time on: ${line}`)
+  }
+  // Seconds, not milliseconds: `ps` does not resolve finer, and three digits that mean nothing
+  // are three digits a reader has to decide to ignore.
+  assert.doesNotMatch(describeLiveness(reading([0.1]), 0), /\.\d{3}Z/)
+})
+
+test('a refreshed reading says so, and a reading that has stopped refreshing says that instead', () => {
+  // The bound is only safe because reaching it is visible. A refresher that went quiet at its
+  // limit would leave a number that looks live and is not, which is the defect this whole
+  // change is about, one turn of the screw later.
+  const fresh = describeLiveness(reading([12.5, 15.0, 11.0]), 40, { count: 0 })
+  assert.match(fresh, /re-measured while the pause lasts/)
+  assert.doesNotMatch(fresh, /no longer updates/)
+
+  const running = describeLiveness(reading([12.5, 15.0, 11.0]), 40, { count: 7 })
+  assert.match(running, /re-measured 7 time\(s\) since the pause was raised/)
+  assert.doesNotMatch(running, /no longer updates/)
+
+  const done = describeLiveness(reading([12.5, 15.0, 11.0]), 40, {
+    count: 60,
+    final: 're-measuring has reached its limit of 60',
+  })
+  assert.match(done, /re-measured 60 time\(s\)/)
+  assert.match(done, /re-measuring has reached its limit of 60/)
+  assert.match(done, /no longer updates and only ages from here/)
+
+  // And no refresher at all is SILENT about refreshing rather than claiming zero. The
+  // `/continue` guard samples once on demand and has no loop behind it; telling the operator it
+  // has been re-measured zero times would promise updates nothing is going to deliver.
+  const once = describeLiveness(reading([12.5, 15.0, 11.0]), undefined)
+  assert.doesNotMatch(once, /re-measured/)
+  assert.match(once, /Measured 2026-08-13T21:04:11Z\.$/)
+})
+
 test('the pause menu offers `wait` on every reading that saw CPU, mixed included', () => {
   // Driven through `describeLiveness` rather than against the phrases, because the relay reads
   // the operator's own evidence line (`reportsChildOnCpu` at the `wait` option in relay.ts) and
@@ -143,7 +198,7 @@ test('the pause menu offers `wait` on every reading that saw CPU, mixed included
   }
   assert.equal(reportsChildOnCpu(describeLiveness(reading([0.1, 0.2]), 3)), false, 'idle offers no wait')
   assert.equal(
-    reportsChildOnCpu(describeLiveness({ pid: 1, alive: false, samples: [], idle: false }, 3)),
+    reportsChildOnCpu(describeLiveness({ pid: 1, alive: false, samples: [], idle: false, measuredAt: MEASURED_AT }, 3)),
     false,
     'a child that is gone is not waited for',
   )

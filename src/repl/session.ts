@@ -459,7 +459,7 @@ function renderPause(p: RunPause, width: number): string {
  *
  * This used to read `pause.verdictOf.participant` instead, and that field is narrower than it
  * looks: it is set at exactly two halt sites, both `turn_incomplete`
- * (`src/relay/relay.ts:4307` and `src/relay/relay.ts:4693`). So FOUR of the five seat-scoped
+ * (`src/relay/relay.ts:4587` and `src/relay/relay.ts:4971`). So FOUR of the five seat-scoped
  * reasons -- `rotation_candidate`, `implementer_unanswered`, `merge_blocked`, `review_blocked`
  * -- named a seat in their scope and were sampled by rank anyway, because the field the guard
  * read was empty. The scope is the field that is always populated, which is the other half of
@@ -473,16 +473,16 @@ function renderPause(p: RunPause, width: number): string {
  * pause never mentioned. The rank fallback's own comment argued it was right "only because
  * there is one of them", which is an argument for deriving the seat from the pause instead of
  * from a rank. Worse than useless on one of them: resuming an `advisor_escalated` pause sends
- * to the ADVISOR (`src/relay/relay.ts:4406`), so the fallback measured children that were not
+ * to the ADVISOR (`src/relay/relay.ts:4686`), so the fallback measured children that were not
  * about to be sent to at all.
  *
  * What that gives up, stated rather than discovered: the `advisor_escalated` halt raised when a
- * seat's turn completed and its report could not be read (`src/relay/relay.ts:4603`) is
+ * seat's turn completed and its report could not be read (`src/relay/relay.ts:4883`) is
  * conclave-scoped by design -- "the reason names who is being asked to take it, and the scope
  * follows the reason" -- yet the thing an operator wants to know there is whether THAT seat's
  * child is still writing. Under the rank fallback that seat was sampled at N=1 by coincidence
  * of being the only implementer. It is not sampled now. The pause still carries its own
- * liveness EVIDENCE from the halt site (`src/relay/relay.ts:4616`), which is what the operator
+ * liveness EVIDENCE from the halt site (`src/relay/relay.ts:4897`), which is what the operator
  * reads;
  * what is gone is a refusal derived from a rank scan. Narrowing that halt's scope, if the
  * refusal is wanted back, is a change to the halt site rather than to this guard.
