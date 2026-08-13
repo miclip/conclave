@@ -324,10 +324,10 @@ const DECLARED: Record<string, string> = {
     'Authority routing (#56, D2) sends implementer_unanswered to the advisor before the operator, ' +
     'so a default run interrupts the human less than today. Real change at N=1, an improvement, ' +
     'declared rather than discovered. The pause reason exists at src/relay/run.ts:51 and the halt ' +
-    'that raises it is at src/relay/relay.ts:4574.',
+    'that raises it is at src/relay/relay.ts:4834.',
   'status.pause.resolution':
     'Classifying unresolved conditions on both axes (#56, D2) added `resolution` to every RunPause ' +
-    '(src/relay/run.ts:193), so `conclave status --json` on a paused default run now carries ' +
+    '(src/relay/run.ts:237), so `conclave status --json` on a paused default run now carries ' +
     'pause.resolution = {reason, authority, scope} and pause.resolution.scope = {kind}. Additive and ' +
     'recorded rather than acted on: authority and scope are computed at the halt site from the reason ' +
     'and the run configuration (src/relay/resolution.ts:190), and a request whose authority is ' +
@@ -335,7 +335,7 @@ const DECLARED: Record<string, string> = {
     'resolve one and dropping the pause first would lose the decision point rather than automate it. ' +
     '`reason` is deliberately duplicated between pause.reason and pause.resolution.reason: the loose ' +
     'field is what every existing reader is written against and the nested one is the whole ' +
-    'classification (src/relay/run.ts:169-183). Nothing an existing consumer read changed value.',
+    'classification (src/relay/run.ts:213-227). Nothing an existing consumer read changed value.',
   'per-seat artifact attribution':
     'Artifact attribution (#62) is now scoped to the ROOT a participant works in, and records ' +
     'which seat each attributed path came from. `RestrictedOrigin` gains one key, ' +
@@ -606,7 +606,7 @@ const DECLARED: Record<string, string> = {
     'participant and nobody else, and a conclave or workstream scope samples NOBODY. It used to ' +
     'read pause.verdictOf.participant and fall back to scanning participants by rank for ' +
     'implementers — and verdictOf is set at exactly two halt sites, both turn_incomplete ' +
-    '(src/relay/relay.ts:4327, src/relay/relay.ts:4713), so every other pause reached that rank ' +
+    '(src/relay/relay.ts:4587, src/relay/relay.ts:4971), so every other pause reached that rank ' +
     'scan. WHAT CHANGES AT N=1: on the three pauses whose scope names no participant — ' +
     'operator_requested (/pause), advisor_escalated, authority_conflict — the lone implementer ' +
     'child used to be sampled, so a child that measured busy REFUSED the resume and wrote ' +
@@ -615,15 +615,15 @@ const DECLARED: Record<string, string> = {
     'safety guard rather than presented as a pure N>1 fix. The reason it is the right narrowing: ' +
     'the guard exists because continuing SENDS into a child that cannot accept input mid-turn, ' +
     'and on those three pauses the child it measured is not the child being sent to — resuming ' +
-    'advisor_escalated sends to the ADVISOR (src/relay/relay.ts:4426), resuming ' +
+    'advisor_escalated sends to the ADVISOR (src/relay/relay.ts:4686), resuming ' +
     'authority_conflict queues a constraint that is delivered by the dispatcher on the next ' +
     'dispatch to a free seat, and operator_requested is consumed at an advisor-turn boundary ' +
     'whose own evidence line says no turn is in flight. WHAT IS GIVEN UP, named rather than ' +
     'discovered: the advisor_escalated halt raised when a seat’s turn completed and its report ' +
-    'could not be read (src/relay/relay.ts:4623) is conclave-scoped by design, yet the useful ' +
+    'could not be read (src/relay/relay.ts:4883) is conclave-scoped by design, yet the useful ' +
     'question there is whether THAT seat is still writing; at N=1 the rank scan sampled it by ' +
     'coincidence of it being the only implementer, and now nothing does. The pause still carries ' +
-    'that seat’s liveness evidence from the halt site (src/relay/relay.ts:4636), which is what ' +
+    'that seat’s liveness evidence from the halt site (src/relay/relay.ts:4897), which is what ' +
     'the operator actually reads; restoring a refusal there is a change to that halt’s scope, ' +
     'not to the guard. AT N>1 the old behaviour was unsafe in the other direction: a pause about ' +
     'one seat could be refused because a DIFFERENT seat was mid-turn, and the operator was told ' +
@@ -652,8 +652,11 @@ const DECLARED: Record<string, string> = {
     'exported constant that is unmeasured and documented as unmeasured: it changes wording ' +
     'only, and `idle`, the /continue refusal and the pause menu are all blind to it. THREE ' +
     'PROGRAMMATIC SURFACES ARE ADDED, all in src/outcomes/liveness.ts and all read-only over a ' +
-    'ChildLiveness that itself does not change (so pause.refusal.liveness in the status JSON is ' +
-    'the shape it was): LivenessReading, readingOf and reportsChildOnCpu. The last exists ' +
+    'ChildLiveness that this entry did not change: LivenessReading, readingOf and ' +
+    'reportsChildOnCpu. (ChildLiveness HAS since gained a measuredAt, and pause.refusal.liveness ' +
+    'in the status JSON carries it — declared under the timestamped-liveness entry below, not ' +
+    'here. The sentence is repaired rather than left standing: a declaration that quietly ' +
+    'became false is worse than one that was never written.) The last exists ' +
     'because the relay decided the `wait` option by regex over the operator’s evidence prose ' +
     '(`/is still working \\(cpu/`), which would have silently dropped `wait` from a mixed pause ' +
     '— the one reading where the non-destructive option is worth the most; it now asks ' +
@@ -670,6 +673,58 @@ const DECLARED: Record<string, string> = {
     'the code it pins (src/repl/session.ts:943). Covered in src/outcomes/liveness.test.ts on ' +
     'the reported numbers, and end to end through the console’s refusal path in ' +
     'src/repl/session.test.ts.',
+  'a paused run keeps measuring the child, and its evidence says when it was measured (#101)':
+    'THE REASON, in one sentence: a pause captured ONE liveness reading and served it unchanged ' +
+    'for as long as the pause lasted, so `conclave status --json` kept saying "is still working ' +
+    '(cpu 3.3%, 5.1%, 3.5%) — 18 event(s) since the prompt was sent" about a child that had ' +
+    'settled to 0.2% with its turn already over, and the operator waited out a finished turn ' +
+    'twice in one day and then aborted a run they could have continued. ' +
+    'THE STATUS DOCUMENT GAINS TWO THINGS, which is why this is declared rather than assumed ' +
+    'invisible. FIRST, pause.liveness: the measurement behind the evidence line as a fact rather ' +
+    'than as prose — participant, index (which evidence entry it is behind), sample, reading, ' +
+    'firstAt, refreshes, and final once refreshing has stopped. It appears on a DEFAULT run, at ' +
+    'N=1, on any pause that carries a liveness line, and that is deliberate: the operator this ' +
+    'was reported by drives conclave with --operator agent and had to regex the prose for the one ' +
+    'fact it never carried. SECOND, ChildLiveness gains measuredAt, so pause.refusal.liveness — ' +
+    'declared under the mixed-liveness entry above as unchanged — is one key wider. ' +
+    'THE EVIDENCE PROSE CHANGES for every reading: each liveness line now ends with a provenance ' +
+    'sentence naming when it was measured, and, where a refresher is behind it, how many times it ' +
+    'has been re-measured or that it has stopped. The head of the line — the phrase, the cpu ' +
+    'clause, the event count — is byte-identical, which is what keeps reportsChildOnCpu and the ' +
+    'pause menu’s `wait` option working off the same string they always did. ' +
+    'A NEW EVENT TYPE, `liveness`, joins the observe() union and events.ndjson, carrying the ' +
+    'pause whose evidence has just been rewritten. Additive under the rule observe.ts already ' +
+    'states: a consumer that does not know it ignores it and reads the same pause block one ' +
+    'refresh behind. It is also the mechanism — the recorder re-serialises the live pause on any ' +
+    'event, and a pause is exactly when no other event is coming. ' +
+    'THE `wait` OPTION IS RECOMPUTED with the line that justifies it, so pause.options can ' +
+    'change while the run is paused. It is offered when the evidence reports a child with ' +
+    'something on the CPU, and that evidence now moves: a menu decided once at raise time ' +
+    'would drift away from its own reason, which is the coupling reportsChildOnCpu exists to ' +
+    'hold (#83). Both directions — withdrawn when a working child goes quiet, offered when an ' +
+    'idle one starts. ONLY `wait`; every other option turns on configuration and authority, ' +
+    'which a CPU sample says nothing about. ' +
+    'THE REFRESH IS BOUNDED, AND SAYS SO: LIVENESS_REFRESH_EVERY_MS (30s) and ' +
+    'LIVENESS_REFRESH_LIMIT (60), so thirty minutes — twice the fifteen-minute default of ' +
+    '/wait, chosen so the non-destructive option cannot outlive the evidence it was taken on. ' +
+    'The last refresh writes `final` into the line AND into pause.liveness, because a refresher ' +
+    'that fell silent at its bound would be the original defect wearing a newer number. ' +
+    'NOTHING BECOMES LESS CONSERVATIVE. The #43 /continue guard is untouched: it still samples ' +
+    'the child itself at the instant of the decision and still refuses on any reading that is ' +
+    'not idle, because continuing SENDS and a reading up to 30s old is not a reading of now. It ' +
+    'does not read pause.liveness, and that is stated at both ends. ' +
+    'TWO RELAY OPTIONS ARE ADDED FOR TESTS ONLY — liveness (the same seam the console already ' +
+    'has at src/repl/session.ts:284) and livenessRefreshMs/livenessRefreshLimit. No CLI flag ' +
+    'exposes them; a default run reads the constants. ' +
+    'ONE CLAIM IN THE ISSUE IS FALSIFIED and recorded here because it points at the mechanism: ' +
+    'the reporter saw a byte-identical evidence line on what looked like two consecutive pauses ' +
+    'and concluded evidence is not re-derived BETWEEN pauses. It cannot be. The loop is ' +
+    'suspended inside #halt for the whole pause, so #halt cannot run again, and a watchdog ' +
+    'revision or replacement turn_end arriving meanwhile amends THE SAME RunPause in place ' +
+    '(src/relay/run.ts:517). There was one pause, read twice — the same defect by a shorter ' +
+    'path than the report proposed. ' +
+    'Covered in src/relay/pauseLiveness.test.ts, which watches the recorded evidence change ' +
+    'after the injected reading changes, and in src/outcomes/liveness.test.ts on the prose.',
   'models are validated before launch, graded per adapter, and a silent first turn names the model':
     'NO FLAG IS ADDED, no status document gains a key, and the pinned sets below are untouched — ' +
     'and this still changes what an existing configuration DOES, twice, which is why it is here. ' +
@@ -899,7 +954,7 @@ const DECLARED: Record<string, string> = {
     'runs, the advisor’s and the reviewer’s absence, and the same three states in the prose.',
 }
 
-test('DECLARED contains exactly the routing, pause-resolution, attribution, ceiling-flag, seat-flag, seat-status, launch-record, flag-reader, integration-check, per-seat-rotation, reviewer, resume-guard, mixed-liveness, model-validation, executable-preflight, compaction-survival and rotation-reporting entries', () => {
+test('DECLARED contains exactly the routing, pause-resolution, attribution, ceiling-flag, seat-flag, seat-status, launch-record, flag-reader, integration-check, per-seat-rotation, reviewer, resume-guard, mixed-liveness, timestamped-liveness, model-validation, executable-preflight, compaction-survival and rotation-reporting entries', () => {
   assert.deepEqual(Object.keys(DECLARED), [
     'implementer_unanswered -> advisor',
     'status.pause.resolution',
@@ -915,6 +970,7 @@ test('DECLARED contains exactly the routing, pause-resolution, attribution, ceil
     '--reviewer on both front-ends, and the review_blocked pause reason',
     "the console's /continue liveness guard samples by pause SCOPE, and no longer by rank",
     'a mixed CPU sample is reported as mixed rather than as a working child (#83)',
+    'a paused run keeps measuring the child, and its evidence says when it was measured (#101)',
     'models are validated before launch, graded per adapter, and a silent first turn names the model',
     'an unarmed run survives a compaction instead of ending on it (#96)',
     'a seat whose CLI is not installed is refused before anything is created (#51)',
@@ -1267,7 +1323,7 @@ async function provokeReviewBlocked(repo: string): Promise<{ relay: Relay; run: 
  * Drive a real relay into one condition and return the pause it raised.
  *
  * The provocations are the ones `resolution.test.ts`'s own `provoke` already uses, deliberately:
- * the same triggers reaching the same single halt site (src/relay/relay.ts:2768), where the
+ * the same triggers reaching the same single halt site (src/relay/relay.ts:2837), where the
  * classification is computed by production `resolutionFor` from the subject the caller passed.
  * Nothing here writes a `RunPause`.
  *
@@ -1560,8 +1616,8 @@ test('default run works in the run cwd and creates no worktree', async () => {
   }
 
   // The relay CLI passes process.cwd() as the run cwd: bin/conclave.ts:1208.
-  // The relay hands that same cwd to each participant adapter: src/relay/relay.ts:1681-1687.
-  // The cwd getter simply returns the option: src/relay/relay.ts:1531-1533.
+  // The relay hands that same cwd to each participant adapter: src/relay/relay.ts:1726-1732.
+  // The cwd getter simply returns the option: src/relay/relay.ts:1574-1576.
   assert.match(relay, /cwd:\s*process\.cwd\(\)/, 'relay block must start in process.cwd')
   // Both creation sites now pass a NAMED context object rather than an inline literal, because
   // the same object composes the launch args that get recorded -- see
@@ -1604,7 +1660,7 @@ test('default run works in the run cwd and creates no worktree', async () => {
 
   // A default run with no subagents must not create any git worktree. The relay only samples
   // the worktree list for its subagent-use report: src/relay/subagents.ts:68 defines
-  // worktreePaths, and src/relay/relay.ts:2228, :2345 and :3857 read it.
+  // worktreePaths, and src/relay/relay.ts:2273, :2390 and :4116 read it.
   // Prove it by exercising the run in a real temporary repository.
   const repo = mkdtempSync(join(tmpdir(), 'conclave-default-'))
   try {

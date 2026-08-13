@@ -60,6 +60,28 @@
  * refuses `/continue` and still offers `wait`, because continuing SENDS and a burst may be a
  * turn. What changed is that the operator is told what was actually measured before they
  * choose, instead of being handed a verdict the numbers do not support.
+ *
+ * ## A measurement without a time is not a measurement
+ *
+ * Everything above is about what the samples SUPPORT. #101 is about something one step back:
+ * how old they are. A pause captured one reading and then replayed it forever, so an operator
+ * polling `conclave status --json` was told `is still working (cpu 3.3%, 5.1%, 3.5%)` by a
+ * line measured minutes earlier, about a child that had since gone quiet at 0.2%. They waited
+ * out a turn that had already ended, twice in one day, and then aborted a run they could have
+ * continued.
+ *
+ * Two things follow, and they are separate:
+ *
+ *   - every `ChildLiveness` carries `measuredAt`, and every sentence built from one says so.
+ *     A reader can discount an old measurement; they cannot discount one that looks current,
+ *     and until now nothing on the line said which it was.
+ *   - the reading is RE-MEASURED while the pause lasts, boundedly, and the line says how many
+ *     times and whether it is still updating. See `LIVENESS_REFRESH_EVERY_MS` below and
+ *     `#refreshPauseLiveness` in `src/relay/relay.ts`, which owns the loop.
+ *
+ * The bound is the part that needs saying out loud: refreshing stops, and a line that stopped
+ * updating without saying so would be the original defect with a fresher number in it. So the
+ * final refresh marks itself final, and from then on the timestamp is the whole story.
  */
 
 import { execFileSync } from 'node:child_process'
@@ -93,6 +115,36 @@ export const IDLE_CPU_PERCENT = 3
  */
 export const QUIET_EVENT_COUNT = 5
 
+/**
+ * How often a paused run re-measures the child behind its liveness evidence.
+ *
+ * Long enough that the sampling is invisible -- three `ps` calls 400ms apart, twice a minute --
+ * and short enough that a turn which ends while the operator is reading the pause is reflected
+ * before they have finished deciding. The failure #101 describes took minutes to matter, not
+ * seconds.
+ */
+export const LIVENESS_REFRESH_EVERY_MS = 30_000
+
+/**
+ * How many times, at most. After this the evidence stops updating and says so.
+ *
+ * 60 at the interval above is thirty minutes, chosen against the one deadline the product
+ * already has: `/wait` defaults to fifteen (`src/repl/session.ts:1471`), so the refresh has to
+ * outlive a default wait or an operator who took the non-destructive option would find the
+ * evidence frozen underneath them at the moment they came back to it. Twice that is the margin.
+ *
+ * Bounded rather than unbounded, deliberately. Not for the cost -- 180 `ps` calls over half an
+ * hour is nothing -- but because an unattended pause can last days, and a background timer
+ * re-measuring a child nobody is reading about is a thing running for no reader. Thirty minutes
+ * is where "the operator is deciding" stops being a plausible description of the run.
+ *
+ * It is a chosen number, not a measured one, and it is labelled as such for the reason
+ * `IDLE_CPU_PERCENT` gives: what must not happen here is a number picked by intuition and then
+ * written about as though it were not. What keeps it honest is that reaching it is VISIBLE --
+ * the last line says re-measuring has stopped, so a stale reading is never silently stale.
+ */
+export const LIVENESS_REFRESH_LIMIT = 60
+
 export interface ChildLiveness {
   pid: number
   /** Whether the process still exists at all. */
@@ -106,6 +158,34 @@ export interface ChildLiveness {
    * that is exactly what a provider that stopped answering looks like from out here.
    */
   idle: boolean
+  /**
+   * When the LAST of the samples above was taken, in epoch milliseconds.
+   *
+   * Required, and that is the point of #101: a reading with no time on it cannot be discounted
+   * by the person reading it, so a pause replayed one for minutes and every reader took it for
+   * current. The last sample rather than the first, because the freshest thing the reading
+   * knows is what a reader is deciding against.
+   */
+  measuredAt: number
+}
+
+/**
+ * Whether the reading beside it is still being re-measured, and how often it has been.
+ *
+ * Absent where nothing is refreshing -- the `/continue` guard samples once, on demand, and has
+ * no loop behind it -- and that absence is reported as silence rather than as `0 refreshes`,
+ * which would claim a refresher exists and has done nothing.
+ */
+export interface LivenessRefreshState {
+  /** Re-measurements since the pause was raised. The first reading is not one. */
+  count: number
+  /**
+   * Why no further measurement will be taken, once that is true.
+   *
+   * Rendered into the line, because a refresher that goes quiet at its limit and says nothing
+   * leaves the reader with exactly the silently-ageing number #101 is about.
+   */
+  final?: string | undefined
 }
 
 /** One reading, or undefined if the process is gone. */
@@ -144,7 +224,15 @@ export async function sampleLiveness(
     if (i < count - 1) await new Promise((r) => setTimeout(r, everyMs))
   }
   const alive = samples.length > 0
-  return { pid, alive, samples, idle: alive && samples.every((c) => c < IDLE_CPU_PERCENT) }
+  return {
+    pid,
+    alive,
+    samples,
+    idle: alive && samples.every((c) => c < IDLE_CPU_PERCENT),
+    // After the loop, not before it: the reading is as old as its LAST sample, and stamping it
+    // at entry would date a `{samples: 3, everyMs: 400}` reading almost a second early.
+    measuredAt: Date.now(),
+  }
 }
 
 /**
@@ -213,9 +301,24 @@ export function reportsChildOnCpu(evidence: string): boolean {
  * samples the child fresh and has no matching count to pair with it — so every refusal said
  * "nothing at all since the prompt was sent" about a number nobody had looked at. Harmless
  * while the count was decoration; not harmless now that it is an input.
+ *
+ * ## The provenance sentence, and why it is a SEPARATE sentence
+ *
+ * Everything #101 adds is appended after the reading rather than woven into it: when the
+ * measurement was taken, and whether it is still being taken. Kept apart because the two halves
+ * answer different questions -- the reading says what the child is doing, the tail says how much
+ * that is worth right now -- and because `reportsChildOnCpu` matches the head, so a fact bolted
+ * into the `(cpu ...)` clause would put the pause menu's `wait` option one edit away from
+ * disappearing.
  */
-export function describeLiveness(l: ChildLiveness, emittedSinceSend: number | undefined): string {
-  if (!l.alive) return `child pid ${l.pid} is gone; the CLI exited without a terminal signal`
+export function describeLiveness(
+  l: ChildLiveness,
+  emittedSinceSend: number | undefined,
+  refresh?: LivenessRefreshState,
+): string {
+  if (!l.alive) {
+    return `child pid ${l.pid} is gone; the CLI exited without a terminal signal${provenance(l, refresh)}`
+  }
   const cpu = l.samples.map((c) => `${c.toFixed(1)}%`).join(', ')
   const since =
     emittedSinceSend === undefined
@@ -225,14 +328,15 @@ export function describeLiveness(l: ChildLiveness, emittedSinceSend: number | un
         : `${emittedSinceSend} event(s) since the prompt was sent`
   const head = (phrase: string): string => `child pid ${l.pid} ${phrase} (cpu ${cpu}) — ${since}. `
   const reading = readingOf(l)
+  const tail = provenance(l, refresh)
   if (reading === 'not_computing') {
     return (
       head(PHRASE.not_computing) +
-      `Idle is not dead: a CLI waiting on a provider that stopped answering looks like this`
+      `Idle is not dead: a CLI waiting on a provider that stopped answering looks like this${tail}`
     )
   }
   if (reading === 'working') {
-    return head(PHRASE.working) + `Continuing sends into a live turn, which neither CLI accepts`
+    return head(PHRASE.working) + `Continuing sends into a live turn, which neither CLI accepts${tail}`
   }
   const low = l.samples.filter((c) => c < IDLE_CPU_PERCENT).length
   const high = l.samples.length - low
@@ -249,6 +353,37 @@ export function describeLiveness(l: ChildLiveness, emittedSinceSend: number | un
     head(low > high ? PHRASE.barely : PHRASE.bursts) +
     `The samples disagree: ${low} below ${IDLE_CPU_PERCENT}% and ${high} at or above. ` +
     `${output} Continuing still sends into whatever produced the high sample, which neither ` +
-    `CLI accepts mid-turn`
+    `CLI accepts mid-turn${tail}`
   )
+}
+
+/** Seconds, no milliseconds: `ps` resolution does not justify three more digits. */
+function stamp(ms: number): string {
+  return new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z')
+}
+
+/**
+ * When this was measured, and whether it is still being measured.
+ *
+ * Always says WHEN. That half is unconditional on purpose: the `/continue` guard has no
+ * refresher behind it and its reading is one second old, but a reading whose age is obvious to
+ * the code that made it is exactly the one whose age a later reader cannot see -- and the
+ * refusal is written onto the pause (`refusal.reason`) where it is read long afterwards.
+ *
+ * Says whether it is STILL being measured only when something is doing so. Absent means "one
+ * reading, taken on demand", which is a different fact from "a refresher that has run zero
+ * times", and reporting the second where the first is true would promise updates nothing is
+ * going to deliver.
+ */
+function provenance(l: ChildLiveness, refresh: LivenessRefreshState | undefined): string {
+  const at = `. Measured ${stamp(l.measuredAt)}`
+  if (!refresh) return `${at}.`
+  if (refresh.final !== undefined) {
+    return (
+      `${at}, re-measured ${refresh.count} time(s) since the pause was raised, and ` +
+      `${refresh.final} — so this reading no longer updates and only ages from here.`
+    )
+  }
+  if (refresh.count === 0) return `${at}, and re-measured while the pause lasts.`
+  return `${at}, re-measured ${refresh.count} time(s) since the pause was raised.`
 }
