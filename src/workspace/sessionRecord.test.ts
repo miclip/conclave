@@ -11,6 +11,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 import type { Confidence, Provenance } from '../contract/outcome.ts'
 import { RelayEventStream } from '../relay/observe.ts'
+import { rotationFor, type RotationConfig } from '../relay/relay.ts'
 import { resolutionFor } from '../relay/resolution.ts'
 import {
   listSessions,
@@ -26,6 +27,7 @@ import {
   type SessionRunState,
   type SessionStatus,
 } from './sessionRecord.ts'
+import { formatSession, formatSessionJson } from './sessionView.ts'
 
 function dir(): string {
   return mkdtempSync(join(tmpdir(), 'conclave-record-'))
@@ -98,8 +100,21 @@ function fakeSeat(id: string, rank: string, agent: string, role: string = rank) 
   }
 }
 
-/** A relay-shaped stand-in. Structural typing is the point: no Relay is constructed. */
-function fakeRelay(): RecordableRelay & {
+/**
+ * A relay-shaped stand-in. Structural typing is the point: no Relay is constructed.
+ *
+ * `opts.rotation` is resolved through the PRODUCTION `rotationFor`, not a hand-written answer.
+ * The claim the rotation block makes is that what an observer reads is what the relay enforces,
+ * and a stand-in that resolved the policy its own way would prove the opposite of that.
+ * `opts.seats` names extra implementer ids, because a per-seat override needs a second seat to
+ * be about.
+ */
+function fakeRelay(opts?: {
+  rotation?: RotationConfig | undefined
+  seats?: string[]
+  /** A reviewer seat: rank `implementer`, role `reviewer` (D5, #72). */
+  reviewer?: boolean
+}): RecordableRelay & {
   stream: RelayEventStream
   pending: { id: string; tool: string }[]
   messages: unknown[]
@@ -110,6 +125,10 @@ function fakeRelay(): RecordableRelay & {
   const messages: unknown[] = []
   const advisor = fakeSeat('advisor', 'advisor', 'codex')
   const implementer = fakeSeat('implementer', 'implementer', 'claude')
+  const extra = (opts?.seats ?? []).map((id) => fakeSeat(id, 'implementer', 'claude'))
+  // Rank `implementer`, role `reviewer`, exactly as `Relay` joins one: the rank/role split is
+  // the whole reason this seat is worth constructing here.
+  if (opts?.reviewer) extra.push(fakeSeat('reviewer', 'implementer', 'codex', 'reviewer'))
   return {
     stream,
     pending,
@@ -117,15 +136,20 @@ function fakeRelay(): RecordableRelay & {
     // Named `transcripts` rather than `seats`: `RecordableRelay.seats()` is the dispatcher's
     // per-seat state, and a stand-in whose `seats` was a map of scripted transcripts would
     // satisfy the structural type by accident and mean something else entirely.
-    transcripts: { advisor: advisor.state, implementer: implementer.state },
+    transcripts: {
+      advisor: advisor.state,
+      implementer: implementer.state,
+      ...Object.fromEntries(extra.map((s) => [s.seat.id, s.state])),
+    },
     cwd: '/tmp/project',
     operator: 'human',
-    participants: [advisor.seat, implementer.seat],
+    participants: [advisor.seat, implementer.seat, ...extra.map((s) => s.seat)],
     get log() {
       return messages
     },
     permissionsPending: () => pending,
-    observe: (opts) => stream.observe(opts),
+    rotationOf: (seatId) => rotationFor(opts?.rotation, seatId),
+    observe: (o) => stream.observe(o),
   }
 }
 
@@ -311,6 +335,131 @@ test('a seat stopped at a permission prompt says so in the status file', async (
 
   relay.stream.close()
   await recording.close()
+})
+
+/**
+ * Whether rotation is armed, per seat, in the file and in the prose (#103).
+ *
+ * The reporter of #103 launched with `--checks`, could not confirm it from `status --json`, and
+ * told their own operator rotation was off. It was on; the console said so and the structured
+ * interface had no key to say it with. So the assertion here is not "a key exists" but that the
+ * THREE states a seat can be in are told apart by a reader who never sees the console:
+ *
+ *   armed        the run's checks apply to this seat, and `rotate` is on its pauses
+ *   unarmed      the run configured no rotation at all -- what a plain `conclave session` is
+ *   not this one  a policy exists and names this seat with `checks: []`, which is a decision
+ *                that this seat cannot be rotated, not an absent configuration
+ *
+ * Resolved through the production `rotationFor`, so the block reports the same policy the relay
+ * enforces. Two seats are checked for ABSENCE, and the second is the interesting one: the
+ * advisor, which holds no seat, and the REVIEWER, whose rank is `implementer` and whose role is
+ * not (D5, #72). Rotation eligibility is the role -- `#implementers()` filters on it and the
+ * pause gate offers `rotate` only for seats in that set -- so a rank-based projection would
+ * report this seat as armed under a policy that can never be applied to it.
+ */
+test('each implementer seat reports whether rotation is armed, and tells an unarmed run from an unrotatable seat', async () => {
+  const root = dir()
+  // One run carries two of the three states, which is the point of resolving per seat: the run
+  // is armed and one seat of it is not, and no run-wide answer is true of both.
+  const armedRun = fakeRelay({
+    seats: ['implementer-2'],
+    reviewer: true,
+    rotation: {
+      checks: ['npm test', { command: 'npm run lint', relevance: 'informational' }],
+      seats: { 'implementer-2': { checks: [] } },
+    },
+  })
+  const armedRec = recordSession(armedRun, {
+    repoRoot: root,
+    id: 'rot-armed',
+    goal: 'g',
+    front: 'session',
+    startedAt: Date.now(),
+    build: 'test-build',
+  })
+  await armedRec.refresh()
+
+  const armedSession = readSession(root, 'rot-armed')
+  assert.ok(armedSession)
+  const byId = (s: typeof armedSession, id: string) => s?.status.participants.find((p) => p.id === id)
+
+  const lead = byId(armedSession, 'implementer')
+  assert.deepEqual(
+    lead?.rotation,
+    {
+      configured: true,
+      armed: true,
+      // Normalized: the bare string is `required`, which is what it has always meant. A
+      // consumer must not have to re-implement that fork to read this field.
+      checks: [
+        { command: 'npm test', relevance: 'required' },
+        { command: 'npm run lint', relevance: 'informational' },
+      ],
+      onDegradation: 'candidate',
+    },
+    'the lead seat is under the run policy, and says so with the commands themselves',
+  )
+
+  const second = byId(armedSession, 'implementer-2')
+  assert.deepEqual(
+    second?.rotation,
+    { configured: true, armed: false, checks: [], onDegradation: 'candidate' },
+    'a seat whose policy sets no checks is CONFIGURED and not armed -- the state a run-wide flag cannot express',
+  )
+
+  assert.equal(byId(armedSession, 'advisor')?.rotation, undefined, 'the advisor holds no seat to rotate')
+
+  // The seat a RANK test would have got wrong. A reviewer's rank IS `implementer` (D5, #72),
+  // and under an armed run policy a rank-based projection reports it as armed -- a policy that
+  // cannot apply to it, because `rotate` is offered only for seats in `#implementers()`, which
+  // filters on role, and no pause names the reviewer as its subject: `review_blocked` names
+  // the seat whose work was rejected.
+  const reviewer = byId(armedSession, 'reviewer')
+  assert.equal(reviewer?.rank, 'implementer', 'the premise: a reviewer shares the implementer rank')
+  assert.equal(reviewer?.role, 'reviewer')
+  assert.equal(reviewer?.rotation, undefined, 'a reviewer is not a rotation subject and reports no policy')
+
+  armedRun.stream.close()
+  await armedRec.close()
+
+  // The third state, and the one the reporter's probe could not tell from the second: a run
+  // that never configured rotation at all.
+  const plainRun = fakeRelay()
+  const plainRec = recordSession(plainRun, {
+    repoRoot: root,
+    id: 'rot-plain',
+    goal: 'g',
+    front: 'session',
+    startedAt: Date.now(),
+    build: 'test-build',
+  })
+  await plainRec.refresh()
+  const plainSession = readSession(root, 'rot-plain')
+  assert.ok(plainSession)
+  assert.deepEqual(
+    byId(plainSession, 'implementer')?.rotation,
+    { configured: false, armed: false, checks: [], onDegradation: null },
+    'an unconfigured run reports the block anyway -- a missing key is what #103 read as false',
+  )
+
+  // Present rather than absent is the whole fix, said as its own assertion: the probe in #103
+  // read a key that did not exist and could not tell that from a false one.
+  assert.ok(
+    JSON.parse(formatSessionJson(plainSession!)).participants.some(
+      (p: { rotation?: unknown }) => p.rotation !== undefined,
+    ),
+    'status --json carries the rotation block on a default unarmed run',
+  )
+
+  // ...and the prose says the same three things, because an operator answering a pause at a
+  // console is making the same decision as the poller.
+  const armedProse = formatSession(armedSession!, Date.now())
+  assert.match(armedProse, /rotation:\s+ARMED, on degradation: candidate — npm test, npm run lint \[informational\]/)
+  assert.match(armedProse, /rotation:\s+not armed for this seat — its policy sets no checks/)
+  assert.match(formatSession(plainSession!, Date.now()), /rotation:\s+not armed — no checks configured for this run/)
+
+  plainRun.stream.close()
+  await plainRec.close()
 })
 
 /**

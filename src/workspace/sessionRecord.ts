@@ -57,6 +57,10 @@ import { join, resolve, sep } from 'node:path'
 import type { Confidence, Provenance } from '../contract/outcome.ts'
 import type { RelayEvent } from '../relay/observe.ts'
 import type { RunOutcome, RunPause } from '../relay/run.ts'
+// The two accessors, not a third copy of them. A check is a bare string or a pair, and a
+// reader that re-implemented that fork would eventually disagree with the one the checks are
+// actually RUN through.
+import { checkCommand, checkRelevance, type CheckRelevance, type CheckSpec } from '../rotation/record.ts'
 
 /** Bumped when a consumer would break. Present from the first version, as in `report.ts`. */
 export const SESSION_SCHEMA = 1
@@ -144,6 +148,83 @@ export interface SessionSeatStatus {
   worktree?: { path: string; branch: string } | undefined
 }
 
+/**
+ * One implementer seat's rotation policy, resolved, as an observer can read it.
+ *
+ * Whether rotation is armed is a run-configuration fact that changes WHAT THE OPTIONS ARE.
+ * Unarmed, a `rotation_candidate` pause offers `continue, constrain, abort`; armed, `rotate`
+ * is spliced in and the seat can be adjudicated instead of merely tolerated or abandoned.
+ * Since #96 that is the only difference at a compaction WHEN THE ARMED POLICY IS `candidate`,
+ * which is the default and every configuration either front-end can produce: such a run
+ * pauses when attended and carries on when not, exactly as an unarmed one does, so `--checks`
+ * widens the choice rather than deciding whether there is a run left to choose for.
+ *
+ * `onDegradation: 'automatic'` is the case that equivalence does NOT cover, and it is why
+ * that field is reported beside `armed` rather than left implicit: an automatic seat takes
+ * neither pause branch. It rotates on detection, attended or not, so there may be no question
+ * put to the operator at all. Programmatic today -- no flag sets it -- which is a fact about
+ * the CLI and not about what a poller can encounter.
+ *
+ * An operator deciding how to answer had no way to tell these regimes apart except by
+ * reading the console this interface exists to replace, and a mistyped `--checks` was
+ * therefore invisible: the run behaved as unarmed and nothing queryable said why (#103).
+ *
+ * PER SEAT, not per run, and that is the decision. Rotation policy is a run-level default a
+ * seat may amend (D7, #78), so `--checks` can be replaced on one seat and left alone on the
+ * others; a single run-wide `rotation` block would be right about the run and wrong about
+ * exactly the seat whose pause is being answered. At N=1 it degenerates to the run's policy,
+ * which is the honest answer there and the one #103 asked for.
+ *
+ * On seats whose ROLE is `implementer`, which is what `Relay#implementers()` means and what
+ * the pause gate reads: `rotate` is offered only when the seat it would act on is in that
+ * set, so a reviewer -- rank `implementer`, role `reviewer` (D5, #72) -- is never offered
+ * rotation and is never assessed for degradation. Reporting a policy on it would describe
+ * something that cannot happen to it.
+ *
+ * Every field is present whenever the block is, including when nothing is configured. A block
+ * that appeared only on armed runs would reproduce the bug it fixes -- the reporter's probe
+ * read a key that did not exist and got a falsy value, which is indistinguishable from a build
+ * that does not report this at all.
+ */
+export interface SessionRotationStatus {
+  /**
+   * Whether this seat is under any rotation policy: the run's, or its own amendment of it.
+   *
+   * `false` is a run that never configured rotation. Distinct from `armed: false` with
+   * `configured: true`, which is a policy that says THIS SEAT is not rotatable -- a seat entry
+   * with `checks: []`. Both refuse to rotate; only the second was asked for, and an operator
+   * chasing a flag that did not take effect needs to know which one they are looking at.
+   */
+  configured: boolean
+  /**
+   * Whether `rotate` is available on this seat's pauses: `checks` is non-empty.
+   *
+   * Derived once here rather than left to each consumer, because it is the same predicate the
+   * relay itself gates on (`rotationFor(...)?.checks.length > 0`), and a consumer re-deriving
+   * it from `checks` is a consumer that will eventually derive it differently.
+   */
+  armed: boolean
+  /**
+   * The commands themselves, and what each is allowed to decide.
+   *
+   * Normalized out of `CheckSpec`, whose bare-string form means `required`: a structured
+   * interface that handed a consumer two shapes for one field would make every reader
+   * re-implement `checkCommand`. Relevance is carried for the reason the console banner
+   * carries it -- three checks of which one can block a transfer is not three armed checks.
+   */
+  checks: { command: string; relevance: CheckRelevance }[]
+  /**
+   * What a detected degradation does on this seat, or `null` when nothing is configured.
+   *
+   * `armed` alone does not answer the operator's actual question at a pause, because
+   * `automatic` means there may be no pause to answer: the seat is replaced without asking.
+   * `null` rather than an invented `'candidate'`, the way `launch.model` is null when the argv
+   * named no model -- reporting the default as though it had been chosen would claim a policy
+   * this run does not have.
+   */
+  onDegradation: 'candidate' | 'automatic' | null
+}
+
 export interface SessionParticipantStatus {
   id: string
   agent: string
@@ -200,6 +281,19 @@ export interface SessionParticipantStatus {
   activity?: { kind: string; tool?: string | undefined; since: number } | undefined
   /** Stopped at a permission prompt, and for what. Read from `relay.permissionsPending()`. */
   awaitingPermission?: { tool: string } | undefined
+  /**
+   * This seat's effective rotation policy. See `SessionRotationStatus`.
+   *
+   * On seats whose ROLE is `implementer`, at every N. The advisor holds no seat and a REVIEWER
+   * holds one that rotation never acts on, so neither carries a block that would report a
+   * policy which could never apply -- the same reason `seat` below is absent on the advisor.
+   * Role rather than rank is the load-bearing part: a reviewer's RANK is `implementer`.
+   * Unlike `seat`, this IS present on a default one-seat run:
+   * D1 keeps a key off the N=1 document when it has nothing to say at N=1, and this one has
+   * the whole of #103 to say there. That is a departure from D1's usual reading and it is
+   * deliberate; the shape pins in `defaultUnchanged.test.ts` record it.
+   */
+  rotation?: SessionRotationStatus | undefined
   /**
    * This seat's place in the dispatcher, at N>1 only.
    *
@@ -666,6 +760,21 @@ export interface RecordableRelay {
    * empty on a session that has not run yet, and the projection says nothing rather than
    * guessing.
    */
+  /**
+   * This seat's resolved rotation policy, or `undefined` when the run configured none.
+   *
+   * Structural like the rest, and deliberately shaped as `EffectiveRotation` rather than as the
+   * document: the relay resolves the policy (`Relay.rotationOf`, which is `rotationFor`), and
+   * this file decides how it is REPORTED. A relay that returned the finished JSON block would
+   * be a relay that knows about being recorded.
+   *
+   * OPTIONAL, so a stand-in written before rotation was reported still satisfies the contract
+   * and gets the document it got before -- no block rather than a block claiming nothing is
+   * configured, because a stand-in that cannot answer has not said the run is unarmed.
+   */
+  rotationOf?(
+    seatId: string,
+  ): { checks: readonly CheckSpec[]; onDegradation: 'candidate' | 'automatic' } | undefined
   seats?(): readonly { seat: string; state: string; current?: string | undefined; dispatched: number }[]
   tasks?(): readonly { task: { id: string; instruction: string }; runtime: { state: string } }[]
   readonly worktrees?: { seats: readonly { seatId: string; worktreePath: string; branch: string }[] } | undefined
@@ -739,6 +848,25 @@ export function recordSession(
     return relay.participants.map((p) => {
       const pending = relay.permissionsPending().find((x) => x.id === p.id)
       const seen = activity.get(p.id)
+      // ROLE, not rank, matching `Relay#implementers()` -- which is what rotation eligibility
+      // means inside the relay: the seats degradation is assessed on, and the seats its refusal
+      // lists. Rank would be wrong by exactly one seat: a REVIEWER is rank `implementer` and
+      // role `reviewer` (D5, #72), so a rank test would report a rotation policy on a seat no
+      // pause ever names as a rotation subject and no assessment ever visits. A stand-in that
+      // cannot resolve a policy (`rotationOf` absent) gets no block at all -- see the contract.
+      const reportsRotation = p.role === 'implementer' && relay.rotationOf !== undefined
+      const rot = reportsRotation ? relay.rotationOf?.(p.id) : undefined
+      const rotation: SessionRotationStatus | undefined = reportsRotation
+        ? {
+            configured: rot !== undefined,
+            armed: (rot?.checks.length ?? 0) > 0,
+            checks: (rot?.checks ?? []).map((c) => ({
+              command: checkCommand(c),
+              relevance: checkRelevance(c),
+            })),
+            onDegradation: rot?.onDegradation ?? null,
+          }
+        : undefined
       const exec = multi ? execs.find((s) => s.seat === p.id) : undefined
       const current = exec?.current === undefined ? undefined : queue.find((e) => e.task.id === exec.current)
       const tree = exec && relay.worktrees?.seats.find((w) => w.seatId === p.id)
@@ -754,6 +882,7 @@ export function recordSession(
         turns: turns.get(p.id) ?? [],
         ...(seen ? { activity: seen } : {}),
         ...(pending ? { awaitingPermission: { tool: pending.tool } } : {}),
+        ...(rotation ? { rotation } : {}),
         ...(exec
           ? {
               seat: {
