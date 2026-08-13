@@ -51,9 +51,20 @@ import {
   type Visibility,
 } from './message.ts'
 import { RelayEventStream, type ObserveOptions, type RelayEvent, type RunReason } from './observe.ts'
-import { describeLiveness, reportsChildOnCpu, sampleLiveness } from '../outcomes/liveness.ts'
+import {
+  LIVENESS_REFRESH_EVERY_MS,
+  LIVENESS_REFRESH_LIMIT,
+  describeLiveness,
+  readingOf,
+  reportsChildOnCpu,
+  sampleLiveness,
+  type ChildLiveness,
+  type LivenessReading,
+  type LivenessRefreshState,
+} from '../outcomes/liveness.ts'
 import {
   RunHandle,
+  type Decision,
   type PauseOption,
   type PauseReason,
   type PauseSupersession,
@@ -453,6 +464,26 @@ export interface RelayOptions {
   onLog?: (m: RelayMessage) => void
   /** Enables automatic rotation on mechanical degradation. See `RotationConfig`. */
   rotation?: RotationConfig
+  /**
+   * Injected for testing the pause's child-liveness evidence and its refresh.
+   *
+   * Production samples the actual child process. An in-memory fake has no child, so without
+   * this seam the whole of #101 -- the measurement, its timestamp, and the re-measurement that
+   * makes the timestamp move -- is unreachable from any test that does not spawn a real CLI.
+   * The console already carries the identical seam for its `/continue` guard
+   * (`src/repl/session.ts:284`), and the two are deliberately the same shape.
+   */
+  liveness?: ((pid: number) => Promise<ChildLiveness>) | undefined
+  /**
+   * How often a paused run re-measures its liveness evidence. Default
+   * `LIVENESS_REFRESH_EVERY_MS`.
+   *
+   * A test that had to wait thirty real seconds to see the second measurement would not be
+   * written, and the refresh would ship with only its first tick ever observed.
+   */
+  livenessRefreshMs?: number | undefined
+  /** How many re-measurements at most. Default `LIVENESS_REFRESH_LIMIT`. */
+  livenessRefreshLimit?: number | undefined
 }
 
 /**
@@ -506,6 +537,20 @@ export interface TurnResult {
   /** Whether the transcript settle window was exhausted with the turn still in progress. */
   unsettled: boolean
   emittedSinceSend: number
+  /**
+   * How long this participant's event list was when the prompt went out.
+   *
+   * The `before` half of the subtraction above, kept rather than discarded so the count can be
+   * TAKEN AGAIN later against the same origin. That is what lets a paused run refresh both
+   * halves of its liveness evidence on one clock: a fresh CPU sample paired with the frozen
+   * count would date one fact to the other's moment, which is the mistake `describeLiveness`
+   * already refuses to make for the `/continue` guard (#101, #83).
+   *
+   * And the count is not decoration on that line. A child whose events go 18 → 26 while the
+   * operator reads the pause is producing; one stuck at 18 is not, and neither fact is legible
+   * from a number that cannot move.
+   */
+  emittedBefore: number
   /** Paths that became dirty in this participant's own root during the turn. */
   changedDuringTurn: string[]
 }
@@ -2488,7 +2533,7 @@ export class Relay {
     for (const text of extractFlags(prose)) {
       this.flags.push({ participant: p.id, text, seq: this.log.length })
     }
-    return { prose, end, unsettled, emittedSinceSend: p.events.length - before, changedDuringTurn: dirtyPaths(turnRoot).filter((f) => !treeBeforeTurn.has(f)) }
+    return { prose, end, unsettled, emittedSinceSend: p.events.length - before, emittedBefore: before, changedDuringTurn: dirtyPaths(turnRoot).filter((f) => !treeBeforeTurn.has(f)) }
   }
 
   /**
@@ -2646,14 +2691,27 @@ export class Relay {
    * Best effort by construction. An adapter with no single child to name returns nothing and
    * the pause reads exactly as it did before; a sampling failure is not worth sinking a
    * pause a human is waiting on.
+   *
+   * Returns the MEASUREMENT and not just the sentence, because the sentence has to be written
+   * again -- `#refreshPauseLiveness` re-renders this same line every interval, and a caller
+   * holding only prose could not tell which of the pause's evidence lines was its to rewrite.
    */
-  async #livenessEvidence(p: RelayParticipant, emittedSinceSend: number): Promise<string[]> {
+  async #measureLiveness(
+    p: RelayParticipant,
+    emittedBefore: number,
+    refresh: LivenessRefreshState,
+  ): Promise<{ line: string; sample: ChildLiveness; reading: LivenessReading } | undefined> {
     const pid = p.session.childPid
-    if (pid === undefined) return []
+    if (pid === undefined) return undefined
     try {
-      return [describeLiveness(await sampleLiveness(pid), emittedSinceSend)]
+      const sample = await (this.#opts.liveness ?? sampleLiveness)(pid)
+      // Counted NOW against the origin the turn recorded, not carried over from the last
+      // reading. Both halves of the line then date from the same moment, which is the rule the
+      // `/continue` guard already follows by passing no count at all rather than a stale one.
+      const line = describeLiveness(sample, p.events.length - emittedBefore, refresh)
+      return { line, sample, reading: readingOf(sample) }
     } catch {
-      return []
+      return undefined
     }
   }
 
@@ -2724,6 +2782,17 @@ export class Relay {
       subject: ResolutionSubject
       detail: string
       evidence: string[]
+      /**
+       * The seat whose child to measure, and the origin its output count is taken from.
+       *
+       * The MEASUREMENT is made here rather than by the caller, which is a move inward: the
+       * three call sites used to append `await this.#livenessEvidence(...)` to their own
+       * evidence arrays, so each one knew where in that array the liveness line had landed and
+       * none of them wrote it down. Refreshing a line means rewriting it in place, and a
+       * position nobody records is a position nobody can rewrite. This is also the one place
+       * every pause passes through, which is the argument `#halt` already makes for itself.
+       */
+      liveness?: { participant: RelayParticipant; emittedBefore: number }
       conflict?: AuthorityConflict
       verdictOf?: { participant: string; endSeq: number }
       superseded?: PauseSupersession
@@ -2760,6 +2829,20 @@ export class Relay {
           `to pause at this point and decide instead.`,
       )
     }
+    // Measured AFTER the unattended branch, which is a change and a small improvement. The
+    // three call sites used to sample before calling in, so an unattended run paid the better
+    // part of a second of `ps` and then threw the reading away -- `#end` takes a reason and a
+    // detail, and the evidence array never reached it. Nothing observable is lost: there was
+    // never anywhere for that reading to appear.
+    //
+    // `{ count: 0 }` is the honest opening state now that the sample is only taken where a
+    // refresher will follow it: the line says it is re-measured while the pause lasts, and it
+    // is. Rendering that sentence for a run about to end would have promised updates from a
+    // loop that was never going to exist.
+    const measured = p.liveness
+      ? await this.#measureLiveness(p.liveness.participant, p.liveness.emittedBefore, { count: 0 })
+      : undefined
+    const evidence = measured ? [...p.evidence, measured.line] : p.evidence
     // Not awaited yet. `pauseAt` installs the pause and flips the handle to `paused`
     // synchronously, and only the promise it returns is the suspension -- so reading
     // `handle.pause` here gets the very object the operator will be handed, before anything
@@ -2798,24 +2881,47 @@ export class Relay {
     //
     // The evidence carrying the liveness reading is the same one the operator reads, so the
     // option and the reason cannot disagree; `reportsChildOnCpu` says which readings count (#83).
-    if (p.evidence.some(reportsChildOnCpu)) options.splice(1, 0, 'wait')
+    if (evidence.some(reportsChildOnCpu)) options.splice(1, 0, 'wait')
 
     const deciding = handle.pauseAt({
       reason,
       resolution,
       detail: p.detail,
-      evidence: p.evidence,
+      evidence,
       options,
       ...(p.conflict === undefined ? {} : { conflict: p.conflict }),
       ...(p.verdictOf === undefined ? {} : { verdictOf: p.verdictOf }),
       ...(p.superseded === undefined ? {} : { superseded: p.superseded }),
+      ...(measured === undefined || p.liveness === undefined
+        ? {}
+        : {
+            liveness: {
+              participant: p.liveness.participant.id,
+              index: evidence.length - 1,
+              sample: measured.sample,
+              reading: measured.reading,
+              firstAt: measured.sample.measuredAt,
+              refreshes: 0,
+            },
+          }),
       atSeq: this.#seq,
     })
     // Set by the line above; nothing runs between the two that could clear it.
     const pause = handle.pause!
     this.#stream.emit({ type: 'pause', pause })
+    // Started here and stopped in the `finally`, so its lifetime is exactly the suspension.
+    // Nothing else in this method may return between the two.
+    const refreshing =
+      p.liveness && pause.liveness
+        ? this.#refreshPauseLiveness(handle, pause, p.liveness.participant, p.liveness.emittedBefore)
+        : undefined
 
-    const decision = await deciding
+    let decision: Decision
+    try {
+      decision = await deciding
+    } finally {
+      refreshing?.stop()
+    }
     // No `resume` on an abort. The run does not continue, and `run_end` is what says so --
     // a resume followed immediately by the end would read as a session that carried on.
     if (decision.kind === 'abort') return this.#end('stopped', decision.detail)
@@ -2824,6 +2930,159 @@ export class Relay {
     this.#stream.emit({ type: 'resume', pause })
     this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text: `resumed from ${reason}` })
     return undefined
+  }
+
+  /**
+   * Keep a paused run's liveness evidence measured rather than remembered.
+   *
+   * ## What was actually wrong
+   *
+   * A pause captured one reading of the child and then served it, unchanged, for as long as the
+   * pause lasted. `conclave status --json` was the only thing an agent operator had, and it kept
+   * saying `is still working (cpu 3.3%, 5.1%, 3.5%) — 18 event(s) since the prompt was sent`
+   * about a child that had since settled to 0.2% with its turn over. The operator waited out a
+   * finished turn twice in one day and then aborted a run they could have continued (#101).
+   *
+   * The reporter also believed a SECOND pause had replayed the first one's samples, from the
+   * byte-identical line appearing minutes apart. That part is not what happened, and it is worth
+   * writing down because it points at a different mechanism: the loop is suspended at `await
+   * deciding` above for the whole pause, so `#halt` cannot run again, and a watchdog `revision`
+   * or replacement `turn_end` arriving meanwhile goes to `#trackSupersession`, which amends THE
+   * SAME `RunPause` in place (`src/relay/run.ts:517`). There was one pause, read twice. The
+   * evidence was not re-derived because nothing had re-derived it since it was captured -- which
+   * is the same defect, reached by a shorter path than the report proposed.
+   *
+   * ## Why a refresh here and not a re-sample on read
+   *
+   * The issue's first suggestion was to re-sample when `status` is read. `conclave status` is a
+   * separate short-lived process reading `status.json` off disk; it holds no `RunHandle`, and the
+   * child pids it would have to sample are never written to that file. Re-sampling on read means
+   * first publishing per-seat child pids, then having every reader shell out to `ps` -- so the
+   * measurement would be made by whoever happened to look, on a machine that may not be the one
+   * the child is on. The orchestrator owns the pty and already knows the pid. It measures.
+   *
+   * ## Bounded, and loudly so
+   *
+   * `LIVENESS_REFRESH_LIMIT` re-measurements and then it stops. The bound is not the interesting
+   * part; SAYING SO is. A refresher that fell silent at its limit would leave the operator with a
+   * number that looks live and is not, which is precisely #101 with extra machinery. So the last
+   * refresh writes `final` into the line and into `pause.liveness`, and from then on the reading
+   * advertises that it only ages.
+   *
+   * ## What this does NOT do
+   *
+   * It does not decide anything, and `/continue` does not read it. That guard samples the child
+   * itself at the instant of the decision, because continuing SENDS into whatever is there and a
+   * reading up to `LIVENESS_REFRESH_EVERY_MS` old is not a reading of now. The conservative
+   * refusal from #43 is untouched; this makes the evidence beside it honest about its age, which
+   * is a different job (see `resumeRun` in `src/repl/session.ts`).
+   */
+  #refreshPauseLiveness(
+    handle: RunHandle,
+    pause: RunPause,
+    participant: RelayParticipant,
+    emittedBefore: number,
+  ): { stop(): void } {
+    const everyMs = this.#opts.livenessRefreshMs ?? LIVENESS_REFRESH_EVERY_MS
+    const limit = this.#opts.livenessRefreshLimit ?? LIVENESS_REFRESH_LIMIT
+    /**
+     * The session the first reading was of.
+     *
+     * `rotate` is an option ON a pause and does not resolve it, so a seat can be replaced while
+     * this loop is running: `#rotate` swaps `p.session` and splices the audition's events onto
+     * the front of the seat's own. Sampling on would then measure the REPLACEMENT's child and
+     * count events belonging to two different children against one origin -- a reading about
+     * nothing that ever existed. There is no honest refresh of a measurement whose subject is
+     * gone, so it stops and says the seat was replaced.
+     */
+    const measuredSession = participant.session
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let stopped = false
+    const stop = (): void => {
+      stopped = true
+      if (timer) clearTimeout(timer)
+    }
+    /**
+     * Whether there is still anything to measure for.
+     *
+     * `handle.pause !== pause` is the ordinary case: the operator decided while a sample was in
+     * flight. `#stream.closed` is the one that is not ordinary and was missed -- `relay.stop()`
+     * ends the run WITHOUT resolving the pause, so `#halt` stays suspended at `await deciding`
+     * forever and the `finally` that calls `stop()` never runs. A console reaching the end of a
+     * piped stdin does exactly that. Without this check the timer went on sampling a closed
+     * session's pid for the rest of its bound -- half an hour past teardown -- and emitting into
+     * a stream that counts refusals as an alarm.
+     */
+    const over = (): boolean => stopped || handle.pause !== pause || this.#stream.closed
+    const tick = async (): Promise<void> => {
+      if (over()) return stop()
+      const block = pause.liveness
+      if (!block) return stop()
+      const replaced = participant.session !== measuredSession
+      const count = replaced ? block.refreshes : block.refreshes + 1
+      const last = replaced || count >= limit
+      const state: LivenessRefreshState = last
+        ? {
+            count,
+            final: replaced
+              ? `${participant.id}'s session was replaced, so there is no longer a child this reading is about`
+              : `re-measuring has reached its limit of ${limit}`,
+          }
+        : { count }
+      // The seat is gone: say so on the existing reading rather than measuring a stranger.
+      const measured = replaced ? undefined : await this.#measureLiveness(participant, emittedBefore, state)
+      if (over()) return stop()
+      // A sampling failure keeps the previous READING rather than blanking it: a pause a human
+      // is deciding at is not improved by losing the line it was deciding on. The line is still
+      // rewritten, from that same unchanged sample, so its refresh state stays true -- the first
+      // version only rewrote on success, which meant a `ps` that failed every time walked to the
+      // bound with `final` set in the JSON and a line still promising updates. That is #101 with
+      // a flag nobody reads, and it is worth more care than the failure itself: the prose is what
+      // an operator acts on, and the fact beside it is what an agent acts on, so the two
+      // disagreeing is worse than either being stale.
+      if (measured) {
+        block.sample = measured.sample
+        block.reading = measured.reading
+      }
+      pause.evidence[block.index] = measured?.line ?? describeLiveness(block.sample, undefined, state)
+      block.refreshes = count
+      if (last) block.final = state.final
+      // `wait` recomputed with the line it is justified by. It is offered when the evidence
+      // reports a child with something on the CPU, and that evidence now MOVES -- so a menu
+      // decided once at raise time would drift away from the reason for it, which is the exact
+      // coupling `reportsChildOnCpu` exists to prevent (#83). Both directions matter: a pause
+      // raised on an idle child that has since started working must offer the non-destructive
+      // option, and one raised on a working child that has since gone must stop advertising a
+      // wait for something that will never arrive.
+      //
+      // Only `wait`. Every other option turns on configuration and authority, which a CPU
+      // sample says nothing about.
+      const shouldWait = pause.evidence.some(reportsChildOnCpu)
+      const offered = pause.options.indexOf('wait')
+      if (shouldWait && offered === -1) pause.options.splice(1, 0, 'wait')
+      else if (!shouldWait && offered !== -1) pause.options.splice(offered, 1)
+      // The status file is written from the LIVE pause object on any event, so an in-place
+      // change reaches disk on the next one -- and a pause is precisely when nothing else is
+      // flowing. Same reasoning as `/wait` in the console (`src/repl/session.ts:1471`), and the
+      // reader who needs it most is the one polling from outside.
+      this.#stream.emit({ type: 'liveness', pause })
+      if (last) return stop()
+      schedule()
+    }
+    const schedule = (): void => {
+      if (over()) return
+      // Rescheduled after each reading rather than on an interval: a sample costs the better
+      // part of a second, and an interval shorter than a slow `ps` would stack ticks.
+      timer = setTimeout(() => void tick(), everyMs)
+      // Nothing here should keep the process alive. A paused run is held open by the operator,
+      // not by its own diagnostics.
+      timer.unref()
+    }
+    // A limit of zero means off, and it has to be checked HERE rather than in the tick: the
+    // bound is tested after a reading has been taken, so a zero that reached the timer would
+    // take exactly one measurement and then announce it had reached a limit of none.
+    if (limit > 0) schedule()
+    return { stop }
   }
 
   /**
@@ -4303,7 +4562,8 @@ export class Relay {
             // field that only exists on the verdict-backed pauses.
             subject: { reason: 'turn_incomplete', participant: lead.id },
             detail: why,
-            evidence: [...evidence, ...(await this.#livenessEvidence(lead, next.emittedSinceSend))],
+            evidence,
+            liveness: { participant: lead, emittedBefore: next.emittedBefore },
             verdictOf: { participant: lead.id, endSeq: next.end.seq },
           })
           if (halted) {
@@ -4609,12 +4869,12 @@ export class Relay {
               `turn_end was proven by the hook; the transcript never produced a body`,
               `waited the settle window, then a further salvage window, and it stayed empty`,
               `raising --settle may help — see transcriptSettleMs and transcriptSalvageMs`,
-              // Wired here too, and it was not. Liveness went into the two `turn_incomplete`
-              // paths only, so a live run's three pauses carried it once -- and the two that
-              // missed out were these, where "the report could not be read" is exactly when
-              // knowing whether the child is still writing changes what the operator does.
-              ...(await this.#livenessEvidence(seat, report.emittedSinceSend)),
             ],
+            // Wired here too, and it was not. Liveness went into the two `turn_incomplete`
+            // paths only, so a live run's three pauses carried it once -- and the two that
+            // missed out were these, where "the report could not be read" is exactly when
+            // knowing whether the child is still writing changes what the operator does.
+            liveness: { participant: seat, emittedBefore: report.emittedBefore },
           })
           // Seat-scoped, and the scope is honoured now: this ends the run, and the OTHER seats
           // still finish, are graded and integrated, and have their reports routed. The rest of
@@ -4686,10 +4946,8 @@ export class Relay {
           const halted = await this.#halt(handle, {
             subject: { reason: 'turn_incomplete', participant: seat.id },
             detail: `${seat.id} turn ended ${formatVerdict(current.verdict)}`,
-            evidence: [
-              ...current.verdict.provenance.map((p) => `${p.source}: ${p.detail}`),
-              ...(await this.#livenessEvidence(seat, report.emittedSinceSend)),
-            ],
+            evidence: current.verdict.provenance.map((p) => `${p.source}: ${p.detail}`),
+            liveness: { participant: seat, emittedBefore: report.emittedBefore },
             verdictOf: { participant: seat.id, endSeq: current.seq },
             ...(pre === undefined ? {} : { superseded: pre }),
           })

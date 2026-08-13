@@ -30,7 +30,7 @@ import type { AuthorityConflict } from './authority.ts'
 import type { Audience, RelayMessage } from './message.ts'
 import type { RunReason } from './observe.ts'
 import type { Verdict } from '../contract/outcome.ts'
-import type { ChildLiveness } from '../outcomes/liveness.ts'
+import type { ChildLiveness, LivenessReading } from '../outcomes/liveness.ts'
 import type { RotationResult } from '../rotation/rotate.ts'
 import type { ResolutionRequest } from './resolution.ts'
 
@@ -175,6 +175,50 @@ export interface PauseContinueRefusal {
   liveness: ChildLiveness
 }
 
+/**
+ * The liveness measurement behind this pause's evidence, as a fact rather than as prose.
+ *
+ * `evidence` is a `string[]` an operator reads. An AGENT operator — which the run this was
+ * reported from was — has to regex it, and the thing it most needs out of that line is the one
+ * thing the line never carried: when the measurement was taken. So the fact is published
+ * alongside the sentence, and the sentence is rendered from the fact.
+ *
+ * REFRESHED IN PLACE while the pause lasts, boundedly. `#refreshPauseLiveness` in `relay.ts`
+ * re-samples the child, rewrites `evidence[index]` and updates this block, so a poller reading
+ * `status.json` twenty seconds apart gets two different readings rather than one replayed
+ * forever. That was #101: the pause's liveness line said `is still working (cpu 3.3%, 5.1%,
+ * 3.5%)` for minutes after the child had dropped to 0.2% and the turn had ended, and an
+ * operator waited out a turn that was already over on the strength of it.
+ *
+ * NOT what `/continue` decides on, and that is deliberate rather than an oversight. The guard
+ * samples the child itself, at the instant of the decision, because continuing SENDS and a
+ * reading up to `LIVENESS_REFRESH_EVERY_MS` old is not a reading of now. This block makes the
+ * evidence honest about its age; it does not make it fresh enough to act on unseen. See
+ * `resumeRun` in `src/repl/session.ts` and #43.
+ */
+export interface PauseLiveness {
+  /** The seat whose child was measured. */
+  participant: string
+  /** Which entry of `evidence` this block is the fact behind. */
+  index: number
+  /** The most recent measurement. `sample.measuredAt` is when. */
+  sample: ChildLiveness
+  /** What that sample supports, so a machine reader need not parse the sentence. */
+  reading: LivenessReading
+  /** When the FIRST measurement was taken — the one the pause was raised carrying. */
+  firstAt: number
+  /** Re-measurements since. Bounded by `LIVENESS_REFRESH_LIMIT`. */
+  refreshes: number
+  /**
+   * Why no further measurement will be taken, once that is true.
+   *
+   * Present means this reading is now fixed and only ages. Absent means it is still being
+   * refreshed — which a reader must be able to tell apart, because a refresher that fell
+   * silent at its bound and said nothing is the original defect wearing a newer number.
+   */
+  final?: string | undefined
+}
+
 export interface RunPause {
   reason: PauseReason
   /**
@@ -212,6 +256,12 @@ export interface RunPause {
   waiting?: PauseWait | undefined
   /** Set when `/continue` was refused because the child was still working. See `PauseContinueRefusal`. */
   refusal?: PauseContinueRefusal | undefined
+  /**
+   * The liveness measurement behind one of the `evidence` lines, and its age. See
+   * `PauseLiveness`. Absent where the pause carries no liveness line -- an adapter with no
+   * child pid to name, or a halt site that measures nothing.
+   */
+  liveness?: PauseLiveness | undefined
   /** Position in the routing log when the run paused, for lining up against `audit()`. */
   atSeq: number
   at: number

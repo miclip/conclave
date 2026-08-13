@@ -402,6 +402,14 @@ the report — and the process stays alive. Commands arrive on stdin as lines: `
 `>implementer`. Nothing needs to be scraped off the console; `status` carries the pause as
 data, including the options you may answer with.
 
+The liveness line in that evidence — whether the child is working or idle — is **re-measured
+while the pause lasts**, so polling `status` twice gets two readings rather than one replayed.
+Every reading says when it was taken, and `pause.liveness` carries the same fact as data
+(`sample.measuredAt`, `refreshes`). Re-measuring is bounded: after thirty minutes it stops and
+the line says so, from which point the timestamp is the whole story. It is evidence to read,
+not a decision — `/continue` samples the child itself at the moment you ask, and still refuses
+on anything that is not clearly idle.
+
 Every message is recorded to `.conclave/runs/` as it happens, and `--resume <log>` replays
 it into both seats — so a run that ended with work in flight is continued rather than
 re-described by hand. Resume **here** rather than into `relay`: a resumed run that hits a
