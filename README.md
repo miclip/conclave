@@ -402,6 +402,14 @@ the report — and the process stays alive. Commands arrive on stdin as lines: `
 `>implementer`. Nothing needs to be scraped off the console; `status` carries the pause as
 data, including the options you may answer with.
 
+Whether `/rotate` is one of those options is a property of the run, not of the pause, so
+every implementer seat carries its own `rotation` block: `configured` (this run has a
+rotation policy at all), `armed` (this seat has checks, so `rotate` joins `continue`,
+`constrain` and `abort` when the seat degrades), the `checks` themselves, and
+`onDegradation`. It is per seat because `--checks` can be replaced on one seat and left
+alone on the others. An unarmed run reports the block too, with `armed: false` — a key that
+appeared only when armed would read as "not armed" on a build that simply did not say.
+
 The liveness line in that evidence — whether the child is working or idle — is **re-measured
 while the pause lasts**, so polling `status` twice gets two readings rather than one replayed.
 Every reading says when it was taken, and `pause.liveness` carries the same fact as data

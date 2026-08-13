@@ -2321,6 +2321,26 @@ export class Relay {
   }
 
   /**
+   * The rotation policy one seat is actually under, for a reader outside the process.
+   *
+   * The SAME resolution every decision inside the relay makes -- `rotationFor` against this
+   * run's config -- rather than a second reading of the option object. A reported policy that
+   * was derived independently is a policy that can disagree with the one being enforced, and
+   * the whole complaint in #103 is an observer being told something false about what is armed.
+   *
+   * Per seat because arming is per seat (D7, #78): one `--checks` can be replaced on
+   * `implementer-2` alone, and a run-wide answer would be wrong for exactly the seat whose
+   * pause the operator is holding.
+   *
+   * `undefined` keeps its meaning from `rotationFor` and is not flattened here: a run with no
+   * rotation policy at all is a different fact from a seat a policy declared unrotatable, and
+   * the caller that reports this is the one place that distinction has to survive.
+   */
+  rotationOf(seatId: string): EffectiveRotation | undefined {
+    return rotationFor(this.#opts.rotation, seatId)
+  }
+
+  /**
    * How many exchanges this relay currently has open on each participant, by id.
    *
    * The relay's OWN bookkeeping, and deliberately not a reading of an adapter. A session's state

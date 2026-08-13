@@ -63,6 +63,27 @@ export function formatSession(s: ReadSession, now: number): string {
       )
     }
     lines.push(`  ${p.id.padEnd(12)} ${p.agent.padEnd(9)} ${p.rank.padEnd(12)} ${bits.join('  ') || 'idle'}`)
+    // The same three states the JSON distinguishes, said in words rather than left to be
+    // inferred from an empty array. A prose reader deciding how to answer a pause needs
+    // "rotation is possible here" as plainly as a parser does, and the seat this run reports
+    // it for is the seat `rotate` would act on.
+    if (p.rotation) {
+      const r = p.rotation
+      const how = r.onDegradation ? `, on degradation: ${r.onDegradation}` : ''
+      if (r.armed) {
+        const checks = r.checks
+          .map((c) => (c.relevance === 'required' ? c.command : `${c.command} [${c.relevance}]`))
+          .join(', ')
+        lines.push(`    rotation:  ARMED${how} — ${checks}`)
+      } else if (r.configured) {
+        // Not the same sentence as the line below it, and the difference is the whole point:
+        // this seat was named and given no checks, which is a policy saying it cannot be
+        // rotated -- not a run that forgot to configure one.
+        lines.push(`    rotation:  not armed for this seat — its policy sets no checks${how}`)
+      } else {
+        lines.push('    rotation:  not armed — no checks configured for this run')
+      }
+    }
   }
   if (st.pause) {
     lines.push(`  PAUSED: ${st.pause.reason} — ${st.pause.detail}`)
