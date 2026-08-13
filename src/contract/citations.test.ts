@@ -91,12 +91,12 @@ const CITED: Record<string, string> = {
   'src/relay/relay.ts:1681-1687': 'createParticipant(spec, ctx)',
   'src/relay/relay.ts:2228': 'worktreePaths(this.#opts.cwd)',
   'src/relay/relay.ts:2255': 'NOT ARMED (no checks configured)',
-  'src/relay/relay.ts:2325': 'worktreePaths(this.#opts.cwd)',
-  'src/relay/relay.ts:2748': 'resolutionFor(p.subject, { rotationArmed: armed })',
-  'src/relay/relay.ts:2966-2969': 'No rotation checks are configured',
+  'src/relay/relay.ts:2345': 'worktreePaths(this.#opts.cwd)',
+  'src/relay/relay.ts:2768': 'resolutionFor(p.subject, { rotationArmed: armed })',
+  'src/relay/relay.ts:2986-2989': 'No rotation checks are configured',
   'src/relay/relay.ts:312': "onDegradation ?? 'candidate'",
-  'src/relay/relay.ts:3837': 'worktreePaths(this.#opts.cwd)',
-  'src/relay/relay.ts:4304': "subject: { reason: 'turn_incomplete', participant: lead.id }",
+  'src/relay/relay.ts:3857': 'worktreePaths(this.#opts.cwd)',
+  'src/relay/relay.ts:4324': "subject: { reason: 'turn_incomplete', participant: lead.id }",
   // The five below are what the console's `/continue` liveness guard cites for reading a
   // pause's SCOPE rather than `verdictOf` or a rank scan (`seatsToSampleAtPause` in
   // src/repl/session.ts). Two of them pin the ONLY sites that populate `verdictOf` -- the
@@ -105,16 +105,16 @@ const CITED: Record<string, string> = {
   // conclave-scoped halt the change gives up sampling on, its own liveness evidence, and the
   // send that a resumed `advisor_escalated` pause actually makes -- to the ADVISOR, which is
   // why measuring implementer children there was answering the wrong question.
-  'src/relay/relay.ts:4307': 'verdictOf: { participant: lead.id, endSeq: next.end.seq },',
-  'src/relay/relay.ts:4406': 'The human has seen your escalation and asked you to continue.',
+  'src/relay/relay.ts:4327': 'verdictOf: { participant: lead.id, endSeq: next.end.seq },',
+  'src/relay/relay.ts:4426': 'The human has seen your escalation and asked you to continue.',
   // The workstream a conflicted instruction belongs to, named after the seat when exactly one
   // seat could take it -- the N=1 coincidence a scope reader must not mistake for a seat.
-  'src/relay/relay.ts:4470': "reason: 'authority_conflict', workstream:",
-  'src/relay/relay.ts:4554': "subject: { reason: 'implementer_unanswered', participant: seat.id }",
-  'src/relay/relay.ts:4603': "subject: { reason: 'advisor_escalated' },",
-  'src/relay/relay.ts:4616': '#livenessEvidence(seat, report.emittedSinceSend)',
-  'src/relay/relay.ts:4687': "subject: { reason: 'turn_incomplete', participant: seat.id }",
-  'src/relay/relay.ts:4693': 'verdictOf: { participant: seat.id, endSeq: current.seq },',
+  'src/relay/relay.ts:4490': "reason: 'authority_conflict', workstream:",
+  'src/relay/relay.ts:4574': "subject: { reason: 'implementer_unanswered', participant: seat.id }",
+  'src/relay/relay.ts:4623': "subject: { reason: 'advisor_escalated' },",
+  'src/relay/relay.ts:4636': '#livenessEvidence(seat, report.emittedSinceSend)',
+  'src/relay/relay.ts:4707': "subject: { reason: 'turn_incomplete', participant: seat.id }",
+  'src/relay/relay.ts:4713': 'verdictOf: { participant: seat.id, endSeq: current.seq },',
   'src/relay/resolution.ts:190': 'export function resolutionFor',
   'src/relay/run.ts:51': "| 'implementer_unanswered'",
   'src/relay/run.ts:169-183': 'reason: PauseReason',
