@@ -74,13 +74,13 @@ const CITED: Record<string, string> = {
   //
   // The three below moved twice over, once for #81 and once for #80's integration work in the
   // same file, and are pinned against the merged tree rather than against either side of it.
-  'bin/conclave.ts:1208': 'cwd: process.cwd(),',
-  'bin/conclave.ts:1296': 'runReport(relay, { goal, outcome, startedAt: runStartedAt, build })',
+  'bin/conclave.ts:1220': 'cwd: process.cwd(),',
+  'bin/conclave.ts:1308': 'runReport(relay, { goal, outcome, startedAt: runStartedAt, build })',
   // One flag for every implementer seat, which is the RUN-WIDE half of the launch args. The
   // per-seat half is no longer missing (#77): it rides inside each `--implementers` entry and
   // is appended after this, so a seat's own spelling wins. This citation still pins what it
   // always pinned -- the flag that applies to all of them.
-  'bin/conclave.ts:1058-1061': "...extraArgs(flag('implementer-args', ''))",
+  'bin/conclave.ts:1070-1073': "...extraArgs(flag('implementer-args', ''))",
   'src/config/project.ts:160-163': 'export function launchArgsFor',
   'src/registry/roles.ts:15': 'export type RoleId = string',
   // The relay.ts citations below moved together when `launch` was added to RelayParticipant
@@ -125,11 +125,11 @@ const CITED: Record<string, string> = {
   // `runSession`: it inserts a documented function into the middle of the file, so every
   // citation past it shifts. Repaired against this tree rather than deleted -- each still
   // points at the line it was written about.
-  'src/repl/session.ts:601': 'escalates to you rather than being replaced',
-  'src/repl/session.ts:764': 'logPath: runLogPath,',
+  'src/repl/session.ts:646': 'escalates to you rather than being replaced',
+  'src/repl/session.ts:809': 'logPath: runLogPath,',
   // Moved by #83's edit to the `/continue` refusal, nine lines above it in the same block.
   // Repaired rather than deleted: the call it pins is the one the console still makes.
-  'src/repl/session.ts:943': "recording.set('paused', { pause: run.pause })",
+  'src/repl/session.ts:988': "recording.set('paused', { pause: run.pause })",
 }
 
 /**

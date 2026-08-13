@@ -667,7 +667,7 @@ const DECLARED: Record<string, string> = {
     'idle" rather than "the child is working right now". THE REFUSAL ITSELF IS UNCHANGED — a ' +
     'mixed sample still refuses /continue and still requires force, because continuing SENDS ' +
     'and a burst may be a turn. No assertion in this file was relaxed; one citation moved with ' +
-    'the code it pins (src/repl/session.ts:943). Covered in src/outcomes/liveness.test.ts on ' +
+    'the code it pins (src/repl/session.ts:988). Covered in src/outcomes/liveness.test.ts on ' +
     'the reported numbers, and end to end through the console’s refusal path in ' +
     'src/repl/session.test.ts.',
   'models are validated before launch, graded per adapter, and a silent first turn names the model':
@@ -960,7 +960,7 @@ async function seatsFromSessionCli(): Promise<{ creates: CreateRecord[]; cwd: st
  * The two machine-readable documents a default run actually emits.
  *
  * Both come out of one `relay --json` run in a temporary repository, through the production
- * call sites: the report is what `bin/conclave.ts:1296` prints, and the status record is what
+ * call sites: the report is what `bin/conclave.ts:1308` prints, and the status record is what
  * `recordSession` wrote during that same run, read back by `main(['status', '--json'])` --
  * which resolves the most recent session in `process.cwd()`, so the record has to have been
  * written where an operator would look for it.
@@ -1005,7 +1005,7 @@ async function defaultRunDocuments(): Promise<{ report: unknown; status: unknown
  * blind to that subtree is claiming more than it checks.
  *
  * Built through the real recorder: `recordSession` is what both front-ends call, and
- * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:943
+ * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:988
  * with the same object -- a `RunPause` the run handle raised, not one written here. Read back
  * through `main(['status', '--json'])`, so the serialisation and the reconciliation against
  * the pid are the production ones.
@@ -1301,7 +1301,7 @@ async function provoke(
  * The status document of a run paused for one given reason.
  *
  * Built through the real recorder: `recordSession` is what both front-ends call, and
- * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:943
+ * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:988
  * with the same object -- a `RunPause` the relay raised, not one written here. Read back
  * through `main(['status', '--json'])`, so the serialisation and the reconciliation against
  * the pid are the production ones.
@@ -1321,7 +1321,7 @@ async function pausedStatusDocument(reason: PauseReason): Promise<unknown> {
     goal: 'a default goal',
     front: 'session',
     startedAt: Date.now(),
-    // Passed because the console always passes one (src/repl/session.ts:764), so the status
+    // Passed because the console always passes one (src/repl/session.ts:809), so the status
     // documents this file pins differ only in what a pause actually changes.
     logPath: join(repo, '.conclave', 'runs', 'session-test.ndjson'),
     build: 'test',
@@ -1505,7 +1505,7 @@ test('default run works in the run cwd and creates no worktree', async () => {
     assert.equal(c.cwd, fromCli.cwd, `the session CLI must create ${c.id} in the run cwd`)
   }
 
-  // The relay CLI passes process.cwd() as the run cwd: bin/conclave.ts:1208.
+  // The relay CLI passes process.cwd() as the run cwd: bin/conclave.ts:1220.
   // The relay hands that same cwd to each participant adapter: src/relay/relay.ts:1681-1687.
   // The cwd getter simply returns the option: src/relay/relay.ts:1531-1533.
   assert.match(relay, /cwd:\s*process\.cwd\(\)/, 'relay block must start in process.cwd')

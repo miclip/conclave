@@ -700,3 +700,56 @@ test('a one-seat console reserves the four rows it always did, even while the se
   )
   c.proc.kill()
 })
+
+/**
+ * An open `<<TAG` block has to be visible at a terminal (#102).
+ *
+ * The framing was added for a piped driver, but the console shares the reader, and there it
+ * has a failure mode a pipe does not have: nothing typed into a block is echoed as a message
+ * and the transcript stops moving, which is exactly what a hung console looks like. The way
+ * out is a word only the operator who opened the block knows, so the row has to keep saying
+ * it rather than announce it once and scroll away.
+ */
+test('an open block is named in the hint row until its terminator closes it', async (t) => {
+  const dir = repo()
+  const c = await spawnConsole(dir, t, null, true)
+  const plain = (s: string) => s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '')
+  assert.ok(
+    await c.until((s) => plain(s).includes('no goal given — type one to start, or /help'), 20_000),
+    'the no-goal prompt should appear',
+  )
+
+  c.type('>advisor <<END\r')
+  assert.ok(
+    await c.until((s) => /collecting a message — 0 line\(s\)/.test(plain(s)), 20_000),
+    'opening a block should say so, and name nothing collected yet',
+  )
+  assert.match(plain(c.text()), /close it with a line reading exactly\s+END/)
+
+  c.type('first paragraph\r')
+  assert.ok(
+    await c.until((s) => /collecting a message — 1 line\(s\)/.test(plain(s)), 20_000),
+    'the count should follow the lines in',
+  )
+  // A blank line is content here, not a submit — the whole reason the framing is explicit.
+  c.type('\r')
+  assert.ok(
+    await c.until((s) => /collecting a message — 2 line\(s\)/.test(plain(s)), 20_000),
+    'a blank line inside a block is part of the message',
+  )
+
+  c.type('END\r')
+  // Asserted against the RENDERED SCREEN, not the captured stream: every earlier draw of the
+  // hint is still in the stream, so "the row is gone" is unprovable there and a `doesNotMatch`
+  // against it would pass only by never having been true.
+  assert.ok(
+    await c.until((s) => /● you → advisor/.test(plain(s)), 20_000),
+    'the terminator should dispatch the collected block as one message',
+  )
+  const screen = renderGrid(c.text(), 30, 100)
+    .map((row) => row.join('').replace(/\s+$/, ''))
+    .join('\n')
+  assert.doesNotMatch(screen, /collecting a message/, 'the hint row is taken back once it closes')
+  assert.match(screen, /first paragraph/, 'and the message is the one that was collected')
+  c.proc.kill()
+})

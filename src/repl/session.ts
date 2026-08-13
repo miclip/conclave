@@ -313,6 +313,22 @@ export const COMMANDS = [
   '/exit',
 ]
 
+/**
+ * A line that opens a multi-line message: NOTHING, or one address prefix, then `<<TAG`.
+ *
+ * Deliberately not "any line ending in `<<TAG`". The head is enumerated -- empty, `>advisor`,
+ * `>implementer`, `>both` -- because the alternative silently reinterprets input that is
+ * already correct today. `/rotate the seat is stuck <<HERE` is a rotate reason and
+ * `>advisor compare a<<b` is a message about C++; under a permissive rule both open a block
+ * instead, and the operator's next several lines vanish into it with the console showing
+ * nothing routed. Every form that is framing has to be a form nobody writes by accident,
+ * which is what makes the framing explicit rather than a guess.
+ *
+ * Module scope so it cannot land in the temporal dead zone of the console's own startup;
+ * see `block` in `runSession`.
+ */
+const HEREDOC_OPEN = /^(|>advisor|>implementer|>both)[ \t]*<<([A-Za-z_][A-Za-z0-9_]*)[ \t]*$/
+
 const HELP = `
   <text>                 to BOTH, at human rank — the default, no prefix needed
   >advisor <text>        to the advisor only — the implementer will not see it
@@ -321,6 +337,22 @@ const HELP = `
   @src/relay/relay.ts    a path, anywhere in the line. Tab completes both sigils.
 
   They compose:  >advisor read @src/relay/relay.ts and tell me what it settles
+
+  <<EOF                  a message that spans lines. Everything up to a line reading
+                         exactly EOF is ONE message, blank lines and all. Any word
+                         works as the tag:
+
+                           >implementer <<EOF
+                           Answered: make it opt-in.
+
+                           Existing drivers write bare lines today.
+                           EOF
+
+                         Only <<TAG on its own or after >advisor, >implementer or
+                         >both opens one — so a message or a command that happens to
+                         end in <<something still means what it always did. Without
+                         it a line is a message, which is what an answer of several
+                         paragraphs written to stdin needs to know.
 
   With a run going, an addressed line is QUEUED and delivered at the next turn
   boundary. With no run, it is asked directly and you wait for the answer — the
@@ -508,6 +540,19 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     (opts.input ?? process.stdin) === process.stdin && process.stdin.isTTY === true
   let rl: Interface | undefined
   let screen: Screen | undefined
+  /**
+   * The open `<<TAG` block, if a line has started one. Declared HERE, with the console's
+   * other state, and not beside the `submit` that uses it.
+   *
+   * `submit` is a hoisted function and the screen is handed it as `onLine` before
+   * `screen.open()` — which awaits a cursor-position reply from the terminal, so it is a
+   * real suspension with a live keyboard behind it. State declared next to `submit`, a
+   * few hundred lines below, is in its temporal dead zone for exactly that window: a key
+   * pressed while the console is opening threw `Cannot access 'block' before
+   * initialization` out of the keypress handler and took the console down with it. Caught
+   * by the pty suite, which types the instant the banner appears.
+   */
+  let block: { head: string; tag: string; lines: string[] } | undefined
   // Cleared by `leave`, alongside the screen it draws to: an interval still firing after
   // the scrolling region is gone would write over whatever the operator ran next.
   let stopAnimation: (() => void) | undefined
@@ -1242,6 +1287,14 @@ export async function runSession(opts: SessionOptions): Promise<number> {
    * they would scroll away from the thing they describe.
    */
   const hint = (): string => {
+    // An open `<<TAG` block outranks both. Nothing typed into one is echoed as a message and
+    // the transcript stays still, so without a row saying so the console is indistinguishable
+    // from one that has stopped responding — and the way out is a word only the operator who
+    // opened the block knows. It is named here on every draw rather than announced once,
+    // because the announcement would have scrolled away by the third line of the answer.
+    if (block) {
+      return `  ${dim(`collecting a message — ${block.lines.length} line(s); close it with a line reading exactly`)} ${bold(block.tag)}`
+    }
     // Only the resting reminder. Whenever there is something to choose the screen draws the
     // menu here instead, because a suggestion belongs against the keystroke that produced
     // it and anywhere in the transcript it would scroll away from it.
@@ -1353,11 +1406,68 @@ export async function runSession(opts: SessionOptions): Promise<number> {
   process.on('SIGINT', onInterrupt)
   process.on('SIGTERM', onInterrupt)
 
+  /**
+   * A message that spans lines, for a driver that has to write one.
+   *
+   * The protocol stays line-oriented and every line that works today still works: this is
+   * opt-in framing, not a new default. `>implementer <<EOF` opens a block, a line that is
+   * exactly `EOF` closes it, and everything between arrives as ONE message with its
+   * newlines and its blank lines intact.
+   *
+   * Reported as #102 by an agent operator answering an `implementer_unanswered` pause --
+   * the case where the answer is longest, because the seat stopped precisely to ask
+   * something that needed a reasoned reply. Seven lines became seven messages, and the
+   * fragmentation was not the worst of it: only the first line carried the `>implementer`
+   * prefix, so the rest of a restricted answer went to everyone; and the run resumed on
+   * one of the middle lines, so the tail of the answer arrived after the implementer had
+   * already acted on the fragment. The message counter -- the number an external observer
+   * polls to tell whether a run is progressing -- moved seven times for one answer.
+   */
   function submit(raw: string): void {
-    const line = raw.trim()
+    const body = raw.replace(/\r$/, '')
+    if (block) {
+      // EXACTLY the tag, with no trim. Inside a block every other line is content, and a
+      // line of spaces is content too — trimming first would make `   EOF   ` a terminator
+      // and so make the rule "the tag, roughly", which is not a rule a driver can generate
+      // against. Nothing else is interpreted either: a blank line is part of the answer and
+      // a line beginning `/` is text rather than a command.
+      if (body === block.tag) {
+        const { head, lines } = block
+        block = undefined
+        // Verbatim. Leading and trailing blank lines are the operator's, not noise to be
+        // tidied: a block is a quotation of what they wrote, and a framing that edits its
+        // own payload is one they have to think about instead of use.
+        const text = lines.join('\n')
+        // Empty is not a message. `>implementer` alone already answers this by asking what
+        // to say, so an empty block routes to that same sentence rather than injecting
+        // whitespace at human rank.
+        return void dispatch(head, text.trim() ? text : '')
+      }
+      block.lines.push(body)
+      // The hint row counts the lines as they arrive, so redraw it. Only the screen: a piped
+      // driver would get a prompt per body line, which is the noise-per-fragment this change
+      // exists to remove — one message earns one prompt, written when it is dispatched.
+      screen?.draw()
+      return
+    }
+    const opened = HEREDOC_OPEN.exec(body)
+    if (opened) {
+      block = { head: opened[1] ?? '', tag: opened[2]!, lines: [] }
+      screen?.draw()
+      return
+    }
+    dispatch(body.trim())
+  }
+
+  /**
+   * @param framed the block's verbatim content, when `line` is the head of one. Its absence
+   * is what keeps a legacy single line on its original path: an unframed message is still
+   * split on whitespace and re-joined with single spaces, exactly as it always has been.
+   */
+  function dispatch(line: string, framed?: string): void {
     void (async () => {
       try {
-        if (line) await handle(line)
+        if (line || framed) await handle(line, framed)
       } catch (err) {
         write(`  ! ${err instanceof Error ? err.message : String(err)}`)
       }
@@ -1367,9 +1477,43 @@ export async function runSession(opts: SessionOptions): Promise<number> {
   }
   rl?.on('line', submit)
 
-  async function handle(line: string): Promise<void> {
-    const [word, ...restWords] = line.split(/\s+/)
-    const rest = restWords.join(' ')
+  /**
+   * Input that ended mid-block is named, not delivered and not silently dropped.
+   *
+   * Delivering the fragment is the one thing that cannot be done honestly here: stdin
+   * closing is what ends the session, so the half-message would be racing teardown and
+   * whether any of it reached a seat would depend on the timing. Saying what was buffered
+   * and how to resend it is the part that is always true.
+   */
+  const flushOpenBlock = () => {
+    if (!block) return
+    const { tag, lines } = block
+    block = undefined
+    write(`  input ended inside <<${tag} — ${lines.length} buffered line(s) were NOT delivered`)
+    write(dim(`  a block is only a message once a line reading exactly ${tag} closes it`))
+  }
+  rl?.on('close', flushOpenBlock)
+
+  /**
+   * @param framed a block's verbatim content, when `line` is the head that opened it.
+   *
+   * The two arrive separately rather than as one reconstructed string, and that is the whole
+   * point: a framed message never goes through `split(/\s+/)`, so its newlines and its runs
+   * of spaces survive, while an unframed line keeps the normalisation it has always had.
+   * Rebuilding `${head} ${text}` and re-parsing it would have meant one path for both, and
+   * the only way to make that path carry newlines was to stop collapsing whitespace for
+   * every ordinary single-line message too -- a change to input that works today, made to
+   * serve input that did not.
+   */
+  async function handle(line: string, framed?: string): Promise<void> {
+    // `framed` is a head from `HEREDOC_OPEN`, which is one of four exact strings — so it is
+    // the whole word by construction, and an empty head is the no-prefix form whose message
+    // goes to both.
+    const [word, ...restWords] = framed === undefined ? line.split(/\s+/) : [line]
+    const rest = framed ?? restWords.join(' ')
+    // What a message-shaped line SAYS, as opposed to the line that carried it. Identical for
+    // unframed input; for a block with no prefix it is the block, not the head.
+    const message = framed ?? line
 
     if (word === '/help') return void write(HELP)
 
@@ -1577,10 +1721,10 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     // progress. A session that demanded its objective up front assumed you arrive knowing
     // it, which is not how anyone gets to one.
     if (!run) {
-      begin(line)
+      begin(message)
       return
     }
-    inject(line, 'all')
+    inject(message, 'all')
     // Answering a pause IS the decision, so it resumes. A reply typed at a pause used to sit
     // queued with the run still stopped, needing a separate `/continue` to count -- the same
     // failure as a menu option that no-ops: the operator acted, something was recorded, and

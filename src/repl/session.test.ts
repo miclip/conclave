@@ -11,7 +11,7 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync, spawn, spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { resolveSession } from '../workspace/sessionRecord.ts'
 import { formatSessionJson } from '../workspace/sessionView.ts'
 import { tmpdir } from 'node:os'
@@ -1177,6 +1177,382 @@ test('a pause is held open for a piped driver, and resolvable from stdin', async
 
   input.end()
   await running
+})
+
+/**
+ * One answer is one message, however many lines it took to write (#102).
+ *
+ * The reported case, and the worst one: an agent operator answering an
+ * `implementer_unanswered` pause, which is the pause whose answer is longest because the
+ * seat stopped precisely to ask something that needed reasoning about. Seven physical lines
+ * became seven messages. Three separate things went wrong with that, and only the first is
+ * the one the title mentions:
+ *
+ *   - `messages` in `status --json` moved seven times, and that number is what an external
+ *     observer polls to tell whether a run is progressing. One answer read as activity.
+ *   - only the FIRST line carried the `>implementer` prefix, so the remaining six lines of a
+ *     deliberately restricted answer were routed to both seats.
+ *   - a bare line at a pause resumes the run, so one of the middle lines resumed it and the
+ *     tail of the answer arrived after the implementer had already acted on the fragment.
+ *
+ * All three are asserted below, because a fix that only merged the lines would still leave
+ * the routing and the resume keyed to whichever fragment happened to arrive first.
+ */
+test('a <<EOF block written to a paused session is one message, addressed once', async () => {
+  const dir = repo()
+  const out = collect()
+  const input = new PassThrough() // held open, as the FIFO and its background `sleep` do
+  const asked = 'Started.\n\nUNANSWERED: Should the new framing be opt-in or the default?'
+  const running = runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'claude',
+    rounds: 8,
+    checks: [],
+    operator: 'agent',
+    registry: registryOf({
+      codex: [slow('advisor', 'codex', ['Do it.', 'More.', 'DONE'], 200)],
+      claude: [slow('impl', 'claude', [asked, asked, asked, 'Did it.'], 200)],
+    }),
+    input,
+    output: out.stream,
+  })
+
+  const until = async (pred: (s: ReturnType<typeof resolveSession>) => boolean, ms = 20_000) => {
+    const t = Date.now()
+    while (Date.now() - t < ms) {
+      const f = resolveSession(dir)
+      if (pred(f)) return f
+      await new Promise((r) => setTimeout(r, 50))
+    }
+    throw new Error(`timed out; console said:\n${out.text().slice(-1500)}`)
+  }
+
+  const paused = await until(
+    (f) => 'session' in f && f.session.status.pause?.reason === 'implementer_unanswered',
+  )
+  assert.ok('session' in paused)
+  const before = paused.session.status.messages
+
+  // Written as ONE write of several lines, which is what `printf ... > "$fifo"` does. The
+  // blank lines are load-bearing: they are the paragraph breaks that made the operator want
+  // more than one line in the first place.
+  input.write(
+    [
+      '>implementer <<EOF',
+      'Answered: make it opt-in.',
+      '',
+      'Every existing driver writes bare lines today, so a change of default',
+      'would silently reinterpret input that is already correct.',
+      '',
+      'One correction: the reason is implementer_unanswered, not turn_incomplete.',
+      'EOF',
+      '',
+    ].join('\n'),
+  )
+
+  await untilText('the block to be delivered', out.text, /Answered: make it opt-in/)
+  const after = await until((f) => 'session' in f && f.session.status.messages > before)
+  assert.ok('session' in after)
+  assert.equal(
+    after.session.status.messages - before,
+    1,
+    'six lines of prose are one message, not six — this is the counter an observer polls',
+  )
+
+  const text = out.text()
+  // From the pause onward, so the goal — which is itself a `you →` block — is not counted.
+  const since = text.slice(text.indexOf('● paused implementer_unanswered'))
+  const block = since.slice(since.indexOf('Answered: make it opt-in'))
+  // The whole answer, with its paragraph breaks, under a single speaker heading.
+  assert.match(block, /would silently reinterpret input that is already correct/)
+  assert.match(block, /One correction: the reason is implementer_unanswered/)
+  assert.equal(
+    since.match(/● you → /g)?.length,
+    1,
+    'one speaker block for one answer; every extra one is a fragment',
+  )
+  // Addressed ONCE and honoured for all of it. `>implementer` appeared on the opening line
+  // only, and the rest of a restricted answer must not fall back to everyone.
+  assert.match(since, /● you → implementer\b/)
+  assert.doesNotMatch(since, /● you → advisor, implementer/)
+
+  input.end()
+  await running.catch(() => {})
+})
+
+test('input that ends inside an unterminated block says so, and delivers nothing', async () => {
+  // The one thing that cannot be done honestly here: stdin closing is what ends the
+  // session, so a flushed half-message would be racing teardown and whether any of it
+  // reached a seat would come down to timing. Naming what was buffered is always true.
+  const dir = repo()
+  const out = collect()
+  const input = new PassThrough()
+  const running = runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'claude',
+    rounds: 3,
+    checks: [],
+    operator: 'agent',
+    registry: registryOf({
+      codex: [slow('advisor', 'codex', ['Do it.', 'DONE'], 150)],
+      claude: [slow('impl', 'claude', ['ack', 'Did it.'], 150)],
+    }),
+    input,
+    output: out.stream,
+  })
+
+  input.write('>implementer <<EOF\nhalf an answer\nand no terminator\n')
+  input.end()
+  await running.catch(() => {})
+
+  const text = out.text()
+  assert.match(text, /input ended inside <<EOF/)
+  assert.match(text, /2 buffered line\(s\) were NOT delivered/)
+  assert.match(text, /a line reading exactly EOF/, 'it says what would have closed it')
+  assert.doesNotMatch(text, /half an answer/, 'the buffered lines were not routed anywhere')
+  assert.doesNotMatch(text, /● you → implementer/, 'and no message was addressed from them')
+})
+
+/**
+ * A message as it was ROUTED, off the run log, rather than as the console drew it.
+ *
+ * The distinction is the whole point of using it: `markdown()` reflows a message to the
+ * terminal width, so runs of spaces and line breaks are normalised on screen regardless of
+ * what was sent. Every assertion about the exact text of a message has to come from here, or
+ * it passes under the behaviour it was written to forbid.
+ */
+function routed(dir: string, needle: string): { text: string } | undefined {
+  const runs = join(dir, '.conclave', 'runs')
+  return readdirSync(runs)
+    .flatMap((f) => readFileSync(join(runs, f), 'utf8').split('\n'))
+    .filter(Boolean)
+    .map((l) => JSON.parse(l) as Record<string, any>)
+    .find((e) => typeof e.text === 'string' && e.text.includes(needle)) as { text: string } | undefined
+}
+
+/**
+ * What the framing must NOT do, which is the half a feature like this is judged on.
+ *
+ * Every assertion here describes input that works today and has to keep working identically.
+ * A permissive opener -- any line ending in `<<word` -- would swallow the next several lines
+ * of a `/rotate` reason or a message about C++ into a block the operator never opened, and
+ * the console would show nothing routed while they kept typing. So the opener is enumerated,
+ * the terminator is an exact match, and an unframed line keeps the whitespace normalisation
+ * it has always had rather than inheriting the verbatim treatment a block needs.
+ */
+test('framing changes nothing about the lines that were already legal', async () => {
+  const dir = repo()
+  const out = collect()
+  const input = new PassThrough()
+  const running = runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'claude',
+    rounds: 6,
+    checks: [],
+    operator: 'agent',
+    registry: registryOf({
+      codex: [slow('advisor', 'codex', ['Do it.', 'More.', 'DONE'], 250)],
+      claude: [slow('impl', 'claude', ['ack', 'Did it.', 'Again.'], 250)],
+    }),
+    input,
+    output: out.stream,
+  })
+
+  // A bare line is one message, and still exactly one.
+  input.write('>implementer a plain single line\n')
+  await untilText('the bare line', out.text, /a plain single line/)
+
+  // A message that merely ENDS in `<<word`. Not an opener: it is routed now, not buffered.
+  input.write('>advisor prefer a<<b over shifting twice\n')
+  await untilText('the shift-operator message', out.text, /prefer a<<b over shifting twice/)
+
+  // A slash command ending the same way. `/rotate` takes a free-text reason, so this is the
+  // realistic collision — and it must reach the command, not open a block. Matched on what
+  // /rotate ITSELF answers, because the word "rotation" is also in the startup banner and an
+  // assertion that the banner satisfies proves nothing.
+  input.write('/rotate the seat is stuck <<HERE\n')
+  await untilText('the rotate command to answer', out.text, /pause first: \/pause, then \/rotate/)
+
+  // Whitespace inside an ordinary line is normalised exactly as it always was. This is the
+  // legacy path, and it is asserted so a later change cannot quietly move it onto the
+  // verbatim one that blocks use.
+  input.write('>implementer two  spaces   collapse\n')
+  await untilText('the spaced line', out.text, /two spaces collapse/)
+
+  const text = out.text()
+  // The load-bearing one, and the reason the last line is sent at all: had any line above
+  // opened a block, everything after it would have been buffered into that block instead of
+  // routed, and nothing since would have appeared at all.
+  assert.equal(
+    text.match(/● you → /g)?.length,
+    4,
+    'the goal and three routed messages — /rotate is a command and draws no speaker block, ' +
+      'and a line swallowed into an accidental block would be a missing one',
+  )
+
+  input.end()
+  await running.catch(() => {})
+
+  // Asserted on what was ROUTED, not on what was drawn. The console reflows a message to the
+  // terminal width, so runs of spaces collapse on screen whether or not they collapsed on the
+  // way in — an assertion against `out.text()` here passes under either behaviour and proves
+  // neither. Caught by mutation: switching the legacy path to verbatim left it green.
+  assert.equal(
+    routed(dir, 'spaces')?.text,
+    'two spaces collapse',
+    'an unframed line keeps the whitespace normalisation it has always had',
+  )
+  assert.equal(
+    routed(dir, 'shifting twice')?.text,
+    'prefer a<<b over shifting twice',
+    'and a message merely ending in <<word is routed as itself',
+  )
+})
+
+/**
+ * A block ends where its terminator says, and the next line is read as a fresh one (#102).
+ *
+ * The failure this rules out is the one that makes an unterminated block dangerous: a
+ * `/continue` typed after the answer being eaten as content, leaving the operator with a
+ * message they think they sent, a pause they think they cleared, and a console that says
+ * neither. It also pins the ordering the docs promise for answering a pause -- the block is
+ * the answer, `/continue` is the decision, and the second is a command and not text.
+ */
+test('a command after a block is a command, and clears the pause the block answered', async () => {
+  const dir = repo()
+  const out = collect()
+  const input = new PassThrough()
+  const asked = 'Started.\n\nUNANSWERED: opt-in or default?'
+  const running = runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'claude',
+    rounds: 8,
+    checks: [],
+    operator: 'agent',
+    registry: registryOf({
+      codex: [slow('advisor', 'codex', ['Do it.', 'More.', 'DONE'], 200)],
+      claude: [slow('impl', 'claude', [asked, asked, 'Did it.', 'Again.'], 200)],
+    }),
+    input,
+    output: out.stream,
+  })
+
+  const until = async (pred: (s: ReturnType<typeof resolveSession>) => boolean, ms = 20_000) => {
+    const t = Date.now()
+    while (Date.now() - t < ms) {
+      const f = resolveSession(dir)
+      if (pred(f)) return f
+      await new Promise((r) => setTimeout(r, 50))
+    }
+    throw new Error(`timed out; console said:\n${out.text().slice(-1500)}`)
+  }
+
+  await until((f) => 'session' in f && f.session.status.pause?.reason === 'implementer_unanswered')
+
+  // The block and the command in ONE write, which is how a driver sends them and the only
+  // ordering under which "the command was swallowed" is possible.
+  input.write(['>implementer <<EOF', 'Opt-in.', '', 'Blank lines survive.', 'EOF', '/continue', ''].join('\n'))
+
+  const resumed = await until((f) => 'session' in f && f.session.status.state === 'running')
+  assert.ok('session' in resumed)
+  assert.equal(resumed.session.status.pause, undefined, 'the /continue was obeyed, not collected')
+
+  const text = out.text()
+  const since = text.slice(text.indexOf('● paused implementer_unanswered'))
+  assert.match(since, /● you → implementer\b/)
+  assert.match(since, /Blank lines survive\./)
+  assert.doesNotMatch(since, /● you → advisor, implementer/, 'the block stayed addressed')
+  // The terminator and the command are protocol, not payload — neither is in the message.
+  const block = since.slice(since.indexOf('Opt-in.'), since.indexOf('queued for implementer'))
+  assert.doesNotMatch(block, /EOF/, 'the terminator is not part of what was sent')
+  assert.doesNotMatch(block, /\/continue/, 'and neither is the command that followed it')
+
+  input.end()
+  await running.catch(() => {})
+})
+
+test('only a line equal to the tag closes a block; a padded one is content', async () => {
+  // Exact, with no trim, and the trade is deliberate: `  EOF  ` closing would make the rule
+  // "the tag, roughly", which is not a rule a driver can generate against — and it would
+  // make a line of an answer that merely mentions the tag able to end the message early.
+  // The cost is that a stray trailing space fails to close, which is loud rather than
+  // silent: the block stays open, the hint row says so, and stdin closing names it.
+  const dir = repo()
+  const out = collect()
+  const input = new PassThrough()
+  const running = runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'claude',
+    rounds: 6,
+    checks: [],
+    operator: 'agent',
+    registry: registryOf({
+      codex: [slow('advisor', 'codex', ['Do it.', 'More.', 'DONE'], 250)],
+      claude: [slow('impl', 'claude', ['ack', 'Did it.', 'Again.'], 250)],
+    }),
+    input,
+    output: out.stream,
+  })
+
+  input.write(['>implementer <<END', 'first', '  END  ', 'last', 'END', ''].join('\n'))
+  await untilText('the block to be delivered', out.text, /queued for implementer/)
+
+  const text = out.text()
+  assert.match(text, /first/)
+  assert.match(text, /last/, 'the padded line did not end the message early')
+  assert.equal(
+    text.match(/● you → /g)?.length,
+    2,
+    'the goal and ONE message — a padded terminator that closed would make two',
+  )
+
+  input.end()
+  await running.catch(() => {})
+})
+
+test('a block keeps its leading and trailing blank lines', async () => {
+  // Verbatim means verbatim. The operator's spacing is the message, and a framing that
+  // tidies its own payload is one they have to reason about instead of use.
+  const dir = repo()
+  const out = collect()
+  const input = new PassThrough()
+  const running = runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'claude',
+    rounds: 6,
+    checks: [],
+    operator: 'agent',
+    registry: registryOf({
+      codex: [slow('advisor', 'codex', ['Do it.', 'More.', 'DONE'], 250)],
+      claude: [slow('impl', 'claude', ['ack', 'Did it.', 'Again.'], 250)],
+    }),
+    input,
+    output: out.stream,
+  })
+
+  input.write(['>implementer <<T', '', 'MIDDLE', '', 'T', ''].join('\n'))
+  await untilText('the block to be delivered', out.text, /queued for implementer/)
+
+  input.end()
+  await running.catch(() => {})
+
+  // Off the run log, not the console: the console trims and reflows for display, so the
+  // blank lines this test is about are invisible there under either behaviour.
+  const sent = routed(dir, 'MIDDLE')
+  assert.ok(sent, 'the block should be in the run log')
+  assert.equal(sent.text, '\nMIDDLE\n', "the blank lines either side of it are the operator's")
 })
 
 /**

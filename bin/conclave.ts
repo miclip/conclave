@@ -81,6 +81,18 @@ Driving conclave from an agent
     >advisor ... / >implementer ... send a message to one seat
     anything else                   the goal, if none has been given yet
 
+  One line is one message. An answer that spans lines needs framing, or each line
+  becomes a message of its own -- addressed to everyone, since only the first line
+  carries the prefix, and resuming the run on whichever line got there first:
+    <<EOF                           open a block, alone or after >advisor,
+    ...                             >implementer or >both -- and only those, so a
+    EOF                             message or a slash command ending in <<word
+                                    is unchanged. Everything up to a line equal to
+                                    EOF is ONE message, blank lines kept. Closing
+                                    stdin mid-block delivers nothing and says so.
+  So an answer to a pause is written:
+    printf '>implementer <<EOF\\n%s\\nEOF\\n' "$(cat answer.txt)" > "$fifo"
+
   Observe from another process, without scraping the console:
     conclave status [<id>] --json   what it is doing now: seats, what each is working
                                     on, whether one is stopped at a permission prompt,

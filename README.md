@@ -402,6 +402,21 @@ the report — and the process stays alive. Commands arrive on stdin as lines: `
 `>implementer`. Nothing needs to be scraped off the console; `status` carries the pause as
 data, including the options you may answer with.
 
+One line is one message, so an answer of several paragraphs needs framing. `<<TAG` opens a
+block — on its own, or after `>advisor`, `>implementer` or `>both`, and only there, so a
+message or a `/command` that happens to end in `<<word` still means what it always did. A
+line **equal to** `TAG` closes it; everything between is a single message, verbatim, with
+its blank lines intact:
+
+```sh
+printf '>implementer <<EOF\n%s\nEOF\n' "$(cat answer.txt)" > "$fifo"
+```
+
+Without it each physical line is its own message — and only the first carries the
+`>implementer` prefix, so the rest of a restricted answer reaches both seats, the run
+resumes on whichever line arrives first, and `messages` in `status --json` counts one answer
+several times. Closing stdin inside an unterminated block delivers nothing and says so.
+
 Every message is recorded to `.conclave/runs/` as it happens, and `--resume <log>` replays
 it into both seats — so a run that ended with work in flight is continued rather than
 re-described by hand. Resume **here** rather than into `relay`: a resumed run that hits a
