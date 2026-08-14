@@ -15,7 +15,18 @@
  */
 
 import { strict as assert } from 'node:assert'
-import { existsSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs'
+import { homedir, tmpdir } from 'node:os'
+import { join } from 'node:path'
 import test from 'node:test'
 import { ClaudePtyHookAdapter } from './claude.ts'
 import type { AgentEvent, SessionSnapshot, TurnEndEvent } from '../contract/session.ts'
@@ -302,6 +313,88 @@ test('closing does not downgrade an already-completed turn', { skip }, async (t)
   const snap = await session.snapshot()
   assert.equal(snap.turns[0]?.state, 'completed')
   assert.equal(snap.turns[0]?.confidence, 'proven')
+})
+
+test('a directory claude has never seen still boots, because the dialog gets answered', { skip }, async () => {
+  // The condition #108 is about, reproduced the only way it can be: a directory Claude Code has
+  // no trust record for. `claude -p` cannot see it -- headless mode never shows the dialog -- so
+  // a temp directory and a real pty is the whole experiment. No turn is sent, so it costs no
+  // model tokens.
+  //
+  // ## Why it runs in a throwaway HOME
+  //
+  // Answering the dialog makes Claude Code write `hasTrustDialogAccepted` into ~/.claude.json,
+  // which is the mutation under test -- and a test that leaves one dead entry per run in the
+  // operator's global config is a test that vandalises the machine it is proving things about.
+  // Editing the entry back out afterwards is worse: ~/.claude.json is a single JSON document
+  // that any concurrently running `claude` rewrites in full, so a read-modify-write races every
+  // other session the operator has open, and the failure mode is losing THEIR data.
+  //
+  // So the child gets its own HOME instead, and the mutation lands in a directory this test
+  // deletes. It cannot be done with CLAUDE_CONFIG_DIR: `sanitizedCopy` strips every CLAUDE*
+  // variable, and rightly -- see `childenv.ts` on CLAUDE_CODE_CHILD_SESSION -- and `assertClean`
+  // throws rather than let one through. HOME is on the allowlist, so it is the seam that exists.
+  //
+  // Authentication survives on macOS because the OAuth credentials are in the Keychain, which is
+  // per-user rather than per-HOME. On Linux they are a file under ~/.claude, so it is symlinked
+  // into the sandbox: linked and not copied, so no token is ever duplicated into a temp file,
+  // and a refresh written through the link lands where it would have anyway.
+  const realHome = homedir()
+  const realConfig = join(realHome, '.claude.json')
+  const digest = () =>
+    existsSync(realConfig) ? createHash('sha256').update(readFileSync(realConfig)).digest('hex') : 'absent'
+  const before = digest()
+
+  const home = mkdtempSync(join(tmpdir(), 'conclave-home-'))
+  // Enough to skip first-run onboarding, and nothing else. Seeding a copy of the operator's real
+  // config would work and was rejected: it would put their account details in a temp file.
+  writeFileSync(join(home, '.claude.json'), JSON.stringify({ hasCompletedOnboarding: true }))
+  const linuxCreds = join(realHome, '.claude', '.credentials.json')
+  if (existsSync(linuxCreds)) {
+    mkdirSync(join(home, '.claude'), { recursive: true })
+    symlinkSync(linuxCreds, join(home, '.claude', '.credentials.json'))
+  }
+
+  const dir = mkdtempSync(join(tmpdir(), 'conclave-trust-'))
+  process.env.HOME = home
+  let session: ClaudePtyHookAdapter | undefined
+  try {
+    session = await ClaudePtyHookAdapter.start({ cwd: dir, role: 'implementer' })
+    assert.equal(session.isReady, true, 'an untrusted directory must not block SessionStart')
+    // The acceptance is reported, and reported with the directory it applied to. Verified on
+    // 2.1.232: ready in 2.1s from a directory with no trust record.
+    const notice = session.startupNotices.find((n) => n.includes('folder-trust'))
+    assert.ok(notice, `the acceptance must be reported: ${JSON.stringify(session.startupNotices)}`)
+    assert.ok(notice.includes(dir), 'and must name the directory it accepted')
+    assert.match(notice, /does not bypass tool permissions/)
+
+    // The decision was actually RECORDED, and recorded in the sandbox. Claude Code stores it
+    // under the realpath, which on macOS is /private/var... for a /var/folders temp directory --
+    // so this matches on the leaf rather than on the path we passed in.
+    const sandboxed = JSON.parse(readFileSync(join(home, '.claude.json'), 'utf8')) as {
+      projects?: Record<string, { hasTrustDialogAccepted?: boolean }>
+    }
+    const leaf = dir.split('/').pop()!
+    const recorded = Object.entries(sandboxed.projects ?? {}).find(([k]) => k.endsWith(leaf))
+    assert.ok(recorded, 'claude must have recorded a trust decision for the directory')
+    assert.equal(recorded[1].hasTrustDialogAccepted, true, 'and it must be an ACCEPTANCE')
+  } finally {
+    process.env.HOME = realHome
+    await session?.close('graceful')
+    // Swept twice, with a pause. The child's hooks are separate processes that inherited the
+    // sandbox HOME, and one still exiting after `close` will happily recreate a directory under
+    // it a moment after the first sweep -- observed leaving an empty tree behind exactly once.
+    rmSync(home, { recursive: true, force: true })
+    rmSync(dir, { recursive: true, force: true })
+    await new Promise((r) => setTimeout(r, 1000))
+    rmSync(home, { recursive: true, force: true })
+    rmSync(dir, { recursive: true, force: true })
+  }
+
+  // The point of all of the above, asserted rather than assumed: the operator's own config is
+  // byte-for-byte what it was. Checked after the sandbox is gone, so a failure here means the
+  // isolation leaked rather than that cleanup was skipped.
+  assert.equal(digest(), before, 'the real ~/.claude.json must be untouched')
 })
 
 test('a boot failure says WHY, not just that SessionStart never came', () => {

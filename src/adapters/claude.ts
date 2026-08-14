@@ -215,6 +215,225 @@ function plainScreen(raw: string): string {
     .replace(/[^\S\n]+/g, ' ')
 }
 
+/**
+ * The folder-trust dialog, in the two phrasings Claude Code has used for it.
+ *
+ * Matched against a screen that has been through `plainScreen`: the raw buffer carries
+ * cursor-positioning sequences BETWEEN words -- `trust\x1b[20Gthis\x1b[25Gfolder` -- so no
+ * phrase appears contiguously and a naive regex silently never matches.
+ */
+const FOLDER_TRUST_DIALOG = /trust this folder|Is this a project you created/i
+
+/**
+ * Whether anything on screen LOOKS like the folder-trust dialog.
+ *
+ * Deliberately broad, and deliberately not the thing that authorises a keystroke. This is the
+ * diagnostic reading: it runs once, after the readiness window has already expired, to explain a
+ * failure that has already happened. Over-matching there costs a slightly wrong sentence in a
+ * message nobody reads unless something is broken. See `answerableFolderTrustDialog` for the
+ * reading that types.
+ */
+export function folderTrustDialogVisible(raw: string): boolean {
+  return FOLDER_TRUST_DIALOG.test(plainScreen(raw).replace(/\s+/g, ' '))
+}
+
+/**
+ * Every part of the dialog that must be on screen before anything is typed at it.
+ *
+ * The broad match above is not safe as a write gate, and the asymmetry is the whole point: a
+ * false negative delays a boot that then fails with a message naming the remedy, while a false
+ * positive types `1` and Enter into a live composer and submits a turn whose entire content is
+ * `1`. A model that quotes the phrase "trust this folder" in its own narration, a file listing,
+ * a diff of THIS source file on screen -- each of those satisfies the broad reading.
+ *
+ * So the structure is required, not the phrase:
+ *
+ *   1. the numbered accept option, `1. Yes, ... trust this folder`
+ *   2. the numbered decline option, `2. No`
+ *   3. the question, or the confirmation affordance the menu is drawn with
+ *
+ * The first is doing more work than pattern-matching. The keystroke this authorises is `1`, and
+ * this is what checks that `1` is the option that TRUSTS -- rather than assuming an ordering
+ * that lives in someone else's interface. On the day those swap, this stops matching and the
+ * run fails with a diagnostic instead of confidently pressing "No, exit".
+ */
+const ANSWERABLE_SIGNATURE = [
+  // The gap is bounded tightly on purpose. A screen is normalised to one long line -- the TUI
+  // positions rows with cursor moves rather than newlines, so there are no line boundaries left
+  // to anchor on -- and a generous bound lets `1. Yes, <another option> ... trust this folder`
+  // satisfy this from two different options. In the real dialog the gap is ", I ".
+  /(^|[^0-9])1\s*[.)]\s*Yes\b.{0,24}trust this folder/i,
+  /(^|[^0-9])2\s*[.)]\s*No\b/i,
+  /Is this a project you created|Enter to confirm/i,
+] as const
+
+/**
+ * Whether the dialog is on screen AND has the shape this knows how to answer.
+ *
+ * The only reading that authorises a write. See `ANSWERABLE_SIGNATURE`.
+ */
+export function answerableFolderTrustDialog(raw: string): boolean {
+  const screen = plainScreen(raw).replace(/\s+/g, ' ')
+  return ANSWERABLE_SIGNATURE.every((re) => re.test(screen))
+}
+
+/**
+ * What was sent to clear the dialog, recorded rather than left on a screen to be grepped.
+ *
+ * The keystrokes are part of the record on purpose. "The dialog was answered" and "option 1
+ * was confirmed" are different claims, and the Codex equivalent shipped a version that
+ * recorded the opposite of what it intended (`ensureTrust.ts`) precisely because the only
+ * evidence kept was that a prompt had appeared.
+ */
+export interface FolderTrustAcceptance {
+  /** The directory the dialog asked about: the session's cwd, verbatim. */
+  directory: string
+  /** Exactly what was written to the pty, in order. */
+  keys: string[]
+  at: number
+}
+
+/** The slice of a pty this needs, so the acceptance can be driven without spawning claude. */
+export interface TrustDialogPty {
+  readonly output: string
+  write(data: string): void
+}
+
+/**
+ * Answer Claude Code's folder-trust dialog once, selecting "Yes, I trust this folder".
+ *
+ * ## Why this is answered rather than reported
+ *
+ * It used to be reported: the adapter detected the dialog, refused, and told the operator to
+ * run `claude` by hand. Under `--operator agent` there is by definition nobody who can carry
+ * that out, so the run did not degrade -- it never started (#108). Nor is it a once-per-machine
+ * cost: a directory that had been running Conclave for weeks began failing at startup the
+ * moment Claude Code auto-updated, because whatever the update changed stopped the previous
+ * acceptance from counting.
+ *
+ * The old comment argued that running Conclave in a directory is not the same as having vetted
+ * what is in it. That reasoning does not survive what invoking Conclave for THIS directory
+ * actually asks for: a Claude Code session in it, running Conclave's own hook client out of
+ * this checkout, which Claude Code will not do until the folder is trusted. Refusing to answer
+ * did not withhold the decision -- it withheld the session, and left the identical decision
+ * for a human to make by hand with less information about it.
+ *
+ * ## What this does NOT grant
+ *
+ * Folder trust only, and for one directory: the one named in `directory`, which is the cwd the
+ * session was launched in. It does not touch tool permissions. Every Read, Bash and Edit the
+ * model asks for is still gated exactly as before, and `--dangerously-skip-permissions` remains
+ * the only thing that changes that -- and, note, does NOT cover this dialog, which is why the
+ * two are easy to confuse and why they are named together here.
+ *
+ * ## Once, and the `prior` argument is what makes that true
+ *
+ * The pty buffer is CUMULATIVE. The dialog text stays in it forever, so a caller polling until
+ * the session is ready sees it on every pass after the first -- and a second pass would type
+ * `1` and Enter into a live composer, submitting a turn whose entire content is `1`. Passing
+ * back the acceptance already held is what stops that, so it is a parameter rather than a rule
+ * in the caller's head. Returns `prior` unchanged and writes nothing when it is set.
+ *
+ * The other half of that guard is `answerableFolderTrustDialog`, which requires the whole menu
+ * rather than a phrase: `prior` stops a SECOND write, and the signature stops a first one at a
+ * screen that merely mentions trusting a folder.
+ */
+export async function acceptFolderTrustDialog(
+  pty: TrustDialogPty,
+  directory: string,
+  opts: { prior?: FolderTrustAcceptance | undefined; settleMs?: number; now?: () => number } = {},
+): Promise<FolderTrustAcceptance | undefined> {
+  if (opts.prior) return opts.prior
+  // The strict reading, never the broad one. Nothing is typed at a screen whose structure has
+  // not been confirmed, including the position of the option about to be pressed.
+  if (!answerableFolderTrustDialog(pty.output)) return undefined
+  // The same shape as the Codex prompt driver: settle, select, settle, confirm. A TUI that
+  // is still drawing drops keys, and both halves have been observed to need the gap.
+  const settle = opts.settleMs ?? 400
+  const keys: string[] = []
+  const send = async (k: string) => {
+    await new Promise((r) => setTimeout(r, settle))
+    pty.write(k)
+    keys.push(k)
+  }
+  await send('1') // "1. Yes, I trust this folder"
+  await send('\r')
+  return { directory, keys, at: (opts.now ?? Date.now)() }
+}
+
+/**
+ * Why the session never became ready, in terms the operator can act on.
+ *
+ * Exported and pure so the message can be tested against the states that produce it, rather
+ * than by driving a real `claude` into each of them.
+ *
+ * Three states read identically from outside and are separated here, because what the operator
+ * should do differs in each:
+ *
+ *   answered, still stuck   the acceptance ran and did not take. Says exactly what it sent, so
+ *                           the next person is debugging the acceptance rather than rediscovering
+ *                           that there is one. The by-hand remedies are still given: a human at a
+ *                           terminal can do what the automation could not, which is the whole
+ *                           asymmetry, and withholding them would leave a stuck run with nothing.
+ *   visible, unanswerable   the dialog is up in a shape the signature does not cover, so nothing
+ *                           was typed at it ON PURPOSE. That is the actionable news, because it
+ *                           says the acceptance needs teaching a new shape rather than that it is
+ *                           broken.
+ *   visible, never answered the acceptance did not run at all -- an older build, or a code path
+ *                           that skipped it.
+ */
+export function bootFailureMessage(state: {
+  screen: string
+  cwd: string
+  alive: boolean
+  trust?: FolderTrustAcceptance | undefined
+}): string {
+  // `claude -p` is named because it is the first thing anyone reaches for, and it is the one
+  // check that cannot see this: headless mode never shows the dialog, so it returns a cheerful
+  // OK in the very directory where every interactive session is stuck (#108).
+  const notATest =
+    'Note that `claude -p "say OK"` is NOT a valid test of this condition -- headless mode ' +
+    'never shows the dialog -- and --dangerously-skip-permissions does NOT cover it.'
+  if (state.trust) {
+    return (
+      `claude showed its folder-trust dialog for ${state.trust.directory} and conclave answered ` +
+      `it (sent ${state.trust.keys.map((k) => (k === '\r' ? 'Enter' : k)).join(' then ')}), but ` +
+      'the session still never reported SessionStart, so the acceptance did not take. Run ' +
+      `\`claude\` in that directory once and accept it by hand, or set projects["${state.cwd}"]` +
+      '.hasTrustDialogAccepted to true in ~/.claude.json. ' +
+      notATest
+    )
+  }
+  if (folderTrustDialogVisible(state.screen)) {
+    const remedy =
+      'run `claude` in that directory once and accept, or set ' +
+      `projects["${state.cwd}"].hasTrustDialogAccepted to true in ~/.claude.json. ${notATest}`
+    // Nothing was typed, and saying so is the point. The signature requires the menu it is about
+    // to press a key on -- `1. Yes, ... trust this folder` and `2. No` -- precisely so that an
+    // unfamiliar screen produces this message instead of a keystroke of unknown meaning.
+    if (!answerableFolderTrustDialog(state.screen)) {
+      return (
+        `claude is waiting on its folder-trust dialog for ${state.cwd}, so no hook can fire and ` +
+        'the session never becomes ready. Conclave did NOT answer it: the dialog is on screen in ' +
+        'a shape it does not recognise, and it will not press a numbered option whose meaning it ' +
+        `has not confirmed. ${remedy}`
+      )
+    }
+    return (
+      `claude is waiting on its folder-trust dialog for ${state.cwd}, so no hook can fire and ` +
+      'the session never becomes ready. Conclave answers this dialog itself, so seeing it here ' +
+      `means the acceptance never ran: ${remedy}`
+    )
+  }
+  if (!state.alive) {
+    return 'claude exited before reporting SessionStart; run `conclave config check` to verify the hook registration'
+  }
+  return (
+    'claude did not report SessionStart within the readiness window. The hooks may not be ' +
+    'registered: run `conclave config check`. If it is merely slow, raise readyTimeoutMs.'
+  )
+}
+
 export class ClaudePtyHookAdapter implements AgentSession {
   readonly agent = 'claude'
   readonly guarantees: Guarantees
@@ -234,6 +453,8 @@ export class ClaudePtyHookAdapter implements AgentSession {
   #closeMode: 'graceful' | 'abandoned' | undefined
   #pendingPrompt: { resolve: (k: TurnKey) => void; reject: (e: Error) => void; prompt: string } | undefined
   #opts: ClaudeAdapterOptions
+  #folderTrust: FolderTrustAcceptance | undefined
+  #notices: string[] = []
   #settingsDir: string | undefined
   #watchdog: TurnWatchdog<TurnState>
 
@@ -324,6 +545,10 @@ export class ClaudePtyHookAdapter implements AgentSession {
 
     const deadline = Date.now() + (this.#opts.readyTimeoutMs ?? 60_000)
     while (!this.#ready && Date.now() < deadline && this.#pty.alive) {
+      // Inside the readiness wait rather than before it: the dialog is drawn by the very
+      // process we are waiting on, and until it is answered no hook fires, so waiting and
+      // watching for it are the same activity.
+      await this.#answerFolderTrust()
       await new Promise((r) => setTimeout(r, 100))
     }
     if (!this.#ready) throw new Error(this.#whyNotReady())
@@ -333,44 +558,49 @@ export class ClaudePtyHookAdapter implements AgentSession {
   }
 
   /**
-   * Why the session never became ready, in terms the operator can act on.
+   * Answer the folder-trust dialog if it is on screen, at most once per session.
    *
-   * `claude session did not report SessionStart` named an internal fact and offered nothing.
-   * The commonest cause by far is the FOLDER TRUST dialog, which 2.1.224 shows on any
+   * The commonest reason a session never becomes ready: Claude Code shows this on any
    * directory it has not seen -- including under `--dangerously-skip-permissions`, which does
-   * not cover it. Nothing proceeds until it is answered, so no hook ever fires and the
+   * not cover it -- and nothing proceeds until it is answered, so no hook ever fires and the
    * failure looks identical to a broken hook registration.
    *
-   * That is a direct hit on what Conclave claims: run it in the project you want worked on,
-   * the project needs nothing installed. It needs one thing, once, and it is not obvious.
-   *
-   * Deliberately NOT answered automatically. The dialog asks whether the FOLDER's contents
-   * are safe to execute, and running Conclave in a directory is not the same as having vetted
-   * what is in it. Both remedies are named instead -- the interactive one, and the key Claude
-   * Code's own message points at.
+   * Announced through `startupNotices` rather than an event: the events emitted during boot
+   * are buffered and drained when the relay attaches, which is before either front-end
+   * subscribes to the activity stream, so a notice sent that way is a notice nobody prints.
+   * The relay records these in the routing log, which both front-ends do print and the run
+   * record keeps.
    */
-  #whyNotReady(): string {
-    // Escapes are stripped and whitespace collapsed before matching. The raw buffer carries
-    // cursor-positioning sequences BETWEEN words -- `trust\x1b[20Gthis\x1b[25Gfolder` -- so
-    // no phrase appears contiguously and a naive regex silently never matches.
-    const screen = plainScreen(this.#pty?.output ?? '').replace(/\s+/g, ' ')
-    if (/trust this folder|Is this a project you created/i.test(screen)) {
-      return (
-        `claude is waiting on its folder-trust dialog for ${this.#opts.cwd}, so no hook can ` +
-        'fire and the session never becomes ready. Run `claude` in that directory once and ' +
-        'accept, or set projects["' +
-        this.#opts.cwd +
-        '"].hasTrustDialogAccepted to true in ~/.claude.json. Note that ' +
-        '--dangerously-skip-permissions does NOT cover this dialog.'
-      )
-    }
-    if (!this.#pty?.alive) {
-      return 'claude exited before reporting SessionStart; run `conclave config check` to verify the hook registration'
-    }
-    return (
-      'claude did not report SessionStart within the readiness window. The hooks may not be ' +
-      'registered: run `conclave config check`. If it is merely slow, raise readyTimeoutMs.'
+  async #answerFolderTrust(): Promise<void> {
+    const accepted = await acceptFolderTrustDialog(this.#pty, this.#opts.cwd, {
+      prior: this.#folderTrust,
+    })
+    // Identity, not truthiness: `accepted` is the acceptance that now STANDS, which on every
+    // pass after the first is the one already held. Only a new one is announced.
+    if (!accepted || accepted === this.#folderTrust) return
+    this.#folderTrust = accepted
+    // The exact directory, because that is the whole content of the decision and it is not
+    // always the one the operator is looking at: a seat working in an isolated worktree is
+    // launched in the tree's path, not the checkout the run was started from.
+    this.#notices.push(
+      `accepted claude's folder-trust dialog for ${accepted.directory} — this grants folder ` +
+        'trust only and does not bypass tool permissions',
     )
+  }
+
+  /** See `#answerFolderTrust`: what happened at boot that the operator must be told about. */
+  get startupNotices(): readonly string[] {
+    return this.#notices
+  }
+
+  /** Why the session never became ready. See `bootFailureMessage`. */
+  #whyNotReady(): string {
+    return bootFailureMessage({
+      screen: this.#pty?.output ?? '',
+      cwd: this.#opts.cwd,
+      alive: this.#pty?.alive === true,
+      trust: this.#folderTrust,
+    })
   }
 
   /**

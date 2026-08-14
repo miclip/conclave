@@ -42,7 +42,7 @@ nothing that could be run, compared or observed, so the outcome cannot be graded
 
 | agent id | CLI | how it is driven | what registration it needs |
 |---|---|---|---|
-| `claude` | Claude Code | pty + hooks + transcript | generated `--settings`, written per session |
+| `claude` | Claude Code | pty + hooks + transcript | generated `--settings`, written per session, **and** the folder trusted — answered for you, see below |
 | `codex` | Codex CLI | pty + hooks + transcript | project `.codex/hooks.json`, **and** those hooks trusted in your user-level config |
 | `opencode` | OpenCode | `run --format json` on stdout | none |
 | `kimi` | Kimi CLI (needs a provider; access waitlisted — see below) | `--print --output-format stream-json` | none |
@@ -644,6 +644,20 @@ Claude Code and Codex need Conclave's hook registration, which
 `conclave config install` writes and a session installs for you; Codex additionally
 requires those hooks to be trusted. OpenCode needs neither — it reports its own lifecycle
 on stdout, so there is nothing to register and nothing to trust.
+
+Both trust gates are answered for you, once, and said out loud in the run log. Codex is
+asked before launch; Claude Code shows its folder-trust dialog inside the session's own
+terminal, so the adapter answers it there and records the exact directory it accepted:
+
+```
+implementer: accepted claude's folder-trust dialog for /Users/you/project — this grants
+folder trust only and does not bypass tool permissions
+```
+
+That is the whole of what it grants. Every tool call is still gated exactly as before, and
+`--dangerously-skip-permissions` remains a separate decision that you make — note that it
+does **not** cover this dialog, which is why a run could previously fail to start in a
+directory where `claude -p "say OK"` answered perfectly (headless mode never shows it).
 
 ## License
 

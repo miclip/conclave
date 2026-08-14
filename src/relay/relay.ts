@@ -1739,6 +1739,13 @@ export class Relay {
     // is the same log it has always been.
     const as = spec.role === rank ? `${rank}` : `${rank} in role ${spec.role}`
     this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text: `${spec.id} joined as ${as} (${spec.agent})` })
+    // Anything the adapter had to do to the operator's machine to make this session exist --
+    // today, answering Claude Code's folder-trust dialog (#108). A separate note rather than a
+    // suffix on the join line: the join line is the same line it has always been on a run
+    // where nothing needed doing, and these appear only when something did.
+    for (const notice of session.startupNotices ?? []) {
+      this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text: `${spec.id}: ${notice}` })
+    }
   }
 
   /**

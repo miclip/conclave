@@ -48,6 +48,8 @@ class FakeSession implements AgentSession {
   // rejects those, since native type stripping cannot erase them.
   readonly agent: string
   readonly sessionId: string
+  /** What a real adapter reports having done to the machine at boot; see `startupNotices`. */
+  readonly startupNotices: string[] = []
   /** Emitted before each turn_end, so a turn is not a single instantaneous event. */
   #tools: string[]
   /**
@@ -307,6 +309,44 @@ async function twoParty(
   })
   return { relay, lead, impl }
 }
+
+// --- startup notices ------------------------------------------------------------------
+
+test('what an adapter had to do to the machine to start is recorded, naming the directory', async () => {
+  // Claude Code's folder-trust dialog is answered by the adapter now (#108), which is a
+  // decision taken on the operator's machine while nobody is watching. The event stream is not
+  // where that can be reported: boot events are drained when the relay attaches, before either
+  // front-end subscribes to activity. The routing log is printed by both and kept by the run
+  // record, so this is the channel the notice has to reach.
+  const lead = new FakeSession('fake-lead', 'lead-1', ['DONE'])
+  const impl = new FakeSession('fake-impl', 'impl-1', [])
+  impl.startupNotices.push(
+    "accepted claude's folder-trust dialog for /Users/x/repo — this grants folder trust only " +
+      'and does not bypass tool permissions',
+  )
+  const relay = await Relay.start({
+    registry: registryWith({ 'fake-lead': lead, 'fake-impl': impl }),
+    cwd: '/tmp',
+    lead: { id: 'advisor', agent: 'fake-lead', role: 'advisor' },
+    implementer: { id: 'implementer', agent: 'fake-impl', role: 'implementer' },
+    maxAdvisorTurns: 3,
+  })
+
+  const notes = relay.log.filter((m) => m.kind === 'note').map((m) => m.text)
+  const notice = notes.find((t) => t.includes('folder-trust'))
+  assert.ok(notice, `the notice must reach the log: ${JSON.stringify(notes)}`)
+  assert.match(notice, /^implementer: /, 'attributed to the seat it happened to')
+  // The exact directory, because that IS the decision. A seat in an isolated worktree is
+  // launched in the tree's path, not the checkout the operator started the run from, so
+  // "trusted the project directory" would name the wrong one.
+  assert.ok(notice.includes('/Users/x/repo'), 'the accepted directory must be named')
+
+  // A seat with nothing to report adds nothing: the default run's log is unchanged.
+  assert.deepEqual(
+    notes.filter((t) => t.startsWith('advisor: ')),
+    [],
+  )
+})
 
 // --- briefings ----------------------------------------------------------------------
 

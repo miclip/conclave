@@ -89,14 +89,14 @@ const CITED: Record<string, string> = {
   // named context object rather than an inline literal -- is pinned on the new spelling.
   'src/relay/relay.ts:1574-1576': 'get cwd(): string',
   'src/relay/relay.ts:1726-1732': 'createParticipant(spec, ctx)',
-  'src/relay/relay.ts:2273': 'worktreePaths(this.#opts.cwd)',
-  'src/relay/relay.ts:2300': 'NOT ARMED (no checks configured)',
-  'src/relay/relay.ts:2390': 'worktreePaths(this.#opts.cwd)',
-  'src/relay/relay.ts:2837': 'resolutionFor(p.subject, { rotationArmed: armed })',
-  'src/relay/relay.ts:3264-3266': 'No rotation checks are configured',
+  'src/relay/relay.ts:2280': 'worktreePaths(this.#opts.cwd)',
+  'src/relay/relay.ts:2307': 'NOT ARMED (no checks configured)',
+  'src/relay/relay.ts:2397': 'worktreePaths(this.#opts.cwd)',
+  'src/relay/relay.ts:2844': 'resolutionFor(p.subject, { rotationArmed: armed })',
+  'src/relay/relay.ts:3271-3273': 'No rotation checks are configured',
   'src/relay/relay.ts:323': "onDegradation ?? 'candidate'",
-  'src/relay/relay.ts:4148': 'worktreePaths(this.#opts.cwd)',
-  'src/relay/relay.ts:4615': "subject: { reason: 'turn_incomplete', participant: lead.id }",
+  'src/relay/relay.ts:4155': 'worktreePaths(this.#opts.cwd)',
+  'src/relay/relay.ts:4622': "subject: { reason: 'turn_incomplete', participant: lead.id }",
   // The five below are what the console's `/continue` liveness guard cites for reading a
   // pause's SCOPE rather than `verdictOf` or a rank scan (`seatsToSampleAtPause` in
   // src/repl/session.ts). Two of them pin the ONLY sites that populate `verdictOf` -- the
@@ -105,13 +105,13 @@ const CITED: Record<string, string> = {
   // conclave-scoped halt the change gives up sampling on, its own liveness evidence, and the
   // send that a resumed `advisor_escalated` pause actually makes -- to the ADVISOR, which is
   // why measuring implementer children there was answering the wrong question.
-  'src/relay/relay.ts:4619': 'verdictOf: { participant: lead.id, endSeq: next.end.seq },',
-  'src/relay/relay.ts:4718': 'The human has seen your escalation and asked you to continue.',
+  'src/relay/relay.ts:4626': 'verdictOf: { participant: lead.id, endSeq: next.end.seq },',
+  'src/relay/relay.ts:4725': 'The human has seen your escalation and asked you to continue.',
   // The workstream a conflicted instruction belongs to, named after the seat when exactly one
   // seat could take it -- the N=1 coincidence a scope reader must not mistake for a seat.
-  'src/relay/relay.ts:4782': "reason: 'authority_conflict', workstream:",
-  'src/relay/relay.ts:4866': "subject: { reason: 'implementer_unanswered', participant: seat.id }",
-  'src/relay/relay.ts:4915': "subject: { reason: 'advisor_escalated' },",
+  'src/relay/relay.ts:4789': "reason: 'authority_conflict', workstream:",
+  'src/relay/relay.ts:4873': "subject: { reason: 'implementer_unanswered', participant: seat.id }",
+  'src/relay/relay.ts:4922': "subject: { reason: 'advisor_escalated' },",
   // Repaired rather than deleted, and it now pins a DESCRIPTOR rather than a call: #101 moved
   // the measurement inside `#halt`, so the halt site says which seat to measure and no longer
   // builds the sentence itself. The claim the citation supports is unchanged -- this halt does
@@ -120,9 +120,9 @@ const CITED: Record<string, string> = {
   // Weaker than the pins around it, and worth saying: the same descriptor appears at the
   // `turn_incomplete` halt below, so only a shift of exactly the distance between the two would
   // slip past. There is nothing unique on the line to pin instead.
-  'src/relay/relay.ts:4929': 'liveness: { participant: seat, emittedBefore: report.emittedBefore },',
-  'src/relay/relay.ts:4999': "subject: { reason: 'turn_incomplete', participant: seat.id }",
-  'src/relay/relay.ts:5003': 'verdictOf: { participant: seat.id, endSeq: current.seq },',
+  'src/relay/relay.ts:4936': 'liveness: { participant: seat, emittedBefore: report.emittedBefore },',
+  'src/relay/relay.ts:5006': "subject: { reason: 'turn_incomplete', participant: seat.id }",
+  'src/relay/relay.ts:5010': 'verdictOf: { participant: seat.id, endSeq: current.seq },',
   'src/relay/resolution.ts:190': 'export function resolutionFor',
   'src/relay/run.ts:51': "| 'implementer_unanswered'",
   'src/relay/run.ts:209-223': 'reason: PauseReason',
@@ -336,7 +336,7 @@ test('the scanner sees both citation forms, so neither can be added unnoticed', 
   assert.deepEqual(citationsInLine(' * `resolutionFor` in `src/relay/resolution.ts` classifies it'), [])
   // An undeclared citation is what the found-must-be-declared test consumes. Proven here on a
   // literal, because a scanner that quietly matched nothing would make that test pass forever.
-  const invented = citationsInLine('// a claim about src/relay/relay.ts:99999')
+  const invented = citationsInLine('// a claim about src/relay/relay.ts:100006')
   assert.equal(invented.length, 1)
   assert.ok(!(invented[0]!.text in CITED), 'an invented citation must not already be declared')
 })
@@ -400,7 +400,7 @@ test('an undeclared citation is reported, and an exemption covers only where it 
     { cite: 'src/relay/run.ts:51', path: 'src/relay/run.ts', start: 51, end: 51, at: 'src/relay/x.ts:7' },
     { cite: 'src/relay/relay.ts:214', path: 'src/relay/relay.ts', start: 214, end: 214, at: 'src/repl/demo.ts:48' },
     { cite: 'src/relay/relay.ts:214', path: 'src/relay/relay.ts', start: 214, end: 214, at: 'src/relay/y.ts:9' },
-    { cite: 'src/relay/relay.ts:31337', path: 'src/relay/relay.ts', start: 31337, end: 31337, at: 'src/relay/z.ts:3' },
+    { cite: 'src/relay/relay.ts:31344', path: 'src/relay/relay.ts', start: 31337, end: 31337, at: 'src/relay/z.ts:3' },
   ]
   assert.deepEqual(
     found.filter((c) => !(c.cite in CITED) && !(exemptKey(c) in NOT_CITATIONS)).map((c) => `${c.at} cites ${c.cite}`),
@@ -408,7 +408,7 @@ test('an undeclared citation is reported, and an exemption covers only where it 
       // The demo's copy is waived and this one is not, though the text is identical: an
       // exemption is granted to a place, so fixture data cannot license a claim elsewhere.
       'src/relay/y.ts:9 cites src/relay/relay.ts:214',
-      'src/relay/z.ts:3 cites src/relay/relay.ts:31337',
+      'src/relay/z.ts:3 cites src/relay/relay.ts:31344',
     ],
   )
 })
