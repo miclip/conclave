@@ -378,10 +378,14 @@ test('a declined candidate is remembered, and a LATER compaction raises it again
   assert.ok(second.evidence.some((e) => e.includes('1 → 2')))
   await run.abort()
 
+  // The note is worded about the BASELINE rather than about who decided, because every caller
+  // of `#acknowledge` reaches it and only this one declined anything (#107). What it still
+  // pins is unchanged: the baseline moved exactly once between the two compactions, which is
+  // what makes the second a new candidate rather than the first one re-read.
   assert.equal(
-    relay.log.filter((m) => m.text.includes('rotation candidate declined')).length,
+    relay.log.filter((m) => m.text.includes('rotation candidate closed at compaction generation 1')).length,
     1,
-    'exactly one decline was recorded between the two compactions',
+    'exactly one candidate was closed between the two compactions',
   )
 })
 
