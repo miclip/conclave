@@ -93,10 +93,10 @@ const CITED: Record<string, string> = {
   'src/relay/relay.ts:2307': 'NOT ARMED (no checks configured)',
   'src/relay/relay.ts:2397': 'worktreePaths(this.#opts.cwd)',
   'src/relay/relay.ts:2844': 'resolutionFor(p.subject, { rotationArmed: armed })',
-  'src/relay/relay.ts:3253-3255': 'No rotation checks are configured',
+  'src/relay/relay.ts:3271-3273': 'No rotation checks are configured',
   'src/relay/relay.ts:323': "onDegradation ?? 'candidate'",
-  'src/relay/relay.ts:4123': 'worktreePaths(this.#opts.cwd)',
-  'src/relay/relay.ts:4590': "subject: { reason: 'turn_incomplete', participant: lead.id }",
+  'src/relay/relay.ts:4155': 'worktreePaths(this.#opts.cwd)',
+  'src/relay/relay.ts:4622': "subject: { reason: 'turn_incomplete', participant: lead.id }",
   // The five below are what the console's `/continue` liveness guard cites for reading a
   // pause's SCOPE rather than `verdictOf` or a rank scan (`seatsToSampleAtPause` in
   // src/repl/session.ts). Two of them pin the ONLY sites that populate `verdictOf` -- the
@@ -105,13 +105,13 @@ const CITED: Record<string, string> = {
   // conclave-scoped halt the change gives up sampling on, its own liveness evidence, and the
   // send that a resumed `advisor_escalated` pause actually makes -- to the ADVISOR, which is
   // why measuring implementer children there was answering the wrong question.
-  'src/relay/relay.ts:4594': 'verdictOf: { participant: lead.id, endSeq: next.end.seq },',
-  'src/relay/relay.ts:4693': 'The human has seen your escalation and asked you to continue.',
+  'src/relay/relay.ts:4626': 'verdictOf: { participant: lead.id, endSeq: next.end.seq },',
+  'src/relay/relay.ts:4725': 'The human has seen your escalation and asked you to continue.',
   // The workstream a conflicted instruction belongs to, named after the seat when exactly one
   // seat could take it -- the N=1 coincidence a scope reader must not mistake for a seat.
-  'src/relay/relay.ts:4757': "reason: 'authority_conflict', workstream:",
-  'src/relay/relay.ts:4841': "subject: { reason: 'implementer_unanswered', participant: seat.id }",
-  'src/relay/relay.ts:4890': "subject: { reason: 'advisor_escalated' },",
+  'src/relay/relay.ts:4789': "reason: 'authority_conflict', workstream:",
+  'src/relay/relay.ts:4873': "subject: { reason: 'implementer_unanswered', participant: seat.id }",
+  'src/relay/relay.ts:4922': "subject: { reason: 'advisor_escalated' },",
   // Repaired rather than deleted, and it now pins a DESCRIPTOR rather than a call: #101 moved
   // the measurement inside `#halt`, so the halt site says which seat to measure and no longer
   // builds the sentence itself. The claim the citation supports is unchanged -- this halt does
@@ -120,9 +120,9 @@ const CITED: Record<string, string> = {
   // Weaker than the pins around it, and worth saying: the same descriptor appears at the
   // `turn_incomplete` halt below, so only a shift of exactly the distance between the two would
   // slip past. There is nothing unique on the line to pin instead.
-  'src/relay/relay.ts:4904': 'liveness: { participant: seat, emittedBefore: report.emittedBefore },',
-  'src/relay/relay.ts:4974': "subject: { reason: 'turn_incomplete', participant: seat.id }",
-  'src/relay/relay.ts:4978': 'verdictOf: { participant: seat.id, endSeq: current.seq },',
+  'src/relay/relay.ts:4936': 'liveness: { participant: seat, emittedBefore: report.emittedBefore },',
+  'src/relay/relay.ts:5006': "subject: { reason: 'turn_incomplete', participant: seat.id }",
+  'src/relay/relay.ts:5010': 'verdictOf: { participant: seat.id, endSeq: current.seq },',
   'src/relay/resolution.ts:190': 'export function resolutionFor',
   'src/relay/run.ts:51': "| 'implementer_unanswered'",
   'src/relay/run.ts:209-223': 'reason: PauseReason',

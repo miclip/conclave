@@ -202,10 +202,16 @@ export function resolutionFor(subject: ResolutionSubject, config: ResolutionConf
         // The `operator` branch is REACHABLE, and it was not until #96. An unarmed run used to
         // end on degradation rather than pause, so the one configuration this branch describes
         // was the one that never produced a pause to describe -- the classification was honest
-        // and unreachable at the same time. The unarmed run now pauses (`src/relay/relay.ts:3253-3255`), which
-        // is what makes the derivation mean anything: with checks the candidate is mechanical
-        // because a replacement could reproduce them, and without checks it is the operator's
-        // because nothing else can settle it.
+        // and unreachable at the same time. An unarmed run attended by a HUMAN now pauses
+        // (`src/relay/relay.ts:3271-3273`), which is what makes the derivation mean anything: with
+        // checks the candidate is mechanical because a replacement could reproduce them, and
+        // without checks it is the operator's because nothing else can settle it.
+        //
+        // Under `--operator agent` that same unarmed candidate is recorded and the run carries
+        // on (#107) -- the operator this axis names cannot re-launch the run it is driving, so
+        // the pause offered it no answer it did not already have. That narrows where the branch
+        // is reached; it does not change what the branch SAYS. Who is entitled to settle an
+        // unarmed candidate is still the operator, and it is still nobody else.
         authority: config.rotationArmed ? 'mechanical' : 'operator',
         scope: { kind: 'participant', participantId: subject.participant },
       }

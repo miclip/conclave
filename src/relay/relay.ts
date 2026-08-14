@@ -3247,14 +3247,32 @@ export class Relay {
       // run was ended under a message that correctly said a human was needed -- while the
       // human was sitting at the console it never asked.
       //
-      // An ATTENDED run asks, exactly as the armed one does. The pause carries the fact that
-      // makes this pause different: rotation is not among the options, so the decision is to
-      // continue or to stop, and arming --checks is what would widen it next time.
+      // A HUMAN-ATTENDED run asks, exactly as the armed one does. The pause carries the fact
+      // that makes this pause different: rotation is not among the options, so the decision is
+      // to continue or to stop, and arming --checks is what would widen it next time.
+      //
+      // An AGENT-operated run does not ask, and that is the second half of the same argument
+      // (#107). #96 replaced an ending with a question because a human was sitting there and
+      // the question cost them a moment. Under `--operator agent` there is no such reader:
+      // the only answers on offer are `continue` and `stop and re-run with --checks`, an agent
+      // operator cannot re-launch the run it is currently driving, so every one of these
+      // pauses resolves to `continue` — and the run pays a full operator round-trip for it.
+      // Worse, it recurs. `#acknowledge` moves the baseline so ONE compaction is raised once,
+      // but a long implementer compacts repeatedly, and each fresh generation is new evidence
+      // that raises the pause again. A run driven by an agent therefore stops, over and over,
+      // on the one condition it has no means to act on. Compaction is normal operation for a
+      // long session; it must never be what ends or stalls the run.
+      //
+      // So the agent-operated run takes the same note-and-continue path the unattended one
+      // takes, for the same reason and with the same record: the candidate is counted in
+      // `rotationWatch`, written to the routing log, and reaches the operator through the
+      // summary and `status --json`. Recorded, not acted on -- which is what this branch has
+      // claimed to do since #96. A human at the console still gets the pause.
       const why = cfg
         ? `${impl.id}'s own rotation policy configures no checks, so it cannot be rotated`
         : `No rotation checks are configured`
       this.rotationWatch.candidates += 1
-      if (handle) {
+      if (handle && this.operator !== 'agent') {
         const halted = await this.#halt(handle, {
           subject: { reason: 'rotation_candidate', participant: impl.id },
           detail: `${detail}. ${why}, so this cannot be adjudicated — continue, or stop and re-run with --checks.`,
@@ -3262,14 +3280,21 @@ export class Relay {
         })
         if (halted) return halted
       } else {
-        // Unattended, and it carries on for the same reason the armed unattended run does:
-        // there is nobody to ask, and ending is not the neutral thing to do while waiting.
+        // Nobody to ask, or nobody a question would help. Unattended it carries on for the
+        // same reason the armed unattended run does -- there is nobody to ask, and ending is
+        // not the neutral thing to do while waiting -- and agent-operated it carries on
+        // because the question has no answer that changes anything. The two are named apart
+        // in the note, because an operator reading the log afterwards has to be able to tell
+        // "nobody was there" from "somebody was there and was deliberately not interrupted".
         this.#record({
           from: 'orchestrator',
           fromRank: 'human',
           to: [],
           kind: 'note',
-          text: `rotation candidate recorded, run continues (unattended, ${cfg ? 'seat has' : 'run has'} no checks to adjudicate with): ${detail}`,
+          text:
+            `rotation candidate recorded, run continues ` +
+            `(${handle ? 'agent-operated' : 'unattended'}, ` +
+            `${cfg ? 'seat has' : 'run has'} no checks to adjudicate with): ${detail}`,
         })
       }
       // Baseline moved either way, so one compaction is raised once. Without this the same
@@ -3367,13 +3392,12 @@ export class Relay {
   }
 
   /**
-   * The human saw this evidence and chose to carry on. Stop re-raising it.
+   * This evidence has been dealt with. Stop re-raising it.
    *
-   * Without this, declining a candidate pauses again on the very next advisor turn, on the same
-   * compaction, forever -- the operator either abandons the feature or stops reading the
-   * pauses, and the second is worse. Moving the baseline means a *later* compaction is new
-   * evidence and does pause again, which is the distinction that makes the signal worth
-   * surfacing at all.
+   * Without this, a candidate re-raises on the very next advisor turn, on the same compaction,
+   * forever -- the operator either abandons the feature or stops reading the pauses, and the
+   * second is worse. Moving the baseline means a *later* compaction is new evidence and is
+   * raised again, which is the distinction that makes the signal worth surfacing at all.
    *
    * Found by three tests hanging rather than by design.
    */
@@ -3385,7 +3409,15 @@ export class Relay {
       fromRank: 'human',
       to: [],
       kind: 'note',
-      text: `rotation candidate declined at compaction generation ${generation}; a later compaction will raise it again`,
+      // Says what HAPPENED, not who decided it. Every caller lands here -- a human who declined
+      // at a pause, an unattended run with nobody to ask, and an agent-operated run that was
+      // deliberately not interrupted (#107) -- and only the first of those declined anything.
+      // The note used to say "declined" for all three, which put a decision in the record of
+      // two runs where nobody made one. The note that names the actor is the candidate note
+      // above; this one is about the baseline.
+      text:
+        `rotation candidate closed at compaction generation ${generation}: the baseline moved, ` +
+        `so this compaction will not be raised again and a later one will`,
     })
     return undefined
   }

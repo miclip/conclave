@@ -25,6 +25,10 @@ import { FakeRotationSession } from '../rotation/fakeSession.ts'
 import { Relay, extractFlags, type RelayOptions } from './relay.ts'
 import type { RelayEvent } from './observe.ts'
 import { NO_DEADLINE_CLOCKS } from '../registry/types.ts'
+// The recorder, used here rather than a hand-built status document: an agent operator reads
+// `status.json` and nothing else, so a claim about what it contains has to be made through the
+// call the console makes (#103, #107).
+import { newSessionId, readSession, recordSession } from '../workspace/sessionRecord.ts'
 
 function repo(): string {
   const dir = mkdtempSync(join(tmpdir(), 'conclave-relay-rot-'))
@@ -382,6 +386,298 @@ test('degradation with no checks configured escalates rather than rotating blind
     relay.log.some((m) => /rotation candidate recorded, run continues \(unattended/.test(m.text) && /degraded/.test(m.text)),
     `the log must record the candidate:\n${relay.log.map((m) => m.text).join('\n---\n')}`,
   )
+})
+
+/**
+ * The same condition, on a run an AGENT is driving (#107).
+ *
+ * #96 turned the unarmed candidate from a run-ending escalation into a question, and the
+ * question is right when a human is at the console: it costs them a moment and the answer is
+ * theirs. `--operator agent` is the case that reasoning does not cover. The only answers the
+ * pause offers are `continue` and "stop and re-run with --checks", and an agent operator
+ * cannot re-launch the run it is presently driving — so every one of these pauses resolves
+ * `continue`, having spent a full operator round-trip to say so.
+ *
+ * And it is not one pause. `#acknowledge` moves the baseline so a single compaction is raised
+ * once, which is exactly what makes a LATER compaction new evidence — so a long implementer,
+ * which compacts repeatedly by design, walks the run into the same pause again and again. That
+ * is the shape this test is built around: repeated DISTINCT compactions, not one replayed.
+ *
+ * The two assertions that matter are a pair, and neither alone would catch a regression:
+ * nothing paused, and every candidate was still written down. "Recorded, not acted on" has to
+ * mean both halves, or this becomes a run that silently stops watching.
+ *
+ * The record is checked where an agent operator actually reads it -- `status.json`, through the
+ * real recorder -- and not only on the relay object. An agent driving this run has no console
+ * and no `relay.log`; if the seat's #103 rotation block went missing or started claiming an
+ * armed policy, the in-process assertions below would all still pass while the one interface
+ * the operator has went wrong.
+ */
+test('an agent-operated run records every compaction and never stops for one', async (t) => {
+  const dir = repo()
+  const advisor = new FakeRotationSession('advisor', 'codex', [
+    'Do the first thing.',
+    'Do the second thing.',
+    'Do the third thing.',
+    'DONE',
+  ])
+  const impl = new FakeRotationSession('impl', 'claude', [
+    'ack',
+    'Did the first thing.',
+    'Did the second thing.',
+    'Did the third thing.',
+  ])
+  // Compacts at the start of every turn that does work, and not on the briefing turn — a long
+  // session compacting more than once is the ordinary case, and `compactOnTurn` can only
+  // express the single one. Each compaction is a new generation, so each is new evidence
+  // rather than the same finding re-read.
+  let sends = 0
+  impl.onSend = () => {
+    if (sends++ > 0) impl.compact()
+  }
+
+  // Unarmed and attended: no checks to adjudicate with, and a handle to suspend into. That is
+  // the exact branch #96 gave a pause, and `operator: 'agent'` is the only difference between
+  // this run and the one below it.
+  const relay = await relayOf(dir, advisor, [impl], {
+    rotation: undefined,
+    maxAdvisorTurns: 4,
+    operator: 'agent',
+  })
+  t.after(() => relay.stop())
+
+  // The real recorder, on the real relay, writing the real file -- the same call the console
+  // makes. `status.json` is the whole of an agent operator's interface to a run it is driving,
+  // so the record has to be checked there and not only on the object.
+  const recording = recordSession(relay, {
+    repoRoot: dir,
+    id: newSessionId(Date.now(), process.pid),
+    goal: 'Keep the work moving.',
+    front: 'session',
+    startedAt: Date.now(),
+    build: 'test-build',
+  })
+  t.after(() => recording.close())
+
+  const run = relay.start('Keep the work moving.')
+  // `settled()` rather than `result()`: it covers the pause and the end together, so a run
+  // that stops here fails this assertion instead of deadlocking against a promise that
+  // provably cannot settle.
+  const settled = await run.settled()
+
+  assert.ok(
+    settled.kind === 'ended',
+    settled.kind === 'paused'
+      ? `an agent-operated run must not stop on a compaction it has no means to act on, and it ` +
+        `stopped on ${settled.pause.reason}: ${settled.pause.detail}`
+      : '',
+  )
+  assert.notEqual(settled.outcome.reason, 'escalated', 'compaction must never end the run either')
+  assert.equal(run.state, 'ended')
+
+  // The halt site records `paused (<reason>)` BEFORE it looks at the handle, so this reads
+  // whether the site was entered at all rather than whether it happened to suspend. Zero
+  // pauses of any reason: nothing else in this run raises one, so a match here is this fix.
+  assert.deepEqual(
+    relay.log.filter((m) => /^paused \(/.test(m.text)).map((m) => m.text),
+    [],
+    'no pause was raised at all',
+  )
+
+  // And every candidate is still on the record, which is the half that keeps "continues" from
+  // meaning "stopped looking".
+  const notes = relay.log.filter(
+    (m) => m.kind === 'note' && /rotation candidate recorded, run continues \(agent-operated/.test(m.text),
+  )
+  assert.ok(
+    notes.length >= 3,
+    `three work turns compacted, so three candidates must be recorded; log:\n${relay.log
+      .map((m) => m.text)
+      .join('\n---\n')}`,
+  )
+  assert.equal(relay.rotationWatch.candidates, notes.length, 'the counter and the log agree')
+  // DISTINCT compactions. The generation pair travels in the evidence the note carries, so a
+  // baseline that had stopped moving — one compaction re-raised N times — would collapse this
+  // set and fail here rather than passing as N candidates.
+  const generations = new Set(notes.map((m) => /rose (\d+ → \d+)/.exec(m.text)?.[1]))
+  assert.equal(
+    generations.size,
+    notes.length,
+    `each candidate must be a new compaction, not the same one re-read: ${[...generations].join(', ')}`,
+  )
+  assert.match(relay.rotationSummary(), /NOT ARMED/)
+
+  // And the same three facts as an agent operator can actually get at them. #103 was a probe
+  // reading a key that did not exist and getting a falsy value it could not tell from a build
+  // that does not report the field, so "present" is asserted as its own claim before the
+  // values are.
+  await recording.refresh()
+  const status = readSession(dir, recording.id)
+  assert.ok(status, 'the run this test drove must be readable as a session record')
+  const seat = status.status.participants.find((p) => p.id === 'implementer')
+  assert.notEqual(seat, undefined, 'the implementer seat is in the status document')
+  assert.notEqual(seat!.rotation, undefined, 'and it carries a rotation block even unarmed (#103)')
+  assert.deepEqual(
+    seat!.rotation,
+    { configured: false, armed: false, checks: [], onDegradation: null },
+    'the run configured no rotation, and the block says exactly that rather than going missing',
+  )
+  // Who was driving, in the same document. It is what makes the block above readable as a
+  // deliberate policy rather than as a run that happened not to be watched.
+  assert.equal(status.status.operator, 'agent')
+})
+
+test('a HUMAN-attended run still pauses on that compaction (#96 stands)', async (t) => {
+  // The other half of #107, and the one that says what was NOT changed. The pause is still
+  // the right thing for a human: they can stop the run and re-launch it with --checks, which
+  // is the one answer that widens the decision next time, and it is an answer an agent
+  // operator driving this run cannot give.
+  const dir = repo()
+  const advisor = new FakeRotationSession('advisor', 'codex', ['Do the first thing.', 'DONE'])
+  const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did the first thing.'])
+  impl.compactOnTurn = 1
+
+  // Identical to the run above but for the operator, which is left at its default.
+  const relay = await relayOf(dir, advisor, [impl], { rotation: undefined, maxAdvisorTurns: 4 })
+  t.after(() => relay.stop())
+
+  const run = relay.start('Keep the work moving.')
+  const settled = await run.settled()
+
+  assert.ok(
+    settled.kind === 'paused',
+    'a human at the console is still asked about a compaction that cannot be adjudicated',
+  )
+  assert.equal(settled.pause.reason, 'rotation_candidate')
+  assert.match(settled.pause.detail, /re-run with --checks/)
+  // No `rotate`: unarmed, so a replacement could not be verified and the option would be inert.
+  assert.deepEqual(settled.pause.options, ['continue', 'constrain', 'abort'])
+  assert.equal(relay.operator, 'human')
+
+  await run.abort()
+})
+
+test('an ARMED agent-operated run still raises the candidate, with rotate offered', async (t) => {
+  // The boundary of #107, and the assertion that keeps it a boundary. What was changed is the
+  // branch where the pause has no answer: unarmed, there is nothing to verify a replacement
+  // against, so `continue` and "re-run with --checks" are the whole menu and an agent operator
+  // can pick neither usefully. Armed is the opposite case. `rotate` is a real option, it is
+  // pre-delegated authority the operator configured on purpose (D2), and an agent CAN take it
+  // — so the question is worth asking and is still asked.
+  //
+  // Without this, the obvious over-broad fix — "an agent operator is never asked about
+  // rotation" — would pass every other test in this file.
+  const dir = repo()
+  const advisor = new FakeRotationSession('advisor', 'codex', ['Do the first thing.', 'DONE'])
+  const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did the first thing.'])
+  const fresh = new FakeRotationSession('fresh', 'claude', [ACCEPTED])
+  impl.compactOnTurn = 1
+
+  const relay = await relayOf(dir, advisor, [impl, fresh], {
+    // Armed, and on the `candidate` policy rather than `automatic`: the policy that says raise
+    // it and let the operator decide, which is the default `rotationFor` resolves to.
+    rotation: { checks: ['exit 0'], checkTimeoutMs: 30_000, onDegradation: 'candidate' },
+    maxAdvisorTurns: 4,
+    operator: 'agent',
+  })
+  t.after(() => relay.stop())
+
+  const run = relay.start('Keep the work moving.')
+  const settled = await run.settled()
+
+  assert.ok(
+    settled.kind === 'paused',
+    'an armed candidate is a decision an agent operator can actually make, so it is still put',
+  )
+  assert.equal(settled.pause.reason, 'rotation_candidate')
+  assert.match(settled.pause.detail, /Recorded as a rotation candidate, not acted on/)
+  assert.ok(
+    settled.pause.options.includes('rotate'),
+    `rotate is the option that makes this pause worth raising: ${settled.pause.options.join(', ')}`,
+  )
+  assert.equal(relay.operator, 'agent', 'the premise: an agent is driving, and is asked anyway')
+  // Untouched while the decision is outstanding, which is what "candidate, not verdict" means.
+  assert.equal(impl.state, 'running')
+  assert.equal(fresh.state, 'running')
+
+  await run.abort()
+})
+
+test('a seat DISARMED by its own policy is unarmed for this purpose too, agent-operated', async (t) => {
+  // The third state, and the one a run-level flag cannot express (#103, D7): the run is armed
+  // and THIS SEAT is not, because its own policy entry sets no checks. `#considerRotation`
+  // decides armed-or-not with `!cfg || cfg.checks.length === 0`, and only the second half of
+  // that test sees this case — a run configured no rotation at all leaves `cfg` undefined and
+  // takes the first half.
+  //
+  // Written because a mutation exposed the hole rather than because a defect did. Narrowing the
+  // discriminator to `!cfg` survived the entire suite: nothing anywhere distinguished "the run
+  // configured none" from "this seat's policy sets none" at this branch. It matters more since
+  // #107 than it did before, because the two halves now lead somewhere different for an agent
+  // operator — one continues and, under that mutation, the other pauses.
+  const dir = repo()
+  const advisor = new FakeRotationSession('advisor', 'codex', [
+    'Do the first thing.',
+    'Do the second thing.',
+    'DONE',
+  ])
+  const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did the first thing.', 'And the second.'])
+  impl.compactOnTurn = 1
+
+  const relay = await relayOf(dir, advisor, [impl], {
+    // Armed at the RUN level, disarmed on the one seat that has work to do.
+    rotation: {
+      checks: ['exit 0'],
+      checkTimeoutMs: 30_000,
+      onDegradation: 'candidate',
+      seats: { implementer: { checks: [] } },
+    },
+    maxAdvisorTurns: 3,
+    operator: 'agent',
+  })
+  t.after(() => relay.stop())
+
+  const recording = recordSession(relay, {
+    repoRoot: dir,
+    id: newSessionId(Date.now(), process.pid),
+    goal: 'Keep the work moving.',
+    front: 'session',
+    startedAt: Date.now(),
+    build: 'test-build',
+  })
+  t.after(() => recording.close())
+
+  const run = relay.start('Keep the work moving.')
+  const settled = await run.settled()
+
+  assert.ok(
+    settled.kind === 'ended',
+    settled.kind === 'paused'
+      ? `a seat with nothing to verify against is unarmed however the run is configured, and it ` +
+        `stopped on ${settled.pause.reason}: ${settled.pause.detail}`
+      : '',
+  )
+  // The note names the SEAT's policy rather than the run's, which is the half of the sentence
+  // that says which of the two states this was.
+  assert.ok(
+    relay.log.some(
+      (m) => m.kind === 'note' && /run continues \(agent-operated, seat has no checks/.test(m.text),
+    ),
+    `the record must say the SEAT is the one with no checks:\n${relay.log.map((m) => m.text).join('\n---\n')}`,
+  )
+  assert.equal(relay.rotationWatch.candidates, 1)
+
+  // And `status.json` reports the state a run-wide answer gets wrong: configured, not armed.
+  await recording.refresh()
+  const status = readSession(dir, recording.id)
+  assert.ok(status)
+  const seat = status.status.participants.find((p) => p.id === 'implementer')
+  assert.deepEqual(seat?.rotation, {
+    configured: true,
+    armed: false,
+    checks: [],
+    onDegradation: 'candidate',
+  })
 })
 
 test('the replacement is not judged degraded by the retired session’s compaction', async (t) => {
