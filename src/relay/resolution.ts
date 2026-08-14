@@ -174,7 +174,7 @@ export interface ResolutionConfig {
    * verification method that makes the decision mechanical: without it the console says a
    * degraded implementer "escalates to you rather than being replaced"
    * (`src/repl/session.ts:646`) and the run reports `rotation: NOT ARMED (no checks
-   * configured)` (`src/relay/relay.ts:2300`).
+   * configured)` (`src/relay/relay.ts:2307`).
    */
   rotationArmed: boolean
 }
@@ -202,7 +202,7 @@ export function resolutionFor(subject: ResolutionSubject, config: ResolutionConf
         // The `operator` branch is REACHABLE, and it was not until #96. An unarmed run used to
         // end on degradation rather than pause, so the one configuration this branch describes
         // was the one that never produced a pause to describe -- the classification was honest
-        // and unreachable at the same time. The unarmed run now pauses (`src/relay/relay.ts:3246-3248`), which
+        // and unreachable at the same time. The unarmed run now pauses (`src/relay/relay.ts:3253-3255`), which
         // is what makes the derivation mean anything: with checks the candidate is mechanical
         // because a replacement could reproduce them, and without checks it is the operator's
         // because nothing else can settle it.

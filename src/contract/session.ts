@@ -263,6 +263,19 @@ export interface AgentSession {
    * a quiet turn (#43, #45). Absent means "cannot say", never "not running".
    */
   readonly childPid?: number | undefined
+  /**
+   * Things an adapter did during boot that the operator has to be told about, in prose.
+   *
+   * For decisions taken on the operator's machine to make the session possible at all --
+   * Claude Code's folder-trust dialog is the one that exists (#108). Deliberately not the
+   * event stream: boot events are buffered and drained when the relay attaches, which happens
+   * before either front-end subscribes to the activity stream, so nothing prints them. The
+   * relay reads this at join and records it in the routing log instead, which both front-ends
+   * print and the run record keeps.
+   *
+   * Notices, not diagnostics. A boot that FAILED throws, and the reason belongs in the throw.
+   */
+  readonly startupNotices?: readonly string[] | undefined
   readonly sessionId: string
   readonly guarantees: Guarantees
 
