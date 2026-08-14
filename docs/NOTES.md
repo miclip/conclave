@@ -7,6 +7,42 @@ Moved out of a `TODO.md` that mixed the two.
 
 ---
 
+## Content reads the record; presentation pins the width
+
+**Standing rule for every assertion in this repository (#109).**
+
+> Content reads the record. Presentation pins the width. Rendered output never stands in for
+> content.
+
+The console is a lossy view. `markdown()` and `summaryLine()` put every message through `wrap()`,
+which splits on `/\s+/` and rejoins at the terminal width — so runs of spaces collapse, line
+breaks disappear into the flow, and a phrase can be broken across a row mid-word. Three failures
+follow, all of them silent in the direction that keeps a test green:
+
+1. **An assertion that greps rendered output for a message's wording cannot see a whitespace or
+   line-break change in that message.** Measured: a routed message altered from
+   `Blank lines survive.` to `Blank   lines   survive.` left every console assertion about it
+   passing, with the run log showing the change. Fifteen assertions in `session.test.ts` shared
+   this defect and none of them could fail on it.
+2. **A negative console assertion — "this phrase was not printed" — is satisfied whenever a wrap
+   falls inside the phrase.** Measured: padding the preceding text so `half` ended one row and
+   `an answer` began the next left a `doesNotMatch` green with the words plainly on screen. An
+   absence claim has to be made against the absence of a RECORD.
+3. **A rendered assertion means nothing at an unknown width**, so the test harness pins one
+   rather than inheriting whatever the stream happens to report.
+
+A console assertion is still correct for a console-only notice — a hint, a refusal, a banner,
+the answer to a REPL command — because no record carries those. Say so where you write one, so a
+later reader can tell a deliberate rendering claim from a content claim that went to the wrong
+place. And note what a rendering assertion cannot pin even in principle: the producer's own
+spacing, which the renderer normalises before anyone sees it. The drawn form is the contract.
+
+The helpers that make this cheap live beside each other at the top of `src/repl/session.test.ts`:
+`collect()` for presentation, `routed()`/`routedAll()` for what was said, `events()` for what
+happened. The rule is written out there too, next to the code it governs.
+
+---
+
 ## ~~Before enabling any adapter with contradictory late evidence~~ — done
 
 **Migrated.** `ClaudePtyHookAdapter` now routes all terminal handling through
