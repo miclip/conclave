@@ -103,17 +103,101 @@ function slow(id: string, agent: string, replies: string[], ms = 250): FakeRotat
   return s
 }
 
+/**
+ * The rule these two helpers exist to enforce (#109).
+ *
+ *   **Content reads the record. Presentation pins the width. Rendered output never stands in
+ *   for content.**
+ *
+ * `markdown()` and `summaryLine()` put every message through `wrap()`, which splits on `/\s+/`
+ * and rejoins at the terminal width. So the console is a LOSSY view of what was sent: runs of
+ * spaces collapse, line breaks vanish into the flow, and a phrase can be broken across a row
+ * mid-word. Three consequences, each of which has produced a test that could not fail:
+ *
+ *   1. An assertion that greps the console for a message's wording cannot see a whitespace or
+ *      line-break change in that message. Measured, not assumed: a routed message altered from
+ *      `Blank lines survive.` to `Blank   lines   survive.` left every console assertion about
+ *      it green. Use `routed()`.
+ *   2. A NEGATIVE assertion against the console -- "this phrase was not printed" -- is satisfied
+ *      whenever a wrap happens to fall inside the phrase. Assert the ABSENCE OF A RECORD instead.
+ *   3. A claim about presentation is only meaningful at a known width, so `collect()` pins one
+ *      rather than inheriting whatever the stream happens to report.
+ *
+ * A console assertion is still the right tool for a console-only notice -- a hint, a refusal, a
+ * banner -- because no record carries those. Say so where you write one, so the next reader can
+ * tell a deliberate rendering claim from a content claim that went to the wrong place.
+ */
+
+/**
+ * The width every test here renders at.
+ *
+ * Pinned rather than inherited. `runSession` takes `Math.min(100, columns ?? 100)`, so an
+ * unadorned stream already produced 100 -- but by accident, invisibly, and identically whether
+ * or not anyone had thought about it. Written down, a rendering assertion says which width it
+ * holds at, and a change to the default becomes a visible edit here instead of a silent shift
+ * under every assertion in the file.
+ */
+const CONSOLE_COLUMNS = 100
+
+/** The console as a reader sees it: rendered, wrapped, and lossy. Presentation claims only. */
 function collect(): { stream: Writable; text: () => string } {
   const chunks: string[] = []
-  return {
-    stream: new Writable({
+  const stream = Object.assign(
+    new Writable({
       write(c, _e, cb) {
         chunks.push(String(c))
         cb()
       },
     }),
+    { columns: CONSOLE_COLUMNS },
+  )
+  return {
+    stream,
     text: () => chunks.join(''),
   }
+}
+
+/**
+ * A message as it was ROUTED, off the run log, rather than as the console drew it.
+ *
+ * The record, in the sense of the rule above: verbatim, addressed, and unwrapped. Every
+ * assertion about what a message SAID, or about who it went to, has to come from here.
+ */
+function routed(dir: string, needle: string): RoutedRecord | undefined {
+  return routedAll(dir).find((e) => typeof e.text === 'string' && e.text.includes(needle))
+}
+
+interface RoutedRecord {
+  readonly text: string
+  readonly from: string
+  readonly fromRank: string
+  readonly to: readonly string[]
+  readonly kind: string
+}
+
+/** Every routed record, in order. For counting messages, which the console cannot be asked. */
+function routedAll(dir: string): RoutedRecord[] {
+  const runs = join(dir, '.conclave', 'runs')
+  return readdirSync(runs)
+    .flatMap((f) => readFileSync(join(runs, f), 'utf8').split('\n'))
+    .filter(Boolean)
+    .map((l) => JSON.parse(l) as RoutedRecord)
+}
+
+/**
+ * The observation stream a stranger reads: pauses, resumes, supersessions, the run's end.
+ *
+ * The other half of the record. `routed()` answers what was SAID; this answers what HAPPENED,
+ * and it is where a pause's reason, evidence and options live as fields rather than as prose.
+ */
+function events(dir: string): Record<string, any>[] {
+  const found = resolveSession(dir)
+  if (!('session' in found)) return []
+  return readFileSync(found.session.status.eventsPath, 'utf8')
+    .trim()
+    .split('\n')
+    .filter(Boolean)
+    .map((l) => JSON.parse(l) as Record<string, any>)
 }
 
 test('a session runs to completion and reports the outcome', async () => {
@@ -134,8 +218,16 @@ test('a session runs to completion and reports the outcome', async () => {
     output: out.stream,
   })
   assert.equal(code, 0)
-  assert.match(out.text(), /run ended: done/)
-  // Without checks, rotation is refused rather than done unverified — and it says so.
+  // CONTENT off the record: the run ended, and on what. The `=== run ended: done` line is drawn
+  // through `summaryLine`, which wraps — so a console grep for it is a claim about the render
+  // that reads like a claim about the outcome.
+  const end = events(dir).at(-1)
+  assert.equal(end?.['type'], 'run_end')
+  assert.equal(end?.['reason'], 'done')
+  // PRESENTATION, at CONSOLE_COLUMNS: the outcome reaches the operator as a summary line.
+  assert.match(out.text(), /=== run ended: done/)
+  // Console-only advice — nothing records that it was given. Without checks, rotation is refused
+  // rather than done unverified, and it says so.
   assert.match(out.text(), /pass --checks/)
 })
 
@@ -239,12 +331,26 @@ test('a pause is rendered with its evidence and the operator resumes it', async 
   assert.equal(await running, 0)
 
   const text = out.text()
-  assert.match(text, /paused/)
-  assert.match(text, /rotation_candidate/)
-  assert.match(text, /compaction generation rose 0 → 1/)
-  assert.match(text, /\/continue/, 'the options are offered')
+  // CONTENT off the record. `untilText` above waits on `● paused rotation_candidate`, and that
+  // string CONTAINS both `paused` and `rotation_candidate` — so console greps for those two words
+  // could not fail here, and mutating either killed the wait rather than the assertion. The pause
+  // event carries the same facts as fields, where a change to one of them is visible.
+  const paused = events(dir).find((e) => e.type === 'pause')
+  assert.ok(paused, 'the pause must reach the event stream')
+  assert.equal(paused['pause'].reason, 'rotation_candidate')
+  assert.ok(
+    (paused['pause'].evidence as string[]).some((e) => e.includes('compaction generation rose 0 → 1')),
+    `the evidence the pause rests on, by name: ${JSON.stringify(paused['pause'].evidence)}`,
+  )
+  assert.ok((paused['pause'].options as string[]).includes('continue'), 'the options are offered')
+  // PRESENTATION, at CONSOLE_COLUMNS: `/state` answers from the live handle rather than a local
+  // copy. Asserted on the console because `/state` IS console-only — no record carries a reply to
+  // a REPL command — and the claim is about what the operator was shown.
   assert.match(text, /run: paused \(rotation_candidate\)/, '/state reports the handle, not a local copy')
-  assert.match(text, /run ended: done/)
+  // CONTENT: the run ended, and on what.
+  const end = events(dir).at(-1)
+  assert.equal(end?.['type'], 'run_end')
+  assert.equal(end?.['reason'], 'done')
 })
 
 test('an addressed line is queued, restricted, and reported as such', async () => {
@@ -304,16 +410,32 @@ test('narration streams to the human, and only the report is shown going to the 
   assert.equal(code, 0)
   const text = out.text()
 
-  assert.match(text, /implementer → you/, 'narration is addressed to the human')
-  assert.match(text, /finding the relevant code/)
-  assert.match(text, /Now the guard report shape/)
-  assert.match(text, /implementer → advisor/, 'and the report is shown going to the advisor')
-  assert.match(text, /Done\. guard --json is in\./)
+  // PRESENTATION, at CONSOLE_COLUMNS. Narration is streamed to the console and never routed —
+  // `routed()` finds nothing for it — so the console is the only place it exists, and these are
+  // rendering claims by necessity rather than content claims in the wrong place. Anchored to the
+  // rows BETWEEN the two headings instead of matched anywhere in the buffer, so "it was narrated"
+  // cannot be satisfied by the report that follows.
+  const rows = text.split('\n')
+  const narratedAt = rows.findIndex((l) => /● implementer → you/.test(l))
+  const reportedAt = rows.findIndex((l) => /● implementer → advisor/.test(l))
+  assert.ok(narratedAt >= 0, 'narration is addressed to the human')
+  assert.ok(reportedAt > narratedAt, 'and the report follows it, addressed to the advisor')
+  const narrated = rows.slice(narratedAt, reportedAt).join('\n')
+  assert.match(narrated, /finding the relevant code/)
+  assert.match(narrated, /Now the guard report shape/)
   assert.equal(
     text.split('Done. guard --json is in.').length - 1,
     1,
-    'the closing message is shown once, as the routed report — not streamed and repeated',
+    'the closing message is drawn once — not streamed and then repeated as the routed copy',
   )
+
+  // CONTENT off the record: the report as it was sent, verbatim and addressed. The console
+  // cannot answer this — it reflows what it draws — and a grep for the wording passed under a
+  // whitespace change to the very message it claims to pin.
+  const report = routed(dir, 'guard --json is in')
+  assert.ok(report, 'the closing report must be in the run log')
+  assert.equal(report.text, 'Done. guard --json is in.')
+  assert.ok(report.to.includes('advisor'), 'and it went to the advisor')
 })
 
 test('the banner names the participants, the checks and the colour legend', async () => {
@@ -534,11 +656,20 @@ test('a delivered message becomes a turn in the transcript, not a note about one
     input: script(['also check the error path']),
     output: out.stream,
   })
-  // Piped input has no box, so the queue confirmation still appears...
+  // PRESENTATION. The queue confirmation is a console-only notice — nothing records that the
+  // operator was told — so it is asserted where it is drawn, at CONSOLE_COLUMNS.
   assert.match(out.text(), /queued for everyone/)
-  // ...and the message itself lands as a speaker block once a participant takes it.
+  // ...and the delivered message is drawn as a SPEAKER BLOCK rather than as a grey log line,
+  // which is the whole point of this test and is a claim about rendering.
   assert.match(out.text(), /● you → /)
-  assert.match(out.text(), /also check the error path/)
+
+  // CONTENT off the record: what was delivered, verbatim and to whom. Asserted here rather than
+  // by grepping the console, which normalises whitespace on the way to the screen and so passes
+  // whether or not the message survived intact.
+  const sent = routed(dir, 'also check the error path')
+  assert.ok(sent, 'the message must be in the run log')
+  assert.equal(sent.text, 'also check the error path')
+  assert.deepEqual([...sent.to].sort(), ['advisor', 'implementer'], 'delivered to everyone')
 })
 
 // ---------------------------------------------------------------------------------------
@@ -635,9 +766,21 @@ test('a verdict withdrawn while the operator reads the pause is surfaced in the 
   const marked = text.split('\n').filter((l) => /^\s*~ /.test(l))
   const replacement = marked.find((l) => /withdrawn and replaced/.test(l))
   assert.ok(replacement, `the supersession must carry the ~ marker:\n${text.slice(-1200)}`)
-  assert.match(replacement, /timed_out/, 'the verdict the pause rests on, by name')
-  assert.match(replacement, /replaced with completed/, 'the replacement is terminal and the line says the turn ended')
-  assert.match(replacement, /still paused/, 'surfaced, not decided')
+
+  // CONTENT off the record: which verdict was withdrawn, and what the note says about what
+  // replaced it. The note is the record's own prose, so its wording belongs here rather than on
+  // the console, where it arrives reflowed and where `timed_out` appears more than once.
+  const superseded = events(dir)
+    .filter((e) => e.type === 'supersede')
+    .at(-1)
+  assert.ok(superseded, 'the supersession must reach the event stream')
+  // `superseded.verdict` is the REPLACEMENT — the verdict that now stands. The withdrawn one is
+  // named in the note, which is why both are asserted.
+  assert.equal(superseded['pause'].superseded.verdict.outcome, 'completed', 'a terminal verdict now stands')
+  const note = superseded['pause'].superseded.note as string
+  assert.match(note, /timed_out verdict .* was withdrawn/, 'the verdict the pause rested on, by name')
+  assert.match(note, /replaced with completed/, 'the replacement is terminal and the note says the turn ended')
+  assert.match(note, /still paused/, 'surfaced, not decided')
 
   // ...and it reaches the STATUS FILE, which is where an operator outside the process reads
   // it. This is load-bearing operational advice: the run stays paused across a supersession
@@ -684,12 +827,29 @@ test('another timeout on the still-running turn is shown as the turn still runni
   impl.lateSignal(TIMED_OUT)
   await untilText('the replacement verdict to reach the console', out.text, /withdrawn and replaced/)
 
+  // CONTENT off the record: which verdict was withdrawn and what replaced it. `timed_out` appears
+  // TWICE on the drawn line — once as the withdrawn verdict and once in `replaced with another
+  // timed_out` — so a console grep for it could not be falsified on its own; killing either
+  // occurrence left the other satisfying it.
+  const superseded = events(dir)
+    .filter((e) => e.type === 'supersede')
+    .at(-1)
+  assert.ok(superseded, 'the supersession must reach the event stream')
+  // `superseded.verdict` is the REPLACEMENT — here, another timeout on the same running turn.
+  assert.equal(superseded['pause'].superseded.verdict.outcome, 'timed_out', 'the replacement is another timeout')
+  // The note IS the record's own prose, so its wording is asserted HERE and not on the console,
+  // where the same words arrive reflowed and `timed_out` appears twice on one line.
+  const note = superseded['pause'].superseded.note as string
+  assert.match(note, /timed_out verdict .* was withdrawn/, 'the verdict the pause rested on, by name')
+  assert.match(note, /replaced with another timed_out/, 'and the replacement is named as another timeout')
+  assert.doesNotMatch(note, /turn ended/, 'and a still-running turn is not described as ended')
+
+  // PRESENTATION, at CONSOLE_COLUMNS: it is MARKED, not merely printed, and it must not say the
+  // turn ended — the line has to fit on one drawn row for the `~` prefix to mean anything.
   const text = out.text()
   const marked = text.split('\n').filter((l) => /^\s*~ /.test(l))
   const replacement = marked.find((l) => /withdrawn and replaced/.test(l))
   assert.ok(replacement, `the supersession must carry the ~ marker:\n${text.slice(-1200)}`)
-  assert.match(replacement, /timed_out/, 'the verdict the pause rests on, by name')
-  assert.match(replacement, /replaced with another timed_out/, 'the replacement is another timeout on the still-running turn')
   assert.doesNotMatch(replacement, /turn ended/, 'another timeout on the still-running turn does not say the turn ended')
 
   input.write('/continue\n')
@@ -1264,22 +1424,38 @@ test('a <<EOF block written to a paused session is one message, addressed once',
     'six lines of prose are one message, not six — this is the counter an observer polls',
   )
 
+  // CONTENT off the record: the whole answer as it was SENT, paragraph breaks and all, and the
+  // seat it was addressed to. The console flattens the breaks and collapses the spacing, so a
+  // grep of `out.text()` for this wording holds whether or not the block survived intact — and
+  // the addressee assertions that used to sit here could not be falsified on their own, because
+  // every way to make `● you → advisor, implementer` appear also broke the counter below.
+  const answer = routed(dir, 'Answered: make it opt-in')
+  assert.ok(answer, 'the answer must be in the run log')
+  assert.equal(
+    answer.text,
+    [
+      'Answered: make it opt-in.',
+      '',
+      'Every existing driver writes bare lines today, so a change of default',
+      'would silently reinterpret input that is already correct.',
+      '',
+      'One correction: the reason is implementer_unanswered, not turn_incomplete.',
+    ].join('\n'),
+    'six lines of prose, verbatim, as one message',
+  )
+  // Addressed ONCE and honoured for all of it. `>implementer` appeared on the opening line
+  // only, and the rest of a restricted answer must not fall back to everyone.
+  assert.deepEqual([...answer.to], ['implementer'], 'restricted to the seat it was addressed to')
+
+  // PRESENTATION, at CONSOLE_COLUMNS. From the pause onward, so the goal — which is itself a
+  // `you →` block — is not counted.
   const text = out.text()
-  // From the pause onward, so the goal — which is itself a `you →` block — is not counted.
   const since = text.slice(text.indexOf('● paused implementer_unanswered'))
-  const block = since.slice(since.indexOf('Answered: make it opt-in'))
-  // The whole answer, with its paragraph breaks, under a single speaker heading.
-  assert.match(block, /would silently reinterpret input that is already correct/)
-  assert.match(block, /One correction: the reason is implementer_unanswered/)
   assert.equal(
     since.match(/● you → /g)?.length,
     1,
     'one speaker block for one answer; every extra one is a fragment',
   )
-  // Addressed ONCE and honoured for all of it. `>implementer` appeared on the opening line
-  // only, and the rest of a restricted answer must not fall back to everyone.
-  assert.match(since, /● you → implementer\b/)
-  assert.doesNotMatch(since, /● you → advisor, implementer/)
 
   input.end()
   await running.catch(() => {})
@@ -1312,30 +1488,28 @@ test('input that ends inside an unterminated block says so, and delivers nothing
   input.end()
   await running.catch(() => {})
 
+  // PRESENTATION, at CONSOLE_COLUMNS. The diagnostic is console-only — nothing records that the
+  // operator was warned — so it is asserted where it is drawn.
   const text = out.text()
   assert.match(text, /input ended inside <<EOF/)
   assert.match(text, /2 buffered line\(s\) were NOT delivered/)
   assert.match(text, /a line reading exactly EOF/, 'it says what would have closed it')
-  assert.doesNotMatch(text, /half an answer/, 'the buffered lines were not routed anywhere')
-  assert.doesNotMatch(text, /● you → implementer/, 'and no message was addressed from them')
-})
 
-/**
- * A message as it was ROUTED, off the run log, rather than as the console drew it.
- *
- * The distinction is the whole point of using it: `markdown()` reflows a message to the
- * terminal width, so runs of spaces and line breaks are normalised on screen regardless of
- * what was sent. Every assertion about the exact text of a message has to come from here, or
- * it passes under the behaviour it was written to forbid.
- */
-function routed(dir: string, needle: string): { text: string } | undefined {
-  const runs = join(dir, '.conclave', 'runs')
-  return readdirSync(runs)
-    .flatMap((f) => readFileSync(join(runs, f), 'utf8').split('\n'))
-    .filter(Boolean)
-    .map((l) => JSON.parse(l) as Record<string, any>)
-    .find((e) => typeof e.text === 'string' && e.text.includes(needle)) as { text: string } | undefined
-}
+  // CONTENT, and specifically an ABSENCE — so it is the RECORD that must be empty, not the
+  // screen. `assert.doesNotMatch(text, /half an answer/)` was the version this replaces, and it
+  // is satisfied whenever a wrap happens to fall inside the phrase: padding the line before it
+  // so `half` ends a row and `an answer` begins the next left the assertion green with the words
+  // plainly on screen. Nothing was routed, and that is checkable rather than inferable.
+  assert.equal(routed(dir, 'half an answer'), undefined, 'the buffered lines were not routed anywhere')
+  assert.equal(routed(dir, 'and no terminator'), undefined, 'neither of them')
+  assert.deepEqual(
+    routedAll(dir)
+      .filter((m) => m.fromRank === 'human' && m.to.length > 0)
+      .map((m) => m.kind),
+    ['goal'],
+    'the goal is the only thing the human addressed — the block became no message at all',
+  )
+})
 
 /**
  * What the framing must NOT do, which is the half a feature like this is judged on.
@@ -1468,15 +1642,15 @@ test('a command after a block is a command, and clears the pause the block answe
   assert.ok('session' in resumed)
   assert.equal(resumed.session.status.pause, undefined, 'the /continue was obeyed, not collected')
 
-  const text = out.text()
-  const since = text.slice(text.indexOf('● paused implementer_unanswered'))
-  assert.match(since, /● you → implementer\b/)
-  assert.match(since, /Blank lines survive\./)
-  assert.doesNotMatch(since, /● you → advisor, implementer/, 'the block stayed addressed')
-  // The terminator and the command are protocol, not payload — neither is in the message.
-  const block = since.slice(since.indexOf('Opt-in.'), since.indexOf('queued for implementer'))
-  assert.doesNotMatch(block, /EOF/, 'the terminator is not part of what was sent')
-  assert.doesNotMatch(block, /\/continue/, 'and neither is the command that followed it')
+  // CONTENT off the record. Exact equality rather than a grep, because the whole question here
+  // is which characters were part of the message: the terminator and the command that followed
+  // it are protocol, not payload, and the blank line between the two sentences is the operator's.
+  // The console answers none of that — `wrap()` collapses the blank line and normalises the
+  // spacing — and a grep of the rendered text stayed green when the payload was altered.
+  const sent = routed(dir, 'Blank lines survive')
+  assert.ok(sent, 'the block must be in the run log')
+  assert.equal(sent.text, 'Opt-in.\n\nBlank lines survive.', 'verbatim, terminator and command excluded')
+  assert.deepEqual([...sent.to], ['implementer'], 'the block stayed addressed')
 
   input.end()
   await running.catch(() => {})
@@ -1510,9 +1684,18 @@ test('only a line equal to the tag closes a block; a padded one is content', asy
   input.write(['>implementer <<END', 'first', '  END  ', 'last', 'END', ''].join('\n'))
   await untilText('the block to be delivered', out.text, /queued for implementer/)
 
+  // CONTENT off the record, and exact: the padded `  END  ` is CONTENT, so it has to still be in
+  // the message, between the two lines it sits between. `assert.match(text, /first/)` was the
+  // version this replaces — it could not see the padding at all, since the console collapses the
+  // spacing before drawing, and `first` and `last` are too common to anchor anything.
+  const sent = routed(dir, 'first')
+  assert.ok(sent, 'the block must be in the run log')
+  assert.equal(sent.text, 'first\n  END  \nlast', 'the padded line is content, kept verbatim')
+  assert.deepEqual([...sent.to], ['implementer'])
+
+  // PRESENTATION, at CONSOLE_COLUMNS: one speaker block, not two. A padded terminator that
+  // closed the block would draw a second.
   const text = out.text()
-  assert.match(text, /first/)
-  assert.match(text, /last/, 'the padded line did not end the message early')
   assert.equal(
     text.match(/● you → /g)?.length,
     2,
@@ -1847,11 +2030,28 @@ test('a console run records a routing log it can be resumed from', async () => {
   const lines = readFileSync(log, 'utf8').trim().split('\n').map((l) => JSON.parse(l))
   assert.ok(lines.length > 0)
   assert.ok(lines.some((m) => m.kind === 'goal'), 'including the goal')
-  // And the operator is told where it is, or it may as well not exist.
-  // The label and the command are separate lines now: a path wrapped with a hanging indent
-  // is pasted with the indent in it, and this is the one line whose purpose is being copied.
-  assert.match(first.text(), /resume with:/)
-  assert.match(first.text(), /conclave session "<goal>" --resume /)
+  // PRESENTATION, at CONSOLE_COLUMNS. The operator is told where the log is, or it may as well
+  // not exist — and this is the one line whose purpose is being COPIED, so the contract is that
+  // the whole command lands on a SINGLE rendered row: a path wrapped with a hanging indent is
+  // pasted with the indent in it. Asserted as a whole row rather than as two greps, which held
+  // even when the line was broken differently underneath them.
+  //
+  // Note what a rendering assertion CANNOT pin here, so nobody adds one expecting it to: the
+  // producer's own spacing. `summaryLine` wraps through `wrap()`, which normalises runs of
+  // whitespace, so doubling the spaces in the source line changes nothing on screen. The drawn,
+  // collapsed form IS the contract; there is no verbatim form of a console-only notice.
+  const resumeRow = first
+    .text()
+    .split('\n')
+    .find((l) => l.includes('--resume '))
+  assert.ok(
+    resumeRow !== undefined && /resume with: conclave session "<goal>" --resume \S+\s*$/.test(resumeRow),
+    `the resume command must be one unbroken, pasteable row, got:\n${first
+      .text()
+      .split('\n')
+      .filter((l) => l.includes('resume'))
+      .join('\n')}`,
+  )
 
   const second = collect()
   await runSession({
@@ -1941,10 +2141,17 @@ test('a reply typed at a pause is delivered and resumes the run', async () => {
   input.write('prefer the smaller change\n')
   const resumed = await until((f) => 'session' in f && f.session.status.state === 'running')
   assert.ok('session' in resumed && resumed.session.status.pause === undefined)
+  // PRESENTATION, at CONSOLE_COLUMNS: the notice is console-only, so it is asserted where it is
+  // drawn.
   assert.match(out.text(), /delivered, and resuming/)
-  // ...and the reply actually reached the participants rather than being swallowed by the
-  // resume, which is the failure the fix could easily have introduced.
-  assert.match(out.text(), /prefer the smaller change/)
+  // CONTENT off the record: the reply actually REACHED the participants rather than being
+  // swallowed by the resume, which is the failure the fix could easily have introduced. Read from
+  // the run log — the console draw is a reflowed copy and stayed green when the reply's spacing
+  // was altered underneath it.
+  const reply = routed(dir, 'prefer the smaller change')
+  assert.ok(reply, 'the reply must be in the run log')
+  assert.equal(reply.text, 'prefer the smaller change')
+  assert.ok(reply.to.length > 0, 'and it was addressed to somebody')
 
   input.end()
   await running
@@ -2094,8 +2301,12 @@ test('a refusal to continue re-samples, so it can lift', async () => {
 
   input.write('/continue\n')
   // It must actually resume. Nothing here is working, so nothing may stand in the way.
-  await until((f) => 'session' in f && f.session.status.state === 'running')
-  assert.doesNotMatch(out.text(), /not continuing/, 'an idle seat must not be treated as busy')
+  const ran = await until((f) => 'session' in f && f.session.status.state === 'running')
+  // An ABSENCE, so it is the record that must be empty. `doesNotMatch(out.text(), ...)` is the
+  // version this replaces: a wrap falling inside the phrase satisfies it whether or not the
+  // refusal happened, so it could pass for the wrong reason.
+  assert.ok('session' in ran)
+  assert.equal(ran.session.status.pause, undefined, 'an idle seat must not be treated as busy')
 
   input.end()
   await running
@@ -2160,7 +2371,9 @@ test('a completed replacement verdict bypasses child liveness sampling on /conti
   const resumed = await until((f) => 'session' in f && f.session.status.state === 'running')
   assert.ok('session' in resumed)
   assert.equal(sampled, false, 'liveness must not be sampled when the replacement is completed')
-  assert.doesNotMatch(out.text(), /not continuing/, 'the run must resume without refusing')
+  // An ABSENCE, read off the record rather than off the screen: a wrap inside `not continuing`
+  // satisfies a console `doesNotMatch` whether or not the refusal happened.
+  assert.equal(resumed.session.status.pause, undefined, 'the run must resume without refusing')
 
   input.end()
   await running
@@ -2338,9 +2551,13 @@ test('a mixed sample still refuses the continue, and is not described as a worki
   // The guard has no output count to pair with a sample it took just now, and says so rather
   // than passing the `0` that used to render as "nothing at all since the prompt was sent".
   assert.match(refusal.reason, /no output count was taken with this reading/)
-  // ...and the console line above it, which is what an operator actually looks at.
+  // The wording it must NOT use, off the RECORD. A `doesNotMatch` against the console is
+  // satisfied whenever a wrap falls inside the phrase, so it cannot carry a "was not said" claim.
+  assert.doesNotMatch(refusal.reason, /working right now/, 'a barely-running child is not described as working')
+
+  // PRESENTATION, at CONSOLE_COLUMNS: the line above it, which is what an operator actually
+  // looks at, and the way past it named where they can see it.
   assert.match(out.text(), /not continuing/)
-  assert.doesNotMatch(out.text(), /the child is working right now/)
   assert.match(out.text(), /the child is not clearly idle/)
   assert.match(out.text(), /\/continue force to send anyway/, 'the way past it is still named')
 
@@ -2553,8 +2770,10 @@ test('a rotation_candidate pause on one seat resumes while the OTHER seat is gen
   assert.equal(busySeat.holding, true, 'and its turn is held open, not merely slow')
 
   input.write('/continue\n')
-  await until((f) => 'session' in f && f.session.status.state === 'running')
-  assert.doesNotMatch(out.text(), /not continuing/, 'a busy seat the pause is not about must not refuse')
+  const resumedAfter = await until((f) => 'session' in f && f.session.status.state === 'running')
+  // An ABSENCE, off the record: the resumed status carries no pause, and so no refusal at all.
+  assert.ok('session' in resumedAfter)
+  assert.equal(resumedAfter.session.status.pause, undefined, 'a busy seat the pause is not about must not refuse')
   assert.deepEqual(asked, [22], 'only the seat the pause names may be sampled')
 
   // Everything this test is about has been observed. The release and the shutdown are in
@@ -2607,9 +2826,11 @@ test('an operator-requested pause samples nobody, even with a busy implementer c
   assert.deepEqual(paused.session.status.pause!.resolution.scope, { kind: 'conclave' })
 
   input.write('/continue\n')
-  await until((f) => 'session' in f && f.session.status.state === 'running')
+  const resumedNobody = await until((f) => 'session' in f && f.session.status.state === 'running')
   assert.equal(asked, 0, 'a pause that names no participant has nothing to sample')
-  assert.doesNotMatch(out.text(), /not continuing/, 'and nothing to refuse on')
+  // An ABSENCE, off the record.
+  assert.ok('session' in resumedNobody)
+  assert.equal(resumedNobody.session.status.pause, undefined, 'and nothing to refuse on')
 
   input.end()
   await running

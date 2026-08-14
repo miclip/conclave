@@ -110,8 +110,23 @@ test('a long summary line wraps under its sentence, not under the marker', () =>
   assert.equal(lines[1]!.search(/\S/), textStarts, 'continuations align with the sentence')
 })
 
-test('a short summary line is left exactly as it was', () => {
-  // Most lines are short and must not gain padding for the sake of a rule about long ones.
+test('a short summary line keeps its words and its width, and normalises the space between them', () => {
+  // Two claims, and they are not the same claim.
+  //
+  // The first is about WIDTH: a short line must not gain padding, a hanging indent, or a
+  // second row for the sake of a rule that exists for long ones. Width is passed explicitly
+  // (96) so the expectation does not move with anyone's terminal.
   assert.equal(summaryLine('===', 'run ended: done — DONE', 96), '=== run ended: done — DONE')
   assert.equal(summaryLine('===', '8 messages routed', 96), '=== 8 messages routed')
+
+  // The second is about SPACE, and it is the one the old name of this test got wrong. Nothing
+  // here is left "exactly as it was": `wrap()` splits on runs of whitespace and rejoins with
+  // single spaces, so every double space, tab and newline inside the text is gone before the
+  // line is returned. That is a contract, not an accident -- a summary is one fact per row and
+  // a participant's stray spacing must not open a gap in the middle of it -- so it is pinned
+  // rather than left to be discovered by whoever next assumes the input survives verbatim.
+  assert.equal(summaryLine('===', 'run  ended:   done', 96), '=== run ended: done')
+  assert.equal(summaryLine('===', 'run\tended:\ndone', 96), '=== run ended: done')
+  // Including the marker's own gap: the leading run collapses with the rest.
+  assert.equal(summaryLine('===', '  8   messages  routed', 96), '===   8 messages routed')
 })

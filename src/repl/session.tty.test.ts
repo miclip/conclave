@@ -19,13 +19,90 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { Progress } from './render.ts'
 
 const REPO = join(import.meta.dirname, '..', '..')
+
+/** One routed message as `events.ndjson` recorded it. */
+interface RecordedMessage {
+  from: string
+  to: string[]
+  kind: string
+  text: string
+}
+
+/**
+ * The routed messages this run wrote to its session record, read back off disk.
+ *
+ * Modelled on `routed()` in `session.test.ts`, and here to enforce the rule a mutation
+ * campaign over this file taught:
+ *
+ *   Content reads the record; presentation pins the width; rendered output must not stand in
+ *   for content.
+ *
+ * `wrap()` splits a message on runs of whitespace and rejoins it at a pinned width, so every
+ * doubled space and every newline is normalised before it reaches the screen. An assertion
+ * that greps the rendered output for a phrase therefore cannot see what the message SAID —
+ * only what it looked like after reflow, which is the renderer's claim and not the run's. A
+ * message body is content, so it is read here; where a row was drawn and how wide it is are
+ * presentation, and stay on the grid.
+ *
+ * The console records every session under `<cwd>/.conclave/sessions/<id>/events.ndjson`, and
+ * `repo()` returns the cwd the driver runs with — so `dir` is all a caller needs. Unparseable
+ * lines are skipped rather than thrown on: this is read while the console is still appending,
+ * and a torn final line is a fact about the read, not about the run.
+ */
+function recorded(dir: string): RecordedMessage[] {
+  const root = join(dir, '.conclave', 'sessions')
+  if (!existsSync(root)) return []
+  return readdirSync(root)
+    .map((id) => join(root, id, 'events.ndjson'))
+    .filter((p) => existsSync(p))
+    .flatMap((p) => readFileSync(p, 'utf8').split('\n'))
+    .filter(Boolean)
+    .flatMap((l) => {
+      try {
+        return [JSON.parse(l) as Record<string, any>]
+      } catch {
+        return []
+      }
+    })
+    .filter((e) => e.type === 'message')
+    .map((e) => e.message as RecordedMessage)
+}
+
+/**
+ * Has the CONSOLE drawn `text` into the transcript as a message to `addressee` — as opposed to
+ * it merely being somewhere in the byte stream?
+ *
+ * The distinction is the whole point. A pty echoes every byte the test types straight back, and
+ * that echo lands before the console has rendered anything, so `text().includes(<what was
+ * typed>)` is answered by the terminal's line discipline: it stays green with the transcript's
+ * message body removed AND with the console's own input row removed. It is not a test of the
+ * console at all.
+ *
+ * So the grid is replayed and the match is anchored on the speaker block — the `● you →
+ * <addressee>` header the console writes above a delivered message, and the body it renders
+ * directly beneath it. That header is something only the console emits and an echo cannot, and
+ * requiring the body under it is what ties the claim to the transcript rather than to the box:
+ * the pinned queue row is also console-drawn, but it says a message is WAITING, which is a
+ * different fact and is what `→ implementer\s{2,}` is asserted about elsewhere in this file.
+ */
+function drawnFor(buf: string, addressee: string, text: string): boolean {
+  const grid = renderGrid(buf, 30, 100).map((row) => row.join('').trimEnd())
+  // `(?!,)` for the same reason the duplicate-render test gives: a broadcast is addressed
+  // `→ advisor, implementer` and is a different message.
+  const header = new RegExp(`● you → ${addressee}(?!,)`)
+  // The body is the row under the header and starts at the transcript's two-space indent.
+  // `includes` is not enough: the box is drawn directly beneath the transcript, so with the
+  // body emptied the row under the header is the PINNED QUEUE ROW carrying the same sentence —
+  // and a check that accepted it would pass with the transcript rendering nothing at all.
+  return grid.some((row, i) => header.test(row) && (grid[i + 1] ?? '').startsWith(`  ${text}`))
+}
 
 /** A driver that runs the console over fakes slow enough to type at. */
 function driver(dir: string, goal: string | null = 'Keep the work moving.', quiet: boolean = false): string {
@@ -149,6 +226,13 @@ function repo(gitignore = '.conclave/\n'): string {
  * Killing at the end of the happy path meant a failed assertion threw first, the child
  * survived, and node could not exit — so one broken expectation hung the whole suite past
  * every per-test timeout. A test that cannot fail cleanly is worse than no test.
+ *
+ * The geometry below is PINNED DELIBERATELY, and 100x30 is part of the contract these tests
+ * check rather than an arbitrary terminal size. Reflow is among the things being observed —
+ * where the box sits, how many rows it reserves, whether a line wraps — and every grid in
+ * this file is replayed at the same 100 columns the pty was given. A test that took its
+ * width from the ambient terminal would assert something different on every machine, and
+ * `wrap()` would quietly move the answer with it.
  */
 async function spawnConsole(
   dir: string,
@@ -386,7 +470,15 @@ test('a typed message appears once, not as a block and a queued row at the same 
 
   const line = 'check the error path too'
   c.type(`>implementer ${line}\r`)
-  assert.ok(await c.until((s) => plain(s).includes(line)), 'the message should appear somewhere')
+  // Waited for on the RENDERED GRID, and compared against its own literal rather than the
+  // variable that was typed. The version this replaces did `plain(s).includes(line)` over the
+  // raw pty bytes, which is two faults at once: the bytes already hold the terminal's echo of
+  // the keystrokes, so the console could draw nothing at all and still pass; and both sides
+  // read the same `line`, so no change to the console could ever move them apart.
+  assert.ok(
+    await c.until((s) => drawnFor(s, 'implementer', 'check the error path too'), 20_000),
+    'the console must draw the message into the transcript as a `● you → implementer` block',
+  )
 
   // The box redraws continuously, so the pinned row legitimately recurs in the byte
   // stream. What must never happen is the SPEAKER BLOCK and a pinned row coexisting: take
@@ -575,16 +667,22 @@ test('the box is drawn under the newest line, and nothing is scrolled to make ro
     'the banner rule should appear',
   )
 
+  // Two messages, so there is a line above and a line below and the question of what moved
+  // between them is meaningful. Both waits are on the RENDERED GRID: a raw-buffer `includes`
+  // of text this test just typed is answered by the terminal's echo of the keystrokes, which
+  // arrives before the console draws — the old form stayed green with the transcript's
+  // message body truncated and with the console's own input row truncated, so it said nothing
+  // about the transcript it names.
   c.type('>advisor first message\r')
   assert.ok(
-    await c.until((s) => plain(s).includes('first message'), 20_000),
-    'first message should be in the transcript',
+    await c.until((s) => drawnFor(s, 'advisor', 'first message'), 20_000),
+    'the console must draw the first message, not merely echo the keystrokes back',
   )
 
   c.type('>advisor second message\r')
   assert.ok(
-    await c.until((s) => plain(s).includes('second message'), 20_000),
-    'second message should be in the transcript',
+    await c.until((s) => drawnFor(s, 'advisor', 'second message'), 20_000),
+    'the console must draw the second message, not merely echo the keystrokes back',
   )
   // WHERE the box is drawn is asserted in `screen.test.ts`, not here, and that is a
   // deliberate division rather than a gap.
@@ -687,10 +785,23 @@ test('a one-seat console reserves the four rows it always did, even while the se
   // in `seatRows` passed the entire console suite before this test existed.
   const dir = repo()
   const c = await spawnConsole(dir, t, undefined, true)
+  // The turn is read from the RECORD. Waiting for `Did it.` in the byte stream looked like a
+  // check on the reply and was not one: `wrap()` had already collapsed the whitespace, so a
+  // seat that replied `Did   it.` still put `Did it.` on the screen and the wait stayed green
+  // over a reply it was not looking at.
+  const report = () => recorded(dir).find((m) => m.from === 'implementer' && m.kind === 'report')
   assert.ok(
-    await c.until((s) => s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '').includes('Did it.'), 40_000),
+    await c.until(() => report() !== undefined, 40_000),
     'the implementer must have taken a whole turn, so the box was drawn while it was working',
   )
+  assert.equal(
+    report()?.text,
+    'Did it.',
+    'the record carries the reply as the seat wrote it, before any reflow',
+  )
+
+  // And the PRESENTATION claim, which is what this test is actually about: the box the console
+  // drew around that working seat is the same four rows it always reserves.
   const regions = [...c.text().matchAll(/\x1b\[1;(\d+)r/g)].map((m) => Number(m[1]))
   assert.ok(regions.length > 0, 'the console must set a scrolling region')
   assert.deepEqual(
@@ -750,6 +861,22 @@ test('an open block is named in the hint row until its terminator closes it', as
     .map((row) => row.join('').replace(/\s+$/, ''))
     .join('\n')
   assert.doesNotMatch(screen, /collecting a message/, 'the hint row is taken back once it closes')
-  assert.match(screen, /first paragraph/, 'and the message is the one that was collected')
+
+  // WHAT was collected is read from the record, not from the screen. A block exists to carry
+  // text a plain line cannot — the blank line in the middle of this one is the whole reason
+  // the framing is explicit — and `wrap()` throws exactly that away on the way to the
+  // terminal. `assert.match(screen, /first paragraph/)` therefore held whatever the block
+  // actually contained, `first paragraph` or `first   paragraph\n`, and could not tell a
+  // preserved block from a collapsed one.
+  assert.ok(
+    await c.until(() => recorded(dir).some((m) => m.from === 'human' && m.to.includes('advisor')), 20_000),
+    'the collected block should reach the record',
+  )
+  const block = recorded(dir).find((m) => m.from === 'human' && m.to.includes('advisor'))
+  assert.equal(
+    block?.text,
+    'first paragraph\n',
+    'the block is delivered as it was typed — the trailing blank line included',
+  )
   c.proc.kill()
 })
