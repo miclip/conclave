@@ -68,10 +68,10 @@ test('internal notes are not replayed', () => {
   // would read to a participant as instructions from a party it cannot see.
   const b = resumeBriefing([
     msg(1, 'real work'),
-    msg(2, 'rotation candidate declined', { visibility: 'internal', kind: 'note', to: [] }),
+    msg(2, 'rotation candidate closed at compaction generation 1', { visibility: 'internal', kind: 'note', to: [] }),
   ])
   assert.match(b, /real work/)
-  assert.doesNotMatch(b, /rotation candidate declined/)
+  assert.doesNotMatch(b, /rotation candidate closed/)
 })
 
 test('truncation drops the OLDEST messages and says how many', () => {
