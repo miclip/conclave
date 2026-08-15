@@ -10,6 +10,7 @@
  * field is a caller that will parse the prose for all of them.
  */
 
+import { ceilingSummary } from '../relay/guardrails.ts'
 import type { ReadSession } from './sessionRecord.ts'
 
 export function elapsed(ms: number): string {
@@ -90,6 +91,10 @@ export function formatSession(s: ReadSession, now: number): string {
     for (const e of st.pause.evidence) lines.push(`    ${e}`)
     lines.push(`    options: ${st.pause.options.join(', ')}`)
   }
+  // The same line the launch banners print, from the same renderer. A prose reader asking why
+  // a run stopped early needs the bound as plainly as a parser does -- and needs it to be the
+  // bound the run actually had, not one recomposed here from a different set of fields.
+  if (st.ceilings) lines.push(`  ceilings:  ${ceilingSummary(st.ceilings)}`)
   if (st.outcome) {
     lines.push(`  outcome:   ${st.outcome.reason}${st.outcome.detail ? ` — ${st.outcome.detail}` : ''}`)
   }

@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import type { Confidence, Provenance } from '../contract/outcome.ts'
+import type { RunCeilings } from '../relay/guardrails.ts'
 import { RelayEventStream } from '../relay/observe.ts'
 import { rotationFor, type RotationConfig } from '../relay/relay.ts'
 import { resolutionFor } from '../relay/resolution.ts'
@@ -114,6 +115,13 @@ function fakeRelay(opts?: {
   seats?: string[]
   /** A reviewer seat: rank `implementer`, role `reviewer` (D5, #72). */
   reviewer?: boolean
+  /**
+   * What bounds the run, as a real relay would resolve it. Absent by DEFAULT and left absent
+   * on every existing case here, which is the half of the contract worth exercising: a
+   * stand-in written before #119 must still satisfy `RecordableRelay` and still get the
+   * document it got before.
+   */
+  ceilings?: RunCeilings
 }): RecordableRelay & {
   stream: RelayEventStream
   pending: { id: string; tool: string }[]
@@ -149,6 +157,7 @@ function fakeRelay(opts?: {
     },
     permissionsPending: () => pending,
     rotationOf: (seatId) => rotationFor(opts?.rotation, seatId),
+    ...(opts?.ceilings ? { ceilings: opts.ceilings } : {}),
     observe: (o) => stream.observe(o),
   }
 }
@@ -847,4 +856,80 @@ test('an id is chronological and survives two sessions in the same second', () =
   assert.notEqual(newSessionId(at, 123), newSessionId(at, 124))
   // Sorting by name sorts by time, which is what makes a directory listing readable.
   assert.ok(newSessionId(at, 1) < newSessionId(at + 60_000, 1))
+})
+
+/**
+ * What bounds the run, in the record and in the prose (#119).
+ *
+ * The recorder's half of the fix. `ceilings.test.ts` drives both front-ends end to end and
+ * proves the numbers are the run's own; this proves the two things only visible from here: the
+ * document carries every limit including the unset ones, and a stand-in that cannot answer
+ * gets no block rather than a block claiming the run is unbounded.
+ */
+test('the status record carries every ceiling, with null for the ones nobody set', async () => {
+  const root = dir()
+  const relay = fakeRelay({
+    ceilings: { advisorTurns: 8, maxTurns: 40, maxDurationMs: null, maxQueueDepth: null, maxConcurrentSeats: null },
+  })
+  const rec = recordSession(relay, {
+    repoRoot: root,
+    id: 'ceil-set',
+    goal: 'g',
+    front: 'session',
+    startedAt: Date.now(),
+    build: 'test-build',
+  })
+  await rec.refresh()
+  const session = readSession(root, 'ceil-set')
+  assert.ok(session)
+
+  // The record, not a rendering of it. The two numbers #119 is about are adjacent here for the
+  // same reason they are adjacent on the banner: an operator confirming that the flag they
+  // raised is the flag that bounds the advisor can only do it by seeing both.
+  assert.deepEqual(session.status.ceilings, {
+    advisorTurns: 8,
+    maxTurns: 40,
+    maxDurationMs: null,
+    maxQueueDepth: null,
+    maxConcurrentSeats: null,
+  })
+  // And in the JSON a poller actually reads, where `null` must survive rather than being
+  // dropped as an absent key -- which is what #103's reporter mistook for a value.
+  const doc = JSON.parse(formatSessionJson(session))
+  assert.equal(doc.ceilings.advisorTurns, 8)
+  assert.ok('maxDurationMs' in doc.ceilings, 'an unset limit is reported as null, never omitted')
+  assert.equal(doc.ceilings.maxDurationMs, null)
+
+  // The prose says the same thing, because `formatSession` promises every field the JSON has
+  // and an operator at a console is asking the same question as the poller.
+  assert.match(formatSession(session, Date.now()), /ceilings:\s+--rounds 8 · --max-turns 40 · --max-minutes none/)
+
+  relay.stream.close()
+  await rec.close()
+})
+
+test('a stand-in that cannot answer gets no ceilings block, rather than one claiming no limits', async () => {
+  // The structural half of the contract, and the same rule `rotationOf` follows: absent means
+  // "this relay was never asked", which is not the same fact as `null` meaning "no limit". A
+  // recorder that defaulted here would write a document asserting a run is unbounded on the
+  // evidence of a stand-in that has no opinion.
+  const root = dir()
+  const relay = fakeRelay()
+  const rec = recordSession(relay, {
+    repoRoot: root,
+    id: 'ceil-absent',
+    goal: 'g',
+    front: 'session',
+    startedAt: Date.now(),
+    build: 'test-build',
+  })
+  await rec.refresh()
+  const session = readSession(root, 'ceil-absent')
+  assert.ok(session)
+  assert.equal(session.status.ceilings, undefined)
+  assert.ok(!('ceilings' in JSON.parse(formatSessionJson(session))), 'no key at all, not a null one')
+  assert.doesNotMatch(formatSession(session, Date.now()), /ceilings:/)
+
+  relay.stream.close()
+  await rec.close()
 })

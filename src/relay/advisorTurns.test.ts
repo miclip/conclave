@@ -287,3 +287,51 @@ test('neither front-end populates the deprecated alias', () => {
     assert.match(source, /\bmaxAdvisorTurns\s*:/, `${basename(path)} must populate maxAdvisorTurns`)
   }
 })
+
+// ---------------------------------------------------------------------------------------
+// What the ending SAYS. `budget` alone was one word for several different limits (#119).
+// ---------------------------------------------------------------------------------------
+
+/** The whole outcome of a run that can only end by spending its advisor turns. */
+async function budgetOutcomeAt(n: number): Promise<{ reason: string; detail: string }> {
+  const dir = repo()
+  const relay = await Relay.start({
+    registry: registryOf({ codex: [tirelessAdvisor('advisor-1', 'codex')], claude: [busyImplementer('impl-1', 'claude')] }),
+    cwd: dir,
+    lead: { id: 'advisor', agent: 'codex', role: 'advisor' },
+    implementer: { id: 'implementer', agent: 'claude', role: 'implementer' },
+    maxAdvisorTurns: n,
+  })
+  try {
+    const outcome = await relay.run('Keep the work moving.')
+    return { reason: outcome.reason, detail: outcome.detail ?? '' }
+  } finally {
+    relay.stop()
+    rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+test('an exhausted advisor budget says which ceiling it was and what it was set to', async () => {
+  // #119: the run ended `budget` at 8 advisor turns nobody had chosen, and `budget` is the same
+  // word a run gets when it exhausts a ceiling the operator set deliberately -- so the report
+  // read as normal operation. For `--operator agent` the cost is higher still: an agent sees
+  // one word and concludes the work was too large.
+  //
+  // Two values, not one, for the reason the flag tests above use two: a detail that hard-coded
+  // a number would satisfy a single case while saying nothing true.
+  const two = await budgetOutcomeAt(2)
+  const five = await budgetOutcomeAt(5)
+
+  // The REASON is unchanged and must stay unchanged: every caller keys on it, `relay` exits on
+  // it, and a resource ceiling has its own reason (`ceiling`) that this must not become.
+  assert.equal(two.reason, 'budget')
+  assert.equal(five.reason, 'budget')
+
+  assert.match(two.detail, /advisor turn budget spent: 2 of a maximum 2/)
+  assert.match(five.detail, /advisor turn budget spent: 5 of a maximum 5/)
+  // No flag is named. The relay does not know which front-end started it, and an embedder that
+  // sets `maxAdvisorTurns` directly has no `--rounds` to raise; the launch banner owns flags.
+  assert.doesNotMatch(five.detail, /--/)
+  // And the same vocabulary rule the pause evidence is held to: this is operator-facing text.
+  assert.doesNotMatch(five.detail, /\bround\b/i, 'no operator-facing text may still call an advisor turn a round')
+})

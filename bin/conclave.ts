@@ -26,7 +26,7 @@ import type { CheckSpec } from '../src/rotation/record.ts'
 import type { ProjectConfig } from '../src/config/project.ts'
 import { runReport } from '../src/relay/report.ts'
 import { RunLogWriter, readRunLog, runLogExists } from '../src/relay/resume.ts'
-import { ceilingsFrom, preflightRefusals } from '../src/relay/guardrails.ts'
+import { ceilingSummary, ceilingsFrom, effectiveCeilings, preflightRefusals } from '../src/relay/guardrails.ts'
 import { ensureCodexHooksTrusted } from '../src/deployment/ensureTrust.ts'
 import type { ReadSession } from '../src/workspace/sessionRecord.ts'
 import { execFileSync, spawn } from 'node:child_process'
@@ -55,7 +55,7 @@ import { seedCodexTrust } from '../src/deployment/codexHookTrust.ts'
 import { defaultRegistry } from '../src/registry/builtin.ts'
 import type { AgentRegistry } from '../src/registry/registry.ts'
 import { runSession } from '../src/repl/session.ts'
-import { implementerSeatPlan, implementerSpecsFor, Relay, reviewerSpecFor, type SeatRequest } from '../src/relay/relay.ts'
+import { boundOf, implementerSeatPlan, implementerSpecsFor, Relay, reviewerSpecFor, type SeatRequest } from '../src/relay/relay.ts'
 import { formatGuardReportJson, guard } from '../src/workspace/sessionLock.ts'
 
 const USAGE = `conclave <command>
@@ -966,6 +966,28 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
     const runStartedAt = Date.now()
     const build = version()
 
+    // What stops this run, resolved ONCE and this early on purpose. Three things below need
+    // the same answer -- the launch line, the status the detached parent writes for a child
+    // that does not exist yet, and `Relay.start` itself -- and #119 is precisely a run whose
+    // operator was told nothing about a bound they believed they had raised. Two of those
+    // three sit above the point the old inline resolution was reachable from, so hoisting it
+    // is what makes "the report and the run cannot disagree" true rather than nearly true.
+    //
+    // Built by `ceilingsFrom` and `boundOf`, the shared readers, so this command and `session`
+    // cannot differ about what a ceiling flag means. The `flag()` calls stay in this block:
+    // the pinned flag sets read it, and a flag parsed out of their sight leaves the guarded
+    // surface without anyone deciding to remove it.
+    const ceilings = ceilingsFrom({
+      maxTurns: flag('max-turns', ''),
+      maxMinutes: flag('max-minutes', ''),
+      maxQueueDepth: flag('max-queue-depth', ''),
+      maxConcurrentSeats: flag('max-concurrent-seats', ''),
+    })
+    const runCeilings = effectiveCeilings({
+      advisorTurns: boundOf({ maxAdvisorTurns: Number(flag('rounds', '4')) }),
+      ...(ceilings ? { ceilings } : {}),
+    })
+
     if (!rejectUnicodeDashes(rest)) return 1
 
     // Before anything is spawned, registered or written. The failure being guarded is an
@@ -1045,6 +1067,15 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
         messages: 0,
         participants: [],
         build,
+        // Resolved here rather than left for the child, and it is the one field on this
+        // placeholder that is not a placeholder. `participants: []` is honestly empty -- nobody
+        // has joined -- but the ceilings are known NOW, from the argv this process just parsed
+        // and is about to hand the child verbatim. A detached run is the form an agent operator
+        // uses, `status --json` is the only interface it has, and the window before the child
+        // records itself is exactly when it polls. Omitting the block there would make the fix
+        // absent at the moment it is most needed, and worse, a run whose child dies during
+        // startup keeps this document forever -- so this is the ONLY report those runs get.
+        ceilings: runCeilings,
       })
       if (asJson) {
         console.log(JSON.stringify({ detached: true, id, pid: child.pid, dir, stdio: logFile }, null, 2))
@@ -1130,6 +1161,15 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
         return work()
       },
     })
+
+    // What stops this run, above the rotation line rather than after it, because these are the
+    // lines that describe the LAUNCH and rotation is the last of them -- the same order the
+    // console banner reads in. #119 is a relay that ended at an advisor budget of 8, the
+    // default, while `--max-turns 40` sat in its argv bounding something else and left 488
+    // uncommitted insertions that survived only because a human was watching. The flag typed
+    // was valid and the flag meant was absent, so nothing anywhere could have said so. This
+    // line could have, before any work existed to lose.
+    say(`  ceilings: ${ceilingSummary(runCeilings)}`)
 
     say(
       checks.length > 0
@@ -1228,20 +1268,12 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
       implementer: implSpecs[0]!,
       ...(seatPlan.kind === 'listed' ? { implementers: implSpecs } : {}),
       ...(reviewerSpec ? { reviewer: reviewerSpec } : {}),
-      maxAdvisorTurns: Number(flag('rounds', '4')),
+      maxAdvisorTurns: runCeilings.advisorTurns,
       // Built by `ceilingsFrom` rather than inline, so this command and `session` cannot
-      // disagree about what a ceiling flag means. The `flag()` calls stay HERE: the pinned
-      // flag sets read this block, and a flag parsed out of their sight leaves the guarded
-      // surface without anyone deciding to remove it.
-      ...(() => {
-        const ceilings = ceilingsFrom({
-          maxTurns: flag('max-turns', ''),
-          maxMinutes: flag('max-minutes', ''),
-          maxQueueDepth: flag('max-queue-depth', ''),
-          maxConcurrentSeats: flag('max-concurrent-seats', ''),
-        })
-        return ceilings ? { ceilings } : {}
-      })(),
+      // disagree about what a ceiling flag means. Read where the launch line above is printed,
+      // for the stronger version of the same rule: the run and the report of the run must come
+      // from one resolution, not two that happen to match.
+      ...(ceilings ? { ceilings } : {}),
       // Without these, degradation has nothing to verify a replacement against, so the run
       // ESCALATES and ends rather than rotating. An unattended form that cannot rotate
       // cannot exercise the mechanism it exists to run unattended.

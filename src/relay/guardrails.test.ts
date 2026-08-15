@@ -10,7 +10,15 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { breached, ceilingsFrom, insideGitRepo, preflightRefusals, type CeilingState } from './guardrails.ts'
+import {
+  breached,
+  ceilingSummary,
+  ceilingsFrom,
+  effectiveCeilings,
+  insideGitRepo,
+  preflightRefusals,
+  type CeilingState,
+} from './guardrails.ts'
 
 /**
  * A reading with everything at rest, so each test names only the axis it is about.
@@ -144,4 +152,76 @@ test('ceilingsFrom converts minutes to milliseconds and passes the rest through'
     maxQueueDepth: 3,
     maxConcurrentSeats: 4,
   })
+})
+
+// ---------------------------------------------------------------------------------------
+// Reporting them, which is a different job from configuring them (#119).
+// ---------------------------------------------------------------------------------------
+
+test('effectiveCeilings says null for every limit nobody set, and never omits one', () => {
+  // The inverse of `ceilingsFrom` above, and the inversion is the point: absent must stay
+  // behaviourless in the CONFIGURATION and must be spelled out in the REPORT. A run whose
+  // operator cannot tell "no limit" from "this build does not report limits" is #119, and it
+  // is #103 one field over -- that reporter read a missing key as `false`.
+  assert.deepEqual(effectiveCeilings({ advisorTurns: 8 }), {
+    advisorTurns: 8,
+    maxTurns: null,
+    maxDurationMs: null,
+    maxQueueDepth: null,
+    maxConcurrentSeats: null,
+  })
+  // And a `Ceilings` that limits nothing is still a report with every key. `ceilingsFrom`
+  // never produces this, but `RelayOptions.ceilings` can be set by hand.
+  assert.deepEqual(effectiveCeilings({ advisorTurns: 8, ceilings: {} }), {
+    advisorTurns: 8,
+    maxTurns: null,
+    maxDurationMs: null,
+    maxQueueDepth: null,
+    maxConcurrentSeats: null,
+  })
+})
+
+test('effectiveCeilings carries every configured limit through unchanged', () => {
+  // Each field named separately rather than in one object, because a report that dropped one
+  // -- or read `maxQueueDepth` where `maxConcurrentSeats` was meant -- would still pass a
+  // single all-fields case if the values happened to be equal. They are not, here.
+  assert.deepEqual(
+    effectiveCeilings({
+      advisorTurns: 40,
+      ceilings: { maxTurns: 9, maxDurationMs: 120_000, maxQueueDepth: 3, maxConcurrentSeats: 4 },
+    }),
+    { advisorTurns: 40, maxTurns: 9, maxDurationMs: 120_000, maxQueueDepth: 3, maxConcurrentSeats: 4 },
+  )
+  // Zero is a real setting on both gauges (see `a zero gauge is a real setting` above), so it
+  // must survive the report as `0` and not fall through a `||` into `null`.
+  assert.deepEqual(effectiveCeilings({ advisorTurns: 1, ceilings: { maxQueueDepth: 0, maxConcurrentSeats: 0 } }), {
+    advisorTurns: 1,
+    maxTurns: null,
+    maxDurationMs: null,
+    maxQueueDepth: 0,
+    maxConcurrentSeats: 0,
+  })
+})
+
+test('the summary names every ceiling by the flag that sets it, in minutes where the flag is minutes', () => {
+  // The line #119 asks for, and the two halves it has to get right: the flag SPELLINGS, so an
+  // operator can see that the number they raised is not the number that bounds the advisor;
+  // and the unit, because `--max-minutes` goes in as minutes and is stored as milliseconds.
+  assert.equal(
+    ceilingSummary(effectiveCeilings({ advisorTurns: 8, ceilings: { maxTurns: 40, maxDurationMs: 120_000 } })),
+    '--rounds 8 · --max-turns 40 · --max-minutes 2 · --max-queue-depth none · --max-concurrent-seats none',
+  )
+  // The unconfigured run, which is the one the issue was reported from: every ceiling still
+  // named, four of them `none`, and the advisor budget -- the only thing actually bounding it
+  // -- readable in the first three lines of the run.
+  assert.equal(
+    ceilingSummary(effectiveCeilings({ advisorTurns: 8 })),
+    '--rounds 8 · --max-turns none · --max-minutes none · --max-queue-depth none · --max-concurrent-seats none',
+  )
+  // Not "round". The flag is `--rounds` and naming a flag is not naming the concept, but any
+  // OTHER use of the word here would be the vocabulary advisorTurns.test.ts retired.
+  assert.doesNotMatch(
+    ceilingSummary(effectiveCeilings({ advisorTurns: 8 })).replace('--rounds', ''),
+    /\bround/i,
+  )
 })

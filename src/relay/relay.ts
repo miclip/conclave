@@ -90,7 +90,7 @@ import { rotate, type RotationResult } from '../rotation/rotate.ts'
 import type { CheckSpec } from '../rotation/record.ts'
 import { buildReviewContext, reviewPrompt } from '../rotation/review.ts'
 import { resumeBriefing } from './resume.ts'
-import { breached, type CeilingBreach, type CeilingState, type Ceilings } from './guardrails.ts'
+import { breached, type CeilingBreach, type CeilingState, type Ceilings, effectiveCeilings, type RunCeilings } from './guardrails.ts'
 import {
   cancelledByFailedDependencies,
   concurrentSeats,
@@ -1757,6 +1757,24 @@ export class Relay {
   }
 
   /**
+   * What stops this run, every ceiling of it, including the ones nobody set.
+   *
+   * Read off the options rather than reconstructed by whoever is reporting: the run's advisor
+   * budget is `boundOf`'s answer and no other, so a status document cannot say 8 while the loop
+   * counts to 6. That is the whole of #119 -- a run ended at a bound the operator did not know
+   * they had, and no surface could be asked what the bound was.
+   *
+   * A getter beside `deadlines`, which reports the same kind of fact the same way: the policy
+   * this run is under for its whole length, with `null` where nothing was configured.
+   */
+  get ceilings(): RunCeilings {
+    return effectiveCeilings({
+      advisorTurns: boundOf(this.#opts),
+      ...(this.#opts.ceilings ? { ceilings: this.#opts.ceilings } : {}),
+    })
+  }
+
+  /**
    * `cwd` is where this participant's adapter is launched, and it is fixed at launch.
    *
    * Defaulting to the run cwd is the whole of the N=1 case and the whole of the advisor's case
@@ -3243,7 +3261,7 @@ export class Relay {
       else if (!shouldWait && offered !== -1) pause.options.splice(offered, 1)
       // The status file is written from the LIVE pause object on any event, so an in-place
       // change reaches disk on the next one -- and a pause is precisely when nothing else is
-      // flowing. Same reasoning as `/wait` in the console (`src/repl/session.ts:1642`), and the
+      // flowing. Same reasoning as `/wait` in the console (`src/repl/session.ts:1650`), and the
       // reader who needs it most is the one polling from outside.
       this.#stream.emit({ type: 'liveness', pause })
       if (last) return stop()
@@ -4668,7 +4686,28 @@ export class Relay {
         // never mid-turn. A run cannot be interrupted mid-turn without discarding that turn's
         // work -- the same reason #exchange has no timeout of its own.
         if (advisorTurn > maxAdvisorTurns) {
-          closing ??= { kind: 'end', reason: 'budget' }
+          // Named and quantified, never bare. `budget` alone is the same word a run gets when it
+          // exhausts a ceiling the operator chose deliberately, so a run that stopped at a
+          // default nobody knew they had reads as normal operation -- which is #119: eight
+          // advisor turns spent against a `--max-turns 40` the operator believed had raised
+          // them, and the early ending was then filed as a defect in something else. The reason
+          // stays `budget` because that is what ended the run and every caller keys on it; the
+          // detail says WHICH ceiling and WHAT it was set to, in the shape `breached` uses for
+          // the ceilings that already carry one -- but saying `budget`, not `ceiling`. The two
+          // words are held apart on purpose (see `report.test.ts`: a resource ceiling gets its
+          // own reason), and this detail is what makes the distinction legible instead of
+          // leaving `budget` to stand for whichever limit it happened to be.
+          //
+          // No flag is named here and no turn is called a round. The relay does not know which
+          // front-end started it -- an embedder setting `maxAdvisorTurns` directly has no
+          // `--rounds` to raise -- and "round" is the operator-facing word this option was
+          // renamed away from (see `RelayOptions.maxRounds`). The flag belongs to the launch
+          // banner, which is the surface that owns flags and now prints every ceiling with one.
+          closing ??= {
+            kind: 'end',
+            reason: 'budget',
+            detail: `advisor turn budget spent: ${maxAdvisorTurns} of a maximum ${maxAdvisorTurns}`,
+          }
           continue advisor
         }
         const ceiling = this.#breachedNow()
