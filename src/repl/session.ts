@@ -365,7 +365,11 @@ const HELP = `
   reference survives being forwarded, which inlined text would not.
 
   /pause                 pause at the next advisor-turn boundary
-  /continue              resume from a pause
+  /continue [message]    resume from a pause. Any text is DELIVERED first, at human rank,
+                         exactly as typing it on its own would — so answering and deciding
+                         are one line. Typing the message alone does the same thing.
+  /continue force        resume even though a child reads mid-turn. The whole word and
+                         nothing after it; anything else is a message, not an override.
   /rotate [reason]       replace the implementer seat this pause is about, carrying a handoff forward
   /abort [reason]        end the run, and stay here for the next one
 
@@ -446,7 +450,11 @@ function renderPause(p: RunPause, width: number): string {
   // `constrain` is not a command — you constrain by typing. Offering it as one sent people
   // looking for a slash command that does not exist.
   const commands = p.options.filter((o) => o !== 'constrain').map((o) => `/${o}`)
-  lines.push('', `  ${dim(commands.join('   '))}   ${dim('or type a message')}`, '')
+  // The combined form, named where the menu is. A menu that lists `/continue` above "or type
+  // a message" reads as two exclusive choices, and an operator with something to say who
+  // picks the command loses the saying of it. `/continue <message>` is both, so the line that
+  // offers the two separately is the line that has to admit they compose.
+  lines.push('', `  ${dim(commands.join('   '))}   ${dim('or type a message — /continue <message> does both')}`, '')
   return lines.join('\n')
 }
 
@@ -1027,6 +1035,31 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     }
     await run.continue()
     wake()
+  }
+
+  /**
+   * Answer a pause with words: deliver them, then resume.
+   *
+   * The one path for "I have something to say AND I am deciding". A reply typed at a pause
+   * takes it, and so does `/continue <message>` -- the same call, in the same order, so the
+   * two forms cannot come to mean different things. They were one behaviour reachable by one
+   * spelling; the second spelling exists because an operator who has just been shown a menu
+   * of slash commands reaches for a slash command, and `/continue prefer the smaller change`
+   * previously resumed while dropping every word of it.
+   *
+   * Delivered BEFORE the continue decision, exactly as the typed reply has always been. So a
+   * `/continue` that the #43/#117 guard refuses still leaves the message queued and the run
+   * paused -- which is the recoverable state: the operator reads the refusal, says nothing
+   * further, and `/continue force` sends what they already typed. Injecting after the guard
+   * would silently discard the message on the one path where the operator most wants it kept.
+   *
+   * Never forced. `force` is an exact word, not a prefix, so nothing that carries a message
+   * can also carry the override -- see `/continue` in `handle`.
+   */
+  const answerPause = async (text: string): Promise<void> => {
+    inject(text, 'all')
+    write(dim('  delivered, and resuming — the run was paused'))
+    await resumeRun()
   }
 
   // The pause loop. `settled()` covers both a pause and the end, which is what a supervising
@@ -1630,7 +1663,37 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     if (word === '/continue') {
       if (!run) return void write(dim('  nothing is running; type a goal to start'))
       if (run.state !== 'paused') return void write(`  not paused (${run.state})`)
-      await resumeRun({ force: rest.trim() === 'force' })
+      // Trailing text is a MESSAGE, delivered at human rank and then resumed on -- the same
+      // call a typed reply makes, via `answerPause`. It used to be discarded: `/continue do
+      // the smaller one` resumed and the words went nowhere, with nothing said about them.
+      // A pause asks a question, and the two things an operator does with a question are
+      // answer it and let it go; a console that offers `/continue` beneath the question and
+      // then eats the answer punishes the operator for using the menu it just drew.
+      //
+      // EXACTLY two forms are preserved, and `force` is one WORD rather than a prefix. The
+      // ambiguity is real -- `/continue force it through` could be a forced resume with a
+      // note, or a message beginning "force" -- and it is resolved toward the message,
+      // because the costs are not symmetric. Reading it as a message costs a refusal the
+      // operator can see and repeat past (`/continue force`), with their words already
+      // queued. Reading it as a force costs a send into a live turn, which is the run-ending
+      // failure #117 exists to prevent. Guessing in the direction of the destructive reading
+      // to save a keystroke is not a trade this command gets to make.
+      //
+      // FALSIFIER, stated because it is the strongest argument against this shape: the
+      // console has no general "trailing text is a message" rule and does not gain one here.
+      // `/rotate <text>` and `/abort <text>` consume their text as a REASON
+      // (`src/repl/session.ts:1735`, `src/repl/session.ts:1765`) and `/pause`, `/queue`, `/audit` ignore
+      // whatever follows them. So an operator who learns this from `/continue` and carries
+      // it to `/pause I'll be back` still loses the sentence. That inconsistency is not
+      // repaired by making `/continue` a third behaviour; it is narrowed by it, and the
+      // remaining commands are left alone deliberately rather than by oversight -- `/rotate`
+      // and `/abort` already have a meaning for their argument that a message would displace,
+      // and changing what an existing spelling does is worse than leaving one that never had
+      // a meaning at all. `/continue` is the only paused-state command whose argument slot
+      // was empty apart from `force`, which is what makes it the one that can take this.
+      const trailing = rest.trim()
+      if (trailing && trailing !== 'force') return void (await answerPause(trailing))
+      await resumeRun({ force: trailing === 'force' })
       return
     }
 
@@ -1759,7 +1822,6 @@ export async function runSession(opts: SessionOptions): Promise<number> {
       begin(message)
       return
     }
-    inject(message, 'all')
     // Answering a pause IS the decision, so it resumes. A reply typed at a pause used to sit
     // queued with the run still stopped, needing a separate `/continue` to count -- the same
     // failure as a menu option that no-ops: the operator acted, something was recorded, and
@@ -1767,11 +1829,11 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     //
     // Only at a pause. Mid-run there is nothing to resume and the line is genuinely held for
     // the next turn boundary, which `queued()` says.
-    if (run.state === 'paused') {
-      write(dim('  delivered, and resuming — the run was paused'))
-      await resumeRun()
-      return
-    }
+    //
+    // Through `answerPause`, which `/continue <message>` also calls: same delivery, same
+    // order, same resume, whichever spelling the operator reached for.
+    if (run.state === 'paused') return void (await answerPause(message))
+    inject(message, 'all')
     queued('everyone')
   }
 

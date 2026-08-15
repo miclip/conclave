@@ -99,7 +99,7 @@ const CITED: Record<string, string> = {
   // footer's notion of "working" is `turn_start` until `turn_end`, and `tool_use` only relabels
   // a turn that is already running. If that ever stops being true, the predicate the relay and
   // `/continue` both send on is no longer the thing the operator is watching.
-  'src/repl/session.ts:861-874': 'progress.start(e.participant)',
+  'src/repl/session.ts:869-882': 'progress.start(e.participant)',
   'src/relay/relay.ts:4331': 'worktreePaths(this.#opts.cwd)',
   'src/relay/relay.ts:4819': "subject: { reason: 'turn_incomplete', participant: lead.id }",
   // The five below are what the console's `/continue` liveness guard cites for reading a
@@ -146,16 +146,22 @@ const CITED: Record<string, string> = {
   // `runSession`: it inserts a documented function into the middle of the file, so every
   // citation past it shifts. Repaired against this tree rather than deleted -- each still
   // points at the line it was written about.
-  'src/repl/session.ts:655': 'escalates to you rather than being replaced',
-  'src/repl/session.ts:818': 'logPath: runLogPath,',
+  'src/repl/session.ts:663': 'escalates to you rather than being replaced',
+  'src/repl/session.ts:826': 'logPath: runLogPath,',
   // Moved by #83's edit to the `/continue` refusal, nine lines above it in the same block.
   // Repaired rather than deleted: the call it pins is the one the console still makes.
-  'src/repl/session.ts:1023': "recording.set('paused', { pause: run.pause })",
+  'src/repl/session.ts:1031': "recording.set('paused', { pause: run.pause })",
   // Why an in-place amendment to a pause needs an event behind it. Cited by both halves of
   // #101's refresh -- the module that explains the mechanism and the loop that uses it --
   // because the argument was already written here, for `/wait`, and restating it in two more
   // places is how three copies of a reason drift apart.
-  'src/repl/session.ts:1650': 'so an in-place change like `superseded` reaches the file on the next one',
+  'src/repl/session.ts:1713': 'so an in-place change like `superseded` reaches the file on the next one',
+  // The falsifier `/continue <message>` is argued against: two commands that already give
+  // their trailing text a meaning, so the new rule is narrow by intent rather than by
+  // accident. Pinned to the dispatch lines, which is what makes "these are unchanged"
+  // checkable rather than a claim about code nobody re-reads.
+  "src/repl/session.ts:1735": "if (word === '/rotate') {",
+  "src/repl/session.ts:1765": "if (word === '/abort') {",
 }
 
 /**

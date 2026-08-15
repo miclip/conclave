@@ -214,13 +214,18 @@ The goal is optional. Start with none and the first thing you type becomes it.
 >implementer <text>    to the implementer only
 @src/relay/relay.ts    a path. Tab completes both sigils.
 
-/pause  /continue [force]  /wait [minutes]  /rotate [reason]  /abort
+/pause  /continue [message | force]  /wait [minutes]  /rotate [reason]  /abort
 /allow [who]  /deny [who]
 /state  /log [n]  /queue  /audit  /help  /exit
 ```
 
 At a pause you may also just answer: a reply is delivered and resumes the run, because
-answering a pause is the decision. `/wait` is for the other case — the child is still
+answering a pause is the decision. `/continue <message>` is the same thing said the other
+way round — the text is delivered at human rank and then the run resumes — for the operator
+who reaches for the command the menu just offered. `force` is the whole word and nothing
+after it: `/continue force it through` is a message, not an override, because a wrong guess
+toward the message costs a refusal you can see and repeat past, and a wrong guess toward the
+override sends into a live turn. `/wait` is for the other case — the child is still
 working and every option would be destructive, so it records that you looked and chose to
 wait rather than leaving the run indistinguishable from one nobody has read. `/continue`
 refuses while the child is measurably busy; `force` overrides it.

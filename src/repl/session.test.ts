@@ -2213,6 +2213,216 @@ test('a reply typed at a pause is delivered and resumes the run', async () => {
   await running
 })
 
+test('/continue carries a message, delivered at human rank before the run resumes', async () => {
+  // The same decision as the test above, said the other way round. A pause draws a menu of
+  // slash commands with "or type a message" beside it, and an operator with something to say
+  // who reaches for the command they were just shown used to lose every word of it:
+  // `/continue prefer the smaller change` resumed, silently, having discarded the sentence.
+  // Both spellings now go through `answerPause`, so neither can start meaning something the
+  // other does not.
+  const dir = repo()
+  const out = collect()
+  const input = new PassThrough()
+  const running = runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'claude',
+    rounds: 6,
+    checks: [],
+    operator: 'agent',
+    registry: registryOf({
+      codex: [slow('advisor', 'codex', ['Do it.', 'More.', 'DONE'], 300)],
+      claude: [slow('impl', 'claude', ['ack', 'Did it.', 'Again.'], 300)],
+    }),
+    input,
+    output: out.stream,
+  })
+
+  const until = async (pred: (f: ReturnType<typeof resolveSession>) => boolean, ms = 10_000) => {
+    const t = Date.now()
+    while (Date.now() - t < ms) {
+      const f = resolveSession(dir)
+      if (pred(f)) return f
+      await new Promise((r) => setTimeout(r, 50))
+    }
+    throw new Error(`timed out; console said:\n${out.text().slice(-700)}`)
+  }
+
+  await new Promise((r) => setTimeout(r, 500))
+  input.write('/pause\n')
+  await until((f) => 'session' in f && f.session.status.state === 'paused')
+
+  input.write('/continue prefer the smaller change\n')
+  const resumed = await until((f) => 'session' in f && f.session.status.state === 'running')
+  assert.ok('session' in resumed && resumed.session.status.pause === undefined, 'the decision was taken')
+
+  // CONTENT off the record, which is where the failure this fixes was invisible: the console
+  // printed nothing about the dropped text, so only the routing log can say whether the words
+  // survived. Verbatim, at human rank, and addressed — a resume that swallowed the message
+  // would leave every console assertion green.
+  const said = routed(dir, 'prefer the smaller change')
+  assert.ok(said, 'the message must be in the run log')
+  assert.equal(said.text, 'prefer the smaller change')
+  assert.equal(said.fromRank, 'human', 'delivered at human rank, as typing it alone would be')
+  // To EVERYONE, which is what a line with no address prefix means everywhere else in this
+  // console. `/continue` carries no address, so narrowing the audience here would invent one.
+  assert.deepEqual([...said.to].sort(), ['advisor', 'implementer'], 'delivered to everyone')
+  // The command word is not part of what was said.
+  assert.ok(!said.text.includes('/continue'), 'the command is not carried into the message')
+
+  input.end()
+  await running
+})
+
+test('/continue force is the whole word: force with text after it is a message, not an override', async () => {
+  // The ambiguity this shape has to resolve, resolved in the direction whose failure is
+  // recoverable. `/continue force it through` could be read as a forced resume carrying a
+  // note; it is read as a MESSAGE. Guessing the other way sends into a live turn — the
+  // run-ending failure #117 exists to prevent — to save the operator a keystroke, and a
+  // command does not get to make that trade on their behalf. Guessing this way costs a
+  // refusal they can see, with their words already delivered, and `/continue force` next.
+  const dir = repo()
+  const impl = slow('impl', 'claude', ['ack', 'Did it, slowly.', 'And again.'])
+  impl.endTurn = { index: 1, verdict: TIMED_OUT, withdraw: 'no_replacement' }
+  impl.childPid = 1
+  const out = collect()
+  const input = new PassThrough()
+  const running = runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'claude',
+    rounds: 6,
+    checks: [],
+    registry: registryOf({
+      codex: [slow('advisor', 'codex', ['Do it.', 'More.', 'DONE'], 300)],
+      claude: [impl],
+    }),
+    liveness: async () => IDLE_LIVENESS,
+    input,
+    output: out.stream,
+  })
+  const until = async (pred: (f: ReturnType<typeof resolveSession>) => boolean, ms = 10_000) => {
+    const t = Date.now()
+    while (Date.now() - t < ms) {
+      const f = resolveSession(dir)
+      if (pred(f)) return f
+      await new Promise((r) => setTimeout(r, 50))
+    }
+    throw new Error(`timed out; console said:\n${out.text().slice(-700)}`)
+  }
+
+  await until((f) => 'session' in f && f.session.status.state === 'paused')
+  await until(
+    (f) =>
+      'session' in f &&
+      f.session.status.pause?.superseded !== undefined &&
+      f.session.status.pause?.superseded?.verdict === undefined,
+  )
+
+  input.write('/continue force it through\n')
+  // Refused, because it was not a force: the guard ran and the child is mid-turn. Read off the
+  // pause's own refusal field rather than the screen, so a reflow cannot decide this.
+  const refused = await until((f) => 'session' in f && f.session.status.pause?.refusal !== undefined)
+  assert.ok('session' in refused)
+  assert.equal(refused.session.status.state, 'paused', 'a message-carrying continue is never forced')
+  // ...and the words were delivered anyway, BEFORE the guard refused. That ordering is the
+  // reason the refusal is recoverable: nothing the operator typed has to be typed again.
+  const said = routed(dir, 'force it through')
+  assert.ok(said, 'the message must be in the run log even though the resume was refused')
+  assert.equal(said.text, 'force it through')
+  assert.equal(said.fromRank, 'human')
+
+  input.write('/continue force\n')
+  const resumed = await until((f) => 'session' in f && f.session.status.state === 'running')
+  assert.ok('session' in resumed && resumed.session.status.pause === undefined, 'the exact word still overrides')
+  // The override is not also a message. `force` alone must never reach a participant as
+  // something the operator said — that is the half of this rule the delivery path could break
+  // without any test above noticing.
+  assert.equal(
+    routedAll(dir).filter((e) => e.fromRank === 'human' && e.text.trim() === 'force').length,
+    0,
+    'the override word is consumed by the command, not spoken',
+  )
+
+  input.end()
+  await running
+})
+
+test('the trailing-text rule stops at /continue: /pause still drops a suffix, /abort still keeps one', async () => {
+  // The falsifier, made checkable rather than argued. There is no general "text after a
+  // command is a message" rule in this console and this change does not create one:
+  // `/rotate` and `/abort` already spend their argument on a REASON, and the argumentless
+  // commands ignore whatever follows. So an operator who generalises from `/continue` to
+  // `/pause I'll be back in ten` still loses the sentence, and that is a real cost of the
+  // shape rather than an oversight in it — `/continue` could take this because `force` was
+  // the only thing its argument slot had ever meant.
+  //
+  // Pinned so that a later attempt to spread the rule has to come here and change what this
+  // test claims, which is the point at which the inconsistency gets argued about again.
+  const dir = repo()
+  const out = collect()
+  const input = new PassThrough()
+  const running = runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'claude',
+    rounds: 6,
+    checks: [],
+    operator: 'agent',
+    registry: registryOf({
+      codex: [slow('advisor', 'codex', ['Do it.', 'More.', 'DONE'], 300)],
+      claude: [slow('impl', 'claude', ['ack', 'Did it.', 'Again.'], 300)],
+    }),
+    input,
+    output: out.stream,
+  })
+  const until = async (pred: (f: ReturnType<typeof resolveSession>) => boolean, ms = 10_000) => {
+    const t = Date.now()
+    while (Date.now() - t < ms) {
+      const f = resolveSession(dir)
+      if (pred(f)) return f
+      await new Promise((r) => setTimeout(r, 50))
+    }
+    throw new Error(`timed out; console said:\n${out.text().slice(-700)}`)
+  }
+
+  await new Promise((r) => setTimeout(r, 500))
+  input.write("/pause I'll be back in ten\n")
+  await until((f) => 'session' in f && f.session.status.state === 'paused')
+  assert.equal(
+    routedAll(dir).filter((e) => typeof e.text === 'string' && e.text.includes("back in ten")).length,
+    0,
+    '/pause still discards its suffix — unchanged, and documented rather than fixed here',
+  )
+
+  // ...while `/abort`'s trailing text is still its reason, spent on the outcome rather than
+  // said to anybody.
+  input.write('/abort the API is down\n')
+  const ended = async (ms = 10_000) => {
+    const t = Date.now()
+    while (Date.now() - t < ms) {
+      const e = events(dir).find((x) => x['type'] === 'run_end')
+      if (e) return e
+      await new Promise((r) => setTimeout(r, 50))
+    }
+    throw new Error(`timed out; console said:\n${out.text().slice(-700)}`)
+  }
+  const end = await ended()
+  assert.equal(end['detail'], 'the API is down', 'the text is the abort reason, not a message')
+  assert.equal(
+    routedAll(dir).filter((e) => e.fromRank === 'human' && e.text.trim() === 'the API is down').length,
+    0,
+    'and it was never routed to anybody',
+  )
+
+  input.write('/exit\n')
+  input.end()
+  await running
+})
+
 test('waiting at a pause is recorded, sends nothing, and leaves the run paused', async () => {
   // Reported by an operator who read the liveness evidence, judged the child healthy, and
   // correctly declined every option — then had no way to say so. Declining to answer and
