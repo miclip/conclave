@@ -96,10 +96,10 @@ test('the generation a snapshot reports is what degradation is measured against'
   assert.ok(current > baseline, 'which is the comparison the relay actually makes')
 })
 
-test('a rewrite and an append are both compactions, and both count', async () => {
+test('a DECLARED compaction counts however it was written down', async () => {
   // Codex rewrites, Claude Code appends. Rotation cares that context was DISCARDED, not how
   // the CLI chose to write it down -- counting only rewrites made the trigger a property of
-  // one vendor's file format.
+  // one vendor's file format. What makes it count is the marker, not the byte pattern.
   const dir = repo()
   const path = join(dir, 'transcript.jsonl')
   writeFileSync(path, `${userRecord('first')}\n`)
@@ -111,13 +111,54 @@ test('a rewrite and an append are both compactions, and both count', async () =>
   await view.poll()
   const afterAppend = (await view.snapshot()).compactionGeneration
 
-  // Now a genuine rewrite: the prefix changes under us.
-  writeFileSync(path, `${userRecord('rewritten history')}\n`)
+  // The same compaction written the other way: the prefix is replaced, marker and all.
+  writeFileSync(path, `${COMPACTION}\n${userRecord('rewritten history')}\n${COMPACTION}\n`)
   await view.poll()
   const afterRewrite = (await view.snapshot()).compactionGeneration
 
   assert.equal(afterAppend, 1)
-  assert.ok(afterRewrite > afterAppend, 'a rewrite still counts, as it always did')
+  assert.equal(afterRewrite, 2, 'a rewrite that declares a compaction still counts')
+})
+
+test('a rewrite with no marker is not a compaction (#122)', async () => {
+  // This test asserted the opposite until #122, on the reasoning that a rewrite is itself
+  // evidence of discarded context. Measured, it is not: 13 child transcripts from four runs
+  // held zero `compact_file_reference` attachments and zero boundary records while nine
+  // "compactions" were reported, and their end state had every UUID-bearing record present,
+  // in order, with no duplicates. That is an end-state check: it shows nothing was
+  // permanently lost, not that nothing was mutated between polls. The per-poll question is
+  // answered upstream by `#reserialized`, which compares the records; by the time a rewrite
+  // reaches this counter, records really have changed. Rotation, which reads only
+  // `compactionGeneration`, is still left alone -- a changed record is not a discarded
+  // context, and only a declared marker says context was discarded.
+  const dir = repo()
+  const path = join(dir, 'transcript.jsonl')
+  writeFileSync(path, `${userRecord('first')}\n`)
+
+  const view = viewOver(path)
+  await view.poll()
+
+  appendFileSync(path, `${COMPACTION}\n${userRecord('after append')}\n`)
+  await view.poll()
+  const afterAppend = (await view.snapshot()).compactionGeneration
+  assert.equal(afterAppend, 1, 'a real compaction, to prove the counter is live')
+
+  // Churn: the prefix changes, and nothing in the result declares a compaction.
+  writeFileSync(path, `${userRecord('rewritten history')}\n`)
+  await view.poll()
+  const snap = await view.snapshot()
+
+  assert.equal(snap.compactionGeneration, afterAppend, 'the rotation trigger does not move')
+  assert.equal(snap.rewriteGeneration, 1, 'but the rewrite is not lost either')
+
+  // And the marker dropped by that rewrite is not double-counted when the next one arrives.
+  appendFileSync(path, `${COMPACTION}\n${userRecord('later')}\n`)
+  await view.poll()
+  assert.equal(
+    (await view.snapshot()).compactionGeneration,
+    afterAppend + 1,
+    'one further compaction, counted once',
+  )
 })
 
 test('polling with nothing new does not inflate the generation', async () => {

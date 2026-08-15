@@ -129,7 +129,16 @@ export interface TurnEndEvent extends EventBase {
  */
 export interface RevisionEvent extends EventBase {
   type: 'revision'
-  reason: 'compaction' | 'late_signal' | 'resync'
+  /**
+   * `compaction` means the transcript DECLARED one -- a marker the parser recognises. It is
+   * evidence that context was discarded, and rotation acts on it.
+   *
+   * `rewrite` means the bytes changed under us with no such marker. Everything derived from
+   * the old bytes is still void, so it is still a revision; but a digest changing is not
+   * evidence that the participant lost anything, and it must not be read as one. See #122:
+   * nine "compactions" in an afternoon were nine of these, and none of them happened.
+   */
+  reason: 'compaction' | 'rewrite' | 'late_signal' | 'resync'
   replaces: number[]
   supersededBy?: AgentEvent | undefined
   provenance: Provenance[]
@@ -204,8 +213,17 @@ export interface SessionSnapshot {
   role?: Role | undefined
   turns: TurnRecord[]
   guarantees: Guarantees
-  /** Bumped whenever the underlying transcript was rewritten under us. */
+  /**
+   * Bumped once per compaction the transcript DECLARES. It is the rotation trigger, so it
+   * counts only what is evidence of lost context -- not every time the file changed shape.
+   */
   compactionGeneration: number
+  /**
+   * Unexplained prefix rewrites seen so far, when the adapter can tell. Diagnostic only:
+   * nothing rotates on this. Separated from `compactionGeneration` by #122, where routine
+   * byte-level churn was being counted as compaction and raising rotation candidates.
+   */
+  rewriteGeneration?: number | undefined
   /** When this snapshot was rebuilt from the transcript. */
   builtAt: number
 }

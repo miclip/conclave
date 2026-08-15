@@ -28,6 +28,23 @@ import { isTerminal } from '../contract/outcome.ts'
 import { RewriteAwareTail, parseJsonLine } from './tail.ts'
 import { parserFor, type ParsedTranscript } from './parse.ts'
 
+/**
+ * A record's identity independent of how it was written down: key order normalised
+ * recursively, so `{a:1,b:2}` and `{b:2,a:1}` compare equal. Whitespace never reaches here --
+ * these are already-parsed objects.
+ */
+function canonicalJson(value: unknown): string {
+  return JSON.stringify(value, (_key, val) =>
+    val && typeof val === 'object' && !Array.isArray(val)
+      ? Object.fromEntries(
+          Object.keys(val as Record<string, unknown>)
+            .sort()
+            .map((k) => [k, (val as Record<string, unknown>)[k]]),
+        )
+      : val,
+  )
+}
+
 interface EmittedTurn {
   seqs: number[]
   textLength: number
@@ -65,8 +82,42 @@ export class TranscriptSessionView {
    * four live oath-lang runs, peak generation pinned at exactly 0. Every negative result from
    * the degradation experiment was unfalsifiable, because a true null and an instrument that
    * cannot fire are indistinguishable from outside.
+   *
+   * "Does not rewrite" is about the MARKER, and is narrower than it reads: Claude Code
+   * transcripts do get their prefix rewritten (#122), just never as the way a compaction is
+   * recorded. See `#rewriteGeneration`.
    */
   #countedCompactions = 0
+  /**
+   * Prefix rewrites with no compaction marker behind them, counted separately and read by
+   * nobody who rotates.
+   *
+   * These are not compactions. Across four runs, 13 child transcripts carried zero
+   * `compact_file_reference` attachments and zero boundary records while the generation
+   * counter reported nine compactions (#122). What those transcripts did carry was ordinary
+   * activity -- hook results, reminders, tool-listing deltas.
+   *
+   * Their FINAL state kept every UUID-bearing record, in order, with no duplicates. That is
+   * an end-state check and no more: it cannot say what the file looked like between two
+   * polls, so it rules out permanent loss and not mutation in flight. `#reserialized` is what
+   * decides that question, and it decides it per poll on the records themselves.
+   *
+   * What rewrote the prefix is not established, and cannot be recovered from those
+   * transcripts: a final state cannot say which earlier bytes moved, so reserialization,
+   * mutation, deletion and reordering are all still on the table for the historical nine.
+   * All that is known is that something changed bytes we had already consumed.
+   *
+   * Ordinary activity is not the cause. A live capture of this project's own session grew
+   * 485,646 -> 659,600 bytes across a turn with an unchanged prefix hash -- append-only, and
+   * an append cannot move a digest that covers only the bytes before it.
+   *
+   * Future occurrences do not need the history: `#reserialized` classifies each one from the
+   * records at the moment it happens. This counter records what is left after that -- a real
+   * change to consumed records -- and a revision is still emitted for it, because whatever we
+   * derived from those records may now be false. What changed is that it no longer claims the
+   * participant lost context.
+   */
+  #rewriteGeneration = 0
   #builtAt = 0
 
   constructor(opts: SessionViewOptions) {
@@ -79,6 +130,11 @@ export class TranscriptSessionView {
     return this.#compactionGeneration
   }
 
+  /** Unexplained rewrites. Diagnostic: see `#rewriteGeneration`. */
+  get rewriteGeneration(): number {
+    return this.#rewriteGeneration
+  }
+
   #next(): number {
     return ++this.#seq
   }
@@ -88,30 +144,77 @@ export class TranscriptSessionView {
     const events: AgentEvent[] = []
 
     if (res.rewritten) {
+      const all = res.all ?? []
+
+      // A changed digest is a claim about BYTES. Before acting on it, ask the records: if
+      // everything we already consumed is still there, unchanged and in the same order, then
+      // the file was re-serialised and possibly appended to, and nothing we told anyone has
+      // become false. Emitting a revision there withdraws evidence that is still good, and
+      // withdrawal is not free -- it clears `#emitted`, so the whole history is re-emitted
+      // and every consumer must reconcile against a snapshot for nothing.
+      //
+      // This is the guard that closes #122 at the seam rather than at the label. The counter
+      // fix stops an unexplained rewrite being *called* a compaction; this stops the common
+      // case being an event at all.
+      const suffix = this.#reserialized(all)
+      if (suffix) {
+        this.#records = all
+        this.#view = this.#parse(this.#records)
+        this.#builtAt = Date.now()
+        // Deliberately identical to the append path from here: `#emitted` is kept, so only
+        // the suffix produces events, and a compaction marker arriving in that suffix counts
+        // exactly as it would have without the reserialization.
+        events.push(...this.#noteDeclaredCompactions())
+        events.push(...this.#emitFor(this.#view.turns))
+        return events
+      }
+
       // Everything we said about the past may now be false. Withdraw it explicitly
       // rather than letting consumers hold contradicting state.
       const replaced = [...this.#emitted.values()].flatMap((e) => e.seqs)
-      this.#records = res.all ?? []
+      this.#records = all
       this.#view = this.#parse(this.#records)
       this.#emitted.clear()
-      this.#compactionGeneration++
       this.#builtAt = Date.now()
+
+      // A rewrite is how the bytes changed; a compaction is what the transcript SAYS
+      // happened. They coincide on Codex and almost never on Claude Code, so they are
+      // counted apart. Markers already counted are not counted again -- the rewritten view
+      // still contains them, and re-counting them on every rewrite is how a byte-level digest
+      // turned into nine imaginary compactions (#122).
+      const declared = this.#view.compactions
+      const fresh = Math.max(0, declared - this.#countedCompactions)
+      // Down as well as up: a rewrite that drops the prefix drops its markers with it, and
+      // leaving the high-water mark behind would silently swallow the next real compaction.
+      this.#countedCompactions = declared
+      this.#compactionGeneration += fresh
+      if (fresh === 0) this.#rewriteGeneration++
 
       const provenance: Provenance[] = [
         { source: 'transcript', detail: 'transcript prefix changed; history was rewritten' },
-        {
-          source: 'transcript',
-          detail: this.#view.declaredCompaction
-            ? 'transcript declares a compaction'
-            : 'rewrite detected by prefix digest; no compaction marker recognised',
-          caveat: !this.#view.declaredCompaction,
-        },
-        { source: 'transcript', detail: `compaction generation ${this.#compactionGeneration}` },
+        fresh > 0
+          ? { source: 'transcript', detail: 'transcript declares a compaction' }
+          : {
+              source: 'transcript',
+              detail: 'rewrite detected by prefix digest; no compaction marker recognised',
+              caveat: true,
+            },
+        fresh > 0
+          ? { source: 'transcript', detail: `compaction generation ${this.#compactionGeneration}` }
+          : {
+              source: 'transcript',
+              detail:
+                `transcript rewrite ${this.#rewriteGeneration}; compaction generation ` +
+                `unchanged at ${this.#compactionGeneration} -- a changed digest is not ` +
+                `evidence that context was lost`,
+            },
       ]
 
       events.push({
         type: 'revision',
-        reason: 'compaction',
+        // Say what was seen. Naming an unexplained rewrite `compaction` is what made routine
+        // churn look like a seat losing its context, all the way through to rotation.
+        reason: fresh > 0 ? 'compaction' : 'rewrite',
         replaces: replaced,
         provenance,
         seq: this.#next(),
@@ -135,12 +238,37 @@ export class TranscriptSessionView {
   }
 
   /**
+   * The records we already consumed, still an ordered prefix of the reread file?
+   *
+   * Returns the appended suffix (possibly empty) when so, and `undefined` when any consumed
+   * record was mutated, deleted or reordered -- which is a real rewrite and keeps the
+   * revision path.
+   *
+   * Semantic, not textual, on purpose: the whole point is that the bytes changed. Two
+   * serialisations of the same record differing only in whitespace or key order are the same
+   * record, and the JSON we hold has already lost the whitespace, so key order is what
+   * `canonicalJson` normalises.
+   *
+   * Cost is a full canonicalisation of both sides, paid only on a rewrite. On the largest
+   * transcript in evidence -- 57,493 records -- that is one pass, against the alternative of
+   * re-emitting 57,493 records' worth of history and calling it a compaction.
+   */
+  #reserialized(all: Record<string, any>[]): Record<string, any>[] | undefined {
+    if (all.length < this.#records.length) return undefined
+    for (let i = 0; i < this.#records.length; i++) {
+      if (canonicalJson(this.#records[i]) !== canonicalJson(all[i])) return undefined
+    }
+    return all.slice(this.#records.length)
+  }
+
+  /**
    * Raise the generation for compactions the transcript DECLARES, however they were recorded.
    *
-   * A rewrite and an appended marker are the same event from the participant's point of view
-   * -- context was discarded -- and rotation is watching for that event, not for a particular
-   * way of writing it down. Counting only rewrites made the trigger a property of Codex's
-   * file format.
+   * A DECLARED compaction is the same event from the participant's point of view however it
+   * reached the file -- context was discarded -- and rotation is watching for that event, not
+   * for a particular way of writing it down. Counting only rewrites made the trigger a
+   * property of Codex's file format; counting every rewrite made it a property of Claude
+   * Code's flushing behaviour (#122). The marker is the thing.
    *
    * No `replaces`: the history is still there, so nothing previously emitted is withdrawn.
    * That is the honest difference from the rewrite path, and it is why this is a separate
@@ -269,6 +397,7 @@ export class TranscriptSessionView {
       turns: this.#view.turns.map((t) => ({ ...t, toolCalls: t.toolCalls.map((c) => ({ ...c })) })),
       guarantees: this.#opts.guarantees,
       compactionGeneration: this.#compactionGeneration,
+      rewriteGeneration: this.#rewriteGeneration,
       builtAt: this.#builtAt || Date.now(),
     }
   }

@@ -27,6 +27,7 @@ import test from 'node:test'
 import { TranscriptSessionView } from './reconcile.ts'
 import { parseClaude, parseCodex } from './parse.ts'
 import { guaranteesFor } from '../contract/session.ts'
+import { assess, detectDegradation } from '../rotation/degradation.ts'
 import { RewriteAwareTail, parseJsonLine } from './tail.ts'
 
 const SCRATCH = mkdtempSync(join(tmpdir(), 'reconcile-'))
@@ -249,12 +250,17 @@ test('SYNTHETIC: compaction withdraws prior events and re-emits surviving histor
   assert.equal(snap.compactionGeneration, 1)
 })
 
-test('SYNTHETIC: an unrecognised rewrite is flagged as a caveat, not asserted as compaction', async () => {
+test('SYNTHETIC: an unrecognised rewrite is a rewrite, not a compaction (#122)', async () => {
+  // Records really did change here -- 'one' is gone -- so the derivations are withdrawn. What
+  // is no longer claimed is that the participant lost context: counting a moved byte as a
+  // compaction reported nine of them in one afternoon against a 1M-context seat whose
+  // transcripts held zero markers.
   const p = join(SCRATCH, 'unmarked.jsonl')
   const user = (c: string) => JSON.stringify({ type: 'user', message: { content: c } }) + '\n'
   writeFileSync(p, user('one') + user('two'))
   const v = view(p, 'claude')
-  await v.poll()
+  const first = await v.poll()
+  const firstSeqs = first.map((e) => e.seq)
 
   writeFileSync(p, user('two'))
   const after = await v.poll()
@@ -262,6 +268,214 @@ test('SYNTHETIC: an unrecognised rewrite is flagged as a caveat, not asserted as
   const unmarked = revision.provenance.find((p) => p.detail.includes('no compaction marker'))
   assert.ok(unmarked, 'an unexplained rewrite must say so')
   assert.equal(unmarked.caveat, true)
+
+  assert.equal(revision.reason, 'rewrite', 'the event must be named for what was seen')
+  assert.equal(v.compactionGeneration, 0, 'no compaction was declared, so none is counted')
+  assert.equal(v.rewriteGeneration, 1, 'the rewrite is counted, on its own counter')
+  assert.equal((await v.snapshot()).compactionGeneration, 0)
+
+  // Still a revision in every other respect: stale evidence is withdrawn, not left standing.
+  assert.deepEqual(
+    [...revision.replaces].sort((a, b) => a - b),
+    [...firstSeqs].sort((a, b) => a - b),
+    'a rewrite still voids everything derived from the old bytes',
+  )
+  assert.ok(
+    revision.provenance.some((p) => /rewrite 1/.test(p.detail)),
+    'and reports which rewrite this was',
+  )
+
+  // Repeated churn accumulates on the rewrite counter and nowhere else.
+  writeFileSync(p, user('three'))
+  await v.poll()
+  assert.equal(v.rewriteGeneration, 2)
+  assert.equal(v.compactionGeneration, 0, 'churn never becomes a compaction by repetition')
+})
+
+/** The same record written a different way: key order reversed, recursively. */
+function reserialize(v: any): any {
+  if (Array.isArray(v)) return v.map(reserialize)
+  if (v && typeof v === 'object') {
+    return Object.fromEntries(
+      Object.keys(v)
+        .reverse()
+        .map((k) => [k, reserialize(v[k])]),
+    )
+  }
+  return v
+}
+
+test('SYNTHETIC: reserialization plus an append is not an event at all (#122)', async () => {
+  // The guard at the seam. The digest is a claim about BYTES; the records are what consumers
+  // were told about. When every consumed record is still there, unchanged and in order,
+  // nothing we said has become false -- so there is nothing to withdraw and no counter to
+  // move, whatever the file did to its own formatting.
+  const p = join(SCRATCH, 'reserialized.jsonl')
+  const rec = (c: string) => ({ type: 'user', message: { role: 'user', content: c } })
+  const line = (o: any) => JSON.stringify(o) + '\n'
+
+  writeFileSync(p, line(rec('one')) + line(rec('two')))
+  const v = view(p, 'claude')
+  const first = await v.poll()
+  assert.equal(first.filter((e) => e.type === 'turn_start').length, 2)
+  const seqBefore = Math.max(...first.map((e) => e.seq))
+
+  // Byte-for-byte different and semantically identical: reversed key order on the first
+  // record, a trailing space on the second. Then genuinely new material after it.
+  const rewritten =
+    JSON.stringify(reserialize(rec('one'))) + '\n' + JSON.stringify(rec('two')) + ' \n'
+  assert.notEqual(rewritten, line(rec('one')) + line(rec('two')), 'the bytes must really differ')
+  writeFileSync(p, rewritten + line(rec('three')))
+
+  const after = await v.poll()
+  assert.equal(
+    after.filter((e) => e.type === 'revision').length,
+    0,
+    'a reserialized prefix withdraws nothing, because nothing it said stopped being true',
+  )
+  assert.equal(v.compactionGeneration, 0, 'and no compaction is claimed')
+  assert.equal(v.rewriteGeneration, 0, 'nor is it counted as a rewrite: no record changed')
+
+  // Only the suffix is emitted. Re-emitting the prefix is the expensive half of the old
+  // behaviour: it clears what consumers were told and makes them reconcile for nothing.
+  const starts = after.filter((e) => e.type === 'turn_start')
+  assert.equal(starts.length, 1, 'exactly the appended record')
+  assert.equal(starts[0]!.prompt, 'three')
+  assert.ok(Math.min(...after.map((e) => e.seq)) > seqBefore, 'seqs continue rather than restart')
+
+  const snap = await v.snapshot()
+  assert.deepEqual(
+    snap.turns.map((t) => t.prompt),
+    ['one', 'two', 'three'],
+    'and the view is complete either way',
+  )
+})
+
+test('SYNTHETIC: a mutated record is still a rewrite, and still withdraws (#122)', async () => {
+  // The other side of the guard. Same record count, same order, one record whose content
+  // changed under us -- what a consumer holds is now wrong, and it is told so.
+  const p = join(SCRATCH, 'mutated.jsonl')
+  const rec = (c: string) => ({ type: 'user', message: { role: 'user', content: c } })
+  const line = (o: any) => JSON.stringify(o) + '\n'
+
+  writeFileSync(p, line(rec('one')) + line(rec('two')))
+  const v = view(p, 'claude')
+  const first = await v.poll()
+  const firstSeqs = first.map((e) => e.seq)
+
+  writeFileSync(p, line(rec('ONE, changed in place')) + line(rec('two')))
+  const after = await v.poll()
+
+  const revision = after.find((e) => e.type === 'revision')
+  assert.ok(revision, 'a mutated record must still produce a revision')
+  assert.equal(revision.reason, 'rewrite')
+  assert.equal(v.rewriteGeneration, 1)
+  assert.equal(v.compactionGeneration, 0)
+  assert.deepEqual(
+    [...revision.replaces].sort((a, b) => a - b),
+    [...firstSeqs].sort((a, b) => a - b),
+    'everything derived from the old bytes is withdrawn',
+  )
+  assert.equal(
+    after.filter((e) => e.type === 'turn_start').length,
+    2,
+    'and the surviving history is re-emitted so events() agrees with snapshot()',
+  )
+})
+
+test('SYNTHETIC: a compaction declared in a reserialized suffix still counts (#122)', async () => {
+  // The guard must not swallow the real signal. A marker arriving in the appended part is
+  // counted exactly as it would be without the reserialization -- generation up, nothing
+  // withdrawn, because the history is still there.
+  const p = join(SCRATCH, 'reserialized-compaction.jsonl')
+  const rec = (c: string) => ({ type: 'user', message: { role: 'user', content: c } })
+  const line = (o: any) => JSON.stringify(o) + '\n'
+  const marker =
+    JSON.stringify({ type: 'attachment', attachment: { type: 'compact_file_reference' } }) + '\n'
+
+  writeFileSync(p, line(rec('one')) + line(rec('two')))
+  const v = view(p, 'claude')
+  await v.poll()
+
+  writeFileSync(
+    p,
+    JSON.stringify(reserialize(rec('one'))) + '\n' + line(rec('two')) + marker + line(rec('three')),
+  )
+  const after = await v.poll()
+
+  assert.equal(v.compactionGeneration, 1, 'the marker counts wherever the bytes moved')
+  assert.equal(v.rewriteGeneration, 0)
+  const revision = after.find((e) => e.type === 'revision')
+  assert.ok(revision)
+  assert.equal(revision.reason, 'compaction')
+  assert.deepEqual(revision.replaces, [], 'appended, so nothing is withdrawn')
+})
+
+test('SYNTHETIC: a rewrite raises no rotation candidate; a declared compaction does (#122)', async () => {
+  // End to end, because the bug lived in the seam: the reconciler named an unexplained
+  // rewrite `compaction`, and `detectDegradation` -- which reads that name and the
+  // generation -- turned it into a rotation candidate. Either half alone looks fine.
+  const churn = join(SCRATCH, 'no-candidate.jsonl')
+  const user = (c: string) => JSON.stringify({ type: 'user', message: { content: c } }) + '\n'
+  const marker =
+    JSON.stringify({ type: 'attachment', attachment: { type: 'compact_file_reference' } }) + '\n'
+
+  writeFileSync(churn, user('one') + user('two'))
+  const v = view(churn, 'claude')
+  const baseline = (await v.snapshot()).compactionGeneration
+
+  // A byte-level rewrite with no marker anywhere in the result.
+  writeFileSync(churn, user('two') + user('three'))
+  const events = await v.poll()
+  const snap = await v.snapshot()
+
+  const d = detectDegradation({
+    baselineGeneration: baseline,
+    currentGeneration: snap.compactionGeneration,
+    events,
+  })
+  assert.equal(d.degraded, false, 'a changed digest is not evidence that context was lost')
+  assert.deepEqual(d.evidence, [])
+  const verdict = assess({
+    participant: 'implementer',
+    prose: 'Done. Tests pass.',
+    baselineGeneration: baseline,
+    currentGeneration: snap.compactionGeneration,
+    events,
+    at: 1,
+  })
+  assert.equal(verdict.decision, 'continue')
+  assert.equal(verdict.reason, 'nothing')
+
+  // The same machinery, on a transcript that actually declares one.
+  const real = join(SCRATCH, 'candidate.jsonl')
+  writeFileSync(real, user('one') + user('two'))
+  const w = view(real, 'claude')
+  const realBaseline = (await w.snapshot()).compactionGeneration
+
+  writeFileSync(real, marker + user('two'))
+  const realEvents = await w.poll()
+  const realSnap = await w.snapshot()
+
+  assert.equal(realSnap.compactionGeneration, realBaseline + 1)
+  const realD = detectDegradation({
+    baselineGeneration: realBaseline,
+    currentGeneration: realSnap.compactionGeneration,
+    events: realEvents,
+  })
+  assert.equal(realD.degraded, true, 'a declared compaction is still the rotation trigger')
+  assert.ok(realD.evidence.some((e) => /declares a compaction/.test(e)))
+  assert.equal(
+    assess({
+      participant: 'implementer',
+      prose: 'Done. Tests pass.',
+      baselineGeneration: realBaseline,
+      currentGeneration: realSnap.compactionGeneration,
+      events: realEvents,
+      at: 1,
+    }).decision,
+    'rotate',
+  )
 })
 
 test('snapshot is authoritative and independent of what events() already said', async () => {
