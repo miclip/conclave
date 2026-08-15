@@ -116,7 +116,7 @@ mediate permissions — `--print` auto-approves for the invocation, so
 Node 24 or newer.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/miclip/conclave/v0.3.5/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/miclip/conclave/v0.4.0/scripts/install.sh | sh
 ```
 
 Installs the newest tagged release into `~/.local/share/conclave`, compiles `node-pty`, and
