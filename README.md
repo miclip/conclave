@@ -415,6 +415,19 @@ rotation policy at all), `armed` (this seat has checks, so `rotate` joins `conti
 alone on the others. An unarmed run reports the block too, with `armed: false` — a key that
 appeared only when armed would read as "not armed" on a build that simply did not say.
 
+The record itself has a pulse. A live run rewrites `status.json` every 30 seconds whether
+anything changed or not, so `updatedAt` says when the file was last **written**, not when the
+state last changed — and a record that stops moving is a writer that stopped, not a run that
+went quiet. Miss three beats and `status --json` appends `stale: {ageMs, thresholdMs}` and the
+prose warns in words; a fresh record carries neither, and keeps the keys, the order and the
+types it always had. One value does change on a healthy run: `updatedAt` now moves every 30
+seconds on a session where nothing has happened, which is the point of it. That reading is
+derived when you read, from the clock, because the run whose disk filled is exactly the run
+that cannot write a field saying so. A failed write is also no longer final: both files retry,
+and stderr carries at most one "could not write" line and one recovery line per minute —
+counted across outages, so a volume that fails one write in ten stays quiet rather than
+complaining once per write.
+
 The liveness line in that evidence — whether the child is working or idle — is **re-measured
 while the pause lasts**, so polling `status` twice gets two readings rather than one replayed.
 Every reading says when it was taken, and `pause.liveness` carries the same fact as data

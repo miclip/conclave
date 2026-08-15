@@ -31,9 +31,24 @@
  * `sessionLock` already draws this distinction for the workspace guard, and for the same
  * reason: a crash-proof mechanism that misreports after a crash gets abandoned in a day.
  *
+ * ## ...and neither is whether the record is current
+ *
+ * Two fields were not enough. `state` and `alive` can BOTH be honest about a run nobody is
+ * describing any more: the process exists, the file says what it last managed to say, and the
+ * gap between them is invisible. #126 is that gap, at its worst — an agent operator polled for
+ * 73 minutes and was told `running`, `pause: none`, while the run sat at a pause whose write
+ * had failed on a full disk and whose writer had then latched off for good.
+ *
+ * So there is a third reading, and it needs no third field. A live recording rewrites the
+ * record every `SESSION_HEARTBEAT_MS` whether or not anything changed, which makes `updatedAt`
+ * a heartbeat rather than a change log; `sessionStaleness` turns a missed beat into the fact a
+ * reader actually wants. And no write is ever final: both files retry, independently, so a disk
+ * that fills for ten seconds costs ten seconds of record rather than the rest of the run.
+ *
  * ## Two files per session
  *
- *   status.json    the current state, rewritten on every change. Small, whole, atomic.
+ *   status.json    the current state, rewritten on every change AND on a heartbeat. Small,
+ *                  whole, atomic.
  *   events.ndjson  the observation stream, appended. Every routing message and every
  *                  adapter event, in the order the relay saw them.
  *
@@ -67,6 +82,52 @@ import { checkCommand, checkRelevance, type CheckRelevance, type CheckSpec } fro
 export const SESSION_SCHEMA = 1
 
 export const SESSIONS_RELATIVE = '.conclave/sessions'
+
+/**
+ * How often a live recording rewrites `status.json` even when nothing has changed.
+ *
+ * This is what makes `updatedAt` mean "the writer is still there" rather than "the state last
+ * changed", and the difference is the whole of #126. A run halted at a pause changes nothing
+ * for as long as nobody answers it, so a record that only moved on change was indistinguishable
+ * from one whose writer had died -- and in the incident that produced this, the writer HAD died,
+ * silently, on a full disk, while the pause it had failed to publish waited 73 minutes for an
+ * operator who was being told there was nothing to do.
+ *
+ * Cheap: one small file rewritten twice a minute. Deliberately not tied to anyone's poll
+ * interval, which the run cannot know.
+ */
+export const SESSION_HEARTBEAT_MS = 30_000
+
+/**
+ * How old a live record may get before a reader is told it has stopped moving.
+ *
+ * Three missed beats, which is the ordinary heartbeat-timeout rule and is chosen for the
+ * ordinary reason: one missed beat is a slow disk or a busy machine, and three is a writer that
+ * is not coming back. Reported rather than acted on -- nothing here kills a run for being quiet.
+ */
+export const SESSION_STALE_AFTER_MS = SESSION_HEARTBEAT_MS * 3
+
+/**
+ * The whole budget for what the recorder says about its own writes, per minute.
+ *
+ * ACROSS OUTAGES, not within one, and that distinction is the point. A rule that always
+ * announced the first failure of each outage would be silent about a disk that stays full and
+ * loud about one that flickers -- and flickering is the ordinary case: contention, a sync, a
+ * snapshot, anything that makes one write fail and the next succeed. At one write per beat plus
+ * one per event, "announce every episode" is a warning and a recovery line per event on a
+ * contended volume, which buries the run's own output under the recorder's complaint. That is
+ * its own way of making the failure invisible.
+ *
+ * So the clock is not reset by recovering. Whether an outage was ANNOUNCED is tracked
+ * separately, and only an announced outage gets a recovery line -- because the recovery line
+ * exists to close a loop with the operator, and there is no loop to close if they were never
+ * told. A failure that outlasts the window is always announced eventually.
+ *
+ * Exported so a test can assert against the window rather than against the number 60000. A test
+ * that hardcoded it would keep passing if this changed, while asserting something that was no
+ * longer true.
+ */
+export const STATUS_WARN_EVERY_MS = 60_000
 
 /**
  * What the session last said about itself.
@@ -332,6 +393,19 @@ export interface SessionStatus {
   operator: 'human' | 'agent'
   state: SessionRunState
   startedAt: number
+  /**
+   * When this file was last WRITTEN — not when the state last changed.
+   *
+   * The distinction is load-bearing since #126. A live recording rewrites the record every
+   * `SESSION_HEARTBEAT_MS` whether anything changed or not, so this field is a heartbeat: a
+   * reader comparing it against the clock is asking "is the writer still there", and a record
+   * older than `SESSION_STALE_AFTER_MS` on a process that still exists means the writer stopped
+   * while the run did not. `sessionStaleness` makes that reading for them.
+   *
+   * It read as "last change" before, and that is exactly what made a 73-minute-old record
+   * indistinguishable from a run that had simply been sitting at a pause. A run sitting at a
+   * pause now beats; a run whose disk filled does not.
+   */
   updatedAt: number
   /** Entries in the routing log. The same count the console prints at the end. */
   messages: number
@@ -441,9 +515,19 @@ function alive(pid: number): boolean {
 /**
  * Writes both files for one session.
  *
- * Every failure is swallowed after the first report, exactly as `RunLogWriter` does: a run
- * must not die because its own status could not be written. Losing observability is bad and
- * losing the work is worse.
+ * A failure is never fatal to the run: recording must not be able to kill the work it exists
+ * to describe, exactly as `RunLogWriter` reasons. But a failure is not final either, and that
+ * is the correction #126 forced. A single flag used to latch on the first failed write or
+ * failed append and silence BOTH writers for the life of the process, so a full disk lasting
+ * ten seconds stopped the record permanently -- and left the last good copy in place, reading
+ * as current, which is worse than an obviously missing file.
+ *
+ * So: every write is attempted, every time, and the two files fail independently. Failed status
+ * writes are reported to stderr at most once per `STATUS_WARN_EVERY_MS` COUNTING ACROSS
+ * OUTAGES, with a matching recovery line only for an outage that was announced -- see that
+ * constant for why recovering must not buy a fresh warning. An event append that fails is
+ * silent, for the reason it always was: the status IS the interface, and a gap in an appended
+ * stream is visible in the stream itself.
  */
 export class SessionRecorder {
   readonly id: string
@@ -451,7 +535,20 @@ export class SessionRecorder {
   readonly statusPath: string
   readonly eventsPath: string
   #status: SessionStatus
-  #failed = false
+  /** Consecutive failed status writes, zeroed by a success. */
+  #statusFailures = 0
+  /**
+   * When stderr was last told about a failed status write, and whether the CURRENT outage was
+   * one of the ones it was told about.
+   *
+   * The timestamp deliberately survives recovery -- see `STATUS_WARN_EVERY_MS`. The flag is what
+   * keeps the two lines paired: an outage nobody was told about must not produce a recovery line
+   * announcing the end of something nobody knew had started.
+   */
+  #statusWarnedAt: number | undefined
+  #outageAnnounced = false
+  /** Consecutive failed event appends. Counted so the directory can be retried; never reported. */
+  #eventFailures = 0
 
   constructor(repoRoot: string, status: Omit<SessionStatus, 'schema' | 'eventsPath' | 'updatedAt'>) {
     this.id = status.id
@@ -467,7 +564,8 @@ export class SessionRecorder {
     try {
       mkdirSync(this.dir, { recursive: true })
     } catch {
-      this.#failed = true
+      // Not fatal and not remembered: the write below will fail too, and a failed write is
+      // what puts this back on the retry path.
     }
     this.write()
   }
@@ -483,6 +581,20 @@ export class SessionRecorder {
   }
 
   /**
+   * Rewrite the record unchanged, stamping `updatedAt`.
+   *
+   * The heartbeat, and it does two things at once. It tells a reader the writer is still there
+   * -- which is what lets `sessionStaleness` say the opposite -- and it republishes whatever
+   * the last successful write missed, because `#status` is current in memory whether or not it
+   * ever reached the disk. A pause lost to a full disk therefore comes back on its own once the
+   * disk does, with nobody re-reporting it. In the incident, nobody did.
+   */
+  beat(): void {
+    this.#status = { ...this.#status, updatedAt: Date.now() }
+    this.write()
+  }
+
+  /**
    * Rewrite via a temporary file and a rename.
    *
    * A reader polling this file would otherwise eventually catch a partial write and get a
@@ -491,32 +603,93 @@ export class SessionRecorder {
    * atomic on every platform this runs on.
    */
   private write(): void {
-    if (this.#failed) return
     const tmp = `${this.statusPath}.tmp`
     try {
+      // Only on the way back from a failure. The directory can be absent because the
+      // constructor's own mkdir failed or because something removed it underneath a live run,
+      // and neither is worth a syscall on a path that runs for every event.
+      if (this.#statusFailures > 0) mkdirSync(this.dir, { recursive: true })
       writeFileSync(tmp, `${JSON.stringify(this.#status, null, 2)}\n`)
       renameSync(tmp, this.statusPath)
+      if (this.#statusFailures > 0) {
+        const failures = this.#statusFailures
+        this.#statusFailures = 0
+        // Only for an outage the operator was actually told about. They were told the record
+        // had stopped and are owed the other half -- without it, a run that recovered looks
+        // exactly like one that did not. A silent outage has no loop to close.
+        if (this.#outageAnnounced) {
+          this.#outageAnnounced = false
+          console.error(
+            `conclave: session status at ${this.statusPath} is being written again ` +
+              `after ${failures} failed attempt(s)`,
+          )
+        }
+      }
     } catch (err) {
-      this.#failed = true
-      console.error(
-        `conclave: could not write session status at ${this.statusPath} ` +
-          `(${err instanceof Error ? err.message : String(err)}); ` +
-          `\`conclave status\` will not see this run`,
-      )
+      this.#statusFailures += 1
+      const now = Date.now()
+      // `#statusWarnedAt` is not cleared by recovering, so this is a budget for the CHANNEL and
+      // not for the episode: a volume that fails one write in ten produces one pair a minute,
+      // not one pair per contended write.
+      // `undefined` rather than 0 for "never warned": 0 is a real instant a mocked or badly set
+      // clock can return, and this must not depend on never being at the epoch.
+      if (this.#statusWarnedAt === undefined || now - this.#statusWarnedAt >= STATUS_WARN_EVERY_MS) {
+        this.#statusWarnedAt = now
+        this.#outageAnnounced = true
+        console.error(
+          `conclave: could not write session status at ${this.statusPath} ` +
+            `(${err instanceof Error ? err.message : String(err)}); ` +
+            `\`conclave status\` is reading a record from before this failure, and will say so`,
+        )
+      }
     }
   }
 
   /** Append one observation event. One JSON object per line, in relay order. */
   event(e: RelayEvent): void {
-    if (this.#failed) return
     try {
+      if (this.#eventFailures > 0) mkdirSync(this.dir, { recursive: true })
       appendFileSync(this.eventsPath, `${JSON.stringify(e)}\n`)
+      this.#eventFailures = 0
     } catch {
-      // Deliberately quieter than the status failure above: the status IS the interface,
-      // and a stream that stops is visible in the stream itself.
-      this.#failed = true
+      // Deliberately quieter than the status failure above, and deliberately not final: the
+      // events lost to a full disk stay lost, and the ones after it do not.
+      this.#eventFailures += 1
     }
   }
+}
+
+/**
+ * Whether a record has stopped moving, for a reader who should not have to work it out.
+ *
+ * Derived here rather than written into the file, and that is the point: the fact a reader
+ * needs is that this record is old NOW, which the record cannot know when it is written -- and
+ * a run whose writer has died is precisely the run that cannot add a field saying so. So this
+ * is computed at read time from two things the reader already has, `updatedAt` and the clock.
+ *
+ * Three conditions, and each excludes a case that is already reported honestly:
+ *
+ *   alive        a dead process is `abandoned`, which is the existing flag for a record that
+ *                cannot be trusted. Saying `stale` as well would be a second name for it.
+ *   not ended    a finished run stops writing on purpose. Its record is old and correct, and a
+ *                warning there would fire on every archived session anyone ever reads.
+ *   past three   see `SESSION_STALE_AFTER_MS`.
+ *   beats
+ *
+ * Note what this does NOT claim: that the writer is broken. A record can be stale because the
+ * disk is full, because the process is wedged, or because the machine was suspended. It claims
+ * only that the file is not being kept up, which is the fact `state` and `alive` between them
+ * could not express -- `state` is what the session last said, `alive` is that someone is there,
+ * and #126 is the gap where both are true and neither is current.
+ */
+export function sessionStaleness(
+  s: ReadSession,
+  now: number,
+): { ageMs: number; thresholdMs: number } | undefined {
+  if (!s.alive || s.status.state === 'ended') return undefined
+  const ageMs = now - s.status.updatedAt
+  if (ageMs <= SESSION_STALE_AFTER_MS) return undefined
+  return { ageMs, thresholdMs: SESSION_STALE_AFTER_MS }
 }
 
 /** Read one session, reconciling what it claims against whether it is there. */
@@ -861,6 +1034,12 @@ export function recordSession(
     startedAt: number
     logPath?: string | undefined
     build: string
+    /**
+     * How often the record is rewritten when nothing has changed. `SESSION_HEARTBEAT_MS` by
+     * default; injectable ONLY so a test can watch a beat land without sleeping thirty seconds.
+     * Neither front-end passes it.
+     */
+    heartbeatMs?: number | undefined
   },
 ): SessionRecording {
   /** The last adapter event per seat, which is what "what is it doing" means live. */
@@ -1041,6 +1220,23 @@ export function recordSession(
     void refresh()
   }
 
+  /**
+   * The heartbeat. See `SessionRecorder.beat` for what one does and `SESSION_HEARTBEAT_MS` for
+   * why it exists at all.
+   *
+   * Bounded twice over. It is UNREFERENCED, so recording can never be the reason a process
+   * refuses to exit -- the same rule the follow loop obeys by being detached. And it skips an
+   * `ended` record rather than stamping it forever: a finished run has stopped saying anything,
+   * `close()` is meant to clear this immediately afterwards, and a beat that outlived it would
+   * push the record's prune eligibility (`updatedAt < olderThan`) out by one interval at a time,
+   * forever.
+   */
+  const heartbeat = setInterval(() => {
+    if (recorder.status.state === 'ended') return
+    recorder.beat()
+  }, opts.heartbeatMs ?? SESSION_HEARTBEAT_MS)
+  heartbeat.unref()
+
   let stop: (() => void) | undefined
   const following = (async () => {
     const stream = relay.observe({ replay: true })
@@ -1099,6 +1295,10 @@ export function recordSession(
      * final one has to be the one that wins.
      */
     close: async () => {
+      // First, before anything that can take time. Teardown writes the final record itself, and
+      // a heartbeat still ticking during a two-second race would stamp a record the caller is
+      // about to replace.
+      clearInterval(heartbeat)
       await Promise.race([following, new Promise((r) => setTimeout(r, 2_000).unref())])
       stop?.()
       await following

@@ -1105,9 +1105,48 @@ const DECLARED: Record<string, string> = {
     'Covered in src/outcomes/liveness.test.ts, including a real two-process tree — a waiting `sh` ' +
     'in front of a spinning one — and mutation-checked by reverting the aggregation and watching ' +
     'that test fail.',
+  'the session record beats, retries, and says when it has stopped moving (#126)':
+    'THREE CHANGES AN EXISTING CONSUMER CAN SEE, all of them at N=1. (1) `updatedAt` now means ' +
+    'WHEN THE FILE WAS LAST WRITTEN, not when the state last changed: a live recording rewrites ' +
+    'status.json every SESSION_HEARTBEAT_MS = 30s whether anything changed or not ' +
+    '(src/workspace/sessionRecord.ts, SessionRecorder.beat and the interval in recordSession). No ' +
+    'key moved and no value changed type; what changed is what the number MEANS, and it changed ' +
+    'in the direction the field was already being read in — `formatSession` has always printed it ' +
+    'under "is it stuck". A run sitting at a pause used to be indistinguishable from a run whose ' +
+    'writer had died, which is #126: an agent operator polled `status --json` for 73 minutes and ' +
+    'was told running/pause: none while the run was halted at a turn_incomplete pause the writer ' +
+    'had failed to publish when the disk filled. (2) `status --json` gains `stale: {ageMs, ' +
+    'thresholdMs}`, APPENDED and CONDITIONAL — present only for a record that is alive, not ended, ' +
+    'and older than three missed beats (SESSION_STALE_AFTER_MS = 90s, sessionStaleness). A fresh ' +
+    'default document therefore has the same keys, in the same order, with the same types, which ' +
+    'is why the shape pins above did not move and are the guard on this claim rather than a ' +
+    'casualty of it. IT IS NOT BYTE-IDENTICAL, and the exception is (1): `updatedAt` advances on ' +
+    'a heartbeat, so two polls of an idle run differ in that one value where before they would ' +
+    'not have. That is the whole of what an existing consumer can observe change on a healthy ' +
+    'default run, and it is the change the feature IS -- a reader that treated a constant ' +
+    '`updatedAt` as "nothing is happening" was reading the field that #126 proved could not ' +
+    'support the reading. Conditional against the ' +
+    'usual reading of #103, and the difference is stated in sessionView.ts: `rotation` and ' +
+    '`ceilings` describe THE RUN permanently, so an absent key there was mistaken for a false one; ' +
+    'this describes THIS READ, where absent IS the fact and an always-present `stale: false` would ' +
+    'change what every existing consumer parses to say nothing. Derived at read time, from ' +
+    '`updatedAt` and the clock, because the run that cannot write its record is exactly the run ' +
+    'that cannot add a field saying so. `formatSession` gains a matching two-line STALE warning ' +
+    'directly under `updated:`. (3) The recorder no longer stops. One `#failed` flag used to latch ' +
+    'on the first failed status write OR failed event append and silence both writers for the life ' +
+    'of the process, so a full disk lasting ten seconds ended recording permanently and left the ' +
+    'last good copy in place reading as current. The two files now fail independently and every ' +
+    'write is retried; status failures are reported once and then at most once a minute while they ' +
+    'continue, plus one line when writing resumes; event failures stay silent, as they always ' +
+    'were. NOTHING IS ACTED ON: no run is killed, paused or resumed for being quiet, and no flag ' +
+    'is added. The heartbeat is unreferenced and skips an `ended` record, so it can neither hold a ' +
+    'process open nor push a finished record past its own prune cutoff. Covered in ' +
+    'src/workspace/sessionRecord.test.ts, including a blocked write proving the stale warning ' +
+    'reaches the operator without a successful write, and mutation-checked by disabling the beat ' +
+    'and watching the republish assertion fail.',
 }
 
-test('DECLARED contains exactly the routing, pause-resolution, attribution, ceiling-flag, seat-flag, seat-status, launch-record, flag-reader, integration-check, per-seat-rotation, reviewer, resume-guard, mixed-liveness, timestamped-liveness, model-validation, executable-preflight, compaction-survival, rotation-reporting, send-precondition, process-tree-liveness and ceiling-reporting entries', () => {
+test('DECLARED contains exactly the routing, pause-resolution, attribution, ceiling-flag, seat-flag, seat-status, launch-record, flag-reader, integration-check, per-seat-rotation, reviewer, resume-guard, mixed-liveness, timestamped-liveness, model-validation, executable-preflight, compaction-survival, rotation-reporting, send-precondition, process-tree-liveness, ceiling-reporting and record-heartbeat entries', () => {
   assert.deepEqual(Object.keys(DECLARED), [
     'implementer_unanswered -> advisor',
     'status.pause.resolution',
@@ -1131,6 +1170,7 @@ test('DECLARED contains exactly the routing, pause-resolution, attribution, ceil
     'every ceiling is reported at launch and in status --json, and an exhausted advisor budget says which ceiling and what it was (#119)',
     'a peer send waits for a live turn, and CPU decides nothing anywhere a send is decided (#117)',
     'liveness measures the child’s whole process tree, not the pid the orchestrator holds (#111)',
+    'the session record beats, retries, and says when it has stopped moving (#126)',
   ])
 })
 

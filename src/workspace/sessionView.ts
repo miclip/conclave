@@ -11,7 +11,7 @@
  */
 
 import { ceilingSummary } from '../relay/guardrails.ts'
-import type { ReadSession } from './sessionRecord.ts'
+import { SESSION_HEARTBEAT_MS, sessionStaleness, type ReadSession } from './sessionRecord.ts'
 
 export function elapsed(ms: number): string {
   const s = Math.round(ms / 1000)
@@ -53,6 +53,20 @@ export function formatSession(s: ReadSession, now: number): string {
   // The single most useful number for "is it stuck". A status that has not been touched in
   // twenty minutes says something no amount of state does.
   lines.push(`  updated:   ${elapsed(now - st.updatedAt)} ago`)
+  // ...and since #126 it does not have to be inferred from that number. Immediately after the
+  // line it qualifies, and before everything below it, because everything below it is what the
+  // record CLAIMED and this is the warning that the claim may predate what the run is doing now.
+  const stale = sessionStaleness(s, now)
+  if (stale) {
+    lines.push(
+      `  STALE:     nothing has written this record in ${elapsed(stale.ageMs)}, and a live run ` +
+        `rewrites it every ${elapsed(SESSION_HEARTBEAT_MS)}.`,
+    )
+    lines.push(
+      `             pid ${st.pid} is still there, so everything below is what the run last ` +
+        `managed to say — not necessarily what it is doing.`,
+    )
+  }
   lines.push(`  messages:  ${st.messages}`)
   for (const p of st.participants) {
     const bits: string[] = []
@@ -109,7 +123,26 @@ export function formatSession(s: ReadSession, now: number): string {
  * `alive` and `abandoned` are included, and they are the only two fields not read from the
  * file: they are what the reader learned by checking the pid. A consumer must not have to
  * repeat that check, and one that did would repeat it differently.
+ *
+ * `stale` is the third, and it is the one that APPEARS AND DISAPPEARS. See `sessionStaleness`
+ * for what it means. Present only when there is something to warn about, and appended, so a
+ * fresh document has the same keys in the same order with the same types it had before #126 --
+ * D1, and the shape guard in `defaultUnchanged.test.ts` pins exactly that. NOT byte-identical,
+ * and the difference matters to a reader: `updatedAt` now advances on a heartbeat and means
+ * when the file was last WRITTEN rather than when the state last changed, so its value moves on
+ * a run where nothing has happened. A consumer diffing two polls of an idle run sees that field
+ * change; one reading keys, order or types sees nothing new.
+ *
+ * Appearing-and-disappearing is the opposite of how `rotation` and `ceilings` argue, where an
+ * absent key was mistaken for a false one (#103), and the difference is that those describe the
+ * RUN, permanently, while this describes THIS READ: a consumer's `if (doc.stale)` cannot misread
+ * an absent key here, because absent is the fact.
  */
-export function formatSessionJson(s: ReadSession): string {
-  return JSON.stringify({ ...s.status, alive: s.alive, abandoned: s.abandoned }, null, 2)
+export function formatSessionJson(s: ReadSession, now: number = Date.now()): string {
+  const stale = sessionStaleness(s, now)
+  return JSON.stringify(
+    { ...s.status, alive: s.alive, abandoned: s.abandoned, ...(stale ? { stale } : {}) },
+    null,
+    2,
+  )
 }

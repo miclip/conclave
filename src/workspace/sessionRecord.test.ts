@@ -22,8 +22,12 @@ import {
   readSession,
   recordSession,
   resolveSession,
+  SESSION_HEARTBEAT_MS,
+  SESSION_STALE_AFTER_MS,
   SessionRecorder,
   sessionDir,
+  sessionStaleness,
+  STATUS_WARN_EVERY_MS,
   type RecordableRelay,
   type SessionRunState,
   type SessionStatus,
@@ -164,6 +168,54 @@ function fakeRelay(opts?: {
 
 /** Let the detached follow loop run. It is deliberately not on the caller's critical path. */
 const settle = () => new Promise((r) => setTimeout(r, 30))
+
+/**
+ * Wait for a fact rather than for a duration.
+ *
+ * A fixed sleep long enough to contain a beat on an idle machine is not long enough on a loaded
+ * one, and lengthening it to be safe makes every green run pay for the worst case. Polling asks
+ * the question the assertion is about, returns the moment it is true, and fails with the name of
+ * what never happened rather than with whatever the assertion downstream would have said.
+ */
+async function until<T>(what: string, read: () => T | undefined, timeoutMs = 5_000): Promise<T> {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    const seen = read()
+    if (seen !== undefined) return seen
+    if (Date.now() > deadline) throw new Error(`timed out after ${timeoutMs}ms waiting for ${what}`)
+    await new Promise((r) => setTimeout(r, 5))
+  }
+}
+
+/**
+ * Divert stderr into an array until `restore` is called.
+ *
+ * Two callers with two reasons. The warning tests capture in order to ASSERT what the recorder
+ * said; the failed-write test captures so the suite does not print a simulated production
+ * failure, which would teach a reader to scroll past the real one.
+ */
+function captureStderr(): { said: string[]; restore: () => void } {
+  const said: string[] = []
+  const real = console.error
+  console.error = (...args: unknown[]) => void said.push(args.map(String).join(' '))
+  return {
+    said,
+    restore: () => {
+      console.error = real
+    },
+  }
+}
+
+/** Run `fn` with stderr captured, and hand back every line the recorder wrote. */
+async function whileWatchingStderr(fn: () => void | Promise<void>): Promise<string[]> {
+  const held = captureStderr()
+  try {
+    await fn()
+  } finally {
+    held.restore()
+  }
+  return held.said
+}
 
 test('a status is written at construction, before anything has happened', () => {
   const root = dir()
@@ -906,6 +958,501 @@ test('the status record carries every ceiling, with null for the ones nobody set
 
   relay.stream.close()
   await rec.close()
+})
+
+/**
+ * The record stopped moving and never started again (#126).
+ *
+ * An agent operator polled `status --json` for 73 minutes and was told `running`, `pause:
+ * none`, while the run sat at a `turn_incomplete` pause waiting for the answer that reading
+ * therefore never produced. The disk had filled around the time the record last changed, and
+ * freeing it changed nothing: `SessionRecorder.write()` catches one failure, latches `#failed`,
+ * and every later `write()` returns immediately. So the failure is not "one write was lost" --
+ * the writer stops, permanently, and the last good copy is left behind looking current.
+ *
+ * The pause is the part that makes this worse than stale data. It is the one piece of state
+ * whose whole purpose is to be answered by whoever is reading this file, and the reader has
+ * been handed a document saying no action is needed.
+ *
+ * Failure is staged through `<status>.tmp`, so a directory in that path fails `writeFileSync`
+ * exactly where ENOSPC did -- and leaves `status.json` intact, which is the shape of the
+ * incident. Nothing in this test re-reports the pause and nothing calls `refresh()`: recovery
+ * is the heartbeat's, and if the pause comes back it came from the state the recorder still
+ * holds in memory. Nothing re-reported it in the incident either.
+ *
+ * The middle of the test is the other half of the fix, and it does not depend on the first:
+ * while writes are still blocked, the record on disk is aged and `status --json` is asked what
+ * it thinks. It must say `stale` — which proves the warning reaches the operator over a channel
+ * that does not require the broken writer to work.
+ */
+test('a status write that failed once does not stop the writer for good, and the live pause is republished (#126)', async (t) => {
+  // This test simulates a production failure, so it produces a real `conclave:` line on stderr.
+  // Captured rather than printed: a suite that emitted it on every green run would train a
+  // reader to scroll past the one that means something. WHAT the channel says is asserted in the
+  // two tests below; here the capture only has to not become a mute button, which the check at
+  // the end of the test is for. Restored through `t.after` so a failing assertion cannot leave
+  // console.error swapped for the rest of the file.
+  const stderr = captureStderr()
+  t.after(stderr.restore)
+
+  const root = dir()
+  const relay = fakeRelay()
+  const recording = recordSession(relay, {
+    repoRoot: root,
+    id: 'enospc',
+    goal: 'g',
+    front: 'relay',
+    startedAt: Date.now(),
+    build: 'test-build',
+    // Thirty seconds in production. Injected here only so a beat can be watched to land.
+    heartbeatMs: 20,
+  })
+  recording.set('running')
+  const good = readSession(root, 'enospc')
+  assert.equal(good?.status.state, 'running', 'the premise: the record was being written')
+
+  const tmp = `${recording.recorder.statusPath}.tmp`
+  mkdirSync(tmp, { recursive: true })
+
+  const pause = {
+    reason: 'turn_incomplete' as const,
+    resolution: resolutionFor(
+      { reason: 'turn_incomplete', participant: 'implementer' },
+      { rotationArmed: false },
+    ),
+    detail: 'the child stopped mid-turn',
+    evidence: ['pid 52661 is alive but not computing (cpu 0.0%)'],
+    options: ['continue' as const, 'abort' as const],
+    atSeq: 4,
+    at: Date.now(),
+  }
+  recording.set('paused', { pause })
+  // Let the detached refresh `set` queues run, and FAIL, while the disk is still full. Without
+  // this the whole failure window is synchronous, so that refresh is still pending when the
+  // disk recovers, lands immediately, and republishes the pause -- and the test would pass
+  // against a build with no heartbeat at all. It did; a mutation caught it.
+  await settle()
+
+  const blind = readSession(root, 'enospc')
+  assert.equal(blind?.status.state, 'running', 'the failed write leaves the last good copy in place')
+  assert.equal(blind?.status.pause, undefined, 'and the pause never reached the file -- this is the incident')
+
+  // Time passes with the disk still full. Aged by hand rather than waited for, and the file is
+  // safe to rewrite precisely because the recorder cannot write it: every beat is failing.
+  const p = join(sessionDir(root, 'enospc'), 'status.json')
+  const aged = JSON.parse(readFileSync(p, 'utf8'))
+  writeFileSync(p, `${JSON.stringify({ ...aged, updatedAt: Date.now() - 73 * 60_000 }, null, 2)}\n`)
+
+  const stuck = readSession(root, 'enospc')
+  assert.equal(stuck?.alive, true, 'the process is still there, so nothing existing flags this record')
+  assert.equal(stuck?.abandoned, false)
+  const warned = JSON.parse(formatSessionJson(stuck!))
+  assert.equal(warned.state, 'running', 'still claiming what it claimed 73 minutes ago')
+  assert.equal(warned.pause, undefined, 'still not carrying the pause the run is halted at')
+  assert.ok(
+    warned.stale,
+    'the warning must reach the operator without a successful write -- it is derived at read time, from the clock',
+  )
+  assert.equal(warned.stale.thresholdMs, SESSION_STALE_AFTER_MS)
+  assert.ok(warned.stale.ageMs >= 72 * 60_000)
+  assert.match(formatSession(stuck!, Date.now()), /STALE:\s+nothing has written this record in/)
+
+  // Space is freed. Nobody tells the recorder anything; the next beat is what finds out.
+  rmSync(tmp, { recursive: true, force: true })
+  const back = await until('the heartbeat to republish the pause', () => {
+    // Polled rather than slept for: a fixed wait long enough for a beat on an idle machine is
+    // not long enough on a loaded one, and a writer that gave up permanently never satisfies
+    // this however long it is given.
+    const now = readSession(root, 'enospc')
+    return now?.status.state === 'paused' ? now : undefined
+  })
+  assert.equal(
+    back.status.pause?.reason,
+    'turn_incomplete',
+    'the pause must be republished by the heartbeat, from the state the recorder still holds',
+  )
+  assert.ok(
+    back.status.updatedAt > stuck!.status.updatedAt,
+    'and the record is being written again',
+  )
+  assert.equal(
+    sessionStaleness(back, Date.now()),
+    undefined,
+    'so the warning clears itself -- it is a reading, not a mark left on the record',
+  )
+
+  relay.stream.close()
+  await recording.close()
+
+  // The capture is a diversion, not a gag: everything on it came from the recorder, and the
+  // whole outage cost at most the one warning and the one recovery the window allows.
+  assert.ok(
+    stderr.said.every((l) => l.startsWith('conclave: ')),
+    `only the recorder's own lines belong here, got ${JSON.stringify(stderr.said)}`,
+  )
+  assert.ok(stderr.said.length <= 2, `one warning and one recovery at most, got ${stderr.said.length}`)
+})
+
+/**
+ * A flickering volume must not make the recorder shout (#126).
+ *
+ * Retrying every write is the fix; announcing every retry would be a second defect wearing the
+ * first one's clothes. Ordinary contention -- a sync, a snapshot, a busy volume -- fails one
+ * write and lets the next through, and at one write per beat plus one per event that is a
+ * warning and a recovery line per event, which buries the run's own output. An operator who
+ * learns to scroll past `conclave:` lines has been trained to miss the one that matters.
+ *
+ * So the budget is on the CHANNEL, not the episode: the last-warning timestamp survives
+ * recovering, and a recovery line is emitted only for an outage that was announced. Four
+ * failures and four recoveries inside one second must therefore produce exactly one pair -- the
+ * first -- and the pairing must hold, because a recovery line for an outage nobody was told
+ * about announces the end of something the reader never knew had started.
+ */
+test('a volume that flickers gets one warning and one recovery, not one per failed write (#126)', async () => {
+  const root = dir()
+  const rec = new SessionRecorder(root, {
+    id: 'flap',
+    pid: process.pid,
+    cwd: root,
+    goal: 'g',
+    front: 'relay',
+    operator: 'human',
+    state: 'running',
+    startedAt: Date.now(),
+    messages: 0,
+    participants: [],
+    build: 'test-build',
+  })
+  const tmp = `${rec.statusPath}.tmp`
+
+  const said = await whileWatchingStderr(() => {
+    for (let i = 0; i < 4; i += 1) {
+      mkdirSync(tmp, { recursive: true })
+      rec.update({ messages: i * 2 + 1 })
+      rmSync(tmp, { recursive: true, force: true })
+      rec.update({ messages: i * 2 + 2 })
+    }
+  })
+
+  const failures = said.filter((l) => /could not write session status/.test(l))
+  const recoveries = said.filter((l) => /is being written again/.test(l))
+  assert.equal(failures.length, 1, 'the first failure is announced; the next three are inside the minute')
+  assert.equal(recoveries.length, 1, 'and exactly the announced outage is closed off')
+  assert.equal(said.length, 2, 'nothing else is said')
+
+  // The recorder did not merely go quiet -- it kept writing throughout, which is the whole
+  // reason the failures are survivable enough to be worth staying quiet about.
+  assert.equal(readSession(root, 'flap')?.status.messages, 8, 'every recovered write landed')
+})
+
+/**
+ * The window itself, on a clock the test owns (#126).
+ *
+ * The test above proves the budget holds at the fast end -- four outages inside a second produce
+ * one pair. It cannot prove the other half, that the budget is a WINDOW rather than a one-shot:
+ * an implementation that announced the first failure of a process and then never spoke again
+ * would pass it identically, and would leave an operator whose disk has been full for an hour
+ * with one line from an hour ago.
+ *
+ * So the clock is mocked and stepped, rather than waited on. Two claims that only a controlled
+ * clock can separate:
+ *
+ *   inside the window     an entire outage -- failure and recovery -- passes in silence
+ *   at the boundary       the operator is told again, whether the outage is a NEW one or the
+ *                         same one still going
+ *
+ * And one that neither: however many times an outage is announced, recovering from it emits ONE
+ * line. The recovery closes an outage, not a warning.
+ *
+ * `apis: ['Date']` only -- `setTimeout` is left real, because nothing here waits on one and a
+ * mocked scheduler would silently change what `await` means in this file.
+ */
+test('the warning budget is a window, so a failure that outlasts it is announced again (#126)', async (t) => {
+  // Deliberately not the epoch. `#statusWarnedAt` uses `undefined` for "never warned" precisely
+  // so that 0 can be a real instant, and starting here is what would catch a regression to a
+  // falsy sentinel.
+  t.mock.timers.enable({ apis: ['Date'], now: 1_700_000_000_000 })
+  const root = dir()
+  const rec = new SessionRecorder(root, {
+    id: 'window',
+    pid: process.pid,
+    cwd: root,
+    goal: 'g',
+    front: 'relay',
+    operator: 'human',
+    state: 'running',
+    startedAt: Date.now(),
+    messages: 0,
+    participants: [],
+    build: 'test-build',
+  })
+  const tmp = `${rec.statusPath}.tmp`
+  const block = () => mkdirSync(tmp, { recursive: true })
+  const unblock = () => rmSync(tmp, { recursive: true, force: true })
+  const failures = (said: string[]) => said.filter((l) => /could not write session status/.test(l))
+  const recoveries = (said: string[]) => said.filter((l) => /is being written again/.test(l))
+
+  // The first failure of a process is always announced, and its recovery closes it.
+  const opening = await whileWatchingStderr(() => {
+    block()
+    rec.update({ messages: 1 })
+    unblock()
+    rec.update({ messages: 2 })
+  })
+  assert.equal(failures(opening).length, 1, 'a recorder that has never warned always warns')
+  assert.equal(recoveries(opening).length, 1, 'and the outage it announced is closed off')
+
+  // One millisecond short of the window: a whole outage comes and goes without a word.
+  t.mock.timers.tick(STATUS_WARN_EVERY_MS - 1)
+  const inside = await whileWatchingStderr(() => {
+    block()
+    rec.update({ messages: 3 })
+    unblock()
+    rec.update({ messages: 4 })
+  })
+  assert.deepEqual(inside, [], 'inside the window nothing is said, the recovery line included')
+
+  // At the window exactly. A NEW outage is announced again.
+  t.mock.timers.tick(1)
+  const reopened = await whileWatchingStderr(() => {
+    block()
+    rec.update({ messages: 5 })
+  })
+  assert.equal(
+    failures(reopened).length,
+    1,
+    'the window has elapsed, so the operator hears about it again rather than once per process',
+  )
+
+  // The same outage, still going, crossing the NEXT window without ever having recovered. This
+  // is the case the fast test cannot see at all: nothing recovers, so nothing resets anything.
+  t.mock.timers.tick(STATUS_WARN_EVERY_MS - 1)
+  assert.deepEqual(
+    await whileWatchingStderr(() => rec.update({ messages: 6 })),
+    [],
+    'a continuing outage is no louder inside the window than a flapping one',
+  )
+  t.mock.timers.tick(1)
+  const persisted = await whileWatchingStderr(() => rec.update({ messages: 7 }))
+  assert.equal(
+    failures(persisted).length,
+    1,
+    'a disk that stays full is never silent -- it is announced once a window, for as long as it lasts',
+  )
+
+  // Twice announced, once closed. The recovery line is about the outage, not about the warnings.
+  const closing = await whileWatchingStderr(() => {
+    unblock()
+    rec.update({ messages: 8 })
+  })
+  assert.equal(recoveries(closing).length, 1)
+  assert.equal(closing.length, 1, 'and nothing else is said')
+
+  // Throughout: every write that could land, landed. Quiet is not the same as stopped.
+  assert.equal(readSession(root, 'window')?.status.messages, 8)
+})
+
+/**
+ * The same latch, on the other file (#126).
+ *
+ * `#failed` is one flag for both writers, so the first failure of either stops both. An
+ * appended stream that stops is at least visible in the stream itself, which is why `event()`
+ * is quieter than `write()` -- but "visible" only holds if the stream resumes when the disk
+ * does. Today the second half of that is not true: one failed append and nothing is ever
+ * written to `events.ndjson` again.
+ */
+test('an events append that failed once does not stop the stream for good (#126)', async () => {
+  const root = dir()
+  const relay = fakeRelay()
+  const recording = recordSession(relay, {
+    repoRoot: root,
+    id: 'evt-fail',
+    goal: 'g',
+    front: 'relay',
+    startedAt: Date.now(),
+    build: 'test-build',
+  })
+  // A directory where the stream goes: `appendFileSync` fails the way a full disk fails, and
+  // does so before the first event rather than corrupting one already written.
+  mkdirSync(recording.recorder.eventsPath, { recursive: true })
+  relay.stream.emit({
+    type: 'activity',
+    participant: 'implementer',
+    rank: 'implementer',
+    event: { type: 'turn_start', seq: 1, at: 1, prompt: 'lost' } as never,
+  })
+  await settle()
+
+  rmSync(recording.recorder.eventsPath, { recursive: true, force: true })
+  relay.stream.emit({
+    type: 'activity',
+    participant: 'implementer',
+    rank: 'implementer',
+    event: { type: 'turn_end', seq: 2, at: 2 } as never,
+  })
+  await settle()
+
+  assert.ok(
+    existsSync(recording.recorder.eventsPath),
+    'the stream must resume once appending is possible again',
+  )
+  const kinds = readFileSync(recording.recorder.eventsPath, 'utf8')
+    .trim()
+    .split('\n')
+    .map((l) => JSON.parse(l).event.type)
+  assert.deepEqual(kinds, ['turn_end'], 'the event lost to the full disk stays lost; the ones after it do not')
+
+  relay.stream.close()
+  await recording.close()
+})
+
+/**
+ * Staleness is a fact the payload carries, not one the reader has to compute (#126).
+ *
+ * `alive` is honest -- the process does exist -- and `state` is documented as what the session
+ * last SAID. Between them a reader still cannot tell "last said four seconds ago" from "last
+ * said 73 minutes ago" without diffing `updatedAt` against its own clock, and nothing warns
+ * when that gap becomes absurd. `abandoned` does not cover it: the pid is alive, so the one
+ * existing flag for a record that cannot be trusted stays false throughout.
+ *
+ * Asserted on `formatSessionJson` alone, independently of whether the writer was fixed: a
+ * reader polling a record that stopped moving for ANY reason is owed the same warning.
+ *
+ * The fresh document is pinned key-for-key and in order, which is the other half of the ask.
+ * D1: the default document must not change, so the warning is a key that appears when there is
+ * something to warn about and is APPENDED when it does -- an always-present `stale: false`
+ * would change what every existing consumer reads, and an inserted key would move the rest.
+ */
+test('status --json says a live record has stopped moving, and leaves a fresh one untouched (#126)', async () => {
+  const root = dir()
+  const relay = fakeRelay()
+  const recording = recordSession(relay, {
+    repoRoot: root,
+    id: 'stale-json',
+    goal: 'g',
+    front: 'relay',
+    startedAt: Date.now(),
+    build: 'test-build',
+  })
+  recording.set('running')
+  relay.stream.close()
+  // Closed before the file is rewritten below, so no detached refresh can land on top of it.
+  await recording.close()
+
+  const fresh = readSession(root, 'stale-json')
+  assert.equal(fresh?.alive, true)
+  const freshDoc = JSON.parse(formatSessionJson(fresh!))
+  const FRESH_KEYS = [
+    'id',
+    'pid',
+    'cwd',
+    'goal',
+    'front',
+    'operator',
+    'state',
+    'startedAt',
+    'messages',
+    'participants',
+    'build',
+    'schema',
+    'eventsPath',
+    'updatedAt',
+    'alive',
+    'abandoned',
+  ]
+  assert.deepEqual(Object.keys(freshDoc), FRESH_KEYS, 'a record written seconds ago must read exactly as it does today')
+  assert.equal('stale' in freshDoc, false, 'nothing to warn about, so no warning')
+
+  // The same record, 73 minutes later, with the process still there. Rewritten rather than
+  // waited for: `updatedAt` is the field the whole reading turns on, and a test that could
+  // only write "now" could not tell an old record from a current one.
+  const p = join(sessionDir(root, 'stale-json'), 'status.json')
+  const onDisk = JSON.parse(readFileSync(p, 'utf8'))
+  writeFileSync(p, `${JSON.stringify({ ...onDisk, updatedAt: Date.now() - 73 * 60_000 }, null, 2)}\n`)
+
+  const old = readSession(root, 'stale-json')
+  assert.equal(old?.alive, true, 'the pid answers, which is why nothing existing flags this record')
+  assert.equal(old?.abandoned, false)
+  assert.equal(old?.status.state, 'running', 'and the claim is unchanged: `running`, no pause')
+
+  const doc = JSON.parse(formatSessionJson(old!))
+  assert.ok(
+    doc.stale,
+    'a live run whose record has not moved in 73 minutes must say so in the payload, not leave it to be derived',
+  )
+  assert.deepEqual(
+    Object.keys(doc),
+    [...FRESH_KEYS, 'stale'],
+    'appended, so every key an existing consumer reads is where it was',
+  )
+  // Both numbers, because one of them alone is another thing to look up: the age says how bad
+  // it is and the threshold says what "bad" was measured against, so a reader can judge the
+  // call rather than trust it.
+  assert.deepEqual(Object.keys(doc.stale), ['ageMs', 'thresholdMs'])
+  assert.equal(doc.stale.thresholdMs, SESSION_STALE_AFTER_MS)
+  assert.equal(doc.stale.thresholdMs, SESSION_HEARTBEAT_MS * 3, 'three missed beats, said as its own claim')
+  assert.ok(doc.stale.ageMs >= 72 * 60_000 && doc.stale.ageMs <= 74 * 60_000)
+
+  // AT the threshold, not past it, which is the discipline the prune cutoff above is held to --
+  // an operator who says "three beats" means it. Read against a computed instant rather than the
+  // wall clock, so the boundary is the assertion rather than a race with it.
+  const beat3 = old!.status.updatedAt + SESSION_STALE_AFTER_MS
+  assert.equal(sessionStaleness(old!, beat3), undefined, 'exactly three beats old is not yet stale')
+  assert.deepEqual(
+    sessionStaleness(old!, beat3 + 1),
+    { ageMs: SESSION_STALE_AFTER_MS + 1, thresholdMs: SESSION_STALE_AFTER_MS },
+    'one millisecond past it is',
+  )
+
+  // And in the prose, where the operator at a console is asking the same question. Placed with
+  // the `updated:` line it qualifies, above everything the record CLAIMS.
+  const prose = formatSession(old!, Date.now()).split('\n')
+  const at = prose.findIndex((l) => /STALE:/.test(l))
+  assert.ok(at > 0, 'the prose warns too')
+  assert.match(prose[at - 1]!, /updated:/, 'immediately after the number it qualifies')
+  assert.ok(prose.slice(at).some((l) => /pid \d+ is still there/.test(l)))
+})
+
+/**
+ * The two records that are old for a reason, and must not be warned about (#126).
+ *
+ * A staleness warning that fired on every archived session, or a second time on a record
+ * `abandoned` already covers, would be trained out of a reader within a day -- and the reader
+ * being trained is an agent operator polling on a loop.
+ */
+test('an ended run and an abandoned one are old on purpose, and get no staleness warning (#126)', () => {
+  const root = dir()
+  const long = Date.now() - 73 * 60_000
+  // Finished, and its process still exiting: old because it stopped writing on purpose.
+  stale(root, 'finished', { state: 'ended', pid: process.pid, updatedAt: long })
+  // Claimed to be going, nobody home. `abandoned` is already the name for this.
+  stale(root, 'gone', { state: 'running', pid: DEAD_PID, updatedAt: long })
+
+  const finished = readSession(root, 'finished')
+  assert.equal(finished?.alive, true, 'the premise: the pid answers, so only `ended` keeps it quiet')
+  assert.equal(
+    sessionStaleness(finished!, Date.now()),
+    undefined,
+    'a finished run stopped writing on purpose and is not stale, however old',
+  )
+  assert.equal(
+    'stale' in JSON.parse(formatSessionJson(finished!)),
+    false,
+    'so no archived session anyone ever reads carries the warning',
+  )
+
+  const gone = readSession(root, 'gone')
+  assert.equal(gone?.abandoned, true, 'the premise: this record is already flagged, by its own name')
+  assert.equal(
+    sessionStaleness(gone!, Date.now()),
+    undefined,
+    'a dead process is `abandoned`; `stale` must not become a second name for it',
+  )
+  assert.equal(
+    'stale' in JSON.parse(formatSessionJson(gone!)),
+    false,
+    'one condition, one flag',
+  )
 })
 
 test('a stand-in that cannot answer gets no ceilings block, rather than one claiming no limits', async () => {
