@@ -694,6 +694,9 @@ const BUSY_LIVENESS: ChildLiveness = {
   pid: 1,
   alive: true,
   samples: [12.5, 15.0, 11.0],
+  selfSamples: [12.5, 15.0, 11.0],
+  descendants: 0,
+  workingDescendants: 0,
   idle: false,
   measuredAt: Date.UTC(2026, 7, 13, 21, 4, 11),
 }
@@ -701,6 +704,9 @@ const IDLE_LIVENESS: ChildLiveness = {
   pid: 1,
   alive: true,
   samples: [0.0, 0.1, 0.0],
+  selfSamples: [0.0, 0.1, 0.0],
+  descendants: 0,
+  workingDescendants: 0,
   idle: true,
   measuredAt: Date.UTC(2026, 7, 13, 21, 4, 11),
 }
@@ -714,6 +720,9 @@ const MIXED_LIVENESS: ChildLiveness = {
   pid: 1,
   alive: true,
   samples: [0.3, 0.2, 7.2],
+  selfSamples: [0.3, 0.2, 7.2],
+  descendants: 0,
+  workingDescendants: 0,
   idle: false,
   measuredAt: Date.UTC(2026, 7, 13, 21, 4, 11),
 }

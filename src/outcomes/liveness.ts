@@ -82,6 +82,53 @@
  * The bound is the part that needs saying out loud: refreshing stops, and a line that stopped
  * updating without saying so would be the original defect with a fresher number in it. So the
  * final refresh marks itself final, and from then on the timestamp is the whole story.
+ *
+ * ## The right process, which is not one process (#111)
+ *
+ * Everything above measures the pid the orchestrator spawned. A seat that has shelled out to a
+ * build or a test suite shows almost nothing on that pid while a grandchild saturates a core, so
+ * the reading was fresh, correctly derived, and about the wrong process -- and it failed in the
+ * direction that costs most, because a busy seat reading idle is what #43 exists to prevent. The
+ * operator who reported it was running `pgrep -f 'go test|go build|clang|z3 '` by hand at every
+ * pause, and said the descendant check was decisive twice where CPU alone was ambiguous.
+ *
+ * So a sample is now one `ps -Ao pid=,ppid=,%cpu=` snapshot of the WHOLE table, walked into the
+ * descendant tree of the pid we were given. Four things come out of each snapshot: the parent's
+ * own %cpu, the aggregate over parent and every descendant, how many descendants there were, and
+ * how many of them were individually at or above the line. The reading is classified on the
+ * AGGREGATE; the other three are kept because they are what the sentence has to say.
+ *
+ * Three things were checked rather than assumed, and they are the reason the shape is this one:
+ *
+ *   - COST. The full table on the machine this was written on is ~500 processes and one snapshot
+ *     of it measured 0.01-0.02s, against ~0.03s reported by the operator for a 506-process table.
+ *     A reading is 3 snapshots, so ~0.06s; a pause that refreshes to its bound spends 180 of them
+ *     over thirty minutes, which is a few seconds of `ps` for an entire held pause. The
+ *     per-pid `ps` it replaces was the same call with a narrower filter, so this is not a new
+ *     cost so much as an unfiltered one.
+ *   - EXISTENCE IS NOT WORK. On the same machine, ten idle `sinesync mcp start` helpers sit as
+ *     descendants of long-lived parents at 0.0%. A check for "does this seat have descendants"
+ *     -- which is what the `pgrep` workaround approximates -- would call every one of those a
+ *     working child. So a descendant counts as WORKING only by its own %cpu, and the count of
+ *     descendants that exist is reported separately and never on its own.
+ *   - AGGREGATION CAN DILUTE, AND IT FAILS SAFE. Summing a wide tree of idle helpers can approach
+ *     the line without anything working: the widest all-idle tree on a 498-process table summed
+ *     2.4% over 19 descendants, under `IDLE_CPU_PERCENT` but not by much, and a tree half again as
+ *     wide would cross it. That is a real limit and it is left in, because summing can only ever
+ *     turn a quiet tree into a reported busy one -- never a busy tree into a quiet one. The first
+ *     mistake makes the tool wait; the second is #43. The count of individually-working
+ *     descendants is printed beside the aggregate so a diluted reading is visible as one.
+ *
+ * `-Ao` and not the `-axo` the report used. `-A` is POSIX "select all processes" and means the
+ * same thing on both platforms CI runs (macOS, Ubuntu). Linux's `-a` means "all except session
+ * leaders", and a CLI spawned on a pty is very often a session leader -- so on Ubuntu the one
+ * process this file exists to measure is the one `-axo` could omit, and it would be reported as
+ * `gone`. On macOS the two are identical; the difference is only visible where it would hurt.
+ *
+ * And a tooling failure is not a death. If no snapshot can be taken at all -- a platform whose
+ * `ps` does not accept this, a sandbox that refuses it -- the sample falls back to the per-pid
+ * reading this replaced, rather than reporting a live child as gone on the strength of a `ps`
+ * that never ran.
  */
 
 import { execFileSync } from 'node:child_process'
@@ -149,13 +196,49 @@ export interface ChildLiveness {
   pid: number
   /** Whether the process still exists at all. */
   alive: boolean
-  /** CPU percentages, in sample order. Empty when the process was gone throughout. */
+  /**
+   * CPU percentages, in sample order. Empty when the process was gone throughout.
+   *
+   * The AGGREGATE over the pid and every descendant of it, since #111 -- what the reading is
+   * classified on, and what every existing consumer of this field was already treating as "how
+   * busy is this seat". The pid's own share is `selfSamples`, kept beside it rather than in place
+   * of it: a `go test` leaves the parent at 0.2% while a grandchild takes a core, and the number
+   * that answers "is this seat working" is the one that includes the grandchild.
+   */
   samples: number[]
+  /**
+   * The same snapshots, counting the pid alone.
+   *
+   * The number the old reading printed. Kept because the two together are the diagnosis -- a
+   * quiet parent with a busy tree is a seat that shelled out, and a busy parent with a quiet tree
+   * is the seat itself working -- and an operator who is about to go and look at the process
+   * table needs to know which.
+   */
+  selfSamples: number[]
+  /**
+   * How many descendants were seen, at most, across the snapshots.
+   *
+   * The most any one snapshot saw rather than the last, on the same reasoning three samples
+   * exist for at all: a build that spawns and reaps compilers between two readings is not a
+   * seat with no descendants. Reported, never decisive -- see the module note; ten idle MCP
+   * helpers are ten descendants and no work.
+   */
+  descendants: number
+  /**
+   * How many of those were individually at or above `IDLE_CPU_PERCENT`, at most.
+   *
+   * This is the fact the `pgrep` workaround was reaching for, and the one the evidence line
+   * leads with when the parent is quiet and this is not zero.
+   */
+  workingDescendants: number
   /**
    * True when every sample was effectively zero.
    *
    * "Not computing", never "dead" — a process blocked on a socket reads the same way, and
    * that is exactly what a provider that stopped answering looks like from out here.
+   *
+   * Over the tree, since #111, and that is the conservative direction: a parent idling in front
+   * of a busy grandchild is no longer idle here, and nothing that was idle before became busy.
    */
   idle: boolean
   /**
@@ -188,28 +271,162 @@ export interface LivenessRefreshState {
   final?: string | undefined
 }
 
-/** One reading, or undefined if the process is gone. */
-function cpuOf(pid: number): number | undefined {
+/** One process, as one snapshot saw it. */
+export interface ProcessRow {
+  pid: number
+  ppid: number
+  cpu: number
+}
+
+/** What one snapshot says about the tree rooted at a pid. */
+export interface TreeSnapshot {
+  /** The root's own %cpu. */
+  self: number
+  /** The root plus every descendant. What the reading is classified on. */
+  tree: number
+  /** How many descendants existed, at any depth. */
+  descendants: number
+  /** How many of those were individually at or above `IDLE_CPU_PERCENT`. */
+  working: number
+}
+
+/**
+ * Parse `pid ppid %cpu` rows.
+ *
+ * Rows that do not parse are dropped rather than defaulted, because a row with an invented CPU
+ * is worse than a row that is not there: the aggregate would carry a number nobody measured.
+ * `ps` is run under `LC_ALL=C` so "0.5" cannot arrive as "0,5" on a differently-configured
+ * runner and read as a dropped row on Ubuntu and a real one on macOS.
+ */
+export function parseProcessTable(out: string): ProcessRow[] {
+  const rows: ProcessRow[] = []
+  for (const line of out.split('\n')) {
+    const parts = line.trim().split(/\s+/)
+    if (parts.length !== 3) continue
+    const pid = Number(parts[0])
+    const ppid = Number(parts[1])
+    const cpu = Number(parts[2])
+    if (!Number.isInteger(pid) || !Number.isInteger(ppid) || !Number.isFinite(cpu)) continue
+    rows.push({ pid, ppid, cpu })
+  }
+  return rows
+}
+
+/**
+ * Walk the descendants of `pid` and total the tree.
+ *
+ * Undefined when the pid is not in the table, which is the only thing that means "gone" -- a
+ * table that could not be read at all never reaches here.
+ *
+ * Breadth-first over a children index built once, with a visited set. The visited set is not
+ * defensive theatre: `ps` takes its rows at slightly different moments, so a table can contain a
+ * reparenting that was not true at any single instant, and a walk with no memory would follow it
+ * forever. The cost is one Set on a table of a few hundred rows.
+ */
+export function treeSnapshotOf(rows: ProcessRow[], pid: number): TreeSnapshot | undefined {
+  const byPid = new Map<number, ProcessRow>()
+  const children = new Map<number, number[]>()
+  for (const row of rows) {
+    byPid.set(row.pid, row)
+    const kids = children.get(row.ppid)
+    if (kids) kids.push(row.pid)
+    else children.set(row.ppid, [row.pid])
+  }
+  const root = byPid.get(pid)
+  if (!root) return undefined
+  let tree = root.cpu
+  let descendants = 0
+  let working = 0
+  const seen = new Set<number>([pid])
+  const queue = [...(children.get(pid) ?? [])]
+  while (queue.length > 0) {
+    const next = queue.pop()!
+    if (seen.has(next)) continue
+    seen.add(next)
+    const row = byPid.get(next)
+    if (!row) continue
+    descendants++
+    tree += row.cpu
+    if (row.cpu >= IDLE_CPU_PERCENT) working++
+    queue.push(...(children.get(next) ?? []))
+  }
+  return {
+    self: root.cpu,
+    // Floating point, three hundred times: 0.1 + 0.2 in the tree of a real machine leaves the
+    // aggregate with a tail of digits that would print as 98.30000000000001 if anything ever
+    // printed it unrounded. One decimal is what `ps` gave us in the first place.
+    tree: Math.round(tree * 10) / 10,
+    descendants,
+    working,
+  }
+}
+
+/**
+ * One snapshot of the whole process table, or undefined if `ps` would not give us one.
+ *
+ * The whole table rather than a filtered one: descendants are not knowable from a pid list you
+ * would have to already have. Measured at 0.01-0.02s for ~500 processes, which is the budget
+ * this is allowed to spend three times per reading.
+ */
+function processTable(): ProcessRow[] | undefined {
   try {
-    const out = execFileSync('ps', ['-o', '%cpu=', '-p', String(pid)], {
+    const out = execFileSync('ps', ['-Ao', 'pid=,ppid=,%cpu='], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim()
-    if (!out) return undefined
-    const n = Number(out.split('\n')[0]?.trim())
-    return Number.isFinite(n) ? n : undefined
+      // A machine with a runaway fork bomb is not the machine to throw ENOBUFS on. ~20 bytes a
+      // row means this covers a few hundred thousand processes; the default 1MB covers ~50k.
+      maxBuffer: 8 * 1024 * 1024,
+      env: { ...process.env, LC_ALL: 'C' },
+    })
+    const rows = parseProcessTable(out)
+    return rows.length > 0 ? rows : undefined
   } catch {
-    // A dead process, or a platform whose `ps` does not speak this. Both mean "no reading",
-    // and neither is worth failing a pause over.
     return undefined
   }
 }
 
 /**
- * Sample a child's CPU a few times.
+ * The pid alone, for when the table could not be read.
+ *
+ * This is what every reading was before #111. It is kept as the fallback because the failure it
+ * covers -- a `ps` that will not enumerate, on some platform or sandbox nobody has tried yet --
+ * would otherwise turn into "the CLI exited without a terminal signal", which is a confident
+ * claim about a child that is very probably fine.
+ */
+function selfOnlySnapshot(pid: number): TreeSnapshot | undefined {
+  try {
+    const out = execFileSync('ps', ['-o', '%cpu=', '-p', String(pid)], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      env: { ...process.env, LC_ALL: 'C' },
+    }).trim()
+    if (!out) return undefined
+    const n = Number(out.split('\n')[0]?.trim())
+    if (!Number.isFinite(n)) return undefined
+    return { self: n, tree: n, descendants: 0, working: 0 }
+  } catch {
+    // A dead process, or a platform whose `ps` does not speak this either. Both mean "no
+    // reading", and neither is worth failing a pause over.
+    return undefined
+  }
+}
+
+/** One reading of the tree, by whichever route works. */
+function sampleOnce(pid: number): TreeSnapshot | undefined {
+  const rows = processTable()
+  // A readable table that does not contain the pid is the one honest "gone": the fallback is
+  // for a table that could not be read, not for a process that is not in it.
+  if (rows) return treeSnapshotOf(rows, pid)
+  return selfOnlySnapshot(pid)
+}
+
+/**
+ * Sample a child's process tree a few times.
  *
  * Bounded and small: this runs while an operator waits to be told what happened, and a
- * diagnosis that takes longer than the decision it informs is not worth having.
+ * diagnosis that takes longer than the decision it informs is not worth having. Three snapshots
+ * of a ~500-process table is ~0.06s, and a pause that refreshes to `LIVENESS_REFRESH_LIMIT`
+ * spends 180 of them across half an hour.
  */
 export async function sampleLiveness(
   pid: number,
@@ -218,9 +435,20 @@ export async function sampleLiveness(
   const count = opts.samples ?? 3
   const everyMs = opts.everyMs ?? 400
   const samples: number[] = []
+  const selfSamples: number[] = []
+  let descendants = 0
+  let workingDescendants = 0
   for (let i = 0; i < count; i++) {
-    const c = cpuOf(pid)
-    if (c !== undefined) samples.push(c)
+    const snap = sampleOnce(pid)
+    if (snap) {
+      samples.push(snap.tree)
+      selfSamples.push(snap.self)
+      // The most any snapshot saw, not the last. A build that spawns and reaps a compiler
+      // between two readings did have a working descendant, and the whole reason there are
+      // three readings is that one of them can miss what the others catch.
+      descendants = Math.max(descendants, snap.descendants)
+      workingDescendants = Math.max(workingDescendants, snap.working)
+    }
     if (i < count - 1) await new Promise((r) => setTimeout(r, everyMs))
   }
   const alive = samples.length > 0
@@ -228,6 +456,9 @@ export async function sampleLiveness(
     pid,
     alive,
     samples,
+    selfSamples,
+    descendants,
+    workingDescendants,
     idle: alive && samples.every((c) => c < IDLE_CPU_PERCENT),
     // After the loop, not before it: the reading is as old as its LAST sample, and stamping it
     // at entry would date a `{samples: 3, everyMs: 400}` reading almost a second early.
@@ -251,6 +482,10 @@ export type LivenessReading = 'gone' | 'not_computing' | 'working' | 'mixed'
  * Restated from `samples` rather than read off `idle`, so the reading cannot contradict the
  * numbers printed beside it. It is the same rule: `not_computing` is every sample below the
  * line, which is exactly what `sampleLiveness` set `idle` on.
+ *
+ * Over the tree, because `samples` is the tree (#111). A parent at 0.2% in front of a `go test`
+ * at 99% is `working`, which is the entire point: the classification is of the seat, not of the
+ * one process the orchestrator happens to hold a handle to.
  */
 export function readingOf(l: ChildLiveness): LivenessReading {
   if (!l.alive) return 'gone'
@@ -277,6 +512,24 @@ const PHRASE = {
   bursts: 'is working in bursts',
 } as const
 
+/**
+ * The headline when the pid itself is quiet and something under it is not.
+ *
+ * The sentence #111 asks for in as many words: `child pid 44250 quiet, 1 descendant working`.
+ * "child pid N is barely running" was true and misleading in exactly this case, and it is the
+ * case an operator was running `pgrep` at every pause to detect.
+ *
+ * Written as a function because the count is in it, which is what `DESCENDANTS_WORKING` below
+ * exists for: a phrase with a variable in it cannot be matched by `includes`, and a matcher
+ * written from memory in another file is the coupling this block already lost once.
+ */
+function descendantsWorkingPhrase(n: number): string {
+  return `quiet, ${n} descendant${n === 1 ? '' : 's'} working`
+}
+
+/** The same phrase, as a matcher. Pinned against the builder in liveness.test.ts. */
+const DESCENDANTS_WORKING = /quiet, \d+ descendants? working \(cpu /
+
 /** The phrases that report a child with something on the CPU, mixed included. */
 const ON_CPU = [PHRASE.working, PHRASE.barely, PHRASE.bursts]
 
@@ -285,8 +538,13 @@ const ON_CPU = [PHRASE.working, PHRASE.barely, PHRASE.bursts]
  *
  * For callers deciding what to OFFER rather than what to say — the pause menu's `wait`. Reads
  * the line the operator reads, so the option and the reason for it cannot disagree.
+ *
+ * A quiet parent in front of a working descendant counts, and has to: that reading is the one
+ * where waiting is most obviously right, and it is the one whose head does not contain any of
+ * the four fixed phrases.
  */
 export function reportsChildOnCpu(evidence: string): boolean {
+  if (DESCENDANTS_WORKING.test(evidence)) return true
   return ON_CPU.some((phrase) => evidence.includes(`${phrase} (cpu `))
 }
 
@@ -319,7 +577,14 @@ export function describeLiveness(
   if (!l.alive) {
     return `child pid ${l.pid} is gone; the CLI exited without a terminal signal${provenance(l, refresh)}`
   }
-  const cpu = l.samples.map((c) => `${c.toFixed(1)}%`).join(', ')
+  const percents = (xs: number[]): string => xs.map((c) => `${c.toFixed(1)}%`).join(', ')
+  // Both halves only where there are two halves. With no descendants the tree IS the pid, and
+  // printing `0.3% self; 0.3% tree` would spend a clause on a distinction that does not exist --
+  // and would move the head of every line the #83 and #101 work pinned.
+  const cpu =
+    l.descendants > 0 && l.selfSamples.length > 0
+      ? `${percents(l.selfSamples)} self; ${percents(l.samples)} tree`
+      : percents(l.samples)
   const since =
     emittedSinceSend === undefined
       ? 'no output count was taken with this reading'
@@ -329,14 +594,50 @@ export function describeLiveness(
   const head = (phrase: string): string => `child pid ${l.pid} ${phrase} (cpu ${cpu}) — ${since}. `
   const reading = readingOf(l)
   const tail = provenance(l, refresh)
+  // The #111 case: the pid is quiet and something under it is not. It gets the HEAD rather than a
+  // sentence further down, because the head is what the operator reads and "is barely running"
+  // was a true statement about the wrong process.
+  const parentQuiet = l.selfSamples.length > 0 && l.selfSamples.every((c) => c < IDLE_CPU_PERCENT)
+  const descendantLed = l.workingDescendants > 0 && parentQuiet
+  // Where the descendants are not the headline they are still a fact, and the zero-working case
+  // is the one with a falsifier behind it: ten idle MCP helpers are ten descendants and no work,
+  // so the line says both numbers rather than the one that sounds like activity.
+  const descendantNote =
+    descendantLed || l.descendants === 0
+      ? ''
+      : l.workingDescendants > 0
+        ? `${l.workingDescendants} of ${l.descendants} descendant(s) had CPU too. `
+        : `${l.descendants} descendant(s) exist and none of them is computing — a descendant is ` +
+          `not evidence of work, only a place work could be. `
   if (reading === 'not_computing') {
+    // Quiet everywhere in the tree WITH output still arriving. The honest reading of that is not
+    // "idle": it is a turn whose work is not happening on this machine, which is exactly what a
+    // model generating a long reply looks like from the process table. Saying "alive but not
+    // computing" and stopping there invites the operator to treat it as a free seat.
+    const generatingElsewhere =
+      emittedSinceSend !== undefined && emittedSinceSend > QUIET_EVENT_COUNT
+        ? `. Nothing in this tree is computing — not the pid` +
+          (l.descendants > 0 ? ` and not one of its ${l.descendants} descendant(s)` : ` and it has no descendants`) +
+          ` — yet ${emittedSinceSend} event(s) have arrived since the prompt was sent, so the work ` +
+          `is somewhere this reading cannot see it: a turn generating at the provider, not a seat ` +
+          `with nothing to do`
+        : ''
     return (
+      // The note is dropped where the sentence below says the same thing at more length: it
+      // names the descendants and what they were not doing, and saying it twice reads as two
+      // findings rather than one.
       head(PHRASE.not_computing) +
-      `Idle is not dead: a CLI waiting on a provider that stopped answering looks like this${tail}`
+      (generatingElsewhere ? '' : descendantNote) +
+      `Idle is not dead: a CLI waiting on a provider that stopped answering looks like ` +
+      `this${generatingElsewhere}${tail}`
     )
   }
   if (reading === 'working') {
-    return head(PHRASE.working) + `Continuing sends into a live turn, which neither CLI accepts${tail}`
+    return (
+      head(descendantLed ? descendantsWorkingPhrase(l.workingDescendants) : PHRASE.working) +
+      descendantNote +
+      `Continuing sends into a live turn, which neither CLI accepts${tail}`
+    )
   }
   const low = l.samples.filter((c) => c < IDLE_CPU_PERCENT).length
   const high = l.samples.length - low
@@ -350,7 +651,8 @@ export function describeLiveness(
           `sample above the line is not proof of a stall either.`
         : `Output is still arriving, so the low samples read as gaps between bursts.`
   return (
-    head(low > high ? PHRASE.barely : PHRASE.bursts) +
+    head(descendantLed ? descendantsWorkingPhrase(l.workingDescendants) : low > high ? PHRASE.barely : PHRASE.bursts) +
+    descendantNote +
     `The samples disagree: ${low} below ${IDLE_CPU_PERCENT}% and ${high} at or above. ` +
     `${output} Continuing still sends into whatever produced the high sample, which neither ` +
     `CLI accepts mid-turn${tail}`

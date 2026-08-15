@@ -985,9 +985,62 @@ const DECLARED: Record<string, string> = {
     'it as a live turn is the mistake this entry exists to avoid. No assertion in this file was ' +
     'relaxed. Covered in src/outcomes/activeTurn.test.ts, src/relay/sendPrecondition.test.ts and ' +
     'the console’s refusal path in src/repl/session.test.ts.',
+  'liveness measures the child’s whole process tree, not the pid the orchestrator holds (#111)':
+    'THE REASON, in one sentence: a seat that shells out to a build or a test suite leaves almost ' +
+    'nothing on the pid conclave spawned while a grandchild saturates a core, so the reading was ' +
+    'fresh, correctly derived, and about the wrong process — and the operator who reported it was ' +
+    'running `pgrep -f "go test|go build|clang|z3 "` by hand at every pause, where the descendant ' +
+    'check was decisive twice over CPU that was ambiguous on its own. ' +
+    'WHAT IS MEASURED CHANGES. A sample is now ONE `ps -Ao pid=,ppid=,%cpu=` snapshot of the whole ' +
+    'table, walked into the descendant tree of the pid, instead of `ps -o %cpu= -p PID`. `-Ao` and ' +
+    'not the `-axo` the issue suggests: `-A` is POSIX "all processes" on both CI platforms, while ' +
+    'Linux’s `-a` drops SESSION LEADERS, which a CLI on a pty routinely is — on Ubuntu `-axo` could ' +
+    'omit the one process this file exists to measure and report it as gone. If no table can be ' +
+    'read at all the sample falls back to the old per-pid reading rather than calling a live child ' +
+    'gone on the strength of a `ps` that never ran. ' +
+    'THE STATUS DOCUMENT IS THREE KEYS WIDER, which is why this is declared rather than assumed ' +
+    'invisible: ChildLiveness gains selfSamples, descendants and workingDescendants, and it is ' +
+    'carried by pause.liveness.sample and pause.refusal.liveness on a DEFAULT run at N=1. `samples` ' +
+    'keeps its name and becomes the TREE AGGREGATE — the number every consumer was already reading ' +
+    'as "how busy is this seat" — with the pid’s own share moved to selfSamples beside it. ' +
+    'readingOf and `idle` are computed from the aggregate, which moves only in the conservative ' +
+    'direction: a parent idling in front of a busy grandchild is no longer idle, and nothing that ' +
+    'was idle before became busy. ' +
+    'THE EVIDENCE PROSE GAINS A HEAD. When the pid is quiet and a descendant is not, the line reads ' +
+    '`child pid N quiet, 1 descendant working (cpu 0.4%, 0.2%, 0.3% self; 98.5%, 99.1%, 98.8% ' +
+    'tree)` — the fact the `pgrep` workaround was reaching for, in the position "is barely running" ' +
+    'used to occupy while being true about the wrong process. reportsChildOnCpu MATCHES IT, so the ' +
+    'pause menu’s `wait` option is offered on that reading; the phrase has a count in it and cannot ' +
+    'be matched by `includes`, so liveness.ts owns a regex beside the builder and the two are ' +
+    'pinned together in src/outcomes/liveness.test.ts. A reading with NO descendants is ' +
+    'byte-identical to what it was, head and cpu clause both, which is what keeps the #83 and #101 ' +
+    'assertions meaning what they meant. ' +
+    'TWO SENTENCES ARE ADDED FOR THE CASES THE AGGREGATE CANNOT CARRY ALONE. Descendants that exist ' +
+    'and compute nothing are reported as exactly that, never as activity — the falsifier is ten ' +
+    'idle `sinesync mcp start` helpers sitting at 0.0% under long-lived parents, every one of which ' +
+    'a "has descendants" check would have called a working child. And a tree that is quiet ' +
+    'EVERYWHERE while events keep arriving says so: nothing on the CPU with output still coming is ' +
+    'a turn generating at the provider, not a free seat, and "alive but not computing" on its own ' +
+    'invites the wrong move. ' +
+    'THE COST IS BOUNDED AND WAS MEASURED, not assumed: ~500 processes, 0.01-0.02s per snapshot ' +
+    '(the reporter measured ~0.03s for 506), three snapshots per reading, and 180 of them over the ' +
+    'thirty minutes a pause can refresh for — a few seconds of `ps` for an entire held pause. ' +
+    'ONE LIMIT IS ACCEPTED AND WRITTEN DOWN: summing a wide tree can approach the line with nothing ' +
+    'working. The widest all-idle tree on a 498-process table summed 2.4% over 19 descendants, ' +
+    'under IDLE_CPU_PERCENT but not by much. It is left in because it fails safe — summing can turn ' +
+    'a quiet tree into a reported busy one, never a busy tree into a quiet one, and the second is ' +
+    'the #43 mistake — and the count of individually-working descendants is printed beside the ' +
+    'aggregate so a diluted reading is visible as one. ' +
+    'NOTHING BECOMES LESS CONSERVATIVE and no flag is added. #124 IS NOT ADDRESSED HERE and that is ' +
+    'deliberate: since #117 the /continue refusal is decided by activeTurn in src/repl/session.ts, ' +
+    'not by this reading, so the refusal-on-thin-evidence it describes no longer rests on a mixed ' +
+    'CPU sample or a missing output count from this path. No assertion in this file was relaxed. ' +
+    'Covered in src/outcomes/liveness.test.ts, including a real two-process tree — a waiting `sh` ' +
+    'in front of a spinning one — and mutation-checked by reverting the aggregation and watching ' +
+    'that test fail.',
 }
 
-test('DECLARED contains exactly the routing, pause-resolution, attribution, ceiling-flag, seat-flag, seat-status, launch-record, flag-reader, integration-check, per-seat-rotation, reviewer, resume-guard, mixed-liveness, timestamped-liveness, model-validation, executable-preflight, compaction-survival, rotation-reporting and send-precondition entries', () => {
+test('DECLARED contains exactly the routing, pause-resolution, attribution, ceiling-flag, seat-flag, seat-status, launch-record, flag-reader, integration-check, per-seat-rotation, reviewer, resume-guard, mixed-liveness, timestamped-liveness, model-validation, executable-preflight, compaction-survival, rotation-reporting, send-precondition and process-tree-liveness entries', () => {
   assert.deepEqual(Object.keys(DECLARED), [
     'implementer_unanswered -> advisor',
     'status.pause.resolution',
@@ -1009,6 +1062,7 @@ test('DECLARED contains exactly the routing, pause-resolution, attribution, ceil
     'a seat whose CLI is not installed is refused before anything is created (#51)',
     'the rotation policy each implementer seat is under, in status --json (#103)',
     'a peer send waits for a live turn, and CPU decides nothing anywhere a send is decided (#117)',
+    'liveness measures the child’s whole process tree, not the pid the orchestrator holds (#111)',
   ])
 })
 

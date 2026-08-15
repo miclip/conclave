@@ -274,9 +274,27 @@ function tempRepo(): string {
 }
 
 /** Every sample under the line: what a child blocked in `sleep` inside a Bash call reads. */
-const NEAR_IDLE: ChildLiveness = { pid: 4242, alive: true, samples: [0.4, 0.2, 0.3], idle: true, measuredAt: 0 }
+const NEAR_IDLE: ChildLiveness = {
+  pid: 4242,
+  alive: true,
+  samples: [0.4, 0.2, 0.3],
+  selfSamples: [0.4, 0.2, 0.3],
+  descendants: 0,
+  workingDescendants: 0,
+  idle: true,
+  measuredAt: 0,
+}
 /** A finished child that twitched: the reading that held a run paused for an hour. */
-const TWITCHED: ChildLiveness = { pid: 4242, alive: true, samples: [0.3, 0.2, 7.2], idle: false, measuredAt: 0 }
+const TWITCHED: ChildLiveness = {
+  pid: 4242,
+  alive: true,
+  samples: [0.3, 0.2, 7.2],
+  selfSamples: [0.3, 0.2, 7.2],
+  descendants: 0,
+  workingDescendants: 0,
+  idle: false,
+  measuredAt: 0,
+}
 
 const ADVISOR_REPLIES = ['Do it.', 'Now the other half.', 'DONE']
 const IMPL_REPLIES = ['ack', 'Did the work.', 'Did that too.', 'NONE']
