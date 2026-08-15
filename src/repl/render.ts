@@ -11,6 +11,7 @@
  * a log because that check was missing.
  */
 
+import { ceilingSummary, type RunCeilings } from '../relay/guardrails.ts'
 import type { CheckSpec } from '../rotation/record.ts'
 
 export interface Style {
@@ -203,6 +204,12 @@ export function markdown(text: string, opts: MarkdownOptions = {}): string {
  * The three dots are the speaker legend: the colours used throughout for you, the advisor
  * and the implementer. Teaching the code once here means every later line reads without a
  * key, which is the only reason to spend four lines on a banner at all.
+ *
+ * The ceilings line is the fifth, and it earns its place the way the rotation line does: both
+ * say what this run will do without being asked again. #119 is a run that ended at an advisor
+ * budget of 8 with four files of uncommitted work in the tree, because the flag raised was not
+ * the flag that raises it -- and every surface, this one included, was silent about what any
+ * bound was. Three lines in, before any work exists to lose, is where that costs nothing.
  */
 export function banner(opts: {
   version: string
@@ -210,6 +217,11 @@ export function banner(opts: {
   implementer: string
   cwd: string
   checks: CheckSpec[]
+  /**
+   * What stops this run. Passed in resolved rather than as flags, so the banner reports the
+   * bound the relay will actually be given instead of re-deriving one that could differ.
+   */
+  ceilings: RunCeilings
 }): string {
   const legend = `${magenta('●')} ${cyan('●')} ${green('●')}`
   // Relevance is shown, because a banner listing three checks when only one can block the
@@ -225,6 +237,7 @@ export function banner(opts: {
     `  ${legend}  ${bold('conclave')} ${dim(opts.version)}`,
     `        ${dim('you')} · ${cyan(`advisor ${opts.advisor}`)} · ${green(`implementer ${opts.implementer}`)}`,
     `        ${dim(opts.cwd)}`,
+    `        ${dim('ceilings:')} ${ceilingSummary(opts.ceilings)}`,
     `        ${dim('rotation:')} ${rotation}`,
     '',
   ].join('\n')

@@ -161,6 +161,85 @@ export function ceilingsFrom(raw: {
 }
 
 /**
+ * Every ceiling a run is bound by, with the ones nobody set said explicitly.
+ *
+ * The reporting shape, not the configuration shape, and the difference is the whole point.
+ * `Ceilings` omits what was not configured because absent there must stay BEHAVIOURLESS. Here
+ * absent would be the defect: #119 was a run that stopped at an advisor budget of 8 while the
+ * operator believed they had raised it to 40, and nothing in the banner, the console or
+ * `status --json` said what any ceiling was. A key that vanishes when a limit is unset cannot
+ * be told from a key a reader forgot to look for, so every field is present and `null` means
+ * "no limit". `RunDeadlines.configuredAbsoluteMs` reports the same way for the same reason.
+ *
+ * `advisorTurns` is the ceiling the issue is actually about and it is never null: a run always
+ * has an advisor budget, even when nobody named one (`DEFAULT_ADVISOR_TURNS`). It is here
+ * rather than in `Ceilings` because it is not a `Ceilings` field -- it bounds how many times
+ * the advisor steers, not the run as a resource -- and this type is what an operator means when
+ * they ask what stops the run.
+ */
+export interface RunCeilings {
+  /** Advisor turns, from `--rounds`. Never null: every run has one, set or defaulted. */
+  advisorTurns: number
+  /** `--max-turns`. Turns across all participants. */
+  maxTurns: number | null
+  /** `--max-minutes`, in milliseconds as it is configured and checked. */
+  maxDurationMs: number | null
+  /** `--max-queue-depth`. */
+  maxQueueDepth: number | null
+  /** `--max-concurrent-seats`. */
+  maxConcurrentSeats: number | null
+}
+
+/**
+ * The configuration as it will be REPORTED.
+ *
+ * One reader, for the same reason `ceilingsFrom` is one: the launch banner, the console
+ * banner and `status --json` all answer "what bounds this run", and three places computing it
+ * would eventually disagree about which ceilings exist. `advisorTurns` arrives as a resolved
+ * number rather than as `RelayOptions`, so this module keeps knowing nothing about the relay.
+ */
+export function effectiveCeilings(run: {
+  advisorTurns: number
+  ceilings?: Ceilings | undefined
+}): RunCeilings {
+  const c = run.ceilings
+  return {
+    advisorTurns: run.advisorTurns,
+    maxTurns: c?.maxTurns ?? null,
+    maxDurationMs: c?.maxDurationMs ?? null,
+    maxQueueDepth: c?.maxQueueDepth ?? null,
+    maxConcurrentSeats: c?.maxConcurrentSeats ?? null,
+  }
+}
+
+/**
+ * The same facts on one line, named by the FLAG that sets each one.
+ *
+ * Flag spellings rather than field names, because the reader is an operator deciding whether
+ * what they typed took effect -- and #119 is precisely two adjacent flags bounding different
+ * things. `--rounds 8 · --max-turns 40` is the line that would have shown, in three words, that
+ * the budget raised was not the budget meant.
+ *
+ * Written with the leading dashes so each item reads as the flag it is. `--rounds` is a flag
+ * name, not a claim that an advisor turn is a "round" -- the vocabulary that rename retired,
+ * and which `advisorTurns.test.ts` holds the rest of the product to.
+ *
+ * Unset ceilings are printed as `none` rather than omitted. A line that listed only what was
+ * configured would be empty on the run that lost 488 uncommitted insertions, which is the run
+ * this exists for.
+ */
+export function ceilingSummary(c: RunCeilings): string {
+  const minutes = c.maxDurationMs === null ? 'none' : String(c.maxDurationMs / 60_000)
+  return [
+    `--rounds ${c.advisorTurns}`,
+    `--max-turns ${c.maxTurns ?? 'none'}`,
+    `--max-minutes ${minutes}`,
+    `--max-queue-depth ${c.maxQueueDepth ?? 'none'}`,
+    `--max-concurrent-seats ${c.maxConcurrentSeats ?? 'none'}`,
+  ].join(' · ')
+}
+
+/**
  * Whether a ceiling has been passed.
  *
  * Checked at turn boundaries rather than by a timer, because a run cannot be interrupted

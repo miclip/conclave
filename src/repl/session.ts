@@ -26,7 +26,7 @@
 
 import { describeTool } from '../relay/subagents.ts'
 import { formatGoalFindings, lintGoal } from '../relay/goalLint.ts'
-import { preflightRefusals, type Ceilings } from '../relay/guardrails.ts'
+import { type Ceilings, effectiveCeilings, preflightRefusals } from '../relay/guardrails.ts'
 import { createWriteStream, existsSync, realpathSync } from 'node:fs'
 import { basename, join, relative } from 'node:path'
 import { Writable } from 'node:stream'
@@ -38,7 +38,7 @@ import type { AgentEvent } from '../contract/session.ts'
 import { defaultRegistry } from '../registry/builtin.ts'
 import type { CheckSpec } from '../rotation/record.ts'
 import type { AgentRegistry } from '../registry/registry.ts'
-import { implementerSpecsFor, Relay, reviewerSpecFor, type SeatRequest } from '../relay/relay.ts'
+import { boundOf, implementerSpecsFor, Relay, reviewerSpecFor, type SeatRequest } from '../relay/relay.ts'
 import type { RelayMessage } from '../relay/message.ts'
 import type { RunHandle, RunPause } from '../relay/run.ts'
 import { ensureCodexHooksTrusted } from '../deployment/ensureTrust.ts'
@@ -460,7 +460,7 @@ function renderPause(p: RunPause, width: number): string {
  *
  * This used to read `pause.verdictOf.participant` instead, and that field is narrower than it
  * looks: it is set at exactly two halt sites, both `turn_incomplete`
- * (`src/relay/relay.ts:4784` and `src/relay/relay.ts:5168`). So FOUR of the five seat-scoped
+ * (`src/relay/relay.ts:4823` and `src/relay/relay.ts:5207`). So FOUR of the five seat-scoped
  * reasons -- `rotation_candidate`, `implementer_unanswered`, `merge_blocked`, `review_blocked`
  * -- named a seat in their scope and were sampled by rank anyway, because the field the guard
  * read was empty. The scope is the field that is always populated, which is the other half of
@@ -474,16 +474,16 @@ function renderPause(p: RunPause, width: number): string {
  * pause never mentioned. The rank fallback's own comment argued it was right "only because
  * there is one of them", which is an argument for deriving the seat from the pause instead of
  * from a rank. Worse than useless on one of them: resuming an `advisor_escalated` pause sends
- * to the ADVISOR (`src/relay/relay.ts:4883`), so the fallback measured children that were not
+ * to the ADVISOR (`src/relay/relay.ts:4922`), so the fallback measured children that were not
  * about to be sent to at all.
  *
  * What that gives up, stated rather than discovered: the `advisor_escalated` halt raised when a
- * seat's turn completed and its report could not be read (`src/relay/relay.ts:5080`) is
+ * seat's turn completed and its report could not be read (`src/relay/relay.ts:5119`) is
  * conclave-scoped by design -- "the reason names who is being asked to take it, and the scope
  * follows the reason" -- yet the thing an operator wants to know there is whether THAT seat's
  * child is still writing. Under the rank fallback that seat was sampled at N=1 by coincidence
  * of being the only implementer. It is not sampled now. The pause still carries its own
- * liveness EVIDENCE from the halt site (`src/relay/relay.ts:5094`), which is what the operator
+ * liveness EVIDENCE from the halt site (`src/relay/relay.ts:5133`), which is what the operator
  * reads;
  * what is gone is a refusal derived from a rank scan. Narrowing that halt's scope, if the
  * refusal is wanted back, is a change to the halt site rather than to this guard.
@@ -638,6 +638,14 @@ export async function runSession(opts: SessionOptions): Promise<number> {
       implementer: implementerAgents.join(', '),
       cwd: opts.cwd,
       checks: opts.checks,
+      // Resolved through `boundOf`, the same reader the loop uses, rather than printed straight
+      // off `opts.rounds`. The two agree today because `maxAdvisorTurns: opts.rounds` is two
+      // hundred lines below -- and a banner that quoted the option while the loop quoted the
+      // resolution would be the same silent disagreement #119 is about, one layer up.
+      ceilings: effectiveCeilings({
+        advisorTurns: boundOf({ maxAdvisorTurns: opts.rounds }),
+        ...(opts.ceilings ? { ceilings: opts.ceilings } : {}),
+      }),
     }),
   )
   if (opts.checks.length === 0) {

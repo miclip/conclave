@@ -324,7 +324,7 @@ const DECLARED: Record<string, string> = {
     'Authority routing (#56, D2) sends implementer_unanswered to the advisor before the operator, ' +
     'so a default run interrupts the human less than today. Real change at N=1, an improvement, ' +
     'declared rather than discovered. The pause reason exists at src/relay/run.ts:51 and the halt ' +
-    'that raises it is at src/relay/relay.ts:5031.',
+    'that raises it is at src/relay/relay.ts:5070.',
   'status.pause.resolution':
     'Classifying unresolved conditions on both axes (#56, D2) added `resolution` to every RunPause ' +
     '(src/relay/run.ts:243), so `conclave status --json` on a paused default run now carries ' +
@@ -606,7 +606,7 @@ const DECLARED: Record<string, string> = {
     'participant and nobody else, and a conclave or workstream scope samples NOBODY. It used to ' +
     'read pause.verdictOf.participant and fall back to scanning participants by rank for ' +
     'implementers — and verdictOf is set at exactly two halt sites, both turn_incomplete ' +
-    '(src/relay/relay.ts:4784, src/relay/relay.ts:5168), so every other pause reached that rank ' +
+    '(src/relay/relay.ts:4823, src/relay/relay.ts:5207), so every other pause reached that rank ' +
     'scan. WHAT CHANGES AT N=1: on the three pauses whose scope names no participant — ' +
     'operator_requested (/pause), advisor_escalated, authority_conflict — the lone implementer ' +
     'child used to be sampled, so a child that measured busy REFUSED the resume and wrote ' +
@@ -615,15 +615,15 @@ const DECLARED: Record<string, string> = {
     'safety guard rather than presented as a pure N>1 fix. The reason it is the right narrowing: ' +
     'the guard exists because continuing SENDS into a child that cannot accept input mid-turn, ' +
     'and on those three pauses the child it measured is not the child being sent to — resuming ' +
-    'advisor_escalated sends to the ADVISOR (src/relay/relay.ts:4883), resuming ' +
+    'advisor_escalated sends to the ADVISOR (src/relay/relay.ts:4922), resuming ' +
     'authority_conflict queues a constraint that is delivered by the dispatcher on the next ' +
     'dispatch to a free seat, and operator_requested is consumed at an advisor-turn boundary ' +
     'whose own evidence line says no turn is in flight. WHAT IS GIVEN UP, named rather than ' +
     'discovered: the advisor_escalated halt raised when a seat’s turn completed and its report ' +
-    'could not be read (src/relay/relay.ts:5080) is conclave-scoped by design, yet the useful ' +
+    'could not be read (src/relay/relay.ts:5119) is conclave-scoped by design, yet the useful ' +
     'question there is whether THAT seat is still writing; at N=1 the rank scan sampled it by ' +
     'coincidence of it being the only implementer, and now nothing does. The pause still carries ' +
-    'that seat’s liveness evidence from the halt site (src/relay/relay.ts:5094), which is what ' +
+    'that seat’s liveness evidence from the halt site (src/relay/relay.ts:5133), which is what ' +
     'the operator actually reads; restoring a refusal there is a change to that halt’s scope, ' +
     'not to the guard. AT N>1 the old behaviour was unsafe in the other direction: a pause about ' +
     'one seat could be refused because a DIFFERENT seat was mid-turn, and the operator was told ' +
@@ -674,7 +674,7 @@ const DECLARED: Record<string, string> = {
     'The sentence is repaired rather than left standing, on this entry’s own rule. Everything ' +
     'else above is still true: the three readings, the wording, the event count as an input, and ' +
     'the pause menu’s `wait` option, which still asks reportsChildOnCpu. No assertion in this ' +
-    'file was relaxed; one citation moved with the code it pins (src/repl/session.ts:1015). ' +
+    'file was relaxed; one citation moved with the code it pins (src/repl/session.ts:1023). ' +
     'Covered in src/outcomes/liveness.test.ts on the reported numbers, and end to end through ' +
     'the console’s refusal path in src/repl/session.test.ts.',
   'a paused run keeps measuring the child, and its evidence says when it was measured (#101)':
@@ -956,6 +956,61 @@ const DECLARED: Record<string, string> = {
     'document in the corpus. Proved in src/workspace/sessionRecord.test.ts, which drives the ' +
     'recorder through the production `rotationFor` and asserts all three states across two ' +
     'runs, the advisor’s and the reviewer’s absence, and the same three states in the prose.',
+  'every ceiling is reported at launch and in status --json, and an exhausted advisor budget says which ceiling and what it was (#119)':
+    'THE REASON, in one sentence: two ceiling flags with adjacent names bound different things, ' +
+    'the one an operator reached for to raise the advisor budget was not the one that does it, ' +
+    'and NO SURFACE ANYWHERE said what any ceiling was — so a run launched with --max-turns 40 ' +
+    'ended at the default advisor budget of 8 with 488 uncommitted insertions across four files ' +
+    'in the tree, survived only because a human was watching, and its early ending was then ' +
+    'filed as evidence for a different defect (#112) that a further session had to falsify. ' +
+    'A SECOND REAL CHANGE TO THE DEFAULT N=1 STATUS DOCUMENT, after #103 and by the same ' +
+    'argument. `conclave status --json` now carries a top-level `ceilings = {advisorTurns, ' +
+    'maxTurns, maxDurationMs, maxQueueDepth, maxConcurrentSeats}` with a matching line in ' +
+    '`conclave status` prose, on every run at every N. WHY IT OVERRIDES D1: D1 keeps a key off ' +
+    'the default document when it has NOTHING TO SAY there, and this one has the most to say ' +
+    'exactly there — a run with no ceilings configured is the run whose operator most needs to ' +
+    'read that the only thing bounding it is an advisor budget they never chose. UNSET LIMITS ' +
+    'ARE `null`, NOT ABSENT, which is the same reasoning as `rotation.onDegradation` and ' +
+    '`launch.model`: #103’s reporter read a missing key as false, and a key that vanishes when a ' +
+    'limit is unset cannot be told from a key the reader forgot to look for. `advisorTurns` is ' +
+    'never null — every run has a budget, set or defaulted — and it is in this block though it ' +
+    'is not a `Ceilings` field, because "what stops this run" is one question and answering it ' +
+    'in two shapes is how the operator lost the run in the first place. ' +
+    'THE CONFIGURATION TYPE IS UNTOUCHED. `Ceilings` still OMITS what nobody set, and absent is ' +
+    'still exactly behaviourless (ceilings.test.ts pins it); `RunCeilings` is the REPORTING ' +
+    'shape, built by `effectiveCeilings` in src/relay/guardrails.ts and read off ' +
+    '`Relay.ceilings`, which is `boundOf` plus the configured ceilings — the same resolution the ' +
+    'dispatcher checks against, never a second reading of the flags the front-end believes it ' +
+    'passed. A document built from the caller’s belief is a document that agrees with the caller ' +
+    'and not with the loop, which is the whole defect. ' +
+    'WRITTEN TWICE ON A DETACHED RUN, which is the one place two producers is right: the parent ' +
+    'that hands the run off records the block into its placeholder status before the child ' +
+    'exists. `--detach` returns an id immediately and the child takes seconds to come up, so a ' +
+    'block only the recorder wrote would be missing for exactly as long as an agent operator is ' +
+    'polling to find out what it launched — and permanently for a child that dies during ' +
+    'startup, whose placeholder is the only status anyone ever reads. The parent can answer it ' +
+    'because it parsed the argv it is about to pass on, which is why the resolution is hoisted ' +
+    'to the top of the relay block rather than built beside `Relay.start`. ' +
+    'BOTH LAUNCHES PRINT IT, one line, from that one renderer (`ceilingSummary`): the console ' +
+    'banner gains a fifth line between the cwd and the rotation line, and `conclave relay` gains ' +
+    'a `ceilings:` line immediately above its rotation line — the same order, launch facts ' +
+    'first and rotation last. Written with FLAG spellings — `--rounds 8 · ' +
+    '--max-turns none · …` — because the reader is an operator deciding whether what they typed ' +
+    'took effect. Naming the flag `--rounds` is not calling an advisor turn a round; the ' +
+    'vocabulary rule in advisorTurns.test.ts is about the concept, and the flag is a flag. ' +
+    'THE `budget` OUTCOME NOW CARRIES A DETAIL: `advisor turn budget spent: N of a maximum N`. ' +
+    'The REASON is unchanged and every caller keying on it is unaffected — `budget` still means ' +
+    'the advisor turns ran out and a resource ceiling still gets its own `ceiling` reason ' +
+    '(report.test.ts) — but a bare one-word ending was the same word for several different ' +
+    'limits, and for --operator agent it reads as "the work was too large". The detail names no ' +
+    'flag: the relay does not know which front-end started it, and an embedder setting ' +
+    '`maxAdvisorTurns` directly has no --rounds to raise. ' +
+    'NOT DONE, DELIBERATELY: no flag is renamed or aliased (suggestion 4 in the issue, which the ' +
+    'issue itself says needs deciding rather than assuming — `relay.ts` insists --rounds feeding ' +
+    '`maxAdvisorTurns` must stay true), no ceiling comparison, default or firing point moves, ' +
+    'and the run report is unchanged. Proved in src/relay/ceilings.test.ts (both front-ends ' +
+    'print every ceiling, and the status record carries them), src/relay/advisorTurns.test.ts ' +
+    '(the exhausted budget names itself) and src/repl/session.test.ts (the console banner).',
   'a peer send waits for a live turn, and CPU decides nothing anywhere a send is decided (#117)':
     'THE REASON, in one sentence: neither CLI accepts input mid-turn, so a send that lands during ' +
     'a turn produces no UserPromptSubmit hook and the relay ends the run `transport_failed` — ' +
@@ -1052,7 +1107,7 @@ const DECLARED: Record<string, string> = {
     'that test fail.',
 }
 
-test('DECLARED contains exactly the routing, pause-resolution, attribution, ceiling-flag, seat-flag, seat-status, launch-record, flag-reader, integration-check, per-seat-rotation, reviewer, resume-guard, mixed-liveness, timestamped-liveness, model-validation, executable-preflight, compaction-survival, rotation-reporting, send-precondition and process-tree-liveness entries', () => {
+test('DECLARED contains exactly the routing, pause-resolution, attribution, ceiling-flag, seat-flag, seat-status, launch-record, flag-reader, integration-check, per-seat-rotation, reviewer, resume-guard, mixed-liveness, timestamped-liveness, model-validation, executable-preflight, compaction-survival, rotation-reporting, send-precondition, process-tree-liveness and ceiling-reporting entries', () => {
   assert.deepEqual(Object.keys(DECLARED), [
     'implementer_unanswered -> advisor',
     'status.pause.resolution',
@@ -1073,6 +1128,7 @@ test('DECLARED contains exactly the routing, pause-resolution, attribution, ceil
     'an unarmed run survives a compaction instead of ending on it (#96)',
     'a seat whose CLI is not installed is refused before anything is created (#51)',
     'the rotation policy each implementer seat is under, in status --json (#103)',
+    'every ceiling is reported at launch and in status --json, and an exhausted advisor budget says which ceiling and what it was (#119)',
     'a peer send waits for a live turn, and CPU decides nothing anywhere a send is decided (#117)',
     'liveness measures the child’s whole process tree, not the pid the orchestrator holds (#111)',
   ])
@@ -1170,7 +1226,7 @@ async function seatsFromSessionCli(): Promise<{ creates: CreateRecord[]; cwd: st
  * The two machine-readable documents a default run actually emits.
  *
  * Both come out of one `relay --json` run in a temporary repository, through the production
- * call sites: the report is what `bin/conclave.ts:1309` prints, and the status record is what
+ * call sites: the report is what `bin/conclave.ts:1341` prints, and the status record is what
  * `recordSession` wrote during that same run, read back by `main(['status', '--json'])` --
  * which resolves the most recent session in `process.cwd()`, so the record has to have been
  * written where an operator would look for it.
@@ -1215,7 +1271,7 @@ async function defaultRunDocuments(): Promise<{ report: unknown; status: unknown
  * blind to that subtree is claiming more than it checks.
  *
  * Built through the real recorder: `recordSession` is what both front-ends call, and
- * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:1015
+ * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:1023
  * with the same object -- a `RunPause` the run handle raised, not one written here. Read back
  * through `main(['status', '--json'])`, so the serialisation and the reconciliation against
  * the pid are the production ones.
@@ -1423,7 +1479,7 @@ async function provokeReviewBlocked(repo: string): Promise<{ relay: Relay; run: 
  * Drive a real relay into one condition and return the pause it raised.
  *
  * The provocations are the ones `resolution.test.ts`'s own `provoke` already uses, deliberately:
- * the same triggers reaching the same single halt site (src/relay/relay.ts:2997), where the
+ * the same triggers reaching the same single halt site (src/relay/relay.ts:3015), where the
  * classification is computed by production `resolutionFor` from the subject the caller passed.
  * Nothing here writes a `RunPause`.
  *
@@ -1511,7 +1567,7 @@ async function provoke(
  * The status document of a run paused for one given reason.
  *
  * Built through the real recorder: `recordSession` is what both front-ends call, and
- * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:1015
+ * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:1023
  * with the same object -- a `RunPause` the relay raised, not one written here. Read back
  * through `main(['status', '--json'])`, so the serialisation and the reconciliation against
  * the pid are the production ones.
@@ -1531,7 +1587,7 @@ async function pausedStatusDocument(reason: PauseReason): Promise<unknown> {
     goal: 'a default goal',
     front: 'session',
     startedAt: Date.now(),
-    // Passed because the console always passes one (src/repl/session.ts:810), so the status
+    // Passed because the console always passes one (src/repl/session.ts:818), so the status
     // documents this file pins differ only in what a pause actually changes.
     logPath: join(repo, '.conclave', 'runs', 'session-test.ndjson'),
     build: 'test',
@@ -1715,8 +1771,8 @@ test('default run works in the run cwd and creates no worktree', async () => {
     assert.equal(c.cwd, fromCli.cwd, `the session CLI must create ${c.id} in the run cwd`)
   }
 
-  // The relay CLI passes process.cwd() as the run cwd: bin/conclave.ts:1221.
-  // The relay hands that same cwd to each participant adapter: src/relay/relay.ts:1768-1774.
+  // The relay CLI passes process.cwd() as the run cwd: bin/conclave.ts:1261.
+  // The relay hands that same cwd to each participant adapter: src/relay/relay.ts:1786-1792.
   // The cwd getter simply returns the option: src/relay/relay.ts:1616-1618.
   assert.match(relay, /cwd:\s*process\.cwd\(\)/, 'relay block must start in process.cwd')
   // Both creation sites now pass a NAMED context object rather than an inline literal, because
@@ -1760,7 +1816,7 @@ test('default run works in the run cwd and creates no worktree', async () => {
 
   // A default run with no subagents must not create any git worktree. The relay only samples
   // the worktree list for its subagent-use report: src/relay/subagents.ts:68 defines
-  // worktreePaths, and src/relay/relay.ts:2322, :2550 and :4313 read it.
+  // worktreePaths, and src/relay/relay.ts:2340, :2568 and :4331 read it.
   // Prove it by exercising the run in a real temporary repository.
   const repo = mkdtempSync(join(tmpdir(), 'conclave-default-'))
   try {
@@ -1986,8 +2042,15 @@ test('an ended conclave status --json emits exactly these keys at every depth', 
   assert.deepEqual(
     shapeOf(status),
     {
-      '': 'abandoned, alive, build, cwd, eventsPath, front, goal, id, logPath, messages, operator, outcome, participants, pid, schema, startedAt, state, updatedAt',
+      '': 'abandoned, alive, build, ceilings, cwd, eventsPath, front, goal, id, logPath, messages, operator, outcome, participants, pid, schema, startedAt, state, updatedAt',
       outcome: 'detail, reason',
+      // Every ceiling, on a run that configured none of them -- which is exactly when the
+      // block has something to say. See DECLARED['every ceiling is reported at launch and in
+      // status --json, and an exhausted advisor budget says which ceiling and what it was
+      // (#119)']: four of these five are `null` here, and a shape that dropped the null keys
+      // would reproduce #103's failure in a second place, a reader taking a missing key for a
+      // configured value of none.
+      ceilings: 'advisorTurns, maxConcurrentSeats, maxDurationMs, maxQueueDepth, maxTurns',
       // On the implementer and not on the advisor; see PAUSED_COMMON below for why that
       // disagreement is pinned rather than unioned. This run is UNARMED -- a default
       // invocation passes no `--checks` -- so `checks` is empty and contributes no element
@@ -2024,7 +2087,12 @@ test('an ended conclave status --json emits exactly these keys at every depth', 
  * that the array is there and that its entries are not objects.
  */
 const PAUSED_COMMON = {
-  '': 'abandoned, alive, build, cwd, eventsPath, front, goal, id, logPath, messages, operator, participants, pause, pid, schema, startedAt, state, updatedAt',
+  '': 'abandoned, alive, build, ceilings, cwd, eventsPath, front, goal, id, logPath, messages, operator, participants, pause, pid, schema, startedAt, state, updatedAt',
+  // Present on a paused document too, and for the sharper version of the reason: the operator
+  // answering a pause is deciding how much run is left, and until #119 the only surface that
+  // could tell them was the flags they typed an hour ago. Same five keys at every pause reason,
+  // because a ceiling does not depend on why the run stopped.
+  ceilings: 'advisorTurns, maxConcurrentSeats, maxDurationMs, maxQueueDepth, maxTurns',
   // The rotation block, pinned as a DISAGREEMENT for the reason the `merge_blocked` override
   // below gives about `seat`: it is on the implementer and NOT on the advisor, which holds no
   // seat and can never be a rotation subject. A union here would let it appear on the advisor,

@@ -55,6 +55,7 @@ import {
 } from 'node:fs'
 import { join, resolve, sep } from 'node:path'
 import type { Confidence, Provenance } from '../contract/outcome.ts'
+import type { RunCeilings } from '../relay/guardrails.ts'
 import type { RelayEvent } from '../relay/observe.ts'
 import type { RunOutcome, RunPause } from '../relay/run.ts'
 // The two accessors, not a third copy of them. A check is a bare string or a pair, and a
@@ -356,6 +357,33 @@ export interface SessionStatus {
    * none. Captured at startup and recorded once.
    */
   build: string
+  /**
+   * Every ceiling this run is bound by, with `null` where nothing was configured.
+   *
+   * The same class of gap as the rotation block above, and #119 is its second instance: an
+   * agent operator cannot confirm a flag it passed took effect, so a mistyped or misunderstood
+   * ceiling is invisible to the interface that exists to replace the console. The run that
+   * prompted this stopped at an advisor budget of 8 while `--max-turns 40` sat in its argv
+   * doing something else entirely, and no surface anywhere said either number.
+   *
+   * Present on a default run, like `rotation` and unlike `seat`. D1 keeps a key off the default
+   * document when it has nothing to say there, and this one has the most to say exactly then: a
+   * run with no ceilings configured is the run whose operator most needs to read that the only
+   * thing bounding it is an advisor budget they never chose.
+   *
+   * Written by BOTH producers of a status document, which is the part worth stating: the
+   * recorder writes it from `RecordableRelay.ceilings`, and the detached parent writes it into
+   * the placeholder it records for a child that does not exist yet. A detached run is the form
+   * an agent operator uses and the window before the child records itself is exactly when it
+   * polls, so a block that appeared only once the relay was up would be missing at the one
+   * moment #119 is about -- and for a child that dies during startup, missing permanently.
+   *
+   * OPTIONAL nonetheless, for one case: a `RecordableRelay` stand-in that predates this and
+   * answers nothing. Absent there means "this relay was never asked", which is not the fact
+   * `null` states -- `null` is "no limit, on a run that was asked". A reader must not take the
+   * first for the second, which is why the unset limits are spelled out rather than left off.
+   */
+  ceilings?: RunCeilings | undefined
 }
 
 /** A status plus what could only be learned from outside it. */
@@ -775,6 +803,20 @@ export interface RecordableRelay {
   rotationOf?(
     seatId: string,
   ): { checks: readonly CheckSpec[]; onDegradation: 'candidate' | 'automatic' } | undefined
+  /**
+   * What bounds this run, resolved by the relay because the relay is what obeys them.
+   *
+   * NOT read from the front-end's own flags, though both front-ends have them in hand. A
+   * document built from what the caller believes it passed is a document that agrees with the
+   * caller and not with the loop -- and the whole of #119 is an operator whose belief about the
+   * bound was wrong. `Relay.ceilings` is `boundOf` plus the configured ceilings, which is the
+   * same answer the dispatcher checks against.
+   *
+   * OPTIONAL and structural, like `rotationOf`: a stand-in written before this existed still
+   * satisfies the contract and gets the document it got before, with no `ceilings` key rather
+   * than one claiming a run is unbounded when it was never asked.
+   */
+  readonly ceilings?: RunCeilings | undefined
   seats?(): readonly { seat: string; state: string; current?: string | undefined; dispatched: number }[]
   tasks?(): readonly { task: { id: string; instruction: string }; runtime: { state: string } }[]
   readonly worktrees?: { seats: readonly { seatId: string; worktreePath: string; branch: string }[] } | undefined
@@ -916,6 +958,11 @@ export function recordSession(
     participants: seats(),
     build: opts.build,
     ...(opts.logPath ? { logPath: opts.logPath } : {}),
+    // Written once at construction rather than refreshed alongside the participants: a run's
+    // ceilings are fixed for its whole life, so re-deriving them on every event would be work
+    // that can only ever produce the same answer. Last among the fields this passes, so the
+    // key is appended to the document rather than inserted among the ones already there.
+    ...(relay.ceilings ? { ceilings: relay.ceilings } : {}),
   })
 
   /**
