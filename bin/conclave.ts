@@ -113,7 +113,8 @@ Driving conclave from an agent
 
   Exit codes: status is non-zero only for an abandoned run, because a run that ended
   badly still ended and its outcome is in the record. relay is non-zero on
-  transport_failed or a ceiling. guard is non-zero while participants are live.
+  transport_failed, peer_busy or a ceiling. guard is non-zero while participants
+  are live.
 
 Commands:
   config install [--claude] [--codex] [--no-diagnose] [--trust]
@@ -1312,8 +1313,13 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
       // finished and left a tree that does not pass its own checks (#80). An unattended
       // caller — CI, a wrapper script, an agent operator — decides on the exit code, and a
       // zero there is the whole failure the issue is about, one layer out.
+      // `peer_busy` joins them for the same reason: the run stopped without finishing, and an
+      // unattended caller deciding on the exit code must not read "a child stayed busy" as
+      // success. It is the ending that used to arrive here as `transport_failed` (#117), and
+      // the exit code it produced then is the one it must keep producing now.
       failed =
         outcome.reason === 'transport_failed' ||
+        outcome.reason === 'peer_busy' ||
         outcome.reason === 'ceiling' ||
         outcome.reason === 'integration_failed'
     } catch (err) {

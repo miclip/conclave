@@ -366,7 +366,7 @@ test('the console front-end records the same launch, and a run given no args rec
  * at the CLI, in src/relay/perSeatArgs.test.ts; what this test is about is the RECORD, so it
  * keeps handing `Relay.start` the specs directly rather than reaching the same place through an
  * argv that could fail for its own reasons. Both documents are
- * still the production ones: `runReport` is what `bin/conclave.ts:1308` prints, and the status
+ * still the production ones: `runReport` is what `bin/conclave.ts:1309` prints, and the status
  * is read back through `main(['status', '--json'])` after the real recorder wrote it.
  */
 test('two seats launched with two different models are recorded apart, in both documents', async () => {

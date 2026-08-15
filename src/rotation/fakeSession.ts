@@ -302,6 +302,34 @@ export class FakeRotationSession implements AgentSession {
     })
   }
 
+  /**
+   * A `turn_end` arriving late for the turn that is currently open.
+   *
+   * The counterpart to `lateSignal` for the case it cannot express: after a withdrawal with no
+   * replacement, `#lastEndSeq` is cleared and `lateSignal` refuses to run again -- deliberately,
+   * since there is no longer a verdict to withdraw. But the turn is open, and the thing that
+   * happens next in the real world is that it ends. Nothing could say so (#117).
+   *
+   * Not `completed` by default: a completed replacement is the one outcome that makes the
+   * console's `/continue` bypass its guard entirely, so a fixture reaching for "the turn ended"
+   * would silently be testing the bypass instead.
+   */
+  endTurnLate(verdict: Verdict = { outcome: 'cancelled', confidence: 'proven', provenance: [{ source: 'hook', detail: 'Stop' }] }): void {
+    const turn = this.#turns.at(-1)
+    if (!turn) throw new Error(`${this.sessionId} has no turn to end`)
+    turn.verdict = verdict
+    this.#lastEndSeq = ++this.#seq
+    this.emit({
+      type: 'turn_end',
+      verdict,
+      synthesized: false,
+      turnKey: turn.key,
+      seq: this.#lastEndSeq,
+      at: Date.now(),
+      provisional: false,
+    })
+  }
+
   /** Push an event to whichever reader is waiting, or queue it. Single-consumer, as ever. */
   emit(e: AgentEvent): void {
     const w = this.#waiters.shift()

@@ -163,16 +163,22 @@ export interface PauseWait {
 }
 
 /**
- * A `/continue` refused because the child was still working.
+ * A `/continue` refused because the child was mid-turn.
  *
  * The run stays paused, so a watcher polling `state` sees no change. The refusal is the only
- * durable record that a decision was attempted and rejected, and it carries the measurement
- * so the reason is inspectable later rather than being a transient console line.
+ * durable record that a decision was attempted and rejected, and it carries what it was decided
+ * on so the reason is inspectable later rather than being a transient console line.
+ *
+ * `reason` is now the TURN, not the CPU: `describeActiveTurn` over the child's own
+ * `turn_start`/`turn_end` events. `liveness` is optional and always was colour -- it is absent
+ * when the adapter names no child process, and present when it does, but nothing decided on it
+ * either way. It stays on the record because an operator reading a refusal afterwards is
+ * entitled to the measurement that was taken beside it.
  */
 export interface PauseContinueRefusal {
   at: number
   reason: string
-  liveness: ChildLiveness
+  liveness?: ChildLiveness | undefined
 }
 
 /**

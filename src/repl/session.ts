@@ -107,7 +107,8 @@ export async function withHeartbeat<T>(
     progress.done(label)
   }
 }
-import { describeLiveness, readingOf, sampleLiveness, type ChildLiveness } from '../outcomes/liveness.ts'
+import { activeTurn, describeActiveTurn } from '../outcomes/activeTurn.ts'
+import { describeLiveness, sampleLiveness, type ChildLiveness } from '../outcomes/liveness.ts'
 import { version } from '../version.ts'
 import { guard } from '../workspace/sessionLock.ts'
 import { newSessionId, projectRootFor, recordSession } from '../workspace/sessionRecord.ts'
@@ -459,7 +460,7 @@ function renderPause(p: RunPause, width: number): string {
  *
  * This used to read `pause.verdictOf.participant` instead, and that field is narrower than it
  * looks: it is set at exactly two halt sites, both `turn_incomplete`
- * (`src/relay/relay.ts:4626` and `src/relay/relay.ts:5010`). So FOUR of the five seat-scoped
+ * (`src/relay/relay.ts:4784` and `src/relay/relay.ts:5168`). So FOUR of the five seat-scoped
  * reasons -- `rotation_candidate`, `implementer_unanswered`, `merge_blocked`, `review_blocked`
  * -- named a seat in their scope and were sampled by rank anyway, because the field the guard
  * read was empty. The scope is the field that is always populated, which is the other half of
@@ -473,16 +474,16 @@ function renderPause(p: RunPause, width: number): string {
  * pause never mentioned. The rank fallback's own comment argued it was right "only because
  * there is one of them", which is an argument for deriving the seat from the pause instead of
  * from a rank. Worse than useless on one of them: resuming an `advisor_escalated` pause sends
- * to the ADVISOR (`src/relay/relay.ts:4725`), so the fallback measured children that were not
+ * to the ADVISOR (`src/relay/relay.ts:4883`), so the fallback measured children that were not
  * about to be sent to at all.
  *
  * What that gives up, stated rather than discovered: the `advisor_escalated` halt raised when a
- * seat's turn completed and its report could not be read (`src/relay/relay.ts:4922`) is
+ * seat's turn completed and its report could not be read (`src/relay/relay.ts:5080`) is
  * conclave-scoped by design -- "the reason names who is being asked to take it, and the scope
  * follows the reason" -- yet the thing an operator wants to know there is whether THAT seat's
  * child is still writing. Under the rank fallback that seat was sampled at N=1 by coincidence
  * of being the only implementer. It is not sampled now. The pause still carries its own
- * liveness EVIDENCE from the halt site (`src/relay/relay.ts:4936`), which is what the operator
+ * liveness EVIDENCE from the halt site (`src/relay/relay.ts:5094`), which is what the operator
  * reads;
  * what is gone is a refusal derived from a rank scan. Narrowing that halt's scope, if the
  * refusal is wanted back, is a change to the halt site rather than to this guard.
@@ -925,16 +926,32 @@ export async function runSession(opts: SessionOptions): Promise<number> {
    */
   const resumeRun = async (runOpts: { force?: boolean } = {}): Promise<void> => {
     if (!run || run.state !== 'paused') return
-    // Refused when the child is visibly still working, because continuing SENDS -- and
-    // neither CLI accepts input mid-turn, so the run ends `transport_failed`. A watchdog
-    // that says "completion is uncertain" correctly warns off rotate and abort, which
-    // leaves continue looking like the safe choice when it is the destructive one. Reported
-    // by an operator who lost a run to exactly that, with the token counter still moving.
+    // Refused when the child is mid-turn, because continuing SENDS -- and neither CLI accepts
+    // input mid-turn, so the run ends `transport_failed`. A watchdog that says "completion is
+    // uncertain" correctly warns off rotate and abort, which leaves continue looking like the
+    // safe choice when it is the destructive one. Reported by an operator who lost a run to
+    // exactly that, with the token counter still moving.
     //
-    // Overridable, because the measurement is a measurement: a child pinned by something
-    // unrelated would otherwise be unresumable, and taking the decision away from the
-    // operator is not what a pause is for.
-    // Sampled NOW, never read off the pause.
+    // WHAT IS READ HAS CHANGED (#117). This used to sample the child's CPU and refuse anything
+    // that was not clearly idle. CPU is a proxy for "is this child mid-turn" and it is wrong in
+    // both tails: a child blocked in `sleep` inside a Bash call is mid-turn and reads 3.2%, so
+    // the guard said go and the send was fatal; and a finished child that twitched to 3.6% in a
+    // three-sample window was refused, then refused again, for over an hour. Both readings were
+    // accurate; the quantity was the wrong one, and no sampling schedule repairs that.
+    //
+    // So this reads the turn itself -- `activeTurn` over the child's own `turn_start`/`turn_end`
+    // events, the same predicate the relay's peer send now uses (`Relay#awaitSendable`) and the
+    // same signal the footer above draws `implementer 43s Edit` from. One question, one answer,
+    // and the two callers cannot drift apart into answering it differently again.
+    //
+    // The CPU reading survives as COLOUR beside the refusal, because an operator deciding
+    // whether to force is entitled to it. It decides nothing.
+    //
+    // Overridable, for the same reason it always was: a child stuck mid-turn on something
+    // unrelated would otherwise be unresumable, and taking the decision away from the operator
+    // is not what a pause is for.
+    //
+    // Read NOW, never off the pause.
     //
     // The first version matched the liveness line in `pause.evidence` -- a string captured
     // when the pause was RAISED. So the check that decides "is it safe to continue at this
@@ -944,7 +961,8 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     //
     // Reported after nearly four hours of it, by an operator whose only way out was a flag
     // they had not been told about. A guard that cannot change its mind is not a guard, it
-    // is a wall.
+    // is a wall. Reading the turn keeps that property and sharpens it: the refusal lifts the
+    // moment `turn_end` arrives, rather than when a CPU average happens to fall.
     //
     // Bypassed when the verdict the pause was raised on has been superseded by a completed
     // replacement. The pause still exists -- withdrawing the reason for it is not the same
@@ -962,29 +980,38 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     if (!runOpts.force && !supersededCompleted) {
       const sample = opts.liveness ?? sampleLiveness
       for (const child of children) {
-        const pid = child.session.childPid
-        // No pid is no reading, not a reading of idle: an adapter that does not expose one
-        // leaves this guard with nothing to say about that seat.
-        if (pid === undefined) continue
-        const now = await sample(pid)
-        if (!now.alive || now.idle) continue
+        const turn = activeTurn(child.events)
+        // No turn open is no refusal, whatever the child's CPU is doing. A high or mixed
+        // reading between turns is a finished child cleaning up, and it was the reason a run
+        // sat unresumable for an hour.
+        if (!turn) continue
+        const reason = `${child.id} is mid-turn — ${describeActiveTurn(turn)}`
+        // Taken AFTER the decision, and only for the operator to read. No pid is no reading,
+        // which is not a reading of idle -- and now it is not a reason to skip the seat either,
+        // because the turn is what this refuses on and the turn is knowable without a pid.
+        //
         // No output count belongs with this sample. It is taken fresh, here, and the count on
         // the pause was measured at another moment -- pairing them would date one fact to the
         // other's clock. This passed `0` before, which rendered as "nothing at all since the
         // prompt was sent": a claim nobody had checked, and one the reading now consults (#83).
-        const reason = describeLiveness(now, undefined)
-        // The headline follows the READING. The refusal itself does not: a mixed sample still
-        // refuses, because continuing sends and a burst may be a turn. But an operator choosing
-        // whether to force is choosing on this line, and telling them a child with two idle
-        // samples out of three is "working right now" is the assertion #83 is about.
-        const working = readingOf(now) === 'working'
-        write(yellow(`  not continuing: ${working ? 'the child is working right now.' : 'the child is not clearly idle.'}`))
-        write(`  ${reason}`)
-        write(`  ${working ? 'wait for it to finish' : 'wait and re-read the line above'}, or /continue force to send anyway.`)
+        const pid = child.session.childPid
+        let colour: ChildLiveness | undefined
+        if (pid !== undefined) {
+          try {
+            colour = await sample(pid)
+          } catch {
+            // A sampling failure costs the operator a sentence, not the refusal.
+          }
+        }
+        write(yellow(`  not continuing: ${child.id} is in the middle of a turn.`))
+        write(`  ${describeActiveTurn(turn)}`)
+        write(`  continuing SENDS, and neither CLI accepts input mid-turn.`)
+        if (colour) write(dim(`  for colour only, deciding nothing: ${describeLiveness(colour, undefined)}`))
+        write(`  wait for the turn to end, or /continue force to send anyway.`)
         // The run stays paused, so a watcher polling `state` sees no change. Record the
         // refusal so an external reader can see why `/continue` did not move the run.
         if (run.pause) {
-          run.pause.refusal = { at: Date.now(), reason, liveness: now }
+          run.pause.refusal = { at: Date.now(), reason, ...(colour ? { liveness: colour } : {}) }
           recording.set('paused', { pause: run.pause })
         }
         return

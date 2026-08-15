@@ -50,6 +50,7 @@ import {
   type RelayMessage,
   type Visibility,
 } from './message.ts'
+import { activeTurn, describeActiveTurn } from '../outcomes/activeTurn.ts'
 import { RelayEventStream, type ObserveOptions, type RelayEvent, type RunReason } from './observe.ts'
 import {
   LIVENESS_REFRESH_EVERY_MS,
@@ -338,6 +339,38 @@ export function rotationFor(
  */
 const DEFAULT_SALVAGE_MS = 90_000
 
+/**
+ * How long to wait for a target's transcript to leave `in_progress` before giving up on
+ * sending to it at all (#117).
+ *
+ * Generous for the same reason the salvage window is, and then some: what is being bought is
+ * not a better report but the run itself. Sending into a live turn does not queue the text --
+ * neither CLI accepts input mid-turn -- it ends the run, so every second spent waiting here is
+ * a second that costs nothing against an alternative that costs everything.
+ *
+ * Bounded rather than unbounded because a child that never finishes must still end in a
+ * decision. The bound is what makes the ending honest: at five minutes, "it is still working"
+ * has stopped being a wait and become a fact about the run.
+ */
+const DEFAULT_SEND_PRECONDITION_MS = 300_000
+
+/**
+ * The target was still mid-turn when the send precondition's bound expired, so nothing was
+ * sent (#117).
+ *
+ * A named type rather than a bare `Error` because `#loop` catches everything a run can throw
+ * and reports it as `transport_failed`. That reason is exactly what this condition must stop
+ * claiming, and a string match on the message would be a second way for the two to drift.
+ */
+export class PeerBusyError extends Error {
+  readonly participant: string
+  constructor(participant: string, message: string) {
+    super(message)
+    this.name = 'PeerBusyError'
+    this.participant = participant
+  }
+}
+
 export interface RelayOptions {
   registry: AgentRegistry
   cwd: string
@@ -457,6 +490,15 @@ export interface RelayOptions {
    */
   transcriptSalvageMs?: number
   /**
+   * How long to wait for a target that is still mid-turn before refusing to send (#117).
+   *
+   * A third budget, against a third cost. The settle and salvage windows are both paid AFTER a
+   * turn ended, buying a better account of it; this one is paid BEFORE a send, and what it
+   * buys is the send being possible at all. Default 5 minutes -- see
+   * `DEFAULT_SEND_PRECONDITION_MS` for why it is much the largest of the three.
+   */
+  sendPreconditionMs?: number
+  /**
    * Routing-log entries as they are recorded. Kept for callers that only want the log and
    * only want it pushed at them; `observe()` is the fuller surface, and carries the
    * participant activity this does not.
@@ -471,7 +513,7 @@ export interface RelayOptions {
    * this seam the whole of #101 -- the measurement, its timestamp, and the re-measurement that
    * makes the timestamp move -- is unreachable from any test that does not spawn a real CLI.
    * The console already carries the identical seam for its `/continue` guard
-   * (`src/repl/session.ts:284`), and the two are deliberately the same shape.
+   * (`src/repl/session.ts:285`), and the two are deliberately the same shape.
    */
   liveness?: ((pid: number) => Promise<ChildLiveness>) | undefined
   /**
@@ -2388,7 +2430,118 @@ export class Relay {
     }
   }
 
+  /**
+   * The precondition on a peer send: the target is not in the middle of a turn (#117).
+   *
+   * `/continue` has refused to send into a live turn since #43, because continuing SENDS and
+   * neither CLI accepts input mid-turn. That guard covers the OPERATOR's send. This is the same
+   * refusal for the relay's own, which is the one that was ending runs: four in a single
+   * operator session, three of them mid-task, every one of them reported as `transport_failed`.
+   *
+   * Read off the TARGET's own event stream, via `activeTurn` -- the same predicate the console's
+   * `/continue` guard now uses, so the two cannot answer this question differently again.
+   *
+   * Two things it is deliberately NOT. It is not the settle loop's `unsettled` flag: that flag
+   * describes a turn the hook has already ended whose transcript is merely lagging, which is a
+   * flush race and not a live turn, and it belongs to whichever participant the PREVIOUS
+   * exchange was with -- `#runLoop`'s dispatcher resolves a task to a seat and `launch` looks
+   * that participant up, so it is routinely somebody else. And it is not a CPU sample: that is
+   * a proxy for the wrong quantity and is wrong in both tails (see `activeTurn`).
+   *
+   * Read at the top of the turn rather than literally at the send: everything between here and
+   * `send` is synchronous (`worktreePaths`, `dirtyPaths`), so no turn can begin in the gap. The
+   * relay is the only thing that starts turns under `mediated` input ownership, which is what
+   * makes that guarantee hold rather than merely be likely.
+   *
+   * The relay WAITS where the console refuses. `/continue` is a human at a prompt who can retype
+   * in a second, so a refusal costs them nothing; a peer send is the run's only way forward, and
+   * a turn that is merely long is the commonest reason to be here. A wait that succeeds is
+   * recorded, because a run that quietly stalls for four minutes and then continues is
+   * indistinguishable from a run that hung.
+   */
+  async #awaitSendable(p: RelayParticipant): Promise<void> {
+    if (!activeTurn(p.events)) return
+
+    const bound = this.#opts.sendPreconditionMs ?? DEFAULT_SEND_PRECONDITION_MS
+    const startedAt = Date.now()
+    const eventsAtStart = p.events.length
+    let turn = activeTurn(p.events)
+    while (turn && Date.now() - startedAt < bound) {
+      await new Promise((r) => setTimeout(r, 100))
+      turn = activeTurn(p.events)
+    }
+    const busy = turn !== undefined
+    // Sub-second waits are reported in milliseconds. A bound set small -- a test, an operator
+    // who wants the run to give up quickly -- would otherwise report every wait as "0s", which
+    // reads as a wait that never happened.
+    const elapsed = Date.now() - startedAt
+    const waited = elapsed < 1000 ? `${elapsed}ms` : `${Math.round(elapsed / 1000)}s`
+    if (!busy) {
+      this.#record({
+        from: 'orchestrator',
+        fromRank: 'human',
+        to: [],
+        kind: 'note',
+        text:
+          `${p.id} was mid-turn, so the relay waited ${waited} for the turn to end before ` +
+          `sending; sending into a live turn is what ends a run with no hook after the send`,
+      })
+      return
+    }
+
+    // The bound expired. Everything below is the weaker outcome #117 allows for, and it is
+    // deliberately not a send: a send here is the failure this exists to prevent, and would
+    // trade a run ended honestly for a run ended misleadingly.
+    const evidence = [
+      `${p.id}: ${describeActiveTurn(turn!)}, and it had not ended after ${waited}`,
+      `${p.events.length - eventsAtStart} event(s) arrived from it while waiting`,
+    ]
+    // CPU as COLOUR, never as the decision. It is a proxy for the wrong quantity -- a child
+    // blocked in `sleep` inside a Bash call is mid-turn at 3% and a finished one twitches to 4%
+    // -- so it is worth a sentence to a human choosing what to do next and nothing at all to
+    // the branch above. Best effort besides: an adapter with no single child to name says
+    // nothing, and that is "cannot say" rather than "not running" (#43, #45).
+    const pid = p.session.childPid
+    if (pid !== undefined) {
+      try {
+        const sample = await (this.#opts.liveness ?? sampleLiveness)(pid)
+        evidence.push(`its child (pid ${pid}) reads ${readingOf(sample)}, which decided nothing here`)
+      } catch {
+        // A sampling failure is not worth turning into a second failure mode on a path that
+        // is already ending the run.
+      }
+    }
+    // Dealt with, not abandoned. The old ending left the child running: in the run #117 was
+    // reported from it went on to write 764 lines across six files, unwatched, into a tree the
+    // run record said nothing more about. Cancel first so the turn stops, then close, which
+    // reconciles the transcript before terminating and so keeps the best account of what it
+    // managed to do.
+    const dealt: string[] = []
+    try {
+      await p.session.cancel()
+      dealt.push('its live turn was cancelled')
+    } catch (e) {
+      dealt.push(`its live turn could not be cancelled (${e instanceof Error ? e.message : String(e)})`)
+    }
+    try {
+      await p.session.close('graceful')
+      dealt.push('and the session was closed')
+    } catch (e) {
+      dealt.push(`and the session could not be closed (${e instanceof Error ? e.message : String(e)})`)
+    }
+    const detail =
+      `${p.id} was still mid-turn after ${waited}, so nothing was sent to it: ` +
+      `${evidence.join('; ')}. ${dealt.join(', ')}.`
+    this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text: detail })
+    throw new PeerBusyError(p.id, detail)
+  }
+
   async #exchangeTurn(p: RelayParticipant, text: string): Promise<TurnResult> {
+    // Nothing is sent to a participant that is still working. First, because a send that lands
+    // mid-turn is not queued -- it ends the run (#117) -- and second, because everything below
+    // this line is bookkeeping for a turn that is about to start, and a turn that will never be
+    // sent must not be counted as one.
+    await this.#awaitSendable(p)
     // Counted here, where a turn actually starts, so the ceiling measures work done rather
     // than advisor turns entered -- one advisor turn can drive one turn or several.
     this.#turnsTaken += 1
@@ -2975,7 +3128,7 @@ export class Relay {
    * writing down because it points at a different mechanism: the loop is suspended at `await
    * deciding` above for the whole pause, so `#halt` cannot run again, and a watchdog `revision`
    * or replacement `turn_end` arriving meanwhile goes to `#trackSupersession`, which amends THE
-   * SAME `RunPause` in place (`src/relay/run.ts:517`). There was one pause, read twice. The
+   * SAME `RunPause` in place (`src/relay/run.ts:523`). There was one pause, read twice. The
    * evidence was not re-derived because nothing had re-derived it since it was captured -- which
    * is the same defect, reached by a shorter path than the report proposed.
    *
@@ -3090,7 +3243,7 @@ export class Relay {
       else if (!shouldWait && offered !== -1) pause.options.splice(offered, 1)
       // The status file is written from the LIVE pause object on any event, so an in-place
       // change reaches disk on the next one -- and a pause is precisely when nothing else is
-      // flowing. Same reasoning as `/wait` in the console (`src/repl/session.ts:1615`), and the
+      // flowing. Same reasoning as `/wait` in the console (`src/repl/session.ts:1642`), and the
       // reader who needs it most is the one polling from outside.
       this.#stream.emit({ type: 'liveness', pause })
       if (last) return stop()
@@ -3449,6 +3602,11 @@ export class Relay {
       // Ending here means the caller gets an outcome, the run-end event fires, and every
       // summary line is reachable on the abnormal path as well as the normal one.
       const detail = err instanceof Error ? err.message : String(err)
+      // The one throw that is NOT a transport failure. `#awaitSendable` refused to send into a
+      // live turn, which is a decision this loop made about pacing -- the transport was never
+      // asked to carry anything and never failed. Reporting it as a transport fault is the
+      // misdirection #117 is about, arriving one layer later.
+      if (err instanceof PeerBusyError) return this.#end('peer_busy', detail)
       return this.#end('transport_failed', detail)
     } finally {
       this.#looping = false

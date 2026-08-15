@@ -46,6 +46,22 @@ export type RunReason =
    */
   | 'transport_failed'
   /**
+   * A participant was still mid-turn when the relay had something to send it, and stayed that
+   * way for the whole precondition window (#117).
+   *
+   * Emphatically NOT `transport_failed`, which is the ending this replaces. Neither CLI
+   * accepts input mid-turn, so a peer send issued against a live turn produced
+   * `no UserPromptSubmit hook after send` -- a sentence that sends the operator to the
+   * provider and the CLI, when nothing about either was wrong. The distinction is the whole
+   * point of the reason: this says the run stopped because a child was busy and stayed busy,
+   * which is a fact about pacing, not about the transport.
+   *
+   * The child is dealt with before this is reported -- cancelled and closed -- because the
+   * cost of the old ending was not only the misdirection. It left a child mutating the
+   * working tree with nothing watching it.
+   */
+  | 'peer_busy'
+  /**
    * A configured ceiling was reached: wall clock or total turns.
    *
    * Its own reason rather than `budget`, which means the ADVISOR TURNS were exhausted. The
