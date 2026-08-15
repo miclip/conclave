@@ -299,6 +299,35 @@ export function answerableFolderTrustDialog(raw: string): boolean {
 }
 
 /**
+ * A modal that is DISMISSED rather than answered, and why the two are different.
+ *
+ * Claude Code can raise setup modals mid-session. The one observed (#120) is
+ * `/auto-mode-setup`, which appeared between an implementer's first and second turn and
+ * silently ate every subsequent keystroke -- the text was typed, never became a prompt, and
+ * the run died reporting a hook failure. It offers to scan shell history and other
+ * repositories, so unlike the folder-trust gate this is NOT conclave's to accept: consenting
+ * on an operator's behalf to reading their shell history is not implied by asking conclave to
+ * drive a coding session in one directory.
+ *
+ * Esc is therefore the only key sent. It declines, it is the affordance the dialog itself
+ * advertises, and it is inert if the match was wrong -- Esc at a live composer clears a draft
+ * that this adapter did not put there, where Enter would submit one.
+ *
+ * Required structurally rather than by phrase, for the reason `ANSWERABLE_SIGNATURE` gives:
+ * the title alone appears whenever a model narrates it or this file is on screen.
+ */
+const DISMISSABLE_MODAL = [
+  /auto-mode-setup|Set up auto mode for your environment/i,
+  /Esc to cancel/i,
+] as const
+
+/** Whether a setup modal conclave should decline is on screen. */
+export function dismissableModalVisible(raw: string): boolean {
+  const screen = plainScreen(raw).replace(/\s+/g, ' ')
+  return DISMISSABLE_MODAL.every((re) => re.test(screen))
+}
+
+/**
  * What was sent to clear the dialog, recorded rather than left on a screen to be grepped.
  *
  * The keystrokes are part of the record on purpose. "The dialog was answered" and "option 1
@@ -1113,6 +1142,24 @@ export class ClaudePtyHookAdapter implements AgentSession {
       new Promise<'late'>((r) => setTimeout(() => r('late'), SUBMIT_LANDED_MS)),
     ])
     if (early === 'late' && !(await this.#promptLanded(before, 0))) {
+      // A modal ate it. Checked before either repair, because both of them type at whatever has
+      // focus, and typing a prompt into a settings dialog is how a keystroke gets turned into a
+      // configuration change nobody asked for. Esc declines and returns focus to the composer.
+      if (dismissableModalVisible(this.#pty?.output ?? '')) {
+        await this.#input.cancel('Esc: declining a setup modal that was blocking input')
+        this.#emit({
+          type: 'error',
+          message:
+            'declined a Claude Code setup modal that was blocking input (Esc). It was not accepted: it offers to read shell history and other repositories, which is not conclave\'s to agree to.',
+          fatal: false,
+          seq: this.#next(),
+          at: Date.now(),
+          provisional: false,
+        })
+        await new Promise((r) => setTimeout(r, 500))
+        await this.#input.submit(message, 're-typed: a setup modal had swallowed the send')
+        if (await this.#promptLanded(before, SUBMIT_REPAIR_MS)) return await keyed
+      }
       await this.#input.submit('', 'bare Enter: prompt had not reached the transcript')
       if (!(await this.#promptLanded(before, SUBMIT_REPAIR_MS))) {
         // Now, and only now, re-type the whole message. The two checks above have established
