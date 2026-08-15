@@ -52,6 +52,7 @@ const WORKING: ChildLiveness = {
   // The pid alone, and no descendants: the child in the report was a CLI doing its own work,
   // and the tree aggregate #111 added is the same three numbers where nothing hangs off it.
   selfSamples: [3.3, 5.1, 3.5],
+  busiestDescendant: [],
   descendants: 0,
   workingDescendants: 0,
   idle: false,
@@ -64,6 +65,7 @@ const QUIET: ChildLiveness = {
   alive: true,
   samples: [0.2, 0.7, 0.2],
   selfSamples: [0.2, 0.7, 0.2],
+  busiestDescendant: [],
   descendants: 0,
   workingDescendants: 0,
   idle: true,

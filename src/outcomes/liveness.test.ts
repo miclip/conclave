@@ -8,6 +8,8 @@ import { strict as assert } from 'node:assert'
 import { spawn } from 'node:child_process'
 import test from 'node:test'
 import {
+  IDLE_CPU_PERCENT,
+  activitySamples,
   describeLiveness,
   parseProcessTable,
   readingOf,
@@ -88,23 +90,29 @@ test('the evidence line says what was measured, never what it means', async () =
  * pid: `selfSamples` mirrors it, which is exactly what `sampleLiveness` produces for a child
  * that has not shelled out to anything.
  */
-const reading = (
-  samples: number[],
-  over: Partial<ChildLiveness> = {},
-): ChildLiveness => ({
-  pid: 18255,
-  alive: true,
-  samples,
-  selfSamples: samples,
-  descendants: 0,
-  workingDescendants: 0,
-  idle: samples.every((c) => c < 3),
-  measuredAt: MEASURED_AT,
-  ...over,
-})
+const reading = (samples: number[], over: Partial<ChildLiveness> = {}): ChildLiveness => {
+  const base: ChildLiveness = {
+    pid: 18255,
+    alive: true,
+    samples,
+    selfSamples: samples,
+    busiestDescendant: [],
+    descendants: 0,
+    workingDescendants: 0,
+    idle: false,
+    measuredAt: MEASURED_AT,
+    ...over,
+  }
+  // `idle` derived by the rule `sampleLiveness` uses, unless a test states one deliberately. A
+  // fixture that declared its own would let the classifier and the flag disagree in exactly the
+  // place these tests exist to catch a disagreement.
+  return over.idle !== undefined
+    ? base
+    : { ...base, idle: base.alive && activitySamples(base).every((c) => c < IDLE_CPU_PERCENT) }
+}
 
 /** A child that is not there. Every field a gone reading has, in one place. */
-const GONE: ChildLiveness = reading([], { pid: 1, alive: false, idle: false })
+const GONE: ChildLiveness = reading([], { pid: 1, alive: false })
 
 test('the conservative idle rule is unchanged: one sample above the line is not idle', () => {
   // The asymmetry #83 explicitly keeps. A process between bursts of real work must not be
@@ -310,9 +318,9 @@ test('a row that does not parse is dropped rather than counted as zero', () => {
 /** A parent that has shelled out: quiet itself, with the work one level down. */
 const SHELLED_OUT: ChildLiveness = reading([98.5, 99.1, 98.8], {
   selfSamples: [0.4, 0.2, 0.3],
+  busiestDescendant: [98.1, 98.9, 98.5],
   descendants: 1,
   workingDescendants: 1,
-  idle: false,
 })
 
 test('the evidence leads with the descendant, and prints both halves of the measurement', () => {
@@ -393,4 +401,57 @@ test('a quiet tree that is still producing output says so instead of reading as 
   const quiet = describeLiveness(reading([0.1, 0.2, 0.1]), 0)
   assert.doesNotMatch(quiet, /Nothing in this tree is computing/)
   assert.match(quiet, /nothing at all since the prompt was sent/)
+})
+
+test('a wide tree of idle helpers is not work, however far the aggregate sums past the line', () => {
+  // The regression for the shape the first cut of #111 got wrong. `IDLE_CPU_PERCENT` is drawn
+  // against ONE process, so a sum over enough of them crosses it on process count alone: the
+  // widest all-idle tree measured on a real 498-process table was 2.4% over 19 descendants, and
+  // this is that tree with a few more helpers under it. Classifying on the sum reported
+  // `working` on the same line that says nothing in the tree is computing.
+  const helpers = reading([4.9, 4.8, 5.0], {
+    selfSamples: [0.1, 0.1, 0.1],
+    busiestDescendant: [0.3, 0.2, 0.3],
+    descendants: 24,
+    workingDescendants: 0,
+  })
+  assert.ok(
+    helpers.samples.every((c) => c >= IDLE_CPU_PERCENT),
+    'the premise: the aggregate is above the line throughout',
+  )
+  assert.deepEqual(activitySamples(helpers), [0.3, 0.2, 0.3], 'the busiest single process is what is judged')
+  assert.equal(readingOf(helpers), 'not_computing')
+  assert.equal(helpers.idle, true, 'a seat where nothing is computing is idle, whatever the sum is')
+
+  const line = describeLiveness(helpers, 2)
+  assert.match(line, /is alive but not computing/)
+  assert.doesNotMatch(line, /working/, 'nothing here is working, and the line must not say it is')
+  assert.equal(reportsChildOnCpu(line), false, '`wait` is not offered for a tree with nothing in it')
+  // And the sum is not hidden to make the reading tidy -- an operator who runs `ps` will see
+  // 4.9% and needs the line to have accounted for it.
+  assert.match(line, /The tree totals 5\.0% across 24 descendant\(s\) with no single process at 3%/)
+  assert.match(line, /process count, not work/)
+  // Once, like the generating case: this sentence names the descendants and what they were not
+  // doing, so the shorter note beside it would read as a second finding about the same fact.
+  assert.doesNotMatch(line, /exist and none of them is computing/)
+})
+
+test('one busy descendant is still working, which is the case the count-based rule must not lose', () => {
+  // The other side of the rule above: dropping the aggregate as a threshold must not drop #111
+  // itself. One process over the line anywhere in the tree is work.
+  assert.equal(readingOf(SHELLED_OUT), 'working')
+  assert.equal(SHELLED_OUT.idle, false)
+  assert.equal(reportsChildOnCpu(describeLiveness(SHELLED_OUT, 3)), true)
+
+  // And a descendant that crosses in only one snapshot of three is `mixed`, exactly as a parent
+  // that twitched once is -- which is why the busiest descendant is kept per snapshot rather
+  // than collapsed into the `workingDescendants` count.
+  const intermittent = reading([0.4, 44.0, 0.5], {
+    selfSamples: [0.2, 0.2, 0.3],
+    busiestDescendant: [0.2, 43.8, 0.2],
+    descendants: 4,
+    workingDescendants: 1,
+  })
+  assert.equal(readingOf(intermittent), 'mixed')
+  assert.match(describeLiveness(intermittent, 2), /2 below 3% and 1 at or above/)
 })

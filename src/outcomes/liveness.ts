@@ -93,10 +93,15 @@
  * pause, and said the descendant check was decisive twice where CPU alone was ambiguous.
  *
  * So a sample is now one `ps -Ao pid=,ppid=,%cpu=` snapshot of the WHOLE table, walked into the
- * descendant tree of the pid we were given. Four things come out of each snapshot: the parent's
- * own %cpu, the aggregate over parent and every descendant, how many descendants there were, and
- * how many of them were individually at or above the line. The reading is classified on the
- * AGGREGATE; the other three are kept because they are what the sentence has to say.
+ * descendant tree of the pid we were given. Five things come out of each snapshot: the parent's
+ * own %cpu, the busiest single descendant, the aggregate over parent and every descendant, how
+ * many descendants there were, and how many of them were individually at or above the line.
+ *
+ * The reading is classified on the first two -- `IDLE_CPU_PERCENT` is a per-PROCESS line, so the
+ * question it answers is "is any one process in this tree working", asked of the parent and of
+ * the busiest thing under it. The aggregate is reported and never thresholded; see
+ * `activitySamples`, which is where that argument is written down and where the case this rule
+ * gets wrong is named.
  *
  * Three things were checked rather than assumed, and they are the reason the shape is this one:
  *
@@ -111,13 +116,15 @@
  *     -- which is what the `pgrep` workaround approximates -- would call every one of those a
  *     working child. So a descendant counts as WORKING only by its own %cpu, and the count of
  *     descendants that exist is reported separately and never on its own.
- *   - AGGREGATION CAN DILUTE, AND IT FAILS SAFE. Summing a wide tree of idle helpers can approach
- *     the line without anything working: the widest all-idle tree on a 498-process table summed
- *     2.4% over 19 descendants, under `IDLE_CPU_PERCENT` but not by much, and a tree half again as
- *     wide would cross it. That is a real limit and it is left in, because summing can only ever
- *     turn a quiet tree into a reported busy one -- never a busy tree into a quiet one. The first
- *     mistake makes the tool wait; the second is #43. The count of individually-working
- *     descendants is printed beside the aggregate so a diluted reading is visible as one.
+ *   - AGGREGATION DILUTES, AND IT IS NOT A THRESHOLD. The widest all-idle tree on a 498-process
+ *     table summed 2.4% over 19 descendants, with nothing in it above 3%. That is under the line
+ *     and not by much: a tree half again as wide crosses it on process count alone, and the first
+ *     shape of this change classified on the sum, so it would have reported `working` on the same
+ *     line that says no descendant is computing. A reading cannot contradict itself in the
+ *     sentence it prints. So the sum is reported as SCALE and the classification asks the
+ *     per-process question the threshold was calibrated for -- see `activitySamples`. Where the
+ *     sum crosses the line with nothing under it working, the line says so in those words rather
+ *     than leaving an operator to reconcile two numbers.
  *
  * `-Ao` and not the `-axo` the report used. `-A` is POSIX "select all processes" and means the
  * same thing on both platforms CI runs (macOS, Ubuntu). Linux's `-a` means "all except session
@@ -199,11 +206,11 @@ export interface ChildLiveness {
   /**
    * CPU percentages, in sample order. Empty when the process was gone throughout.
    *
-   * The AGGREGATE over the pid and every descendant of it, since #111 -- what the reading is
-   * classified on, and what every existing consumer of this field was already treating as "how
-   * busy is this seat". The pid's own share is `selfSamples`, kept beside it rather than in place
-   * of it: a `go test` leaves the parent at 0.2% while a grandchild takes a core, and the number
-   * that answers "is this seat working" is the one that includes the grandchild.
+   * The AGGREGATE over the pid and every descendant of it, since #111 -- how much of the machine
+   * this seat is using, which is what every existing consumer of this field was reading it as.
+   * REPORTED, NOT THRESHOLDED: `IDLE_CPU_PERCENT` is a per-process line and a sum over a hundred
+   * processes crosses it on process count alone. What the reading is classified on is
+   * `activitySamples` below. The pid's own share is `selfSamples`.
    */
   samples: number[]
   /**
@@ -215,6 +222,15 @@ export interface ChildLiveness {
    * table needs to know which.
    */
   selfSamples: number[]
+  /**
+   * The highest single descendant %cpu in each snapshot. Zero where there were none.
+   *
+   * The other half of what the reading is classified on, and the reason it is a per-snapshot
+   * ARRAY rather than the `workingDescendants` count below: the three-reading taxonomy is
+   * per-sample, so a compiler that appears in one snapshot of three has to be able to come out
+   * `mixed`, exactly as a parent that twitched once does.
+   */
+  busiestDescendant: number[]
   /**
    * How many descendants were seen, at most, across the snapshots.
    *
@@ -237,8 +253,10 @@ export interface ChildLiveness {
    * "Not computing", never "dead" — a process blocked on a socket reads the same way, and
    * that is exactly what a provider that stopped answering looks like from out here.
    *
-   * Over the tree, since #111, and that is the conservative direction: a parent idling in front
-   * of a busy grandchild is no longer idle here, and nothing that was idle before became busy.
+   * Over `activitySamples` since #111, which is where the change lands: a parent idling in front
+   * of a busy grandchild is NOT idle any more, and that is the fix -- a reading that was idle can
+   * now be busy. What cannot happen is the reverse, because activity is never below the pid's own
+   * %cpu, which is the only thing this used to look at.
    */
   idle: boolean
   /**
@@ -282,8 +300,10 @@ export interface ProcessRow {
 export interface TreeSnapshot {
   /** The root's own %cpu. */
   self: number
-  /** The root plus every descendant. What the reading is classified on. */
+  /** The root plus every descendant. Reported as scale, never thresholded. */
   tree: number
+  /** The highest single descendant, or 0 with no descendants. Half of the classification. */
+  busiest: number
   /** How many descendants existed, at any depth. */
   descendants: number
   /** How many of those were individually at or above `IDLE_CPU_PERCENT`. */
@@ -335,6 +355,7 @@ export function treeSnapshotOf(rows: ProcessRow[], pid: number): TreeSnapshot | 
   const root = byPid.get(pid)
   if (!root) return undefined
   let tree = root.cpu
+  let busiest = 0
   let descendants = 0
   let working = 0
   const seen = new Set<number>([pid])
@@ -347,11 +368,13 @@ export function treeSnapshotOf(rows: ProcessRow[], pid: number): TreeSnapshot | 
     if (!row) continue
     descendants++
     tree += row.cpu
+    busiest = Math.max(busiest, row.cpu)
     if (row.cpu >= IDLE_CPU_PERCENT) working++
     queue.push(...(children.get(next) ?? []))
   }
   return {
     self: root.cpu,
+    busiest,
     // Floating point, three hundred times: 0.1 + 0.2 in the tree of a real machine leaves the
     // aggregate with a tail of digits that would print as 98.30000000000001 if anything ever
     // printed it unrounded. One decimal is what `ps` gave us in the first place.
@@ -403,7 +426,7 @@ function selfOnlySnapshot(pid: number): TreeSnapshot | undefined {
     if (!out) return undefined
     const n = Number(out.split('\n')[0]?.trim())
     if (!Number.isFinite(n)) return undefined
-    return { self: n, tree: n, descendants: 0, working: 0 }
+    return { self: n, tree: n, busiest: 0, descendants: 0, working: 0 }
   } catch {
     // A dead process, or a platform whose `ps` does not speak this either. Both mean "no
     // reading", and neither is worth failing a pause over.
@@ -436,6 +459,7 @@ export async function sampleLiveness(
   const everyMs = opts.everyMs ?? 400
   const samples: number[] = []
   const selfSamples: number[] = []
+  const busiestDescendant: number[] = []
   let descendants = 0
   let workingDescendants = 0
   for (let i = 0; i < count; i++) {
@@ -443,6 +467,7 @@ export async function sampleLiveness(
     if (snap) {
       samples.push(snap.tree)
       selfSamples.push(snap.self)
+      busiestDescendant.push(snap.busiest)
       // The most any snapshot saw, not the last. A build that spawns and reaps a compiler
       // between two readings did have a working descendant, and the whole reason there are
       // three readings is that one of them can miss what the others catch.
@@ -457,9 +482,13 @@ export async function sampleLiveness(
     alive,
     samples,
     selfSamples,
+    busiestDescendant,
     descendants,
     workingDescendants,
-    idle: alive && samples.every((c) => c < IDLE_CPU_PERCENT),
+    // Over ACTIVITY, not over the aggregate: `IDLE_CPU_PERCENT` is a per-process line, and a
+    // hundred idle helpers summing past it would make a sleeping seat read busy on process
+    // count. See `activitySamples`.
+    idle: alive && activitySamples({ samples, selfSamples, busiestDescendant }).every((c) => c < IDLE_CPU_PERCENT),
     // After the loop, not before it: the reading is as old as its LAST sample, and stamping it
     // at entry would date a `{samples: 3, everyMs: 400}` reading almost a second early.
     measuredAt: Date.now(),
@@ -477,20 +506,53 @@ export async function sampleLiveness(
 export type LivenessReading = 'gone' | 'not_computing' | 'working' | 'mixed'
 
 /**
+ * The busiest single process in the tree, per snapshot. What the reading is classified on.
+ *
+ * `IDLE_CPU_PERCENT` is a line drawn against ONE process -- an idle Claude Code TUI at ~1%, a
+ * working one at 12-17%. Comparing a sum of many processes against it asks a different question
+ * with the same number, and the answer scales with how many descendants a seat happens to have:
+ * the widest all-idle tree measured on a 498-process table summed 2.4% over 19 descendants, so a
+ * tree half again as wide reads `working` while the same line says nothing in it is computing.
+ * That is not a conservative failure, it is a self-contradicting one, and it would have been
+ * loudest on exactly the long-lived MCP-heavy seats this project runs.
+ *
+ * So activity is the maximum over the pid and its busiest descendant, which is the same question
+ * `IDLE_CPU_PERCENT` was calibrated for, asked of every process in the tree instead of one. The
+ * aggregate stays on the record and in the prose as SCALE -- how much machine this seat is using
+ * -- where no threshold is applied to it.
+ *
+ * The cost of that choice, named rather than discovered: genuinely parallel work spread so thin
+ * that no single process reaches 3% now reads `not_computing`. Four compilers at 2% each is not
+ * a shape anyone has observed -- real build steps saturate -- but it is the case this rule gets
+ * wrong, and it gets it wrong in the #43 direction, so it is written here rather than left for
+ * someone to find. Nothing else changes: a seat with one busy descendant, which is what #111 was
+ * raised about, classifies identically either way.
+ */
+export function activitySamples(
+  l: Pick<ChildLiveness, 'samples' | 'selfSamples' | 'busiestDescendant'>,
+): number[] {
+  // Indexed against `samples` because that is the array whose length says how many snapshots
+  // succeeded; the other two are pushed with it. A reading hand-built without them falls back to
+  // the aggregate, which is what it was before there was anything else to fall back to.
+  return l.samples.map((tree, i) => Math.max(l.selfSamples[i] ?? tree, l.busiestDescendant[i] ?? 0))
+}
+
+/**
  * Which of the three a reading is.
  *
- * Restated from `samples` rather than read off `idle`, so the reading cannot contradict the
+ * Restated from the samples rather than read off `idle`, so the reading cannot contradict the
  * numbers printed beside it. It is the same rule: `not_computing` is every sample below the
  * line, which is exactly what `sampleLiveness` set `idle` on.
  *
- * Over the tree, because `samples` is the tree (#111). A parent at 0.2% in front of a `go test`
- * at 99% is `working`, which is the entire point: the classification is of the seat, not of the
- * one process the orchestrator happens to hold a handle to.
+ * Over `activitySamples` since #111, so a parent at 0.2% in front of a `go test` at 99% is
+ * `working` — the classification is of the seat, not of the one process the orchestrator happens
+ * to hold a handle to, and not of a sum whose size depends on how many helpers are asleep.
  */
 export function readingOf(l: ChildLiveness): LivenessReading {
   if (!l.alive) return 'gone'
-  if (l.samples.every((c) => c < IDLE_CPU_PERCENT)) return 'not_computing'
-  if (l.samples.every((c) => c >= IDLE_CPU_PERCENT)) return 'working'
+  const activity = activitySamples(l)
+  if (activity.every((c) => c < IDLE_CPU_PERCENT)) return 'not_computing'
+  if (activity.every((c) => c >= IDLE_CPU_PERCENT)) return 'working'
   return 'mixed'
 }
 
@@ -609,6 +671,16 @@ export function describeLiveness(
         ? `${l.workingDescendants} of ${l.descendants} descendant(s) had CPU too. `
         : `${l.descendants} descendant(s) exist and none of them is computing — a descendant is ` +
           `not evidence of work, only a place work could be. `
+  // The sum crossing the line while nothing under it is working. Said out loud, because the
+  // reader can see both numbers and the line would otherwise look like it had contradicted
+  // itself -- and because it is a real fact about the seat: a lot of processes, none of them
+  // doing anything, which is what a long-lived CLI with a shelf of MCP helpers looks like.
+  const diluted =
+    l.samples.some((c) => c >= IDLE_CPU_PERCENT) && activitySamples(l).every((c) => c < IDLE_CPU_PERCENT)
+      ? `The tree totals ${Math.max(...l.samples).toFixed(1)}% across ${l.descendants} descendant(s) ` +
+        `with no single process at ${IDLE_CPU_PERCENT}% — that is process count, not work, and it ` +
+        `is not read as activity. `
+      : ''
   if (reading === 'not_computing') {
     // Quiet everywhere in the tree WITH output still arriving. The honest reading of that is not
     // "idle": it is a turn whose work is not happening on this machine, which is exactly what a
@@ -627,7 +699,8 @@ export function describeLiveness(
       // names the descendants and what they were not doing, and saying it twice reads as two
       // findings rather than one.
       head(PHRASE.not_computing) +
-      (generatingElsewhere ? '' : descendantNote) +
+      diluted +
+      (generatingElsewhere || diluted ? '' : descendantNote) +
       `Idle is not dead: a CLI waiting on a provider that stopped answering looks like ` +
       `this${generatingElsewhere}${tail}`
     )
@@ -639,8 +712,12 @@ export function describeLiveness(
       `Continuing sends into a live turn, which neither CLI accepts${tail}`
     )
   }
-  const low = l.samples.filter((c) => c < IDLE_CPU_PERCENT).length
-  const high = l.samples.length - low
+  // Over ACTIVITY, not over the aggregate: this sentence explains the reading, so counting a
+  // different set of numbers than `readingOf` did would print a split that does not add up to
+  // the phrase in front of it.
+  const activity = activitySamples(l)
+  const low = activity.filter((c) => c < IDLE_CPU_PERCENT).length
+  const high = activity.length - low
   // The output half of the judgement. Near-silence does not make a mixed sample idle -- it
   // makes "still working" the less likely of the two readings, and says so in those terms.
   const output =

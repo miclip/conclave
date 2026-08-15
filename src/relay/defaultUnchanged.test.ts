@@ -998,14 +998,22 @@ const DECLARED: Record<string, string> = {
     'omit the one process this file exists to measure and report it as gone. If no table can be ' +
     'read at all the sample falls back to the old per-pid reading rather than calling a live child ' +
     'gone on the strength of a `ps` that never ran. ' +
-    'THE STATUS DOCUMENT IS THREE KEYS WIDER, which is why this is declared rather than assumed ' +
-    'invisible: ChildLiveness gains selfSamples, descendants and workingDescendants, and it is ' +
-    'carried by pause.liveness.sample and pause.refusal.liveness on a DEFAULT run at N=1. `samples` ' +
-    'keeps its name and becomes the TREE AGGREGATE — the number every consumer was already reading ' +
-    'as "how busy is this seat" — with the pid’s own share moved to selfSamples beside it. ' +
-    'readingOf and `idle` are computed from the aggregate, which moves only in the conservative ' +
-    'direction: a parent idling in front of a busy grandchild is no longer idle, and nothing that ' +
-    'was idle before became busy. ' +
+    'THE STATUS DOCUMENT IS FOUR KEYS WIDER, which is why this is declared rather than assumed ' +
+    'invisible: ChildLiveness gains selfSamples, busiestDescendant, descendants and ' +
+    'workingDescendants, and it is carried by pause.liveness.sample and pause.refusal.liveness on ' +
+    'a DEFAULT run at N=1. `samples` keeps its name and becomes the TREE AGGREGATE — the number ' +
+    'every consumer was already reading as "how busy is this seat" — with the pid’s own share ' +
+    'moved to selfSamples beside it. THE AGGREGATE IS REPORTED AND NEVER THRESHOLDED: readingOf ' +
+    'and `idle` are computed from activitySamples, the per-snapshot maximum of the pid and its ' +
+    'busiest single descendant, because IDLE_CPU_PERCENT is a line calibrated against ONE process ' +
+    'and a sum over many crosses it on process count alone. (The first cut of this change did ' +
+    'classify on the sum, and the sentence saying so is repaired rather than left standing, on ' +
+    'this table’s own rule: it would have reported `working` on the same line that says no ' +
+    'descendant is computing. See the dilution measurement below.) WHAT MOVES, stated in both ' +
+    'directions rather than as a blanket "nothing became busy", which was wrong: a reading that ' +
+    'was idle CAN now be busy — a parent idling in front of a busy grandchild is the fix — and a ' +
+    'reading that was busy cannot become idle, because activity is never below the pid’s own ' +
+    '%cpu, which is the only thing this ever looked at before. ' +
     'THE EVIDENCE PROSE GAINS A HEAD. When the pid is quiet and a descendant is not, the line reads ' +
     '`child pid N quiet, 1 descendant working (cpu 0.4%, 0.2%, 0.3% self; 98.5%, 99.1%, 98.8% ' +
     'tree)` — the fact the `pgrep` workaround was reaching for, in the position "is barely running" ' +
@@ -1025,12 +1033,16 @@ const DECLARED: Record<string, string> = {
     'THE COST IS BOUNDED AND WAS MEASURED, not assumed: ~500 processes, 0.01-0.02s per snapshot ' +
     '(the reporter measured ~0.03s for 506), three snapshots per reading, and 180 of them over the ' +
     'thirty minutes a pause can refresh for — a few seconds of `ps` for an entire held pause. ' +
-    'ONE LIMIT IS ACCEPTED AND WRITTEN DOWN: summing a wide tree can approach the line with nothing ' +
-    'working. The widest all-idle tree on a 498-process table summed 2.4% over 19 descendants, ' +
-    'under IDLE_CPU_PERCENT but not by much. It is left in because it fails safe — summing can turn ' +
-    'a quiet tree into a reported busy one, never a busy tree into a quiet one, and the second is ' +
-    'the #43 mistake — and the count of individually-working descendants is printed beside the ' +
-    'aggregate so a diluted reading is visible as one. ' +
+    'THE DILUTION MEASUREMENT, which is why the sum is not the classifier: the widest all-idle tree ' +
+    'on a 498-process table summed 2.4% over 19 descendants with nothing in it above 3%. A tree ' +
+    'half again as wide crosses the line on count alone, so a sum-based rule reads `working` about ' +
+    'a seat where nothing is running. Where the sum does cross with nothing under it working, the ' +
+    'evidence says so in those words — "the tree totals 5.0% across 24 descendant(s) with no single ' +
+    'process at 3% — that is process count, not work" — so the number an operator would see in `ps` ' +
+    'is accounted for rather than hidden to keep the reading tidy. ONE COST IS ACCEPTED AND NAMED: ' +
+    'genuinely parallel work spread so thin that no single process reaches 3% now reads ' +
+    'not_computing, which is the #43 direction. No observed workload has that shape — real build ' +
+    'steps saturate — and it is written into activitySamples rather than left to be discovered. ' +
     'NOTHING BECOMES LESS CONSERVATIVE and no flag is added. #124 IS NOT ADDRESSED HERE and that is ' +
     'deliberate: since #117 the /continue refusal is decided by activeTurn in src/repl/session.ts, ' +
     'not by this reading, so the refusal-on-thin-evidence it describes no longer rests on a mixed ' +
