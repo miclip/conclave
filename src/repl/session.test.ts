@@ -2900,10 +2900,14 @@ test('the refusal #124 reports is unreachable: the blip it named is never sample
   // evidence was poor and could have taken more; this guard took none, because CPU is not what
   // it reads. There is no thin reading here to widen.
   assert.equal(sampled, false, 'no turn open is no refusal, so no sample is taken to describe one')
-  // And the reported sentence is nowhere on the screen. Secondary to the two above -- an
-  // absence a wrap could fake -- but it is the operator-visible half of the claim.
-  assert.doesNotMatch(out.text(), /barely running/, 'the phrase the report quotes is not printed')
-  assert.doesNotMatch(out.text(), /samples disagree/)
+  // The two assertions above are the whole claim. There were two more here, greping the SCREEN
+  // for the phrases the report quotes -- and they were the defect #109 names, in a file that
+  // states the rule: a negative assertion against rendered output is a content claim read off
+  // the wrong surface. They failed on macOS CI and passed on Linux, because `relay.ts` renders
+  // liveness prose too (its pause evidence, #101's refresh) and the screen carries both. The
+  // assertion could not tell whose sentence it had found, so it was answering a question about
+  // the CONSOLE GUARD with text produced by the relay. `sampled === false` says what they meant
+  // to say, about the right component, and cannot be faked by a wrap or by a neighbour.
 
   input.end()
   await running
