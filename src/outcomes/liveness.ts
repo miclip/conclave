@@ -57,9 +57,12 @@
  * order to go and look at the right thing.
  *
  * The conservative half is untouched everywhere it decides anything. A mixed reading still
- * refuses `/continue` and still offers `wait`, because continuing SENDS and a burst may be a
- * turn. What changed is that the operator is told what was actually measured before they
- * choose, instead of being handed a verdict the numbers do not support.
+ * offers `wait`, because a burst may be a turn and waiting is the non-destructive option. It no
+ * longer REFUSES `/continue`: that sentence stood here until #117 moved the send decision onto
+ * the turn itself, and it is repaired rather than deleted because the #124 note below is about
+ * what the reading does and does not decide now. What changed in #83 is that the operator is
+ * told what was actually measured before they choose, instead of being handed a verdict the
+ * numbers do not support.
  *
  * ## A measurement without a time is not a measurement
  *
@@ -136,6 +139,40 @@
  * `ps` does not accept this, a sandbox that refuses it -- the sample falls back to the per-pid
  * reading this replaced, rather than reporting a live child as gone on the strength of a `ps`
  * that never ran.
+ *
+ * ## Widening a thin reading, and why it decides nothing either (#124)
+ *
+ * #124 reports a `/continue` refused on `cpu 0.1%, 3.6%, 0.8%` by a message that names two
+ * weaknesses in its own evidence -- no output count was taken with this reading, and the samples
+ * disagree -- and then refuses on exactly that evidence. It asks for the repair that shape
+ * invites: a guard that can say "I did not take an output count" can take one, so notice the poor
+ * reading, widen the sample, and refuse only if it is still ambiguous afterwards.
+ *
+ * Two facts stand in front of that, and both are pinned by tests rather than argued here.
+ *
+ *   - THE REFUSAL IS UNREACHABLE. Since #117 the console's `/continue` guard refuses on
+ *     `activeTurn` and samples CPU only AFTER it has decided to refuse, as colour that decides
+ *     nothing. The run in the report had a closed turn, so today it resumes -- and nothing is
+ *     sampled at all, so there is no thin reading for anything to notice. Held with the report's
+ *     own numbers in `src/repl/session.test.ts`.
+ *   - WIDENING WOULD NOT HAVE LIFTED IT. The operator's own fifteen seconds read
+ *     `0.0 0.0 0.0 0.1 0.0`. Added to the three that were refused on, that is eight samples with
+ *     one of them at 3.6%, and `not_computing` is EVERY sample below the line -- so the widened
+ *     reading is `mixed`, exactly as the narrow one was, and the widened sentence says `7 below
+ *     3% and 1 at or above` instead of `2 and 1`. More evidence, same answer.
+ *
+ * The only widening that changes the answer is one that DISCARDS the samples already in hand and
+ * classifies the fresh ones alone. That is not a wider sample, it is a different one, and it is
+ * the #83 asymmetry run backwards: a process BETWEEN bursts of real work reads exactly like a
+ * finished one that twitched, and calling the first idle is what cost a run. So a re-reading may
+ * age out an old measurement -- which is what `LIVENESS_REFRESH_EVERY_MS` already does, on the
+ * clock rather than on a hunch that the last reading was disappointing -- and it may not launder
+ * a sample that saw CPU out of the record.
+ *
+ * What survives of #124's general shape is that a caveat should reach its reader, and here it
+ * does: the split and the missing output count are both printed, and the output count is an
+ * INPUT to the mixed sentence rather than a clause beside it (see #83 above). What no caveat
+ * here does any longer is decide a send, because nothing in this file does.
  */
 
 import { execFileSync } from 'node:child_process'

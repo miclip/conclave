@@ -248,9 +248,10 @@ test('the evidence a paused run publishes changes when the child does', async (t
   )
 
   // Nothing about a refresh DECIDES anything. The run is still paused, on the same pause object,
-  // and no refreshed reading resumed it. Continuing is the console's `/continue`, which samples
-  // the child itself at the moment of the decision and refuses on anything not clearly idle
-  // (#43) -- it does not read any of this. See src/repl/session.test.ts.
+  // and no refreshed reading resumed it. Continuing is the console's `/continue`, which reads the
+  // child's own turn at the moment of the decision and refuses only while one is open (#117) --
+  // it does not read any of this, and it has not refused on CPU since. (It did when this comment
+  // was written, and that is the sentence #124 was reported against.) See src/repl/session.test.ts.
   assert.equal(run.state, 'paused')
   assert.equal(run.pause, pause, 'refreshing amends the pause, it does not raise another')
 

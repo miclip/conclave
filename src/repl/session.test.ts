@@ -773,6 +773,24 @@ const MIXED_LIVENESS: ChildLiveness = {
   idle: false,
   measuredAt: Date.UTC(2026, 7, 13, 21, 4, 11),
 }
+/**
+ * The reading #124 was refused on, verbatim: `cpu 0.1%, 3.6%, 0.8%`.
+ *
+ * The same shape as the #83 reading above and a different report, kept separate because the
+ * issue is about THESE numbers — a child that was idle throughout, held paused for over an hour
+ * on one 3.6% blip in a three-sample window.
+ */
+const BLIP_LIVENESS: ChildLiveness = {
+  pid: 1,
+  alive: true,
+  samples: [0.1, 3.6, 0.8],
+  selfSamples: [0.1, 3.6, 0.8],
+  busiestDescendant: [],
+  descendants: 0,
+  workingDescendants: 0,
+  idle: false,
+  measuredAt: Date.UTC(2026, 7, 13, 21, 4, 11),
+}
 
 async function untilText(what: string, text: () => string, re: RegExp, ms = 5000): Promise<void> {
   const deadline = Date.now() + ms
@@ -2822,6 +2840,70 @@ test('a mixed CPU reading with no turn open no longer refuses the continue', asy
   // continuing` satisfies a console `doesNotMatch` whether or not the refusal happened.
   assert.equal(resumed.session.status.pause, undefined, 'a mixed reading must not hold a finished turn')
   assert.equal(sampled, false, 'with no turn open there is nothing to describe, so nothing is sampled')
+
+  input.end()
+  await running
+})
+
+test('the refusal #124 reports is unreachable: the blip it named is never sampled', async () => {
+  // #124 asks a refusal that admits its own evidence is thin -- "no output count was taken with
+  // this reading", "the samples disagree" -- to widen the sample before refusing. The refusal it
+  // asks about cannot happen any more. Since #117 this guard refuses on `activeTurn`, and it
+  // samples CPU only after it has already decided to refuse, as colour. The reported run's turn
+  // had ENDED, so there is no refusal, and therefore no reading taken, thin or otherwise.
+  //
+  // Distinct from the #83 test above, which proves the same path with different numbers. This
+  // one is the report's own reading, so the issue's exact claim has an exact falsifier.
+  const dir = repo()
+  const impl = slow('impl', 'claude', ['ack', 'Did it, slowly.', 'And again.'])
+  impl.endTurn = { index: 1, verdict: TIMED_OUT }
+  impl.childPid = 1
+  const out = collect()
+  const input = new PassThrough()
+  let sampled = false
+  const running = runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'claude',
+    rounds: 6,
+    checks: [],
+    registry: registryOf({
+      codex: [slow('advisor', 'codex', ['Do it.', 'More.', 'DONE'], 300)],
+      claude: [impl],
+    }),
+    liveness: async () => {
+      sampled = true
+      return BLIP_LIVENESS
+    },
+    input,
+    output: out.stream,
+  })
+  const until = async (pred: (f: ReturnType<typeof resolveSession>) => boolean, ms = 10_000) => {
+    const t = Date.now()
+    while (Date.now() - t < ms) {
+      const f = resolveSession(dir)
+      if (pred(f)) return f
+      await new Promise((r) => setTimeout(r, 50))
+    }
+    throw new Error(`timed out; console said:\n${out.text().slice(-700)}`)
+  }
+
+  await until((f) => 'session' in f && f.session.status.state === 'paused')
+  input.write('/continue\n')
+  const resumed = await until((f) => 'session' in f && f.session.status.state === 'running')
+  assert.ok('session' in resumed)
+  // Read off the RECORD, which is where a refusal is written. The pause is gone, so nothing
+  // refused; a screen assertion could be satisfied by a line wrap instead.
+  assert.equal(resumed.session.status.pause, undefined, 'a 3.6% blip must not hold a finished turn')
+  // The load-bearing half of the falsifier. The issue's premise is a guard that noticed its
+  // evidence was poor and could have taken more; this guard took none, because CPU is not what
+  // it reads. There is no thin reading here to widen.
+  assert.equal(sampled, false, 'no turn open is no refusal, so no sample is taken to describe one')
+  // And the reported sentence is nowhere on the screen. Secondary to the two above -- an
+  // absence a wrap could fake -- but it is the operator-visible half of the claim.
+  assert.doesNotMatch(out.text(), /barely running/, 'the phrase the report quotes is not printed')
+  assert.doesNotMatch(out.text(), /samples disagree/)
 
   input.end()
   await running

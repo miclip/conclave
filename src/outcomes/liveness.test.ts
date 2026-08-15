@@ -167,6 +167,37 @@ test('no output count is said to be no output count, and not to be zero', () => 
   assert.doesNotMatch(line, /likelier reading/, 'no count is no basis for leaning either way')
 })
 
+test('widening the sample from #124 does not resolve it: eight samples say what three said', () => {
+  // #124 asks a refusal that admits its evidence is thin to take another reading before
+  // refusing. Two facts stand in front of that. The FIRST is in src/repl/session.test.ts --
+  // since #117 a mixed reading with no turn open never reaches a refusal, so there is nothing
+  // to widen. This is the SECOND: widening would not have changed the answer if it had.
+  //
+  // Both sets of numbers are the report's own. The refusal was written on 0.1%, 3.6%, 0.8%;
+  // the operator then watched the same child for fifteen seconds and read 0.0 0.0 0.0 0.1 0.0,
+  // with no descendants beyond a persistent MCP server.
+  const REFUSED = [0.1, 3.6, 0.8]
+  const OPERATOR = [0.0, 0.0, 0.0, 0.1, 0.0]
+  assert.equal(readingOf(reading(REFUSED)), 'mixed', 'one sample at or above the line is not idle')
+  // The widening the issue asks for: another reading, ADDED to the one already in hand. The
+  // 3.6% is still in the set and `not_computing` is every sample below the line, so eight
+  // samples classify exactly as three did. The precision bought cannot be spent.
+  const widened = reading([...REFUSED, ...OPERATOR])
+  assert.equal(readingOf(widened), 'mixed')
+  // Same sentence, longer split -- which is what makes this a durable falsifier rather than an
+  // argument: the only thing widening changes is the count in the prose.
+  const line = describeLiveness(widened, undefined)
+  assert.match(line, /is barely running/)
+  assert.match(line, /7 below 3% and 1 at or above/)
+  assert.match(line, /cpu 0\.1%, 3\.6%, 0\.8%, 0\.0%, 0\.0%, 0\.0%, 0\.1%, 0\.0%/)
+  // The one route that WOULD have changed the answer, named rather than left for someone to
+  // find: a second reading that REPLACES the first reads `not_computing`. That is a discard,
+  // not a widening, and discarding the sample that saw CPU is the #83 asymmetry run backwards
+  // -- a process between bursts of real work is indistinguishable from a finished one that
+  // twitched, and calling the first idle is the mistake that costs a run.
+  assert.equal(readingOf(reading(OPERATOR)), 'not_computing')
+})
+
 test('every reading says when it was measured, including the one that found nothing', () => {
   // The half of #101 that stands on its own. An operator can discount a measurement they can
   // see the age of; they cannot discount one that looks current, and every line in this file
