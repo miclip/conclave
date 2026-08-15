@@ -14,7 +14,7 @@ import { assess, ComplaintLedger, detectComplaint, detectDegradation } from './d
 function revision(declared: boolean): AgentEvent {
   return {
     type: 'revision',
-    reason: 'compaction',
+    reason: declared ? 'compaction' : 'rewrite',
     replaces: [1, 2],
     provenance: [
       { source: 'transcript', detail: 'transcript prefix changed; history was rewritten' },
@@ -38,12 +38,33 @@ test('a risen compaction generation is degradation', () => {
   assert.ok(d.evidence[0]!.includes('0 → 1'))
 })
 
-test('an undeclared rewrite still counts, and says so', () => {
-  // The transcript may be rewritten without a marker either CLI documents. Requiring the
-  // marker would make the signal depend on vendor labelling rather than on what happened.
-  const d = detectDegradation({ baselineGeneration: 0, currentGeneration: 0, events: [revision(false)] })
+test('an undeclared rewrite is not degradation (#122)', () => {
+  // This test asserted the opposite until #122: an unexplained rewrite was counted as a
+  // compaction, on the reasoning that requiring a marker would make the signal depend on
+  // vendor labelling. The measurement went the other way. Thirteen child transcripts across
+  // four runs held zero compaction markers while nine rotation candidates were raised off the
+  // digest, and their end state had every UUID-bearing record present and in order. Rotation
+  // is premised on a seat having LOST something; a moved byte is not evidence of that. What
+  // the bytes did between polls is decided upstream, per poll, by comparing the records
+  // themselves -- see `#reserialized` in transcript/reconcile.ts.
+  const d = detectDegradation({
+    baselineGeneration: 0,
+    currentGeneration: 0,
+    events: [revision(false)],
+  })
+  assert.equal(d.degraded, false)
+  assert.deepEqual(d.evidence, [])
+})
+
+test('a declared compaction is degradation, from the event channel alone', () => {
+  // The generation may not have been snapshotted yet; the live event carries it.
+  const d = detectDegradation({
+    baselineGeneration: 0,
+    currentGeneration: 0,
+    events: [revision(true)],
+  })
   assert.equal(d.degraded, true)
-  assert.ok(d.evidence.some((e) => e.includes('no compaction marker recognised')))
+  assert.ok(d.evidence.some((e) => e.includes('declares a compaction')))
 })
 
 test('discussing compaction as a design topic is not a complaint about oneself', () => {
