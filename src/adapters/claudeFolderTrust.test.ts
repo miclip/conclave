@@ -18,6 +18,7 @@ import { strict as assert } from 'node:assert'
 import test from 'node:test'
 import {
   acceptFolderTrustDialog,
+  dismissableModalVisible,
   answerableFolderTrustDialog,
   bootFailureMessage,
   folderTrustDialogVisible,
@@ -124,7 +125,7 @@ const FAST = { settleMs: 0, now: () => 1_700_000_000_000 }
 test('the dialog is detected only once the escapes are stripped', () => {
   assert.doesNotMatch(DIALOG, /trust this folder/, 'not contiguous in the raw buffer')
   assert.equal(folderTrustDialogVisible(DIALOG), true)
-  assert.equal(answerableFolderTrustDialog(DIALOG), true)
+  assert.equal(answerableFolderTrustDialog(TRUST_DIALOG_WITH_AFFORDANCE), true)
   assert.equal(folderTrustDialogVisible(COMPOSER), false)
   assert.equal(answerableFolderTrustDialog(COMPOSER), false)
 })
@@ -252,4 +253,63 @@ test('the pre-existing diagnostics survive, including the unanswered-dialog one'
   const slow = bootFailureMessage({ screen: COMPOSER, cwd: '/Users/x/repo', alive: true })
   assert.match(slow, /did not report SessionStart within the readiness window/)
   assert.match(slow, /raise readyTimeoutMs/)
+})
+
+/**
+ * The setup modal that is DECLINED rather than answered (#120).
+ *
+ * A different failure from the trust gate, and a different remedy. This one appears MID-SESSION
+ * -- observed between an implementer's first and second turn -- and it does not block the boot,
+ * it silently eats every keystroke after it. The text was typed, never became a prompt, no hook
+ * could fire for a turn that never started, and the run died reporting a hook failure.
+ *
+ * The buffer below is the real screen, captured from the failing run with the cursor-positioning
+ * escapes a TUI puts between words.
+ */
+const AUTO_MODE_MODAL =
+  '\x1b[2J\x1b[H  \x1b[4G❯ /auto-mode-setup \x1b[24G──────────────────── \x1b[52GSet up auto mode for your \x1b[78Genvironment? \n' +
+  ' Claude Code reads this \x1b[26Gproject, your recent Claude \x1b[56Gsessions, and optionally your \x1b[88Gshell history \n' +
+  ' How you use Claude here ◀ \x1b[30GMixed ▶ \n ❯ Also scan shell history [✔] \n Also scan your other repos [ ] \n Continue \n' +
+  ' ←/→ to change usage · \x1b[26GEnter to continue · \x1b[50GEsc to cancel \n'
+
+test('the setup modal is recognised through the escapes a real TUI emits', () => {
+  assert.equal(dismissableModalVisible(AUTO_MODE_MODAL), true)
+})
+
+test('a screen that merely names the modal is not treated as one', () => {
+  // A model narrating what it is doing, or this source file open in the child's editor. The
+  // title alone must not authorise a keystroke, for the reason the trust signature gives.
+  const narrating =
+    '\x1b[2J\x1b[H ⏺ I will check whether \x1b[30G/auto-mode-setup \x1b[52Gis what blocked the send. \n' +
+    ' ❯ \x1b[4Gsay something \n'
+  assert.equal(dismissableModalVisible(narrating), false)
+})
+
+test('the live composer after a turn is not a modal', () => {
+  const composer =
+    '\x1b[2J\x1b[H ⏺ Done. \n ❯ \x1b[4G \n ⏵⏵ bypass permissions on \x1b[34G(shift+tab to cycle) \n'
+  assert.equal(dismissableModalVisible(composer), false)
+})
+
+/**
+ * The trust dialog AS CURRENTLY DRAWN, which is the fixture that makes the next test bite.
+ *
+ * Captured from a real pty on 2.1.232. The older `DIALOG` fixture above predates the
+ * confirmation row, and without `Esc to cancel` on screen it cannot discriminate between a
+ * modal to decline and a dialog to accept -- a title-less signature passed against it.
+ */
+const TRUST_DIALOG_WITH_AFFORDANCE =
+  `${ESC}[2GQuick${ESC}[8Gsafety${ESC}[15Gcheck:${ESC}[22GIs${ESC}[25Gthis${ESC}[30Ga` +
+  `${ESC}[32Gproject${ESC}[40Gyou${ESC}[44Gcreated${ESC}[2G` +
+  `${ESC}[4G1.${ESC}[8GYes,${ESC}[12GI${ESC}[14Gtrust${ESC}[20Gthis${ESC}[25Gfolder` +
+  `${ESC}[2G${ESC}[4G2.${ESC}[8GNo,${ESC}[12Gexit` +
+  `${ESC}[2G${ESC}[4GEnter${ESC}[10Gto${ESC}[13Gconfirm${ESC}[22G·${ESC}[24GEsc to cancel`
+
+test('the trust dialog is not mistaken for a modal to decline', () => {
+  // The one that must NOT match, and the reason the title is required rather than the
+  // affordance: the folder-trust dialog also offers "Esc to cancel", and it is the dialog this
+  // adapter exists to ACCEPT (#108). Matching on the affordance alone would send Esc at it and
+  // turn a working boot into a declined one.
+  assert.equal(dismissableModalVisible(TRUST_DIALOG_WITH_AFFORDANCE), false)
+  assert.equal(answerableFolderTrustDialog(TRUST_DIALOG_WITH_AFFORDANCE), true)
 })

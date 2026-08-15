@@ -199,7 +199,28 @@ export interface ClaudeAdapterOptions {
  * should say what to do about it.
  */
 const SEND_HOOK_TIMEOUT =
-  "no UserPromptSubmit hook after send. The child accepted the text but no hook fired, so this turn could not be observed. Most often the previous turn had not finished -- neither CLI accepts input mid-turn -- so try a longer --settle. If it recurs at the first turn, the hooks are probably not firing at all: run `conclave config check`."
+  "no UserPromptSubmit hook after send, and the prompt IS in the child's transcript -- so the text was accepted and the hook is what did not arrive. Most often the previous turn had not finished -- neither CLI accepts input mid-turn -- so try a longer --settle. If it recurs at the first turn, the hooks are probably not firing at all: run `conclave config check`."
+
+/**
+ * The other half of the send failure, and the half that used to be reported as the one above.
+ *
+ * `#input.submit()` resolving means THIS PROCESS TYPED, not that the child received. When the
+ * keystroke is swallowed the prompt never reaches the transcript, no hook can fire for a turn
+ * that never started, and the old single message asserted "the child accepted the text" --
+ * which was unverified, and in the observed case false (#120). It then named the hooks and
+ * `--settle` as the remedies, the two things demonstrably working, and cost two runs
+ * misattributed to other causes before anyone read the child's own transcript.
+ *
+ * Distinguishing the two costs one transcript read, which is already parsed and already polled.
+ */
+const SEND_NOT_ACCEPTED =
+  "the text was typed but never became a prompt: it is absent from the child's transcript after a re-submit, so this is swallowed input rather than a hook failure. Nothing is wrong with the hooks -- `conclave config check` and `--settle` will not help. The turn was not started, so no work was lost."
+
+/** How long to wait for a submitted prompt to appear in the transcript before repairing. */
+const SUBMIT_LANDED_MS = 6_000
+
+/** How long to wait after the repair keystroke before concluding the text never landed. */
+const SUBMIT_REPAIR_MS = 6_000
 
 /**
  * A pty buffer with escape sequences removed and whitespace collapsed.
@@ -275,6 +296,35 @@ const ANSWERABLE_SIGNATURE = [
 export function answerableFolderTrustDialog(raw: string): boolean {
   const screen = plainScreen(raw).replace(/\s+/g, ' ')
   return ANSWERABLE_SIGNATURE.every((re) => re.test(screen))
+}
+
+/**
+ * A modal that is DISMISSED rather than answered, and why the two are different.
+ *
+ * Claude Code can raise setup modals mid-session. The one observed (#120) is
+ * `/auto-mode-setup`, which appeared between an implementer's first and second turn and
+ * silently ate every subsequent keystroke -- the text was typed, never became a prompt, and
+ * the run died reporting a hook failure. It offers to scan shell history and other
+ * repositories, so unlike the folder-trust gate this is NOT conclave's to accept: consenting
+ * on an operator's behalf to reading their shell history is not implied by asking conclave to
+ * drive a coding session in one directory.
+ *
+ * Esc is therefore the only key sent. It declines, it is the affordance the dialog itself
+ * advertises, and it is inert if the match was wrong -- Esc at a live composer clears a draft
+ * that this adapter did not put there, where Enter would submit one.
+ *
+ * Required structurally rather than by phrase, for the reason `ANSWERABLE_SIGNATURE` gives:
+ * the title alone appears whenever a model narrates it or this file is on screen.
+ */
+const DISMISSABLE_MODAL = [
+  /auto-mode-setup|Set up auto mode for your environment/i,
+  /Esc to cancel/i,
+] as const
+
+/** Whether a setup modal conclave should decline is on screen. */
+export function dismissableModalVisible(raw: string): boolean {
+  const screen = plainScreen(raw).replace(/\s+/g, ' ')
+  return DISMISSABLE_MODAL.every((re) => re.test(screen))
 }
 
 /**
@@ -1068,7 +1118,63 @@ export class ClaudePtyHookAdapter implements AgentSession {
       this.#pendingPrompt = { resolve, reject, prompt: message }
     })
     // Serialized against cancel() and decidePermission() by the shared queue.
+    const before = await this.#transcriptTurns()
     await this.#input.submit(message)
+
+    // Did it actually arrive? `submit()` resolving means this process TYPED -- the pty took the
+    // bytes -- and says nothing about whether the child turned them into a prompt. Observed on
+    // this repository (#120): a second send was typed, never became a prompt, and the failure was
+    // reported as a hook problem because nothing had checked. The child's transcript is the
+    // independent witness, already parsed and already polled, and it does not depend on the hook
+    // path being healthy to answer.
+    //
+    // The repair is a bare Enter, not a re-send of the text. If the composer holds the message and
+    // only the submit keystroke was swallowed, Enter completes it; if the text never landed either,
+    // Enter is a no-op on an empty composer. Re-sending the text could not tell those apart and
+    // would concatenate in the first case, which is why the verification comes first and the
+    // repair is the weaker action rather than the more thorough one.
+    // Only when the hook is LATE. A healthy send resolves here in well under a second, and
+    // making every send wait for the transcript to catch up would tax the common path to
+    // diagnose the rare one -- the transcript settles behind the hook by design, so it is the
+    // slower of the two witnesses and must not gate the faster.
+    const early = await Promise.race([
+      keyed.then(() => 'hooked' as const),
+      new Promise<'late'>((r) => setTimeout(() => r('late'), SUBMIT_LANDED_MS)),
+    ])
+    if (early === 'late' && !(await this.#promptLanded(before, 0))) {
+      // A modal ate it. Checked before either repair, because both of them type at whatever has
+      // focus, and typing a prompt into a settings dialog is how a keystroke gets turned into a
+      // configuration change nobody asked for. Esc declines and returns focus to the composer.
+      if (dismissableModalVisible(this.#pty?.output ?? '')) {
+        await this.#input.cancel('Esc: declining a setup modal that was blocking input')
+        this.#emit({
+          type: 'error',
+          message:
+            'declined a Claude Code setup modal that was blocking input (Esc). It was not accepted: it offers to read shell history and other repositories, which is not conclave\'s to agree to.',
+          fatal: false,
+          seq: this.#next(),
+          at: Date.now(),
+          provisional: false,
+        })
+        await new Promise((r) => setTimeout(r, 500))
+        await this.#input.submit(message, 're-typed: a setup modal had swallowed the send')
+        if (await this.#promptLanded(before, SUBMIT_REPAIR_MS)) return await keyed
+      }
+      await this.#input.submit('', 'bare Enter: prompt had not reached the transcript')
+      if (!(await this.#promptLanded(before, SUBMIT_REPAIR_MS))) {
+        // Now, and only now, re-type the whole message. The two checks above have established
+        // what makes this safe: the text is not in the composer, because if it were, the bare
+        // Enter would have submitted it and the transcript would show a turn. So there is
+        // nothing to concatenate with. Observed live on #120 -- a swallowed second send leaves
+        // the composer empty rather than holding an unsubmitted line, so the weaker repair
+        // cannot recover it and the stronger one cannot duplicate.
+        await this.#input.submit(message, 're-typed: composer was empty after bare Enter')
+        if (!(await this.#promptLanded(before, SUBMIT_REPAIR_MS))) {
+          throw new Error(SEND_NOT_ACCEPTED)
+        }
+      }
+    }
+
     // Cleared on the way out: the loser of the race is a live 30s timer, and leaving it
     // pending keeps the event loop alive long after the send resolved.
     let timer: NodeJS.Timeout | undefined
@@ -1079,6 +1185,35 @@ export class ClaudePtyHookAdapter implements AgentSession {
       return await Promise.race([keyed, timeout])
     } finally {
       clearTimeout(timer)
+    }
+  }
+
+  /**
+   * Turns the child's own transcript currently shows.
+   *
+   * Zero before the view exists, which is correct rather than convenient: a send before the
+   * transcript is readable cannot be verified, and `#promptLanded` treats "cannot see" as
+   * "landed" so an unverifiable send behaves exactly as it did before this check existed.
+   */
+  async #transcriptTurns(): Promise<number | undefined> {
+    if (!this.#view) return undefined
+    try {
+      return (await this.#view.snapshot()).turns.length
+    } catch {
+      return undefined
+    }
+  }
+
+  /** Whether a new turn has appeared since `before`, polled until `budgetMs` runs out. */
+  async #promptLanded(before: number | undefined, budgetMs: number): Promise<boolean> {
+    // No baseline means no view, and a check that cannot run must not fail the send.
+    if (before === undefined) return true
+    const deadline = Date.now() + budgetMs
+    for (;;) {
+      const now = await this.#transcriptTurns()
+      if (now === undefined || now > before) return true
+      if (Date.now() >= deadline) return false
+      await new Promise((r) => setTimeout(r, 400))
     }
   }
 
