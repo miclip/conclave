@@ -13,6 +13,7 @@ import { strict as assert } from 'node:assert'
 import { execFileSync, spawn, spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { resolveSession } from '../workspace/sessionRecord.ts'
+import { acquire as acquireLock, lockPath } from '../workspace/sessionLock.ts'
 import { formatSessionJson } from '../workspace/sessionView.ts'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -622,6 +623,107 @@ test('a flag in the goal position is flags, not a goal named --lead', async () =
     /unknown agent 'nope'/,
     `--lead was not parsed as a flag; stderr was:\n${stderr}\nstdout was:\n${stdout}`,
   )
+})
+
+/**
+ * A scratch project whose `.conclave/session.lock` is live and belongs to THIS process.
+ *
+ * `read()` in sessionLock.ts decides liveness with `process.kill(pid, 0)` and `acquire()` writes
+ * `process.pid`, so the test runner IS the live session as far as any CLI shelled out below is
+ * concerned. That is the whole reason the state is manufactured rather than produced: the
+ * condition under test is the lock, and a genuine live session would have to bring a genuine
+ * pair of agent CLIs with it — real processes, real quota — to assert something about a JSON
+ * file and one `kill(pid, 0)`.
+ *
+ * The participants named in it are the ones #130 was reported against, so a refusal quoted in a
+ * failure message here reads the same as the one the issue quotes.
+ */
+function lockedRepo(): string {
+  const dir = repo()
+  acquireLock(dir, [
+    { id: 'advisor', agent: 'codex' },
+    { id: 'implementer', agent: 'claude' },
+  ])
+  return dir
+}
+
+/** The real binary by absolute path, in a scratch project — never in this checkout. */
+function runCli(cwd: string, argv: readonly string[]): { status: number | null; stdout: string; stderr: string } {
+  const root = join(import.meta.dirname, '..', '..')
+  const r = spawnSync(process.execPath, [join(root, 'bin/conclave.ts'), ...argv], {
+    cwd,
+    encoding: 'utf8',
+    // stdin ignored rather than inherited: `session` without a goal opens a console and reads
+    // lines, and a test that handed it the runner's stdin would hang on a change that stopped
+    // refusing.
+    stdio: ['ignore', 'pipe', 'pipe'],
+    timeout: 60_000,
+  })
+  return { status: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' }
+}
+
+test('a live lock does not preempt an unknown agent name (#130)', () => {
+  // The open half of #130. `--lead nope` is a PURE VALIDATION invocation: the spelling is wrong
+  // whatever else is happening in the tree, and no run is going to start either way — so the
+  // lock has nothing to protect there, and answering the operator's actual mistake is strictly
+  // more useful than reporting somebody else's live participants.
+  //
+  // The isolation half is already fixed (see the test above, which now shells out into a temp
+  // directory), so this is not about the suite being runnable. It is about the CLI's answer to
+  // an operator who typed a name that does not exist while a session runs in their checkout:
+  // today they are told about the session and not about the name.
+  const r = runCli(lockedRepo(), ['session', '--lead', 'nope'])
+  const said = `${r.stdout}${r.stderr}`
+  assert.equal(r.status, 1, `an unresolvable agent must be refused; output was:\n${said}`)
+  // Combined rather than stderr alone, deliberately. The existing test above pins the stream
+  // because that is where `main`'s catch writes; a validation refusal raised earlier in the
+  // `session` block would legitimately be a `console.error` OR a console line, and which one it
+  // is is not what this test is about.
+  assert.match(said, /unknown agent 'nope'/, `the name is what was wrong; output was:\n${said}`)
+  assert.ok(
+    !/participants are live/.test(said),
+    `the live session is not the operator's problem here; output was:\n${said}`,
+  )
+})
+
+test('every seat is checked before the lock, not just the advisor (#130)', () => {
+  // `--lead` is the spelling the issue was reported against, and pinning only that would leave
+  // the fix half-applied in exactly the way this codebase keeps rediscovering: a capability
+  // wired into one seat and not its neighbours. Every seat a run can name is resolved together
+  // — the advisor, the default implementer, each entry of a seat LIST, and the opt-in reviewer.
+  //
+  // The seat list matters most of the three. `--implementers "claude,nope"` is valid up to its
+  // last entry, so it is the case where a check that stopped after the first seat would look
+  // like it worked.
+  for (const argv of [
+    ['session', 'a goal', '--implementer', 'nope'],
+    ['session', 'a goal', '--implementers', 'claude,nope'],
+    ['session', 'a goal', '--reviewer', 'nope'],
+  ]) {
+    const r = runCli(lockedRepo(), argv)
+    const said = `${r.stdout}${r.stderr}`
+    assert.equal(r.status, 1, `${argv.join(' ')}: output was:\n${said}`)
+    assert.match(said, /unknown agent 'nope'/, `${argv.join(' ')}: output was:\n${said}`)
+    assert.ok(!/participants are live/.test(said), `${argv.join(' ')}: output was:\n${said}`)
+  }
+})
+
+test('a run-starting session is still refused by a live lock (#130)', () => {
+  // The control, and the reason the two tests above are safe to want. Whatever moves ahead of
+  // the lock check, an invocation that WOULD start participants must still be stopped by it —
+  // otherwise the fix for a validation wart has quietly disabled the guard that keeps two runs
+  // out of one tree, which is the failure sessionLock.ts exists for.
+  //
+  // Nothing here is stubbed, so this is also the test that would spawn real agent CLIs if the
+  // refusal ever stopped happening. That is the honest shape of the assertion — the refusal is
+  // the only thing standing between this argv and two live children — and the timeout in `runCli`
+  // bounds it.
+  const r = runCli(lockedRepo(), ['session', 'Keep the work moving.'])
+  const said = `${r.stdout}${r.stderr}`
+  assert.equal(r.status, 1, `a live lock refuses a run; output was:\n${said}`)
+  assert.match(said, /refusing to start/, `output was:\n${said}`)
+  assert.match(said, /participants are live/, `and says who is live; output was:\n${said}`)
+  assert.ok(!/joined as/.test(said), `no participant may start; output was:\n${said}`)
 })
 
 test('an address and a path compose: >advisor read @path', async () => {

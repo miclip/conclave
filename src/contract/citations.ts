@@ -93,7 +93,7 @@ export const CITED: Record<string, string> = {
   // footer's notion of "working" is `turn_start` until `turn_end`, and `tool_use` only relabels
   // a turn that is already running. If that ever stops being true, the predicate the relay and
   // `/continue` both send on is no longer the thing the operator is watching.
-  'src/repl/session.ts:907-920': 'progress.start(e.participant)',
+  'src/repl/session.ts:975-988': 'progress.start(e.participant)',
   'src/relay/relay.ts:4554': 'this.#worktreesAtStart = worktreePaths(this.#opts.cwd)',
   'src/relay/relay.ts:5042': "subject: { reason: 'turn_incomplete', participant: lead.id }",
   // The five below are what the console's `/continue` liveness guard cites for reading a
@@ -132,31 +132,31 @@ export const CITED: Record<string, string> = {
   // one, because there is only ever the one object.
   'src/relay/run.ts:618': 'this.#pause.superseded = info',
   'src/relay/subagents.ts:68': 'export function worktreePaths',
-  'src/repl/session.ts:210-222': 'turnWatchdogMs?: number | undefined',
+  'src/repl/session.ts:211-223': 'turnWatchdogMs?: number | undefined',
   // The console's liveness seam, cited by the relay's own copy of it (#101). Two front-ends
   // needing the same injection is not duplication to be noticed later -- it is the shape the
   // relay deliberately copied, and the citation is what keeps the two spellings together.
-  'src/repl/session.ts:285': 'liveness?: (pid: number) => Promise<ChildLiveness>',
+  'src/repl/session.ts:286': 'liveness?: (pid: number) => Promise<ChildLiveness>',
   // The three below moved by the same edit that added `seatsToSampleAtPause` above
   // `runSession`: it inserts a documented function into the middle of the file, so every
   // citation past it shifts. Repaired against this tree rather than deleted -- each still
   // points at the line it was written about.
-  'src/repl/session.ts:701': 'escalates to you rather than being replaced',
-  'src/repl/session.ts:864': 'logPath: runLogPath,',
+  'src/repl/session.ts:783': 'escalates to you rather than being replaced',
+  'src/repl/session.ts:932': 'logPath: runLogPath,',
   // Moved by #83's edit to the `/continue` refusal, nine lines above it in the same block.
   // Repaired rather than deleted: the call it pins is the one the console still makes.
-  'src/repl/session.ts:1068-1069': "run.pause.refusal = { at: Date.now(), reason,",
+  'src/repl/session.ts:1136-1137': "run.pause.refusal = { at: Date.now(), reason,",
   // Why an in-place amendment to a pause needs an event behind it. Cited by both halves of
   // #101's refresh -- the module that explains the mechanism and the loop that uses it --
   // because the argument was already written here, for `/wait`, and restating it in two more
   // places is how three copies of a reason drift apart.
-  'src/repl/session.ts:1829': 'so an in-place change like `superseded` reaches the file on the next one',
+  'src/repl/session.ts:1897': 'so an in-place change like `superseded` reaches the file on the next one',
   // The falsifier `/continue <message>` is argued against: two commands that already give
   // their trailing text a meaning, so the new rule is narrow by intent rather than by
   // accident. Pinned to the dispatch lines, which is what makes "these are unchanged"
   // checkable rather than a claim about code nobody re-reads.
-  "src/repl/session.ts:1851": "if (word === '/rotate') {",
-  "src/repl/session.ts:1884": "if (word === '/abort') {",
+  "src/repl/session.ts:1919": "if (word === '/rotate') {",
+  "src/repl/session.ts:1952": "if (word === '/abort') {",
 }
 
 /**

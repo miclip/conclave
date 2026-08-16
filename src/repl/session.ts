@@ -38,6 +38,7 @@ import type { AgentEvent } from '../contract/session.ts'
 import { defaultRegistry } from '../registry/builtin.ts'
 import type { CheckSpec } from '../rotation/record.ts'
 import type { AgentRegistry } from '../registry/registry.ts'
+import type { ParticipantSpec } from '../registry/types.ts'
 import { boundOf, implementerSpecsFor, Relay, reviewerSpecFor, type SeatRequest } from '../relay/relay.ts'
 import type { RelayMessage } from '../relay/message.ts'
 import type { RunHandle, RunPause } from '../relay/run.ts'
@@ -668,6 +669,87 @@ export async function runSession(opts: SessionOptions): Promise<number> {
   // launch is not built from this: `implSpecs` below is.
   const implementerAgents = seatRequests.map((s) => s.agent)
 
+  /**
+   * Everything that is an answer to the ARGV ALONE, settled before the lock is consulted.
+   *
+   * The ordering is #130. A live lock means someone else's participants are working in this
+   * tree, and refusing to start is the right answer to an invocation that would start
+   * something. `--lead nope` is not that. It is not going to launch
+   * anything whatever the lock says, so a refusal naming somebody else's session answers a
+   * question the operator did not ask and buries the one they did — reported as a plausible
+   * flag-parsing regression, which cost a debugging afternoon before it was diagnosed three
+   * layers away in `sessionLock.ts`.
+   *
+   * The line between the two kinds of invocation is drawn deliberately narrow, and drawing it
+   * narrowly IS the fix:
+   *
+   *   - A TERMINAL ARGUMENT OR SPEC ERROR — an agent name no registry knows, a role that is
+   *     not a model seat, a malformed `.conclave/config.json` — ends the invocation here.
+   *     There was never a run for the lock to protect anything from.
+   *   - EVERYTHING ELSE falls through to the refusal below, unchanged. A valid invocation
+   *     that is going to start participants is precisely what the lock exists to stop, and
+   *     being valid is not a reason to let it past.
+   *
+   * Only READING moved. `readProjectConfig` parses a file that is already there, and
+   * `registry.resolve` is the registry's own "validate a spec without launching anything";
+   * the hook registration, the Codex trust probe, the permission-mode write in the CLI and
+   * `Relay.start`'s own `acquire` all remain below the refusal, where they were.
+   */
+  const projectConfig = readProjectConfig(opts.cwd)
+  // Config-derived first, then per-invocation, so an explicit flag wins.
+  const leadArgs = [...launchArgsFor(projectConfig, opts.lead), ...(opts.leadArgs ?? [])]
+  // Per agent, as in the relay CLI: config-derived arguments are keyed by agent and two seats
+  // can be filled by different ones, while `implementerArgs` is the operator's own and applies
+  // to every implementer seat. Arguments belonging to ONE seat arrive on that seat's request
+  // and are appended after these by `implementerSpecsFor`, so the more specific spelling wins.
+  const implArgsFor = (agent: string) => [
+    ...launchArgsFor(projectConfig, agent),
+    ...(opts.implementerArgs ?? []),
+  ]
+  const implSpecs = implementerSpecsFor(seatRequests, implArgsFor)
+  const reviewerSpec = reviewerSpecFor(opts.reviewer ?? '', (agent) => [
+    ...launchArgsFor(projectConfig, agent),
+    ...(opts.reviewerArgs ?? []),
+  ])
+  // Built once and handed to `Relay.start` unchanged, rather than recomposed there. The seat
+  // that gets VALIDATED and the seat that gets LAUNCHED have to be the same object, or the
+  // check below is a check of something else.
+  const leadSpec: ParticipantSpec = {
+    id: 'advisor',
+    agent: opts.lead,
+    role: 'advisor',
+    ...(leadArgs.length > 0 ? { args: leadArgs } : {}),
+  }
+
+  const registry = opts.registry ?? defaultRegistry()
+  // Every seat this invocation asked for, against the registry, before anything else happens.
+  //
+  // It THROWS rather than writing a refusal, and that is deliberate: `unknown agent 'nope'.
+  // Registered agents: ...` is the registry's own sentence, the CLI's catch already puts it on
+  // stderr, and a second copy phrased here would be a second copy to keep in step. It is also
+  // the message this path produced before the fix — reached from `Relay.start` after the hooks
+  // had been written and the trust probed — so nothing an operator has learned to grep for
+  // changes, only how much happens on their behalf first.
+  //
+  // What is NOT checked here: whether each seat's CLI is on PATH, and whether it has the model
+  // named. Both spawn or stat things, both are `Relay.start`'s (see `refuseMissingCommands`),
+  // and `relay --dry-run` does not do them either. A spelling this file can settle from a map
+  // it already holds is a different question from an installation it would have to go looking
+  // for.
+  for (const spec of [leadSpec, ...implSpecs, ...(reviewerSpec ? [reviewerSpec] : [])]) {
+    registry.resolve(spec)
+  }
+
+  // A `--resume` naming a log that is not there is the third terminal argument error, and it
+  // belongs up here with the other two rather than below the lock. It is the same shape: a
+  // path that does not exist will not start existing because the tree is free, and `relay`
+  // refuses it above its own dry run for exactly this reason. Reading the log stays where it
+  // was -- this is the existence question, which is the part that can refuse.
+  if (opts.resume && !runLogExists(opts.resume)) {
+    write(`refusing to start: no run log at ${opts.resume}`)
+    return 1
+  }
+
   const existing = guard(opts.cwd)
   if (existing.live) {
     write(`refusing to start: ${existing.messages.join('\n')}`)
@@ -759,24 +841,10 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     })
   }
 
-  // Read before anything is launched, and loudly: a malformed config that silently meant
-  // "ask" would present as a session that stops on every command for no stated reason.
-  const projectConfig = readProjectConfig(opts.cwd)
-  // Config-derived first, then per-invocation, so an explicit flag wins.
-  const leadArgs = [...launchArgsFor(projectConfig, opts.lead), ...(opts.leadArgs ?? [])]
-  // Per agent, as in the relay CLI: config-derived arguments are keyed by agent and two seats
-  // can be filled by different ones, while `implementerArgs` is the operator's own and applies
-  // to every implementer seat. Arguments belonging to ONE seat arrive on that seat's request
-  // and are appended after these by `implementerSpecsFor`, so the more specific spelling wins.
-  const implArgsFor = (agent: string) => [
-    ...launchArgsFor(projectConfig, agent),
-    ...(opts.implementerArgs ?? []),
-  ]
-  const implSpecs = implementerSpecsFor(seatRequests, implArgsFor)
-  const reviewerSpec = reviewerSpecFor(opts.reviewer ?? '', (agent) => [
-    ...launchArgsFor(projectConfig, agent),
-    ...(opts.reviewerArgs ?? []),
-  ])
+  // The project config, the launch arguments and every seat spec were resolved above the lock
+  // check -- read before anything is launched, and loudly, exactly as they were when they lived
+  // here. A malformed config that silently meant "ask" would present as a session that stops on
+  // every command for no stated reason, and it now says so before the lock does.
 
   // Said once, at the top, naming who. A session that never asks permission is a thing
   // the operator should be reminded of while it runs, not something they configured weeks
@@ -797,10 +865,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     write(yellow(`  permission prompts bypassed for ${bypassing.join(' and ')} — per ${CONFIG_RELATIVE}`))
   }
 
-  if (opts.resume && !runLogExists(opts.resume)) {
-    write(`refusing to start: no run log at ${opts.resume}`)
-    return 1
-  }
+  // Refused above, with the other terminal argument errors. What is left here is the read.
   const prior = opts.resume ? readRunLog(opts.resume) : []
   if (prior.length > 0) {
     write(dim(`  resuming from ${opts.resume} — ${prior.length} messages replayed into both seats`))
@@ -812,7 +877,8 @@ export async function runSession(opts: SessionOptions): Promise<number> {
   const runLog = new RunLogWriter(runLogPath)
 
   const relay = await Relay.start({
-    registry: opts.registry ?? defaultRegistry(),
+    // The same registry the seats were validated against above, not a second one built here.
+    registry,
     cwd: opts.cwd,
     ...(prior.length > 0 ? { resume: prior } : {}),
     ...(opts.operator ? { operator: opts.operator } : {}),
@@ -821,7 +887,9 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     ...(opts.turnWatchdogMs ? { turnWatchdogMs: opts.turnWatchdogMs } : {}),
     // Unchanged, deliberately. See `SessionOptions.ceilings`.
     ...(opts.ceilings ? { ceilings: opts.ceilings } : {}),
-    lead: { id: 'advisor', agent: opts.lead, role: 'advisor', ...(leadArgs.length > 0 ? { args: leadArgs } : {}) },
+    // The object that was resolved above, so the seat validated and the seat launched cannot
+    // be two different descriptions that merely agree today.
+    lead: leadSpec,
     // `implSpecs[0]` is the object this built by hand: `seatIdFor(0)` is 'implementer' and the
     // args are the same list. The plural key is spread in only when the operator named a list,
     // so a default console run reaches `Relay.start` with exactly the options it always did.
@@ -1798,7 +1866,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
       // FALSIFIER, stated because it is the strongest argument against this shape: the
       // console has no general "trailing text is a message" rule and does not gain one here.
       // `/rotate <text>` and `/abort <text>` consume their text as a REASON
-      // (`src/repl/session.ts:1851`, `src/repl/session.ts:1884`) and `/pause`, `/queue`, `/audit` ignore
+      // (`src/repl/session.ts:1919`, `src/repl/session.ts:1952`) and `/pause`, `/queue`, `/audit` ignore
       // whatever follows them. So an operator who learns this from `/continue` and carries
       // it to `/pause I'll be back` still loses the sentence. That inconsistency is not
       // repaired by making `/continue` a third behaviour; it is narrowed by it, and the
