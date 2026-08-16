@@ -603,6 +603,303 @@ test('an ARMED agent-operated run still raises the candidate, with rotate offere
   await run.abort()
 })
 
+/**
+ * The same pause, asked again and again, of a human who already answered it (#118).
+ *
+ * #107 took the repeating pause away from an AGENT operator on the grounds that it had no
+ * answer it could give. A human at an ARMED `candidate` run does have one — `rotate` is on the
+ * menu — so the pause was kept, and kept unconditionally. That is the gap this test is about.
+ *
+ * The falsifier for "this is just replayed evidence" is closed. `#considerRotation` reads
+ * `impl.baselineGeneration` against the live snapshot, and `#acknowledge` moves that baseline
+ * every time the site is reached — so each pause below carries a DIFFERENT generation pair and
+ * is therefore a genuinely new compaction, not one finding re-read. The generation pairs are
+ * asserted for exactly that reason: if the baseline ever stopped moving, this test would be
+ * describing a replay defect and would say so by collapsing the set.
+ *
+ * So the defect is rate and class, not detection. A long implementer compacts by design; every
+ * compaction is real, and every one of them re-puts a question the operator answered `continue`
+ * to the first time, in the same terms, on the same evidence class. An operator asked the same
+ * question five times stops reading pauses, and the fifth one is the one that mattered.
+ *
+ * What must survive the fix is the part that makes "asked once" honest:
+ *
+ *   - every candidate is still counted and still written to the routing log, with its own
+ *     generation pair, so "not asked" never quietly becomes "not watched";
+ *   - a candidate whose evidence class CHANGES is a new question and is put again. Here that is
+ *     `corroborated`: the seat compacted AND said so, which is strictly more than the
+ *     `degraded`-only evidence the operator declined on, and the operator never answered it.
+ *
+ * Without the second half the obvious fix — "raise a rotation candidate at most once per run" —
+ * would pass every other assertion here.
+ */
+test('a declined candidate is not re-put on the same evidence class, but a corroborated one is (#118)', async (t) => {
+  const dir = repo()
+  const advisor = new FakeRotationSession('advisor', 'codex', [
+    'Do the first thing.',
+    'Do the second thing.',
+    'Do the third thing.',
+    'Do the fourth thing.',
+    'DONE',
+  ])
+  const impl = new FakeRotationSession('impl', 'claude', [
+    'ack',
+    'Did the first thing.',
+    'Did the second thing.',
+    'Did the third thing.',
+    // The fourth turn adds the complaint. First person and past participle, which is what
+    // `detectComplaint` discriminates on -- prose ABOUT compaction is not a report of one.
+    'Did the fourth thing. I have been compacted and I am losing track of what I was doing; ' +
+      'I need a fresh session before I can carry on.',
+  ])
+  const fresh = new FakeRotationSession('fresh', 'claude', [ACCEPTED])
+  // Compacts at the start of every turn that does work, and not on the briefing turn.
+  // `compactOnTurn` can only express one; four distinct compactions is the point.
+  let sends = 0
+  impl.onSend = () => {
+    if (sends++ > 0) impl.compact()
+  }
+
+  // Armed, `candidate`, and attended by a human: the one configuration where the pause has a
+  // real answer and is therefore still put. `operator` is left at its default.
+  const relay = await relayOf(dir, advisor, [impl, fresh], {
+    rotation: { checks: ['exit 0'], checkTimeoutMs: 30_000, onDegradation: 'candidate' },
+    maxAdvisorTurns: 5,
+  })
+  t.after(() => relay.stop())
+
+  const run = relay.start('Keep the work moving.')
+
+  // Decline every pause with `continue`, and record what was asked. Capped rather than
+  // unbounded: the defect this test describes is "asked too often", so a loop that answered
+  // forever would hang on the very failure it is meant to report.
+  const asked: { detail: string; evidence: string[]; options: readonly string[] }[] = []
+  for (;;) {
+    const s = await run.settled()
+    if (s.kind === 'ended') break
+    asked.push({ detail: s.pause.detail, evidence: [...s.pause.evidence], options: [...s.pause.options] })
+    if (asked.length > 6) {
+      await run.abort()
+      break
+    }
+    await run.continue()
+  }
+
+  /** The generation pair a candidate rests on: `0 → 1`, and so on. */
+  const genOf = (lines: string[]): string | undefined =>
+    lines.map((l) => /rose (\d+ → \d+)/.exec(l)?.[1]).find((g) => g !== undefined)
+
+  // THE SEQUENCE. Two questions, not four: the first compaction, and the one whose evidence
+  // class the operator has not yet ruled on.
+  assert.deepEqual(
+    asked.map((p) => genOf(p.evidence)),
+    ['0 → 1', '3 → 4'],
+    `the operator is asked once per evidence class, not once per compaction; asked:\n${asked
+      .map((p) => `${genOf(p.evidence)}: ${p.detail}`)
+      .join('\n---\n')}`,
+  )
+  // The first is the ordinary armed candidate, with rotation actually on the menu -- which is
+  // what makes it worth asking at all.
+  assert.match(asked[0]!.detail, /Recorded as a rotation candidate, not acted on/)
+  assert.match(asked[0]!.detail, /did not say so/, 'the first is compaction alone: the `degraded` class')
+  assert.ok(asked[0]!.options.includes('rotate'), `rotate must be offered: ${asked[0]!.options.join(', ')}`)
+  // The second is a different question. The seat now SAYS it is spent, which is evidence the
+  // operator has not seen and did not decline.
+  assert.match(asked[1]!.detail, /and said so/, 'the second is the `corroborated` class, and is put again')
+  assert.ok(asked[1]!.options.includes('rotate'))
+
+  // AND EVERY CANDIDATE IS STILL ON THE RECORD. This is the half that keeps "asked once" from
+  // meaning "stopped watching" -- four compactions happened and four were seen, whatever was
+  // done about them.
+  assert.equal(relay.rotationWatch.candidates, 4, 'every compaction is still a counted candidate')
+  assert.equal(relay.rotationWatch.degradationsSeen, 4)
+  assert.equal(relay.rotationWatch.complaintsSeen, 1, 'exactly one turn complained')
+
+  // The two that were NOT put are written to the routing log instead, each carrying its own
+  // generation pair -- so a retrospective reader can see the compactions the operator was
+  // spared, and can tell them apart.
+  const notes = relay.log.filter(
+    (m) => m.kind === 'note' && /rotation candidate recorded, run continues/.test(m.text),
+  )
+  assert.deepEqual(
+    notes.map((m) => genOf([m.text])),
+    ['1 → 2', '2 → 3'],
+    `the unasked candidates must be logged, distinctly:\n${relay.log.map((m) => m.text).join('\n---\n')}`,
+  )
+  // The pauses that WERE raised, read from the log rather than the handle, because this is the
+  // record an operator or a status reader gets after the fact.
+  assert.equal(
+    relay.log.filter((m) => /^paused \(rotation_candidate\)/.test(m.text)).length,
+    2,
+    'the log agrees with the handle about how many times the run stopped',
+  )
+
+  assert.equal(run.outcome!.reason, 'done', 'and the run still finishes')
+})
+
+test('rotating AT the pause is not a decline, so the replacement is still asked (#118)', async (t) => {
+  // The narrower of the two ways a decline is scoped to its session, and the one the test below
+  // cannot reach. `rotate` is an option ON a pause and does not resolve it, so the operator
+  // rotates and then still has to say what the run should do. That resume looks exactly like a
+  // decline from inside `#considerRotation` -- `#halt` returned without ending the run -- and it
+  // is not one: the session the question was about has already left the seat, and the answer was
+  // to replace it rather than to live with it.
+  //
+  // Latching there would hand the replacement a decline nobody made about it, and the first
+  // compaction of a brand new session would go unremarked. Isolated here because the sibling
+  // test rotates at a DIFFERENT class than the one it later checks, so a wrongly latched class
+  // slips past it.
+  const dir = repo()
+  const advisor = new FakeRotationSession('advisor', 'codex', [
+    'Do the first thing.',
+    HANDOFF,
+    'Do the second thing.',
+    'Do the third thing.',
+    'DONE',
+  ])
+  const old = new FakeRotationSession('old', 'claude', ['ack', 'Did the first thing.'])
+  const fresh = new FakeRotationSession('fresh', 'claude', [ACCEPTED, 'Second.', 'Third.'])
+  old.compactOnTurn = 1
+  let worked = 0
+  fresh.onSend = () => {
+    if (worked++ > 0) fresh.compact()
+  }
+
+  const relay = await relayOf(dir, advisor, [old, fresh], {
+    rotation: { checks: ['exit 0'], checkTimeoutMs: 30_000, onDegradation: 'candidate' },
+    maxAdvisorTurns: 5,
+  })
+  t.after(() => relay.stop())
+
+  const run = relay.start('Keep the work moving.')
+  const asked: string[] = []
+  let rotated = false
+  for (;;) {
+    const s = await run.settled()
+    if (s.kind === 'ended') break
+    asked.push(s.pause.detail)
+    if (!rotated) {
+      assert.equal((await run.rotateImplementer('the operator chose to rotate')).status, 'rotated')
+      rotated = true
+    }
+    if (asked.length > 4) {
+      await run.abort()
+      break
+    }
+    await run.continue()
+  }
+
+  assert.equal(relay.rotationWatch.rotations, 1)
+  assert.equal(relay.participants.find((p) => p.rank === 'implementer')!.session, fresh)
+  // Two: the compaction that prompted the rotation, and the replacement's own first one, which
+  // is the same evidence class and a question about a different session.
+  assert.equal(
+    asked.length,
+    2,
+    `rotating at a pause answers it about the retired session only:\n${asked.join('\n---\n')}`,
+  )
+  assert.match(asked[0]!, /compaction generation rose 0 → 1/)
+  assert.match(asked[1]!, /transcript declares a compaction/)
+  assert.equal(run.outcome!.reason, 'done')
+})
+
+test('the decline does not survive the session it was about (#118)', async (t) => {
+  // The scope that makes the latch safe. A decline says "not this session, not on this
+  // evidence"; a replacement is a different session, and its first compaction is a question
+  // nobody has been asked. Carrying the answer across the swap would suppress the very first
+  // candidate raised against a brand new implementer -- which is the failure a "raise it at most
+  // once per run" fix would have, one seat further along.
+  //
+  // Built to separate the two places the clearing happens, because they overlap and a test that
+  // only reached the overlap would leave one of them unexercised. Written after a mutation
+  // showed exactly that: deleting the latch at the rotation site changed nothing, because the
+  // simpler scenario was already covered by the resume-side guard.
+  //
+  //   1. the seat compacts             -> declined, `degraded` latched
+  //   2. it compacts AND complains     -> `corroborated`: a class nobody has ruled on, so it is
+  //                                       still put, and the operator ROTATES at it
+  //   3. the replacement compacts      -> `degraded` again, and it must be PUT
+  //
+  // Step 3 is the isolating one. The resume in step 2 declines to latch `corroborated` because
+  // the session changed under it -- but the `degraded` latched in step 1 is still there, and
+  // only `rotateSeat` dropping it lets step 3 reach the operator.
+  const dir = repo()
+  const advisor = new FakeRotationSession('advisor', 'codex', [
+    'Do the first thing.',
+    'Do the second thing.',
+    HANDOFF,
+    'Do the third thing.',
+    'Do the fourth thing.',
+    'Do the fifth thing.',
+    'DONE',
+  ])
+  const old = new FakeRotationSession('old', 'claude', [
+    'ack',
+    'Did the first thing.',
+    'Did the second thing. I have been compacted and I need a fresh session.',
+  ])
+  const fresh = new FakeRotationSession('fresh', 'claude', [ACCEPTED, 'Third.', 'Fourth.', 'Fifth.'])
+  // Both sessions compact on every turn that does work, and not on their briefing or acceptance
+  // turn. An ordinary long session on either side of the swap.
+  let retiring = 0
+  old.onSend = () => {
+    if (retiring++ > 0) old.compact()
+  }
+  let replacing = 0
+  fresh.onSend = () => {
+    if (replacing++ > 0) fresh.compact()
+  }
+
+  const relay = await relayOf(dir, advisor, [old, fresh], {
+    rotation: { checks: ['exit 0'], checkTimeoutMs: 30_000, onDegradation: 'candidate' },
+    maxAdvisorTurns: 7,
+  })
+  t.after(() => relay.stop())
+
+  const run = relay.start('Keep the work moving.')
+  const asked: string[] = []
+  let rotated = false
+  for (;;) {
+    const s = await run.settled()
+    if (s.kind === 'ended') break
+    asked.push(s.pause.detail)
+    if (asked.length === 2 && !rotated) {
+      // The option this pause offers, taken. `rotate` does not resolve the pause, so continuing
+      // is still a separate decision -- and it is the resume that would latch, if the session
+      // under it had not just been replaced.
+      assert.equal((await run.rotateImplementer('the operator chose to rotate')).status, 'rotated')
+      rotated = true
+    }
+    if (asked.length > 5) {
+      await run.abort()
+      break
+    }
+    await run.continue()
+  }
+
+  assert.equal(relay.rotationWatch.rotations, 1)
+  assert.equal(relay.participants.find((p) => p.rank === 'implementer')!.session, fresh)
+
+  assert.equal(asked.length, 3, `three questions, one per class per session:\n${asked.join('\n---\n')}`)
+  assert.match(asked[0]!, /compacted and did not say so: compaction generation rose 0 → 1/)
+  assert.match(asked[1]!, /compacted and said so: compaction generation rose 1 → 2/)
+  // The replacement's own first compaction, on the class the RETIRED session's operator already
+  // declined. Asked anyway, because that decline went with the session it was about.
+  assert.match(asked[2]!, /compacted and did not say so/)
+  assert.match(asked[2]!, /transcript declares a compaction/)
+
+  // And the latch re-arms per session: once the replacement's class has been declined too, its
+  // later compactions are recorded rather than put, exactly as the first session's were.
+  assert.equal(relay.rotationWatch.candidates, 5, 'five compactions, all counted')
+  assert.equal(
+    relay.log.filter((m) => /rotation candidate recorded, run continues \(the operator already declined/.test(m.text))
+      .length,
+    2,
+    `the replacement's later compactions are suppressed and logged:\n${relay.log.map((m) => m.text).join('\n---\n')}`,
+  )
+  assert.equal(run.outcome!.reason, 'done')
+})
+
 test('a seat DISARMED by its own policy is unarmed for this purpose too, agent-operated', async (t) => {
   // The third state, and the one a run-level flag cannot express (#103, D7): the run is armed
   // and THIS SEAT is not, because its own policy entry sets no checks. `#considerRotation`

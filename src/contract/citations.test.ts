@@ -93,15 +93,15 @@ const CITED: Record<string, string> = {
   'src/relay/relay.ts:2367': 'NOT ARMED (no checks configured)',
   'src/relay/relay.ts:2568': 'worktreePaths(this.#opts.cwd)',
   'src/relay/relay.ts:3015': 'resolutionFor(p.subject, { rotationArmed: armed })',
-  'src/relay/relay.ts:3443-3445': 'No rotation checks are configured',
+  'src/relay/relay.ts:3449-3451': 'No rotation checks are configured',
   'src/relay/relay.ts:324': "onDegradation ?? 'candidate'",
   // The console's status line, cited by `activeTurn` for the claim its own doc rests on: the
   // footer's notion of "working" is `turn_start` until `turn_end`, and `tool_use` only relabels
   // a turn that is already running. If that ever stops being true, the predicate the relay and
   // `/continue` both send on is no longer the thing the operator is watching.
   'src/repl/session.ts:869-882': 'progress.start(e.participant)',
-  'src/relay/relay.ts:4331': 'worktreePaths(this.#opts.cwd)',
-  'src/relay/relay.ts:4819': "subject: { reason: 'turn_incomplete', participant: lead.id }",
+  'src/relay/relay.ts:4413': 'worktreePaths(this.#opts.cwd)',
+  'src/relay/relay.ts:4901': "subject: { reason: 'turn_incomplete', participant: lead.id }",
   // The five below are what the console's `/continue` liveness guard cites for reading a
   // pause's SCOPE rather than `verdictOf` or a rank scan (`seatsToSampleAtPause` in
   // src/repl/session.ts). Two of them pin the ONLY sites that populate `verdictOf` -- the
@@ -110,13 +110,13 @@ const CITED: Record<string, string> = {
   // conclave-scoped halt the change gives up sampling on, its own liveness evidence, and the
   // send that a resumed `advisor_escalated` pause actually makes -- to the ADVISOR, which is
   // why measuring implementer children there was answering the wrong question.
-  'src/relay/relay.ts:4823': 'verdictOf: { participant: lead.id, endSeq: next.end.seq },',
-  'src/relay/relay.ts:4922': 'The human has seen your escalation and asked you to continue.',
+  'src/relay/relay.ts:4905': 'verdictOf: { participant: lead.id, endSeq: next.end.seq },',
+  'src/relay/relay.ts:5004': 'The human has seen your escalation and asked you to continue.',
   // The workstream a conflicted instruction belongs to, named after the seat when exactly one
   // seat could take it -- the N=1 coincidence a scope reader must not mistake for a seat.
-  'src/relay/relay.ts:4986': "reason: 'authority_conflict', workstream:",
-  'src/relay/relay.ts:5070': "subject: { reason: 'implementer_unanswered', participant: seat.id }",
-  'src/relay/relay.ts:5119': "subject: { reason: 'advisor_escalated' },",
+  'src/relay/relay.ts:5068': "reason: 'authority_conflict', workstream:",
+  'src/relay/relay.ts:5152': "subject: { reason: 'implementer_unanswered', participant: seat.id }",
+  'src/relay/relay.ts:5201': "subject: { reason: 'advisor_escalated' },",
   // Repaired rather than deleted, and it now pins a DESCRIPTOR rather than a call: #101 moved
   // the measurement inside `#halt`, so the halt site says which seat to measure and no longer
   // builds the sentence itself. The claim the citation supports is unchanged -- this halt does
@@ -125,9 +125,9 @@ const CITED: Record<string, string> = {
   // Weaker than the pins around it, and worth saying: the same descriptor appears at the
   // `turn_incomplete` halt below, so only a shift of exactly the distance between the two would
   // slip past. There is nothing unique on the line to pin instead.
-  'src/relay/relay.ts:5133': 'liveness: { participant: seat, emittedBefore: report.emittedBefore },',
-  'src/relay/relay.ts:5203': "subject: { reason: 'turn_incomplete', participant: seat.id }",
-  'src/relay/relay.ts:5207': 'verdictOf: { participant: seat.id, endSeq: current.seq },',
+  'src/relay/relay.ts:5215': 'liveness: { participant: seat, emittedBefore: report.emittedBefore },',
+  'src/relay/relay.ts:5285': "subject: { reason: 'turn_incomplete', participant: seat.id }",
+  'src/relay/relay.ts:5289': 'verdictOf: { participant: seat.id, endSeq: current.seq },',
   'src/relay/resolution.ts:190': 'export function resolutionFor',
   'src/relay/run.ts:51': "| 'implementer_unanswered'",
   'src/relay/run.ts:215-229': 'reason: PauseReason',

@@ -352,10 +352,19 @@ test('a FLAG marker does not pause the run', async (t) => {
   assert.ok(relay.flags.some((f) => /conformance\.sh/.test(f.text)))
 })
 
-test('a declined candidate is remembered, and a LATER compaction raises it again', async (t) => {
-  // Found by three tests hanging: without this the same compaction re-pauses every advisor turn
-  // forever, and the operator either abandons the feature or stops reading the pauses.
-  // The second is worse than never having built it.
+test('a declined candidate closes at its own generation, so a LATER compaction is new evidence', async (t) => {
+  // Found by three tests hanging: without `#acknowledge` the same compaction re-pauses every
+  // advisor turn forever, and the operator either abandons the feature or stops reading the
+  // pauses. The second is worse than never having built it.
+  //
+  // What this test is about is the BASELINE, and that is unchanged. What has changed is what
+  // the run then does with the new evidence: since #118 the operator is not re-asked about a
+  // compaction whose evidence class they have already declined, so the second candidate below
+  // is recorded rather than put. The two halves are separable and both are asserted here --
+  // the baseline moves per compaction (this mechanism), and the pause is not repeated on an
+  // unchanged class (#118). `rotation.test.ts` owns the other side of #118: an evidence class
+  // the operator has NOT ruled on -- a compaction the seat also complains about -- is a new
+  // question and is still put, so declining once is not standing consent for anything else.
   const dir = repo()
   const impl = new FakeRotationSession('impl', 'claude', ['ack', 'One.', 'Two.', 'Three.'])
   const advisor = new FakeRotationSession('advisor', 'codex', ['Do one.', 'Do two.', 'Do three.', 'DONE'])
@@ -370,22 +379,33 @@ test('a declined candidate is remembered, and a LATER compaction raises it again
   assert.ok(first!.evidence.some((e) => e.includes('0 → 1')))
   await run.continue()
 
-  // A second, distinct compaction is new evidence and must be raised. Declining once is
-  // not standing consent for whatever happens next.
+  // A second, distinct compaction: new evidence, same evidence class, already answered.
   impl.compact()
-  const second = await run.untilPause()
-  assert.ok(second, 'a later compaction is new evidence')
-  assert.ok(second.evidence.some((e) => e.includes('1 → 2')))
-  await run.abort()
+  assert.equal(
+    await run.untilPause(),
+    undefined,
+    'the same question is not put twice; the run carries on to its end instead',
+  )
+  assert.equal((await run.result()).reason, 'done')
 
   // The note is worded about the BASELINE rather than about who decided, because every caller
-  // of `#acknowledge` reaches it and only this one declined anything (#107). What it still
-  // pins is unchanged: the baseline moved exactly once between the two compactions, which is
-  // what makes the second a new candidate rather than the first one re-read.
-  assert.equal(
-    relay.log.filter((m) => m.text.includes('rotation candidate closed at compaction generation 1')).length,
-    1,
-    'exactly one candidate was closed between the two compactions',
+  // of `#acknowledge` reaches it and only the first of them declined anything (#107). Both
+  // compactions reach it, and each closes at its own generation -- which is what makes the
+  // second a new candidate rather than the first one re-read, whether or not it was put.
+  for (const generation of [1, 2]) {
+    assert.equal(
+      relay.log.filter((m) => m.text.includes(`rotation candidate closed at compaction generation ${generation}`))
+        .length,
+      1,
+      `exactly one candidate closed at generation ${generation}`,
+    )
+  }
+  // Counted whether or not the operator was interrupted for it. "Not asked" must never quietly
+  // become "not watched".
+  assert.equal(relay.rotationWatch.candidates, 2)
+  assert.ok(
+    relay.log.some((m) => /rotation candidate recorded, run continues \(the operator already declined/.test(m.text)),
+    `the suppressed candidate is on the record:\n${relay.log.map((m) => m.text).join('\n---\n')}`,
   )
 })
 

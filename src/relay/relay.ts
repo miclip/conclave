@@ -85,7 +85,7 @@ import {
   type AuthorityConflict,
   type RestrictedOrigin,
 } from './authority.ts'
-import { assess, ComplaintLedger, topicOf } from '../rotation/degradation.ts'
+import { assess, ComplaintLedger, topicOf, type Assessment } from '../rotation/degradation.ts'
 import { rotate, type RotationResult } from '../rotation/rotate.ts'
 import type { CheckSpec } from '../rotation/record.ts'
 import { buildReviewContext, reviewPrompt } from '../rotation/review.ts'
@@ -3399,6 +3399,12 @@ export class Relay {
         ? ` — whether compaction predicts degraded work is unestablished (#10), so this is a ` +
           `candidate on what was observed and not a finding about the quality of its work`
         : '')
+    // The evidence CLASS, and the whole of what the latch below remembers (#118). Taken from
+    // `verdict.reason` rather than recomputed, and taken WHOLE rather than folded into a
+    // boolean: `degraded` and `corroborated` are two different questions to put to an operator,
+    // and a class this code does not yet know about must not be silently answered by a decision
+    // that was made about a different one.
+    const cls: Assessment['reason'] = verdict.reason
     // THIS SEAT'S policy: the run's default as amended by its own entry (D7, #78). A seat whose
     // override configures no checks is in the same position as a run that configured none --
     // there is nothing a replacement could reproduce -- so it takes the same branch.
@@ -3443,13 +3449,21 @@ export class Relay {
         ? `${impl.id}'s own rotation policy configures no checks, so it cannot be rotated`
         : `No rotation checks are configured`
       this.rotationWatch.candidates += 1
-      if (handle && this.operator !== 'agent') {
+      if (handle && this.operator !== 'agent' && this.#declined(impl.id).has(cls)) {
+        // Asked and answered (#118). See `#suppressedCandidate`.
+        this.#suppressedCandidate(impl, cls, detail)
+      } else if (handle && this.operator !== 'agent') {
+        // Which session is in the seat right now, so the resume below can tell "the operator
+        // declined" from "the operator rotated and then resumed". Only the first is a decision
+        // about the evidence; the second replaced the thing the evidence was about.
+        const answering = impl.session
         const halted = await this.#halt(handle, {
           subject: { reason: 'rotation_candidate', participant: impl.id },
           detail: `${detail}. ${why}, so this cannot be adjudicated — continue, or stop and re-run with --checks.`,
           evidence: verdict.evidence,
         })
         if (halted) return halted
+        if (impl.session === answering) this.#declined(impl.id).add(cls)
       } else {
         // Nobody to ask, or nobody a question would help. Unattended it carries on for the
         // same reason the armed unattended run does -- there is nobody to ask, and ending is
@@ -3489,13 +3503,18 @@ export class Relay {
       // The count reaches the operator through `rotationWatch` and the summary, which is the
       // whole point of those counters existing.
       this.rotationWatch.candidates += 1
-      if (handle) {
+      if (handle && this.#declined(impl.id).has(cls)) {
+        // Asked and answered (#118). See `#suppressedCandidate`.
+        this.#suppressedCandidate(impl, cls, detail)
+      } else if (handle) {
+        const answering = impl.session
         const halted = await this.#halt(handle, {
           subject: { reason: 'rotation_candidate', participant: impl.id },
           detail: `${detail}. Recorded as a rotation candidate, not acted on.`,
           evidence: verdict.evidence,
         })
         if (halted) return halted
+        if (impl.session === answering) this.#declined(impl.id).add(cls)
       } else {
         this.#record({
           from: 'orchestrator',
@@ -3572,6 +3591,69 @@ export class Relay {
    *
    * Found by three tests hanging rather than by design.
    */
+  /**
+   * Evidence classes an attended operator has already declined, per seat (#118).
+   *
+   * `#acknowledge` makes each compaction a NEW piece of evidence -- that is what stops one
+   * finding being re-raised forever, and it is right. What it cannot say is that the new
+   * evidence answers a question the operator has already answered. A long implementer compacts
+   * by design; every one of those compactions is genuine, and every one of them re-put the same
+   * pause, in the same words, differing only in a generation pair. Observed as four identical
+   * `rotation_candidate` pauses in one run. An operator asked the same question four times stops
+   * reading pauses, and the one that finally differs is the one they skim.
+   *
+   * So the decision is remembered rather than the evidence. Scoped three ways, and each scope is
+   * load-bearing:
+   *
+   *   - by SEAT, because declining a candidate for one implementer says nothing about another;
+   *   - by CLASS, because `corroborated` -- the seat compacted AND said so -- is strictly more
+   *     than the `degraded` the operator declined on, and is a question they have not been
+   *     asked. That is what keeps this from degenerating into "ask once per run";
+   *   - by SESSION, cleared wherever a replacement takes the seat, because the decision was
+   *     about the session that is now gone.
+   *
+   * Deliberately NOT an escalating threshold ("ask again after N more"). A threshold re-asks on
+   * evidence whose class has not changed, which is the thing being fixed; the count an operator
+   * would want out of one is already in `rotationWatch.candidates` and in the routing log, where
+   * reading it costs nobody a turn.
+   *
+   * Only ATTENDED declines are recorded. An unattended or agent-operated run never puts the
+   * question, so there is no answer to remember and nothing to suppress -- those paths keep the
+   * note-and-continue they already had (#96, #107, #113).
+   */
+  #declinedClasses = new Map<string, Set<Assessment['reason']>>()
+
+  /** This seat's declined classes, created on first use. */
+  #declined(seat: string): Set<Assessment['reason']> {
+    let s = this.#declinedClasses.get(seat)
+    if (!s) {
+      s = new Set()
+      this.#declinedClasses.set(seat, s)
+    }
+    return s
+  }
+
+  /**
+   * A candidate the operator was not asked about, because they already declined this class.
+   *
+   * Written to the routing log rather than dropped, and this is the half that keeps "not asked"
+   * from becoming "not watched". `rotationWatch.candidates` has already counted it; this note is
+   * where a retrospective reader finds WHICH compaction it was -- `detail` carries the generation
+   * pair -- and why nobody was interrupted for it.
+   */
+  #suppressedCandidate(impl: RelayParticipant, cls: Assessment['reason'], detail: string): void {
+    this.#record({
+      from: 'orchestrator',
+      fromRank: 'human',
+      to: [],
+      kind: 'note',
+      text:
+        `rotation candidate recorded, run continues (the operator already declined a ${cls} ` +
+        `candidate for this session of ${impl.id}, and this is the same evidence class, so the ` +
+        `same question is not put again): ${detail}`,
+    })
+  }
+
   #acknowledge(impl: RelayParticipant, generation: number): undefined {
     impl.baselineGeneration = generation
     impl.degradationCursor = impl.events.length
@@ -5613,6 +5695,10 @@ export class Relay {
       impl.events = audition.events
       impl.baselineGeneration = 0
       impl.degradationCursor = impl.events.length
+      // The declines were about the session that just left the seat (#118). A replacement that
+      // then compacts is a question nobody has been asked, and carrying the answer across the
+      // swap would suppress the first candidate raised against a brand new session.
+      this.#declinedClasses.delete(impl.id)
       this.complaints.progressed(impl.id)
       // Counted HERE, where a replacement has been accepted -- not where one was proposed.
       //
