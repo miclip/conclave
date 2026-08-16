@@ -557,6 +557,62 @@ test('a HUMAN-attended run still pauses on that compaction (#96 stands)', async 
   await run.abort()
 })
 
+test('the UNARMED human-attended pause is not repeated either (#118)', async (t) => {
+  // The same latch on the other branch that puts this question. Unarmed, the menu is `continue`
+  // or "stop and re-run with --checks" -- which makes repeating it worse rather than better,
+  // because the answer that would widen the decision is one the operator has to leave the run
+  // to give. #96 argued the pause is worth a human's moment; it did not argue it is worth their
+  // moment once per compaction.
+  //
+  // Asserted separately from the armed case because the two branches are separate code with
+  // separate attendance rules -- this one excludes an agent operator (#107) and the armed one
+  // does not -- so a latch on one says nothing about the other.
+  const dir = repo()
+  const advisor = new FakeRotationSession('advisor', 'codex', [
+    'Do the first thing.',
+    'Do the second thing.',
+    'Do the third thing.',
+    'DONE',
+  ])
+  const impl = new FakeRotationSession('impl', 'claude', ['ack', 'One.', 'Two.', 'Three.'])
+  let worked = 0
+  impl.onSend = () => {
+    if (worked++ > 0) impl.compact()
+  }
+
+  const relay = await relayOf(dir, advisor, [impl], { rotation: undefined, maxAdvisorTurns: 4 })
+  t.after(() => relay.stop())
+
+  const run = relay.start('Keep the work moving.')
+  const asked: { detail: string; options: readonly string[] }[] = []
+  for (;;) {
+    const s = await run.settled()
+    if (s.kind === 'ended') break
+    asked.push({ detail: s.pause.detail, options: [...s.pause.options] })
+    if (asked.length > 4) {
+      await run.abort()
+      break
+    }
+    await run.continue()
+  }
+
+  assert.equal(asked.length, 1, `asked once, on the first compaction:\n${asked.map((a) => a.detail).join('\n---\n')}`)
+  assert.match(asked[0]!.detail, /rose 0 → 1/)
+  assert.match(asked[0]!.detail, /re-run with --checks/)
+  // Still no `rotate`: nothing to verify a replacement against, so the option would be inert.
+  assert.deepEqual(asked[0]!.options, ['continue', 'constrain', 'abort'])
+
+  // The later compactions are counted and written down, exactly as on the armed branch.
+  assert.equal(relay.rotationWatch.candidates, 3, 'three compactions, all counted')
+  assert.equal(
+    relay.log.filter((m) => /rotation candidate recorded, run continues \(the operator already declined/.test(m.text))
+      .length,
+    2,
+    `the two the operator was spared are on the record:\n${relay.log.map((m) => m.text).join('\n---\n')}`,
+  )
+  assert.equal(run.outcome!.reason, 'done')
+})
+
 test('an ARMED agent-operated run still raises the candidate, with rotate offered', async (t) => {
   // The boundary of #107, and the assertion that keeps it a boundary. What was changed is the
   // branch where the pause has no answer: unarmed, there is nothing to verify a replacement
