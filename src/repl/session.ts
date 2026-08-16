@@ -486,12 +486,12 @@ function renderPause(p: RunPause, width: number): string {
  * about to be sent to at all.
  *
  * What that gives up, stated rather than discovered: the `advisor_escalated` halt raised when a
- * seat's turn completed and its report could not be read (`src/relay/relay.ts:5266`) is
+ * seat's turn completed and its report could not be read (`src/relay/relay.ts:5266-5268`) is
  * conclave-scoped by design -- "the reason names who is being asked to take it, and the scope
  * follows the reason" -- yet the thing an operator wants to know there is whether THAT seat's
  * child is still writing. Under the rank fallback that seat was sampled at N=1 by coincidence
  * of being the only implementer. It is not sampled now. The pause still carries its own
- * liveness EVIDENCE from the halt site (`src/relay/relay.ts:5280`), which is what the operator
+ * liveness EVIDENCE from the halt site (`src/relay/relay.ts:5278-5280`), which is what the operator
  * reads;
  * what is gone is a refusal derived from a rank scan. Narrowing that halt's scope, if the
  * refusal is wanted back, is a change to the halt site rather than to this guard.

@@ -329,7 +329,7 @@ test('a repair rewrites the citation it was asked to, in the form it was written
   assert.equal(repairLine('// src/relay/run.ts:100 is unrelated', by), '// src/relay/run.ts:100 is unrelated')
 })
 
-test('the tokens that are not a pin on their own are the ones we know about', () => {
+test('every declared token is a pin on its own, so nothing needs a neighbour to be found', () => {
   // Not `planRepairs().refused`, which was the first thing written here and proves nothing: on a
   // tree with no faults there is nothing to relocate, so it asserts an empty list against an
   // empty list forever. This asks the question that has an answer whether or not anything has
@@ -341,26 +341,22 @@ test('the tokens that are not a pin on their own are the ones we know about', ()
   // between two occurrences moves the citation onto the other one and passes. `planRepairs`
   // covers the repair side by taking the shift its unambiguous neighbours measured; nothing
   // covers this side, so the list is pinned and a NINTH has to be argued for.
+  // Eight of the thirty-eight were not, when this was first asked. All eight are now, and the
+  // list is empty rather than an allowlist -- which is a much stronger thing to assert and was
+  // only affordable because asking the question at all showed how few there were.
+  //
+  // Three needed nothing but a better token: the LINES differed and the declared token was the
+  // substring they had in common. The other five had a genuine twin -- `cwd: process.cwd(),`
+  // appears five times in `conclave.ts` and nothing on that line can tell them apart -- so the
+  // citation was widened to a range that includes something distinguishing. Widening is a
+  // judgement about what the claim rests on, which is why the repair tool does not do it.
   assert.deepEqual(
     weakPins().map((w) => w.cite),
-    [
-      // Five constructor sites take the same cwd. The claim is about this one, and the range
-      // form is not available -- there is nothing adjacent to widen into.
-      'bin/conclave.ts:1262',
-      'src/relay/relay.ts:1786-1792',
-      // The three `worktreePaths` readers cite each other's spelling by construction: the claim
-      // they support is that these are the only readers, so they cannot be told apart by it.
-      'src/relay/relay.ts:2340',
-      'src/relay/relay.ts:2568',
-      'src/relay/relay.ts:4478',
-      'src/relay/relay.ts:5266',
-      // The one that was already documented as weak, in its own CITED comment.
-      'src/relay/relay.ts:5280',
-      'src/repl/session.ts:1031',
-    ],
+    [],
     'A declared token that matches more than one line is a weaker pin than it looks: only a ' +
-      'shift of exactly the distance between two occurrences slips past it. Narrow the token, ' +
-      'widen the citation to a range that is unique, or add it here with the reason it cannot be.',
+      'shift of exactly the distance between two occurrences slips past it, and it cannot be ' +
+      'relocated on its own evidence. Narrow the token, or widen the citation to a range that ' +
+      'contains something unique.',
   )
 })
 

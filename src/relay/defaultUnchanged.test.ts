@@ -620,10 +620,10 @@ const DECLARED: Record<string, string> = {
     'dispatch to a free seat, and operator_requested is consumed at an advisor-turn boundary ' +
     'whose own evidence line says no turn is in flight. WHAT IS GIVEN UP, named rather than ' +
     'discovered: the advisor_escalated halt raised when a seat’s turn completed and its report ' +
-    'could not be read (src/relay/relay.ts:5266) is conclave-scoped by design, yet the useful ' +
+    'could not be read (src/relay/relay.ts:5266-5268) is conclave-scoped by design, yet the useful ' +
     'question there is whether THAT seat is still writing; at N=1 the rank scan sampled it by ' +
     'coincidence of it being the only implementer, and now nothing does. The pause still carries ' +
-    'that seat’s liveness evidence from the halt site (src/relay/relay.ts:5280), which is what ' +
+    'that seat’s liveness evidence from the halt site (src/relay/relay.ts:5278-5280), which is what ' +
     'the operator actually reads; restoring a refusal there is a change to that halt’s scope, ' +
     'not to the guard. AT N>1 the old behaviour was unsafe in the other direction: a pause about ' +
     'one seat could be refused because a DIFFERENT seat was mid-turn, and the operator was told ' +
@@ -674,7 +674,7 @@ const DECLARED: Record<string, string> = {
     'The sentence is repaired rather than left standing, on this entry’s own rule. Everything ' +
     'else above is still true: the three readings, the wording, the event count as an input, and ' +
     'the pause menu’s `wait` option, which still asks reportsChildOnCpu. No assertion in this ' +
-    'file was relaxed; one citation moved with the code it pins (src/repl/session.ts:1031). ' +
+    'file was relaxed; one citation moved with the code it pins (src/repl/session.ts:1030-1031). ' +
     'Covered in src/outcomes/liveness.test.ts on the reported numbers, and end to end through ' +
     'the console’s refusal path in src/repl/session.test.ts.',
   'a paused run keeps measuring the child, and its evidence says when it was measured (#101)':
@@ -1311,7 +1311,7 @@ async function defaultRunDocuments(): Promise<{ report: unknown; status: unknown
  * blind to that subtree is claiming more than it checks.
  *
  * Built through the real recorder: `recordSession` is what both front-ends call, and
- * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:1031
+ * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:1030-1031
  * with the same object -- a `RunPause` the run handle raised, not one written here. Read back
  * through `main(['status', '--json'])`, so the serialisation and the reconciliation against
  * the pid are the production ones.
@@ -1607,7 +1607,7 @@ async function provoke(
  * The status document of a run paused for one given reason.
  *
  * Built through the real recorder: `recordSession` is what both front-ends call, and
- * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:1031
+ * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:1030-1031
  * with the same object -- a `RunPause` the relay raised, not one written here. Read back
  * through `main(['status', '--json'])`, so the serialisation and the reconciliation against
  * the pid are the production ones.
@@ -1811,7 +1811,7 @@ test('default run works in the run cwd and creates no worktree', async () => {
     assert.equal(c.cwd, fromCli.cwd, `the session CLI must create ${c.id} in the run cwd`)
   }
 
-  // The relay CLI passes process.cwd() as the run cwd: bin/conclave.ts:1262.
+  // The relay CLI passes process.cwd() as the run cwd: bin/conclave.ts:1260-1262.
   // The relay hands that same cwd to each participant adapter: src/relay/relay.ts:1786-1792.
   // The cwd getter simply returns the option: src/relay/relay.ts:1616-1618.
   assert.match(relay, /cwd:\s*process\.cwd\(\)/, 'relay block must start in process.cwd')
@@ -1856,7 +1856,7 @@ test('default run works in the run cwd and creates no worktree', async () => {
 
   // A default run with no subagents must not create any git worktree. The relay only samples
   // the worktree list for its subagent-use report: src/relay/subagents.ts:68 defines
-  // worktreePaths, and src/relay/relay.ts:2340, :2568 and :4478 read it.
+  // worktreePaths, and src/relay/relay.ts:2340-2341, :2568 and :4478 read it.
   // Prove it by exercising the run in a real temporary repository.
   const repo = mkdtempSync(join(tmpdir(), 'conclave-default-'))
   try {

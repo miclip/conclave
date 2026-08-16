@@ -68,7 +68,7 @@ export const CITED: Record<string, string> = {
   //
   // The three below moved twice over, once for #81 and once for #80's integration work in the
   // same file, and are pinned against the merged tree rather than against either side of it.
-  'bin/conclave.ts:1262': 'cwd: process.cwd(),',
+  'bin/conclave.ts:1260-1262': "    const relay = await Relay.start({\n      registry,\n      cwd: process.cwd(),",
   'bin/conclave.ts:1342': 'runReport(relay, { goal, outcome, startedAt: runStartedAt, build })',
   // One flag for every implementer seat, which is the RUN-WIDE half of the launch args. The
   // per-seat half is no longer missing (#77): it rides inside each `--implementers` entry and
@@ -82,10 +82,10 @@ export const CITED: Record<string, string> = {
   // written about, and the one whose LINE no longer says what it said -- `#join` now passes a
   // named context object rather than an inline literal -- is pinned on the new spelling.
   'src/relay/relay.ts:1616-1618': 'get cwd(): string',
-  'src/relay/relay.ts:1786-1792': 'createParticipant(spec, ctx)',
-  'src/relay/relay.ts:2340': 'worktreePaths(this.#opts.cwd)',
+  'src/relay/relay.ts:1786-1792': 'const ctx = { cwd, watchdogMs: this.#opts.turnWatchdogMs }',
+  'src/relay/relay.ts:2340-2341': "this.#worktreesSeen.add(w)\n    return {",
   'src/relay/relay.ts:2367': 'NOT ARMED (no checks configured)',
-  'src/relay/relay.ts:2568': 'worktreePaths(this.#opts.cwd)',
+  'src/relay/relay.ts:2568': 'if (this.#worktreesAtStart) for (const w of worktreePaths',
   'src/relay/relay.ts:3015': 'resolutionFor(p.subject, { rotationArmed: armed })',
   'src/relay/relay.ts:3449-3451': 'No rotation checks are configured',
   'src/relay/relay.ts:324': "onDegradation ?? 'candidate'",
@@ -94,7 +94,7 @@ export const CITED: Record<string, string> = {
   // a turn that is already running. If that ever stops being true, the predicate the relay and
   // `/continue` both send on is no longer the thing the operator is watching.
   'src/repl/session.ts:869-882': 'progress.start(e.participant)',
-  'src/relay/relay.ts:4478': 'worktreePaths(this.#opts.cwd)',
+  'src/relay/relay.ts:4478': 'this.#worktreesAtStart = worktreePaths(this.#opts.cwd)',
   'src/relay/relay.ts:4966': "subject: { reason: 'turn_incomplete', participant: lead.id }",
   // The five below are what the console's `/continue` liveness guard cites for reading a
   // pause's SCOPE rather than `verdictOf` or a rank scan (`seatsToSampleAtPause` in
@@ -110,7 +110,7 @@ export const CITED: Record<string, string> = {
   // seat could take it -- the N=1 coincidence a scope reader must not mistake for a seat.
   'src/relay/relay.ts:5133': "reason: 'authority_conflict', workstream:",
   'src/relay/relay.ts:5217': "subject: { reason: 'implementer_unanswered', participant: seat.id }",
-  'src/relay/relay.ts:5266': "subject: { reason: 'advisor_escalated' },",
+  'src/relay/relay.ts:5266-5268': "its report could not be read, so there is",
   // Repaired rather than deleted, and it now pins a DESCRIPTOR rather than a call: #101 moved
   // the measurement inside `#halt`, so the halt site says which seat to measure and no longer
   // builds the sentence itself. The claim the citation supports is unchanged -- this halt does
@@ -120,7 +120,7 @@ export const CITED: Record<string, string> = {
   // `turn_incomplete` halt below, so only a shift of exactly the distance between the two would
   // slip past. There is nothing unique on the line to pin instead. It is also why this entry
   // is never auto-relocated -- two matches is not a pin, and `planRepairs` refuses it by rule.
-  'src/relay/relay.ts:5280': 'liveness: { participant: seat, emittedBefore: report.emittedBefore },',
+  'src/relay/relay.ts:5278-5280': "knowing whether the child is still writing changes what the operator does.",
   'src/relay/relay.ts:5350': "subject: { reason: 'turn_incomplete', participant: seat.id }",
   'src/relay/relay.ts:5354': 'verdictOf: { participant: seat.id, endSeq: current.seq },',
   'src/relay/resolution.ts:190': 'export function resolutionFor',
@@ -145,7 +145,7 @@ export const CITED: Record<string, string> = {
   'src/repl/session.ts:826': 'logPath: runLogPath,',
   // Moved by #83's edit to the `/continue` refusal, nine lines above it in the same block.
   // Repaired rather than deleted: the call it pins is the one the console still makes.
-  'src/repl/session.ts:1031': "recording.set('paused', { pause: run.pause })",
+  'src/repl/session.ts:1030-1031': "run.pause.refusal = { at: Date.now(), reason,",
   // Why an in-place amendment to a pause needs an event behind it. Cited by both halves of
   // #101's refresh -- the module that explains the mechanism and the loop that uses it --
   // because the argument was already written here, for `/wait`, and restating it in two more
