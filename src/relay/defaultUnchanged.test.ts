@@ -674,7 +674,7 @@ const DECLARED: Record<string, string> = {
     'The sentence is repaired rather than left standing, on this entry’s own rule. Everything ' +
     'else above is still true: the three readings, the wording, the event count as an input, and ' +
     'the pause menu’s `wait` option, which still asks reportsChildOnCpu. No assertion in this ' +
-    'file was relaxed; one citation moved with the code it pins (src/repl/session.ts:1136-1137). ' +
+    'file was relaxed; one citation moved with the code it pins (src/repl/session.ts:1223-1224). ' +
     'Covered in src/outcomes/liveness.test.ts on the reported numbers, and end to end through ' +
     'the console’s refusal path in src/repl/session.test.ts.',
   'a paused run keeps measuring the child, and its evidence says when it was measured (#101)':
@@ -718,7 +718,7 @@ const DECLARED: Record<string, string> = {
     'not idle, because continuing SENDS and a reading up to 30s old is not a reading of now. It ' +
     'does not read pause.liveness, and that is stated at both ends. ' +
     'TWO RELAY OPTIONS ARE ADDED FOR TESTS ONLY — liveness (the same seam the console already ' +
-    'has at src/repl/session.ts:286) and livenessRefreshMs/livenessRefreshLimit. No CLI flag ' +
+    'has at src/repl/session.ts:325) and livenessRefreshMs/livenessRefreshLimit. No CLI flag ' +
     'exposes them; a default run reads the constants. ' +
     'ONE CLAIM IN THE ISSUE IS FALSIFIED and recorded here because it points at the mechanism: ' +
     'the reporter saw a byte-identical evidence line on what looked like two consecutive pauses ' +
@@ -1198,9 +1198,33 @@ const DECLARED: Record<string, string> = {
     'intent arrives DISTINGUISHABLE on the surfaces a consumer reads (which the shape guards ' +
     'below cannot say), the automatic one only ever through a run whose policy actually rotates ' +
     'unattended.',
+  '--dry-run on the console, reversing a written parity decision (#134)':
+    'The optional flag surface grows by one on `session`: --dry-run, which resolves everything, ' +
+    'prints the plan and starts nothing. It was DECLARED relay-only in ' +
+    'src/relay/frontEndParity.test.ts on the grounds that a dry run needs a point of no return ' +
+    'to stop short of and the console had none -- it starts, then waits for a goal. #130 made ' +
+    'that false: everything answering the argv alone (the project config, the launch-argument ' +
+    'composition, every seat spec and its registry.resolve) now sits ABOVE the lock check in ' +
+    'runSession, and the hook registration, the Codex trust probe, the permission-mode write, ' +
+    'the run log and Relay.start all sit below it. So the lock is the console point of no ' +
+    'return, and the dry run returns between the two. Declared rather than merely added: ' +
+    'reversing a written decision should start from someone deciding to, and the flag is a ' +
+    'change an operator can see on a command whose default run is unchanged -- absent, ' +
+    'runSession takes exactly the options it always took, and the plan is printed by nothing. ' +
+    'Two front-end-shaped differences remain and are deliberate. The console prints ' +
+    '"goal: would be asked for" when it was given none, which relay (which refuses to start ' +
+    'without a goal) cannot be. And the console REFUSES --dry-run with --bypass, where relay ' +
+    'overlays the requested mode onto the config in memory (withBypass) and prints a plan ' +
+    'composed as the run would be: the console reads the config inside runSession and has no ' +
+    'such overlay, so applying the bypass would leave a permission mode written by an ' +
+    'invocation that started nothing, and skipping it would print launch arguments the real ' +
+    'run would not use. The plan itself is rendered for both commands by one module ' +
+    '(src/relay/dryRunPlan.ts) and asserted line for line in ' +
+    'src/relay/frontEndParity.test.ts; that it touches nothing is asserted positively, by ' +
+    'comparing the project tree before and after, in src/repl/sessionDryRun.test.ts.',
 }
 
-test('DECLARED contains exactly the routing, pause-resolution, attribution, ceiling-flag, seat-flag, seat-status, launch-record, flag-reader, integration-check, per-seat-rotation, reviewer, resume-guard, mixed-liveness, timestamped-liveness, model-validation, executable-preflight, compaction-survival, rotation-reporting, send-precondition, process-tree-liveness, ceiling-reporting, record-heartbeat and rotation-intent entries', () => {
+test('DECLARED contains exactly the routing, pause-resolution, attribution, ceiling-flag, seat-flag, seat-status, launch-record, flag-reader, integration-check, per-seat-rotation, reviewer, resume-guard, mixed-liveness, timestamped-liveness, model-validation, executable-preflight, compaction-survival, rotation-reporting, send-precondition, process-tree-liveness, ceiling-reporting, record-heartbeat, rotation-intent and console-dry-run entries', () => {
   assert.deepEqual(Object.keys(DECLARED), [
     'implementer_unanswered -> advisor',
     'status.pause.resolution',
@@ -1226,6 +1250,7 @@ test('DECLARED contains exactly the routing, pause-resolution, attribution, ceil
     'liveness measures the child’s whole process tree, not the pid the orchestrator holds (#111)',
     'the session record beats, retries, and says when it has stopped moving (#126)',
     'why each rotation happened, in the run report and in status --json (#75)',
+    '--dry-run on the console, reversing a written parity decision (#134)',
   ])
 })
 
@@ -1321,7 +1346,7 @@ async function seatsFromSessionCli(): Promise<{ creates: CreateRecord[]; cwd: st
  * The two machine-readable documents a default run actually emits.
  *
  * Both come out of one `relay --json` run in a temporary repository, through the production
- * call sites: the report is what `bin/conclave.ts:1351` prints, and the status record is what
+ * call sites: the report is what `bin/conclave.ts:1330` prints, and the status record is what
  * `recordSession` wrote during that same run, read back by `main(['status', '--json'])` --
  * which resolves the most recent session in `process.cwd()`, so the record has to have been
  * written where an operator would look for it.
@@ -1366,7 +1391,7 @@ async function defaultRunDocuments(): Promise<{ report: unknown; status: unknown
  * blind to that subtree is claiming more than it checks.
  *
  * Built through the real recorder: `recordSession` is what both front-ends call, and
- * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:1136-1137
+ * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:1223-1224
  * with the same object -- a `RunPause` the run handle raised, not one written here. Read back
  * through `main(['status', '--json'])`, so the serialisation and the reconciliation against
  * the pid are the production ones.
@@ -1662,7 +1687,7 @@ async function provoke(
  * The status document of a run paused for one given reason.
  *
  * Built through the real recorder: `recordSession` is what both front-ends call, and
- * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:1136-1137
+ * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:1223-1224
  * with the same object -- a `RunPause` the relay raised, not one written here. Read back
  * through `main(['status', '--json'])`, so the serialisation and the reconciliation against
  * the pid are the production ones.
@@ -1682,7 +1707,7 @@ async function pausedStatusDocument(reason: PauseReason): Promise<unknown> {
     goal: 'a default goal',
     front: 'session',
     startedAt: Date.now(),
-    // Passed because the console always passes one (src/repl/session.ts:932), so the status
+    // Passed because the console always passes one (src/repl/session.ts:1019), so the status
     // documents this file pins differ only in what a pause actually changes.
     logPath: join(repo, '.conclave', 'runs', 'session-test.ndjson'),
     build: 'test',
@@ -1866,7 +1891,7 @@ test('default run works in the run cwd and creates no worktree', async () => {
     assert.equal(c.cwd, fromCli.cwd, `the session CLI must create ${c.id} in the run cwd`)
   }
 
-  // The relay CLI passes process.cwd() as the run cwd: bin/conclave.ts:1269-1271.
+  // The relay CLI passes process.cwd() as the run cwd: bin/conclave.ts:1248-1250.
   // The relay hands that same cwd to each participant adapter: src/relay/relay.ts:1796-1802.
   // The cwd getter simply returns the option: src/relay/relay.ts:1626-1628.
   assert.match(relay, /cwd:\s*process\.cwd\(\)/, 'relay block must start in process.cwd')
@@ -2023,6 +2048,9 @@ test('both flag helpers fall back when the flag is absent, and each block reads 
       'checks',
       'checks-informational',
       'checks-unrelated',
+      // The declared addition; see DECLARED['--dry-run on the console, reversing a written
+      // parity decision (#134)']. Boolean and optional, so a default console run is unchanged.
+      'dry-run',
       'force',
       'implementer',
       'implementer-args',
@@ -2062,7 +2090,7 @@ const runDocuments = (): Promise<{ report: unknown; status: unknown }> =>
  *     field added inside any of them was invisible -- which is precisely where per-seat
  *     features land.
  *   - A declared field is not an emitted one. `turnWatchdogMs` was declared and dropped for
- *     its whole life (src/repl/session.ts:211-223), and a text-level pin cannot tell the
+ *     its whole life (src/repl/session.ts:250-262), and a text-level pin cannot tell the
  *     difference.
  *   - An emitted field need not be declared anywhere this test was reading. A key spread in
  *     from another type, or written by a builder that widens its return, appears in the JSON

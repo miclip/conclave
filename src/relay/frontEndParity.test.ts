@@ -35,7 +35,7 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PassThrough, Writable } from 'node:stream'
@@ -79,10 +79,25 @@ const DECLARED: Record<string, string> = {
     'the WATCHING half unnecessary; driving a detached console is #4 and needs a decision ' +
     'about how input reaches it, not a flag.',
   'detached-id': 'internal: how a detached child adopts the id its parent already printed.',
-  'dry-run':
-    'relay resolves everything and starts nothing, which needs a point of no return to stop ' +
-    'short of. The console has none -- it starts, then waits for a goal -- so the same flag ' +
-    'would describe a plan it was already too late not to have made.',
+  // `dry-run` was declared here, on the grounds that relay resolves everything and starts
+  // nothing, which needs a point of no return to stop short of, and the console had none -- it
+  // starts, then waits for a goal -- so the same flag would describe a plan it was already too
+  // late not to have made.
+  //
+  // RESOLVED rather than deleted quietly, because that reasoning was true when it was written
+  // and #130 is what made it false. Everything that answers the argv alone is now resolution
+  // done ABOVE the lock check in `runSession`: `readProjectConfig`, the launch-argument
+  // composition, every seat spec and `registry.resolve` over each of them. The hook
+  // registration, the Codex trust probe, the permission-mode write, the run log and
+  // `Relay.start` are all below it, and `guard` only reads -- so the lock IS the console's
+  // point of no return, the same boundary relay stops short of, reached by the same argument.
+  //
+  // The flag is now on both commands and prints the same plan through the same renderer
+  // (`dryRunPlan.ts`), so there is no divergence left to declare. Two differences remain and
+  // are properties of the front-ends rather than of the flag: the console prints
+  // `goal: would be asked for` where it was given none, which relay cannot be, and the console
+  // REFUSES `--dry-run` with `--bypass` where relay overlays the requested mode in memory --
+  // it has no such overlay, so both applying and skipping the write would be wrong.
   json:
     'the console IS the human surface; a --json console would be two renderings competing ' +
     'for one stdout. `conclave status --json` is the machine-readable view of a live ' +
@@ -284,6 +299,161 @@ function tempRepo(): string {
   execFileSync('git', ['commit', '-m', 'init', '--quiet'], { cwd: dir })
   return dir
 }
+
+/**
+ * A registry that knows the named agents and creates nothing without recording it.
+ *
+ * `opencode` rather than `claude`/`codex` in the dry-run test below, for a reason worth
+ * stating: `AGENT_KINDS` is the set that needs hook FILES rendered into a project, and
+ * opencode is not in it — so relay's registration and its Codex trust probe are both handed
+ * an empty agent list and do nothing. That keeps the test's subject the plan, rather than
+ * relay's habit of registering hooks above its own dry run.
+ */
+function knownAgents(agents: readonly string[], created: string[]): AgentRegistry {
+  const registry = new AgentRegistry()
+  for (const agent of agents) {
+    registry.register({
+      id: agent,
+      displayName: agent,
+      capabilities: {
+        agent,
+        readinessSignal: 'unknown',
+        turnKeySource: 'prompt_id',
+        outcomes: {
+          completed: 'observed',
+          cancelled: 'reasoned_but_unverified',
+          permission_refused: 'reasoned_but_unverified',
+          process_exited: 'reasoned_but_unverified',
+          timed_out: 'reasoned_but_unverified',
+          transport_lost: 'reasoned_but_unverified',
+          unknown_abnormal_end: 'reasoned_but_unverified',
+        },
+      },
+      deadlines: NO_DEADLINE_CLOCKS,
+      launch: { command: agent, baseArgs: [] },
+      async create(resolved) {
+        created.push(resolved.spec.id)
+        return new FakeRotationSession(`${agent}-1`, agent, [])
+      },
+    })
+  }
+  return registry
+}
+
+test('both front-ends describe the same plan, line for line, from one invocation', async () => {
+  // `--dry-run` is on both commands as of this test, which is what retires the DECLARED entry
+  // above. Existing on both is the weak claim, and this file has been fooled by it before
+  // (#81): what matters is that the two commands describe the SAME resolution.
+  //
+  // They cannot share the composition, and should not. `relay` composes launch arguments in
+  // its CLI block; the console composes them inside `runSession`, from the project config it
+  // reads there, and a plan built in `bin/conclave.ts` for the console would be a SECOND
+  // composition able to disagree with the run it claims to describe. So what is shared is the
+  // description -- `dryRunPlan.ts` -- and this asserts the two arrive at the same one.
+  //
+  // ONE repository, run twice, because `cwd` is a line of the plan. Session goes first: it
+  // writes nothing, where relay registers hooks and creates `.conclave/runs/` above its own
+  // dry run (see the note in that block).
+  //
+  // Every kind of launch argument at once, since composition is where the two could differ:
+  // config-derived (`--auto`, from the bypass mode written into .conclave/config.json),
+  // per-invocation (`--implementer-args`), and per-seat (inside `--implementers`).
+  const repo = tempRepo()
+  mkdirSync(join(repo, '.conclave'), { recursive: true })
+  writeFileSync(
+    join(repo, '.conclave', 'config.json'),
+    JSON.stringify({ agents: { opencode: { permissions: 'bypass' } } }, null, 2),
+  )
+  const argsFor = (front: 'relay' | 'session'): string[] => [
+    front,
+    'a goal both front-ends resolve identically',
+    '--advisor',
+    'opencode',
+    '--implementer',
+    'opencode',
+    '--implementers',
+    'opencode --model a, opencode --model b',
+    '--implementer-args',
+    '--print',
+    '--reviewer',
+    'opencode',
+    // Short-form, because `--reviewer-args` is not in PASS_THROUGH_FLAGS: both front-ends read
+    // a leading `--` there as a value that went missing, which the acceptance table above
+    // pins. That agreement is the subject of that test, not of this one.
+    '--reviewer-args',
+    '-q',
+    '--checks',
+    'npm test',
+    '--checks-informational',
+    'npm run lint',
+    '--dry-run',
+  ]
+
+  const before = process.cwd()
+  const plans: Record<string, string[]> = {}
+  const created: string[] = []
+  // What `process.cwd()` reports from inside the repo, which on macOS is the realpath of the
+  // temp directory and not the path `mkdtemp` returned. The plan prints the former.
+  let cwdSeen = repo
+  try {
+    process.chdir(repo)
+    cwdSeen = process.cwd()
+    for (const front of ['session', 'relay'] as const) {
+      const said: string[] = []
+      const [log, error] = [console.log, console.error]
+      console.log = (...a: unknown[]) => void said.push(a.map(String).join(' '))
+      console.error = () => {}
+      let code: number
+      try {
+        code = await main(argsFor(front), {
+          registry: knownAgents(['opencode'], created),
+          input: new PassThrough(),
+          // The console writes its plan through its own `write`, which goes here.
+          output: new Writable({
+            write(chunk, _e, cb) {
+              said.push(...String(chunk).split('\n').filter(Boolean))
+              cb()
+            },
+          }),
+        })
+      } finally {
+        console.log = log
+        console.error = error
+      }
+      assert.equal(code, 0, `${front} --dry-run must succeed; it said:\n${said.join('\n')}`)
+      // From the marker, because relay prints its own preamble first -- goal lint, hook
+      // registration, ceilings, the rotation line -- and the claim here is about the PLAN.
+      const at = said.indexOf('dry run — nothing was started')
+      assert.ok(at >= 0, `${front} must print a plan; it said:\n${said.join('\n')}`)
+      plans[front] = said.slice(at)
+    }
+  } finally {
+    process.chdir(before)
+    rmSync(repo, { recursive: true, force: true })
+  }
+
+  assert.deepEqual(
+    plans['session'],
+    plans['relay'],
+    'the two front-ends describe one invocation differently, which is the failure a dry run ' +
+      'cannot survive: its whole value is that the plan is the run.',
+  )
+  // Named as well as compared, so parity cannot be satisfied by both commands printing a plan
+  // with every argument missing from it. Config-derived, per-invocation and per-seat arguments
+  // in that order, on the seat that carries all three.
+  assert.deepEqual(plans['session'], [
+    'dry run — nothing was started',
+    `  cwd:         ${cwdSeen}`,
+    '  advisor:     opencode --auto',
+    '  implementer: opencode --auto --print --model a',
+    '  implementer-2: opencode --auto --print --model b',
+    '  reviewer   : opencode --auto -q',
+    '  checks:      npm test [required], npm run lint [informational]',
+    '  goal:        a goal both front-ends resolve identically',
+  ])
+  // And neither front-end created a participant on the way to describing one.
+  assert.deepEqual(created, [], 'a dry run must start nothing, on either command')
+})
 
 test('the same --implementer-args value reaches the same launch from both front-ends', async () => {
   // #81 end to end, and the half the acceptance table above cannot reach: a front-end could

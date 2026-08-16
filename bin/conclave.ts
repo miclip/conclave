@@ -25,6 +25,7 @@ import { flagReader, missingValueMessage } from '../src/config/cliFlags.ts'
 import type { CheckSpec } from '../src/rotation/record.ts'
 import type { ProjectConfig } from '../src/config/project.ts'
 import { runReport } from '../src/relay/report.ts'
+import { dryRunPlan, dryRunPlanLines, type DryRunPlanInput } from '../src/relay/dryRunPlan.ts'
 import { RunLogWriter, readRunLog, runLogExists } from '../src/relay/resume.ts'
 import { ceilingSummary, ceilingsFrom, effectiveCeilings, preflightRefusals } from '../src/relay/guardrails.ts'
 import { ensureCodexHooksTrusted } from '../src/deployment/ensureTrust.ts'
@@ -298,7 +299,7 @@ Commands:
                    [--bypass [agent]] [--operator agent] [--settle SECONDS]
                    [--salvage SECONDS] [--record <path>] [--resume <log>] [--force]
                    [--turn-timeout SECONDS] [--max-turns N] [--max-minutes N]
-                   [--max-queue-depth N] [--max-concurrent-seats N]
+                   [--max-queue-depth N] [--max-concurrent-seats N] [--dry-run]
                                    The same session, interactively. The goal is optional:
                                    without one the console waits and the first thing you
                                    type starts the run. Pauses become decision
@@ -356,6 +357,15 @@ Commands:
                                    --record tees every byte written to the terminal,
                                    escape codes included, so a rendering fault can be
                                    inspected rather than screenshotted.
+                                   --dry-run resolves everything and starts nothing, as in
+                                   relay, and prints the same plan line for line. It stops
+                                   above the session lock, so it registers no hooks, probes
+                                   no Codex trust, writes no permission mode, takes no lock
+                                   and creates no participant. Without a goal the plan says
+                                   the goal would be asked for. Refused with --bypass:
+                                   applying it would leave a permission mode written by an
+                                   invocation that started nothing, and skipping it would
+                                   print launch arguments the real run would not use.
 `
 
 /**
@@ -954,9 +964,6 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
     const seatRequests: SeatRequest[] =
       seatPlan.kind === 'listed' ? seatPlan.seats : [{ agent: flag('implementer', 'claude'), args: [] }]
     const implementerAgents = seatRequests.map((s) => s.agent)
-    // The lead implementer, which is what every singular reader below wants: registration,
-    // the bypass notice, the dry-run plan and `RelayOptions.implementer` itself.
-    const implementer = implementerAgents[0]!
     const checks = parseChecks(
       flag('checks', ''),
       flag('checks-informational', ''),
@@ -1120,12 +1127,9 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
       ...launchArgsFor(projectConfig, agent),
       ...extraArgs(flag('reviewer-args', '')),
     ])
-    // The lead seat's argv as it will actually be launched, read back off the spec rather than
-    // recomposed. Recomposing it from the agent alone would drop that seat's own
-    // `--implementers` arguments, so the dry run would print a plan the real run does not match
-    // -- which is the one thing a dry run must not do. At N=1 with no per-seat arguments this is
-    // byte for byte what `implArgsFor(implementer)` returned.
-    const implArgs = implSpecs[0]!.args ?? []
+    // Every seat's argv is read back off its spec rather than recomposed for the plan, so the
+    // dry run cannot print something the real run does not match -- which is the one thing a
+    // dry run must not do. See the plan built below.
     const allAgents = [lead, ...implementerAgents, ...(reviewerSpec ? [reviewerSpec.agent] : [])]
     const bypassing = allAgents.filter((a) => permissionModeFor(projectConfig, a) === 'bypass')
     if (bypassing.length > 0) {
@@ -1217,51 +1221,26 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
       // Respects --json for the same reason the report does: an agent operator checking what
       // WOULD run is exactly the caller most likely to be parsing, and handing it prose
       // because it also passed --dry-run would be the trap this mode exists to avoid.
-      const plan = {
-        dryRun: true,
+      //
+      // Built and rendered by `dryRunPlan` / `dryRunPlanLines`, which the console's own dry run
+      // also calls. The two commands compose their launch arguments in different places -- here,
+      // and inside `runSession` from the config it reads itself -- so the ONE thing that must
+      // not be written twice is the description of the result. See `dryRunPlan.ts`.
+      const plan: DryRunPlanInput = {
         cwd: process.cwd(),
         goal,
         advisor: { agent: lead, args: leadArgs },
-        implementer: { agent: implementer, args: implArgs },
-        // Only when the operator named a seat list. A default dry run's document is what it
-        // has always been -- one `implementer` key naming one agent -- and a `seats` array
-        // that appeared on every plan would change what an existing reader parses to say
-        // nothing it did not already know.
-        ...(seatPlan.kind === 'listed'
-          ? { implementers: implSpecs.map((s) => ({ id: s.id, agent: s.agent, args: s.args ?? [] })) }
-          : {}),
+        implementers: implSpecs.map((s) => ({ id: s.id, agent: s.agent, args: s.args ?? [] })),
+        seatsNamed: seatPlan.kind === 'listed',
         // Opt-in and absent otherwise (#72): a default dry run's document does not gain a
         // `reviewer` key it never had a reason to carry.
         ...(reviewerSpec ? { reviewer: { agent: reviewerSpec.agent, args: reviewerSpec.args ?? [] } } : {}),
-        checks: checks.map((c) =>
-          typeof c === 'string'
-            ? { command: c, relevance: 'required' }
-            : { command: c.command, relevance: c.relevance },
-        ),
+        checks,
       }
       if (asJson) {
-        console.log(JSON.stringify(plan, null, 2))
+        console.log(JSON.stringify(dryRunPlan(plan), null, 2))
       } else {
-        say('dry run — nothing was started')
-        say(`  cwd:         ${plan.cwd}`)
-        say(`  advisor:     ${lead}${leadArgs.length ? ` ${leadArgs.join(' ')}` : ''}`)
-        // One line per seat when the operator named a list, so the prose says the same thing
-        // the JSON does. At N=1 it is the line it has always been.
-        for (const s of implSpecs) {
-          const label = implSpecs.length === 1 ? 'implementer' : s.id
-          say(`  ${label.padEnd(11)}: ${s.agent}${s.args?.length ? ` ${s.args.join(' ')}` : ''}`)
-        }
-        if (reviewerSpec) {
-          say(`  reviewer   : ${reviewerSpec.agent}${reviewerSpec.args?.length ? ` ${reviewerSpec.args.join(' ')}` : ''}`)
-        }
-        say(
-          `  checks:      ${
-            plan.checks.length
-              ? plan.checks.map((c) => `${c.command} [${c.relevance}]`).join(', ')
-              : 'none — rotation not armed'
-          }`,
-        )
-        say(`  goal:        ${goal}`)
+        for (const line of dryRunPlanLines(plan)) say(line)
       }
       return 0
     }
@@ -1490,13 +1469,52 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
       console.error(`conclave: ${seatPlan.reason}`)
       return 1
     }
-    // The console applies and persists together: unlike `relay` there is no dry run and no
-    // preflight refusal, so the point of no return is here.
+    /**
+     * `--dry-run` and `--bypass` are refused TOGETHER rather than resolved either way.
+     *
+     * Both orderings are wrong, which is what makes this a refusal instead of a decision:
+     *
+     *   - APPLY the bypass and the dry run has written a permission mode into the operator's
+     *     project, for this run and every future one, from an invocation whose own last line
+     *     says nothing was started. That is the failure `applyBypassFlag`'s position in this
+     *     block exists to prevent, arrived at from the other side.
+     *   - SKIP it and the plan is a plan of a run that would launch with different launch
+     *     arguments than the ones printed -- `--dangerously-skip-permissions` is composed from
+     *     the config, and the config is what the bypass would have changed. A dry run whose
+     *     argv is not the plan's argv is the one thing this mode must never produce.
+     *
+     * `relay` has a third option and takes it: `withBypass` overlays the requested mode onto
+     * the config IN MEMORY, so its plan is composed as the run would be while nothing is
+     * written. The console has no such overlay -- `runSession` reads the project config itself,
+     * which is the whole reason the plan is printed there (#130) -- so the honest answer here
+     * is to say the two flags do not go together rather than to pick a side quietly.
+     *
+     * Read through `bypassRequest` rather than by scanning the argv for the flag here: the
+     * parity guard compares the flags each block MENTIONS, and the bypass token appearing in
+     * this block and not in relay's would read as a capability the console has and relay lacks.
+     */
+    const dryRun = args.includes('--dry-run')
+    if (dryRun && bypassRequest(args).requested) {
+      console.error(
+        'conclave: --dry-run and --bypass contradict each other. --bypass WRITES a permission ' +
+          'mode into .conclave/config.json for this run and future ones, and a dry run must ' +
+          'leave nothing behind; skipping the write would print launch arguments the real run ' +
+          'would not use. Run the dry run first, then --bypass without it.',
+      )
+      return 1
+    }
+    // The console applies and persists together: there is no in-memory overlay as in `relay`,
+    // so the point of no return is here. A dry run never reaches it -- it is refused above with
+    // `--bypass`, and without one there is nothing to apply.
     if (!applyBypassFlag(args, (l) => console.log(l))) return 1
     return runSession({
       cwd: process.cwd(),
       ...(operator ? { operator } : {}),
       ...(force ? { force } : {}),
+      // Absent unless asked for, so a normal console run passes exactly the options it always
+      // passed. `runSession` prints the plan and returns above its lock check -- see `dryRun`
+      // on SessionOptions for why it cannot be printed from here.
+      ...(dryRun ? { dryRun } : {}),
       ...(settle ? { transcriptSettleMs: Number(settle) * 1000 } : {}),
       ...(salvage ? { transcriptSalvageMs: Number(salvage) * 1000 } : {}),
       ...(record ? { record } : {}),

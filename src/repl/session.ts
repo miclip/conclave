@@ -114,6 +114,7 @@ import { version } from '../version.ts'
 import { guard } from '../workspace/sessionLock.ts'
 import { newSessionId, projectRootFor, recordSession } from '../workspace/sessionRecord.ts'
 import { RunLogWriter, readRunLog, runLogExists } from '../relay/resume.ts'
+import { dryRunPlanLines } from '../relay/dryRunPlan.ts'
 
 export interface SessionOptions {
   cwd: string
@@ -207,6 +208,44 @@ export interface SessionOptions {
    * version. Attribution and rotation are meaningless there, and so is undo.
    */
   force?: boolean | undefined
+  /**
+   * Resolve everything, print the plan, start nothing.
+   *
+   * ## Why it is printed HERE and not in the CLI block
+   *
+   * The console composes its launch arguments inside this function: `readProjectConfig`,
+   * `launchArgsFor` per agent, `implementerSpecsFor`, `reviewerSpecFor`. A plan built in
+   * `bin/conclave.ts` would have to compose them a second time, and a second composition is a
+   * plan that can describe a different resolution than the run it claims to describe --
+   * which is the only way a dry run can actively mislead rather than merely be unhelpful.
+   * The rendering itself is shared with `relay` (see `dryRunPlan.ts`); only the inputs differ.
+   *
+   * ## Where it returns, and why that point
+   *
+   * Above the lock check, below the resolution #130 moved there. `guard` only READS, and every
+   * PERSISTENT side effect a session has from here on -- the hook registration, the Codex trust
+   * probe, the run log, `Relay.start`'s own `acquire` and every participant it creates -- is
+   * below it. `frontEndParity.test.ts` and `sessionDryRun.test.ts` assert that by comparing the
+   * project tree before and after rather than by reading this comment.
+   *
+   * ONE PERSISTENT WRITE IS NOT BELOW THIS LINE, and saying so is the difference between a
+   * rationale and a slogan. `--bypass` writes a permission mode into `.conclave/config.json`,
+   * and `applyBypassFlag` runs in `bin/conclave.ts` BEFORE `runSession` is called at all --
+   * upstream of this function, so no return inside it could stop the write. What stops it is
+   * the explicit refusal of `--bypass` with `--dry-run` at the call site, which is a different
+   * mechanism from this boundary and is load-bearing on its own.
+   *
+   * That correction came from an independent review of the branch that added this, and it is
+   * worth keeping rather than quietly fixing: the whole justification for reversing the parity
+   * decision was that a stated reason had become false, so shipping a new one that is false in
+   * a smaller way would have been the same fault at a smaller scale. `relay` has no such
+   * exception because `withBypass` is an in-memory overlay there; giving the console one is the
+   * real remedy and is not attempted here.
+   *
+   * The parity declaration this reverses said the console had no point of no return to stop
+   * short of -- true when it was written, and #130 made it false.
+   */
+  dryRun?: boolean | undefined
   /**
    * The absolute per-turn deadline handed to each adapter's watchdog.
    *
@@ -527,7 +566,10 @@ export function seatsToSampleAtPause<T extends { id: string }>(
 
 export async function runSession(opts: SessionOptions): Promise<number> {
   const target = opts.output ?? process.stdout
-  const tee = opts.record ? createWriteStream(opts.record) : undefined
+  // Not on a dry run, which renders no session to inspect and must create no file. This is the
+  // one side effect that would happen ABOVE the plan, because the tee wraps the stream the plan
+  // is written to.
+  const tee = opts.record && opts.dryRun !== true ? createWriteStream(opts.record) : undefined
   const out: NodeJS.WritableStream = tee
     ? new Writable({
         write(chunk, _enc, cb) {
@@ -748,6 +790,51 @@ export async function runSession(opts: SessionOptions): Promise<number> {
   if (opts.resume && !runLogExists(opts.resume)) {
     write(`refusing to start: no run log at ${opts.resume}`)
     return 1
+  }
+
+  /**
+   * Resolved everything, started nothing — the last point at which that is still true.
+   *
+   * Everything above is resolution (#130) or reads that leave nothing behind: the project
+   * config read, the launch arguments composed, every seat spec built and checked against the
+   * registry, a `--resume` path confirmed to exist. Not ONLY resolution, and the difference is
+   * worth stating rather than rounding off -- the output stream is opened, the colour mode is
+   * set process-wide, and the git preflight spawns `git rev-parse`. None of them persist
+   * anything, which is the property that matters here, but "everything above is resolution" is
+   * a tidier sentence than it is a true one.
+   *
+   * Everything below PERSISTS something — hooks into the project, a trust decision into the
+   * operator's global Codex config, a run log, the lock, participants. The one persistent write
+   * that is NOT below this line is the `--bypass` permission mode, which `bin/conclave.ts`
+   * applies before calling this function; it is kept off a dry run by refusing the two flags
+   * together at the call site, not by this return. See `SessionOptions.dryRun`.
+   *
+   * ABOVE the lock check on purpose, and it is the same argument #130 made for the resolution
+   * it is printed from: a dry run is not going to start anything whatever the lock says, so
+   * refusing it because somebody else's participants are live answers a question the operator
+   * did not ask. Nothing is read from the lock and nothing is written to it.
+   *
+   * `write` is the console's own, so a plan goes to `--output` in tests and to the terminal in
+   * use. There is no readline and no screen yet: both are opened far below, and a dry run
+   * never reaches either.
+   */
+  if (opts.dryRun === true) {
+    for (const line of dryRunPlanLines({
+      cwd: opts.cwd,
+      // Absent rather than empty when the console was given none: the plan says it would be
+      // asked for, which is the line `relay` has no need of and cannot print.
+      ...(opts.goal === undefined ? {} : { goal: opts.goal }),
+      advisor: { agent: opts.lead, args: leadArgs },
+      // Read back off the specs, not recomposed: these are the objects `Relay.start` would be
+      // handed, so the plan cannot describe a seat the run would not launch.
+      implementers: implSpecs.map((s) => ({ id: s.id, agent: s.agent, args: s.args ?? [] })),
+      seatsNamed: opts.implementers !== undefined,
+      ...(reviewerSpec ? { reviewer: { agent: reviewerSpec.agent, args: reviewerSpec.args ?? [] } } : {}),
+      checks: opts.checks,
+    })) {
+      write(line)
+    }
+    return 0
   }
 
   const existing = guard(opts.cwd)
@@ -1866,7 +1953,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
       // FALSIFIER, stated because it is the strongest argument against this shape: the
       // console has no general "trailing text is a message" rule and does not gain one here.
       // `/rotate <text>` and `/abort <text>` consume their text as a REASON
-      // (`src/repl/session.ts:1919`, `src/repl/session.ts:1952`) and `/pause`, `/queue`, `/audit` ignore
+      // (`src/repl/session.ts:2006`, `src/repl/session.ts:2039`) and `/pause`, `/queue`, `/audit` ignore
       // whatever follows them. So an operator who learns this from `/continue` and carries
       // it to `/pause I'll be back` still loses the sentence. That inconsistency is not
       // repaired by making `/continue` a third behaviour; it is narrowed by it, and the

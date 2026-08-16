@@ -368,7 +368,13 @@ have, is refused before anything is spawned, registered or written — not twelv
 as a watchdog, and not on the first turn as an abnormal exit. Only the agents this run seats
 are checked.
 
-`--dry-run` resolves configuration, checks and arguments and starts nothing, and `relay`
+`--dry-run` resolves configuration, checks and arguments and starts nothing. It is on both
+commands and prints the same plan line for line; on the console it stops above the session
+lock, so it registers no hooks, writes no permission mode, takes no lock and creates no
+participant, and it says the goal would be asked for when you gave it none. It is refused
+together with `--bypass` there, because applying that would leave a permission mode written by
+an invocation that started nothing and skipping it would print launch arguments the real run
+would not use. `relay`
 refuses to run outside a git repository unless you pass `--force` — attribution and rotation
 both diff the tree, so neither means anything without one. `--max-turns` and `--max-minutes`
 stop a run that is still going and exit non-zero; a silent stop is indistinguishable from a
