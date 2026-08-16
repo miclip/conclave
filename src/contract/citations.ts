@@ -322,6 +322,31 @@ export function citationFault(cite: string, expected: string, root: string = REP
 }
 
 /**
+ * Every line a token STARTS on, counting a token that spans lines as one occurrence.
+ *
+ * The obvious spelling -- `lines.filter(l => l.includes(expected))` -- cannot see a multi-line
+ * token at all, because no single line contains one. That is not hypothetical: widening a citation
+ * to a range whose distinguishing text spans two lines is exactly what you do when a token has an
+ * identical twin, so the tokens this got wrong were precisely the ones created BY fixing the
+ * weakest pins.
+ *
+ * It failed in both directions at once, which is why it went unnoticed. `relocate` reported "the
+ * token appears nowhere in the file, so the cited thing is gone" about a token plainly sitting
+ * there -- alarming, but at least loud. `weakPins` counted ZERO occurrences and concluded the pin
+ * was unique, so a measurement that could not see two of its entries reported them as its
+ * strongest. An instrument blind to a case reads as evidence of that case's absence.
+ */
+function tokenLines(lines: string[], expected: string): number[] {
+  const text = lines.join('\n')
+  const out: number[] = []
+  for (let i = text.indexOf(expected); i !== -1; i = text.indexOf(expected, i + 1)) {
+    // +1 twice: `split` counts the lines before the match, and lines are 1-based.
+    out.push(text.slice(0, i).split('\n').length)
+  }
+  return out
+}
+
+/**
  * Where a citation's token lives now, or why that cannot be said.
  *
  * One match is a relocation. Zero means the cited thing is gone, and more than one means the
@@ -340,7 +365,7 @@ export function relocate(
   } catch {
     return { to: undefined, candidates: [], why: 'no such file', lines: [] }
   }
-  const hits = lines.flatMap((l, i) => (l.includes(expected) ? [i + 1] : []))
+  const hits = tokenLines(lines, expected)
   if (hits.length === 0) {
     return {
       to: undefined,
@@ -499,7 +524,10 @@ export function weakPins(
     } catch {
       continue
     }
-    const hits = text.split('\n').filter((l) => l.includes(expected)).length
+    // `tokenLines`, not a per-line filter: a multi-line token occurs zero times by that measure,
+    // and zero is not `> 1`, so the entries this function was least able to judge were the ones it
+    // reported as strongest. See `tokenLines`.
+    const hits = tokenLines(text.split('\n'), expected).length
     if (hits > 1) out.push({ cite, hits })
   }
   return out.sort((a, b) => a.cite.localeCompare(b.cite))

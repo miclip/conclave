@@ -252,6 +252,56 @@ test('a token that is gone, or no longer unique, is refused rather than relocate
   }
 })
 
+test('a token that spans lines is found, and counted, like any other', () => {
+  // The blind spot that shipped. `relocate` and `weakPins` both searched line by line, and no
+  // single line contains a multi-line token — so both silently treated one as ZERO occurrences.
+  //
+  // It failed in both directions at once, which is why nothing caught it. `relocate` announced
+  // "the token appears nowhere in the file, so the cited thing is gone" about a token plainly
+  // sitting there. `weakPins` read zero, zero is not `> 1`, and it therefore certified as a
+  // perfect pin exactly the entries it could not see.
+  //
+  // And the entries it could not see were the ones created BY strengthening the weakest pins:
+  // when a token has an identical twin, widening the citation to a range whose distinguishing
+  // text spans two lines is the fix. Two of this repo's own citations are that shape.
+  const root = mkdtempSync(join(tmpdir(), 'conclave-citations-span-'))
+  try {
+    const span = 'const start = {\n  key: 1,'
+    writeFileSync(
+      join(root, 'span.ts'),
+      ['// header', 'const start = {', '  key: 1,', '}', ''].join('\n'),
+    )
+
+    // Found, at the line it STARTS on, and reported as the single occurrence it is.
+    const moved = relocate('span.ts:1-2', span, root)
+    assert.equal(moved.to, 'span.ts:2-3', 'the range moves as a block onto the token')
+    assert.deepEqual(moved.lines, [2], 'reported at the line the token starts on')
+    assert.equal(citationFault('span.ts:2-3', span, root), undefined)
+    assert.deepEqual(weakPins({ 'span.ts:2-3': span }, root), [], 'one occurrence is not weak')
+
+    // A citation NARROWER than its own token has no answer, and saying so is right rather than a
+    // gap: one line cannot contain two, so there is nothing to relocate onto. The old code
+    // reached the same refusal by a different route — it could not see the token anywhere — and
+    // the distinction matters, because that route also refused the satisfiable case above.
+    const tooNarrow = relocate('span.ts:1', span, root)
+    assert.equal(tooNarrow.to, undefined)
+    assert.match(tooNarrow.why, /no window of the cited width contains it/)
+    assert.deepEqual(tooNarrow.lines, [2], 'the token was still FOUND; only the width is wrong')
+
+    // Twice over, and it is a weak pin like any other rather than an invisible one.
+    writeFileSync(
+      join(root, 'twice.ts'),
+      ['const start = {', '  key: 1,', '}', 'const start = {', '  key: 1,', '}', ''].join('\n'),
+    )
+    assert.deepEqual(weakPins({ 'twice.ts:1-2': span }, root), [{ cite: 'twice.ts:1-2', hits: 2 }])
+    const ambiguous = relocate('twice.ts:5-6', span, root)
+    assert.equal(ambiguous.to, undefined, 'two occurrences cannot be told apart')
+    assert.deepEqual(ambiguous.lines, [1, 4])
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test('a weak pin is relocated by the shift its neighbours measured, or not at all', () => {
   // The pass that made this tool worth having. Eight of the repo's thirty-eight tokens are not
   // unique in their file, and on the first run against a real edit the tool repaired eleven
