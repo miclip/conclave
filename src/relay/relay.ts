@@ -3657,6 +3657,9 @@ export class Relay {
   #acknowledge(impl: RelayParticipant, generation: number): undefined {
     impl.baselineGeneration = generation
     impl.degradationCursor = impl.events.length
+    // `get` rather than `#declined`, which would create an entry for a seat that has never had
+    // one -- a reader is not a writer, and the note below is only reporting.
+    const declined = [...(this.#declinedClasses.get(impl.id) ?? [])]
     this.#record({
       from: 'orchestrator',
       fromRank: 'human',
@@ -3668,9 +3671,22 @@ export class Relay {
       // The note used to say "declined" for all three, which put a decision in the record of
       // two runs where nobody made one. The note that names the actor is the candidate note
       // above; this one is about the baseline.
+      //
+      // The tail is conditional since #118, because the unconditional form stopped being true.
+      // "A later one will" was a promise about what the run would do next, and the latch is
+      // exactly the thing that can now make it false -- a later compaction of a class the
+      // operator has already declined is recorded, not put. An operator reading a note that
+      // promises a pause they will never see is worse off than one reading nothing: they will
+      // wait for it. The un-latched wording is left exactly as it was, so this reads the same on
+      // every run where nothing has been declined.
       text:
         `rotation candidate closed at compaction generation ${generation}: the baseline moved, ` +
-        `so this compaction will not be raised again and a later one will`,
+        `so this compaction will not be raised again` +
+        (declined.length > 0
+          ? `. A later one is new evidence, but ${declined.join(' and ')} has already been ` +
+            `declined for this session, so a later candidate of that class is recorded rather ` +
+            `than put (#118)`
+          : ` and a later one will`),
     })
     return undefined
   }
