@@ -943,6 +943,10 @@ test('the decline does not survive the session it was about (#118)', async (t) =
   // declined. Asked anyway, because that decline went with the session it was about.
   assert.match(asked[2]!, /compacted and did not say so/)
   assert.match(asked[2]!, /transcript declares a compaction/)
+  // Counted from the replacement's OWN zero (#128). Before that fix this line was absent and
+  // only the revision channel spoke here, because the seat had been handed the retired session's
+  // baseline and the snapshot channel had nothing it could say about a session at generation 1.
+  assert.match(asked[2]!, /compaction generation rose 0 → 1/)
 
   // And the latch re-arms per session: once the replacement's class has been declined too, its
   // later compactions are recorded rather than put, exactly as the first session's were.
@@ -954,6 +958,65 @@ test('the decline does not survive the session it was about (#118)', async (t) =
     `the replacement's later compactions are suppressed and logged:\n${relay.log.map((m) => m.text).join('\n---\n')}`,
   )
   assert.equal(run.outcome!.reason, 'done')
+})
+
+test('a rotation at a pause leaves the replacement its OWN baseline (#128)', async (t) => {
+  // `#considerRotation` snapshots once, at the top, and that snapshot belongs to the session
+  // that is in the seat when the assessment begins. If the operator takes the `rotate` option
+  // during the halt, the session under it changes -- `rotateSeat` promotes the replacement and
+  // correctly sets `baselineGeneration = 0` -- and the `#acknowledge` after the halt then
+  // overwrote that with a generation belonging to a session that had already been retired.
+  //
+  // The consequence is quiet, which is why it survived: `detectDegradation` reads two channels,
+  // so the replacement's first compaction still raised a candidate off its `revision` event.
+  // What went missing was the snapshot half of the evidence -- the `rose N → M` line an operator
+  // reads to see how far the seat has gone -- and the baseline stayed one generation ahead of
+  // the session for the rest of the run.
+  //
+  // Asserted on `baselineGeneration` directly rather than inferred from the evidence prose. The
+  // prose is the symptom; the field is the defect, and a fix that repaired the sentence while
+  // leaving the number wrong would pass a test written the other way round.
+  const dir = repo()
+  const advisor = new FakeRotationSession('advisor', 'codex', [
+    'Do the first thing.',
+    HANDOFF,
+    'Do the second thing.',
+    'DONE',
+  ])
+  const old = new FakeRotationSession('old', 'claude', ['ack', 'Did the first thing.'])
+  const fresh = new FakeRotationSession('fresh', 'claude', [ACCEPTED, 'Second.'])
+  old.compactOnTurn = 1
+
+  const relay = await relayOf(dir, advisor, [old, fresh], {
+    rotation: { checks: ['exit 0'], checkTimeoutMs: 30_000, onDegradation: 'candidate' },
+    maxAdvisorTurns: 4,
+  })
+  t.after(() => relay.stop())
+
+  const run = relay.start('Keep the work moving.')
+  const first = await run.untilPause()
+  assert.equal(first!.reason, 'rotation_candidate')
+  assert.ok(first!.evidence.some((e) => e.includes('rose 0 → 1')), 'the retired session had compacted once')
+
+  // The option the pause offers, taken -- and `rotate` does not resolve the pause, so the seat
+  // is measured here, between the replacement landing and the run being told to carry on.
+  assert.equal((await relay.rotateImplementer('the operator chose to rotate')).status, 'rotated')
+  const impl = relay.participants.find((p) => p.rank === 'implementer')!
+  assert.equal(impl.session, fresh, 'the replacement is in the seat')
+  assert.equal(impl.baselineGeneration, 0, 'and rotateSeat gave it a baseline of its own')
+
+  await run.continue()
+  await run.result()
+
+  // The claim, and the whole of #128: resuming must not hand the new session the retired one's
+  // generation. `fresh` never compacted, so anything above 0 here is the old session's number
+  // wearing the replacement's name -- and it would take TWO compactions before the snapshot
+  // channel could speak again.
+  assert.equal(
+    impl.baselineGeneration,
+    0,
+    'the replacement kept its own baseline across the resume; it did not inherit generation 1',
+  )
 })
 
 test('a seat DISARMED by its own policy is unarmed for this purpose too, agent-operated', async (t) => {

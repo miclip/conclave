@@ -3449,6 +3449,7 @@ export class Relay {
         ? `${impl.id}'s own rotation policy configures no checks, so it cannot be rotated`
         : `No rotation checks are configured`
       this.rotationWatch.candidates += 1
+      let replaced = false
       if (handle && this.operator !== 'agent' && this.#declined(impl.id).has(cls)) {
         // Asked and answered (#118). See `#suppressedCandidate`.
         this.#suppressedCandidate(impl, cls, detail)
@@ -3463,7 +3464,8 @@ export class Relay {
           evidence: verdict.evidence,
         })
         if (halted) return halted
-        if (impl.session === answering) this.#declined(impl.id).add(cls)
+        replaced = impl.session !== answering
+        if (!replaced) this.#declined(impl.id).add(cls)
       } else {
         // Nobody to ask, or nobody a question would help. Unattended it carries on for the
         // same reason the armed unattended run does -- there is nobody to ask, and ending is
@@ -3485,7 +3487,13 @@ export class Relay {
       // Baseline moved either way, so one compaction is raised once. Without this the same
       // generation re-raises on every subsequent turn, which on an unarmed run is now a
       // repeating pause rather than a single fatal one -- a worse failure than the one fixed.
-      return this.#acknowledge(impl, snap.compactionGeneration)
+      //
+      // Unless the seat was replaced while the question was outstanding (#128): `snap` is the
+      // RETIRED session's, and acknowledging it against the replacement would hand a session at
+      // generation 0 a baseline of 1.
+      return replaced
+        ? this.#answeredByReplacement(impl, snap.compactionGeneration)
+        : this.#acknowledge(impl, snap.compactionGeneration)
     }
     if (cfg.onDegradation === 'candidate') {
       // A candidate, not a verdict. The mechanism is built and the policy is not earned:
@@ -3503,6 +3511,7 @@ export class Relay {
       // The count reaches the operator through `rotationWatch` and the summary, which is the
       // whole point of those counters existing.
       this.rotationWatch.candidates += 1
+      let replaced = false
       if (handle && this.#declined(impl.id).has(cls)) {
         // Asked and answered (#118). See `#suppressedCandidate`.
         this.#suppressedCandidate(impl, cls, detail)
@@ -3514,7 +3523,8 @@ export class Relay {
           evidence: verdict.evidence,
         })
         if (halted) return halted
-        if (impl.session === answering) this.#declined(impl.id).add(cls)
+        replaced = impl.session !== answering
+        if (!replaced) this.#declined(impl.id).add(cls)
       } else {
         this.#record({
           from: 'orchestrator',
@@ -3524,7 +3534,11 @@ export class Relay {
           text: `rotation candidate recorded, run continues (unattended): ${detail}`,
         })
       }
-      return this.#acknowledge(impl, snap.compactionGeneration)
+      // As above (#128): `snap` describes the session that was in the seat when the question was
+      // put, and the operator may have answered it by replacing that session.
+      return replaced
+        ? this.#answeredByReplacement(impl, snap.compactionGeneration)
+        : this.#acknowledge(impl, snap.compactionGeneration)
     }
 
     // A fault an earlier rotation proved nothing can get past. Declined WITHOUT attempting,
@@ -3652,6 +3666,41 @@ export class Relay {
         `candidate for this session of ${impl.id}, and this is the same evidence class, so the ` +
         `same question is not put again): ${detail}`,
     })
+  }
+
+  /**
+   * The candidate was answered by REPLACING the seat, not by ruling on its evidence (#128).
+   *
+   * `#considerRotation` snapshots once, before it decides anything, and `rotate` is an option ON
+   * a pause rather than a resolution of one -- so an operator can promote a replacement and then
+   * resume, and the snapshot the resume path still holds belongs to a session that has been
+   * retired. `#acknowledge` would write that generation onto the seat, over the `0` that
+   * `rotateSeat` had just correctly set, and the new session would carry its predecessor's
+   * baseline for the rest of the run.
+   *
+   * It hid well, because nothing STOPPED working: `detectDegradation` reads the snapshot channel
+   * and the `revision` channel together, exactly so that either can be ahead of the other, and
+   * the replacement's first compaction still raised its candidate off the revision event. What
+   * was lost was the `rose N → M` line beside it -- the evidence an operator reads to see how far
+   * the seat has actually gone -- on the one pause where the seat is newest and that number
+   * matters most.
+   *
+   * So the baseline is not touched here. `rotateSeat` set it, from the session that is actually
+   * in the seat, and this records that it did. The note exists because every other candidate
+   * ends in one, and a resolution that left no line would read as a candidate that went nowhere.
+   */
+  #answeredByReplacement(impl: RelayParticipant, retired: number): undefined {
+    this.#record({
+      from: 'orchestrator',
+      fromRank: 'human',
+      to: [],
+      kind: 'note',
+      text:
+        `rotation candidate answered by replacing ${impl.id}: the baseline is the new session's ` +
+        `own (${impl.baselineGeneration}), not the retired session's ${retired}, so the ` +
+        `replacement is judged on what IT does from here`,
+    })
+    return undefined
   }
 
   #acknowledge(impl: RelayParticipant, generation: number): undefined {
