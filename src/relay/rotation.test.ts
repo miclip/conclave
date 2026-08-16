@@ -856,6 +856,12 @@ test('rotating AT the pause is not a decline, so the replacement is still asked 
   )
   assert.match(asked[0]!, /compaction generation rose 0 → 1/)
   assert.match(asked[1]!, /transcript declares a compaction/)
+  // And counted from the REPLACEMENT's own zero (#128, #129). This line was the one the old
+  // baseline defect removed: the seat carried the retired session's generation, so the snapshot
+  // channel had nothing to say about a new session at generation 1 and only the revision channel
+  // spoke here. Asserted now because it is the difference between two channels agreeing and one
+  // of them silently sitting out.
+  assert.match(asked[1]!, /compaction generation rose 0 → 1/)
   assert.equal(run.outcome!.reason, 'done')
 })
 
