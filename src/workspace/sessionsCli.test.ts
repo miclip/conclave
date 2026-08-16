@@ -15,7 +15,7 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync, spawnSync } from 'node:child_process'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -79,6 +79,23 @@ function sessions(cwd: string, ...flags: string[]) {
   const r = spawnSync(process.execPath, [CLI, 'sessions', ...flags], { cwd, encoding: 'utf8' })
   if (r.error) throw r.error
   return { status: r.status, stdout: r.stdout, stderr: r.stderr }
+}
+
+/**
+ * Enough records that the JSON listing cannot fit in a pipe's 64 KiB buffer.
+ *
+ * 200 is roughly 115 KiB -- not a near-miss that a slightly terser record could slip back
+ * under. Shared by the two tests below, which need the same "too big to fit" fixture to ask
+ * two different questions about it.
+ */
+function bulkRecords(dir: string, count: number): void {
+  for (let i = 0; i < count; i++) {
+    record(dir, `bulk-${String(i).padStart(4, '0')}`, {
+      state: 'ended',
+      pid: DEAD_PID,
+      ageDays: 1,
+    })
+  }
 }
 
 test('the default cutoff is seven days', () => {
@@ -371,4 +388,102 @@ test('an empty project still lists rather than erroring', () => {
   const { status, stdout } = sessions(repo())
   assert.equal(status, 0)
   assert.match(stdout, /no sessions have been recorded in this project/)
+})
+
+/**
+ * The 64 KiB cliff.
+ *
+ * A pipe holds 64 KiB. `process.exit()` does not flush, so a listing bigger than that used
+ * to arrive as exactly 65,536 bytes of JSON cut mid-token -- while the SAME command
+ * redirected to a file was complete and valid. Every other test in this file passes either
+ * way, because every other fixture is small enough to fit in the buffer.
+ *
+ * So the size is the test. `spawnSync` gives the child a real pipe, which is the only
+ * configuration where the bug exists at all: attach a terminal, or a file, and the writes
+ * are synchronous and there is nothing left buffered to lose. 200 records is roughly 115 KiB
+ * -- not a near-miss that a slightly terser record could slip back under.
+ *
+ * It guards `sessions`, but not only `sessions`. The flush belongs to process termination,
+ * so `status`, `guard`, `config show` and relay's JSON all ride on the same fix; this is
+ * the cheapest command to make large on demand, which is why the guard lives here.
+ */
+test('a --json listing larger than a pipe buffer arrives whole', () => {
+  const dir = repo()
+  const count = 200
+  bulkRecords(dir, count)
+
+  const { status, stdout } = sessions(dir, '--json')
+
+  assert.equal(status, 0)
+  const bytes = Buffer.byteLength(stdout)
+  assert.ok(
+    bytes > 64 * 1024,
+    `the fixture has to outgrow the pipe buffer or it proves nothing, got ${bytes} bytes`,
+  )
+
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(stdout)
+  } catch (err) {
+    // Named, because "Unterminated string in JSON" on its own reads like a formatting bug
+    // rather than the truncation it is.
+    assert.fail(
+      `--json emitted ${bytes} bytes that do not parse -- output was cut short: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    )
+  }
+  assert.equal((parsed as unknown[]).length, count, 'every record has to survive the pipe')
+})
+
+/**
+ * `conclave sessions --json | head -1`, which is how anyone checks the shape of a listing.
+ *
+ * The other half of waiting for the buffer to drain. `head` reads one line and closes the
+ * pipe with ~50 KiB still queued; the pending write then fails EPIPE, and Node reports that
+ * failure TWICE -- once to the write callback and once as an `error` event on the stream.
+ * `process.exit()` used to run before either arrived, so neither was ever seen. Waiting is
+ * what exposes them, and the specific way to get this wrong is to REMOVE the error listener
+ * when the write callback settles the wait: the event then has nowhere to land, and a clean
+ * `| head` becomes an unhandled-error stack trace and a non-zero exit. Trading truncated
+ * output for a crash is not a fix, so this asserts the pipeline that would show it.
+ *
+ * So both halves are asserted, because either one alone can be satisfied by the bug. The
+ * exit code has to be the one the COMMAND chose -- a broken pipe is the reader's decision to
+ * stop reading, not a failure of the listing -- and stderr has to stay clean.
+ */
+test('a reader that stops early gets the command exit code, not a stack trace', () => {
+  const dir = repo()
+  bulkRecords(dir, 200)
+
+  const errPath = join(dir, 'cli-stderr.txt')
+  const codePath = join(dir, 'cli-code.txt')
+  // The real pipeline, run by a real shell. Reaching into the child's stdout from this
+  // process and destroying it was tried first and rejected: it closes the read end at a
+  // moment nothing controls, so whether the EPIPE lands before the exit is a coin flip, and
+  // a test that catches the regression on some runs is worse than none. `head` closing the
+  // pipe after one line is both what an operator actually types and, measured, deterministic.
+  //
+  // The braces are what make the exit code observable: `$?` inside the pipeline's subshell
+  // is the CLI's own status, where the shell's status for the pipeline would be `head`'s.
+  const r = spawnSync(
+    'sh',
+    ['-c', `{ "$1" "$2" sessions --json 2> "$3"; echo $? > "$4"; } | head -1`, 'sh',
+      process.execPath, CLI, errPath, codePath],
+    { cwd: dir, encoding: 'utf8' },
+  )
+  if (r.error) throw r.error
+
+  const stderr = readFileSync(errPath, 'utf8')
+  const code = readFileSync(codePath, 'utf8').trim()
+
+  assert.match(r.stdout, /^\[/, 'head has to have received a real prefix before closing')
+  assert.equal(code, '0', `a closed reader is not a failed listing, stderr was: ${stderr}`)
+  // The specific shapes Node prints for an unhandled stream error. Matching the text rather
+  // than merely requiring silence keeps the assertion honest about what regressed.
+  assert.doesNotMatch(
+    stderr,
+    /EPIPE|Unhandled 'error' event|ERR_STREAM|ERR_UNHANDLED/,
+    `a broken pipe must not surface as a crash, stderr was: ${stderr}`,
+  )
 })

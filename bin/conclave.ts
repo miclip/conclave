@@ -30,6 +30,7 @@ import { ceilingSummary, ceilingsFrom, effectiveCeilings, preflightRefusals } fr
 import { ensureCodexHooksTrusted } from '../src/deployment/ensureTrust.ts'
 import type { ReadSession } from '../src/workspace/sessionRecord.ts'
 import { execFileSync, spawn } from 'node:child_process'
+import { exitAfterFlush } from '../src/process/exit.ts'
 import {
   listSessions,
   newSessionId,
@@ -1568,10 +1569,10 @@ function invokedDirectly(): boolean {
 
 if (invokedDirectly()) {
   main(process.argv.slice(2)).then(
-    (code) => process.exit(code),
+    (code) => exitAfterFlush(code),
     (err) => {
       console.error(`conclave: ${err instanceof Error ? err.message : String(err)}`)
-      process.exit(1)
+      return exitAfterFlush(1)
     },
   )
 }

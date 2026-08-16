@@ -19,6 +19,7 @@
  */
 
 import { readFileSync } from 'node:fs'
+import { exitAfterFlush } from '../process/exit.ts'
 import { HookJournal, mintDeliveryId } from './journal.ts'
 
 async function main(): Promise<number> {
@@ -93,9 +94,9 @@ async function main(): Promise<number> {
 }
 
 main().then(
-  (code) => process.exit(code),
+  (code) => exitAfterFlush(code),
   (err) => {
     process.stderr.write(`[orch-hook] fatal: ${String(err)}\n`)
-    process.exit(1)
+    return exitAfterFlush(1)
   },
 )
