@@ -11,7 +11,7 @@
  * branch, so it gets the same treatment: rot becomes a test failure.
  *
  * A citation is ENFORCEABLE when it names a repo-root-relative path, a line or line range, and
- * an expected token declared in `CITED` below. The token is the tripwire, not the claim: it is
+ * an expected token declared in `CITED`. The token is the tripwire, not the claim: it is
  * whatever short piece of the cited line would have to change for the citation to be pointing
  * somewhere else. A citation that cannot be pinned to a token that specific -- a range covering
  * a whole helper, a nested block of an interface -- belongs in the other form the issue offers,
@@ -37,223 +37,31 @@
  * bare filenames (`relay.ts:1818`) that no root resolves, and the design records among them are
  * snapshots of a decision rather than claims about today. Enforcing them is a separate piece of
  * work with a separate answer to "what should a frozen document cite".
+ *
+ * The registry and the scanner live in `citations.ts`, because `scripts/fix-citations.ts` needs
+ * both and a second copy of a parser is the failure `439cf05` is about. What stays here is the
+ * proving: the guard, and the fixtures the guard is proven against.
  */
 
 import { strict as assert } from 'node:assert'
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, relative } from 'node:path'
+import { join } from 'node:path'
 import test from 'node:test'
-
-const REPO = join(import.meta.dirname, '..', '..')
-
-/** Scanned for citations. */
-const SOURCE_ROOTS = ['src', 'bin']
-
-/**
- * This file, which declares citations as data and would otherwise satisfy the found-and-declared
- * pin with itself -- every key found in its own table, proving nothing about the tree.
- */
-const SELF = 'src/contract/citations.test.ts'
-
-/**
- * What each cited line must still say.
- *
- * Keyed by the citation exactly as it is written in the sources, so one entry covers every place
- * that cites it. Repairing a citation means changing the line number here and in the prose
- * together, which is the point: the two cannot drift apart without this test saying so.
- */
-const CITED: Record<string, string> = {
-  // The two per-command flag helpers are gone (#81), and with them the four citations that
-  // pinned their bodies and the one that pinned `value.startsWith('--')` -- the line recording
-  // why the console could not be passed `--model x` through `--implementer-args`. Deleted
-  // rather than repaired, and that is the exception rather than the rule here: each was
-  // evidence FOR a divergence that no longer exists, so there is nothing left for them to point
-  // at. What replaced them is cited by symbol -- `flagReader` and `PASS_THROUGH_FLAGS` in
-  // src/config/cliFlags.ts -- which needs no line to survive.
-  //
-  // The three below moved twice over, once for #81 and once for #80's integration work in the
-  // same file, and are pinned against the merged tree rather than against either side of it.
-  'bin/conclave.ts:1262': 'cwd: process.cwd(),',
-  'bin/conclave.ts:1342': 'runReport(relay, { goal, outcome, startedAt: runStartedAt, build })',
-  // One flag for every implementer seat, which is the RUN-WIDE half of the launch args. The
-  // per-seat half is no longer missing (#77): it rides inside each `--implementers` entry and
-  // is appended after this, so a seat's own spelling wins. This citation still pins what it
-  // always pinned -- the flag that applies to all of them.
-  'bin/conclave.ts:1102-1105': "...extraArgs(flag('implementer-args', ''))",
-  'src/config/project.ts:160-163': 'export function launchArgsFor',
-  'src/registry/roles.ts:15': 'export type RoleId = string',
-  // The relay.ts citations below moved together when `launch` was added to RelayParticipant
-  // and `#join` (#71). Repaired rather than deleted: each still points at the thing it was
-  // written about, and the one whose LINE no longer says what it said -- `#join` now passes a
-  // named context object rather than an inline literal -- is pinned on the new spelling.
-  'src/relay/relay.ts:1616-1618': 'get cwd(): string',
-  'src/relay/relay.ts:1786-1792': 'createParticipant(spec, ctx)',
-  'src/relay/relay.ts:2340': 'worktreePaths(this.#opts.cwd)',
-  'src/relay/relay.ts:2367': 'NOT ARMED (no checks configured)',
-  'src/relay/relay.ts:2568': 'worktreePaths(this.#opts.cwd)',
-  'src/relay/relay.ts:3015': 'resolutionFor(p.subject, { rotationArmed: armed })',
-  'src/relay/relay.ts:3449-3451': 'No rotation checks are configured',
-  'src/relay/relay.ts:324': "onDegradation ?? 'candidate'",
-  // The console's status line, cited by `activeTurn` for the claim its own doc rests on: the
-  // footer's notion of "working" is `turn_start` until `turn_end`, and `tool_use` only relabels
-  // a turn that is already running. If that ever stops being true, the predicate the relay and
-  // `/continue` both send on is no longer the thing the operator is watching.
-  'src/repl/session.ts:869-882': 'progress.start(e.participant)',
-  'src/relay/relay.ts:4478': 'worktreePaths(this.#opts.cwd)',
-  'src/relay/relay.ts:4966': "subject: { reason: 'turn_incomplete', participant: lead.id }",
-  // The five below are what the console's `/continue` liveness guard cites for reading a
-  // pause's SCOPE rather than `verdictOf` or a rank scan (`seatsToSampleAtPause` in
-  // src/repl/session.ts). Two of them pin the ONLY sites that populate `verdictOf` -- the
-  // claim the guard's comment rests on is "exactly two, both turn_incomplete", and a third
-  // one appearing elsewhere would leave that sentence quietly false. The other three pin the
-  // conclave-scoped halt the change gives up sampling on, its own liveness evidence, and the
-  // send that a resumed `advisor_escalated` pause actually makes -- to the ADVISOR, which is
-  // why measuring implementer children there was answering the wrong question.
-  'src/relay/relay.ts:4970': 'verdictOf: { participant: lead.id, endSeq: next.end.seq },',
-  'src/relay/relay.ts:5069': 'The human has seen your escalation and asked you to continue.',
-  // The workstream a conflicted instruction belongs to, named after the seat when exactly one
-  // seat could take it -- the N=1 coincidence a scope reader must not mistake for a seat.
-  'src/relay/relay.ts:5133': "reason: 'authority_conflict', workstream:",
-  'src/relay/relay.ts:5217': "subject: { reason: 'implementer_unanswered', participant: seat.id }",
-  'src/relay/relay.ts:5266': "subject: { reason: 'advisor_escalated' },",
-  // Repaired rather than deleted, and it now pins a DESCRIPTOR rather than a call: #101 moved
-  // the measurement inside `#halt`, so the halt site says which seat to measure and no longer
-  // builds the sentence itself. The claim the citation supports is unchanged -- this halt does
-  // carry liveness evidence -- so the pointer moved with the thing it points at.
-  //
-  // Weaker than the pins around it, and worth saying: the same descriptor appears at the
-  // `turn_incomplete` halt below, so only a shift of exactly the distance between the two would
-  // slip past. There is nothing unique on the line to pin instead.
-  'src/relay/relay.ts:5280': 'liveness: { participant: seat, emittedBefore: report.emittedBefore },',
-  'src/relay/relay.ts:5350': "subject: { reason: 'turn_incomplete', participant: seat.id }",
-  'src/relay/relay.ts:5354': 'verdictOf: { participant: seat.id, endSeq: current.seq },',
-  'src/relay/resolution.ts:190': 'export function resolutionFor',
-  'src/relay/run.ts:51': "| 'implementer_unanswered'",
-  'src/relay/run.ts:215-229': 'reason: PauseReason',
-  'src/relay/run.ts:243': 'resolution: ResolutionRequest',
-  // The pause is amended IN PLACE while it is held. #101's report read a repeated status as a
-  // second pause replaying the first one's samples; this is the line that says it cannot be
-  // one, because there is only ever the one object.
-  'src/relay/run.ts:523': 'this.#pause.superseded = info',
-  'src/relay/subagents.ts:68': 'export function worktreePaths',
-  'src/repl/session.ts:210-222': 'turnWatchdogMs?: number | undefined',
-  // The console's liveness seam, cited by the relay's own copy of it (#101). Two front-ends
-  // needing the same injection is not duplication to be noticed later -- it is the shape the
-  // relay deliberately copied, and the citation is what keeps the two spellings together.
-  'src/repl/session.ts:285': 'liveness?: (pid: number) => Promise<ChildLiveness>',
-  // The three below moved by the same edit that added `seatsToSampleAtPause` above
-  // `runSession`: it inserts a documented function into the middle of the file, so every
-  // citation past it shifts. Repaired against this tree rather than deleted -- each still
-  // points at the line it was written about.
-  'src/repl/session.ts:663': 'escalates to you rather than being replaced',
-  'src/repl/session.ts:826': 'logPath: runLogPath,',
-  // Moved by #83's edit to the `/continue` refusal, nine lines above it in the same block.
-  // Repaired rather than deleted: the call it pins is the one the console still makes.
-  'src/repl/session.ts:1031': "recording.set('paused', { pause: run.pause })",
-  // Why an in-place amendment to a pause needs an event behind it. Cited by both halves of
-  // #101's refresh -- the module that explains the mechanism and the loop that uses it --
-  // because the argument was already written here, for `/wait`, and restating it in two more
-  // places is how three copies of a reason drift apart.
-  'src/repl/session.ts:1713': 'so an in-place change like `superseded` reaches the file on the next one',
-  // The falsifier `/continue <message>` is argued against: two commands that already give
-  // their trailing text a meaning, so the new rule is narrow by intent rather than by
-  // accident. Pinned to the dispatch lines, which is what makes "these are unchanged"
-  // checkable rather than a claim about code nobody re-reads.
-  "src/repl/session.ts:1735": "if (word === '/rotate') {",
-  "src/repl/session.ts:1765": "if (word === '/abort') {",
-}
-
-/**
- * Text that looks like a citation and is not one.
- *
- * Keyed by the file it appears in as well as the citation, so an exemption covers the one place
- * it was granted for and not every future use of the same string. Both entries are checked to be
- * still present, so an exemption cannot outlive the fixture it was written for.
- */
-const NOT_CITATIONS: Record<string, string> = {
-  'src/repl/demo.ts|src/relay/relay.ts:214':
-    'Sample report prose in the demo fixture. The numbers are what a participant wrote in an ' +
-    'imaginary report, not a claim about this tree, and changing them would change what the ' +
-    'demo shows rather than repair anything.',
-  'src/repl/render.test.ts|parse.ts:76':
-    'An inline code span the markdown renderer must pass through unchanged. `src/repl/parse.ts` ' +
-    'does not exist; the string is there to be rendered, not resolved.',
-}
-
-interface Found {
-  /** The citation as written, path always repo-root-relative in the enforceable form. */
-  readonly cite: string
-  readonly path: string
-  readonly start: number
-  readonly end: number
-  /** Where it was written, for the failure message. */
-  readonly at: string
-}
-
-const PATHY = /([A-Za-z0-9_][A-Za-z0-9_./-]*\.(?:ts|tsx|js|cjs|mjs|json|md|py|sh)):(\d+)(?:-(\d+))?/g
-/**
- * The continuation form: `relay.ts:1653, :1700 and :2885`, which inherits the nearest path to
- * its left. Written this way in two places already, and a scanner blind to it would leave a
- * whole shape of citation unenforced -- the same hole the two-way pin exists to close.
- */
-const CONTINUED = /(?<=[\s`(,[])(:)(\d+)(?:-(\d+))?(?![\d.\-\w])/g
-
-/** Every citation in one line of text, both forms. */
-function citationsInLine(line: string): { path: string; start: number; end: number; text: string }[] {
-  const full = [...line.matchAll(PATHY)]
-  const out = full.map((m) => ({
-    path: m[1]!,
-    start: Number(m[2]),
-    end: Number(m[3] ?? m[2]),
-    text: m[0],
-    index: m.index,
-  }))
-  for (const m of line.matchAll(CONTINUED)) {
-    // Inside a full match already -- the `-34` of `foo.ts:12-34` cannot reach here, but belt
-    // and braces: an overlap would double-count rather than fail, which is the harder bug.
-    if (full.some((f) => m.index >= f.index && m.index < f.index + f[0].length)) continue
-    const owner = [...out].reverse().find((c) => c.index < m.index)
-    if (!owner) continue
-    out.push({
-      path: owner.path,
-      start: Number(m[2]),
-      end: Number(m[3] ?? m[2]),
-      text: `${owner.path}${m[0]}`,
-      index: m.index,
-    })
-  }
-  return out.map(({ path, start, end, text }) => ({ path, start, end, text }))
-}
-
-function sourceFiles(): string[] {
-  const out: string[] = []
-  const walk = (dir: string): void => {
-    for (const e of readdirSync(dir, { withFileTypes: true })) {
-      const p = join(dir, e.name)
-      if (e.isDirectory()) walk(p)
-      else if (e.name.endsWith('.ts')) out.push(p)
-    }
-  }
-  for (const root of SOURCE_ROOTS) walk(join(REPO, root))
-  return out.map((p) => relative(REPO, p)).filter((p) => p !== SELF)
-}
-
-function allCitations(): Found[] {
-  const out: Found[] = []
-  for (const file of sourceFiles()) {
-    readFileSync(join(REPO, file), 'utf8')
-      .split('\n')
-      .forEach((line, i) => {
-        for (const c of citationsInLine(line)) {
-          out.push({ cite: c.text, path: c.path, start: c.start, end: c.end, at: `${file}:${i + 1}` })
-        }
-      })
-  }
-  return out
-}
-
-const exemptKey = (c: Found): string => `${c.at.slice(0, c.at.lastIndexOf(':'))}|${c.cite}`
+import {
+  CITED,
+  NOT_CITATIONS,
+  REPO,
+  allCitations,
+  citationFault,
+  citationsInLine,
+  exemptKey,
+  planRepairs,
+  relocate,
+  repairLine,
+  sourceFiles,
+  type Found,
+} from './citations.ts'
 
 test('every path:line citation in the sources is declared with an expected token', () => {
   const undeclared = allCitations().filter((c) => !(c.cite in CITED) && !(exemptKey(c) in NOT_CITATIONS))
@@ -266,44 +74,18 @@ test('every path:line citation in the sources is declared with an expected token
   )
 })
 
-/**
- * Why one citation is not checkable, or `undefined` when it is.
- *
- * Separated from the test that walks `CITED` so the two ways a citation rots -- the cited line
- * is GONE, and the cited line is still there but no longer SAYS it -- can be proven against
- * fixtures rather than argued for in a comment. A guard whose failure path never runs is a
- * guard nobody has seen work.
- */
-function citationFault(cite: string, expected: string, root: string = REPO): string | undefined {
-  const colon = cite.lastIndexOf(':')
-  const path = cite.slice(0, colon)
-  const [start, end] = cite
-    .slice(colon + 1)
-    .split('-')
-    .map(Number) as [number, number?]
-  let lines: string[]
-  try {
-    lines = readFileSync(join(root, path), 'utf8').split('\n')
-  } catch {
-    return `${cite}: no such file (citations must be repo-root-relative)`
-  }
-  const last = end ?? start
-  if (!(start >= 1 && last >= start)) return `${cite}: not a line or range`
-  if (last > lines.length) return `${cite}: the file ends at line ${lines.length}`
-  const cited = lines.slice(start - 1, last).join('\n')
-  if (cited.includes(expected)) return undefined
-  return `${cite}: expected ${JSON.stringify(expected)}, found ${JSON.stringify(cited.trim().slice(0, 120))}`
-}
-
 test('every declared citation still points at what it says it does', () => {
   assert.deepEqual(
     Object.entries(CITED)
       .map(([cite, expected]) => citationFault(cite, expected))
       .filter((f) => f !== undefined),
     [],
-    'These citations have rotted. Find where the cited thing moved to, repair the line number ' +
-      'in the prose AND in CITED, and keep the citation -- a stale citation is evidence that ' +
-      'went missing, and deleting it loses the claim as well as the pointer.',
+    'These citations have rotted. Each message says where the token went, and ' +
+      '`npm run citations:fix` repairs the ones that moved cleanly -- in CITED and in the prose ' +
+      'together. What it refuses is what actually needs deciding: a token that is GONE, or one ' +
+      'that now matches in several places and was therefore never a pin. Keep the citation ' +
+      'either way -- a stale citation is evidence that went missing, and deleting it loses the ' +
+      'claim as well as the pointer.',
   )
 })
 
@@ -323,6 +105,17 @@ test('no declaration or exemption outlives the citation it was written for', () 
     'NOT_CITATIONS exempts text that is no longer there. Remove the entry, so the next thing ' +
       'to appear at that spelling is checked rather than inheriting a waiver.',
   )
+})
+
+test('the registry and its fixtures are not scanned as sources', () => {
+  // Both files carry citations as DATA. Either one scanned would satisfy the found-and-declared
+  // pin with itself -- every key found in its own table -- and the guard would pass over a tree
+  // it had never looked at. Asserted rather than left to `SELF`, because the exclusion moved
+  // when the registry did and a silent regression here disables everything above.
+  const files = sourceFiles()
+  assert.ok(!files.includes('src/contract/citations.ts'), 'the registry is not a source')
+  assert.ok(!files.includes('src/contract/citations.test.ts'), 'nor are its fixtures')
+  assert.ok(files.includes('src/relay/relay.ts'), 'and the tree it guards still is')
 })
 
 test('the scanner sees both citation forms, so neither can be added unnoticed', () => {
@@ -379,14 +172,20 @@ test('both ways a citation rots are caught, against a tree written for the purpo
     // Mode two, and the one line numbers alone can never catch: the line EXISTS and says
     // something else. Code moved down, the citation kept its number, and it now points at a
     // real line that supports a different claim -- exactly how a reader is misled.
+    //
+    // The message names where the token went. That sentence is the difference between a repair
+    // that is one command and a repair that starts by re-deriving what this function already
+    // knows -- which is how four throwaway scripts got written in one session on this branch.
     assert.equal(
       citationFault('moved.ts:1', 'export const second = 2', root),
-      'moved.ts:1: expected "export const second = 2", found "export const first = 1"',
+      'moved.ts:1: expected "export const second = 2", found "export const first = 1"' +
+        ' — it is now at moved.ts:2; `npm run citations:fix` repairs this',
     )
     // Range form: the token has to be inside the cited range, not merely in the file.
     assert.equal(
       citationFault('moved.ts:1-2', 'export const third = 3', root),
-      'moved.ts:1-2: expected "export const third = 3", found "export const first = 1\\nexport const second = 2"',
+      'moved.ts:1-2: expected "export const third = 3", found "export const first = 1\\nexport const second = 2"' +
+        ' — it is now at moved.ts:3-4; `npm run citations:fix` repairs this',
     )
 
     // And the true cases, so the two above are not passing because everything fails.
@@ -402,6 +201,93 @@ test('both ways a citation rots are caught, against a tree written for the purpo
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
+})
+
+test('a token that is gone, or no longer unique, is refused rather than relocated', () => {
+  // The whole safety argument for having a repair tool. Relocation is only ever inferred from a
+  // token that appears EXACTLY once: zero means the cited thing is gone, and more than one means
+  // the pin was never a pin. Both are the cases the guard exists to raise, and a tool that
+  // guessed at either would launder real rot into a green build.
+  const root = mkdtempSync(join(tmpdir(), 'conclave-citations-refuse-'))
+  try {
+    writeFileSync(
+      join(root, 'twice.ts'),
+      ['const a = 1', 'const dup = 2', 'const b = 3', 'const dup = 4', ''].join('\n'),
+    )
+
+    const gone = relocate('twice.ts:1', 'const vanished = 9', root)
+    assert.equal(gone.to, undefined)
+    assert.match(gone.why, /appears nowhere/)
+
+    const ambiguous = relocate('twice.ts:1', 'const dup =', root)
+    assert.equal(ambiguous.to, undefined)
+    assert.match(ambiguous.why, /appears on 2 lines \(2, 4\)/)
+    assert.deepEqual(ambiguous.lines, [2, 4])
+
+    // And the plan refuses both, naming each, rather than dropping them silently.
+    const plan = planRepairs({ 'twice.ts:1': 'const vanished = 9', 'twice.ts:3': 'const dup =' }, root)
+    assert.deepEqual(plan.repairs, [])
+    assert.deepEqual(
+      plan.refused.map((r) => r.cite),
+      ['twice.ts:1', 'twice.ts:3'],
+    )
+
+    // The single-match case in the same tree, so the refusals above are not passing because
+    // nothing ever relocates.
+    const moved = planRepairs({ 'twice.ts:1': 'const b = 3' }, root)
+    assert.deepEqual(moved.refused, [])
+    assert.deepEqual(moved.repairs, [{ from: 'twice.ts:1', to: 'twice.ts:3', expected: 'const b = 3' }])
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('a repair rewrites the citation it was asked to, in the form it was written in', () => {
+  // Spliced by position rather than substituted, and this is the test that says why. A
+  // hand-rolled repair reaches for string replacement, and string replacement cannot tell the
+  // citation from the identical number next to it -- nor put a continuation back as a
+  // continuation, which would grow a path the author deliberately left off.
+  const by = new Map([
+    ['src/relay/relay.ts:100', 'src/relay/relay.ts:150'],
+    ['src/relay/relay.ts:200', 'src/relay/relay.ts:250'],
+  ])
+
+  assert.equal(
+    repairLine('// see src/relay/relay.ts:100 for the reason', by),
+    '// see src/relay/relay.ts:150 for the reason',
+  )
+  // The continuation keeps its form: `:200`, not the full path.
+  assert.equal(
+    repairLine('// src/relay/relay.ts:100, :200 and :300 read it.', by),
+    '// src/relay/relay.ts:150, :250 and :300 read it.',
+  )
+  // `:300` above is untouched because it is not in the map -- a citation nobody asked to move
+  // must not move.
+  //
+  // And the number that is not a citation stays put. Substitution would have rewritten `100`
+  // here as readily as the citation above it.
+  assert.equal(
+    repairLine('// a budget of 100 turns, unlike src/relay/relay.ts:100', by),
+    '// a budget of 100 turns, unlike src/relay/relay.ts:150',
+  )
+  // A citation into a DIFFERENT file that happens to share the line number is not the one being
+  // repaired, and a path-blind pass would take it.
+  assert.equal(repairLine('// src/relay/run.ts:100 is unrelated', by), '// src/relay/run.ts:100 is unrelated')
+})
+
+test('the repo has no citation the fixer would refuse', () => {
+  // The plan, run against the real tree on every `npm test`. Zero refusals is not the same
+  // claim as zero faults: it says that IF something rots, it rots in the shape the tool can
+  // repair -- every declared token is still unique in its file. A pin that quietly stopped
+  // being unique would otherwise only be discovered by the one person trying to repair it, at
+  // the moment they were least equipped to notice.
+  const plan = planRepairs()
+  assert.deepEqual(
+    plan.refused.map((r) => `${r.cite}: ${r.why}`),
+    [],
+    'These declared tokens are no longer a pin. Narrow the token, or move the claim to a symbol ' +
+      'citation -- the repair tool cannot and must not guess at them.',
+  )
 })
 
 test('an undeclared citation is reported, and an exemption covers only where it was granted', () => {
@@ -422,4 +308,15 @@ test('an undeclared citation is reported, and an exemption covers only where it 
       'src/relay/z.ts:3 cites src/relay/relay.ts:31344',
     ],
   )
+})
+
+test('the fixer is wired into package.json under the name the guard tells you to run', () => {
+  // The failure message names `npm run citations:fix`. A message that names a command which
+  // does not exist is worse than one that names none -- it spends the reader's trust once and
+  // then teaches them to ignore the rest of the sentence.
+  const pkg = JSON.parse(readFileSync(join(REPO, 'package.json'), 'utf8')) as {
+    scripts?: Record<string, string>
+  }
+  assert.ok(pkg.scripts?.['citations:fix'], 'the guard points at this script by name')
+  assert.match(pkg.scripts['citations:fix']!, /fix-citations/)
 })

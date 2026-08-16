@@ -29,7 +29,8 @@
     "test:live:rollback": "ORCH_LIVE_ROLLBACK=1 node --test src/rotation/rotate.rollback.live.test.ts",
     "test:live:claim": "ORCH_LIVE_CLAIM=1 node --test src/rotation/acceptanceClaim.live.test.ts",
     "test:live:authority": "ORCH_LIVE_AUTHORITY=1 node --test src/relay/authority.live.test.ts",
-    "session": "node bin/conclave.ts session"
+    "session": "node bin/conclave.ts session",
+    "citations:fix": "node scripts/fix-citations.ts"
   },
   "dependencies": {
     "node-pty": "^1.0.0"
