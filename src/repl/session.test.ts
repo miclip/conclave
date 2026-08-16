@@ -24,7 +24,7 @@ import { NO_DEADLINE_CLOCKS } from '../registry/types.ts'
 import type { AgentSession } from '../contract/session.ts'
 import { AgentRegistry } from '../registry/registry.ts'
 import { FakeRotationSession } from '../rotation/fakeSession.ts'
-import { runSession, seatsToSampleAtPause, withHeartbeat } from './session.ts'
+import { HELP, runSession, seatsToSampleAtPause, withHeartbeat } from './session.ts'
 import type { ResolutionSubject } from '../relay/resolution.ts'
 import { resolutionFor } from '../relay/resolution.ts'
 import type { RunPause } from '../relay/run.ts'
@@ -1009,6 +1009,37 @@ test('the setup heartbeat appends when there is no cursor to move', async () => 
  * Asserted across the commands that SPAWN something, since those are the ones where being
  * wrong costs quota rather than a confusing message.
  */
+test('both help surfaces say what /rotate does with the reason you type (#75)', () => {
+  // Neither help string was asserted by anything before this. That is how `/rotate [reason]` came
+  // to be documented as an optional, unconditional argument while it was neither: a reason is
+  // REQUIRED for an operator-initiated rotation and is REFUSED, and at a rotation candidate the
+  // one you type is deliberately not recorded because accepting a candidate is agreement and the
+  // record has to carry the proxy's words.
+  //
+  // Both of those surprise an operator in the moment they are deciding something, which is the
+  // worst time to be surprised -- and the console's own notice is only a remedy for the second of
+  // them, and only once you have already typed it.
+  //
+  // Asserted on the console's HELP verbatim and on the CLI's real stdout, because they are two
+  // separately-maintained strings describing one behaviour, and the pair drifting is likelier than
+  // either being wrong alone.
+  assert.match(HELP, /\/rotate/)
+  assert.match(HELP, /REQUIRED/, 'the console help must say a reason is required')
+  assert.match(HELP, /rotation candidate/, 'and that the candidate case is different')
+  assert.match(HELP, /PROXY'S words|proxy's own words|proxy's words/i)
+
+  const root = join(import.meta.dirname, '..', '..')
+  const stdout = execFileSync(process.execPath, [join(root, 'bin/conclave.ts'), 'session', '--help'], {
+    cwd: mkdtempSync(join(tmpdir(), 'conclave-help-')),
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    timeout: 30_000,
+  })
+  assert.match(stdout, /REQUIRES a reason/, 'the CLI help must say a reason is required')
+  assert.match(stdout, /rotation candidate/)
+  assert.match(stdout, /proxy's own\s+words/, 'and whose words the record keeps')
+})
+
 test('--help is answered by every command, and starts nothing', () => {
   const root = join(import.meta.dirname, '..', '..')
   for (const argv of [

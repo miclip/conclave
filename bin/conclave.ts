@@ -74,7 +74,10 @@ Driving conclave from an agent
 
   Keep stdin OPEN and write commands as lines. Closing it ends the session once its
   current run finishes.
-    /continue /rotate /abort        answer a pause
+    /continue /rotate /abort        answer a pause. /rotate REQUIRES a reason and records it
+                                    — unless the pause is a rotation candidate, where taking
+                                    it is agreement, so the record keeps the proxy's own
+                                    words and the one you typed is not kept (#75)
     /wait [minutes]                 keep waiting, when the child still has CPU. Records
                                     the decision, sends nothing, leaves the run paused
     /allow /deny                    answer a permission prompt

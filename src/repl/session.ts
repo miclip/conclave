@@ -330,7 +330,16 @@ export const COMMANDS = [
  */
 const HEREDOC_OPEN = /^(|>advisor|>implementer|>both)[ \t]*<<([A-Za-z_][A-Za-z0-9_]*)[ \t]*$/
 
-const HELP = `
+/**
+ * What `/help` writes, verbatim.
+ *
+ * Exported for the same reason `COMMANDS` above it is: a test asserts that the help describes
+ * behaviour an operator would otherwise be surprised by, and asserting on the string the console
+ * actually writes is the only version of that claim worth making. Nothing asserted either help
+ * surface before #75, which is how `/rotate [reason]` came to be documented as optional and
+ * unconditional while it was neither.
+ */
+export const HELP = `
   <text>                 to BOTH, at human rank — the default, no prefix needed
   >advisor <text>        to the advisor only — the implementer will not see it
   >implementer <text>    to the implementer only — the advisor will not see it
@@ -370,7 +379,11 @@ const HELP = `
                          are one line. Typing the message alone does the same thing.
   /continue force        resume even though a child reads mid-turn. The whole word and
                          nothing after it; anything else is a message, not an override.
-  /rotate [reason]       replace the implementer seat this pause is about, carrying a handoff forward
+  /rotate [reason]       replace the implementer seat this pause is about, carrying a handoff
+                         forward. A reason is REQUIRED and becomes the record — except at a
+                         rotation candidate, where accepting it is agreement with the proxy,
+                         so the record keeps the PROXY's words and yours is not kept (#75).
+                         The console says which it did before the transaction starts.
   /abort [reason]        end the run, and stay here for the next one
 
   /allow [who]           answer a participant stopped at a permission prompt
@@ -1785,7 +1798,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
       // FALSIFIER, stated because it is the strongest argument against this shape: the
       // console has no general "trailing text is a message" rule and does not gain one here.
       // `/rotate <text>` and `/abort <text>` consume their text as a REASON
-      // (`src/repl/session.ts:1838`, `src/repl/session.ts:1871`) and `/pause`, `/queue`, `/audit` ignore
+      // (`src/repl/session.ts:1851`, `src/repl/session.ts:1884`) and `/pause`, `/queue`, `/audit` ignore
       // whatever follows them. So an operator who learns this from `/continue` and carries
       // it to `/pause I'll be back` still loses the sentence. That inconsistency is not
       // repaired by making `/continue` a third behaviour; it is narrowed by it, and the
