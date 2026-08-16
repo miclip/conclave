@@ -347,13 +347,18 @@ function parseTerminal(buf: string, rows: number, cols: number): { grid: string[
           for (let i = 0; i <= c; i++) grid[r]![i] = ' '
         }
       } else if (k === 'J') {
+        // Erase in display, and it must reach the rows BELOW the cursor, not just the rest of
+        // the cursor's row. Erasing only the current row keeps every row the console has
+        // cleared, so the box appears to exist at every position it has ever occupied — and a
+        // scan for the input row finds the oldest ghost instead of the live one. The console
+        // has erased to end-of-screen since it started clearing under a descending box.
         const mode = parseInt(a[0] ?? '0') || 0
-        if (mode === 0) {
-          for (let i = c; i < cols; i++) grid[r]![i] = ' '
-        } else if (mode === 2) {
-          for (let row = 0; row < rows; row++) {
-            for (let i = 0; i < cols; i++) grid[row]![i] = ' '
-          }
+        const from = mode === 0 ? r : 0
+        const to = mode === 1 ? r : rows - 1
+        for (let row = from; row <= to; row++) {
+          const startCol = mode === 0 && row === r ? c : 0
+          const endCol = mode === 1 && row === r ? Math.min(c, cols - 1) : cols - 1
+          for (let i = startCol; i <= endCol; i++) grid[row]![i] = ' '
         }
       } else if (k === 'T') {
         // Scroll Down: insert n blank lines at the top of the scroll region.
@@ -525,62 +530,37 @@ test('the box is pinned below the transcript, and progress lives only in it', as
   const c = await spawnConsole(dir, t, undefined, true)
   assert.ok(await c.until((s) => /─{20,}/.test(s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '')), 20_000))
   c.type('typing here')
-  await new Promise((r) => setTimeout(r, 1500))
 
   const rows = 30
   const cols = 100
-  const grid = Array.from({ length: rows }, () => ' '.repeat(cols).split(''))
-  let r = 0
-  let col = 0
-  let top = 1
-  let bot = rows
-  const re = /\x1b\[([0-9;]*)([A-Za-z])|\n|\r|[^\x1b\n\r]+/g
-  let m: RegExpExecArray | null
-  const buf = c.text()
-  while ((m = re.exec(buf))) {
-    const tok = m[0]
-    if (tok === '\n') {
-      if (r === bot - 1) {
-        grid.splice(top - 1, 1)
-        grid.splice(bot - 1, 0, ' '.repeat(cols).split(''))
-      } else r = Math.min(rows - 1, r + 1)
-    } else if (tok === '\r') col = 0
-    else if (tok.startsWith('\x1b')) {
-      const a = (m[1] ?? '').split(';')
-      const k = m[2]
-      if (k === 'H') {
-        r = (parseInt(a[0] ?? '1') || 1) - 1
-        col = (parseInt(a[1] ?? '1') || 1) - 1
-      } else if (k === 'r') {
-        top = parseInt(a[0] ?? '1') || 1
-        bot = parseInt(a[1] ?? String(rows)) || rows
-      } else if (k === 'K') for (let i = col; i < cols; i++) grid[r]![i] = ' '
-      else if (k === 'J') {
-        // Erase in display. Without this the model kept every row the console had erased,
-        // and the box appeared to exist at every position it had ever occupied — so a test
-        // looking for the input row found the oldest one and read the transcript line above
-        // it as a missing rule. The console has erased to end-of-screen since it started
-        // clearing under a descending box; the emulator simply could not see it.
-        const mode = parseInt(a[0] ?? '0') || 0
-        const from = mode === 1 ? 0 : mode === 2 ? 0 : r
-        const to = mode === 1 ? r : rows - 1
-        for (let y = from; y <= to; y++) {
-          const startCol = mode === 0 && y === r ? col : 0
-          for (let i = startCol; i < cols; i++) grid[y]![i] = ' '
-        }
-      }
-    } else for (const ch of tok) if (col < cols) grid[r]![col++] = ch
-  }
-  const line = (n: number) => grid[n - 1]!.join('').replace(/\s+$/, '')
 
   // Find the box rather than assuming it is at the bottom of the terminal. It is only there
   // once output has filled the screen; before that it sits directly under the last transcript
   // line and descends as more is printed. This test is about the box's internal layout and
   // about where the status may appear, neither of which depends on which row it starts on.
-  const inputRow = Array.from({ length: rows }, (_, i) => i + 1).find((n) =>
-    /›\s*typing here/.test(line(n)),
-  )
-  assert.ok(inputRow, `the input row should be on screen, holding what was typed`)
+  //
+  // Waiting for the row rather than sleeping a fixed 1.5s: the console draws the echo when it
+  // draws it, and a fixed sleep either fails on a slow machine or wastes time on a fast one.
+  // The pty is fixed at 30x100 and the scan below covers every row of it, so a miss means the
+  // row is not drawn YET — which is exactly what polling answers. The grid that first holds
+  // the typed line is kept, so every assertion below reads one coherent frame rather than
+  // re-replaying a stream that has moved on since the row was found.
+  let screen: string[][] | undefined
+  let found: number | undefined
+  const drawn = await c.until((s) => {
+    const g = renderGrid(s, rows, cols)
+    const at = Array.from({ length: rows }, (_, i) => i + 1).find((n) =>
+      /›\s*typing here/.test(g[n - 1]!.join('').replace(/\s+$/, '')),
+    )
+    if (at === undefined) return false
+    screen = g
+    found = at
+    return true
+  }, 20_000)
+  assert.ok(drawn && screen && found, `the input row should be on screen, holding what was typed`)
+  const grid = screen
+  const inputRow = found
+  const line = (n: number) => grid[n - 1]!.join('').replace(/\s+$/, '')
 
   // The status is inlaid into the top rule rather than given a row of its own: a permanent
   // row for one short phrase is a row spent on nothing.
@@ -737,22 +717,32 @@ test('two working seats get a row each above the box, and come off the status ru
 
   // Both seats dispatched from the one advisor reply, and both still working: the fakes take
   // six seconds a turn, so this instant is several seconds wide rather than a race.
+  //
+  // The frame that satisfies the wait is the frame that gets asserted. Re-rendering after the
+  // wait reads a LATER screen than the one that passed: a seat can finish its six seconds in
+  // between, and then the layout assertions run against a screen where one of the two rows the
+  // wait just saw is no longer there.
+  let frame: string[] | undefined
   const bothWorking = (s: string): boolean => {
-    const grid = renderGrid(s, rows, cols).map((r) => r.join('').trimEnd())
-    return (
-      grid.some((line) => /implementer\b.*rebuild the parser/.test(line)) &&
-      grid.some((line) => /implementer-2\b.*rewrite the docs/.test(line))
-    )
+    const g = renderGrid(s, rows, cols).map((r) => r.join('').trimEnd())
+    if (
+      !g.some((line) => /implementer\b.*rebuild the parser/.test(line)) ||
+      !g.some((line) => /implementer-2\b.*rewrite the docs/.test(line))
+    ) {
+      return false
+    }
+    frame = g
+    return true
   }
   assert.ok(
-    await c.until(bothWorking, 40_000),
+    (await c.until(bothWorking, 40_000)) && frame,
     `both seats should have a pinned row naming their own task. screen was:\n${renderGrid(c.text(), rows, cols)
       .map((r) => r.join('').trimEnd())
       .filter(Boolean)
       .join('\n')}`,
   )
 
-  const grid = renderGrid(c.text(), rows, cols).map((r) => r.join('').trimEnd())
+  const grid = frame
   const alphaRow = grid.findIndex((line) => /implementer\b.*rebuild the parser/.test(line))
   const betaRow = grid.findIndex((line) => /implementer-2\b.*rewrite the docs/.test(line))
   assert.notEqual(alphaRow, betaRow, 'two seats are two rows: one row holding both is the thing being replaced')
