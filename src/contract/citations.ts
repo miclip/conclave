@@ -332,46 +332,54 @@ export function relocate(
   cite: string,
   expected: string,
   root: string = REPO,
-): { to: string | undefined; why: string; lines: number[] } {
+): { to: string | undefined; candidates: string[]; why: string; lines: number[] } {
   const { path, start, end } = parseCite(cite)
   let lines: string[]
   try {
     lines = readFileSync(join(root, path), 'utf8').split('\n')
   } catch {
-    return { to: undefined, why: 'no such file', lines: [] }
+    return { to: undefined, candidates: [], why: 'no such file', lines: [] }
   }
   const hits = lines.flatMap((l, i) => (l.includes(expected) ? [i + 1] : []))
   if (hits.length === 0) {
     return {
       to: undefined,
+      candidates: [],
       why: 'the token appears nowhere in the file, so the cited thing is gone rather than moved — decide whether the claim survives',
       lines: [],
     }
   }
-  if (hits.length > 1) {
-    return {
-      to: undefined,
-      why: `the token appears on ${hits.length} lines (${hits.join(', ')}), so it is not a pin — narrow it before relocating`,
-      lines: hits,
-    }
-  }
-  const at = hits[0]!
-  // A range keeps its WIDTH and moves as a block. Its token sat somewhere inside it, and the
-  // only shift that is safe to infer is the one that puts the token back inside a window of the
-  // same size -- anchored so the token keeps the offset it has in the current file. Verified by
-  // the caller before anything is written, so a wrong guess is dropped rather than committed.
-  if (end !== undefined && end !== start) {
-    const width = end - start + 1
+
+  // A range keeps its WIDTH and moves as a block, and its token sat SOMEWHERE inside it -- which
+  // the current file cannot tell you. Anchoring the token to the range's first line was the
+  // obvious guess and it is wrong: it silently re-frames the range around the token and reports
+  // a shift one or two lines off the one the file actually took. So every window of the cited
+  // width that contains the token is a candidate, and something better-evidenced than a guess
+  // picks between them.
+  const width = end === undefined ? 1 : end - start + 1
+  const candidates: string[] = []
+  for (const at of hits) {
     for (let offset = 0; offset < width; offset++) {
       const s = at - offset
       if (s < 1 || s + width - 1 > lines.length) continue
-      if (lines.slice(s - 1, s + width - 1).join('\n').includes(expected)) {
-        return { to: formatCite(path, s, s + width - 1), why: 'relocated', lines: hits }
-      }
+      if (!lines.slice(s - 1, s + width - 1).join('\n').includes(expected)) continue
+      const cand = formatCite(path, s, end === undefined ? undefined : s + width - 1)
+      if (!candidates.includes(cand)) candidates.push(cand)
     }
-    return { to: undefined, why: 'the token moved but no window of the cited width contains it', lines: hits }
   }
-  return { to: formatCite(path, at, undefined), why: 'relocated', lines: hits }
+  if (candidates.length === 1) return { to: candidates[0], candidates, why: 'relocated', lines: hits }
+  if (candidates.length === 0) {
+    return { to: undefined, candidates, why: 'the token moved but no window of the cited width contains it', lines: hits }
+  }
+  return {
+    to: undefined,
+    candidates,
+    why:
+      hits.length > 1
+        ? `the token appears on ${hits.length} lines (${hits.join(', ')}), so it is not a pin on its own`
+        : `the token is inside ${candidates.length} windows of the cited width, so its offset in the range is not recoverable from the file alone`,
+    lines: hits,
+  }
 }
 
 export interface Repair {
@@ -396,21 +404,105 @@ export interface RepairPlan {
 export function planRepairs(cited: Record<string, string> = CITED, root: string = REPO): RepairPlan {
   const repairs: Repair[] = []
   const refused: { cite: string; why: string }[] = []
-  for (const [cite, expected] of Object.entries(cited)) {
-    if (citationFault(cite, expected, root) === undefined) continue
-    const { to, why } = relocate(cite, expected, root)
-    if (!to) {
-      refused.push({ cite, why })
-      continue
-    }
+  const faulted = Object.entries(cited).filter(([c, e]) => citationFault(c, e, root) !== undefined)
+
+  const accept = (cite: string, to: string, expected: string): boolean => {
     const stillWrong = citationFault(to, expected, root)
     if (stillWrong) {
       refused.push({ cite, why: `proposed ${to} does not verify: ${stillWrong}` })
-      continue
+      return false
     }
     repairs.push({ from: cite, to, expected })
+    return true
+  }
+
+  // Pass one: the citations that have exactly one possible answer. Those need nothing but
+  // themselves, and they are what measures the file's shift for pass two.
+  const ambiguous: { cite: string; expected: string; why: string; candidates: string[] }[] = []
+  for (const [cite, expected] of faulted) {
+    const { to, candidates, why } = relocate(cite, expected, root)
+    if (to) {
+      accept(cite, to, expected)
+      continue
+    }
+    if (candidates.length > 1) ambiguous.push({ cite, expected, why, candidates })
+    else refused.push({ cite, why })
+  }
+
+  // Pass two, and the one that makes this worth having on a real tree.
+  //
+  // A weak pin -- `worktreePaths(this.#opts.cwd)` is cited three times over -- cannot say where
+  // it went on its own. But it did not move on its own: an insertion shifts everything below it
+  // by the SAME amount, and the citations in the file that DO pin uniquely have already
+  // measured that shift. So a file with one consistent delta lends it to its ambiguous
+  // citations, and the candidate is only taken if it lands exactly on a line that has the token.
+  //
+  // Consensus is required, not a majority. Two different deltas in one file means more than a
+  // simple insertion happened, and the arithmetic that makes this safe no longer holds.
+  const deltas = new Map<string, Set<number>>()
+  for (const r of repairs) {
+    const from = parseCite(r.from)
+    const to = parseCite(r.to)
+    const set = deltas.get(from.path) ?? new Set<number>()
+    set.add(to.start - from.start)
+    deltas.set(from.path, set)
+  }
+  for (const a of ambiguous) {
+    const { path, start, end } = parseCite(a.cite)
+    const seen = deltas.get(path)
+    if (!seen || seen.size !== 1) {
+      refused.push({
+        cite: a.cite,
+        why: seen
+          ? `${a.why}, and its file shifted by no single amount (${[...seen].join(', ')}) to infer from`
+          : `${a.why}, and no citation in its file relocated on its own evidence, so there is no shift to measure`,
+      })
+      continue
+    }
+    const delta = [...seen][0]!
+    const shifted = formatCite(path, start + delta, end === undefined ? undefined : end + delta)
+    // The shift has to land on one of the answers the file itself allows. Taking `start + delta`
+    // on faith would let a consensus measured elsewhere in the file invent a line that does not
+    // hold the token at all -- which `accept` would catch, but as a confusing failure rather
+    // than as the refusal it is.
+    if (!a.candidates.includes(shifted)) {
+      refused.push({
+        cite: a.cite,
+        why: `${a.why}, and the file's shift of ${delta} picks none of them (${a.candidates.join(', ')})`,
+      })
+      continue
+    }
+    accept(a.cite, shifted, a.expected)
   }
   return { repairs, refused }
+}
+
+/**
+ * Declared citations whose token is not unique in the file it points into.
+ *
+ * A weak pin still guards -- the cited line either says the thing or it does not -- but it is
+ * weaker in two specific ways worth knowing about rather than discovering: only a shift of
+ * exactly the distance between two occurrences slips past it, and it cannot be relocated on its
+ * own evidence. `planRepairs` covers the second with the file's measured shift; nothing covers
+ * the first, which is why this is reported rather than hidden.
+ */
+export function weakPins(
+  cited: Record<string, string> = CITED,
+  root: string = REPO,
+): { cite: string; hits: number }[] {
+  const out: { cite: string; hits: number }[] = []
+  for (const [cite, expected] of Object.entries(cited)) {
+    const { path } = parseCite(cite)
+    let text: string
+    try {
+      text = readFileSync(join(root, path), 'utf8')
+    } catch {
+      continue
+    }
+    const hits = text.split('\n').filter((l) => l.includes(expected)).length
+    if (hits > 1) out.push({ cite, hits })
+  }
+  return out.sort((a, b) => a.cite.localeCompare(b.cite))
 }
 
 /**

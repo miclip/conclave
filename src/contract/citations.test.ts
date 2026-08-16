@@ -58,6 +58,7 @@ import {
   exemptKey,
   planRepairs,
   relocate,
+  weakPins,
   repairLine,
   sourceFiles,
   type Found,
@@ -182,10 +183,19 @@ test('both ways a citation rots are caught, against a tree written for the purpo
         ' — it is now at moved.ts:2; `npm run citations:fix` repairs this',
     )
     // Range form: the token has to be inside the cited range, not merely in the file.
+    //
+    // And a range does NOT get told where it went, which is the honest answer. The token sat
+    // somewhere inside the range and the current file cannot say where, so several windows of
+    // the cited width contain it and each implies a different shift. Anchoring the token to the
+    // range's first line was the obvious guess; it re-frames the range around the token and
+    // reports a shift one or two lines off the one the file actually took. `planRepairs` settles
+    // these from the shift its unambiguous neighbours measured, which is evidence rather than a
+    // preference between equally good guesses.
     assert.equal(
       citationFault('moved.ts:1-2', 'export const third = 3', root),
       'moved.ts:1-2: expected "export const third = 3", found "export const first = 1\\nexport const second = 2"' +
-        ' — it is now at moved.ts:3-4; `npm run citations:fix` repairs this',
+        ' — the token is inside 2 windows of the cited width, so its offset in the range is not' +
+        ' recoverable from the file alone',
     )
 
     // And the true cases, so the two above are not passing because everything fails.
@@ -242,6 +252,50 @@ test('a token that is gone, or no longer unique, is refused rather than relocate
   }
 })
 
+test('a weak pin is relocated by the shift its neighbours measured, or not at all', () => {
+  // The pass that made this tool worth having. Eight of the repo's thirty-eight tokens are not
+  // unique in their file, and on the first run against a real edit the tool repaired eleven
+  // citations and refused three of them -- which would have left me finishing the job by hand,
+  // which is the entire thing it exists to stop.
+  //
+  // A weak pin cannot say where it went. But it did not move on its own: an insertion shifts
+  // everything below it by the SAME amount, and the citations that DO pin uniquely have already
+  // measured that shift. So the file lends its consensus to the ones that cannot speak, and the
+  // answer is only taken if it lands on a line that actually holds the token.
+  const root = mkdtempSync(join(tmpdir(), 'conclave-citations-shift-'))
+  try {
+    const cited = { 'shift.ts:3': 'const b = 3', 'shift.ts:5': 'dup()' }
+    const body = ['const a = 1', 'dup()', 'const b = 3', 'filler', 'dup()', '']
+
+    // Correct to begin with, so what follows is caused by the edit and not by the fixture.
+    writeFileSync(join(root, 'shift.ts'), body.join('\n'))
+    assert.deepEqual(planRepairs(cited, root), { repairs: [], refused: [] })
+
+    // One line inserted at the top: everything below shifts by exactly one.
+    writeFileSync(join(root, 'shift.ts'), ['// inserted', ...body].join('\n'))
+    const plan = planRepairs(cited, root)
+    assert.deepEqual(plan.refused, [])
+    assert.deepEqual(plan.repairs, [
+      // Pass one. Unique token, so it needs nothing but itself -- and it is what measures +1.
+      { from: 'shift.ts:3', to: 'shift.ts:4', expected: 'const b = 3' },
+      // Pass two. `dup()` is on lines 3 and 6 and cannot choose; +1 picks 6, which is one of
+      // them, so it is taken. Note the order: repairs come out in the order they were settled,
+      // not in the order they were declared.
+      { from: 'shift.ts:5', to: 'shift.ts:6', expected: 'dup()' },
+    ])
+
+    // And alone, with nothing to measure the shift from, the same citation is refused rather
+    // than guessed at. This is the assertion that keeps pass two evidence rather than a
+    // preference: strip the neighbour and the answer disappears with it.
+    const lonely = planRepairs({ 'shift.ts:5': 'dup()' }, root)
+    assert.deepEqual(lonely.repairs, [])
+    assert.equal(lonely.refused.length, 1)
+    assert.match(lonely.refused[0]!.why, /no citation in its file relocated on its own evidence/)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test('a repair rewrites the citation it was asked to, in the form it was written in', () => {
   // Spliced by position rather than substituted, and this is the test that says why. A
   // hand-rolled repair reaches for string replacement, and string replacement cannot tell the
@@ -275,18 +329,38 @@ test('a repair rewrites the citation it was asked to, in the form it was written
   assert.equal(repairLine('// src/relay/run.ts:100 is unrelated', by), '// src/relay/run.ts:100 is unrelated')
 })
 
-test('the repo has no citation the fixer would refuse', () => {
-  // The plan, run against the real tree on every `npm test`. Zero refusals is not the same
-  // claim as zero faults: it says that IF something rots, it rots in the shape the tool can
-  // repair -- every declared token is still unique in its file. A pin that quietly stopped
-  // being unique would otherwise only be discovered by the one person trying to repair it, at
-  // the moment they were least equipped to notice.
-  const plan = planRepairs()
+test('the tokens that are not a pin on their own are the ones we know about', () => {
+  // Not `planRepairs().refused`, which was the first thing written here and proves nothing: on a
+  // tree with no faults there is nothing to relocate, so it asserts an empty list against an
+  // empty list forever. This asks the question that has an answer whether or not anything has
+  // rotted -- is each declared token unique in the file it points into?
+  //
+  // Eight of thirty-eight are not, and only one of them said so. A duplicate token is still a
+  // guard: the cited line either says the thing or it does not. It is weaker in one specific
+  // way, and the way is worth naming rather than discovering -- a shift of exactly the distance
+  // between two occurrences moves the citation onto the other one and passes. `planRepairs`
+  // covers the repair side by taking the shift its unambiguous neighbours measured; nothing
+  // covers this side, so the list is pinned and a NINTH has to be argued for.
   assert.deepEqual(
-    plan.refused.map((r) => `${r.cite}: ${r.why}`),
-    [],
-    'These declared tokens are no longer a pin. Narrow the token, or move the claim to a symbol ' +
-      'citation -- the repair tool cannot and must not guess at them.',
+    weakPins().map((w) => w.cite),
+    [
+      // Five constructor sites take the same cwd. The claim is about this one, and the range
+      // form is not available -- there is nothing adjacent to widen into.
+      'bin/conclave.ts:1262',
+      'src/relay/relay.ts:1786-1792',
+      // The three `worktreePaths` readers cite each other's spelling by construction: the claim
+      // they support is that these are the only readers, so they cannot be told apart by it.
+      'src/relay/relay.ts:2340',
+      'src/relay/relay.ts:2568',
+      'src/relay/relay.ts:4478',
+      'src/relay/relay.ts:5266',
+      // The one that was already documented as weak, in its own CITED comment.
+      'src/relay/relay.ts:5280',
+      'src/repl/session.ts:1031',
+    ],
+    'A declared token that matches more than one line is a weaker pin than it looks: only a ' +
+      'shift of exactly the distance between two occurrences slips past it. Narrow the token, ' +
+      'widen the citation to a range that is unique, or add it here with the reason it cannot be.',
   )
 })
 

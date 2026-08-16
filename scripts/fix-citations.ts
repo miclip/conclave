@@ -68,8 +68,13 @@ for (const file of files) {
 // this checks that writing them actually took, which is the half a plan cannot prove -- a
 // citation the rewriter failed to find would leave CITED repaired and the prose stale, and the
 // two drifting apart is the exact thing this table exists to prevent.
+//
+// Against the REPAIRED spellings, not against the imported table. `CITED` was read into memory
+// before any of this ran, so checking it after writing asks whether the old line numbers hold in
+// the new file -- which they cannot, by construction. The first version of this script did
+// exactly that and reported total failure over a set of repairs that were all correct.
 const stillWrong = Object.entries(CITED)
-  .map(([cite, expected]) => citationFault(cite, expected))
+  .map(([cite, expected]) => citationFault(by.get(cite) ?? cite, expected))
   .filter((f) => f !== undefined)
 
 console.log(`\ncitations: repaired ${repairs.length} across ${touched.length} files`)
