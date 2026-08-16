@@ -30,6 +30,7 @@
 import type { Confidence, Provenance } from '../contract/outcome.ts'
 import type { ParticipantLaunch } from '../registry/launch.ts'
 import type { RunOutcome } from './run.ts'
+import type { RotationRecord } from './rotationIntent.ts'
 import type { Relay, RunDeadlines } from './relay.ts'
 
 /**
@@ -136,6 +137,23 @@ export interface RunReport {
     candidates: number
     rotations: number
     peakGeneration: number
+    /**
+     * Each accepted rotation and WHY it happened. See `rotationIntent.ts`.
+     *
+     * `rotations` above says how many; this says which population each belongs to, and without
+     * it the count is not usable as evidence. #10 asks whether compaction predicts degradation
+     * strongly enough to act on unattended, and a rotation the operator took to get a fresh
+     * reader onto a just-committed criterion arrives WITH a compaction generation attached --
+     * because compaction happens anyway. So it reads as "the proxy fired and the operator
+     * rotated", which is exactly the correlation being measured, and any dataset built from
+     * `rotations` alone confirms the hypothesis with rotations that had nothing to do with
+     * degradation (#75).
+     *
+     * Present and empty on a run that rotated nothing, per this file's second rule: a key that
+     * vanishes when it has nothing to say makes a reader distinguish "no rotations" from "this
+     * build does not report why".
+     */
+    records: RotationRecord[]
   }
   /**
    * Whether subagents were used, and whether any worktree appeared while they were.
@@ -239,6 +257,10 @@ export async function runReport(relay: Relay, input: ReportInput): Promise<RunRe
       candidates: relay.rotationWatch.candidates,
       rotations: relay.rotationWatch.rotations,
       peakGeneration: relay.rotationWatch.peakGeneration,
+      // Through the relay's own accessor, which copies. The rule at the top of this file is
+      // that nothing here is re-derived; the rule beside `launch` is that a report handed to a
+      // caller who may keep it must not share an array the relay still owns.
+      records: relay.rotationRecords(),
     },
     subagents: relay.subagentUse(),
     flags: relay.flags.map((f) => ({ participant: f.participant, text: f.text, seq: f.seq })),

@@ -73,6 +73,7 @@ import type { Confidence, Provenance } from '../contract/outcome.ts'
 import type { RunCeilings } from '../relay/guardrails.ts'
 import type { RelayEvent } from '../relay/observe.ts'
 import type { RunOutcome, RunPause } from '../relay/run.ts'
+import type { RotationRecord } from '../relay/rotationIntent.ts'
 // The two accessors, not a third copy of them. A check is a bare string or a pair, and a
 // reader that re-implemented that fork would eventually disagree with the one the checks are
 // actually RUN through.
@@ -458,6 +459,32 @@ export interface SessionStatus {
    * first for the second, which is why the unset limits are spelled out rather than left off.
    */
   ceilings?: RunCeilings | undefined
+  /**
+   * Every accepted rotation this run has made, and WHY each one happened.
+   *
+   * The live half of #75. A rotation is the one event in a run that replaces the thing doing
+   * the work, and until now the only queryable trace of it was a COUNT -- so an operator, or an
+   * analysis, could see that a seat had been replaced and not why. That gap is not cosmetic:
+   * #10 asks whether compaction predicts degradation strongly enough to act on unattended, and
+   * a rotation the operator took for a reason of their own arrives carrying a compaction
+   * generation regardless, because compaction happens anyway. Counted alone it reads as "the
+   * proxy fired and the operator agreed", which is exactly the correlation being measured.
+   *
+   * Present and EMPTY on a run that has rotated nothing, for the reason `rotation` above is
+   * present on an unarmed seat: #103 was a probe reading a key that did not exist and getting a
+   * falsy value it could not tell from a build that does not report the field. An empty array
+   * is a run that has not rotated; an absent key is a producer that was never asked.
+   *
+   * Written by BOTH producers, like `ceilings`: the recorder from `RecordableRelay`, and the
+   * detached parent into the placeholder it records for a child that does not exist yet. The
+   * placeholder's empty array is not a guess -- a child that has not started has rotated
+   * nothing -- and a detached run is the form an agent operator polls.
+   *
+   * OPTIONAL for the same one case as `ceilings`: a `RecordableRelay` stand-in that predates
+   * this and answers nothing. Absent there means "never asked", which is a different fact from
+   * the empty array's "asked, and nothing has rotated".
+   */
+  rotations?: RotationRecord[] | undefined
 }
 
 /** A status plus what could only be learned from outside it. */
@@ -990,6 +1017,18 @@ export interface RecordableRelay {
    * than one claiming a run is unbounded when it was never asked.
    */
   readonly ceilings?: RunCeilings | undefined
+  /**
+   * Every accepted rotation and WHY, as the relay recorded it at the moment it accepted one.
+   *
+   * A method rather than a property because it grows during the run, and the recorder rewrites
+   * the document on every event -- a property would be a live array the recorder serialises,
+   * which is the shared-state hazard `report.ts` copies to avoid.
+   *
+   * OPTIONAL and structural, like `rotationOf` and `ceilings`: a stand-in written before #75
+   * still satisfies the contract and gets the document it got before, with no `rotations` key
+   * rather than an empty one claiming this run rotated nothing when it was never asked.
+   */
+  rotationRecords?(): readonly RotationRecord[]
   seats?(): readonly { seat: string; state: string; current?: string | undefined; dispatched: number }[]
   tasks?(): readonly { task: { id: string; instruction: string }; runtime: { state: string } }[]
   readonly worktrees?: { seats: readonly { seatId: string; worktreePath: string; branch: string }[] } | undefined
@@ -1124,6 +1163,21 @@ export function recordSession(
     })
   }
 
+  /**
+   * The rotation records, re-read on every write rather than captured once.
+   *
+   * Unlike `ceilings`, which is fixed for a run's whole life, this GROWS: a rotation happens
+   * mid-run, and the whole point of putting it in the status file is that an operator watching
+   * a live run can see it there (#75). So it is a call, made wherever the document is rewritten.
+   *
+   * `undefined` when the relay does not answer, spread away rather than written as an empty
+   * array: a stand-in that was never asked has not said this run rotated nothing.
+   */
+  const rotations = (): { rotations: RotationRecord[] } | Record<string, never> => {
+    const records = relay.rotationRecords?.()
+    return records === undefined ? {} : { rotations: [...records] }
+  }
+
   const recorder = new SessionRecorder(opts.repoRoot, {
     id: opts.id,
     pid: process.pid,
@@ -1142,6 +1196,9 @@ export function recordSession(
     // that can only ever produce the same answer. Last among the fields this passes, so the
     // key is appended to the document rather than inserted among the ones already there.
     ...(relay.ceilings ? { ceilings: relay.ceilings } : {}),
+    // After `ceilings`, so the key is appended to the document rather than inserted among the
+    // ones already there -- the same rule, for the same reason.
+    ...rotations(),
   })
 
   /**
@@ -1192,7 +1249,7 @@ export function recordSession(
     if (gen < applied) return
     applied = gen
     for (const [id, ts] of fresh) turns.set(id, ts)
-    recorder.update({ messages: relay.log.length, participants: seats() })
+    recorder.update({ messages: relay.log.length, participants: seats(), ...rotations() })
   }
 
   /**
@@ -1214,6 +1271,7 @@ export function recordSession(
       participants: seats(),
       pause: extra?.pause,
       outcome: lastOutcome,
+      ...rotations(),
     })
     // Detached: `set` is called from the run loop and a lifecycle change must not wait on a
     // transcript read. The state above is written immediately; the turns catch up.
@@ -1266,7 +1324,7 @@ export function recordSession(
       // Every event refreshes the participant block, so a permission prompt appears in the
       // status file at the moment it appears in the stream rather than at the next
       // lifecycle change -- which for a seat stopped at a prompt would be never.
-      recorder.update({ messages: relay.log.length, participants: seats() })
+      recorder.update({ messages: relay.log.length, participants: seats(), ...rotations() })
     }
   })()
 

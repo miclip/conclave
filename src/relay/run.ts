@@ -33,6 +33,7 @@ import type { Verdict } from '../contract/outcome.ts'
 import type { ChildLiveness, LivenessReading } from '../outcomes/liveness.ts'
 import type { RotationResult } from '../rotation/rotate.ts'
 import type { ResolutionRequest } from './resolution.ts'
+import { requiresStatedReason } from './rotationIntent.ts'
 
 export type RunState = 'running' | 'paused' | 'ended'
 
@@ -289,6 +290,15 @@ export type Decision = { kind: 'continue' } | { kind: 'abort'; detail: string }
  */
 export interface RunControl {
   rotate(reason: string): Promise<RotationResult>
+  /**
+   * The seat `rotate` would act on, or `undefined` when the current pause names none.
+   *
+   * Only so the handle can ask whether a reason must be STATED before it starts a transaction
+   * (#75). Deliberately a read of the relay's own target rather than a second derivation from
+   * the pause: a handle that resolved the seat differently would demand a reason for one seat
+   * and then rotate another.
+   */
+  rotationTarget(): string | undefined
   constrain(text: string, audience: Audience): RelayMessage
   /** Ask the loop to stop at its next advisor-turn boundary. */
   requestStop(): void
@@ -397,12 +407,97 @@ export class RunHandle {
    * Separate from `continue()` on purpose: rotating and resuming are two decisions, and an
    * operator may well want to read the handoff and the acceptance report before letting the
    * session carry on.
+   *
+   * ## Why an omitted reason is now sometimes refused (#75)
+   *
+   * This used to fall back to `pause.detail` whatever the pause was about, so an operator who
+   * rotated for a reason of their own -- to get a fresh reader onto a just-committed criterion,
+   * say -- had that rotation recorded in the words of whatever compaction happened to be on
+   * screen. The record then said the proxy fired and the operator agreed, which is precisely
+   * the correlation #10 is trying to measure, and it said it because rotating was cheap rather
+   * than because it was true.
+   *
+   * The fallback survives where it is honest: at a `rotation_candidate` pause about the seat
+   * being rotated, the proxy IS what spoke and agreeing with it is the whole of the operator's
+   * contribution. Everywhere else the reason is the only thing distinguishing the two
+   * populations, so it is asked for rather than invented.
+   *
+   * A THROW rather than a silent default, because the caller is a front end with an operator in
+   * front of it and the remedy is one sentence from them. `src/repl/session.ts` prompts on the
+   * same predicate rather than provoking this.
+   *
+   * ## Why an accepted candidate carries the PROXY's words even when the operator typed some
+   *
+   * The pause decides the reason, not the argument. `RotationRecord.reason` is defined as "the
+   * proxy's detail when a candidate was accepted, the operator's own sentence otherwise", and
+   * that is not a stylistic preference: it is what makes `intent` and `reason` describe the same
+   * event. A record reading `candidate_accepted` beside a sentence the proxy never said is a
+   * record where the two fields disagree, and an analysis reading either one alone gets a
+   * different answer about the same rotation.
+   *
+   * So the branch is chosen by `rotationNeedsReason()` FIRST and the argument is consulted only
+   * inside the branch where it is the only thing there is. `/rotate the session is wedged` at a
+   * `rotation_candidate` pause about this seat is still agreement with the proxy -- the operator
+   * added a gloss, not a different reason -- and the gloss is dropped rather than recorded as
+   * the cause. The console says so out loud (`src/repl/session.ts`), because an operator who
+   * typed a sentence and saw it vanish would reasonably assume it had been kept.
+   *
+   * ## And why a candidate with no detail is refused rather than papered over
+   *
+   * A sentence composed here would be the only text in the record and no participant would have
+   * said it. That is worse than the borrowed detail this whole change exists to stop: borrowed
+   * words are at least words somebody wrote about something. A blank detail on a
+   * `rotation_candidate` is a malformed pause -- the relay always writes one -- so it is reported
+   * as the defect it is rather than smoothed into a record that reads as evidence.
    */
   async rotateImplementer(reason?: string): Promise<RotationResult> {
     if (this.#state !== 'paused') {
       throw new Error(`can only rotate from a paused run; this one is '${this.#state}'`)
     }
-    return this.#control.rotate(reason ?? this.#pause?.detail ?? 'operator requested rotation')
+    if (!this.rotationNeedsReason()) {
+      // An accepted candidate. The proxy is what spoke, so the proxy's detail is what the record
+      // carries -- whatever was passed.
+      const detail = this.#pause?.detail?.trim()
+      if (!detail) {
+        throw new Error(
+          `this pause is a rotation candidate about ` +
+            `${this.#control.rotationTarget() ?? 'this seat'} but carries no detail, so there is ` +
+            `nothing the proxy said to record as why the seat is being replaced. Composing one ` +
+            `here would put text in the record that no participant wrote -- and a reason you pass ` +
+            `is not it either, because accepting a candidate is agreement with the proxy and the ` +
+            `record has to say what was agreed with. Fix the pause that raised this.`,
+        )
+      }
+      return this.#control.rotate(detail)
+    }
+    const stated = reason?.trim()
+    if (!stated) {
+      throw new Error(
+        `this rotation needs a reason. The pause in front of you is ` +
+          `${this.#pause ? `'${this.#pause.reason}'` : 'absent'}, not a rotation candidate about ` +
+          `${this.#control.rotationTarget() ?? 'this seat'}, so nothing here says why the seat is ` +
+          `being replaced -- and borrowing the pause's own words would record a rotation you ` +
+          `chose as one the degradation proxy prompted. Pass one: rotateImplementer('why').`,
+      )
+    }
+    return this.#control.rotate(stated)
+  }
+
+  /**
+   * Would a bare `rotateImplementer()` here be recorded in words nobody chose? (#75)
+   *
+   * Exposed so a front end can ASK before it commits an operator to a transaction it would have
+   * to abandon -- the console prompts on this, and never provokes the throw above. Both read the
+   * same predicate against the same target, so the console cannot prompt for one seat while the
+   * handle rotates another.
+   *
+   * `true` when the target seat cannot be named at all. That is a pause offering no rotation
+   * subject, and it is the case where borrowing a detail is least defensible: there is not even
+   * a seat to say the borrowed words were about.
+   */
+  rotationNeedsReason(): boolean {
+    const target = this.#control.rotationTarget()
+    return target === undefined || requiresStatedReason(this.#pause, target)
   }
 
   /**

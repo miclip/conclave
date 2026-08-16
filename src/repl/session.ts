@@ -468,7 +468,7 @@ function renderPause(p: RunPause, width: number): string {
  *
  * This used to read `pause.verdictOf.participant` instead, and that field is narrower than it
  * looks: it is set at exactly two halt sites, both `turn_incomplete`
- * (`src/relay/relay.ts:4970` and `src/relay/relay.ts:5354`). So FOUR of the five seat-scoped
+ * (`src/relay/relay.ts:5046` and `src/relay/relay.ts:5430`). So FOUR of the five seat-scoped
  * reasons -- `rotation_candidate`, `implementer_unanswered`, `merge_blocked`, `review_blocked`
  * -- named a seat in their scope and were sampled by rank anyway, because the field the guard
  * read was empty. The scope is the field that is always populated, which is the other half of
@@ -482,16 +482,16 @@ function renderPause(p: RunPause, width: number): string {
  * pause never mentioned. The rank fallback's own comment argued it was right "only because
  * there is one of them", which is an argument for deriving the seat from the pause instead of
  * from a rank. Worse than useless on one of them: resuming an `advisor_escalated` pause sends
- * to the ADVISOR (`src/relay/relay.ts:5069`), so the fallback measured children that were not
+ * to the ADVISOR (`src/relay/relay.ts:5145`), so the fallback measured children that were not
  * about to be sent to at all.
  *
  * What that gives up, stated rather than discovered: the `advisor_escalated` halt raised when a
- * seat's turn completed and its report could not be read (`src/relay/relay.ts:5266-5268`) is
+ * seat's turn completed and its report could not be read (`src/relay/relay.ts:5342-5344`) is
  * conclave-scoped by design -- "the reason names who is being asked to take it, and the scope
  * follows the reason" -- yet the thing an operator wants to know there is whether THAT seat's
  * child is still writing. Under the rank fallback that seat was sampled at N=1 by coincidence
  * of being the only implementer. It is not sampled now. The pause still carries its own
- * liveness EVIDENCE from the halt site (`src/relay/relay.ts:5278-5280`), which is what the operator
+ * liveness EVIDENCE from the halt site (`src/relay/relay.ts:5354-5356`), which is what the operator
  * reads;
  * what is gone is a refusal derived from a rank scan. Narrowing that halt's scope, if the
  * refusal is wanted back, is a change to the halt site rather than to this guard.
@@ -562,6 +562,31 @@ export async function runSession(opts: SessionOptions): Promise<number> {
    * by the pty suite, which types the instant the banner appears.
    */
   let block: { head: string; tag: string; lines: string[] } | undefined
+  /**
+   * A `/rotate` waiting on the reason its operator did not type. Declared beside `block` for the
+   * same temporal-dead-zone reason, and consumed in the same place.
+   *
+   * ## Why the console asks instead of guessing
+   *
+   * Rotation was built as recovery and is being used as an instrument: replacing a seat so a
+   * fresh reader applies a just-committed criterion is a good reason to rotate and is
+   * methodologically UNRELATED to degradation. Until #75 the record could not tell those apart,
+   * because a bare `/rotate` inherited whatever pause happened to be on screen -- and a
+   * compaction generation is attached to every long session whether or not it prompted anything.
+   * So the methodological rotation was recorded in the proxy's words, and #10's dataset filled
+   * with rotations that had nothing to do with degradation.
+   *
+   * The prompt is scoped to exactly where the record would otherwise be a fiction. At a
+   * `rotation_candidate` pause about this seat the proxy IS what spoke, agreeing with it is the
+   * whole of the operator's contribution, and `run.rotateImplementer()` carries the pause's own
+   * detail -- so nothing is asked and the common case costs nothing.
+   *
+   * Held rather than refused, because a refusal makes the operator retype the command; this
+   * takes their next line as the answer. A line beginning `/` cancels instead of becoming the
+   * reason: an operator who changes their mind at the prompt must not have `/abort` recorded as
+   * why they rotated.
+   */
+  let awaitingRotateReason = false
   // Cleared by `leave`, alongside the screen it draws to: an interval still firing after
   // the scrolling region is gone would write over whatever the operator ran next.
   let stopAnimation: (() => void) | undefined
@@ -1062,6 +1087,46 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     await resumeRun()
   }
 
+  /**
+   * Perform the rotation and report it. Reached with the reason in hand, however it was got.
+   *
+   * Factored out of the `/rotate` branch because since #75 there are two ways in -- the reason
+   * typed on the command, and the reason typed at the follow-up prompt -- and the second is a
+   * separate turn through `submit`. Two copies of the reporting would eventually report two
+   * different things about the same transaction.
+   *
+   * ## Why a reason typed at a candidate is announced as NOT kept (#75)
+   *
+   * `/rotate the session is wedged` at a rotation candidate is a natural thing to type, and the
+   * handle records the PROXY's detail regardless: accepting a candidate is agreement, and a
+   * record whose `intent` says `candidate_accepted` beside a sentence the proxy never said has
+   * two fields describing different events. Dropping the sentence is right. Dropping it in
+   * silence is not -- the operator watched their words go into a command and would reasonably
+   * assume the record now carries them, which is exactly the false belief about what the record
+   * says that #75 exists to remove. So it is said out loud, before the transaction rather than
+   * after, while `/abort` is still cheap.
+   */
+  const rotateNow = async (reason: string): Promise<void> => {
+    if (!run) return void write(dim('  nothing is running; type a goal to start'))
+    if (reason.trim() && !run.rotationNeedsReason()) {
+      write('  note: your reason was NOT recorded. This pause is a rotation candidate, so')
+      write('  accepting it is agreement with the degradation proxy and the record carries the')
+      write(`  proxy's own words: ${run.pause?.detail ?? ''}`)
+      write(dim('  (a rotation you chose for your own reasons is recorded in yours — #75)'))
+    }
+    write('  rotating the seat this pause is about — the advisor writes a handoff, then a replacement must reproduce the record')
+    const result = await run.rotateImplementer(reason || undefined)
+    if (result.status === 'rotated') {
+      write(`  rotated into ${result.replacement.sessionId}; still paused — /continue when ready`)
+      for (const c of result.acceptance.carriedFailures) {
+        write(`  carried forward failing: \`${c.command}\` exits ${c.exitCode}, as it did at handoff`)
+      }
+    } else {
+      write(`  rolled back (${result.reason}): ${result.detail}`)
+      write(`  the original is back in service; still paused — /continue when ready`)
+    }
+  }
+
   // The pause loop. `settled()` covers both a pause and the end, which is what a supervising
   // caller wants and why holding `result()` here would be wrong.
   /**
@@ -1363,6 +1428,12 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     if (block) {
       return `  ${dim(`collecting a message — ${block.lines.length} line(s); close it with a line reading exactly`)} ${bold(block.tag)}`
     }
+    // Same argument one case over: while this is held the next line is neither a message nor a
+    // command, and a console that looks ordinary while quietly reinterpreting the keyboard is
+    // one the operator finds out about by having their sentence recorded as a rotation reason.
+    if (awaitingRotateReason) {
+      return `  ${dim('waiting for the reason this seat is being rotated — a')} ${bold('/command')} ${dim('cancels')}`
+    }
     // Only the resting reminder. Whenever there is something to choose the screen draws the
     // menu here instead, because a suggestion belongs against the keystroke that produced
     // it and anywhere in the transcript it would scroll away from it.
@@ -1493,6 +1564,31 @@ export async function runSession(opts: SessionOptions): Promise<number> {
    */
   function submit(raw: string): void {
     const body = raw.replace(/\r$/, '')
+    // Before the block opener and before `dispatch`, because a `/rotate` waiting on its reason
+    // is holding a decision the operator has already started making and every other reading of
+    // this line would take it somewhere else (#75).
+    //
+    // A line beginning `/` CANCELS instead of becoming the reason. The alternative is recording
+    // `/abort` as why a seat was rotated, and an operator who changes their mind at the prompt
+    // is the likeliest person to type one -- so the command is honoured and the rotation is not
+    // performed. `block` is checked first because a `<<TAG` cannot be open here: opening one
+    // requires a line this branch would have consumed.
+    if (awaitingRotateReason) {
+      const reason = body.trim()
+      awaitingRotateReason = false
+      if (!reason) {
+        // An empty line never reaches `dispatch` either, so this is unreachable through the
+        // console and is here for a driver writing straight into `submit`. Named rather than
+        // treated as an answer: nothing was stated, so nothing may be recorded as stated.
+        write('  no reason given — the rotation was not performed. /rotate <why> when ready.')
+        return void refreshPrompt()
+      }
+      if (reason.startsWith('/')) {
+        write(dim('  rotation cancelled — nothing was replaced'))
+        return void dispatch(reason)
+      }
+      return void dispatch(`/rotate ${reason}`)
+    }
     if (block) {
       // EXACTLY the tag, with no trim. Inside a block every other line is content, and a
       // line of spaces is content too — trimming first would make `   EOF   ` a terminator
@@ -1554,6 +1650,13 @@ export async function runSession(opts: SessionOptions): Promise<number> {
    * and how to resend it is the part that is always true.
    */
   const flushOpenBlock = () => {
+    if (awaitingRotateReason) {
+      // The same rule as the block below, and the stronger case for it: nothing was rotated,
+      // because the reason never arrived. Saying so beats leaving an operator to wonder whether
+      // a seat was replaced as their session went down.
+      awaitingRotateReason = false
+      write('  input ended before a rotation reason was given — nothing was rotated')
+    }
     if (!block) return
     const { tag, lines } = block
     block = undefined
@@ -1682,7 +1785,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
       // FALSIFIER, stated because it is the strongest argument against this shape: the
       // console has no general "trailing text is a message" rule and does not gain one here.
       // `/rotate <text>` and `/abort <text>` consume their text as a REASON
-      // (`src/repl/session.ts:1735`, `src/repl/session.ts:1765`) and `/pause`, `/queue`, `/audit` ignore
+      // (`src/repl/session.ts:1838`, `src/repl/session.ts:1871`) and `/pause`, `/queue`, `/audit` ignore
       // whatever follows them. So an operator who learns this from `/continue` and carries
       // it to `/pause I'll be back` still loses the sentence. That inconsistency is not
       // repaired by making `/continue` a third behaviour; it is narrowed by it, and the
@@ -1748,17 +1851,20 @@ export async function runSession(opts: SessionOptions): Promise<number> {
         }
         return
       }
-      write('  rotating the seat this pause is about — the advisor writes a handoff, then a replacement must reproduce the record')
-      const result = await run.rotateImplementer(rest || undefined)
-      if (result.status === 'rotated') {
-        write(`  rotated into ${result.replacement.sessionId}; still paused — /continue when ready`)
-        for (const c of result.acceptance.carriedFailures) {
-          write(`  carried forward failing: \`${c.command}\` exits ${c.exitCode}, as it did at handoff`)
-        }
-      } else {
-        write(`  rolled back (${result.reason}): ${result.detail}`)
-        write(`  the original is back in service; still paused — /continue when ready`)
+      // Asked for, not guessed at (#75). See `awaitingRotateReason` for why a bare `/rotate`
+      // away from a rotation candidate cannot honestly borrow the pause's words, and
+      // `run.rotationNeedsReason()` for the predicate -- read from the handle rather than
+      // recomputed here, so the console cannot prompt about one seat and rotate another.
+      if (!rest && run.rotationNeedsReason()) {
+        awaitingRotateReason = true
+        write('  why are you rotating this seat? One line.')
+        write(dim('  this pause is not a rotation candidate, so nothing here says why — and a'))
+        write(dim('  rotation you chose for your own reasons must not be recorded as one the'))
+        write(dim('  degradation proxy prompted (#75). A /command instead cancels the rotation.'))
+        screen?.draw()
+        return
       }
+      await rotateNow(rest)
       return
     }
 

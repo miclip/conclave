@@ -212,6 +212,194 @@ test('rotation state is reported even when nothing happened', async () => {
   assert.equal(report.rotation.armed, true)
   assert.equal(typeof report.rotation.assessments, 'number')
   assert.equal(report.rotation.peakGeneration, 0)
+  // Present and EMPTY, by the same argument one field over (#75). `rotations: 0` says nothing
+  // rotated; an absent `records` would say nothing about whether this build can tell WHY one
+  // did, and a consumer excluding operator-initiated rotations from #10's dataset has to be
+  // able to tell those apart before it trusts a single row.
+  assert.deepEqual(report.rotation.records, [])
+})
+
+// ---------------------------------------------------------------------------------------
+// The three populations, on the wire (#75).
+//
+// The empty case above is the shape claim. This is the CONTENT claim, and it is the one an
+// analysis depends on: #10 asks whether compaction predicts degradation strongly enough to act
+// on unattended, and a report that carried three rotations without saying which was the proxy
+// firing would answer it with rotations that had nothing to do with degradation. Proving the
+// array is present is not proving the values are distinguishable in it.
+//
+// TWO RELAYS, because the intent cannot be forged and should not be: `onDegradation` is a
+// run-wide policy, and the automatic path only exists on a run configured to rotate without
+// asking. A relay whose policy is `candidate` produces the two populations an operator can be
+// in, side by side, which is where "distinguishable" is actually at risk; a second relay
+// running the real automatic policy produces the third. Passing the intent in as an argument
+// would have fitted all three in one report and proved nothing -- that argument no longer
+// exists, for exactly that reason (see `Relay.rotateSeat`).
+// ---------------------------------------------------------------------------------------
+
+const HANDOFF = `## BRIEF
+Keep the work moving.
+
+## STATE
+Half done.
+
+## DECISIONS
+- none
+
+## EVIDENCE
+The implementer says the check passes.
+
+## FILES
+- work.ts
+
+## DISAGREEMENT
+- none
+
+## NEXT
+Carry on.`
+
+const ACCEPTED = 'CHECK 1: exit 0\n\nRead work.ts and ran the check. It matches.'
+
+/**
+ * A repository with a commit in it.
+ *
+ * `repo()` above is enough for a run, and not for a ROTATION: the transaction captures the
+ * repository around the handoff, and there is nothing to capture before the first commit.
+ */
+function committedRepo(): string {
+  const dir = repo()
+  execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'init'], {
+    cwd: dir,
+  })
+  return dir
+}
+
+test('the report tells the operator populations apart, each in its own words (#75)', async () => {
+  const dir = committedRepo()
+  const advisor = new FakeRotationSession('advisor', 'codex', [
+    'Do the first thing.',
+    // One per rotation: `rotate()` spends an advisor turn asking for the handoff.
+    HANDOFF,
+    HANDOFF,
+  ])
+  const old = new FakeRotationSession('old', 'claude', ['ack', 'Did the first thing.'])
+  old.compactOnTurn = 1
+  const replacements = [
+    new FakeRotationSession('fresh-1', 'claude', [ACCEPTED]),
+    new FakeRotationSession('fresh-2', 'claude', [ACCEPTED]),
+  ]
+
+  const relay = await Relay.start({
+    registry: registryOf({ codex: [advisor], claude: [old, ...replacements] }),
+    cwd: dir,
+    lead: { id: 'advisor', agent: 'codex', role: 'advisor' },
+    implementer: { id: 'implementer', agent: 'claude', role: 'implementer' },
+    maxAdvisorTurns: 5,
+    // The policy that ASKS, which is what makes the first rotation an accepted candidate rather
+    // than a detector's. Both rows below are reachable by an operator on this one run.
+    rotation: { checks: ['exit 0'], checkTimeoutMs: 30_000, onDegradation: 'candidate' },
+  })
+  const startedAt = Date.now()
+
+  // ONE: the proxy asked and the operator agreed. Through the pause, because the pause is what
+  // classifies it -- a reason typed here would not change the population.
+  const run = relay.start('a goal')
+  const settled = await run.settled()
+  assert.ok(settled.kind === 'paused')
+  assert.equal(settled.pause.reason, 'rotation_candidate')
+  assert.equal((await run.rotateImplementer()).status, 'rotated')
+  const outcome = await run.abort()
+
+  // TWO: the operator arrived with their own reason and no pause in front of them. The
+  // population #10's dataset has to EXCLUDE, and the one that used to be indistinguishable --
+  // it arrives WITH a compaction generation attached, because compaction happens anyway.
+  assert.equal(
+    (await relay.rotateImplementer('a fresh reader applying the just-committed criterion is a stronger test')).status,
+    'rotated',
+  )
+
+  const report = await runReport(relay, { goal: 'a goal', outcome, startedAt, build: BUILD })
+  await relay.stop()
+
+  // The count an operator already reads, and the rows that explain it. These cannot disagree:
+  // a rolled-back rotation records nothing and increments nothing.
+  assert.equal(report.rotation.rotations, 2)
+  assert.equal(report.rotation.records.length, 2)
+  assert.deepEqual(
+    report.rotation.records.map((r) => r.intent),
+    ['candidate_accepted', 'operator_requested'],
+    'in the order they happened, and each in its own population',
+  )
+
+  const [accepted, operator] = report.rotation.records
+  // WORDS, not just labels. The reason is what a reader checks the label against, and it is
+  // the field that used to be the proxy's on both rows.
+  assert.match(accepted!.reason, /compaction generation rose 0 → 1/, 'the proxy is what spoke')
+  assert.match(operator!.reason, /fresh reader applying the just-committed criterion/)
+  assert.doesNotMatch(operator!.reason, /compaction generation/, 'and it is not the proxy\u2019s words')
+
+  // Every row names the seat it replaced and the session that took it, so a reader can join
+  // this to the events without matching prose.
+  assert.deepEqual(
+    report.rotation.records.map((r) => r.seat),
+    ['implementer', 'implementer'],
+  )
+  assert.deepEqual(
+    report.rotation.records.map((r) => r.replacement),
+    replacements.map((s) => s.sessionId),
+  )
+  for (const r of report.rotation.records) assert.equal(typeof r.at, 'number')
+
+  // And it survives the wire. `--json` prints this document; a field that only exists on the
+  // in-memory object is not something a consumer can read.
+  const wire = JSON.parse(JSON.stringify(report)) as typeof report
+  assert.deepEqual(wire.rotation.records, report.rotation.records)
+})
+
+test('a run that rotates unattended reports the third population, and nobody could have forged it (#75)', async () => {
+  // The automatic path, driven by the POLICY rather than declared by the caller. `rotateSeat`
+  // takes no intent: an embedder that could pass `degradation_automatic` could write rows into
+  // the population #10 reads as the proxy predicting degradation, and a forged row is
+  // indistinguishable from evidence. So the only way to produce this value is to configure a run
+  // that rotates without asking and let the detector do it -- which is what this does.
+  const dir = committedRepo()
+  const advisor = new FakeRotationSession('advisor', 'codex', [
+    'Do the first thing.',
+    HANDOFF,
+    'Do the second thing.',
+    'DONE',
+  ])
+  const old = new FakeRotationSession('old', 'claude', ['ack', 'Did the first thing.'])
+  old.compactOnTurn = 1
+  const fresh = new FakeRotationSession('fresh', 'claude', [ACCEPTED, 'Second.', 'NONE'])
+
+  const relay = await Relay.start({
+    registry: registryOf({ codex: [advisor], claude: [old, fresh] }),
+    cwd: dir,
+    lead: { id: 'advisor', agent: 'codex', role: 'advisor' },
+    implementer: { id: 'implementer', agent: 'claude', role: 'implementer' },
+    maxAdvisorTurns: 5,
+    rotation: { checks: ['exit 0'], checkTimeoutMs: 30_000, onDegradation: 'automatic' },
+  })
+  const startedAt = Date.now()
+  const outcome = await relay.run('a goal')
+  const report = await runReport(relay, { goal: 'a goal', outcome, startedAt, build: BUILD })
+  await relay.stop()
+
+  assert.equal(report.rotation.rotations, 1)
+  assert.deepEqual(
+    report.rotation.records.map((r) => r.intent),
+    ['degradation_automatic'],
+    'nobody was asked, and the record says so rather than filing it under the operator',
+  )
+  assert.equal(report.rotation.records[0]!.seat, 'implementer')
+  assert.equal(report.rotation.records[0]!.replacement, fresh.sessionId)
+  // The detector's own words for what it saw, which is what makes the row checkable against
+  // its label rather than merely labelled.
+  assert.match(report.rotation.records[0]!.reason, /compaction generation/)
+
+  const wire = JSON.parse(JSON.stringify(report)) as typeof report
+  assert.deepEqual(wire.rotation.records, report.rotation.records)
 })
 
 test('an empty flags array is a claim, not a gap', async () => {

@@ -29,6 +29,10 @@ import { NO_DEADLINE_CLOCKS } from '../registry/types.ts'
 // `status.json` and nothing else, so a claim about what it contains has to be made through the
 // call the console makes (#103, #107).
 import { newSessionId, readSession, recordSession } from '../workspace/sessionRecord.ts'
+// The two renderings the operator actually sees. `status --json` prints the first and the
+// human `status` prints the second, so a claim about what a poller can read has to be made
+// through them rather than off the record they format.
+import { formatSession, formatSessionJson } from '../workspace/sessionView.ts'
 
 function repo(): string {
   const dir = mkdtempSync(join(tmpdir(), 'conclave-relay-rot-'))
@@ -1243,4 +1247,391 @@ test('a run with nothing outstanding says nothing', () => {
   // Prose ABOUT flagging is not a flag: the marker is line-initial.
   assert.deepEqual(extractFlags('I could FLAG: something here mid-sentence'), [])
   assert.deepEqual(extractFlags('done\nFLAG: one thing\nFLAG: another'), ['one thing', 'another'])
+})
+
+// ---------------------------------------------------------------------------------------
+// #75: what each rotation was FOR.
+//
+// Rotation was built as recovery and is being used as an instrument. Replacing a seat so a
+// fresh reader applies a just-committed criterion is a good reason to rotate and is
+// methodologically unrelated to degradation -- and it arrives WITH a compaction generation
+// attached, because compaction happens anyway. So it reads as "the proxy fired and the
+// operator agreed", which is precisely the correlation #10 exists to measure.
+//
+// These prove the two populations end up on separate sides of one field, through the real
+// transaction, in the run report and in the status file an agent operator polls.
+// ---------------------------------------------------------------------------------------
+
+test('a rotation the operator initiated is recorded as theirs, in their own words (#75)', async (t) => {
+  const dir = repo()
+  const advisor = new FakeRotationSession('advisor', 'codex', [HANDOFF])
+  const old = new FakeRotationSession('old', 'claude')
+  const fresh = new FakeRotationSession('fresh', 'claude', [ACCEPTED])
+
+  const relay = await relayOf(dir, advisor, [old, fresh])
+  t.after(() => relay.stop())
+
+  // No run and therefore no pause: the plainest operator-initiated rotation there is, and the
+  // one an embedder makes. The reason is the methodological one #75 was reported from.
+  const r = await relay.rotateImplementer('a fresh reader applying the just-committed criterion is a stronger test')
+  assert.equal(r.status, 'rotated')
+
+  assert.equal(relay.rotationWatch.rotations, 1)
+  const records = relay.rotationRecords()
+  assert.equal(records.length, 1, 'the count and the records are written together and cannot disagree')
+  assert.equal(records[0]!.seat, 'implementer')
+  assert.equal(records[0]!.intent, 'operator_requested')
+  assert.match(records[0]!.reason, /fresh reader applying the just-committed criterion/)
+  assert.equal(records[0]!.replacement, fresh.sessionId)
+  // Copied on the way out. A caller that kept this and watched it grow would be reading a list
+  // the relay still owns.
+  assert.notEqual(relay.rotationRecords(), records)
+})
+
+test('accepting a rotation candidate at the pause is recorded as the proxy having fired (#75)', async (t) => {
+  const dir = repo()
+  const advisor = new FakeRotationSession('advisor', 'codex', [
+    'Do the first thing.',
+    HANDOFF,
+    'Do the second thing.',
+    'DONE',
+  ])
+  const old = new FakeRotationSession('old', 'claude', ['ack', 'Did the first thing.'])
+  const fresh = new FakeRotationSession('fresh', 'claude', [ACCEPTED, 'Second.', 'NONE'])
+  old.compactOnTurn = 1
+
+  const relay = await relayOf(dir, advisor, [old, fresh], {
+    rotation: { checks: ['exit 0'], checkTimeoutMs: 30_000, onDegradation: 'candidate' },
+    maxAdvisorTurns: 5,
+  })
+  t.after(() => relay.stop())
+
+  const run = relay.start('Keep the work moving.')
+  const settled = await run.settled()
+  assert.ok(settled.kind === 'paused')
+  assert.equal(settled.pause.reason, 'rotation_candidate')
+
+  // No reason typed, and none is asked for: at THIS pause the proxy is what spoke, so the
+  // pause's own detail is the honest record and the handle carries it.
+  assert.equal(run.rotationNeedsReason(), false)
+  assert.equal((await run.rotateImplementer()).status, 'rotated')
+
+  const records = relay.rotationRecords()
+  assert.equal(records.length, 1)
+  assert.equal(records[0]!.intent, 'candidate_accepted')
+  // The proxy's own words, which is what makes this population identifiable without reading them.
+  assert.match(records[0]!.reason, /compaction generation rose 0 → 1/)
+
+  await run.abort()
+})
+
+test('a reason typed at a candidate does not become the record, through the real transaction (#75)', async (t) => {
+  // The same acceptance as above, with the operator typing something as they take it -- which
+  // is a natural thing to do and used to decide the record. `candidate_accepted` beside the
+  // operator's sentence is a record whose two fields describe different events: the intent says
+  // the proxy raised this seat, the reason says a human had their own cause. An analysis reading
+  // either field alone would then get a different answer about the same rotation.
+  //
+  // Through the whole transaction rather than at the handle, because that is where the string
+  // becomes a `RotationRecord` an analysis actually reads.
+  const dir = repo()
+  const advisor = new FakeRotationSession('advisor', 'codex', [
+    'Do the first thing.',
+    HANDOFF,
+    'Do the second thing.',
+    'DONE',
+  ])
+  const old = new FakeRotationSession('old', 'claude', ['ack', 'Did the first thing.'])
+  const fresh = new FakeRotationSession('fresh', 'claude', [ACCEPTED, 'Second.', 'NONE'])
+  old.compactOnTurn = 1
+
+  const relay = await relayOf(dir, advisor, [old, fresh], {
+    rotation: { checks: ['exit 0'], checkTimeoutMs: 30_000, onDegradation: 'candidate' },
+    maxAdvisorTurns: 5,
+  })
+  t.after(() => relay.stop())
+
+  const run = relay.start('Keep the work moving.')
+  const settled = await run.settled()
+  assert.ok(settled.kind === 'paused')
+  assert.equal(settled.pause.reason, 'rotation_candidate')
+
+  assert.equal((await run.rotateImplementer('the session is wedged')).status, 'rotated')
+
+  const records = relay.rotationRecords()
+  assert.equal(records.length, 1)
+  assert.equal(records[0]!.intent, 'candidate_accepted')
+  assert.match(records[0]!.reason, /compaction generation rose 0 → 1/, 'the proxy is what spoke')
+  assert.doesNotMatch(records[0]!.reason, /wedged/, 'and the operator’s gloss is not what the record says')
+  // The line a human reads at the end of the run says the same thing, so the two cannot drift.
+  assert.match(relay.rotationSummary(), /implementer \(candidate_accepted\) — .*compaction generation rose 0 → 1/)
+
+  await run.abort()
+})
+
+test('the detector rotating on its own is neither of the operator populations (#75)', async (t) => {
+  // `onDegradation: 'automatic'` asks nobody, so there is no pause to classify from -- and the
+  // default reading would call it operator-initiated, filing the ONE unambiguously proxy-driven
+  // rotation in the run into the population an analysis exists to exclude. The detector says
+  // what it is at the call site, because it is the only thing that knows.
+  const dir = repo()
+  const advisor = new FakeRotationSession('advisor', 'codex', ['Do the first thing.', HANDOFF, 'Do the second thing.', 'DONE'])
+  const old = new FakeRotationSession('old', 'claude', ['ack', 'Did the first thing.'])
+  const fresh = new FakeRotationSession('fresh', 'claude', [ACCEPTED, 'Second.', 'NONE'])
+  old.compactOnTurn = 1
+
+  const relay = await relayOf(dir, advisor, [old, fresh], { maxAdvisorTurns: 5 })
+  t.after(() => relay.stop())
+
+  assert.equal((await relay.run('Keep the work moving.')).reason, 'done')
+
+  const records = relay.rotationRecords()
+  assert.equal(records.length, 1, 'the compaction rotated the seat without asking anybody')
+  assert.equal(records[0]!.intent, 'degradation_automatic')
+  assert.equal(records[0]!.seat, 'implementer')
+})
+
+test('a rolled-back rotation leaves no record, so records.length still means rotations (#75)', async (t) => {
+  const dir = repo()
+  // No headings, so the handoff is unusable and the transaction rolls back.
+  const advisor = new FakeRotationSession('advisor', 'codex', ['no headings here'])
+  const old = new FakeRotationSession('old', 'claude')
+  const fresh = new FakeRotationSession('fresh', 'claude', [ACCEPTED])
+
+  const relay = await relayOf(dir, advisor, [old, fresh])
+  t.after(() => relay.stop())
+
+  assert.equal((await relay.rotateImplementer('trying it')).status, 'rolled_back')
+  assert.equal(relay.rotationWatch.rotations, 0)
+  assert.deepEqual(relay.rotationRecords(), [], 'nothing was replaced, so nothing is recorded as having been')
+})
+
+test('the terminal summary names the intent and the reason, not just a count (#75)', async (t) => {
+  const dir = repo()
+  const advisor = new FakeRotationSession('advisor', 'codex', [HANDOFF])
+  const old = new FakeRotationSession('old', 'claude')
+  const fresh = new FakeRotationSession('fresh', 'claude', [ACCEPTED])
+
+  const relay = await relayOf(dir, advisor, [old, fresh])
+  t.after(() => relay.stop())
+
+  // Nothing rotated yet: a breakdown of zero is noise, and the line the run report already
+  // prints must not gain a row on every run of a feature most runs never reach.
+  assert.equal(relay.rotationIntentSummary(), '')
+
+  assert.equal((await relay.rotateImplementer('wanted a blind reader on the criterion')).status, 'rotated')
+
+  const summary = relay.rotationSummary()
+  assert.match(summary, /1 rotations/, 'the count an operator already reads is unchanged')
+  assert.match(summary, /rotation intent: 1 operator_requested/)
+  // The reason, because the terminal report is what a human actually reads at the end of a run
+  // and `1 rotations` beside a compaction generation reads as the proxy having fired.
+  assert.match(summary, /implementer \(operator_requested\) — wanted a blind reader on the criterion/)
+})
+
+test('status --json carries every rotation and why, while the run is still live (#75)', async (t) => {
+  const dir = repo()
+  const advisor = new FakeRotationSession('advisor', 'codex', [HANDOFF])
+  const old = new FakeRotationSession('old', 'claude')
+  const fresh = new FakeRotationSession('fresh', 'claude', [ACCEPTED])
+
+  const relay = await relayOf(dir, advisor, [old, fresh])
+  t.after(() => relay.stop())
+
+  // The real recorder on the real relay, as above: `status.json` is the whole of an agent
+  // operator's interface, so the claim has to be made through the call the console makes.
+  const recording = recordSession(relay, {
+    repoRoot: dir,
+    id: newSessionId(Date.now(), process.pid),
+    goal: 'Keep the work moving.',
+    front: 'session',
+    startedAt: Date.now(),
+    build: 'test-build',
+  })
+  t.after(() => recording.close())
+
+  // PRESENT AND EMPTY before anything rotates, which is the whole of #103's lesson one field
+  // over: a probe reading a key that does not exist gets a falsy value it cannot tell from a
+  // build that does not report the field at all.
+  await recording.refresh()
+  assert.deepEqual(readSession(dir, recording.id)!.status.rotations, [])
+
+  assert.equal((await relay.rotateImplementer('a blind reader is a stronger test')).status, 'rotated')
+
+  await recording.refresh()
+  const rotations = readSession(dir, recording.id)!.status.rotations
+  assert.equal(rotations?.length, 1, 'the rotation reaches the file a poller reads, while the run is still live')
+  assert.equal(rotations![0]!.seat, 'implementer')
+  assert.equal(rotations![0]!.intent, 'operator_requested')
+  assert.match(rotations![0]!.reason, /blind reader/)
+})
+
+test('the operator populations reach the printed status surfaces distinguishably (#75)', async (t) => {
+  // The test above proves one record reaches the FILE. This is the other half of the same
+  // claim, and the half an agent operator actually consumes: `conclave status --json` prints
+  // `formatSessionJson`, and a human reads `formatSession`. A record that reached the file but
+  // arrived on those surfaces without its intent would be a dataset nobody can filter.
+  //
+  // Two rotations rather than one, because "distinguishable" is not a property of a row -- it
+  // is a property of rows side by side. These are the two an OPERATOR can be responsible for,
+  // which is where the confusion #75 is about actually lives; the detector's own population
+  // needs a different run policy and is asserted in the test after this one.
+  const dir = repo()
+  const advisor = new FakeRotationSession('advisor', 'codex', [
+    'Do the first thing.',
+    // One per rotation: `rotate()` spends an advisor turn asking for the handoff.
+    HANDOFF,
+    HANDOFF,
+  ])
+  const old = new FakeRotationSession('old', 'claude', ['ack', 'Did the first thing.'])
+  old.compactOnTurn = 1
+  const replacements = [
+    new FakeRotationSession('fresh-1', 'claude', [ACCEPTED]),
+    new FakeRotationSession('fresh-2', 'claude', [ACCEPTED]),
+  ]
+
+  const relay = await relayOf(dir, advisor, [old, ...replacements], {
+    rotation: { checks: ['exit 0'], checkTimeoutMs: 30_000, onDegradation: 'candidate' },
+    maxAdvisorTurns: 5,
+  })
+  t.after(() => relay.stop())
+
+  const recording = recordSession(relay, {
+    repoRoot: dir,
+    id: newSessionId(Date.now(), process.pid),
+    goal: 'Keep the work moving.',
+    front: 'session',
+    startedAt: Date.now(),
+    build: 'test-build',
+  })
+  t.after(() => recording.close())
+
+  // ONE: the proxy asked, at the pause, and the operator agreed.
+  const run = relay.start('Keep the work moving.')
+  const settled = await run.settled()
+  assert.ok(settled.kind === 'paused')
+  assert.equal(settled.pause.reason, 'rotation_candidate')
+  assert.equal((await run.rotateImplementer()).status, 'rotated')
+  await run.abort()
+
+  // TWO: the operator, with their own reason and no pause in front of them.
+  assert.equal(
+    (await relay.rotateImplementer('a fresh reader applying the just-committed criterion is a stronger test')).status,
+    'rotated',
+  )
+
+  await recording.refresh()
+  const read = readSession(dir, recording.id)!
+
+  // THE JSON SURFACE. Parsed from the string the console prints, not read off the record: a
+  // consumer sees the string, and a field lost in the serialisation is lost to them whatever
+  // the object behind it held.
+  const doc = JSON.parse(formatSessionJson(read, Date.now())) as {
+    rotations: { seat: string; intent: string; reason: string; replacement: string; at: number }[]
+  }
+  assert.equal(doc.rotations.length, 2)
+  assert.deepEqual(
+    doc.rotations.map((r) => r.intent),
+    ['candidate_accepted', 'operator_requested'],
+  )
+  assert.match(doc.rotations[0]!.reason, /compaction generation rose 0 \u2192 1/, 'the proxy is what spoke')
+  assert.match(doc.rotations[1]!.reason, /fresh reader applying the just-committed criterion/)
+  assert.doesNotMatch(doc.rotations[1]!.reason, /compaction generation/, 'and the operator\u2019s is not the proxy\u2019s')
+  assert.deepEqual(
+    doc.rotations.map((r) => r.replacement),
+    replacements.map((s) => s.sessionId),
+    'each row names the session that took the seat, so this joins to the events without prose',
+  )
+
+  // THE PROSE SURFACE, which is what a human reads and where the misreading #75 is about
+  // happens: `implementer replaced` beside a compaction generation reads as the proxy having
+  // fired whether or not it did, so the intent is on the line itself.
+  const prose = formatSession(read, Date.now())
+  assert.match(prose, /rotated:\s+implementer \(candidate_accepted\) \u2014 .*compaction generation rose 0 \u2192 1/)
+  assert.match(prose, /rotated:\s+implementer \(operator_requested\) \u2014 a fresh reader applying/)
+})
+
+test('an unattended rotation reaches those same surfaces as the detector\u2019s, not the operator\u2019s (#75)', async (t) => {
+  // The third population, produced the only way it can be: by a run whose policy is to rotate
+  // without asking. `rotateSeat` takes no intent argument, so this value cannot be written by a
+  // caller at all -- which is the point of it, since a forged `degradation_automatic` row is
+  // indistinguishable from the evidence #10 is trying to weigh.
+  const dir = repo()
+  const advisor = new FakeRotationSession('advisor', 'codex', [
+    'Do the first thing.',
+    HANDOFF,
+    'Do the second thing.',
+    'DONE',
+  ])
+  const old = new FakeRotationSession('old', 'claude', ['ack', 'Did the first thing.'])
+  old.compactOnTurn = 1
+  const fresh = new FakeRotationSession('fresh', 'claude', [ACCEPTED, 'Second.', 'NONE'])
+
+  // `relayOf` defaults to `onDegradation: 'automatic'`, which is the policy under test.
+  const relay = await relayOf(dir, advisor, [old, fresh], { maxAdvisorTurns: 5 })
+  t.after(() => relay.stop())
+
+  const recording = recordSession(relay, {
+    repoRoot: dir,
+    id: newSessionId(Date.now(), process.pid),
+    goal: 'Keep the work moving.',
+    front: 'session',
+    startedAt: Date.now(),
+    build: 'test-build',
+  })
+  t.after(() => recording.close())
+
+  assert.equal((await relay.run('Keep the work moving.')).reason, 'done')
+
+  await recording.refresh()
+  const read = readSession(dir, recording.id)!
+
+  const doc = JSON.parse(formatSessionJson(read, Date.now())) as {
+    rotations: { seat: string; intent: string; reason: string; replacement: string }[]
+  }
+  assert.deepEqual(
+    doc.rotations.map((r) => r.intent),
+    ['degradation_automatic'],
+    'a poller must be able to exclude the rotations nobody chose, and to keep the ones nobody chose',
+  )
+  assert.equal(doc.rotations[0]!.seat, 'implementer')
+  assert.equal(doc.rotations[0]!.replacement, fresh.sessionId)
+  assert.match(doc.rotations[0]!.reason, /compaction generation/)
+
+  const prose = formatSession(read, Date.now())
+  assert.match(prose, /rotated:\s+implementer \(degradation_automatic\) \u2014 .*compaction generation/)
+})
+
+test('an embedder cannot label its own rotation as the detector’s (#75)', async (t) => {
+  // The claim the private helper exists to make, asserted at RUNTIME rather than left to the
+  // type checker. `rotateSeat` used to take an optional intent, and an optional argument is
+  // available to everybody: an embedder could write rows into `degradation_automatic`, which is
+  // the population #10 reads as the proxy predicting degradation. A forged row there is not a
+  // mislabelled entry -- it is indistinguishable from evidence, and it confirms the hypothesis
+  // by construction.
+  //
+  // Cast through `any` on purpose. TypeScript already refuses the third argument, and a
+  // JavaScript embedder walks straight through TypeScript; what has to hold is that the value
+  // is not read even when it is passed.
+  const dir = repo()
+  const advisor = new FakeRotationSession('advisor', 'codex', [HANDOFF])
+  const old = new FakeRotationSession('old', 'claude')
+  const fresh = new FakeRotationSession('fresh', 'claude', [ACCEPTED])
+
+  const relay = await relayOf(dir, advisor, [old, fresh])
+  t.after(() => relay.stop())
+
+  const forge = relay.rotateSeat as (seat: string, reason: string, intent?: string) => Promise<unknown>
+  const result = (await forge.call(relay, 'implementer', 'a blind reader is a stronger test', 'degradation_automatic')) as {
+    status: string
+  }
+  assert.equal(result.status, 'rotated')
+
+  const records = relay.rotationRecords()
+  assert.equal(records.length, 1)
+  assert.equal(
+    records[0]!.intent,
+    'operator_requested',
+    'the pause is what classifies a public rotation, and there was none — the passed value is not read',
+  )
 })

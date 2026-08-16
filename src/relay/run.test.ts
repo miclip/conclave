@@ -1008,6 +1008,9 @@ test('a /wait is not carried to a fresh pause on a different turn', async (t) =>
 function runHandle(): RunHandle {
   const control = {
     rotate: async () => ({ status: 'rolled_back', reason: 'test', detail: 'test' }) as any,
+    // These tests are about the wait memory and never rotate. A named seat rather than
+    // `undefined` so `rotationNeedsReason` reads the PAUSE, which is what it is for.
+    rotationTarget: () => 'implementer',
     constrain: () => ({}) as any,
     requestStop: () => {},
     requestPause: () => {},
@@ -1230,4 +1233,168 @@ test('the pause on the stream is the one that gets amended, not a snapshot of it
     'a copy would have frozen at the moment of emission',
   )
   await run.abort()
+})
+
+// ---------------------------------------------------------------------------------------
+// Which words a rotation is recorded in, decided by the PAUSE rather than by the argument (#75).
+//
+// `RotationRecord` pairs an `intent` with a `reason`, and the pairing is the whole point: an
+// analysis excluding the methodological population reads one field and trusts it describes the
+// same event as the other. So `candidate_accepted` beside a sentence the proxy never said is a
+// record whose two halves disagree -- and it is the easy record to produce, because typing
+// `/rotate the session is wedged` at a rotation candidate is a natural thing for an operator to
+// do. The handle resolves the branch from the pause first and reads its argument only inside the
+// branch where the argument is the only thing there is.
+//
+// At the handle rather than through the relay on purpose: the claim is about which string
+// reaches `RunControl.rotate`, and one refusal is about `rotate` NOT BEING CALLED AT ALL, which a
+// real transaction cannot show you.
+// ---------------------------------------------------------------------------------------
+
+/** A handle whose control records every reason it is asked to rotate with, and nothing else. */
+function spyingHandle(target: string | undefined): { run: RunHandle; reasons: string[] } {
+  const reasons: string[] = []
+  const control = {
+    rotate: async (reason: string) => {
+      reasons.push(reason)
+      return { status: 'rotated' } as any
+    },
+    rotationTarget: () => target,
+    constrain: () => ({}) as any,
+    requestStop: () => {},
+    requestPause: () => {},
+  } satisfies RunControl
+  return { run: new RunHandle(control), reasons }
+}
+
+/** The pause the degradation proxy raises, about `participant`. */
+function candidatePause(participant: string): Omit<import('./run.ts').RunPause, 'at'> {
+  return {
+    reason: 'rotation_candidate',
+    resolution: resolutionFor({ reason: 'rotation_candidate', participant }, { rotationArmed: true }),
+    detail: `${participant}'s compaction generation rose 0 → 1`,
+    evidence: [],
+    options: ['continue', 'rotate', 'abort'],
+    atSeq: 1,
+  }
+}
+
+test('an accepted candidate is recorded in the proxy’s words even when the operator typed some (#75)', async () => {
+  const { run, reasons } = spyingHandle('implementer')
+  const decision = run.pauseAt(candidatePause('implementer'))
+
+  // Nothing is asked for here, and the typed text is a gloss on agreement rather than a
+  // different reason: the proxy is still what raised this seat.
+  assert.equal(run.rotationNeedsReason(), false)
+  await run.rotateImplementer('the session is wedged')
+
+  assert.deepEqual(
+    reasons,
+    ["implementer's compaction generation rose 0 → 1"],
+    'the pause decides the reason, so `intent` and `reason` cannot describe different events',
+  )
+
+  await run.continue()
+  await decision
+})
+
+test('an accepted candidate with no reason typed carries the same words (#75)', async () => {
+  // The path that already worked, asserted beside the one above so a future change cannot make
+  // the two spellings of the same decision produce two different records.
+  const { run, reasons } = spyingHandle('implementer')
+  const decision = run.pauseAt(candidatePause('implementer'))
+
+  await run.rotateImplementer()
+  assert.deepEqual(reasons, ["implementer's compaction generation rose 0 → 1"])
+
+  await run.continue()
+  await decision
+})
+
+test('a candidate carrying no detail is refused rather than given words nobody wrote (#75)', async () => {
+  // The one case where there is nothing honest to record: the proxy is what has to have spoken,
+  // and it said nothing. A sentence composed here would be the ONLY text in the record and no
+  // participant would have written it -- worse than the borrowed detail this change exists to
+  // stop, because borrowed words were at least written by somebody about something.
+  //
+  // A passed reason does not rescue it either: accepting a candidate is agreement, and a record
+  // has to say what was agreed with. So the pause is reported as malformed, which it is.
+  const { run, reasons } = spyingHandle('implementer')
+  const blank = { ...candidatePause('implementer'), detail: '   ' }
+  const decision = run.pauseAt(blank)
+
+  assert.equal(run.rotationNeedsReason(), false, 'it is still an accepted candidate; it is just unrecordable')
+  await assert.rejects(() => run.rotateImplementer(), /carries no detail/)
+  await assert.rejects(() => run.rotateImplementer('the session is wedged'), /carries no detail/)
+  assert.deepEqual(reasons, [], 'nothing was rotated on either attempt')
+
+  await run.continue()
+  await decision
+})
+
+test('a whitespace-only reason is refused, and the seat is never touched (#75)', async () => {
+  const { run, reasons } = spyingHandle('implementer')
+  // `turn_incomplete`: a real pause offering a real rotation, and not the proxy asking. Nothing
+  // here says why the seat is being replaced.
+  const decision = run.pauseAt(pauseShape('implementer', 1))
+  assert.equal(run.rotationNeedsReason(), true)
+
+  await assert.rejects(() => run.rotateImplementer('   \t  '), /this rotation needs a reason/)
+  await assert.rejects(() => run.rotateImplementer(''), /this rotation needs a reason/)
+  await assert.rejects(() => run.rotateImplementer(), /this rotation needs a reason/)
+
+  // The refusal is the point, but so is WHERE it happens. `rotate()` quiesces a session, spends
+  // an advisor turn on a handoff and makes a replacement prove itself; a refusal that arrived
+  // after any of that would have cost the operator a live seat to tell them to type a sentence.
+  assert.deepEqual(reasons, [], 'no transaction was started')
+
+  await run.continue()
+  await decision
+})
+
+test('a stated reason survives verbatim where it is the only thing there is (#75)', async () => {
+  const { run, reasons } = spyingHandle('implementer')
+  const decision = run.pauseAt(pauseShape('implementer', 1))
+
+  await run.rotateImplementer('  a fresh reader applying the just-committed criterion is a stronger test  ')
+  assert.deepEqual(
+    reasons,
+    ['a fresh reader applying the just-committed criterion is a stronger test'],
+    'trimmed, and otherwise the operator’s own sentence',
+  )
+
+  await run.continue()
+  await decision
+})
+
+test('a rotation candidate about ANOTHER seat still demands the operator’s own reason (#75)', async () => {
+  // The N>1 case the classifier is careful about: the proxy raised `implementer-2`, the operator
+  // is rotating `implementer`, and borrowing the detail would attribute one seat's evidence to
+  // another seat's replacement.
+  const { run, reasons } = spyingHandle('implementer')
+  const decision = run.pauseAt(candidatePause('implementer-2'))
+
+  assert.equal(run.rotationNeedsReason(), true)
+  await assert.rejects(() => run.rotateImplementer(), /this rotation needs a reason/)
+  assert.deepEqual(reasons, [])
+
+  await run.rotateImplementer('replacing the lead so a blind reader takes the criterion')
+  assert.deepEqual(reasons, ['replacing the lead so a blind reader takes the criterion'])
+
+  await run.continue()
+  await decision
+})
+
+test('a pause naming no rotation target demands a reason rather than borrowing one (#75)', async () => {
+  // No seat named at all. Borrowing is least defensible here: there is not even a seat to say
+  // the borrowed words were about.
+  const { run, reasons } = spyingHandle(undefined)
+  const decision = run.pauseAt(candidatePause('implementer'))
+
+  assert.equal(run.rotationNeedsReason(), true)
+  await assert.rejects(() => run.rotateImplementer(), /this rotation needs a reason/)
+  assert.deepEqual(reasons, [])
+
+  await run.continue()
+  await decision
 })

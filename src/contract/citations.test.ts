@@ -364,7 +364,12 @@ test('an undeclared citation is reported, and an exemption covers only where it 
   // The bypass half, on synthetic input. `allCitations()` is what the real test feeds this
   // filter; the filter itself is what decides whether a new citation can slip through.
   const found: Found[] = [
-    { cite: 'src/relay/run.ts:51', path: 'src/relay/run.ts', start: 51, end: 51, at: 'src/relay/x.ts:7' },
+    // A DECLARED citation, so the filter drops it. It has to be one that is really in `CITED`,
+    // which means it moves when that entry moves -- this file is in `SELF` and so is not
+    // rewritten by `npm run citations:fix`, and a fixture pointing at a line the table no
+    // longer declares would make this test fail for a reason that has nothing to do with the
+    // filter it is about.
+    { cite: 'src/relay/run.ts:52', path: 'src/relay/run.ts', start: 52, end: 52, at: 'src/relay/x.ts:7' },
     { cite: 'src/relay/relay.ts:214', path: 'src/relay/relay.ts', start: 214, end: 214, at: 'src/repl/demo.ts:48' },
     { cite: 'src/relay/relay.ts:214', path: 'src/relay/relay.ts', start: 214, end: 214, at: 'src/relay/y.ts:9' },
     { cite: 'src/relay/relay.ts:31344', path: 'src/relay/relay.ts', start: 31337, end: 31337, at: 'src/relay/z.ts:3' },

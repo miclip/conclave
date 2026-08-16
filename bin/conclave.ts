@@ -1077,6 +1077,12 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
         // absent at the moment it is most needed, and worse, a run whose child dies during
         // startup keeps this document forever -- so this is the ONLY report those runs get.
         ceilings: runCeilings,
+        // Empty, and honestly so: a child that has not started has rotated nothing. Written
+        // here for the same reason `ceilings` is -- the key has to exist at the moment an agent
+        // operator polls, or a probe reading it gets a falsy value it cannot tell from a build
+        // that does not report rotation intent at all (#103, #75). Appended last, so it lands
+        // where the recorder's own document puts it.
+        rotations: [],
       })
       if (asJson) {
         console.log(JSON.stringify({ detached: true, id, pid: child.pid, dir, stdio: logFile }, null, 2))

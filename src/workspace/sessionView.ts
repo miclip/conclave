@@ -109,6 +109,17 @@ export function formatSession(s: ReadSession, now: number): string {
   // a run stopped early needs the bound as plainly as a parser does -- and needs it to be the
   // bound the run actually had, not one recomposed here from a different set of fields.
   if (st.ceilings) lines.push(`  ceilings:  ${ceilingSummary(st.ceilings)}`)
+  // Only when something rotated. The JSON carries the empty array because a probe cannot tell an
+  // absent key from a false one (#103); a prose reader can tell an absent LINE from a present one
+  // perfectly well, and printing `rotations: none` on every run of a feature most runs never
+  // reach is the noise this renderer keeps out.
+  //
+  // The intent is on the line rather than only in the JSON because it is what makes the entry
+  // readable at all: "implementer replaced" beside a compaction generation reads as the proxy
+  // having fired, whether or not it did, and that misreading is the whole of #75.
+  for (const r of st.rotations ?? []) {
+    lines.push(`  rotated:   ${r.seat} (${r.intent}) — ${r.reason}`)
+  }
   if (st.outcome) {
     lines.push(`  outcome:   ${st.outcome.reason}${st.outcome.detail ? ` — ${st.outcome.detail}` : ''}`)
   }

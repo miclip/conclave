@@ -73,6 +73,7 @@ import {
   type RunPause,
 } from './run.ts'
 import { actorFor, resolutionFor, type ResolutionSubject } from './resolution.ts'
+import { rotationIntentFor, type RotationIntent, type RotationRecord } from './rotationIntent.ts'
 import {
   attributable,
   evidenceForRoot,
@@ -1389,6 +1390,15 @@ export class Relay {
    */
   #rotationSeat: string | undefined
 
+  /**
+   * The supervised run's handle, when there is one. Read for its PAUSE and nothing else.
+   *
+   * `run()` sets none, and that is the honest answer rather than a gap: an unattended run has
+   * nobody in front of a decision, so a rotation taken there was never an answer to a question
+   * put to an operator.
+   */
+  #handle: RunHandle | undefined
+
   private constructor(opts: RelayOptions) {
     this.#opts = opts
     // A wait is minutes long when it happens -- a rotation holds the lane across a whole agent
@@ -2223,6 +2233,18 @@ export class Relay {
     complaintsSeen: 0,
     peakGeneration: 0,
     rotations: 0,
+    /**
+     * Each accepted rotation, with WHY it happened. See `rotationIntent.ts` for the argument.
+     *
+     * `rotations` above is this array's length and is kept as its own field rather than derived
+     * from it: every existing consumer reads the counter, and a number that started disagreeing
+     * with the array it was computed from would be worse than either alone. They are written
+     * together, in one place, where a replacement is accepted.
+     *
+     * Only ACCEPTED rotations. A rolled-back one replaced nothing, and the routing log already
+     * carries it -- putting it here would make `records.length` stop meaning `rotations`.
+     */
+    records: [] as RotationRecord[],
   }
 
   /**
@@ -2383,8 +2405,40 @@ export class Relay {
     return (
       `rotation: armed — ${w.assessments} assessments, ${w.degradationsSeen} degraded, ` +
       `${w.complaintsSeen} complaints, ${w.candidates} candidates, ${w.rotations} rotations, ` +
-      `peak compaction generation ${w.peakGeneration}${stopped}`
+      `peak compaction generation ${w.peakGeneration}${stopped}${this.rotationIntentSummary()}`
     )
+  }
+
+  /**
+   * What each rotation was FOR, appended to the summary line and rendered from the records.
+   *
+   * Empty when nothing rotated, which is the common case and the one where a breakdown of zero
+   * would be noise. The moment something does rotate this is the line that stops the run report
+   * from being unusable as evidence: `1 rotations` beside a compaction generation reads as the
+   * proxy having fired, and it reads that way whether or not it did (#75).
+   *
+   * The reasons themselves are here rather than only in the JSON because the terminal report is
+   * what a human actually reads at the end of a run, and an operator-initiated rotation whose
+   * reason is invisible is the record #75 is about wearing a counter.
+   */
+  rotationIntentSummary(): string {
+    const records = this.rotationWatch.records
+    if (records.length === 0) return ''
+    const byIntent = new Map<RotationIntent, number>()
+    for (const r of records) byIntent.set(r.intent, (byIntent.get(r.intent) ?? 0) + 1)
+    const counts = [...byIntent].map(([intent, n]) => `${n} ${intent}`).join(', ')
+    return `\n  rotation intent: ${counts}${records.map((r) => `\n    ${r.seat} (${r.intent}) — ${r.reason}`).join('')}`
+  }
+
+  /**
+   * Every accepted rotation and why, for a reader outside the process.
+   *
+   * Copied, and the objects with it: the caller may keep what it is handed, and a shared array
+   * would let a reader of a finished run watch a list the relay still owns. The same rule
+   * `report.ts` follows for `launch`.
+   */
+  rotationRecords(): RotationRecord[] {
+    return this.rotationWatch.records.map((r) => ({ ...r }))
   }
 
   /**
@@ -3146,7 +3200,7 @@ export class Relay {
    * writing down because it points at a different mechanism: the loop is suspended at `await
    * deciding` above for the whole pause, so `#halt` cannot run again, and a watchdog `revision`
    * or replacement `turn_end` arriving meanwhile goes to `#trackSupersession`, which amends THE
-   * SAME `RunPause` in place (`src/relay/run.ts:523`). There was one pause, read twice. The
+   * SAME `RunPause` in place (`src/relay/run.ts:618`). There was one pause, read twice. The
    * evidence was not re-derived because nothing had re-derived it since it was captured -- which
    * is the same defect, reached by a shorter path than the report proposed.
    *
@@ -3261,7 +3315,7 @@ export class Relay {
       else if (!shouldWait && offered !== -1) pause.options.splice(offered, 1)
       // The status file is written from the LIVE pause object on any event, so an in-place
       // change reaches disk on the next one -- and a pause is precisely when nothing else is
-      // flowing. Same reasoning as `/wait` in the console (`src/repl/session.ts:1713`), and the
+      // flowing. Same reasoning as `/wait` in the console (`src/repl/session.ts:1816`), and the
       // reader who needs it most is the one polling from outside.
       this.#stream.emit({ type: 'liveness', pause })
       if (last) return stop()
@@ -3299,6 +3353,11 @@ export class Relay {
         this.#rotationSeat === undefined
           ? this.rotateImplementer(reason)
           : this.rotateSeat(this.#rotationSeat, reason),
+      // The same seat, exposed so the handle can ask whether a reason has to be STATED before
+      // it starts a transaction (#75). It is a read of `#rotationSeat` rather than a second
+      // derivation from the pause, because a front end that resolved the target differently
+      // from the `rotate` above would demand a reason for one seat and rotate another.
+      rotationTarget: () => this.#rotationSeat,
       constrain: (text, audience) => this.say(text, audience),
       requestStop: () => {
         this.#stopped = true
@@ -3307,6 +3366,13 @@ export class Relay {
         this.#pauseRequested = reason
       },
     })
+    // Kept so `rotateSeat` can read the pause the operator is actually looking at, which is
+    // what classifies a rotation's intent (#75). The handle is the only thing that holds it:
+    // `#halt` hands the pause object to `pauseAt` and then suspends inside an await, so there
+    // is no relay-side field to consult and duplicating one would give two answers about a
+    // single decision. `handle.pause` is `undefined` once the operator answers, which is
+    // exactly when a rotation is no longer an answer to that question.
+    this.#handle = handle
     void this.#loop(goal, handle).then(
       (outcome) => handle.settle(outcome),
       // Retained as a backstop only. #loop now converts a throw into a `transport_failed`
@@ -3567,7 +3633,17 @@ export class Relay {
     // `#loop`'s backstop reported as `transport_failed`: a transport fault, for a policy gap
     // (#74). Rotation now replaces the degraded seat's session, in that seat's own worktree,
     // while its siblings keep working; nothing here asks how many seats the run has.
-    const result = await this.rotateSeat(impl.id, detail)
+    // `degradation_automatic` stated rather than left to be derived (#75). Nobody is asked on
+    // this path -- that is what `onDegradation: 'automatic'` MEANS -- so there is no pause to
+    // classify from, and the pause reading would record the one unambiguously proxy-driven
+    // rotation in the run as operator-initiated.
+    //
+    // Through the PRIVATE form, which is the only way to state an intent at all. `rotateSeat` no
+    // longer takes one: an embedder able to declare `degradation_automatic` could forge rows
+    // into the population #10 treats as the proxy predicting degradation, and forged rows are
+    // indistinguishable from evidence. This is the one call site that knows better, and it is
+    // inside the class that owns the record.
+    const result = await this.#rotateSeatDeclaring(impl.id, detail, 'degradation_automatic')
     if (result.status === 'rotated') return undefined
     if (result.reason === 'acceptance_unobservable') {
       // The one rollback that is not an invitation to try again. `rotateSeat` has latched it and
@@ -5489,8 +5565,46 @@ export class Relay {
    * Callable by the human as well as by the run loop. Nothing about it assumes the loop is
    * running -- an operator watching a session degrade should not have to wait for the
    * orchestrator to notice.
+   *
+   * ## Why no caller may state the intent (#75)
+   *
+   * This took an optional `intent` for one honest reason -- the detector's automatic path has no
+   * pause to classify from -- and an optional argument is available to everybody. An embedder
+   * could then label a rotation it chose for its own reasons `degradation_automatic`, and that
+   * is not a mislabelled row: `degradation_automatic` is the population #10 counts as the proxy
+   * predicting degradation, so forged rows are indistinguishable from evidence and confirm the
+   * hypothesis by construction. The field exists to make the dataset trustworthy; a public way
+   * to write it by hand would have removed exactly the property it was added for.
+   *
+   * So the classification is not a parameter here at all. Every public rotation is read from the
+   * ACTIVE PAUSE, which is the one thing a caller cannot fabricate -- it is the question the
+   * orchestrator itself put -- and the single call site that legitimately knows better reaches
+   * `#rotateSeatDeclaring` instead, which is private to this class and cannot be reached from
+   * outside it.
    */
   async rotateSeat(seatId: string, reason: string): Promise<RotationResult> {
+    // Classified HERE, before the transaction runs, because the fact it is classified from does
+    // not survive it: `rotate()` spends a full agent turn, and an operator can answer the pause
+    // the moment it returns. Reading `handle.pause` afterwards would be reading whatever
+    // question came next (#75).
+    return this.#rotateSeatDeclaring(seatId, reason, rotationIntentFor(this.#handle?.pause, seatId))
+  }
+
+  /**
+   * The transaction, with its population already decided.
+   *
+   * PRIVATE, and that is the whole of its design. Two callers may reach it: `rotateSeat` above,
+   * which passes what the active pause says, and `#considerRotation`, which passes
+   * `degradation_automatic` because `onDegradation: 'automatic'` asks nobody and there is no
+   * pause to read -- the default reading would file the one unambiguously proxy-driven rotation
+   * in the run as the operator's, which is #75's contamination running backwards.
+   *
+   * A `#` method rather than a naming convention: TypeScript's `private` is a compile-time
+   * courtesy that a JavaScript embedder walks straight through, and the argument here is not
+   * about tidiness. It is that no code outside this class may choose what a rotation record
+   * says it was.
+   */
+  async #rotateSeatDeclaring(seatId: string, reason: string, intent: RotationIntent): Promise<RotationResult> {
     const impl = this.#participants.get(seatId)
     if (!impl || impl.rank !== 'implementer') {
       throw new Error(
@@ -5621,7 +5735,7 @@ export class Relay {
     // would be a seat nobody could ever replace, which is worse than the race it prevents.
     this.#rotationsInFlight.set(seatId, reason)
     try {
-      return await this.#rotateSeatTransaction(impl, advisor, cfg, reason)
+      return await this.#rotateSeatTransaction(impl, advisor, cfg, reason, intent)
     } finally {
       this.#rotationsInFlight.delete(seatId)
     }
@@ -5649,6 +5763,13 @@ export class Relay {
     advisor: RelayParticipant,
     cfg: EffectiveRotation,
     reason: string,
+    /**
+     * Which population this rotation belongs to (#75), decided by `rotateSeat` BEFORE the
+     * transaction opened. Passed rather than re-derived here: the transaction spends a full
+     * agent turn, and the pause it was classified from can be answered the moment that turn
+     * ends -- so a reading taken at the end would be a reading of whatever came next.
+     */
+    intent: RotationIntent,
   ): Promise<RotationResult> {
     const seatId = impl.id
     const spec = implementerSeats(this.#opts).find((s) => s.id === seatId)!
@@ -5777,7 +5898,20 @@ export class Relay {
       // report the thing it is watching for makes every reading of it worthless, including
       // the readings that happened to be right.
       this.rotationWatch.rotations += 1
-      this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text: `${impl.id} rotated into ${result.replacement.sessionId}` })
+      // And WHY, in the same breath as the count, because a count on its own is what #75 is
+      // about: rotations taken because a proxy fired and rotations taken because the operator
+      // wanted a blind reader both arrive carrying a compaction generation, and a dataset that
+      // cannot separate them confirms #10's hypothesis with rotations that had nothing to do
+      // with degradation. Written here rather than beside the classification above so a
+      // rolled-back transaction leaves no record -- `records.length` means `rotations`.
+      this.rotationWatch.records.push({
+        seat: impl.id,
+        intent,
+        reason,
+        replacement: result.replacement.sessionId,
+        at: Date.now(),
+      })
+      this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text: `${impl.id} rotated into ${result.replacement.sessionId} (${intent})` })
       // A replacement proved itself, so whatever made an earlier acceptance unobservable is
       // not holding now. Cleared on the evidence rather than on a timer: the latch's whole
       // claim is "no replacement can pass while this holds", and one just did.

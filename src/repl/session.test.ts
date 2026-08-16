@@ -588,20 +588,40 @@ test('a flag in the goal position is flags, not a goal named --lead', async () =
   // Proven with an agent name that cannot resolve: reaching "unknown agent" means the flag
   // was parsed as a flag. It also means no session is spawned, which a test asserting on
   // the CLI must not do.
+  //
+  // ## Why it runs in a fixture repository rather than in this checkout
+  //
+  // The BINARY is this checkout's, by absolute path; the working directory is a scratch repo.
+  // Run in the checkout itself, the session lock refuses to start while participants are live
+  // (`src/workspace/sessionLock.ts`) -- and this project is developed BY conclave sessions in
+  // this very repository, so a legitimate live session made the CLI exit before it ever looked
+  // at `--lead`, and the test failed reporting a parsing defect that did not exist. The lock is
+  // correct and its ordering is deliberately untouched: a refusal that arrives before agent
+  // resolution is the point of it. What was wrong was asserting on argument parsing from a
+  // directory whose state is someone else's business.
   const { execFileSync } = await import('node:child_process')
   const root = join(import.meta.dirname, '..', '..')
   let stderr = ''
+  let stdout = ''
   try {
     execFileSync(process.execPath, [join(root, 'bin/conclave.ts'), 'session', '--lead', 'nope'], {
-      cwd: root,
+      cwd: repo(),
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
       timeout: 30_000,
     })
   } catch (err) {
     stderr = (err as { stderr?: string }).stderr ?? ''
+    stdout = (err as { stdout?: string }).stdout ?? ''
   }
-  assert.match(stderr, /unknown agent 'nope'/, `--lead was not parsed as a flag; stderr was:\n${stderr}`)
+  // `stdout` in the message, not just `stderr`: the failure this comment is about printed its
+  // refusal on stdout and left stderr empty, so the report said only "stderr was:" and nothing
+  // after it -- which is the least useful thing a failing assertion can say.
+  assert.match(
+    stderr,
+    /unknown agent 'nope'/,
+    `--lead was not parsed as a flag; stderr was:\n${stderr}\nstdout was:\n${stdout}`,
+  )
 })
 
 test('an address and a path compose: >advisor read @path', async () => {
@@ -3011,7 +3031,7 @@ test('a participant-scoped pause samples that seat and no other, at every reason
   assert.deepEqual(sampled(pauseFor({ reason: 'rotation_candidate', participant: 'implementer-2' })), ['implementer-2'])
   assert.deepEqual(sampled(pauseFor({ reason: 'implementer_unanswered', participant: 'implementer-2' })), ['implementer-2'])
   // The ADVISOR is a participant like any other, and its own bad turn pauses the run
-  // (src/relay/relay.ts:4966). A rank scan for implementers sampled the wrong child here too.
+  // (src/relay/relay.ts:5042). A rank scan for implementers sampled the wrong child here too.
   assert.deepEqual(
     sampled(pauseFor({ reason: 'turn_incomplete', participant: 'advisor' }, { participant: 'advisor', endSeq: 2 })),
     ['advisor'],
@@ -3020,13 +3040,13 @@ test('a participant-scoped pause samples that seat and no other, at every reason
 
 test('a conclave- or workstream-scoped pause samples nobody, with no fall back to rank', () => {
   // Both conclave-scoped reasons. Resuming an `advisor_escalated` pause sends to the ADVISOR
-  // (src/relay/relay.ts:5069), so measuring implementer children was never the question; and
+  // (src/relay/relay.ts:5145), so measuring implementer children was never the question; and
   // `operator_requested` is consumed at an advisor-turn boundary that states no turn is in
   // flight. Neither has anything for this guard to sample.
   assert.deepEqual(sampled(pauseFor({ reason: 'advisor_escalated' })), [])
   assert.deepEqual(sampled(pauseFor({ reason: 'operator_requested' })), [])
   // Workstream scope, and the id deliberately COLLIDES with a seat id -- at N=1 the workstream
-  // is named after the seat carrying the instruction (src/relay/relay.ts:5133), which is exactly
+  // is named after the seat carrying the instruction (src/relay/relay.ts:5209), which is exactly
   // the coincidence a guard could read as "so sample that seat". A workstream is not a seat.
   assert.deepEqual(sampled(pauseFor({ reason: 'authority_conflict', workstream: 'implementer' })), [])
 })
@@ -3042,7 +3062,7 @@ test('a scope naming a seat that is gone samples nobody rather than falling back
 test('a rotation_candidate pause on one seat resumes while the OTHER seat is genuinely mid-turn', async (t) => {
   // The production shape of the N>1 case the rank scan got wrong, and the reason it has to be
   // this shape: `rotation_candidate` carries NO `verdictOf` -- that field is set at two halt
-  // sites, both turn_incomplete (src/relay/relay.ts:4970, src/relay/relay.ts:5354) -- so under
+  // sites, both turn_incomplete (src/relay/relay.ts:5046, src/relay/relay.ts:5430) -- so under
   // the old expression this pause fell through to the rank scan and sampled EVERY implementer.
   // A simpler `turn_incomplete` fixture cannot show that: it populates the field, takes the
   // named-seat branch, and passes against the code being replaced.
@@ -3094,7 +3114,7 @@ test('a rotation_candidate pause on one seat resumes while the OTHER seat is gen
     ],
     rounds: 6,
     // ARMS ROTATION, which is what makes degradation a pause instead of an ended run
-    // (src/relay/relay.ts:3449-3451). A command that exits 0 immediately: what the checks DO is
+    // (src/relay/relay.ts:3515-3517). A command that exits 0 immediately: what the checks DO is
     // not what this test is about, only that a replacement would have something to reproduce.
     checks: ['true'],
     registry: registryOf({
@@ -3297,6 +3317,200 @@ test('a turn that ends lets /continue resume on retry, however busy the child re
   await until((f) => 'session' in f && f.session.status.state === 'running')
   assert.equal(calls, 1, 'and no second reading is needed, because the turn is what lifted it')
 
+  input.end()
+  await running
+})
+
+// ---------------------------------------------------------------------------------------
+// #75: a manual /rotate must carry the operator's own reason.
+//
+// Rotation was built as recovery and is being used as an instrument -- replacing a seat so a
+// fresh reader applies a just-committed criterion is a good reason to rotate and is
+// methodologically unrelated to degradation. A bare `/rotate` used to inherit whatever pause
+// was on screen, so that rotation went into the record in the degradation proxy's words, and
+// #10's dataset filled with rotations that had nothing to do with degradation.
+//
+// The prompt is the console half of the fix. These are about the PROMPT: whether it appears,
+// what it consumes, and what it leaves alone. What the relay then records is proven in
+// `src/relay/rotation.test.ts`.
+// ---------------------------------------------------------------------------------------
+
+test('a bare /rotate away from a rotation candidate asks why, and the next line is the reason (#75)', async () => {
+  const dir = repo()
+  const out = collect()
+  const input = new PassThrough()
+  const running = runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'claude',
+    rounds: 6,
+    // ARMS ROTATION, which is what puts `rotate` on the pause's menu at all. What the check
+    // DOES is not what this test is about.
+    checks: ['true'],
+    registry: registryOf({
+      // The handoff has no headings, so the transaction rolls back. Deliberate: this test is
+      // about the REASON reaching the rotation, and `rotating <seat>: <reason>` is recorded
+      // before the transaction can fail. Driving a full acceptance here would re-test
+      // `rotate.ts` and say nothing more about the prompt.
+      codex: [slow('advisor', 'codex', ['Do it.', 'no headings here', 'More.', 'DONE'])],
+      claude: [slow('impl', 'claude', ['ack', 'Did it.', 'And again.', 'NONE']), slow('fresh', 'claude', [])],
+    }),
+    input,
+    output: out.stream,
+  })
+  await untilText('the first instruction', out.text, /Do it\./)
+  input.write('/pause\n')
+  // An `operator_requested` pause: rotation is offered on it, and it is emphatically NOT the
+  // degradation proxy asking -- which is the whole case for the prompt.
+  await untilText('the pause', out.text, /● paused operator_requested/)
+
+  input.write('/rotate\n')
+  // CONSOLE-ONLY notice, which is the one thing this file allows `out.text()` to be asserted
+  // on: no record carries a prompt, and the claim is about what the operator was shown.
+  await untilText('the prompt for a reason', out.text, /why are you rotating this seat/)
+
+  input.write('a fresh reader applying the committed criterion is a stronger test\n')
+  await untilText('the rotation to be attempted', out.text, /rolled back|rotated into/)
+
+  // CONTENT off the record. The reason the operator typed is what the relay was given, rather
+  // than the pause's own words -- which is exactly what a bare `/rotate` used to record.
+  const note = routed(dir, 'rotating implementer:')
+  assert.ok(note, `the rotation must be attempted with a reason: ${JSON.stringify(routedAll(dir).map((r) => r.text))}`)
+  assert.match(note.text, /rotating implementer: a fresh reader applying the committed criterion is a stronger test/)
+
+  input.write('/continue\n')
+  input.end()
+  await running
+})
+
+test('a /command typed at the reason prompt cancels the rotation and runs the command (#75)', async () => {
+  // An operator who changes their mind at the prompt is the likeliest person to type one, and
+  // the alternative is recording `/state` as why a seat was replaced.
+  const dir = repo()
+  const out = collect()
+  const input = new PassThrough()
+  const running = runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'claude',
+    rounds: 6,
+    checks: ['true'],
+    registry: registryOf({
+      codex: [slow('advisor', 'codex', ['Do it.', 'More.', 'DONE'])],
+      claude: [slow('impl', 'claude', ['ack', 'Did it.', 'And again.', 'NONE']), slow('fresh', 'claude', [])],
+    }),
+    input,
+    output: out.stream,
+  })
+  await untilText('the first instruction', out.text, /Do it\./)
+  input.write('/pause\n')
+  await untilText('the pause', out.text, /● paused operator_requested/)
+
+  input.write('/rotate\n')
+  await untilText('the prompt for a reason', out.text, /why are you rotating this seat/)
+  input.write('/state\n')
+  // Both halves are console-only notices: the cancellation, and the command having been run
+  // rather than swallowed as a reason.
+  await untilText('the cancellation', out.text, /rotation cancelled/)
+  await untilText('/state to answer', out.text, /run: paused \(operator_requested\)/)
+
+  // And nothing was rotated. Asserted as the ABSENCE OF A RECORD rather than of console text,
+  // which a wrap could hide: the relay writes `rotating <seat>: <reason>` before it does
+  // anything else, so its absence is the seat never having been touched.
+  assert.equal(routed(dir, 'rotating implementer:'), undefined, 'the seat must not have been rotated')
+
+  input.write('/continue\n')
+  input.end()
+  await running
+})
+
+test('/rotate at a rotation candidate still costs nothing to answer (#75)', async () => {
+  // The other half, and the one that keeps the prompt from being a toll. At THIS pause the
+  // proxy is what spoke; agreeing with it is the whole of the operator's contribution, so the
+  // pause's own detail is the honest record and no question is put.
+  const dir = repo()
+  const impl = slow('impl', 'claude', ['ack', 'Did it.', 'And again.', 'NONE'])
+  impl.compactOnTurn = 1
+  const out = collect()
+  const input = new PassThrough()
+  const running = runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'claude',
+    rounds: 6,
+    checks: ['true'],
+    registry: registryOf({
+      codex: [slow('advisor', 'codex', ['Do it.', 'no headings here', 'More.', 'DONE'])],
+      claude: [impl, slow('fresh', 'claude', [])],
+    }),
+    input,
+    output: out.stream,
+  })
+  await untilText('the candidate pause', out.text, /● paused rotation_candidate/)
+
+  input.write('/rotate\n')
+  await untilText('the rotation to be attempted', out.text, /rolled back|rotated into/)
+
+  // CONTENT: it went straight through, carrying the proxy's own words. A prompt would have
+  // held the command instead, so this note existing at all is the claim.
+  const note = routed(dir, 'rotating implementer:')
+  assert.ok(note, `an accepted candidate rotates without being asked anything: ${out.text()}`)
+  assert.match(note.text, /compaction generation rose 0 → 1/)
+
+  input.write('/continue\n')
+  input.end()
+  await running
+})
+
+test('/rotate WITH a reason at a candidate says the reason was not recorded (#75)', async () => {
+  // `/rotate the session is wedged` at a candidate is a natural thing to type, and the record
+  // still carries the proxy's words: accepting a candidate is agreement, and `candidate_accepted`
+  // beside a sentence the proxy never said is a record whose two fields describe different
+  // events. Dropping the sentence is right; dropping it in silence is not. The operator watched
+  // their words go into a command and would reasonably assume the record now carries them --
+  // which is the same false belief about what the record says that #75 exists to remove.
+  const dir = repo()
+  const impl = slow('impl', 'claude', ['ack', 'Did it.', 'And again.', 'NONE'])
+  impl.compactOnTurn = 1
+  const out = collect()
+  const input = new PassThrough()
+  const running = runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'claude',
+    rounds: 6,
+    checks: ['true'],
+    registry: registryOf({
+      codex: [slow('advisor', 'codex', ['Do it.', 'no headings here', 'More.', 'DONE'])],
+      claude: [impl, slow('fresh', 'claude', [])],
+    }),
+    input,
+    output: out.stream,
+  })
+  await untilText('the candidate pause', out.text, /● paused rotation_candidate/)
+
+  input.write('/rotate the session is wedged\n')
+  // CONSOLE-ONLY notice, and the reason this file may assert on `out.text()` at all: no record
+  // carries it, and the claim is precisely about what the operator was shown.
+  await untilText('the notice', out.text, /your reason was NOT recorded/)
+  // The words it will be recorded in, quoted back on the notice's own line -- matched together
+  // rather than separately, because the pause banner above already shows the detail and an
+  // assertion on the detail alone would pass without the notice existing at all.
+  await untilText("the proxy's words, quoted back", out.text, /proxy's own words: .*compaction generation rose 0 → 1/)
+  await untilText('the rotation to be attempted', out.text, /rolled back|rotated into/)
+
+  // CONTENT: and it is not a notice that lies. What the relay was actually given is the pause's
+  // own detail, with nothing of the typed sentence in it.
+  const note = routed(dir, 'rotating implementer:')
+  assert.ok(note, `the rotation must be attempted: ${out.text()}`)
+  assert.match(note.text, /compaction generation rose 0 → 1/)
+  assert.doesNotMatch(note.text, /wedged/, 'the operator’s gloss is not what the seat was replaced for')
+
+  input.write('/continue\n')
   input.end()
   await running
 })
