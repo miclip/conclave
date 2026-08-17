@@ -330,10 +330,23 @@ test('a sampling failure keeps the last reading rather than blanking the line', 
 })
 
 test('a run torn down at a pause stops re-measuring, rather than sampling a closed session', async (t) => {
-  // `relay.stop()` ends the run WITHOUT resolving the pause, so `#halt` stays suspended and the
-  // `finally` that stops the refresher never runs. A console reaching the end of a piped stdin
-  // takes exactly that path. Left unguarded the timer sampled a closed session's pid for the
-  // rest of its bound and emitted into a closed stream, which counts refusals as an alarm.
+  // A console reaching the end of a piped stdin tears a run down while a human is still holding
+  // it. Left unguarded the refresh timer sampled a closed session's pid for the rest of its bound
+  // -- half an hour past teardown -- and emitted into a closed stream, which counts refusals as
+  // an alarm. That is the subject here, and it is unchanged.
+  //
+  // THE PREMISE UNDERNEATH IT HAS CHANGED, deliberately (#142). This used to assert
+  // `run.state === 'paused'` after `stop()`, because `stop()` ended the run without resolving
+  // the pause: `#halt` stayed suspended forever, the `finally` that stops the refresher never
+  // ran, and `#stream.closed` was the only thing that could stop the timer. That was the defect,
+  // not a property worth pinning -- `result()` never settled either, and since #112 the handle's
+  // suspension ledger stayed open and went on reporting a pause on a run that had ended.
+  //
+  // So the run now ENDS, and the refresher is stopped by two independent things rather than one:
+  // `settle()` clears the pause, which trips the refresher's own `handle.pause !== pause` check
+  // immediately, and the released `#halt` then unwinds through the `finally`. The assertion below
+  // is rewritten to the new premise rather than dropped, because a teardown that silently stopped
+  // ending the run is exactly what this test is positioned to catch.
   const dir = repo()
   const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it, slowly.'])
   impl.endTurn = { index: 1, verdict: TIMED_OUT }
@@ -354,7 +367,8 @@ test('a run torn down at a pause stops re-measuring, rather than sampling a clos
   await until('at least one refresh before teardown', () => (pause.liveness!.refreshes > 0 ? true : undefined))
 
   await relay.stop()
-  assert.equal(run.state, 'paused', 'the premise: stop() does not resolve the pause')
+  assert.equal(run.state, 'ended', 'the premise: stop() ends the run it was holding')
+  assert.equal(run.pause, undefined, 'and clears the pause, which is what the refresher reads')
   const afterStop = reads
   await new Promise((r) => setTimeout(r, 200))
   assert.equal(reads, afterStop, 'nothing was sampled after the run was torn down')

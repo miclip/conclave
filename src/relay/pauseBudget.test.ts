@@ -244,7 +244,10 @@ test('the suspension currently being decided is already on the ledger', async ()
   // Not awaited: `abort()` returns `result()`, and nothing here is going to settle a handle
   // whose control surface is inert. What is under test is the ledger, which closes synchronously.
   void handle.abort('the operator gave up')
-  assert.equal((await deciding).kind, 'abort')
+  // `pauseAt` can also resolve with `undefined` -- no decision, the run ended underneath the
+  // question (#142). This is the other case: an operator who answered, so a decision is exactly
+  // what must come back, and asserting the shape says the two are not being confused.
+  assert.deepEqual(await deciding, { kind: 'abort', detail: 'the operator gave up' })
   clock.advance(HOUR)
   assert.equal(handle.suspendedMs, HOUR, 'and an abort closes the interval like any other answer')
 })
@@ -253,12 +256,13 @@ test('a handle settled while it is still paused stops the ledger where the run s
   // A ledger closed only at the halt site runs forever when the handle is settled out from under
   // an unresolved pause, and a report read afterwards claims a suspension that is still going.
   //
-  // NOT a test of `relay.stop()`, and an earlier version of this comment said it was. `stop()`
-  // does not settle the handle at all -- the loop stays parked on the unresolved `pauseAt()`, so
-  // `run.state` never leaves `paused` and `result()` never resolves (`pauseLiveness.test.ts`
-  // asserts exactly that). This exercises `settle()` directly, which is the seam it can reach;
-  // the production hole `stop()` leaves is real, predates this change, and is filed separately.
-  // A test that names a caller it never invokes is the failure this repository keeps finding.
+  // NOT a test of `relay.stop()`, and an earlier version of this comment said it was. At the time
+  // it could not have been: `stop()` did not settle the handle at all, so the loop stayed parked
+  // on the unresolved `pauseAt()` and `run.state` never left `paused`. That hole is closed --
+  // `stop()` settles the handle now, and `stopWhilePaused.test.ts` drives a real relay through it
+  // (#142) -- and this still exercises `settle()` directly, because the ledger's contract is that
+  // ANY settle closes the interval, whoever called it. A test that names a caller it never
+  // invokes is the failure this repository keeps finding, so the caller is tested where it lives.
   const clock = clockFrom()
   const handle = new RunHandle(inertControl(), { now: clock.now })
   void handle.pauseAt(pauseShape())

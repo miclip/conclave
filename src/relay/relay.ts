@@ -1427,6 +1427,17 @@ export class Relay {
   #stream = new RelayEventStream()
   #ended = false
   /**
+   * The outcome `run_end` actually carried — the run's one ending, kept rather than recomputed.
+   *
+   * `#end` returns whatever its CALLER asked for, on every call, so a second `#end` after the
+   * run is over gets back a well-formed outcome that was never emitted anywhere. That is
+   * harmless where the caller is the loop unwinding past an ending it already made, and it is
+   * not harmless in `stop()`, which has to settle the handle with the run's outcome and would
+   * otherwise settle a finished `done` run as `stopped`. Recorded where `run_end` is emitted so
+   * the two cannot disagree.
+   */
+  #firstEnd: RunOutcome | undefined
+  /**
    * The seat worktrees this run created, or `undefined` at N=1.
    *
    * `undefined` is the load-bearing value: it is what makes a default run touch none of this
@@ -2273,6 +2284,7 @@ export class Relay {
       // says what the ceiling saw. Stamped here rather than in the loop because this is the one
       // place a run ends, however it ends, and `#ended` already makes it exactly once.
       this.#stopClock()
+      this.#firstEnd = detail === undefined ? { reason } : { reason, detail }
       this.#stream.emit({ type: 'run_end', reason, detail })
       this.#stream.close()
     }
@@ -3464,6 +3476,17 @@ export class Relay {
       // is a claim, and a run that cannot take a reading cannot make it.
       this.#forgetIncompleteAnswer(p.latch)
     }
+    // The run ended while this halt was being assembled, which `relay.stop()` can do at any point
+    // the loop is not inside an await it owns (#142). There is nobody to put a question to and
+    // nothing that could answer it, so the halt is abandoned here rather than one line later.
+    //
+    // BEFORE the note, and that is the whole reason for a second guard on top of the one in
+    // `RunHandle.pauseAt`: a `paused (...)` line in the routing log is the log's account of a
+    // decision point a human was at, and writing one for a pause that is then not raised makes
+    // the log describe a moment that never existed. The audit trail is read afterwards by people
+    // reconstructing what the operator saw, and a note with no pause under it is worse than a
+    // gap. Nothing awaits between here and `pauseAt`, so the check cannot go stale.
+    if (handle?.state === 'ended') return handle.outcome ?? this.#end('stopped')
     this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text: `paused (${reason}): ${p.detail}` })
     if (!handle) {
       return this.#end(
@@ -3536,8 +3559,13 @@ export class Relay {
           }),
       atSeq: this.#seq,
     })
-    // Set by the line above; nothing runs between the two that could clear it.
-    const pause = handle.pause!
+    // Set by the line above; nothing runs between the two that could clear it -- with the one
+    // exception the guard above already returned on, an ended handle, which `pauseAt` refuses to
+    // install a pause on. Read as a value rather than asserted non-null so that a future ending
+    // this method has not been taught about is an ordinary unwind instead of a crash on `!`, and
+    // so the emit and the refresher below cannot be handed a pause that does not exist.
+    const pause = handle.pause
+    if (!pause) return handle.outcome ?? this.#end('stopped')
     // Which session is in the seat right now, read before the operator can change it. #118 needs
     // the same fact for the same reason: an operator who ROTATED and then resumed did not answer
     // a question about this evidence, they replaced the thing the evidence was about, and
@@ -3551,12 +3579,28 @@ export class Relay {
         ? this.#refreshPauseLiveness(handle, pause, p.liveness.participant, p.liveness.emittedBefore)
         : undefined
 
-    let decision: Decision
+    let decision: Decision | undefined
     try {
       decision = await deciding
     } finally {
       refreshing?.stop()
     }
+    // Nobody decided: the run was ended out from under the question -- `relay.stop()`, which is
+    // what a console reaching the end of a piped stdin does. The handle has already been settled
+    // by whoever ended it, so its outcome is the run's outcome and this returns THAT rather than
+    // deriving a second one: a run torn down after a ceiling had already ended it must not be
+    // re-reported as `stopped` on the way out of a pause it never left (#142).
+    //
+    // Nothing else happens on this path, and each omission is the same omission. No `resume`,
+    // for the reason the abort below gives. No `#armIncomplete`, because arming remembers an
+    // ANSWER against evidence, and the whole content of this case is that there was none -- a
+    // latch set here would silence the first pause of the next run on the strength of a question
+    // nobody read. The `finally` above has already stopped the refresher.
+    //
+    // `#end('stopped')` only as a backstop: the handle is settled before the pause is released,
+    // so `outcome` is present by construction, and a settle that somehow did not happen still
+    // has to return an outcome rather than a hole.
+    if (decision === undefined) return handle.outcome ?? this.#end('stopped')
     // No `resume` on an abort. The run does not continue, and `run_end` is what says so --
     // a resume followed immediately by the end would read as a session that carried on.
     if (decision.kind === 'abort') return this.#end('stopped', decision.detail)
@@ -3606,7 +3650,7 @@ export class Relay {
    * writing down because it points at a different mechanism: the loop is suspended at `await
    * deciding` above for the whole pause, so `#halt` cannot run again, and a watchdog `revision`
    * or replacement `turn_end` arriving meanwhile goes to `#trackSupersession`, which amends THE
-   * SAME `RunPause` in place (`src/relay/run.ts:676`). There was one pause, read twice. The
+   * SAME `RunPause` in place (`src/relay/run.ts:734`). There was one pause, read twice. The
    * evidence was not re-derived because nothing had re-derived it since it was captured -- which
    * is the same defect, reached by a shorter path than the report proposed.
    *
@@ -3664,12 +3708,16 @@ export class Relay {
      * Whether there is still anything to measure for.
      *
      * `handle.pause !== pause` is the ordinary case: the operator decided while a sample was in
-     * flight. `#stream.closed` is the one that is not ordinary and was missed -- `relay.stop()`
-     * ends the run WITHOUT resolving the pause, so `#halt` stays suspended at `await deciding`
-     * forever and the `finally` that calls `stop()` never runs. A console reaching the end of a
-     * piped stdin does exactly that. Without this check the timer went on sampling a closed
-     * session's pid for the rest of its bound -- half an hour past teardown -- and emitting into
-     * a stream that counts refusals as an alarm.
+     * flight. It now also covers teardown, because `relay.stop()` settles the handle and
+     * `settle()` clears the pause -- so this predicate is true the instant the run ends, and the
+     * `finally` that calls `stop()` runs a moment later as the released `#halt` unwinds (#142).
+     *
+     * `#stream.closed` is kept, and is no longer the only thing standing between a stopped run
+     * and a timer sampling a closed session's pid for the rest of its bound -- half an hour past
+     * teardown, emitting into a stream that counts refusals as an alarm. It was written when
+     * `stop()` left the pause parked forever, and it is retained as the check that does not
+     * depend on the handle at all: `#end` closes the stream on EVERY ending, including the ones
+     * an unattended run reaches with no handle to settle.
      */
     const over = (): boolean => stopped || handle.pause !== pause || this.#stream.closed
     const tick = async (): Promise<void> => {
@@ -3721,7 +3769,7 @@ export class Relay {
       else if (!shouldWait && offered !== -1) pause.options.splice(offered, 1)
       // The status file is written from the LIVE pause object on any event, so an in-place
       // change reaches disk on the next one -- and a pause is precisely when nothing else is
-      // flowing. Same reasoning as `/wait` in the console (`src/repl/session.ts:1984`), and the
+      // flowing. Same reasoning as `/wait` in the console (`src/repl/session.ts:2001`), and the
       // reader who needs it most is the one polling from outside.
       this.#stream.emit({ type: 'liveness', pause })
       if (last) return stop()
@@ -6606,6 +6654,29 @@ export class Relay {
     // A run that already ended keeps the reason it ended for; teardown is not a second
     // outcome. Only a relay stopped without ever finishing a run reports 'stopped'.
     this.#end('stopped')
+    // And the HANDLE is settled here rather than left to the loop, which is #142.
+    //
+    // `start()` settles from `#loop`'s completion callbacks, so a supervised run's ending
+    // depended on the loop running to completion -- and the loop does not always get there. At a
+    // pause it is parked on the promise `RunHandle.pauseAt` returned, which nothing was going to
+    // resolve; mid-turn it is polling for a `turn_end` from a session this method is closing, and
+    // `#exchange` has no timeout of its own by design. In both cases the RUN was over --
+    // `run_end` is on the stream, the clock has stopped, the sessions are going -- while
+    // `run.state` still said `paused` or `running` and `result()` never settled. A caller
+    // awaiting the end of a run it had itself just stopped waited for an event that could not
+    // come, and since #112 the handle's suspension ledger stayed open with it, so the reported
+    // `pausedMs` went on growing on a run that had ended.
+    //
+    // Before the sessions are closed, so the ledger closes at the instant the run stopped rather
+    // than at the end of teardown, and `#firstEnd` rather than a fresh outcome so a run that had
+    // already ended keeps the reason it ended for. `settle()` is first-outcome-wins from the
+    // other side too: the loop unwinding a moment later cannot overwrite this, which is what
+    // stops a stop from being reported as the transport fault its own teardown provoked.
+    //
+    // Settling also RELEASES a parked pause -- with no decision, because there was none -- so the
+    // `#halt` frame unwinds instead of holding this relay for the life of the process. See
+    // `RunHandle.pauseAt` for why that is not spelled as an abort.
+    if (this.#firstEnd) this.#handle?.settle(this.#firstEnd)
     for (const p of this.participants) await p.session.close('graceful')
     // Between closing the sessions and releasing the claim, in that order and for a reason.
     // Cleanup reads each seat's tree, so it must happen after the writers are gone; and

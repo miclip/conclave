@@ -279,6 +279,13 @@ export interface RunOutcome {
   detail?: string | undefined
 }
 
+/**
+ * What the operator chose. Both variants have an author, and that is the point of the type.
+ *
+ * A pause can also end WITHOUT one — `settle()` resolves an outstanding `pauseAt()` with
+ * `undefined` when the run is ended out from under it — and that absence is deliberately not a
+ * third `Decision`. See `pauseAt` for the argument.
+ */
 export type Decision = { kind: 'continue' } | { kind: 'abort'; detail: string }
 
 /**
@@ -341,8 +348,11 @@ export class RunHandle {
   /** When the current suspension began, or `undefined` while the run is not paused. */
   #suspendedSince: number | undefined
 
-  /** Resolves the loop's `pauseAt()` once the operator decides. */
-  #decide: ((d: Decision) => void) | undefined
+  /**
+   * Resolves the loop's `pauseAt()` once the operator decides — or with `undefined` if the run
+   * is settled while they are still deciding, which is not a decision. See `pauseAt`.
+   */
+  #decide: ((d: Decision | undefined) => void) | undefined
   /** Waiting `untilPause()` callers. Resolved with the pause, or `undefined` if it ended. */
   #watchers: ((p: RunPause | undefined) => void)[] = []
   #settled: { resolve: (o: RunOutcome) => void; reject: (e: Error) => void }[] = []
@@ -601,8 +611,56 @@ export class RunHandle {
   // that, so it is said here instead.
   // ---------------------------------------------------------------------------
 
-  /** Suspend the loop until the operator decides. */
-  pauseAt(pause: Omit<RunPause, 'at'>): Promise<Decision> {
+  /**
+   * Suspend the loop until the operator decides.
+   *
+   * ## Resolving with `undefined`, and why that is not a synthesised abort (#142)
+   *
+   * There is a third way out of this promise besides `continue` and `abort`: the run can be
+   * ENDED while the operator is still holding it. `relay.stop()` does that — a console reaching
+   * the end of a piped stdin, a supervisor tearing a session down, a `t.after` cleaning up. The
+   * run is over; nobody answered the question; the loop is nevertheless parked here.
+   *
+   * Something has to happen to this promise, and the two candidates are not equal:
+   *
+   *   - Resolve it with `{ kind: 'abort', detail: <something> }`. Unwinding then goes through
+   *     the one path every other ending uses, which is genuinely worth having. But it records
+   *     an operator decision that no operator made, with a detail no participant wrote, at the
+   *     exact site whose job is to represent what a human chose. This repository refuses that
+   *     trade in `rotateImplementer` — "composing one here would put text in the record that no
+   *     participant wrote" — and the reason is the same one here: a `Decision` is evidence about
+   *     a person, and a manufactured one is indistinguishable from a real one afterwards.
+   *   - Leave it unresolved and settle the handle around it. Fewer moving parts at the instant
+   *     of teardown, but the `#halt` frame beneath it is parked for the life of the process,
+   *     holding the relay and its participants, and `#loop`'s `finally` never runs.
+   *
+   * So: `undefined`, which is neither. It says the only true thing — the run ended and no
+   * decision was taken — and it says it in a shape a caller cannot mistake for a choice. The
+   * loop unwinds through the same code an abort unwinds through, and `Relay#halt` reads the
+   * absence as what it is: it returns the outcome the run ALREADY has rather than deriving a
+   * new one, emits no `resume`, and arms no answer against the evidence nobody looked at.
+   *
+   * Widening `Decision` with a third variant would have done the same job and cost more: every
+   * front end that switches on a decision would have to handle a case that is not one.
+   */
+  pauseAt(pause: Omit<RunPause, 'at'>): Promise<Decision | undefined> {
+    // ENDED IS TERMINAL, and this is the line that makes it so.
+    //
+    // The loop is not stopped by `settle()`, only unblocked by it. `relay.stop()` can settle a
+    // run that is between awaits rather than at a pause, and the loop then carries on to
+    // whichever halt site was next -- a turn that came back `timed_out`, a rotation candidate --
+    // and asks for a pause on a handle whose run is over. Without this, that call would flip
+    // `state` back to `paused` on an ended run, REOPEN the suspension ledger that `settle()` had
+    // just closed so `suspendedMs` grew for the life of the object again, hand a fresh pause to
+    // `untilPause()` watchers who were told the run had ended, and then park forever because
+    // nothing was ever going to answer it. That is every symptom of #142 restored one halt site
+    // later, and #112's figures untrue again with it.
+    //
+    // Returning the no-decision result rather than throwing: the caller is the loop unwinding
+    // past an ending it has not noticed yet, which is ordinary, and it already knows what to do
+    // with an absent decision. Nothing is installed and nothing is notified, so a handle that has
+    // ended cannot be observed as anything else afterwards.
+    if (this.#state === 'ended') return Promise.resolve(undefined)
     const full = { ...pause, at: Date.now() }
     // The suspension starts HERE, at the same instant the state flips, and on the ledger's own
     // clock rather than on `full.at` -- the pause is a document with a wall-clock timestamp on
@@ -639,7 +697,7 @@ export class RunHandle {
       for (const s of waiting) s.reject(err)
     }
 
-    return new Promise<Decision>((resolve) => {
+    return new Promise<Decision | undefined>((resolve) => {
       this.#decide = resolve
     })
   }
@@ -697,15 +755,21 @@ export class RunHandle {
     return true
   }
 
-  /** Record the terminal outcome and wake everyone waiting on anything. */
+  /**
+   * Record the terminal outcome and wake everyone waiting on anything.
+   *
+   * FIRST OUTCOME WINS, and every caller depends on that: `relay.stop()` settles from one side
+   * while `#loop` settles from the other, and a run has one ending however those two interleave.
+   * A `done` run tidied up afterwards must not come to be recorded as `stopped`, and a run
+   * stopped mid-turn must not be recorded as the transport fault its own teardown provoked.
+   */
   settle(outcome: RunOutcome): void {
     if (this.#outcome) return
     this.#outcome = outcome
     this.#state = 'ended'
-    // The fourth exit, and the one a ledger kept at the halt site would have missed:
-    // `relay.stop()` ends a run WITHOUT resolving the pause it is sitting in, so `#halt` never
-    // returns and never closes anything. Left open, the total would grow for as long as the
-    // object lived and a report read afterwards would claim a suspension still running.
+    // The fourth exit, and the one a ledger kept at the halt site would have missed: a run can be
+    // ended while it is still parked at a pause. Left open, the total would grow for as long as
+    // the object lived and a report read afterwards would claim a suspension still running (#112).
     this.#resumeClock()
     this.#pause = undefined
     this.#waitMemory.clear()
@@ -715,5 +779,11 @@ export class RunHandle {
     const settled = this.#settled
     this.#settled = []
     for (const s of settled) s.resolve(outcome)
+    // Last, and after `#outcome` is set: the loop parked in `pauseAt` resumes on this, and the
+    // first thing it does is read the outcome it is unwinding towards. `undefined` because
+    // nobody decided anything -- the run ended underneath the question. See `pauseAt` (#142).
+    const decide = this.#decide
+    this.#decide = undefined
+    decide?.(undefined)
   }
 }
