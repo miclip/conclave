@@ -324,7 +324,7 @@ const DECLARED: Record<string, string> = {
     'Authority routing (#56, D2) sends implementer_unanswered to the advisor before the operator, ' +
     'so a default run interrupts the human less than today. Real change at N=1, an improvement, ' +
     'declared rather than discovered. The pause reason exists at src/relay/run.ts:52 and the halt ' +
-    'that raises it is at src/relay/relay.ts:5293.',
+    'that raises it is at src/relay/relay.ts:5447.',
   'status.pause.resolution':
     'Classifying unresolved conditions on both axes (#56, D2) added `resolution` to every RunPause ' +
     '(src/relay/run.ts:244), so `conclave status --json` on a paused default run now carries ' +
@@ -606,7 +606,7 @@ const DECLARED: Record<string, string> = {
     'participant and nobody else, and a conclave or workstream scope samples NOBODY. It used to ' +
     'read pause.verdictOf.participant and fall back to scanning participants by rank for ' +
     'implementers — and verdictOf is set at exactly two halt sites, both turn_incomplete ' +
-    '(src/relay/relay.ts:5046, src/relay/relay.ts:5430), so every other pause reached that rank ' +
+    '(src/relay/relay.ts:5200, src/relay/relay.ts:5584), so every other pause reached that rank ' +
     'scan. WHAT CHANGES AT N=1: on the three pauses whose scope names no participant — ' +
     'operator_requested (/pause), advisor_escalated, authority_conflict — the lone implementer ' +
     'child used to be sampled, so a child that measured busy REFUSED the resume and wrote ' +
@@ -615,15 +615,15 @@ const DECLARED: Record<string, string> = {
     'safety guard rather than presented as a pure N>1 fix. The reason it is the right narrowing: ' +
     'the guard exists because continuing SENDS into a child that cannot accept input mid-turn, ' +
     'and on those three pauses the child it measured is not the child being sent to — resuming ' +
-    'advisor_escalated sends to the ADVISOR (src/relay/relay.ts:5145), resuming ' +
+    'advisor_escalated sends to the ADVISOR (src/relay/relay.ts:5299), resuming ' +
     'authority_conflict queues a constraint that is delivered by the dispatcher on the next ' +
     'dispatch to a free seat, and operator_requested is consumed at an advisor-turn boundary ' +
     'whose own evidence line says no turn is in flight. WHAT IS GIVEN UP, named rather than ' +
     'discovered: the advisor_escalated halt raised when a seat’s turn completed and its report ' +
-    'could not be read (src/relay/relay.ts:5342-5344) is conclave-scoped by design, yet the useful ' +
+    'could not be read (src/relay/relay.ts:5496-5498) is conclave-scoped by design, yet the useful ' +
     'question there is whether THAT seat is still writing; at N=1 the rank scan sampled it by ' +
     'coincidence of it being the only implementer, and now nothing does. The pause still carries ' +
-    'that seat’s liveness evidence from the halt site (src/relay/relay.ts:5354-5356), which is what ' +
+    'that seat’s liveness evidence from the halt site (src/relay/relay.ts:5508-5510), which is what ' +
     'the operator actually reads; restoring a refusal there is a change to that halt’s scope, ' +
     'not to the guard. AT N>1 the old behaviour was unsafe in the other direction: a pause about ' +
     'one seat could be refused because a DIFFERENT seat was mid-turn, and the operator was told ' +
@@ -1222,9 +1222,43 @@ const DECLARED: Record<string, string> = {
     '(src/relay/dryRunPlan.ts) and asserted line for line in ' +
     'src/relay/frontEndParity.test.ts; that it touches nothing is asserted positively, by ' +
     'comparing the project tree before and after, in src/repl/sessionDryRun.test.ts.',
+  'the report’s flags are reconciled at the close, and supersededFlags joins them (#131)':
+    'NO FLAG IS ADDED and the pinned flag sets below are untouched. What changes is the run ' +
+    'report and the summary line a DONE run prints, on the DEFAULT run, which is why this is ' +
+    'declared rather than left to be found. Every FLAG: line was lifted as it went past and the ' +
+    'closing question’s answer was then APPENDED to the same list with nothing compared, so a ' +
+    'seat that answered the closing question honestly -- restating what still stood -- inflated ' +
+    'the count by restating it. The closing answer is now a RECONCILIATION: the seat is shown ' +
+    'its own outstanding flags, asked which still stand, and the ones it does not restate are ' +
+    'marked superseded. Two surfaces move. `flags[]` gains `restated`, the later routing-log ' +
+    'positions where the same seat raised the same item verbatim, because the duplicate is ' +
+    'collapsed into one entry and collapsing must not be lossy. And the report gains ' +
+    '`supersededFlags`, EMPTY on a run that superseded nothing -- so it contributes no element ' +
+    'path to the pinned shape, and the default run’s `flags` array is the same array it was. ' +
+    'Superseding is not deleting, and the separate array is the reason: `NONE` from a seat that ' +
+    'fixed everything and `NONE` from a seat that ran out of context are the same four ' +
+    'characters, so a summary that simply went quiet on the second one would be a worse failure ' +
+    'than the noisy one #131 is about. `flagSummary()` prints the retired items under their own ' +
+    'heading for the same reason. REPORT_SCHEMA is not bumped: no key was removed or renamed, and ' +
+    '`flags` still lists what is unresolved, which is what its own doc comment claimed before ' +
+    'this change and what it now does accurately. An independent review argued for a bump on ' +
+    'the opposite reading -- that a consumer built against the OBSERVED behaviour, where ' +
+    'nothing was ever retired and so `flags` held everything raised, will now silently read a ' +
+    'retired item as never raised. That risk is real and the distinction is worth having on ' +
+    'the record: the documented contract did not change, the observable one did. It is not ' +
+    'bumped because no such consumer exists -- this report is read by this repository and by ' +
+    'operators, and `supersededFlags` carries the retired set for anyone who wants it. A ' +
+    'bump is the right answer the day something outside this tree parses it. What the relay ' +
+    'must NOT do is decide from ' +
+    'the words whether a flag was resolved; that judgement belongs to the participant, and ' +
+    'guessing it would be the same class of error as the defect. The only machine test applied ' +
+    'is textual identity from the same participant, which is why the closing question asks for ' +
+    'the restatement word for word. Preserved on failure: an empty answer, a dead session or a ' +
+    'send that throws reconciles nothing and every historical flag stands. Driven through a real ' +
+    'relay across several turns in src/relay/flagReconciliation.test.ts.',
 }
 
-test('DECLARED contains exactly the routing, pause-resolution, attribution, ceiling-flag, seat-flag, seat-status, launch-record, flag-reader, integration-check, per-seat-rotation, reviewer, resume-guard, mixed-liveness, timestamped-liveness, model-validation, executable-preflight, compaction-survival, rotation-reporting, send-precondition, process-tree-liveness, ceiling-reporting, record-heartbeat, rotation-intent and console-dry-run entries', () => {
+test('DECLARED contains exactly the routing, pause-resolution, attribution, ceiling-flag, seat-flag, seat-status, launch-record, flag-reader, integration-check, per-seat-rotation, reviewer, resume-guard, mixed-liveness, timestamped-liveness, model-validation, executable-preflight, compaction-survival, rotation-reporting, send-precondition, process-tree-liveness, ceiling-reporting, record-heartbeat, rotation-intent, console-dry-run and flag-reconciliation entries', () => {
   assert.deepEqual(Object.keys(DECLARED), [
     'implementer_unanswered -> advisor',
     'status.pause.resolution',
@@ -1251,6 +1285,7 @@ test('DECLARED contains exactly the routing, pause-resolution, attribution, ceil
     'the session record beats, retries, and says when it has stopped moving (#126)',
     'why each rotation happened, in the run report and in status --json (#75)',
     '--dry-run on the console, reversing a written parity decision (#134)',
+    'the report’s flags are reconciled at the close, and supersededFlags joins them (#131)',
   ])
 })
 
@@ -1599,7 +1634,7 @@ async function provokeReviewBlocked(repo: string): Promise<{ relay: Relay; run: 
  * Drive a real relay into one condition and return the pause it raised.
  *
  * The provocations are the ones `resolution.test.ts`'s own `provoke` already uses, deliberately:
- * the same triggers reaching the same single halt site (src/relay/relay.ts:3069), where the
+ * the same triggers reaching the same single halt site (src/relay/relay.ts:3223), where the
  * classification is computed by production `resolutionFor` from the subject the caller passed.
  * Nothing here writes a `RunPause`.
  *
@@ -1892,8 +1927,8 @@ test('default run works in the run cwd and creates no worktree', async () => {
   }
 
   // The relay CLI passes process.cwd() as the run cwd: bin/conclave.ts:1248-1250.
-  // The relay hands that same cwd to each participant adapter: src/relay/relay.ts:1796-1802.
-  // The cwd getter simply returns the option: src/relay/relay.ts:1626-1628.
+  // The relay hands that same cwd to each participant adapter: src/relay/relay.ts:1818-1824.
+  // The cwd getter simply returns the option: src/relay/relay.ts:1648-1650.
   assert.match(relay, /cwd:\s*process\.cwd\(\)/, 'relay block must start in process.cwd')
   // Both creation sites now pass a NAMED context object rather than an inline literal, because
   // the same object composes the launch args that get recorded -- see
@@ -1936,7 +1971,7 @@ test('default run works in the run cwd and creates no worktree', async () => {
 
   // A default run with no subagents must not create any git worktree. The relay only samples
   // the worktree list for its subagent-use report: src/relay/subagents.ts:68 defines
-  // worktreePaths, and src/relay/relay.ts:2362-2363, :2622 and :4554 read it.
+  // worktreePaths, and src/relay/relay.ts:2482-2483, :2776 and :4708 read it.
   // Prove it by exercising the run in a real temporary repository.
   const repo = mkdtempSync(join(tmpdir(), 'conclave-default-'))
   try {
@@ -2107,12 +2142,17 @@ test('the default relay --json report emits exactly these keys at every depth', 
   assert.deepEqual(
     shapeOf(report),
     {
-      '': 'build, cwd, deadlines, durationMs, endedAt, flags, goal, messages, operator, outcome, participants, restricted, rotation, schema, startedAt, subagents',
+      '': 'build, cwd, deadlines, durationMs, endedAt, flags, goal, messages, operator, outcome, participants, restricted, rotation, schema, startedAt, subagents, supersededFlags',
       deadlines: 'configuredAbsoluteMs, participants',
       'deadlines.participants[]': 'absolute, agent, id, silence',
       'deadlines.participants[].absolute': 'status',
       'deadlines.participants[].silence': 'status',
-      'flags[]': 'participant, seq, text',
+      // `restated` is the declared addition; see DECLARED['the report’s flags are reconciled
+      // at the close, and supersededFlags joins them (#131)']. EMPTY on a default run -- the
+      // seat raised its one item once -- so like `launch.args` it contributes no element path,
+      // and what is pinned is that the key is present and has grown no shape underneath it.
+      // `supersededFlags` above is empty for the same reason and contributes no path at all.
+      'flags[]': 'participant, restated, seq, text',
       outcome: 'detail, reason',
       'participants[]': 'agent, compactionGeneration, id, launch, rank, role, sessionId, turns',
       // The declared addition; see DECLARED['per-seat launch args and model ...']. `args` is

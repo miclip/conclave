@@ -165,8 +165,27 @@ export interface RunReport {
    * a subagent that only reads is explicitly allowed the shared directory.
    */
   subagents: { delegated: boolean; worktreesCreated: string[] }
-  /** What participants said was left unresolved. Empty is a claim, not a gap. */
-  flags: { participant: string; text: string; seq: number }[]
+  /**
+   * What participants say is left unresolved. Empty is a claim, not a gap.
+   *
+   * Reconciled, not accumulated (#131): a seat is shown its own flags when the advisor calls
+   * the work done and asked which still stand, and only those are here. `restated` carries the
+   * later routing-log positions where the same seat raised the same item verbatim, because a
+   * concern raised on three turns is one outstanding item and three data points.
+   */
+  flags: { participant: string; text: string; seq: number; restated: number[] }[]
+  /**
+   * Raised during the run, then not restated when the seat that raised it was asked.
+   *
+   * A separate array rather than a status field on `flags`, so that the field an operator
+   * already reads as "what is unresolved" keeps meaning exactly that. Present and empty on
+   * every run that superseded nothing, per this file's second rule.
+   *
+   * These are RETIRED, not disproved. `NONE` from a seat that fixed everything and `NONE`
+   * from a seat that had run out of context are the same four characters, so the record keeps
+   * what was retired and by which message -- superseded is not the same as never-raised.
+   */
+  supersededFlags: { participant: string; text: string; seq: number; supersededBy: number; restated: number[] }[]
   /** Restricted asides and what was traced to each, with how well it was supported. */
   restricted: {
     seq: number
@@ -263,7 +282,23 @@ export async function runReport(relay: Relay, input: ReportInput): Promise<RunRe
       records: relay.rotationRecords(),
     },
     subagents: relay.subagentUse(),
-    flags: relay.flags.map((f) => ({ participant: f.participant, text: f.text, seq: f.seq })),
+    // Through the relay's own views, which apply the reconciliation. Splitting `relay.flags`
+    // here would be a second answer to "is this still outstanding", and the rule at the top of
+    // this file is that nothing is re-derived. The arrays are rebuilt per entry either way, so
+    // a caller keeping the report cannot reach the flags the relay still owns.
+    flags: relay.outstandingFlags().map((f) => ({
+      participant: f.participant,
+      text: f.text,
+      seq: f.seq,
+      restated: [...(f.restated ?? [])],
+    })),
+    supersededFlags: relay.supersededFlags().map((f) => ({
+      participant: f.participant,
+      text: f.text,
+      seq: f.seq,
+      supersededBy: f.supersededBy,
+      restated: [...(f.restated ?? [])],
+    })),
     restricted: relay.restrictedOrigins.map((o) => ({
       seq: o.seq,
       informed: o.informed,

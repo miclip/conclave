@@ -494,7 +494,7 @@ for (const reason of Object.keys(EXPECTED) as RunPause['reason'][]) {
 
 test('an advisor turn that ends badly scopes to the advisor, not to the implementer', async (t) => {
   // The one place the scope is not obvious. `turn_incomplete` is raised for either seat --
-  // `src/relay/relay.ts:5042` for the advisor, `:5426` for the implementer -- and a scope
+  // `src/relay/relay.ts:5196` for the advisor, `:5580` for the implementer -- and a scope
   // read off "the implementer" rather than off the seat would be silently wrong for half of
   // them, in a way no N=1 run with one implementer would ever reveal.
   const dir = repo()

@@ -897,6 +897,28 @@ export interface RelayFlag {
   text: string
   /** Routing-log position of the turn that raised it, so it can be found in context. */
   seq: number
+  /**
+   * The closing statement that retired this, when one did. Absent while it still stands.
+   *
+   * SUPERSEDED IS NOT NEVER-RAISED, and both have to remain readable off the record (#131).
+   * A seat is shown its own accumulated flags at the close and asked which still stand; the
+   * ones it does not restate stop being outstanding, because the seat is the only thing in
+   * this system that can make that judgement. But a seat that answers `NONE` because it was
+   * lazy or truncated looks exactly like a seat that fixed everything, so the item is retired
+   * rather than deleted, and `flagSummary` still prints it under its own heading. A summary
+   * going quiet is a worse failure than a summary being noisy.
+   */
+  supersededBy?: number
+  /**
+   * Later routing-log positions where the same participant raised this same text verbatim.
+   *
+   * The duplicate is collapsed rather than counted twice -- three turns of "conformance.sh
+   * remains unrun" is one unresolved item, and a summary that says `3 flagged items carried`
+   * over the top of it is telling an operator something false about how much is outstanding.
+   * The positions are kept because collapsing must not be lossy: a flag re-raised on three
+   * separate turns is a different fact from one raised once, even though the count is the same.
+   */
+  restated?: number[]
 }
 
 /** The marker participants are told to use. Line-initial, so prose about it does not match. */
@@ -2259,6 +2281,47 @@ export class Relay {
   readonly flags: RelayFlag[] = []
 
   /**
+   * Raise a flag, collapsing an exact duplicate from the same participant into the first one.
+   *
+   * "Exact" is textual identity after trimming, which both callers have already done, and it
+   * is deliberately the ONLY test applied: deciding from the words whether two differently
+   * phrased flags are the same concern -- or whether a flag's subject has since been fixed --
+   * is the judgement this whole mechanism exists to route to a participant, and guessing it
+   * here would be the same class of error as the defect in #131. Verbatim repetition is the
+   * one case a machine can settle, and the closing question asks for the restatement verbatim
+   * precisely so that it can.
+   *
+   * A duplicate of an already-SUPERSEDED flag is a new flag, not a restatement of a retired
+   * one: it means the concern came back after a seat said it was done with it, and merging
+   * the two would quietly restore an item the record shows as closed.
+   */
+  #raiseFlag(participant: string, text: string, seq: number): void {
+    const standing = this.flags.find(
+      (f) => f.participant === participant && f.text === text && f.supersededBy === undefined,
+    )
+    if (standing) {
+      standing.restated = [...(standing.restated ?? []), seq]
+      return
+    }
+    this.flags.push({ participant, text, seq })
+  }
+
+  /** What is still outstanding: everything raised that no closing statement has retired. */
+  outstandingFlags(): RelayFlag[] {
+    return this.flags.filter((f) => f.supersededBy === undefined)
+  }
+
+  /**
+   * Raised, then not restated when the seat that raised it was asked what still stands.
+   *
+   * Narrowed on the way out so a consumer does not have to defend against a `supersededBy`
+   * that the filter has already established is there.
+   */
+  supersededFlags(): (RelayFlag & { supersededBy: number })[] {
+    return this.flags.filter((f): f is RelayFlag & { supersededBy: number } => f.supersededBy !== undefined)
+  }
+
+  /**
    * The implementer's guaranteed last word, asked once when the advisor says DONE.
    *
    * A run used to end on the advisor's verdict alone, with the implementer's final report
@@ -2279,6 +2342,28 @@ export class Relay {
    * Anything other than NONE is carried, structured or not. A participant that answers in
    * prose is telling us something; discarding it for lacking a prefix would repeat the exact
    * failure this exists to fix.
+   *
+   * It is also the RECONCILIATION, which is what #131 is about. Every `FLAG:` line raised
+   * during the run was lifted as it went past, and this question's answer was then appended
+   * to the same list with nothing compared: a conscientious seat that answered honestly --
+   * restating the two things that still stood -- ended the run with four flagged items, two of
+   * them the same two. The count an operator reads off the last three lines of a DONE was
+   * inflated by the very diligence it was meant to reward.
+   *
+   * So the seat is SHOWN its own accumulated flags here and asked which of them still stand.
+   * That is the same question it was already being asked, made answerable: it is the only
+   * participant in a position to know that the thing it flagged on turn three was fixed on
+   * turn nine, and nothing outside it can read that off the text without guessing.
+   *
+   * What the answer does NOT do is delete. The items it does not restate are marked
+   * superseded and stay in the record and in the summary under their own heading, because
+   * `NONE` from a seat that fixed everything and `NONE` from a seat that ran out of context
+   * are the same four characters. Replacement would make the second one silent, and silence
+   * is the failure mode this whole mechanism was built against.
+   *
+   * And it reconciles only on an answer. An empty reply, a dead session, a send that throws --
+   * none of those is a judgement that anything was resolved, so every historical flag survives
+   * them untouched.
    */
   async #closingQuestion(impl: RelayParticipant): Promise<void> {
     // Nothing to ask if it never worked. A relay that ended before the implementer's first
@@ -2295,6 +2380,17 @@ export class Relay {
     if (last && last.verdict.outcome !== 'completed') return
     if (impl.session.state !== 'running') return
 
+    // Read BEFORE the question is asked, because asking it is what changes them: `#exchange`
+    // lifts the answer's own FLAG: lines as the turn goes past, so after the await this list
+    // no longer says what the seat was carrying when it was asked.
+    const carried = this.flags.filter((f) => f.participant === impl.id && f.supersededBy === undefined)
+    // How many times each was restated before the question. A restatement DURING the closing
+    // turn is how `#raiseFlag` records a verbatim repeat, and it is the signal that the seat
+    // said this one still stands -- but only the growth is, since a flag raised twice earlier
+    // arrives here with a non-empty list already.
+    const restatementsBefore = new Map(carried.map((f) => [f, (f.restated ?? []).length]))
+    const flagsBefore = this.flags.length
+
     try {
       const reply = await this.#exchange(
         impl,
@@ -2302,6 +2398,14 @@ export class Relay {
           'Before it does: is anything unresolved, unverified, or unanswered? A test you did ' +
           'not run, a belief you took from a comment rather than confirmed, a question you ' +
           'asked that was not answered, or a disagreement with how this was closed.\n\n' +
+          (carried.length === 0
+            ? ''
+            : 'You raised these during the run:\n' +
+              carried.map((f) => `  [msg ${f.seq}] ${f.text}`).join('\n') +
+              '\n\nThat list is now yours to settle: your answer REPLACES it. Restate — ' +
+              'word for word, so it is recognised as the same item rather than counted twice ' +
+              '— only the ones that STILL stand. Leave out any that have since been resolved. ' +
+              'Add anything not on the list that has not been settled.\n\n') +
           'Reply with one FLAG: line per item, or exactly NONE if there is nothing. This is ' +
           'carried into the run summary; it does not reopen the work.',
       )
@@ -2311,20 +2415,36 @@ export class Relay {
       // instruction -- it is the participant's closing statement to the RECORD. Filing it as a
       // report made it the last thing `kind === 'report'` queries returned, which is how the
       // relayed-report assertions started reading it instead of the actual last report.
-      this.#record({
+      const closing = this.#record({
         from: impl.id,
         fromRank: 'implementer',
         to: [],
         kind: 'note',
         text: `closing statement: ${prose || '(no reply)'}`,
       })
-      if (!prose || /^NONE\b/i.test(prose)) return
+      // Silence is not a judgement. A seat that said nothing has not told us anything was
+      // resolved, so its history stands exactly as it was.
+      if (!prose) return
 
+      // Which of the carried flags the seat restated verbatim. `#raiseFlag` collapsed each of
+      // those into the flag it repeats rather than pushing a second copy, so they are found by
+      // the growth in `restated` and not in the tail of `flags`.
+      const restated = carried.filter((f) => (f.restated ?? []).length > (restatementsBefore.get(f) ?? 0))
       // `#exchange` already lifted any FLAG: lines. Anything else is carried whole rather than
-      // dropped for want of a prefix.
-      const already = this.flags.filter((f) => f.seq >= this.log.length - 1)
-      if (already.length === 0) {
-        this.flags.push({ participant: impl.id, text: prose, seq: this.log.length })
+      // dropped for want of a prefix (#38) -- but only when the answer really was unstructured.
+      // A bare NONE is structured, and a verbatim restatement lifted a line that `#raiseFlag`
+      // then merged, so neither is prose to be salvaged.
+      const lifted = this.flags.length > flagsBefore || restated.length > 0
+      if (!lifted && !/^NONE\b/i.test(prose)) {
+        this.#raiseFlag(impl.id, prose, closing.seq)
+      }
+
+      // The reconciliation. Everything this seat was carrying that it did not restate is
+      // retired against this statement -- not deleted, because `flagSummary` and the report
+      // both still show it, labelled with what retired it and when.
+      for (const f of carried) {
+        if (restated.includes(f)) continue
+        f.supersededBy = closing.seq
       }
     } catch (err) {
       // A closing question is worth one turn, never a verdict. If the send fails anyway --
@@ -2366,11 +2486,45 @@ export class Relay {
     }
   }
 
-  /** Lines naming everything left unresolved. Empty when there is nothing to carry. */
+  /**
+   * Lines naming everything left unresolved. Empty when there is nothing to carry.
+   *
+   * Two sections, and the second one is the point of #131. What is OUTSTANDING is what the
+   * seats that raised it still say is outstanding, so a run whose implementer flagged three
+   * things and then reported one still standing says `1 flagged item carried` -- the count is
+   * the seat's own arithmetic rather than the transcript's.
+   *
+   * What was superseded is printed under it anyway. Retiring a flag on a seat's say-so is the
+   * best signal available and it is still only a claim; an operator who can see `raised, then
+   * not restated` can go and check, and one who sees nothing cannot. This is the section that
+   * keeps a truncated `NONE` from reading exactly like a clean run.
+   */
   flagSummary(): string[] {
-    if (this.flags.length === 0) return []
-    const head = `${this.flags.length} flagged item${this.flags.length === 1 ? '' : 's'} carried:`
-    return [head, ...this.flags.map((f) => `  ${f.participant} [msg ${f.seq}] — ${f.text}`)]
+    const outstanding = this.outstandingFlags()
+    const superseded = this.supersededFlags()
+    if (outstanding.length === 0 && superseded.length === 0) return []
+
+    const line = (f: RelayFlag): string => {
+      // Every position it was raised at, not just the first. A concern raised on three turns
+      // is one item and three data points, and the collapse must not hide the second fact.
+      const again = (f.restated ?? []).length > 0 ? ` (raised again at msg ${(f.restated ?? []).join(', ')})` : ''
+      return `  ${f.participant} [msg ${f.seq}] — ${f.text}${again}`
+    }
+
+    const lines: string[] = []
+    if (outstanding.length > 0) {
+      lines.push(`${outstanding.length} flagged item${outstanding.length === 1 ? '' : 's'} carried:`)
+      lines.push(...outstanding.map(line))
+    }
+    if (superseded.length > 0) {
+      const n = `${superseded.length} earlier item${superseded.length === 1 ? '' : 's'}`
+      lines.push(
+        `${outstanding.length === 0 ? 'nothing outstanding, but ' : ''}${n} superseded at the close ` +
+          `(raised, then not restated when the seat was asked what still stands):`,
+      )
+      lines.push(...superseded.map(line))
+    }
+    return lines
   }
 
   /** One line an operator can read to know whether the detector was live and what it saw. */
@@ -2783,7 +2937,7 @@ export class Relay {
       }
     }
     for (const text of extractFlags(prose)) {
-      this.flags.push({ participant: p.id, text, seq: this.log.length })
+      this.#raiseFlag(p.id, text, this.log.length)
     }
     return { prose, end, unsettled, emittedSinceSend: p.events.length - before, emittedBefore: before, changedDuringTurn: dirtyPaths(turnRoot).filter((f) => !treeBeforeTurn.has(f)) }
   }
@@ -5876,6 +6030,19 @@ export class Relay {
       // array both objects now share -- the old session's reader retires itself on its
       // next event, because `#attach` checks that it still owns `p.session`.
       audition.events.unshift(...impl.events)
+      // Flags raised while the replacement was AUDITIONING were recorded against
+      // `<seat>~replacement`, because `#raiseFlag` stores whichever id the participant had at
+      // the time. Rewriting the object's id below does not move them, and the closing question
+      // selects a seat's flags by the stable id -- so without this they are never shown to the
+      // seat, never superseded, and if the seat happens to restate one it becomes a SECOND
+      // outstanding entry. That is #131's inflated-duplicate defect reappearing by another
+      // route, inside the change that fixes it.
+      //
+      // Rewritten rather than filtered at the read site, for the reason the id is rewritten at
+      // all: an audition that is promoted IS this seat, retrospectively, and every other record
+      // of it already says so. Found by an independent review of this change, not by a test --
+      // there was none for a flag raised during an audition, and there is one now.
+      for (const f of this.flags) if (f.participant === audition.id) f.participant = impl.id
       audition.id = impl.id
       impl.session = result.replacement
       impl.events = audition.events
