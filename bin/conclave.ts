@@ -1136,6 +1136,78 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
       say(`  permission prompts bypassed for ${[...new Set(bypassing)].join(', ')} — per ${CONFIG_RELATIVE}`)
     }
 
+    // Every seat resolved before anything is written, so a dry run answers the argv on its own
+    // merits and a plan is only ever printed for a run that could actually happen (#136). A
+    // plan naming a seat no registry can fill is the dry run failing at its only job, and the
+    // operator would find out when they dropped the flag -- which is exactly the moment the
+    // flag exists to come before. `session` has refused this since #130; relay is what moved.
+    //
+    // It THROWS rather than writing its own refusal, so the operator gets the registry's own
+    // sentence -- `unknown agent 'nope'. Registered agents: ...` -- the same one relay produced
+    // before, just without hooks, the trust probe and the run log happening first.
+    //
+    // `leadSpec` is hoisted so the object validated here is the object handed to `Relay.start`
+    // below; the seat checked and the seat launched cannot drift.
+    const leadSpec = { id: 'advisor', agent: lead, role: 'advisor' as const, ...(leadArgs.length > 0 ? { args: leadArgs } : {}) }
+    for (const spec of [leadSpec, ...implSpecs, ...(reviewerSpec ? [reviewerSpec] : [])]) {
+      registry.resolve(spec)
+    }
+
+    // The existence question only, and it belongs above the dry run for the reason #130 put
+    // it above the console's lock: a path that is not there will not become there because the
+    // command was about to start something, so refusing it is an answer to the argv alone.
+    const resumeFrom = flag('resume', '')
+    if (resumeFrom && !runLogExists(resumeFrom)) {
+      console.error(`conclave: no run log at ${resumeFrom}`)
+      return 1
+    }
+
+    // What stops this run, above the rotation line rather than after it, because these are the
+    // lines that describe the LAUNCH and rotation is the last of them -- the same order the
+    // console banner reads in. #119 is a relay that ended at an advisor budget of 8, the
+    // default, while `--max-turns 40` sat in its argv bounding something else and left 488
+    // uncommitted insertions that survived only because a human was watching. The flag typed
+    // was valid and the flag meant was absent, so nothing anywhere could have said so. This
+    // line could have, before any work existed to lose.
+    say(`  ceilings: ${ceilingSummary(runCeilings)}`)
+
+    say(
+      checks.length > 0
+        ? `  rotation armed — a degraded implementer will be replaced, verified by: ${checks.map((c) => (typeof c === 'string' ? c : `${c.command} [${c.relevance}]`)).join(', ')}`
+        : '  rotation NOT armed — no --checks, so degradation escalates instead of rotating',
+    )
+
+    if (rest.includes('--dry-run')) {
+      // Everything above this line is resolution: config read, checks parsed, args composed.
+      // Nothing below it is, so this is the last point at which nothing has been spawned.
+      //
+      // Respects --json for the same reason the report does: an agent operator checking what
+      // WOULD run is exactly the caller most likely to be parsing, and handing it prose
+      // because it also passed --dry-run would be the trap this mode exists to avoid.
+      //
+      // Built and rendered by `dryRunPlan` / `dryRunPlanLines`, which the console's own dry run
+      // also calls. The two commands compose their launch arguments in different places -- here,
+      // and inside `runSession` from the config it reads itself -- so the ONE thing that must
+      // not be written twice is the description of the result. See `dryRunPlan.ts`.
+      const plan: DryRunPlanInput = {
+        cwd: process.cwd(),
+        goal,
+        advisor: { agent: lead, args: leadArgs },
+        implementers: implSpecs.map((s) => ({ id: s.id, agent: s.agent, args: s.args ?? [] })),
+        seatsNamed: seatPlan.kind === 'listed',
+        // Opt-in and absent otherwise (#72): a default dry run's document does not gain a
+        // `reviewer` key it never had a reason to carry.
+        ...(reviewerSpec ? { reviewer: { agent: reviewerSpec.agent, args: reviewerSpec.args ?? [] } } : {}),
+        checks,
+      }
+      if (asJson) {
+        console.log(JSON.stringify(dryRunPlan(plan), null, 2))
+      } else {
+        for (const line of dryRunPlanLines(plan)) say(line)
+      }
+      return 0
+    }
+
     // Register before starting, as the console does. `relay` refused at the preflight in a
     // project that had never run Conclave — correctly, but with an instruction where an
     // action belonged, and inconsistently with the other front-end. Registration is a
@@ -1176,20 +1248,16 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
       },
     })
 
-    // What stops this run, above the rotation line rather than after it, because these are the
-    // lines that describe the LAUNCH and rotation is the last of them -- the same order the
-    // console banner reads in. #119 is a relay that ended at an advisor budget of 8, the
-    // default, while `--max-turns 40` sat in its argv bounding something else and left 488
-    // uncommitted insertions that survived only because a human was watching. The flag typed
-    // was valid and the flag meant was absent, so nothing anywhere could have said so. This
-    // line could have, before any work existed to lose.
-    say(`  ceilings: ${ceilingSummary(runCeilings)}`)
-
-    say(
-      checks.length > 0
-        ? `  rotation armed — a degraded implementer will be replaced, verified by: ${checks.map((c) => (typeof c === 'string' ? c : `${c.command} [${c.relevance}]`)).join(', ')}`
-        : '  rotation NOT armed — no --checks, so degradation escalates instead of rotating',
-    )
+    // AFTER installation and the trust probe, and the ordering is the point rather than an
+    // accident of the diff. `--bypass` WRITES a permission mode into the project for this run
+    // and every future one, and the two calls above are the ones most likely to fail on a
+    // machine that has never run this. Applying the mode first would leave that setting behind
+    // on a run that then refused to start -- a consequential change from an invocation that
+    // reported doing nothing, which is #136's own complaint one line further down.
+    //
+    // No longer conditional: the dry run returns above, so `!rest.includes('--dry-run')` would
+    // guard a state that cannot be reached, and a redundant guard is one nobody maintains.
+    if (!applyBypassFlag(rest, say)) return 1
 
     // Recorded continuously into a gitignored directory, because a record written on exit
     // is exactly the record a crash destroys -- and a crash is one of the endings a resume
@@ -1198,51 +1266,11 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
       flag('record', '') || join(process.cwd(), '.conclave', 'runs', `relay-${runStartedAt}.ndjson`)
     const recorder = new RunLogWriter(recordPath)
 
-    const resumeFrom = flag('resume', '')
-    if (resumeFrom && !runLogExists(resumeFrom)) {
-      console.error(`conclave: no run log at ${resumeFrom}`)
-      return 1
-    }
+    // READING it is a different thing from asking whether it is there, and it happens on this
+    // side of the line with the rest of the work a real run does.
     const prior = resumeFrom ? readRunLog(resumeFrom) : []
     if (prior.length > 0) {
       say(`  resuming from ${resumeFrom} — ${prior.length} messages replayed into both seats`)
-    }
-
-    // AFTER the preflight refusals, the goal lint and the dry-run short-circuit, and before
-    // anything is spawned. Writing permissive mode into a project on a run that then refuses
-    // to start -- or that was only ever a dry run -- leaves a consequential setting behind
-    // from an invocation that reported doing nothing.
-    if (!rest.includes('--dry-run') && !applyBypassFlag(rest, say)) return 1
-
-    if (rest.includes('--dry-run')) {
-      // Everything above this line is resolution: config read, checks parsed, args composed.
-      // Nothing below it is, so this is the last point at which nothing has been spawned.
-      //
-      // Respects --json for the same reason the report does: an agent operator checking what
-      // WOULD run is exactly the caller most likely to be parsing, and handing it prose
-      // because it also passed --dry-run would be the trap this mode exists to avoid.
-      //
-      // Built and rendered by `dryRunPlan` / `dryRunPlanLines`, which the console's own dry run
-      // also calls. The two commands compose their launch arguments in different places -- here,
-      // and inside `runSession` from the config it reads itself -- so the ONE thing that must
-      // not be written twice is the description of the result. See `dryRunPlan.ts`.
-      const plan: DryRunPlanInput = {
-        cwd: process.cwd(),
-        goal,
-        advisor: { agent: lead, args: leadArgs },
-        implementers: implSpecs.map((s) => ({ id: s.id, agent: s.agent, args: s.args ?? [] })),
-        seatsNamed: seatPlan.kind === 'listed',
-        // Opt-in and absent otherwise (#72): a default dry run's document does not gain a
-        // `reviewer` key it never had a reason to carry.
-        ...(reviewerSpec ? { reviewer: { agent: reviewerSpec.agent, args: reviewerSpec.args ?? [] } } : {}),
-        checks,
-      }
-      if (asJson) {
-        console.log(JSON.stringify(dryRunPlan(plan), null, 2))
-      } else {
-        for (const line of dryRunPlanLines(plan)) say(line)
-      }
-      return 0
     }
 
     const relay = await Relay.start({
@@ -1250,7 +1278,7 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
       cwd: process.cwd(),
       ...(prior.length > 0 ? { resume: prior } : {}),
       ...(flag('operator', '') === 'agent' ? { operator: 'agent' as const } : {}),
-      lead: { id: 'advisor', agent: lead, role: 'advisor', ...(leadArgs.length > 0 ? { args: leadArgs } : {}) },
+      lead: leadSpec,
       // `implSpecs[0]` IS the seat this used to build by hand: `seatIdFor(0)` is 'implementer'
       // and the args are the same list, so a default invocation hands `Relay.start` the object
       // it always did. The plural key is spread in only when the operator named a seat list.

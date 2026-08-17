@@ -1221,7 +1221,12 @@ const DECLARED: Record<string, string> = {
     'run would not use. The plan itself is rendered for both commands by one module ' +
     '(src/relay/dryRunPlan.ts) and asserted line for line in ' +
     'src/relay/frontEndParity.test.ts; that it touches nothing is asserted positively, by ' +
-    'comparing the project tree before and after, in src/repl/sessionDryRun.test.ts.',
+    'comparing the project tree before and after, in src/repl/sessionDryRun.test.ts. Relay was ' +
+    'the front-end BEHIND on that last claim and caught up in #136: it registered hooks, probed ' +
+    "Codex's trust (which writes the operator's global ~/.codex/config.toml) and opened its run " +
+    'log above its own short-circuit, and it resolved seats below it -- so it described a run it ' +
+    'could not have started while the console refused one. Both now refuse, and the same ' +
+    'positive comparison is made for relay in src/relay/relayDryRun.test.ts.',
   'the report’s flags are reconciled at the close, and supersededFlags joins them (#131)':
     'NO FLAG IS ADDED and the pinned flag sets below are untouched. What changes is the run ' +
     'report and the summary line a DONE run prints, on the DEFAULT run, which is why this is ' +
@@ -1381,7 +1386,7 @@ async function seatsFromSessionCli(): Promise<{ creates: CreateRecord[]; cwd: st
  * The two machine-readable documents a default run actually emits.
  *
  * Both come out of one `relay --json` run in a temporary repository, through the production
- * call sites: the report is what `bin/conclave.ts:1330` prints, and the status record is what
+ * call sites: the report is what `bin/conclave.ts:1358` prints, and the status record is what
  * `recordSession` wrote during that same run, read back by `main(['status', '--json'])` --
  * which resolves the most recent session in `process.cwd()`, so the record has to have been
  * written where an operator would look for it.
@@ -1926,7 +1931,7 @@ test('default run works in the run cwd and creates no worktree', async () => {
     assert.equal(c.cwd, fromCli.cwd, `the session CLI must create ${c.id} in the run cwd`)
   }
 
-  // The relay CLI passes process.cwd() as the run cwd: bin/conclave.ts:1248-1250.
+  // The relay CLI passes process.cwd() as the run cwd: bin/conclave.ts:1276-1278.
   // The relay hands that same cwd to each participant adapter: src/relay/relay.ts:1818-1824.
   // The cwd getter simply returns the option: src/relay/relay.ts:1648-1650.
   assert.match(relay, /cwd:\s*process\.cwd\(\)/, 'relay block must start in process.cwd')

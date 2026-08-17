@@ -303,11 +303,13 @@ function tempRepo(): string {
 /**
  * A registry that knows the named agents and creates nothing without recording it.
  *
- * `opencode` rather than `claude`/`codex` in the dry-run test below, for a reason worth
- * stating: `AGENT_KINDS` is the set that needs hook FILES rendered into a project, and
- * opencode is not in it — so relay's registration and its Codex trust probe are both handed
- * an empty agent list and do nothing. That keeps the test's subject the plan, rather than
- * relay's habit of registering hooks above its own dry run.
+ * `opencode` rather than `claude`/`codex` in the dry-run test below, for a reason that has
+ * since been fixed elsewhere and is kept because it is still the tidier choice: `AGENT_KINDS`
+ * is the set that needs hook FILES rendered into a project, and opencode is not in it — so the
+ * registration and the Codex trust probe are handed an empty agent list whatever order they
+ * are called in. That USED to be what kept this test's subject the plan rather than relay's
+ * habit of registering hooks above its own dry run; #136 moved both below relay's short-circuit
+ * (`src/relay/relayDryRun.test.ts`), so neither front-end reaches them on a dry run now.
  */
 function knownAgents(agents: readonly string[], created: string[]): AgentRegistry {
   const registry = new AgentRegistry()
@@ -351,9 +353,10 @@ test('both front-ends describe the same plan, line for line, from one invocation
   // composition able to disagree with the run it claims to describe. So what is shared is the
   // description -- `dryRunPlan.ts` -- and this asserts the two arrive at the same one.
   //
-  // ONE repository, run twice, because `cwd` is a line of the plan. Session goes first: it
-  // writes nothing, where relay registers hooks and creates `.conclave/runs/` above its own
-  // dry run (see the note in that block).
+  // ONE repository, run twice, because `cwd` is a line of the plan. The order used to matter
+  // -- session wrote nothing where relay registered hooks and created `.conclave/runs/` above
+  // its own dry run -- and since #136 neither front-end writes anything here, so it no longer
+  // does.
   //
   // Every kind of launch argument at once, since composition is where the two could differ:
   // config-derived (`--auto`, from the bypass mode written into .conclave/config.json),
