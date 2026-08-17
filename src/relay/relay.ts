@@ -1300,6 +1300,41 @@ function supersessionOf(
   return { revision: events[i] as RevisionEvent, replacement }
 }
 
+/**
+ * What makes two `turn_incomplete` pauses the same question. See `Relay#incompleteAnswered`.
+ *
+ * A module function rather than a template written twice, because the whole latch turns on the
+ * two spellings agreeing: one built at the arming site and one at the checking site would latch
+ * an answer nothing could ever match, and the failure would be invisible -- the run would simply
+ * go on asking, which is what it does today.
+ */
+function incompleteSignature(
+  outcome: Verdict['outcome'],
+  provenance: readonly { source: string; detail: string }[],
+  reading: LivenessReading,
+): string {
+  // The PROVENANCE is in the key, not just the outcome, and that is not belt and braces.
+  // `timed_out`'s own contract says it means a deadline expired and never says why -- the why is
+  // in the provenance chain, which is also what the pause shows the operator as its evidence.
+  // Keying on the outcome alone collapses two different faults that happen to end a turn the same
+  // way into one question, and answers the second with the first one's answer while the child
+  // still reads `working`. That is the failure this whole latch exists to avoid, reached from
+  // the inside. Raised by an independent review, and pinned by a test that mutates this line.
+  //
+  // Stable enough to match a genuine repeat: these details are categorical sentences, not
+  // timestamps or durations. Where one does carry a value -- a tool name, an abort reason -- a
+  // change in it IS a different situation, and asking again is right.
+  const why = provenance.map((x) => `${x.source}:${x.detail}`).join('|')
+  return `${outcome}/${why}/${reading}`
+}
+
+/** What a `turn_incomplete` pause needs in order to be recognised again. */
+interface IncompleteLatch {
+  seat: RelayParticipant
+  outcome: Verdict['outcome']
+  provenance: readonly { source: string; detail: string }[]
+}
+
 /** A pause in front of a human that rests on a turn verdict, and can therefore go stale. */
 interface VerdictPause {
   handle: RunHandle
@@ -3106,7 +3141,7 @@ export class Relay {
     p: RelayParticipant,
     emittedBefore: number,
     refresh: LivenessRefreshState,
-  ): Promise<{ line: string; sample: ChildLiveness; reading: LivenessReading } | undefined> {
+  ): Promise<{ line: string; sample: ChildLiveness; reading: LivenessReading; emitted: number } | undefined> {
     const pid = p.session.childPid
     if (pid === undefined) return undefined
     try {
@@ -3114,8 +3149,13 @@ export class Relay {
       // Counted NOW against the origin the turn recorded, not carried over from the last
       // reading. Both halves of the line then date from the same moment, which is the rule the
       // `/continue` guard already follows by passing no count at all rather than a stale one.
-      const line = describeLiveness(sample, p.events.length - emittedBefore, refresh)
-      return { line, sample, reading: readingOf(sample) }
+      const emitted = p.events.length - emittedBefore
+      const line = describeLiveness(sample, emitted, refresh)
+      // The count travels with the reading so a caller that has to write the sentence AGAIN can
+      // write the same one. `#suppressedIncomplete` is that caller: it renders this reading with
+      // no refresh state, because a line promising to be re-measured while the pause lasts would
+      // be promising it for a pause that is not being raised.
+      return { line, sample, reading: readingOf(sample), emitted }
     } catch {
       return undefined
     }
@@ -3202,6 +3242,16 @@ export class Relay {
       conflict?: AuthorityConflict
       verdictOf?: { participant: string; endSeq: number }
       superseded?: PauseSupersession
+      /**
+       * Remember the answer, and do not put the same question twice. See `#incompleteAnswered`.
+       *
+       * Only the `turn_incomplete` sites pass it. `seat` is the participant whose session the
+       * answer is about -- the same object `liveness` names, and the latch needs the OBJECT
+       * rather than the id so it can tell an operator who declined from one who rotated and
+       * then resumed. `outcome` is the verdict outcome, which is half the signature; the other
+       * half is the liveness reading, and that is measured below rather than passed in.
+       */
+      latch?: IncompleteLatch
     },
   ): Promise<RunOutcome | undefined> {
     const reason: PauseReason = p.subject.reason
@@ -3227,6 +3277,39 @@ export class Relay {
     // pause passes through, and because the day a `mechanical` authority is wired to a
     // resolver that does not exist, the alternative to throwing is silence.
     actorFor(resolution)
+    // Measured BEFORE the `paused` note, and still only where somebody is attending. The
+    // unattended run pays nothing, exactly as it did when this sat below the branch: `#end`
+    // takes a reason and a detail, and the evidence array never reached it, so a reading taken
+    // for an unattended halt was the better part of a second of `ps` thrown away.
+    //
+    // What moved it up is the latch below, which needs the reading to know whether this is a
+    // question the operator has already answered -- and the note must not say `paused` for a
+    // pause that is then not put. Nothing records between here and there, so the note's place
+    // in the log relative to everything else is unchanged.
+    //
+    // `{ count: 0 }` is the honest opening state now that the sample is only taken where a
+    // refresher will follow it: the line says it is re-measured while the pause lasts, and it
+    // is. Rendering that sentence for a run about to end would have promised updates from a
+    // loop that was never going to exist.
+    const measured =
+      handle && p.liveness
+        ? await this.#measureLiveness(p.liveness.participant, p.liveness.emittedBefore, { count: 0 })
+        : undefined
+    if (handle && p.latch) {
+      if (measured && this.#incompleteAnswered(p.latch, measured.reading)) {
+        this.#suppressedIncomplete(p.latch, measured, p.detail)
+        return undefined
+      }
+      // Seen, and it is not what was answered. The remembered answer is void from HERE, before
+      // the pause is even raised, and this is the ONLY place anything forgets one -- see
+      // `#forgetIncompleteAnswer`. Holding it until the new answer arrives would let a seat
+      // oscillating A -> B -> A match it again on the way back, which is a child behaving oddly
+      // being asked about LESS rather than more.
+      //
+      // An unmeasurable child lands here too, and belongs here: "the character has not changed"
+      // is a claim, and a run that cannot take a reading cannot make it.
+      this.#forgetIncompleteAnswer(p.latch)
+    }
     this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text: `paused (${reason}): ${p.detail}` })
     if (!handle) {
       return this.#end(
@@ -3235,19 +3318,6 @@ export class Relay {
           `to pause at this point and decide instead.`,
       )
     }
-    // Measured AFTER the unattended branch, which is a change and a small improvement. The
-    // three call sites used to sample before calling in, so an unattended run paid the better
-    // part of a second of `ps` and then threw the reading away -- `#end` takes a reason and a
-    // detail, and the evidence array never reached it. Nothing observable is lost: there was
-    // never anywhere for that reading to appear.
-    //
-    // `{ count: 0 }` is the honest opening state now that the sample is only taken where a
-    // refresher will follow it: the line says it is re-measured while the pause lasts, and it
-    // is. Rendering that sentence for a run about to end would have promised updates from a
-    // loop that was never going to exist.
-    const measured = p.liveness
-      ? await this.#measureLiveness(p.liveness.participant, p.liveness.emittedBefore, { count: 0 })
-      : undefined
     const evidence = measured ? [...p.evidence, measured.line] : p.evidence
     // Not awaited yet. `pauseAt` installs the pause and flips the handle to `paused`
     // synchronously, and only the promise it returns is the suspension -- so reading
@@ -3314,6 +3384,11 @@ export class Relay {
     })
     // Set by the line above; nothing runs between the two that could clear it.
     const pause = handle.pause!
+    // Which session is in the seat right now, read before the operator can change it. #118 needs
+    // the same fact for the same reason: an operator who ROTATED and then resumed did not answer
+    // a question about this evidence, they replaced the thing the evidence was about, and
+    // remembering that as an answer would silence the first pause raised against a new session.
+    const answering = p.latch?.seat.session
     this.#stream.emit({ type: 'pause', pause })
     // Started here and stopped in the `finally`, so its lifetime is exactly the suspension.
     // Nothing else in this method may return between the two.
@@ -3335,6 +3410,29 @@ export class Relay {
     // loop can see it; the note is the log's account of the same moment.
     this.#stream.emit({ type: 'resume', pause })
     this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text: `resumed from ${reason}` })
+    // The answer is remembered on the reading the operator was LAST SHOWN, not on the one the
+    // pause opened with. `#refreshPauseLiveness` rewrites that block while they decide, and a
+    // child that went quiet mid-decision is what they answered about -- latching the opening
+    // `working` there would silence a later working pause on the strength of a reading nobody
+    // saw. `#armIncomplete` takes it from there, and remembers nothing but a live child.
+    if (p.latch && p.latch.seat.session === answering) {
+      // The verdict as it stands NOW, not the one the pause opened with. `#trackSupersession`
+      // amends a pause in place while the operator reads it -- a `timed_out` withdrawn and
+      // replaced with `completed`, or with a different fault -- and the answer they gave was
+      // about what they were last shown, exactly as the reading is. Arming the original outcome
+      // let an operator who answered "the turn finished, carry on" arm `timed_out`, so the next
+      // genuine timeout was suppressed on the strength of an answer about a turn that had ended.
+      //
+      // `completed` needs no special case: the check site is only reached for a verdict that did
+      // NOT complete, so a signature built on `completed` can never match and the pause is left
+      // effectively unarmed -- the right answer for an operator told the turn resolved itself.
+      // Raised by an independent review.
+      this.#armIncomplete(
+        p.latch,
+        pause.superseded?.verdict?.outcome ?? p.latch.outcome,
+        pause.liveness?.reading ?? measured?.reading,
+      )
+    }
     return undefined
   }
 
@@ -3897,6 +3995,156 @@ export class Relay {
         `same question is not put again): ${detail}`,
     })
   }
+
+  /**
+   * The same argument, one condition over: a `turn_incomplete` already answered (#107).
+   *
+   * ## What was actually wrong
+   *
+   * A run doing one coherent piece of work raised nine `turn_incomplete` pauses. Every one of
+   * them said `implementer turn ended timed_out (uncertain)` beside a liveness line saying the
+   * child was working; every one of them was answered `/wait` and then `/continue`; and nothing
+   * anywhere remembered that the question had been put. `#verdictPause` looks like the place it
+   * would live and is not -- it exists to match a later revision to a live pause, and it is
+   * cleared the moment the pause resolves.
+   *
+   * ## What identifies "the same question", which is NOT the same turn
+   *
+   * The obvious key is the turn, and it does not work, for two reasons established from the code
+   * rather than assumed:
+   *
+   *   - `endSeq` is a fresh sequence number on every watchdog verdict, so it cannot identify a
+   *     turn across two of them. The issue's own comment thread had already found this.
+   *   - a turn cannot raise two of these anyway. `#halt` stays suspended at `await deciding` for
+   *     the whole life of a pause, and a second watchdog verdict for the same turn arrives
+   *     through `#trackSupersession`, which amends the pause in place. So the nine were nine
+   *     DISTINCT turns of one long piece of work -- and `turnKey` would suppress none of them.
+   *     (It is also optional on `TurnEndEvent`, so an adapter may not supply one at all.)
+   *
+   * What repeats is not a turn, it is a SITUATION, and that is what is remembered. Scoped three
+   * ways, on #118's pattern and for the same reasons:
+   *
+   *   - by SEAT, because an answer about one implementer says nothing about another;
+   *   - by SIGNATURE -- the verdict outcome and the liveness reading, taken whole. `timed_out`
+   *     and `transport_lost` are two different questions; so are `working` and `mixed`, which
+   *     #83 went to some trouble to keep apart and which must not be folded back together here;
+   *   - by SESSION, cleared wherever a replacement takes the seat, because the answer was about
+   *     the session that is now gone.
+   *
+   * ## ONE answer per seat, not a collection of them
+   *
+   * The obvious structure is a set of answered signatures per seat, and it is wrong. A set only
+   * ever grows, so a run that oscillates accumulates permissions and never returns them: after
+   * working, quiet and mixed have each been seen once, every subsequent deadline matches
+   * something and the seat goes silent for the rest of the run. "Asked once" drifts into "never
+   * asks again", by exactly the route that makes it hardest to notice.
+   *
+   * So this holds the CURRENT character and nothing else. Any `turn_incomplete` whose signature
+   * does not match the remembered one invalidates it before pausing -- so A → B → A asks all
+   * three times, which is right on its own terms as well as structurally: a child alternating
+   * between working and quiet is a child behaving oddly, and that is worth MORE of an operator's
+   * attention than one steadily working, not less.
+   *
+   * ## And the half that must NOT be silenced
+   *
+   * Only a reading that reports a live child arms this -- see `#armIncomplete` -- and a quiet or
+   * gone reading actively clears whatever was remembered. Liveness turning from "the child is
+   * working" into "the child is idle or gone" is new information, and it voids a keep-waiting
+   * answer that was given about a live child: an operator who answered `/wait` about a live seat
+   * and then hears nothing when it dies is worse off than one asked nine times. Silence is for
+   * the case where the answer would genuinely be the same, and a dead child is not that case.
+   *
+   * The suppression COUNT is not reset by any of this. It is cumulative for the session, because
+   * it answers "how many times did this run decline to interrupt me", and a counter that restarted
+   * whenever the latch re-armed would understate exactly the runs where it mattered most.
+   *
+   * Deliberately NOT a policy flag and NOT a standing answer the operator types. The issue offers
+   * `/wait auto` as a third shape; a flag would make this the operator's job to configure, and
+   * the thing being fixed is a question with no decision content, which the run can see for
+   * itself.
+   */
+  #incompleteAnswered(latch: IncompleteLatch, reading: LivenessReading): boolean {
+    return this.#incompleteAnswers.get(latch.seat.id) === incompleteSignature(latch.outcome, latch.provenance, reading)
+  }
+
+  /**
+   * Forget this seat's remembered answer, because the situation it was about no longer holds.
+   *
+   * Called at the OBSERVATION and not at the arming, which is the whole of the current-character
+   * rule: by the time a pause is raised the run has already seen evidence that the character
+   * changed, and leaving the old answer in place until the new one resolves would let an
+   * oscillation match it again on the way back.
+   */
+  #forgetIncompleteAnswer(latch: { seat: RelayParticipant }): void {
+    this.#incompleteAnswers.delete(latch.seat.id)
+  }
+
+  /**
+   * Remember this answer, if it is one that can be repeated.
+   *
+   * The reading is the gate. `working` and `mixed` both report something on the CPU -- they are
+   * the readings that offer `wait`, and the ones where "the child is fine, carry on" is an answer
+   * that stays true while nothing changes. `not_computing` and `gone` are not: they are the
+   * readings a pause exists for, and an operator who saw one and continued has not agreed to be
+   * told nothing next time. Those, and a seat with no measurable child, leave the seat with no
+   * remembered answer -- which is where the observation above has already put it.
+   *
+   * Remembers and never forgets, deliberately: forgetting belongs to the observation, and an
+   * invariant with two owners is one a later edit can leave half-applied.
+   */
+  #armIncomplete(latch: IncompleteLatch, outcome: Verdict['outcome'], reading: LivenessReading | undefined): void {
+    if (reading !== 'working' && reading !== 'mixed') return
+    this.#incompleteAnswers.set(latch.seat.id, incompleteSignature(outcome, latch.provenance, reading))
+  }
+
+  /**
+   * A `turn_incomplete` the operator was not asked about, because they already answered it.
+   *
+   * Written to the routing log rather than dropped, and this is the half that keeps "not asked"
+   * from becoming "not watched". Nothing else counts these -- there is no `rotationWatch` for
+   * deadlines -- so the note carries the running count itself, and an operator reading afterwards
+   * can see how many times the run declined to interrupt them without counting the lines.
+   */
+  #suppressedIncomplete(
+    latch: { seat: RelayParticipant; outcome: Verdict['outcome'] },
+    measured: { sample: ChildLiveness; reading: LivenessReading; emitted: number },
+    detail: string,
+  ): void {
+    const n = (this.#suppressedIncompletes.get(latch.seat.id) ?? 0) + 1
+    this.#suppressedIncompletes.set(latch.seat.id, n)
+    // Re-rendered with no refresh state rather than reusing `measured.line`. That line was built
+    // for a pause and ends "re-measured while the pause lasts" -- true where a refresher follows
+    // it and a promise of updates nothing will deliver here, which is #101's defect written into
+    // the note that exists to stop #107's.
+    const line = describeLiveness(measured.sample, measured.emitted)
+    this.#record({
+      from: 'orchestrator',
+      fromRank: 'human',
+      to: [],
+      kind: 'note',
+      text:
+        `turn_incomplete recorded, run continues (the operator already answered a ${latch.outcome} ` +
+        `pause for this session of ${latch.seat.id} while the child read ${measured.reading}, and ` +
+        `the reading has not changed character, so the same question is not put again — ` +
+        `${n} suppressed so far for this seat): ${detail}. ${line}`,
+    })
+  }
+
+  /**
+   * The ONE `turn_incomplete` signature each seat's operator has currently answered.
+   *
+   * A value and not a set, and that is load-bearing rather than a simplification. See
+   * `#incompleteAnswered`.
+   */
+  #incompleteAnswers = new Map<string, string>()
+
+  /**
+   * How many re-raises this seat's latch has swallowed, for the note that says so.
+   *
+   * Cumulative for the life of the session, unlike the answer above: the answer is about the
+   * situation right now, the count is about the whole run.
+   */
+  #suppressedIncompletes = new Map<string, number>()
 
   /**
    * The candidate was answered by REPLACING the seat, not by ruling on its evidence (#128).
@@ -5198,6 +5446,19 @@ export class Relay {
             evidence,
             liveness: { participant: lead, emittedBefore: next.emittedBefore },
             verdictOf: { participant: lead.id, endSeq: next.end.seq },
+            // The advisor's own seat, and it latches on the same terms the implementer's does
+            // (#107). An advisor that keeps tripping the same deadline puts the same question
+            // just as often, and the answer is no more informative the ninth time for being
+            // about the other seat.
+            //
+            // The VERDICT branch only. This condition covers two faults sharing one reason, and
+            // the other is a completed turn whose reply would not parse -- which is followed by
+            // a RE-ASK a few lines down, so latching it would turn a visible stall into a silent
+            // loop churning advisor turns at the ceiling. A latch may make a question quieter;
+            // it may not make a spin invisible.
+            ...(next.end.verdict.outcome === 'completed'
+              ? {}
+              : { latch: { seat: lead, outcome: next.end.verdict.outcome, provenance: next.end.verdict.provenance } }),
           })
           if (halted) {
             closing ??= { kind: 'outcome', outcome: halted }
@@ -5582,6 +5843,11 @@ export class Relay {
             evidence: current.verdict.provenance.map((p) => `${p.source}: ${p.detail}`),
             liveness: { participant: seat, emittedBefore: report.emittedBefore },
             verdictOf: { participant: seat.id, endSeq: current.seq },
+            // The pause #107 counted nine of. `current` and not `report.end`, so a verdict the
+            // adapter has already withdrawn and replaced is remembered as the one the operator
+            // was actually shown -- the same value the detail and the grade above were taken
+            // from. See `#incompleteAnswered`.
+            latch: { seat, outcome: current.verdict.outcome, provenance: current.verdict.provenance },
             ...(pre === undefined ? {} : { superseded: pre }),
           })
           this.#verdictPause = undefined
@@ -6052,6 +6318,12 @@ export class Relay {
       // then compacts is a question nobody has been asked, and carrying the answer across the
       // swap would suppress the first candidate raised against a brand new session.
       this.#declinedClasses.delete(impl.id)
+      // And the deadline answers, for exactly the same reason (#107). "The child is working, let
+      // it run" was a judgement about a session that has just been retired; a replacement that
+      // then trips the watchdog is a question nobody has been asked, and the count goes with it
+      // so the note on the far side of a rotation is not still counting its predecessor's.
+      this.#incompleteAnswers.delete(impl.id)
+      this.#suppressedIncompletes.delete(impl.id)
       this.complaints.progressed(impl.id)
       // Counted HERE, where a replacement has been accepted -- not where one was proposed.
       //

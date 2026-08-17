@@ -1251,6 +1251,29 @@ compaction moves the baseline to it, so the same evidence stops re-raising every
 design — without it the operator either abandons the feature or stops reading the pauses,
 and the second is worse than never having built it.
 
+**Answering a `turn_incomplete` is remembered the same way, and on the same terms.** A run
+doing one long piece of work trips the watchdog turn after turn, and each firing put the
+same question: same seat, same `timed_out`, same liveness line saying the child was busy,
+same answer. The turn is not what identifies it — a turn cannot raise two of these, because
+a pause holds the loop suspended and a second watchdog verdict amends it in place, so the
+repeats are *distinct* turns of one continuous piece of work. What is remembered is the
+seat, the verdict outcome and the liveness reading, scoped to the session in the seat.
+
+**One answer per seat, not a collection of them.** A set of answered signatures only grows,
+so an oscillating run accumulates permissions and never returns them — "asked once" drifting
+into "never asks again" by the route hardest to notice. So the latch holds the *current*
+character: any `turn_incomplete` that does not match it voids it on sight, and A→B→A is
+asked all three times. That is also right on its own terms — a child alternating between
+working and idle deserves more attention than one steadily working, not less.
+
+Only a reading that reports a live child is remembered at all, and a quiet, gone or
+unmeasurable one clears whatever was: an operator who answered about a working seat must
+still be told when it goes quiet or dies, and a death voids a keep-waiting answer given
+about a live child. The suppression count is cumulative for the session regardless, because
+it answers a question about the whole run. Every suppressed re-raise is written to the
+routing log with its evidence and that running count, because not asked must never become
+not watched.
+
 #### A pause suspends orchestration, not observation [Invariant, 2026-08-06]
 
 | suspended | continuing |
