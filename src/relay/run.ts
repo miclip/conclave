@@ -306,11 +306,40 @@ export interface RunControl {
   requestPause(reason: string): void
 }
 
+/** What a handle needs besides its control surface. Exists for the clock; see `RunHandle`. */
+export interface RunHandleOptions {
+  /**
+   * The clock the suspension ledger is read from. Defaults to `Date.now`.
+   *
+   * Injected only so a test can drive a duration ceiling without sleeping. The relay passes
+   * ITS clock in, because the ledger below is subtracted from the relay's own elapsed reading
+   * and two clocks would make that subtraction meaningless.
+   */
+  now?: (() => number) | undefined
+}
+
 export class RunHandle {
   #control: RunControl
+  #now: () => number
   #state: RunState = 'running'
   #pause: RunPause | undefined
   #outcome: RunOutcome | undefined
+  /**
+   * How long this run has spent SUSPENDED at a pause, waiting for a human to decide.
+   *
+   * Kept here because this class is the only thing that knows: `pauseAt` opens the interval and
+   * every way out of a pause -- `continue`, `rotate`-then-`continue`, `abort`, and a `settle`
+   * that ends the run while it is still paused -- closes it. A ledger kept beside the halt site
+   * instead would have to be closed in four places and would miss the fourth.
+   *
+   * It exists because `--max-minutes` was measuring two different things with one number (#112).
+   * A run suspended here is not running away: nothing is dispatched, no child is spending quota,
+   * and the only thing advancing is a human's deliberation -- which may be a night's sleep. See
+   * `Relay#pausedMs` for what is done with it and why that cannot unbound a stuck run.
+   */
+  #suspendedMs = 0
+  /** When the current suspension began, or `undefined` while the run is not paused. */
+  #suspendedSince: number | undefined
 
   /** Resolves the loop's `pauseAt()` once the operator decides. */
   #decide: ((d: Decision) => void) | undefined
@@ -327,8 +356,9 @@ export class RunHandle {
    */
   #waitMemory = new Map<string, PauseWait>()
 
-  constructor(control: RunControl) {
+  constructor(control: RunControl, opts: RunHandleOptions = {}) {
     this.#control = control
+    this.#now = opts.now ?? Date.now
   }
 
   #verdictKey(v: { participant: string; endSeq: number }): string {
@@ -346,6 +376,25 @@ export class RunHandle {
 
   get outcome(): RunOutcome | undefined {
     return this.#outcome
+  }
+
+  /**
+   * Total time suspended at pauses, INCLUDING the pause currently in front of the operator.
+   *
+   * Reads live rather than only on release, because the ceiling that consults it is checked
+   * while the run is going and a pause that has not been answered yet is the longest one there
+   * is. A reader taking this after the run ends gets the same total either way.
+   */
+  get suspendedMs(): number {
+    const open = this.#suspendedSince === undefined ? 0 : this.#now() - this.#suspendedSince
+    return this.#suspendedMs + open
+  }
+
+  /** Close the open suspension, if there is one. Idempotent; every exit from a pause calls it. */
+  #resumeClock(): void {
+    if (this.#suspendedSince === undefined) return
+    this.#suspendedMs += this.#now() - this.#suspendedSince
+    this.#suspendedSince = undefined
   }
 
   /**
@@ -541,6 +590,9 @@ export class RunHandle {
     this.#decide = undefined
     this.#pause = undefined
     this.#state = 'running'
+    // Before the loop is let go, so no part of the interval that follows can be charged to the
+    // suspension. `abort` comes through here too and closes the ledger the same way.
+    this.#resumeClock()
     decide(d)
   }
 
@@ -552,6 +604,12 @@ export class RunHandle {
   /** Suspend the loop until the operator decides. */
   pauseAt(pause: Omit<RunPause, 'at'>): Promise<Decision> {
     const full = { ...pause, at: Date.now() }
+    // The suspension starts HERE, at the same instant the state flips, and on the ledger's own
+    // clock rather than on `full.at` -- the pause is a document with a wall-clock timestamp on
+    // it, and the two only have to agree in production. Nothing between this line and the
+    // `await` the caller does can run for long, but the interval is opened first anyway: the
+    // reading that matters is taken by whoever asks while the run is parked.
+    this.#suspendedSince = this.#now()
     // A later pause for the same turn inherits an unexpired wait decision so the operator
     // is not asked again until their stated deadline. Different turns or expired waits do not.
     if (full.verdictOf) {
@@ -644,6 +702,11 @@ export class RunHandle {
     if (this.#outcome) return
     this.#outcome = outcome
     this.#state = 'ended'
+    // The fourth exit, and the one a ledger kept at the halt site would have missed:
+    // `relay.stop()` ends a run WITHOUT resolving the pause it is sitting in, so `#halt` never
+    // returns and never closes anything. Left open, the total would grow for as long as the
+    // object lived and a report read afterwards would claim a suspension still running.
+    this.#resumeClock()
     this.#pause = undefined
     this.#waitMemory.clear()
     const watchers = this.#watchers

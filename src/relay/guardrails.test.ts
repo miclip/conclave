@@ -79,7 +79,12 @@ test('a duration ceiling is measured in elapsed time, not advisor turns', () => 
   // turn, so a run can be progressing and still have been progressing for two hours.
   const b = breached({ maxDurationMs: 60_000 }, at({ elapsedMs: 61_000, turns: 1 }))!
   assert.equal(b.kind, 'duration')
-  assert.match(b.detail, /61s elapsed of a maximum 60s/)
+  assert.match(b.detail, /61s of active run time of a maximum 60s/)
+  // And the line says which clock that was. Since #112 the reading handed in here is net of
+  // every interval the run spent paused, so a detail that said "elapsed" would be inviting the
+  // reader to check it against a wall clock that will not agree. What is counted and what is
+  // not is decided by `Relay#ceilingState`; saying so is this module's half.
+  assert.match(b.detail, /time paused for an operator is not counted/)
 })
 
 test('turns are checked before duration, so the more specific reason wins', () => {

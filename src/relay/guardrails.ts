@@ -94,7 +94,13 @@ export function preflightRefusals(cwd: string, opts: { force?: boolean } = {}): 
  * The asymmetry is deliberate and is the one thing about this type worth reading twice.
  */
 export interface Ceilings {
-  /** Wall-clock ceiling in milliseconds. Absent means no limit. Consumable: breaches on `>=`. */
+  /**
+   * Duration ceiling in milliseconds. Absent means no limit. Consumable: breaches on `>=`.
+   *
+   * ACTIVE run time, not wall-clock: time the run spent suspended at a pause, waiting for an
+   * operator to decide, is not counted against it (#112). The reason is in `Relay#pausedMs`,
+   * along with what still bounds a run that never makes progress.
+   */
   maxDurationMs?: number | undefined
   /** Total turns across all participants. Absent means no limit. Consumable: breaches on `>=`. */
   maxTurns?: number | undefined
@@ -118,6 +124,7 @@ export interface Ceilings {
 
 /** What the run looked like when the ceilings were checked. Every field is a real reading. */
 export interface CeilingState {
+  /** Time spent RUNNING since the window opened; suspended intervals are already deducted. */
   elapsedMs: number
   turns: number
   queueDepth: number
@@ -247,6 +254,10 @@ export function ceilingSummary(c: RunCeilings): string {
  * its own. So a duration ceiling stops the run at the first boundary AFTER the limit, and the
  * report says the elapsed figure rather than the limit, because a reader comparing the two
  * needs both.
+ *
+ * `elapsedMs` arrives already net of time the run spent paused; this function is handed a
+ * reading and does not know how it was taken. The caller that takes it is `Relay#ceilingState`,
+ * and `Relay#pausedMs` is where the deduction is argued for (#112).
  */
 export function breached(ceilings: Ceilings, now: CeilingState): CeilingBreach | undefined {
   if (ceilings.maxTurns !== undefined && now.turns >= ceilings.maxTurns) {
@@ -263,7 +274,12 @@ export function breached(ceilings: Ceilings, now: CeilingState): CeilingBreach |
       kind: 'duration',
       limit: ceilings.maxDurationMs,
       reached: now.elapsedMs,
-      detail: `time ceiling reached: ${s(now.elapsedMs)} elapsed of a maximum ${s(ceilings.maxDurationMs)}`,
+      // Says WHICH time, because since #112 it is no longer the wall clock. A run that paused
+      // for an hour and then ended on a five-minute ceiling reads as arithmetic nobody can
+      // check unless the line names what it counted.
+      detail:
+        `time ceiling reached: ${s(now.elapsedMs)} of active run time of a maximum ` +
+        `${s(ceilings.maxDurationMs)} (time paused for an operator is not counted)`,
     }
   }
   // The gauges, on `>` rather than `>=`. See `Ceilings`: these read what is outstanding right

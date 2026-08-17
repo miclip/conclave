@@ -126,6 +126,33 @@ export interface RunReport {
   startedAt: number
   endedAt: number
   durationMs: number
+  /**
+   * How long the run spent PAUSED, waiting for an operator to decide (#112).
+   *
+   * Present and `0` on every run that never paused, per this file's rule that a key which
+   * vanishes when it has nothing to say cannot be told from a key a reader forgot to look for.
+   *
+   * This is the answer to the question the issue asked the report to answer: "ended: budget,
+   * spent on work" and "ended: budget, spent on interruptions" read identically before it, and a
+   * reader could only tell them apart by counting the pauses in the routing log by hand.
+   */
+  pausedMs: number
+  /**
+   * How long the run spent RUNNING, which is the figure the duration ceiling compared (#112).
+   *
+   * Read off `Relay.activeMs` -- the ceiling's own reading -- rather than derived here, because
+   * it cannot be derived here. `durationMs - pausedMs` looks like the same quantity and is not:
+   * `durationMs` starts when the FRONT END did, before any session was spawned or briefed, while
+   * the ceiling window opens at the run's first turn. The difference is the launch, and it is
+   * charged to neither.
+   *
+   * So the three time figures answer three different questions and are not an identity to be
+   * checked: `durationMs` is how long the operator waited for the whole command, `pausedMs` is
+   * how much of that the run spent waiting for the operator back, and this is what
+   * `--max-minutes` was measured against. A run that ends on that ceiling quotes THIS number in
+   * its detail.
+   */
+  activeMs: number
   messages: number
   participants: ReportedParticipant[]
   rotation: {
@@ -264,6 +291,12 @@ export async function runReport(relay: Relay, input: ReportInput): Promise<RunRe
     startedAt: input.startedAt,
     endedAt,
     durationMs: endedAt - input.startedAt,
+    // Both read off the relay rather than recomputed here, per the rule at the top of this file.
+    // The relay's handle is the only thing that saw the suspensions, and `activeMs` is the very
+    // value `breached` was handed -- a second reckoning of either would be a second answer to a
+    // question the ceiling has already decided.
+    pausedMs: relay.pausedMs,
+    activeMs: relay.activeMs,
     messages: relay.log.length,
     participants,
     // Copied field by field rather than spread, so a new counter on rotationWatch cannot

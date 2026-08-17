@@ -324,7 +324,7 @@ const DECLARED: Record<string, string> = {
     'Authority routing (#56, D2) sends implementer_unanswered to the advisor before the operator, ' +
     'so a default run interrupts the human less than today. Real change at N=1, an improvement, ' +
     'declared rather than discovered. The pause reason exists at src/relay/run.ts:52 and the halt ' +
-    'that raises it is at src/relay/relay.ts:5708.',
+    'that raises it is at src/relay/relay.ts:5886.',
   'status.pause.resolution':
     'Classifying unresolved conditions on both axes (#56, D2) added `resolution` to every RunPause ' +
     '(src/relay/run.ts:244), so `conclave status --json` on a paused default run now carries ' +
@@ -606,7 +606,7 @@ const DECLARED: Record<string, string> = {
     'participant and nobody else, and a conclave or workstream scope samples NOBODY. It used to ' +
     'read pause.verdictOf.participant and fall back to scanning participants by rank for ' +
     'implementers — and verdictOf is set at exactly two halt sites, both turn_incomplete ' +
-    '(src/relay/relay.ts:5448, src/relay/relay.ts:5845), so every other pause reached that rank ' +
+    '(src/relay/relay.ts:5626, src/relay/relay.ts:6023), so every other pause reached that rank ' +
     'scan. WHAT CHANGES AT N=1: on the three pauses whose scope names no participant — ' +
     'operator_requested (/pause), advisor_escalated, authority_conflict — the lone implementer ' +
     'child used to be sampled, so a child that measured busy REFUSED the resume and wrote ' +
@@ -615,15 +615,15 @@ const DECLARED: Record<string, string> = {
     'safety guard rather than presented as a pure N>1 fix. The reason it is the right narrowing: ' +
     'the guard exists because continuing SENDS into a child that cannot accept input mid-turn, ' +
     'and on those three pauses the child it measured is not the child being sent to — resuming ' +
-    'advisor_escalated sends to the ADVISOR (src/relay/relay.ts:5560), resuming ' +
+    'advisor_escalated sends to the ADVISOR (src/relay/relay.ts:5738), resuming ' +
     'authority_conflict queues a constraint that is delivered by the dispatcher on the next ' +
     'dispatch to a free seat, and operator_requested is consumed at an advisor-turn boundary ' +
     'whose own evidence line says no turn is in flight. WHAT IS GIVEN UP, named rather than ' +
     'discovered: the advisor_escalated halt raised when a seat’s turn completed and its report ' +
-    'could not be read (src/relay/relay.ts:5757-5759) is conclave-scoped by design, yet the useful ' +
+    'could not be read (src/relay/relay.ts:5935-5937) is conclave-scoped by design, yet the useful ' +
     'question there is whether THAT seat is still writing; at N=1 the rank scan sampled it by ' +
     'coincidence of it being the only implementer, and now nothing does. The pause still carries ' +
-    'that seat’s liveness evidence from the halt site (src/relay/relay.ts:5768-5770), which is what ' +
+    'that seat’s liveness evidence from the halt site (src/relay/relay.ts:5946-5948), which is what ' +
     'the operator actually reads; restoring a refusal there is a change to that halt’s scope, ' +
     'not to the guard. AT N>1 the old behaviour was unsafe in the other direction: a pause about ' +
     'one seat could be refused because a DIFFERENT seat was mid-turn, and the operator was told ' +
@@ -725,7 +725,7 @@ const DECLARED: Record<string, string> = {
     'and concluded evidence is not re-derived BETWEEN pauses. It cannot be. The loop is ' +
     'suspended inside #halt for the whole pause, so #halt cannot run again, and a watchdog ' +
     'revision or replacement turn_end arriving meanwhile amends THE SAME RunPause in place ' +
-    '(src/relay/run.ts:618). There was one pause, read twice — the same defect by a shorter ' +
+    '(src/relay/run.ts:676). There was one pause, read twice — the same defect by a shorter ' +
     'path than the report proposed. ' +
     'Covered in src/relay/pauseLiveness.test.ts, which watches the recorded evidence change ' +
     'after the injected reading changes, and in src/outcomes/liveness.test.ts on the prose.',
@@ -1261,9 +1261,59 @@ const DECLARED: Record<string, string> = {
     'the restatement word for word. Preserved on failure: an empty answer, a dead session or a ' +
     'send that throws reconciles nothing and every historical flag stands. Driven through a real ' +
     'relay across several turns in src/relay/flagReconciliation.test.ts.',
+  'the duration ceiling counts active run time, and the report says how long the run was paused (#112)':
+    'NO FLAG IS ADDED, no ceiling default moves, and turn accounting is untouched. What changes ' +
+    'on the DEFAULT run is one key on the run report: `pausedMs`, `0` on every run that never ' +
+    'paused. THE REASON: `--max-minutes` was wall-clock from the first turn, so a run that paused ' +
+    'and was answered `/continue` five times on one healthy piece of work spent its allowance on ' +
+    'the interruptions — one number measuring two things, how much work a run may do and how many ' +
+    'times it was interrupted while doing it. The reported run ended holding uncommitted work. ' +
+    'Part of that report was a misattribution (#119: the ending was the advisor budget, not the ' +
+    'ceilings, and a later session falsified it), and what survived it is this: an operator ' +
+    'answering a pause has not advanced the goal, and the clock that counts their deliberation is ' +
+    'measuring the operator rather than the run. So the duration ceiling now reads ACTIVE run ' +
+    'time — wall-clock less every interval suspended in `RunHandle.pauseAt` — and its breach ' +
+    'detail says so rather than saying `elapsed`. ' +
+    'WHAT WAS DELIBERATELY NOT CHANGED, and it is the half worth reading: a turn ended by an ' +
+    'expired deadline is still charged exactly what a completed turn is charged, against both ' +
+    '`--max-turns` and the advisor budget. The issue offers exempting it as a candidate; it is ' +
+    'refused, because such a turn ran a child for a whole watchdog and produced nothing, which ' +
+    'makes it the most expensive kind of turn and the signature of a run wedged in a loop of ' +
+    'them. Exempting it is the change that would convert a bounded failure into an unbounded one, ' +
+    'which is strictly worse than the defect. A pause itself already cost neither counter — ' +
+    '`#turnsTaken` is incremented where a turn is SENT, and a continued halt falls through inside ' +
+    'the same advisor-turn iteration — and that is now pinned rather than merely true. ' +
+    'WHAT STILL STOPS A RUN THAT NEVER PROGRESSES: every turn it takes, every advisor turn that ' +
+    'drives one, and the active time all of them spend — a watchdog running out is a child ' +
+    'running for the whole watchdog, which is active time by construction. Only the interval ' +
+    'where a human holds the run and nothing is running is deducted, and an unattended run cannot ' +
+    'reach one at all (`#halt` with no handle ends the run instead of pausing). ' +
+    'THE REPORT KEYS ARE WHY THIS IS DECLARED, and there are TWO. `durationMs` is still ' +
+    'wall-clock and still means what it meant, so on a run that paused it no longer explains the ' +
+    'ceiling that ended it. `pausedMs` is how long the run was held, and it is the record’s ' +
+    'answer to the issue’s third suggestion — "ended: budget, spent on work" and "spent on ' +
+    'interruptions" read identically before it and could only be told apart by counting pauses ' +
+    'in the log by hand. `activeMs` is the ceiling’s OWN reading, reported rather than left to ' +
+    'be derived because `durationMs - pausedMs` is not it: `durationMs` starts when the ' +
+    'front-end did, before any session was spawned or briefed, while the ceiling window opens at ' +
+    'the run’s first turn — so the subtraction charges the run for its own launch — and the two ' +
+    'need not be on the same clock at all. The dispatcher and the report now read one getter ' +
+    '(`Relay.activeMs`), so the figure a ceiling quotes when it fires is the figure the record ' +
+    'carries, asserted as an equality rather than as a range. ' +
+    'Present and `0` rather than omitted, per this file’s rule. REPORT_SCHEMA is not bumped: no ' +
+    'key was removed or renamed and no existing key changed meaning. `conclave status --json` is ' +
+    'NOT touched — it reports no elapsed figure at all, so nothing in it became untrue. ' +
+    '`RelayOptions.now` is added as a test seam for the ceiling clock alone (the routing log, the ' +
+    'verdicts and the report timestamps keep the wall clock), because the alternative is a ' +
+    'duration test that sleeps — a fixture calibrated to the machine it was written on, which is ' +
+    'the failure `FakeRotationSession.holdTurn` already documents. Driven through a real relay in ' +
+    'src/relay/pauseBudget.test.ts: healthy work interrupted five times finishes its work and ' +
+    'ends `done` under a ceiling it never spent, and a run that never produces a report still ' +
+    'ends — on the duration ceiling when its turns burn time, and on the advisor budget when the ' +
+    'clock does not move at all.',
 }
 
-test('DECLARED contains exactly the routing, pause-resolution, attribution, ceiling-flag, seat-flag, seat-status, launch-record, flag-reader, integration-check, per-seat-rotation, reviewer, resume-guard, mixed-liveness, timestamped-liveness, model-validation, executable-preflight, compaction-survival, rotation-reporting, send-precondition, process-tree-liveness, ceiling-reporting, record-heartbeat, rotation-intent, console-dry-run and flag-reconciliation entries', () => {
+test('DECLARED contains exactly the routing, pause-resolution, attribution, ceiling-flag, seat-flag, seat-status, launch-record, flag-reader, integration-check, per-seat-rotation, reviewer, resume-guard, mixed-liveness, timestamped-liveness, model-validation, executable-preflight, compaction-survival, rotation-reporting, send-precondition, process-tree-liveness, ceiling-reporting, record-heartbeat, rotation-intent, console-dry-run, flag-reconciliation and paused-time entries', () => {
   assert.deepEqual(Object.keys(DECLARED), [
     'implementer_unanswered -> advisor',
     'status.pause.resolution',
@@ -1291,6 +1341,7 @@ test('DECLARED contains exactly the routing, pause-resolution, attribution, ceil
     'why each rotation happened, in the run report and in status --json (#75)',
     '--dry-run on the console, reversing a written parity decision (#134)',
     'the report’s flags are reconciled at the close, and supersededFlags joins them (#131)',
+    'the duration ceiling counts active run time, and the report says how long the run was paused (#112)',
   ])
 })
 
@@ -1639,7 +1690,7 @@ async function provokeReviewBlocked(repo: string): Promise<{ relay: Relay; run: 
  * Drive a real relay into one condition and return the pause it raised.
  *
  * The provocations are the ones `resolution.test.ts`'s own `provoke` already uses, deliberately:
- * the same triggers reaching the same single halt site (src/relay/relay.ts:3273), where the
+ * the same triggers reaching the same single halt site (src/relay/relay.ts:3427), where the
  * classification is computed by production `resolutionFor` from the subject the caller passed.
  * Nothing here writes a `RunPause`.
  *
@@ -1932,8 +1983,8 @@ test('default run works in the run cwd and creates no worktree', async () => {
   }
 
   // The relay CLI passes process.cwd() as the run cwd: bin/conclave.ts:1276-1278.
-  // The relay hands that same cwd to each participant adapter: src/relay/relay.ts:1852-1858.
-  // The cwd getter simply returns the option: src/relay/relay.ts:1683-1685.
+  // The relay hands that same cwd to each participant adapter: src/relay/relay.ts:1999-2005.
+  // The cwd getter simply returns the option: src/relay/relay.ts:1730-1732.
   assert.match(relay, /cwd:\s*process\.cwd\(\)/, 'relay block must start in process.cwd')
   // Both creation sites now pass a NAMED context object rather than an inline literal, because
   // the same object composes the launch args that get recorded -- see
@@ -1976,7 +2027,7 @@ test('default run works in the run cwd and creates no worktree', async () => {
 
   // A default run with no subagents must not create any git worktree. The relay only samples
   // the worktree list for its subagent-use report: src/relay/subagents.ts:68 defines
-  // worktreePaths, and src/relay/relay.ts:2517-2518, :2811 and :4956 read it.
+  // worktreePaths, and src/relay/relay.ts:2671-2672, :2965 and :5121 read it.
   // Prove it by exercising the run in a real temporary repository.
   const repo = mkdtempSync(join(tmpdir(), 'conclave-default-'))
   try {
@@ -2147,7 +2198,14 @@ test('the default relay --json report emits exactly these keys at every depth', 
   assert.deepEqual(
     shapeOf(report),
     {
-      '': 'build, cwd, deadlines, durationMs, endedAt, flags, goal, messages, operator, outcome, participants, restricted, rotation, schema, startedAt, subagents, supersededFlags',
+      // `pausedMs` and `activeMs` are the declared addition; see DECLARED['the duration ceiling
+      // counts active run time, and the report says how long the run was paused (#112)'].
+      // `pausedMs` is `0` on this run -- nothing paused it -- and present anyway, because a key
+      // that appears only when it is non-zero cannot be told from a key the reader forgot to
+      // look for. `activeMs` is the ceiling's own reading, and it is a THIRD figure rather than
+      // `durationMs - pausedMs`: that subtraction charges the run for the launch, which happens
+      // before the ceiling window opens, and assumes both are on the wall clock.
+      '': 'activeMs, build, cwd, deadlines, durationMs, endedAt, flags, goal, messages, operator, outcome, participants, pausedMs, restricted, rotation, schema, startedAt, subagents, supersededFlags',
       deadlines: 'configuredAbsoluteMs, participants',
       'deadlines.participants[]': 'absolute, agent, id, silence',
       'deadlines.participants[].absolute': 'status',

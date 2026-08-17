@@ -81,21 +81,21 @@ export const CITED: Record<string, string> = {
   // and `#join` (#71). Repaired rather than deleted: each still points at the thing it was
   // written about, and the one whose LINE no longer says what it said -- `#join` now passes a
   // named context object rather than an inline literal -- is pinned on the new spelling.
-  'src/relay/relay.ts:1683-1685': 'get cwd(): string',
-  'src/relay/relay.ts:1852-1858': 'const ctx = { cwd, watchdogMs: this.#opts.turnWatchdogMs }',
-  'src/relay/relay.ts:2517-2518': "this.#worktreesSeen.add(w)\n    return {",
-  'src/relay/relay.ts:2578': 'NOT ARMED (no checks configured)',
-  'src/relay/relay.ts:2811': 'if (this.#worktreesAtStart) for (const w of worktreePaths',
-  'src/relay/relay.ts:3273': 'resolutionFor(p.subject, { rotationArmed: armed })',
-  'src/relay/relay.ts:3766-3768': 'No rotation checks are configured',
+  'src/relay/relay.ts:1730-1732': 'get cwd(): string',
+  'src/relay/relay.ts:1999-2005': 'const ctx = { cwd, watchdogMs: this.#opts.turnWatchdogMs }',
+  'src/relay/relay.ts:2671-2672': "this.#worktreesSeen.add(w)\n    return {",
+  'src/relay/relay.ts:2732': 'NOT ARMED (no checks configured)',
+  'src/relay/relay.ts:2965': 'if (this.#worktreesAtStart) for (const w of worktreePaths',
+  'src/relay/relay.ts:3427': 'resolutionFor(p.subject, { rotationArmed: armed })',
+  'src/relay/relay.ts:3925-3927': 'No rotation checks are configured',
   'src/relay/relay.ts:325': "onDegradation ?? 'candidate'",
   // The console's status line, cited by `activeTurn` for the claim its own doc rests on: the
   // footer's notion of "working" is `turn_start` until `turn_end`, and `tool_use` only relabels
   // a turn that is already running. If that ever stops being true, the predicate the relay and
   // `/continue` both send on is no longer the thing the operator is watching.
   'src/repl/session.ts:1062-1075': 'progress.start(e.participant)',
-  'src/relay/relay.ts:4956': 'this.#worktreesAtStart = worktreePaths(this.#opts.cwd)',
-  'src/relay/relay.ts:5444': "subject: { reason: 'turn_incomplete', participant: lead.id }",
+  'src/relay/relay.ts:5121': 'this.#worktreesAtStart = worktreePaths(this.#opts.cwd)',
+  'src/relay/relay.ts:5622': "subject: { reason: 'turn_incomplete', participant: lead.id }",
   // The five below are what the console's `/continue` liveness guard cites for reading a
   // pause's SCOPE rather than `verdictOf` or a rank scan (`seatsToSampleAtPause` in
   // src/repl/session.ts). Two of them pin the ONLY sites that populate `verdictOf` -- the
@@ -104,13 +104,13 @@ export const CITED: Record<string, string> = {
   // conclave-scoped halt the change gives up sampling on, its own liveness evidence, and the
   // send that a resumed `advisor_escalated` pause actually makes -- to the ADVISOR, which is
   // why measuring implementer children there was answering the wrong question.
-  'src/relay/relay.ts:5448': 'verdictOf: { participant: lead.id, endSeq: next.end.seq },',
-  'src/relay/relay.ts:5560': 'The human has seen your escalation and asked you to continue.',
+  'src/relay/relay.ts:5626': 'verdictOf: { participant: lead.id, endSeq: next.end.seq },',
+  'src/relay/relay.ts:5738': 'The human has seen your escalation and asked you to continue.',
   // The workstream a conflicted instruction belongs to, named after the seat when exactly one
   // seat could take it -- the N=1 coincidence a scope reader must not mistake for a seat.
-  'src/relay/relay.ts:5624': "reason: 'authority_conflict', workstream:",
-  'src/relay/relay.ts:5708': "subject: { reason: 'implementer_unanswered', participant: seat.id }",
-  'src/relay/relay.ts:5757-5759': "its report could not be read, so there is",
+  'src/relay/relay.ts:5802': "reason: 'authority_conflict', workstream:",
+  'src/relay/relay.ts:5886': "subject: { reason: 'implementer_unanswered', participant: seat.id }",
+  'src/relay/relay.ts:5935-5937': "its report could not be read, so there is",
   // Repaired rather than deleted, and it now pins a DESCRIPTOR rather than a call: #101 moved
   // the measurement inside `#halt`, so the halt site says which seat to measure and no longer
   // builds the sentence itself. The claim the citation supports is unchanged -- this halt does
@@ -120,9 +120,9 @@ export const CITED: Record<string, string> = {
   // `turn_incomplete` halt below, so only a shift of exactly the distance between the two would
   // slip past. There is nothing unique on the line to pin instead. It is also why this entry
   // is never auto-relocated -- two matches is not a pin, and `planRepairs` refuses it by rule.
-  'src/relay/relay.ts:5768-5770': "knowing whether the child is still writing changes what the operator does.",
-  'src/relay/relay.ts:5841': "subject: { reason: 'turn_incomplete', participant: seat.id }",
-  'src/relay/relay.ts:5845': 'verdictOf: { participant: seat.id, endSeq: current.seq },',
+  'src/relay/relay.ts:5946-5948': "knowing whether the child is still writing changes what the operator does.",
+  'src/relay/relay.ts:6019': "subject: { reason: 'turn_incomplete', participant: seat.id }",
+  'src/relay/relay.ts:6023': 'verdictOf: { participant: seat.id, endSeq: current.seq },',
   'src/relay/resolution.ts:190': 'export function resolutionFor',
   'src/relay/run.ts:52': "| 'implementer_unanswered'",
   'src/relay/run.ts:216-230': 'reason: PauseReason',
@@ -130,7 +130,7 @@ export const CITED: Record<string, string> = {
   // The pause is amended IN PLACE while it is held. #101's report read a repeated status as a
   // second pause replaying the first one's samples; this is the line that says it cannot be
   // one, because there is only ever the one object.
-  'src/relay/run.ts:618': 'this.#pause.superseded = info',
+  'src/relay/run.ts:676': 'this.#pause.superseded = info',
   'src/relay/subagents.ts:68': 'export function worktreePaths',
   'src/repl/session.ts:250-262': 'turnWatchdogMs?: number | undefined',
   // The console's liveness seam, cited by the relay's own copy of it (#101). Two front-ends

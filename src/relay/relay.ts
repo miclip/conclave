@@ -527,6 +527,22 @@ export interface RelayOptions {
   livenessRefreshMs?: number | undefined
   /** How many re-measurements at most. Default `LIVENESS_REFRESH_LIMIT`. */
   livenessRefreshLimit?: number | undefined
+  /**
+   * The clock the DURATION CEILING is measured on, and nothing else. Defaults to `Date.now`.
+   *
+   * Injected for the same reason `livenessRefreshMs` is: the alternative is a test that sleeps.
+   * A duration ceiling proved by sleeping is a fixture calibrated to the machine it was written
+   * on -- the fake session's own `holdTurn` doc has the story of the last one of those -- and
+   * #112 needs two facts proved about this clock that a sleep cannot separate: that a paused
+   * interval does not advance it, and that an active one still does.
+   *
+   * Deliberately NOT the clock the routing log, the verdicts or the report timestamps are
+   * written with. Those are records of when something happened in the world, and a run whose log
+   * disagreed with the wall would be a worse artefact than an untested ceiling. The one reading
+   * beyond the ceiling that moves with it is the seat table's opening `idleSince`, stamped from
+   * the same instant the window opens because it IS that instant.
+   */
+  now?: (() => number) | undefined
 }
 
 /**
@@ -1348,8 +1364,21 @@ interface VerdictPause {
 
 export class Relay {
   readonly log: RelayMessage[] = []
-  /** When the run began, for the wall-clock ceiling. Set on the first turn taken. */
+  /**
+   * When the duration ceiling's window opened. Set on the first turn taken, not at construction.
+   *
+   * The window it opens is measured in ACTIVE time, not wall-clock: `activeMs` deducts every
+   * interval the run spent paused, and that getter is where the reasoning lives (#112).
+   */
   #startedAt = Date.now()
+  /**
+   * The window's terminal reading, stamped once when the run ends. See `activeMs`.
+   *
+   * Both figures together rather than the active one alone, because a run that `stop()` ends
+   * while a pause is still open has a paused total that is also still moving at that instant.
+   * Freezing one of a pair that must add up is how a record comes to contradict itself.
+   */
+  #atEnd: { activeMs: number; pausedMs: number } | undefined
   /** Worktrees present when the run began, so new ones can be told from pre-existing ones. */
   #worktreesAtStart: string[] | undefined
   /**
@@ -1367,6 +1396,24 @@ export class Relay {
    * -- work happens directly in `opts.cwd` -- so this is the closest available "before".
    */
   #runStartSha: string | undefined
+  /**
+   * What `handle.suspendedMs` read when the ceiling window opened.
+   *
+   * The window starts at `#startedAt`, which is set after the briefings rather than at
+   * construction, so a suspension from before it is not inside the interval being measured and
+   * subtracting it would drive the elapsed reading negative. Nothing pauses that early today;
+   * this is what keeps that from being a fact the subtraction silently depends on.
+   */
+  #suspendedAtStart = 0
+  /**
+   * Whether the ceiling window has opened. False until `#runLoop` reaches its first turn.
+   *
+   * `#startedAt` cannot answer this: it is initialised at construction so that it is never
+   * `undefined`, which means a relay that has not run yet reports an elapsed time anyway. It is
+   * harmless for the ceiling, which is only ever checked inside the loop, and NOT harmless for
+   * `activeMs`, which a report may read off a relay whose run never started.
+   */
+  #windowOpened = false
   /** Turns taken across all participants, which is what a ceiling counts. */
   #turnsTaken = 0
   #participants = new Map<string, RelayParticipant>()
@@ -1842,6 +1889,106 @@ export class Relay {
   }
 
   /**
+   * The clock the duration ceiling is read from. See `RelayOptions.now`.
+   *
+   * Used by exactly two readings -- when the ceiling window opened, and how far into it the run
+   * is -- so that a test can move one without moving the timestamps on the record.
+   */
+  #now(): number {
+    return this.#opts.now?.() ?? Date.now()
+  }
+
+  /**
+   * How long this run has spent PAUSED inside its ceiling window.
+   *
+   * ## What the duration ceiling counts, and why this is subtracted from it (#112)
+   *
+   * A run reported "ended: budget" after five pause/continue cycles on one healthy piece of
+   * work. The ceilings had bounded the tool rather than the run: `--max-minutes` was wall-clock
+   * from the first turn, so a night spent waiting for an operator to answer `/continue` was
+   * spent out of the same allowance as the work. One number was measuring two things -- how much
+   * a run may do, and how long a human took to answer it -- and only the first is a run going
+   * wrong.
+   *
+   * So the ceiling now measures ACTIVE run time: wall-clock, less every interval the run was
+   * suspended at a pause. A suspended run dispatches nothing, sends nothing and spends no
+   * quota; there is no runaway to bound, and the clock it was on was measuring the operator.
+   *
+   * ## What still stops a run that never makes progress
+   *
+   * This is the constraint the change had to hold, because trading a bounded failure for an
+   * unbounded one would be strictly worse than the defect. Nothing here exempts a stuck run:
+   *
+   *   - A turn that ends `timed_out` still costs a turn (`#turnsTaken`, `--max-turns`) and still
+   *     costs the advisor turn that drove it (`maxAdvisorTurns`). Both are UNCHANGED by #112 and
+   *     both are what a seat wedged in a timeout loop exhausts. A truncated turn is charged
+   *     exactly what a completed one is charged, deliberately: it burned a full watchdog of
+   *     child time to produce nothing, which makes it the most expensive kind of turn, not a
+   *     free one. Exempting it is the change that WOULD unbound this.
+   *   - The time such a run spends is active time -- the watchdog runs while the child runs --
+   *     so `--max-minutes` still accrues through every one of those turns and still fires.
+   *
+   * What is subtracted is only the interval where a human holds the run and nothing is running.
+   * A run parked at a pause forever is parked by a person, spends nothing, and would never have
+   * been ended by a ceiling anyway: an unattended run has no handle, and `#halt` with no handle
+   * ends the run rather than pausing it.
+   *
+   * Zero for an unattended run, and zero before the window opens, so `run()` behaves exactly as
+   * it did.
+   */
+  get pausedMs(): number {
+    if (this.#atEnd) return this.#atEnd.pausedMs
+    const suspended = (this.#handle?.suspendedMs ?? 0) - this.#suspendedAtStart
+    return suspended > 0 ? suspended : 0
+  }
+
+  /**
+   * The duration ceiling's OWN reading: how long this run has spent running, net of pauses.
+   *
+   * Exposed rather than left to be reconstructed, because it cannot be reconstructed. The
+   * obvious arithmetic -- a report's `durationMs` minus `pausedMs` -- is wrong twice over, and
+   * quietly:
+   *
+   *   - `durationMs` is measured from the front-end's own start, which is before the sessions
+   *     are spawned and before any seat is briefed. The ceiling window opens after all of that
+   *     (`#runLoop`), so the subtraction overstates active time by however long the launch took.
+   *   - The two figures need not even be on the same clock. `durationMs` is wall-clock by
+   *     definition; this is whatever `RelayOptions.now` is.
+   *
+   * So a reader asking "how much of the ceiling did this run actually spend" gets the number the
+   * ceiling compared, from the object that compared it, and never a second derivation that
+   * agrees with it only approximately. `breached` is handed exactly this value.
+   *
+   * ## It stops when the run does
+   *
+   * Live while the run is going, because that is what a ceiling checked at every boundary needs.
+   * FROZEN at the ending, because a report is not assembled at the instant a run ends: teardown
+   * happens, `runReport` awaits a snapshot from every participant, and a front end may write the
+   * document later still. A figure that kept counting through all that would grow past anything
+   * the ceiling ever saw and would disagree with the ending's own detail, which quotes it -- a
+   * record contradicting itself about the one number that stopped the run. See `#atEnd`.
+   */
+  /**
+   * Stop the run's clock, once, wherever the run was decided.
+   *
+   * `#end` is the obvious home and is not the only one: a ceiling breach settles what the run's
+   * active time WAS at the instant it was checked, and only then drains the seats still working.
+   * Stamping at `#end` alone let the report carry a larger number than the ending's own detail
+   * quoted, on exactly the runs that had work outstanding. Idempotent, so the breach and the
+   * `#end` that follows it cannot disagree either.
+   */
+  #stopClock(): void {
+    this.#atEnd ??= { activeMs: this.activeMs, pausedMs: this.pausedMs }
+  }
+
+  get activeMs(): number {
+    if (this.#atEnd) return this.#atEnd.activeMs
+    if (!this.#windowOpened) return 0
+    const active = this.#now() - this.#startedAt - this.pausedMs
+    return active > 0 ? active : 0
+  }
+
+  /**
    * `cwd` is where this participant's adapter is launched, and it is fixed at launch.
    *
    * Defaulting to the run cwd is the whole of the N=1 case and the whole of the advisor's case
@@ -2119,6 +2266,13 @@ export class Relay {
     }
     if (!this.#ended) {
       this.#ended = true
+      // The instant the run is over is the instant its clock stops. Before this, both figures
+      // recomputed on every read, so a report assembled after teardown -- `runReport` awaits a
+      // snapshot per participant, and a front end may write it seconds later -- would claim more
+      // active time than any ceiling ever observed, and contradict the very detail beside it that
+      // says what the ceiling saw. Stamped here rather than in the loop because this is the one
+      // place a run ends, however it ends, and `#ended` already makes it exactly once.
+      this.#stopClock()
       this.#stream.emit({ type: 'run_end', reason, detail })
       this.#stream.close()
     }
@@ -3452,7 +3606,7 @@ export class Relay {
    * writing down because it points at a different mechanism: the loop is suspended at `await
    * deciding` above for the whole pause, so `#halt` cannot run again, and a watchdog `revision`
    * or replacement `turn_end` arriving meanwhile goes to `#trackSupersession`, which amends THE
-   * SAME `RunPause` in place (`src/relay/run.ts:618`). There was one pause, read twice. The
+   * SAME `RunPause` in place (`src/relay/run.ts:676`). There was one pause, read twice. The
    * evidence was not re-derived because nothing had re-derived it since it was captured -- which
    * is the same defect, reached by a shorter path than the report proposed.
    *
@@ -3597,27 +3751,32 @@ export class Relay {
    * `run()` is not the same as resuming.
    */
   start(goal: string): RunHandle {
-    const handle = new RunHandle({
-      // The seat the CURRENT pause is about, which is the one the operator is looking at. With
-      // no pause in front of them there is no seat named, and the unnamed form's own rule
-      // applies: the lead at N=1, refused at N>1.
-      rotate: (reason) =>
-        this.#rotationSeat === undefined
-          ? this.rotateImplementer(reason)
-          : this.rotateSeat(this.#rotationSeat, reason),
-      // The same seat, exposed so the handle can ask whether a reason has to be STATED before
-      // it starts a transaction (#75). It is a read of `#rotationSeat` rather than a second
-      // derivation from the pause, because a front end that resolved the target differently
-      // from the `rotate` above would demand a reason for one seat and rotate another.
-      rotationTarget: () => this.#rotationSeat,
-      constrain: (text, audience) => this.say(text, audience),
-      requestStop: () => {
-        this.#stopped = true
+    const handle = new RunHandle(
+      {
+        // The seat the CURRENT pause is about, which is the one the operator is looking at. With
+        // no pause in front of them there is no seat named, and the unnamed form's own rule
+        // applies: the lead at N=1, refused at N>1.
+        rotate: (reason) =>
+          this.#rotationSeat === undefined
+            ? this.rotateImplementer(reason)
+            : this.rotateSeat(this.#rotationSeat, reason),
+        // The same seat, exposed so the handle can ask whether a reason has to be STATED before
+        // it starts a transaction (#75). It is a read of `#rotationSeat` rather than a second
+        // derivation from the pause, because a front end that resolved the target differently
+        // from the `rotate` above would demand a reason for one seat and rotate another.
+        rotationTarget: () => this.#rotationSeat,
+        constrain: (text, audience) => this.say(text, audience),
+        requestStop: () => {
+          this.#stopped = true
+        },
+        requestPause: (reason) => {
+          this.#pauseRequested = reason
+        },
       },
-      requestPause: (reason) => {
-        this.#pauseRequested = reason
-      },
-    })
+      // The handle's suspension ledger is subtracted from this relay's elapsed reading, so the
+      // two have to be taken from the same clock. See `RelayOptions.now`.
+      { now: () => this.#now() },
+    )
     // Kept so `rotateSeat` can read the pause the operator is actually looking at, which is
     // what classifies a rotation's intent (#75). The handle is the only thing that holds it:
     // `#halt` hands the pause object to `pauseAt` and then suspends inside an await, so there
@@ -4878,7 +5037,9 @@ export class Relay {
    */
   #ceilingState(): CeilingState {
     return {
-      elapsedMs: Date.now() - this.#startedAt,
+      // The same getter a report reads, not a second computation of it. Two expressions for one
+      // quantity is how a record comes to disagree with the ceiling it is describing.
+      elapsedMs: this.activeMs,
       turns: this.#turnsTaken,
       queueDepth: queueDepth(this.#queue, this.#taskRuntime),
       concurrentSeats: concurrentSeats([...this.#seatState.values()]),
@@ -4952,7 +5113,11 @@ export class Relay {
     )
 
     const maxAdvisorTurns = boundOf(this.#opts)
-    this.#startedAt = Date.now()
+    this.#startedAt = this.#now()
+    // The ceiling window opens here, so the pause ledger is baselined here too. See
+    // `#suspendedAtStart`: only suspensions INSIDE the window may be subtracted from it.
+    this.#suspendedAtStart = handle?.suspendedMs ?? 0
+    this.#windowOpened = true
     this.#worktreesAtStart = worktreePaths(this.#opts.cwd)
     this.#worktreesSeen = new Set(this.#worktreesAtStart)
     // Best-effort and only ever read as a fallback (`#admitReview`): a repo with no commits
@@ -5344,6 +5509,19 @@ export class Relay {
             kind: 'note',
             text: ceiling.detail,
           })
+          // The clock stops HERE, not at `#end`. The detail above quotes the reading the ceiling
+          // was checked against, and the run then drains whatever seats are still working before
+          // it can end -- so a terminal reading taken after the drain is a different number from
+          // the one the operator is being shown, on a run whose whole claim is that `activeMs`
+          // IS the value handed to `breached`. Two expressions that merely agree on a quiet run
+          // is exactly what this change set out to stop having.
+          //
+          // Draining is teardown, not run time. The ceiling has already decided the run is over;
+          // what follows is letting seats finish so their work is not discarded, and charging the
+          // operator's allowance for it would be charging them for the ending itself. Raised by
+          // an independent review, which found the two readings could differ only when seats were
+          // still outstanding -- the case the equality test happened not to cover.
+          this.#stopClock()
           closing ??= { kind: 'end', reason: 'ceiling', detail: ceiling.detail }
           continue advisor
         }
