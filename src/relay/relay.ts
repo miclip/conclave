@@ -3457,6 +3457,25 @@ export class Relay {
     // refresher will follow it: the line says it is re-measured while the pause lasts, and it
     // is. Rendering that sentence for a run about to end would have promised updates from a
     // loop that was never going to exist.
+    // The run ended while this halt was being assembled, which `relay.stop()` can do at any point
+    // the loop is not inside an await it owns (#142). There is nobody to put a question to and
+    // nothing that could answer it, so the halt is abandoned before it does anything at all.
+    //
+    // FIRST, ahead of the liveness sample and the latch, and that placement is the correction an
+    // independent review asked for. Measuring samples a participant `stop()` has just closed, and
+    // `#forgetIncompleteAnswer` discards an answer the operator gave about a situation nobody is
+    // going to be asked about again -- both on a run that is already over. Neither reopens state
+    // or the ledger, so nothing was WRONG afterwards, but teardown that still reaches into a
+    // torn-down seat is not teardown, and the latch it clears belongs to #107's record.
+    //
+    // It also stands ahead of the `paused (...)` routing-log note, which is why the guard is
+    // worth having on top of the one in `RunHandle.pauseAt`: that note is the log's account of a
+    // decision point a human was at, and writing one for a pause that is then not raised makes
+    // the log describe a moment that never existed. A note with no pause under it is worse than
+    // a gap to someone reconstructing what the operator saw. Nothing awaits between here and
+    // `pauseAt`, so the check cannot go stale.
+    if (handle?.state === 'ended') return handle.outcome ?? this.#end('stopped')
+
     const measured =
       handle && p.liveness
         ? await this.#measureLiveness(p.liveness.participant, p.liveness.emittedBefore, { count: 0 })
@@ -3476,17 +3495,6 @@ export class Relay {
       // is a claim, and a run that cannot take a reading cannot make it.
       this.#forgetIncompleteAnswer(p.latch)
     }
-    // The run ended while this halt was being assembled, which `relay.stop()` can do at any point
-    // the loop is not inside an await it owns (#142). There is nobody to put a question to and
-    // nothing that could answer it, so the halt is abandoned here rather than one line later.
-    //
-    // BEFORE the note, and that is the whole reason for a second guard on top of the one in
-    // `RunHandle.pauseAt`: a `paused (...)` line in the routing log is the log's account of a
-    // decision point a human was at, and writing one for a pause that is then not raised makes
-    // the log describe a moment that never existed. The audit trail is read afterwards by people
-    // reconstructing what the operator saw, and a note with no pause under it is worse than a
-    // gap. Nothing awaits between here and `pauseAt`, so the check cannot go stale.
-    if (handle?.state === 'ended') return handle.outcome ?? this.#end('stopped')
     this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text: `paused (${reason}): ${p.detail}` })
     if (!handle) {
       return this.#end(
