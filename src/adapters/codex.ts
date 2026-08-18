@@ -733,38 +733,47 @@ export class CodexPtyHookAdapter implements AgentSession {
     if (this.#closed) return
     this.#closed = true
     this.#closeMode = mode
-    // We are done observing, so the deadline stops applying. Left armed it could fire
-    // during the awaits below and race the verdict each branch is deliberately choosing.
-    this.#watchdog.disarmAll()
+    // The queue is closed in a `finally`, so a close that THROWS still ends the iteration (#143).
+    // Everything between here and there can reject -- draining stdin, reconciling the transcript,
+    // terminating the pty, stopping the receiver -- and `#closed` is already true above, so a
+    // caller that retries returns immediately without ever reaching this line. The relay waits for
+    // its forwarder to drain before it abandons a turn, and a queue that never ends turns that
+    // wait into the hang it was added to remove: the one path least able to afford it, again.
+    try {
+      // We are done observing, so the deadline stops applying. Left armed it could fire
+      // during the awaits below and race the verdict each branch is deliberately choosing.
+      this.#watchdog.disarmAll()
 
-    if (mode === 'graceful' && this.#pty.alive) {
-      await this.#input.drain()
-      // Reconcile before terminating: an established verdict must not be replaced by a
-      // weaker causal guess because cleanup killed the process.
-      await this.#reconcileFromTranscript()
-      await this.#pty.terminate()
-    } else if (mode === 'abandoned') {
-      // Through the tracker, never around it. Emitting a verdict the tracker does not
-      // hold is precisely what made events() and snapshot() disagree here.
-      for (const turn of this.#liveTurns()) {
-        this.#apply(turn, turn.tracker.observeObservationGap(), true)
+      if (mode === 'graceful' && this.#pty.alive) {
+        await this.#input.drain()
+        // Reconcile before terminating: an established verdict must not be replaced by a
+        // weaker causal guess because cleanup killed the process.
+        await this.#reconcileFromTranscript()
+        await this.#pty.terminate()
+      } else if (mode === 'abandoned') {
+        // Through the tracker, never around it. Emitting a verdict the tracker does not
+        // hold is precisely what made events() and snapshot() disagree here.
+        for (const turn of this.#liveTurns()) {
+          this.#apply(turn, turn.tracker.observeObservationGap(), true)
+        }
+        // Record the gap first, THEN terminate. The distinction between the two modes is
+        // epistemic, not custodial: abandonment refuses to claim anything about the turns,
+        // and it was never meant to leak the process. It did -- the first live rotation
+        // rolled back, closed its replacement as abandoned, and left a Claude CLI running.
+        // The node process then could not exit for 26 minutes, which is how this was found.
+        //
+        // Terminating after the gap is recorded means cleanup cannot manufacture a verdict:
+        // the tracker already holds `unknown_abnormal_end`, and process death is weaker
+        // evidence than what it holds, so the classifier's rule order discards it.
+        if (this.#pty.alive) await this.#pty.terminate()
       }
-      // Record the gap first, THEN terminate. The distinction between the two modes is
-      // epistemic, not custodial: abandonment refuses to claim anything about the turns,
-      // and it was never meant to leak the process. It did -- the first live rotation
-      // rolled back, closed its replacement as abandoned, and left a Claude CLI running.
-      // The node process then could not exit for 26 minutes, which is how this was found.
-      //
-      // Terminating after the gap is recorded means cleanup cannot manufacture a verdict:
-      // the tracker already holds `unknown_abnormal_end`, and process death is weaker
-      // evidence than what it holds, so the classifier's rule order discards it.
-      if (this.#pty.alive) await this.#pty.terminate()
-    }
 
-    this.#stopTailing()
-    await this.#receiver.stop()
-    this.#state = 'terminated'
-    this.#events.close()
+      this.#stopTailing()
+      await this.#receiver.stop()
+      this.#state = 'terminated'
+    } finally {
+      this.#events.close()
+    }
   }
 
   /** Test and diagnostic access. */

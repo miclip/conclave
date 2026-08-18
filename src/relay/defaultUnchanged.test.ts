@@ -19,6 +19,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PassThrough, Writable } from 'node:stream'
 import test from 'node:test'
+import { AsyncQueue } from '../adapters/asyncQueue.ts'
 import { VALUED_FLAGS, main } from '../../bin/conclave.ts'
 import { flagReader } from '../config/cliFlags.ts'
 import { newSessionId, recordSession } from '../workspace/sessionRecord.ts'
@@ -45,8 +46,16 @@ class DefaultRunFakeSession implements AgentSession {
   readonly received: string[] = []
   onSend: ((message: string) => void) | undefined
   #replies: string[]
-  #queue: AgentEvent[] = []
-  #waiters: ((e: IteratorResult<AgentEvent>) => void)[] = []
+  /**
+   * The one delivery mechanism, shared with the adapters rather than reimplemented.
+   *
+   * Every double in this project used to carry its own copy of a single-consumer queue, and every
+   * copy had the same hole: nothing ended the iteration, so a consumer's `for await` parked
+   * forever after `close()`. `AgentSession.events()` is required to END once `close()` has
+   * returned -- `Relay.stop()` waits for exactly that before it calls a turn abandoned (#143) --
+   * and a double that cannot do it is a double that cannot be stopped.
+   */
+  #events = new AsyncQueue<AgentEvent>()
   #seq = 0
   #turns: { key: TurnKey; prose: string }[] = []
 
@@ -75,23 +84,11 @@ class DefaultRunFakeSession implements AgentSession {
   }
 
   #emit(e: AgentEvent): void {
-    const w = this.#waiters.shift()
-    if (w) w({ value: e, done: false })
-    else this.#queue.push(e)
+    this.#events.push(e)
   }
 
   events(): AsyncIterable<AgentEvent> {
-    const self = this
-    return {
-      [Symbol.asyncIterator]: () => ({
-        next: () =>
-          new Promise<IteratorResult<AgentEvent>>((resolve) => {
-            const item = self.#queue.shift()
-            if (item) resolve({ value: item, done: false })
-            else self.#waiters.push(resolve)
-          }),
-      }),
-    }
+    return this.#events
   }
 
   async snapshot(): Promise<SessionSnapshot> {
@@ -131,6 +128,9 @@ class DefaultRunFakeSession implements AgentSession {
   }
   async close(mode: CloseMode = 'graceful'): Promise<void> {
     this.state = 'terminated'
+    // The stream ENDS with the session, which is the half of the contract every one of these
+    // doubles used to omit. See `#events`.
+    this.#events.close()
   }
 }
 
@@ -324,7 +324,7 @@ const DECLARED: Record<string, string> = {
     'Authority routing (#56, D2) sends implementer_unanswered to the advisor before the operator, ' +
     'so a default run interrupts the human less than today. Real change at N=1, an improvement, ' +
     'declared rather than discovered. The pause reason exists at src/relay/run.ts:52 and the halt ' +
-    'that raises it is at src/relay/relay.ts:5942.',
+    'that raises it is at src/relay/relay.ts:6147.',
   'status.pause.resolution':
     'Classifying unresolved conditions on both axes (#56, D2) added `resolution` to every RunPause ' +
     '(src/relay/run.ts:244), so `conclave status --json` on a paused default run now carries ' +
@@ -606,7 +606,7 @@ const DECLARED: Record<string, string> = {
     'participant and nobody else, and a conclave or workstream scope samples NOBODY. It used to ' +
     'read pause.verdictOf.participant and fall back to scanning participants by rank for ' +
     'implementers — and verdictOf is set at exactly two halt sites, both turn_incomplete ' +
-    '(src/relay/relay.ts:5682, src/relay/relay.ts:6079), so every other pause reached that rank ' +
+    '(src/relay/relay.ts:5884, src/relay/relay.ts:6284), so every other pause reached that rank ' +
     'scan. WHAT CHANGES AT N=1: on the three pauses whose scope names no participant — ' +
     'operator_requested (/pause), advisor_escalated, authority_conflict — the lone implementer ' +
     'child used to be sampled, so a child that measured busy REFUSED the resume and wrote ' +
@@ -615,15 +615,15 @@ const DECLARED: Record<string, string> = {
     'safety guard rather than presented as a pure N>1 fix. The reason it is the right narrowing: ' +
     'the guard exists because continuing SENDS into a child that cannot accept input mid-turn, ' +
     'and on those three pauses the child it measured is not the child being sent to — resuming ' +
-    'advisor_escalated sends to the ADVISOR (src/relay/relay.ts:5794), resuming ' +
+    'advisor_escalated sends to the ADVISOR (src/relay/relay.ts:5996), resuming ' +
     'authority_conflict queues a constraint that is delivered by the dispatcher on the next ' +
     'dispatch to a free seat, and operator_requested is consumed at an advisor-turn boundary ' +
     'whose own evidence line says no turn is in flight. WHAT IS GIVEN UP, named rather than ' +
     'discovered: the advisor_escalated halt raised when a seat’s turn completed and its report ' +
-    'could not be read (src/relay/relay.ts:5991-5993) is conclave-scoped by design, yet the useful ' +
+    'could not be read (src/relay/relay.ts:6196-6198) is conclave-scoped by design, yet the useful ' +
     'question there is whether THAT seat is still writing; at N=1 the rank scan sampled it by ' +
     'coincidence of it being the only implementer, and now nothing does. The pause still carries ' +
-    'that seat’s liveness evidence from the halt site (src/relay/relay.ts:6002-6004), which is what ' +
+    'that seat’s liveness evidence from the halt site (src/relay/relay.ts:6207-6209), which is what ' +
     'the operator actually reads; restoring a refusal there is a change to that halt’s scope, ' +
     'not to the guard. AT N>1 the old behaviour was unsafe in the other direction: a pause about ' +
     'one seat could be refused because a DIFFERENT seat was mid-turn, and the operator was told ' +
@@ -1690,7 +1690,7 @@ async function provokeReviewBlocked(repo: string): Promise<{ relay: Relay; run: 
  * Drive a real relay into one condition and return the pause it raised.
  *
  * The provocations are the ones `resolution.test.ts`'s own `provoke` already uses, deliberately:
- * the same triggers reaching the same single halt site (src/relay/relay.ts:3439), where the
+ * the same triggers reaching the same single halt site (src/relay/relay.ts:3608), where the
  * classification is computed by production `resolutionFor` from the subject the caller passed.
  * Nothing here writes a `RunPause`.
  *
@@ -1983,8 +1983,8 @@ test('default run works in the run cwd and creates no worktree', async () => {
   }
 
   // The relay CLI passes process.cwd() as the run cwd: bin/conclave.ts:1276-1278.
-  // The relay hands that same cwd to each participant adapter: src/relay/relay.ts:2010-2016.
-  // The cwd getter simply returns the option: src/relay/relay.ts:1741-1743.
+  // The relay hands that same cwd to each participant adapter: src/relay/relay.ts:2091-2097.
+  // The cwd getter simply returns the option: src/relay/relay.ts:1822-1824.
   assert.match(relay, /cwd:\s*process\.cwd\(\)/, 'relay block must start in process.cwd')
   // Both creation sites now pass a NAMED context object rather than an inline literal, because
   // the same object composes the launch args that get recorded -- see
@@ -2027,7 +2027,7 @@ test('default run works in the run cwd and creates no worktree', async () => {
 
   // A default run with no subagents must not create any git worktree. The relay only samples
   // the worktree list for its subagent-use report: src/relay/subagents.ts:68 defines
-  // worktreePaths, and src/relay/relay.ts:2683-2684, :2977 and :5177 read it.
+  // worktreePaths, and src/relay/relay.ts:2787-2788, :3124 and :5366 read it.
   // Prove it by exercising the run in a real temporary repository.
   const repo = mkdtempSync(join(tmpdir(), 'conclave-default-'))
   try {

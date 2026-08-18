@@ -356,6 +356,16 @@ const DEFAULT_SALVAGE_MS = 90_000
 const DEFAULT_SEND_PRECONDITION_MS = 300_000
 
 /**
+ * How often `#exchangeTurn` looks for the `turn_end` it is waiting on.
+ *
+ * A cadence and nothing else: nothing counts these, no ending depends on how many have gone by,
+ * and the loop runs for as long as the turn does. The one exit besides the event -- the session
+ * being closed under it (#143) -- is a signal rather than a count, so this number cannot decide
+ * anything even indirectly.
+ */
+const TURN_POLL_MS = 250
+
+/**
  * The target was still mid-turn when the send precondition's bound expired, so nothing was
  * sent (#117).
  *
@@ -368,6 +378,25 @@ export class PeerBusyError extends Error {
   constructor(participant: string, message: string) {
     super(message)
     this.name = 'PeerBusyError'
+    this.participant = participant
+  }
+}
+
+/**
+ * The turn this was waiting on was abandoned because `stop()` closed the session under it (#143).
+ *
+ * A named type for the same reason `PeerBusyError` is one: `#loop` reports every other throw as
+ * `transport_failed`, and this is not a transport fault. It is the run being torn down, which
+ * `run_end` has already called `stopped` -- and a handle and a stream describing one run must not
+ * disagree about how it ended (see `stopWhilePaused.test.ts`).
+ *
+ * It carries the participant because the only thing worth saying about it is whose turn was lost.
+ */
+export class TurnAbandonedError extends Error {
+  readonly participant: string
+  constructor(participant: string, message: string) {
+    super(message)
+    this.name = 'TurnAbandonedError'
     this.participant = participant
   }
 }
@@ -1420,6 +1449,58 @@ export class Relay {
   #seq = 0
   #opts: RelayOptions
   #stopped = false
+  /**
+   * Per participant: has `stop()` finished closing its session, and a promise that says so.
+   *
+   * This is the signal `#exchangeTurn`'s poll leaves on, and the reason it is keyed on the CLOSE
+   * rather than on `#stopped` is the whole of #143's design question.
+   *
+   * `#stopped` is set at the top of `stop()`, before a single session has been touched. A poll
+   * that left there would leave while the adapter was still mid-sentence -- and on
+   * `ClaudeSession` the sentence is the point: `close('graceful')` reconciles from the transcript
+   * BEFORE it terminates the pty, so a graceful close is routinely the thing that ESTABLISHES the
+   * verdict and emits the very `turn_end` being waited for. Leaving early would throw away a
+   * report that was about to arrive, which is worse than the leak it was fixing: a lost verdict is
+   * work the run can no longer account for, where a parked poll is only a timer nobody unrefs.
+   *
+   * So the line is "the adapter has finished saying what happened AND the relay has heard it",
+   * not "somebody asked us to stop". `stop()` fires each participant's signal once two things
+   * have both happened: that participant's own `close('graceful')` has returned, and the
+   * `#attach` reader forwarding its events has drained. The second half is a barrier rather than
+   * a grace period on purpose -- how long a verdict takes to cross the forwarder is not something
+   * this code should be guessing a number for, and a guess that is ever wrong loses a report.
+   *
+   * ## Which adapters actually guarantee that verdict
+   *
+   * None of them (filed as #146); #143 establishes it rather than assuming. Read out per adapter:
+   *
+   *   claude.ts   `close('graceful')` reconciles from the transcript BEFORE terminating the pty,
+   *               which is the ordering the contract asks for and the reason this signal is not
+   *               `#stopped`. But the reconcile issues a verdict only for a turn the transcript
+   *               already shows as finished -- a genuinely live turn classifies `in_progress`
+   *               (the pty is still alive at that point by construction) and emits nothing. The
+   *               verdict then comes from the `exit` listener, which `close()` does not await, so
+   *               it races `#events.close()` at the end of the same method.
+   *   codex.ts    The same shape and the same race, and weaker at the reconcile: a turn the
+   *               transcript has not recorded yet is skipped without the tracker being asked.
+   *   kimi.ts     Kills first and waits for the child's own exit to produce the verdict, capped
+   *               at 3s. A child that ignores SIGTERM -- and neither this adapter nor opencode
+   *               escalates to SIGKILL -- leaves the turn open and the stream closes over it.
+   *   opencode.ts Identical to kimi's, cap included.
+   *
+   * So a mid-turn `stop()` may or may not produce a terminal `turn_end`, on every adapter this
+   * project has, and which one it does is decided by an unsequenced race between a transcript
+   * read and a socket shutdown. That is the case this exists for: the poll has to be able to
+   * leave WITHOUT one, and it must not leave before the race has been given its chance to be
+   * won. `FakeRotationSession` is the honest floor -- its `close()` emits nothing under any
+   * circumstances -- which is why the tests drive both ends against it.
+   *
+   * What this does NOT do is synthesize the missing verdict. `TurnResult.end` would have to be
+   * invented, and a `turn_end` the relay wrote itself would be indistinguishable in the routing
+   * log from one an adapter observed. The turn is recorded as lost instead, by name, in
+   * `#runLoop`'s `finally`.
+   */
+  #closed = new Map<string, { done: boolean; promise: Promise<void>; fire: () => void }>()
   /** Set by `RunHandle.requestPause()`; consumed at the next advisor-turn boundary. */
   #pauseRequested: string | undefined
   /** The pause currently in front of a human, when it rests on a verdict. See `#trackSupersession`. */
@@ -2047,16 +2128,39 @@ export class Relay {
    * pushing the new session's events under the old reader.
    */
   #attach(p: RelayParticipant, session: AgentSession = p.session): void {
-    void (async () => {
-      for await (const e of session.events()) {
-        if (p.session !== session) return
-        p.events.push(e)
-        this.#trackPermission(p, e)
-        this.#trackSupersession(p, e)
-        this.#stream.emit({ type: 'activity', participant: p.id, rank: p.rank, event: e })
-      }
-    })()
+    // Kept rather than voided, because `stop()` has to be able to WAIT for it (#143). Keyed on
+    // the participant and overwritten on rotation, so what is stored is always the reader for the
+    // session `p.session` currently names -- a retired session's reader ends on its own, either
+    // with its stream or at the identity check below, and nothing needs to wait for that.
+    //
+    // Storing it changes nothing about failure: it was unawaited before and it is unawaited now
+    // until teardown, so a throw in here surfaces exactly as it always did.
+    this.#forwarding.set(
+      p.id,
+      (async () => {
+        for await (const e of session.events()) {
+          if (p.session !== session) return
+          p.events.push(e)
+          this.#trackPermission(p, e)
+          this.#trackSupersession(p, e)
+          this.#stream.emit({ type: 'activity', participant: p.id, rank: p.rank, event: e })
+        }
+      })(),
+    )
   }
+
+  /**
+   * Per participant: the `#attach` reader for the session it currently holds.
+   *
+   * The barrier `stop()` closes the #143 race on. A `turn_end` emitted inside `close('graceful')`
+   * exists before `close()` returns and reaches `p.events` only afterwards, through this reader --
+   * so "the adapter has finished saying what happened" is not "close returned", it is "close
+   * returned AND everything it said has been forwarded". Waiting for this loop to END is that
+   * second half stated exactly, rather than approximated by a grace period: the reader finishes
+   * when the session's event stream finishes, which is a fact about the adapter rather than a
+   * guess about how fast it is.
+   */
+  #forwarding = new Map<string, Promise<void>>()
 
   /**
    * Which participants are stopped at a permission prompt, and for what.
@@ -2887,15 +2991,32 @@ export class Relay {
    * indistinguishable from a run that hung.
    */
   async #awaitSendable(p: RelayParticipant): Promise<void> {
+    // A session `stop()` has already closed is not going to become sendable, and nothing is
+    // going to be sent to it (#143). Reached when teardown lands between two turns rather than
+    // inside one: the loop is unwinding either way, and waiting out the precondition's bound --
+    // five minutes by default -- would make `stop()` sit through it, since `stop()` now waits for
+    // the loop. Thrown as an abandoned turn rather than as `peer_busy`, because nothing here is
+    // busy: the run was taken away.
+    const closed = this.#closeSignal(p.id)
+    if (closed.done) {
+      throw new TurnAbandonedError(p.id, `${p.id}'s session was closed before this turn could be sent`)
+    }
     if (!activeTurn(p.events)) return
 
     const bound = this.#opts.sendPreconditionMs ?? DEFAULT_SEND_PRECONDITION_MS
     const startedAt = Date.now()
     const eventsAtStart = p.events.length
     let turn = activeTurn(p.events)
-    while (turn && Date.now() - startedAt < bound) {
-      await new Promise((r) => setTimeout(r, 100))
+    while (turn && Date.now() - startedAt < bound && !closed.done) {
+      await Promise.race([new Promise((r) => setTimeout(r, 100)), closed.promise])
       turn = activeTurn(p.events)
+    }
+    // Closed under us while waiting. Same reasoning as above, and checked after the loop rather
+    // than inside it so the last look at `activeTurn` still counts: a close that ended the turn
+    // makes this participant sendable in the only sense that matters, and the give-up path below
+    // must not be entered for a turn that has just finished.
+    if (turn && closed.done) {
+      throw new TurnAbandonedError(p.id, `${p.id}'s session was closed while its previous turn was still open`)
     }
     const busy = turn !== undefined
     // Sub-second waits are reported in milliseconds. A bound set small -- a test, an operator
@@ -2963,6 +3084,32 @@ export class Relay {
     throw new PeerBusyError(p.id, detail)
   }
 
+  /**
+   * The close signal for one participant, created on first use by whichever side asks first.
+   *
+   * Both sides need it and neither can be relied on to run first: a turn can be in flight long
+   * before anyone stops the relay, and `stop()` can be called on a participant that never took a
+   * turn at all. Created lazily here so the two always get the same object.
+   */
+  #closeSignal(id: string): { done: boolean; promise: Promise<void>; fire: () => void } {
+    const existing = this.#closed.get(id)
+    if (existing) return existing
+    let resolve!: () => void
+    const promise = new Promise<void>((r) => {
+      resolve = r
+    })
+    const signal = {
+      done: false,
+      promise,
+      fire: () => {
+        signal.done = true
+        resolve()
+      },
+    }
+    this.#closed.set(id, signal)
+    return signal
+  }
+
   async #exchangeTurn(p: RelayParticipant, text: string): Promise<TurnResult> {
     // Nothing is sent to a participant that is still working. First, because a send that lands
     // mid-turn is not queued -- it ends the run (#117) -- and second, because everything below
@@ -2996,10 +3143,32 @@ export class Relay {
     // that was merely long. It discarded working sessions to report a timeout, and it did
     // so with a hardcoded throw rather than the `timed_out` verdict the design already
     // defines. Losing the session is worse than waiting for it.
+    //
+    // It does have ONE exit besides the event: the session being closed under it (#143). Not the
+    // same thing as a deadline, and deliberately not `#stopped` either -- see `#closed` for why
+    // the line is drawn at the close returning rather than at the request to stop. Until someone
+    // closes this session, this loop is exactly the loop it has always been.
+    const terminal = (): TurnEndEvent | undefined =>
+      p.events.slice(before).find((e) => e.type === 'turn_end') as TurnEndEvent | undefined
+    const closed = this.#closeSignal(p.id)
     let end: TurnEndEvent | undefined
-    while (!end) {
-      end = p.events.slice(before).find((e) => e.type === 'turn_end') as TurnEndEvent | undefined
-      if (!end) await new Promise((r) => setTimeout(r, 250))
+    for (;;) {
+      end = terminal()
+      if (end) break
+      // The signal does not fire until the session is closed AND its reader has drained, so the
+      // look taken at the top of this iteration has already seen every event the close produced.
+      // There is nothing left to wait for and nothing to wait a grace period for: if a verdict
+      // existed, `terminal()` would be holding it.
+      if (closed.done) {
+        throw new TurnAbandonedError(
+          p.id,
+          `${p.id}'s session was closed while its turn was still open, and the close produced no ` +
+            `verdict for it — so the turn was abandoned and its report is lost`,
+        )
+      }
+      // Raced rather than slept through, so a stop does not wait out a poll interval it has
+      // already made pointless.
+      await Promise.race([new Promise((r) => setTimeout(r, TURN_POLL_MS)), closed.promise])
     }
 
     // The transcript can lag the hook. `Stop` fires when the turn ends; the final assistant
@@ -3840,12 +4009,15 @@ export class Relay {
     // single decision. `handle.pause` is `undefined` once the operator answers, which is
     // exactly when a rotation is no longer an answer to that question.
     this.#handle = handle
-    void this.#loop(goal, handle).then(
+    // The settle is part of what `stop()` waits for, not just the loop body: a caller that has
+    // awaited `stop()` and then reads `run.state` must not be reading it a tick early.
+    this.#looped = this.#loop(goal, handle).then(
       (outcome) => handle.settle(outcome),
       // Retained as a backstop only. #loop now converts a throw into a `transport_failed`
       // outcome, so this fires only for something #loop itself could not handle.
       (err: Error) => handle.settle(this.#end('transport_failed', `the run threw: ${err.message}`)),
     )
+    void this.#looped
     return handle
   }
 
@@ -4441,8 +4613,18 @@ export class Relay {
    * attended form, and the difference is deliberate rather than incidental.
    */
   async run(goal: string): Promise<RunOutcome> {
-    return this.#loop(goal, undefined)
+    const looping = this.#loop(goal, undefined)
+    this.#looped = looping
+    return looping
   }
+
+  /**
+   * The run in progress, so `stop()` can wait for it to unwind (#143).
+   *
+   * Held here rather than only in `start()`'s `void` call because `run()` -- the unattended form
+   * -- has no handle to hang it off, and the thing `stop()` needs is the same in both.
+   */
+  #looped: Promise<unknown> | undefined
 
   async #loop(goal: string, handle: RunHandle | undefined): Promise<RunOutcome> {
     this.#looping = true
@@ -4465,6 +4647,13 @@ export class Relay {
       // asked to carry anything and never failed. Reporting it as a transport fault is the
       // misdirection #117 is about, arriving one layer later.
       if (err instanceof PeerBusyError) return this.#end('peer_busy', detail)
+      // Nor is a turn abandoned by teardown (#143). `stop()` closed the session under it, so the
+      // send that never came back was one this relay withdrew rather than one the transport
+      // dropped. `#end` is first-outcome-wins and `stop()` has already ended the run as
+      // `stopped`, so this call returns that outcome rather than installing a second one -- and
+      // saying `stopped` here rather than `transport_failed` is what keeps a relay stopped
+      // BEFORE its run ever started from reporting a fault it did not have.
+      if (err instanceof TurnAbandonedError) return this.#end('stopped', detail)
       return this.#end('transport_failed', detail)
     } finally {
       this.#looping = false
@@ -5265,6 +5454,19 @@ export class Relay {
      */
     const arrived: Completion[] = []
     /**
+     * Tasks whose turn came back as a THROW and was re-raised, which ends the run.
+     *
+     * Kept because the re-raise is what removes them from every other account: the task has left
+     * `inflight` and has been shifted off `arrived`, so by the time the `finally` below runs,
+     * `outstanding()` is zero and the note that names lost turns had nothing to name. At N=1 that
+     * made the note unreachable on the only two endings it exists for -- a turn abandoned by
+     * `stop()` (#143) and a turn that threw -- which is to say, unreachable.
+     *
+     * A turn that threw is the plainest case of the thing the note is about: the instruction went
+     * out and no report came back.
+     */
+    const abandoned: string[] = []
+    /**
      * Turns this run still owes an answer to: sent and not back, or back and not yet processed.
      *
      * Both, and the second is not pedantry. A turn that has arrived has left `inflight` and has
@@ -5926,7 +6128,10 @@ export class Relay {
         // Re-raised HERE rather than where it happened, so a turn that threw ends the run
         // through the same path a serial one always did instead of surfacing as an unhandled
         // rejection from whichever seat happened to fail first.
-        if ('error' in completion) throw completion.error
+        if ('error' in completion) {
+          abandoned.push(completion.task.id)
+          throw completion.error
+        }
         const { task, seat, exec, report } = completion
 
         // A build-changing scope question is not a report the advisor can act on. The
@@ -6157,8 +6362,8 @@ export class Relay {
       // because a run that lost a report must say so: the routing log shows the instruction
       // going out and nothing coming back, and a reader cannot tell that from a seat that is
       // still thinking.
-      if (outstanding() > 0) {
-        const lost = [...inflight.keys(), ...arrived.map((c) => c.task.id)]
+      const lost = [...inflight.keys(), ...arrived.map((c) => c.task.id), ...abandoned]
+      if (lost.length > 0) {
         this.#record({
           from: 'orchestrator',
           fromRank: 'human',
@@ -6685,7 +6890,52 @@ export class Relay {
     // `#halt` frame unwinds instead of holding this relay for the life of the process. See
     // `RunHandle.pauseAt` for why that is not spelled as an abort.
     if (this.#firstEnd) this.#handle?.settle(this.#firstEnd)
-    for (const p of this.participants) await p.session.close('graceful')
+    for (const p of this.participants) {
+      // The signal fires whatever the close did, including throwing (#143). A `close()` that fails
+      // has still taken the session away, and leaving the signal unfired would park a polling turn
+      // on a session nobody is coming back to -- which is the leak, reinstated on the path least
+      // able to afford it.
+      try {
+        await p.session.close('graceful')
+      } finally {
+        // The forwarding barrier, and it is in the `finally` on purpose. `close()` returning means
+        // the adapter has said everything it is going to; this means the relay has HEARD it.
+        // Between the two sits `#attach`, and a `turn_end` established by the close is in flight
+        // across it for as long as the reader takes to hand it on -- which is not a duration
+        // anything here should be guessing at.
+        //
+        // A close that THROWS has still said whatever it managed to say before it threw, and a
+        // reconcile that established a verdict and then failed to terminate the pty is exactly
+        // that shape. Draining only on the happy path discarded it, and discarding a verdict is
+        // worse than the leak this whole change is about -- raised by an independent review.
+        //
+        // This terminates because `AgentSession.events()` is required to end once `close()` has
+        // returned, and every adapter now closes its queue in a `finally` of its own so a
+        // throwing close still ends the iteration (#143). Without that half, awaiting here on the
+        // exceptional path would replace a discarded verdict with a hang. `catch` because a
+        // reader that threw has still stopped reading, and teardown is not where that gets
+        // reported.
+        await this.#forwarding.get(p.id)?.catch(() => {})
+        this.#closeSignal(p.id).fire()
+      }
+    }
+    // And now the loop is waited for, which is the rest of #143.
+    //
+    // #142 settled the handle from here precisely so a caller was not left depending on the loop
+    // unwinding. That still holds: the handle is settled above, before this line, so `result()`
+    // has already resolved and nothing a caller awaits is gated on what follows. This is a
+    // narrower guarantee laid on top of it -- that by the time `stop()` returns, the run has
+    // finished SAYING what it lost. The unfinished-turn note in `#runLoop`'s `finally` names the
+    // seat turns whose reports never reached the advisor, and it is written as the loop unwinds;
+    // a `stop()` that returned first would let a front end assemble its report, or a test assert
+    // on the log, in the window before the run had accounted for itself.
+    //
+    // It can only wait as long as the loop takes to unwind, because every place the loop can be
+    // parked is now released before this line: a pause by `settle()` above (#142), a turn's
+    // `turn_end` poll and the send precondition by the close signals just fired, and everything
+    // else the loop does between those is bounded already. `catch` because the outcome is not
+    // wanted here and a rejection is `start()`'s business, not teardown's.
+    await this.#looped?.catch(() => {})
     // Between closing the sessions and releasing the claim, in that order and for a reason.
     // Cleanup reads each seat's tree, so it must happen after the writers are gone; and
     // releasing the claim while a seat worktree still holds uncommitted work would report the

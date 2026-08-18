@@ -327,7 +327,18 @@ export interface AgentSession {
   /** Respond to a pending permission request. Only meaningful under mediated input. */
   decidePermission(decision: 'allow' | 'deny'): Promise<void>
 
-  /** Live, provisional, revisable. */
+  /**
+   * Live, provisional, revisable.
+   *
+   * Single-consumer, and it MUST END once `close()` has returned. A consumer has no other way to
+   * know it has been told everything: a verdict established by a graceful close is emitted during
+   * the close and delivered afterwards, so "the close returned" alone does not mean the stream is
+   * spent. `Relay.stop()` waits for this iterable to finish before it treats a turn with no
+   * `turn_end` as abandoned (#143), and a session that never ends it would park that wait.
+   *
+   * Every adapter satisfies this by closing its `AsyncQueue` inside `close()`, which drains what
+   * is buffered and then reports `done`.
+   */
   events(): AsyncIterable<AgentEvent>
 
   /** Canonical, rebuilt from the transcript as it currently exists. */

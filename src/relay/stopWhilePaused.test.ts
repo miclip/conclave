@@ -33,7 +33,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import type { Verdict } from '../contract/outcome.ts'
-import type { AgentSession } from '../contract/session.ts'
+import type { AgentEvent, AgentSession, CloseMode } from '../contract/session.ts'
 import { AgentRegistry } from '../registry/registry.ts'
 import { NO_DEADLINE_CLOCKS } from '../registry/types.ts'
 import { FakeRotationSession } from '../rotation/fakeSession.ts'
@@ -125,6 +125,82 @@ async function relayOf(
 /** Enough scripted turns that nothing but the test ends these runs. */
 function endlessly(prefix: string): string[] {
   return Array.from({ length: 40 }, (_, i) => `${prefix} ${i + 1}.`)
+}
+
+/**
+ * A session whose graceful close ENDS the turn that was open, the way a reconciling adapter does.
+ *
+ * `FakeRotationSession.close()` records the mode and terminates, and emits nothing -- which is the
+ * right default, because it is also what every adapter does in the case #143 exists for. This is
+ * the other case, and it has to be a session rather than a `setTimeout` in the test: the whole
+ * question is whether the relay uses a verdict produced INSIDE `close('graceful')`, so the release
+ * has to happen there and nowhere else.
+ *
+ * `ClaudeSession` is the shape being imitated: `#reconcileFromTranscript()` runs before the pty is
+ * terminated, so the close is what establishes the verdict for a turn the transcript had not yet
+ * shown as finished.
+ */
+class ReconcilingSession extends FakeRotationSession {
+  /**
+   * How long the reconcile takes, and it has to be LONGER than the relay's own poll cadence.
+   *
+   * Reading a transcript is file I/O and takes real time, so a close that establishes a verdict
+   * does not do it instantaneously. That delay is also what gives this test teeth: a relay that
+   * left its poll when it noticed the stop, rather than when the close returned, would be gone
+   * before the verdict existed -- and with an instant reconcile it would still find one, because
+   * the poll's own next tick would happen to arrive after the release. The number therefore has
+   * to sit on the far side of that tick, or the test passes for the wrong reason.
+   */
+  reconcileMs = 500
+
+  override async close(mode: CloseMode = 'graceful'): Promise<void> {
+    if (mode === 'graceful' && this.holding) {
+      await new Promise((r) => setTimeout(r, this.reconcileMs))
+      this.releaseTurn()
+    }
+    await super.close(mode)
+  }
+}
+
+/**
+ * A session whose close produces the verdict immediately and whose STREAM is slow to hand it on.
+ *
+ * The other way the same report gets lost, and the one a grace period cannot cover. `close()`
+ * returns promptly here -- the verdict exists the moment it is called -- but the event takes
+ * `lagMs` to cross the relay's forwarding reader, which is where every real adapter's events also
+ * travel. Any fixed grace is a bet on that crossing being quick, and this is the case that
+ * collects on the bet.
+ *
+ * The lag is applied only once the close has begun, so the turn itself runs at normal speed and
+ * nothing else in the run is slowed down to make the point.
+ */
+class LaggingSession extends FakeRotationSession {
+  /** Comfortably past the poll cadence, so no tick can rescue a relay that guessed. */
+  lagMs = 600
+  #closing = false
+
+  override events(): AsyncIterable<AgentEvent> {
+    const base = super.events()[Symbol.asyncIterator]()
+    const lag = (): Promise<void> => new Promise((r) => setTimeout(r, this.lagMs))
+    return {
+      [Symbol.asyncIterator]: () => ({
+        next: async () => {
+          const step = await base.next()
+          if (this.#closing) await lag()
+          return step
+        },
+      }),
+    }
+  }
+
+  override async close(mode: CloseMode = 'graceful'): Promise<void> {
+    // Set BEFORE the release, so the reader that is already parked on this turn is the one that
+    // gets slowed down. Setting it after would let the verdict through at full speed and leave
+    // the test asserting nothing.
+    this.#closing = true
+    if (mode === 'graceful' && this.holding) this.releaseTurn()
+    await super.close(mode)
+  }
 }
 
 // ---------------------------------------------------------------------------------------
@@ -246,14 +322,136 @@ test('a run stopped mid-turn ends too, and is not reported as the fault its tear
   assert.equal(run.state, 'ended')
   assert.equal((await run.result()).reason, 'stopped')
 
-  // The caller is unblocked, which is what this fixes. The LOOP is not: `#exchange` has no
-  // timeout of its own by design -- the adapter's watchdog owns that clock -- so it is still
-  // polling every 250ms for a `turn_end` from a session that has been closed, on a timer nothing
-  // unrefs. Released here so this file's process can exit, and named rather than hidden: an
-  // orphaned poll surviving `stop()` is a different defect from this one, which is about the
-  // handle -- and this fix does not depend on the loop unwinding, which is why it is not blocked
-  // on it. Filed as #143.
-  impl.releaseTurn()
+  // The LOOP is unblocked too, and that is #143. This turn is never released -- `releaseTurn()`
+  // used to be called here purely so the file's process could exit, because the poll went on
+  // waiting forever on a 250ms timer nothing unrefs. It is gone: the poll leaves when the session
+  // it is waiting on has been closed, so there is nothing left holding the process open and
+  // nothing to release. The fake's `close()` emits no `turn_end` under any circumstances, which
+  // is the honest floor -- no adapter this project has GUARANTEES one either (see `Relay#closed`).
+  assert.ok(impl.holding, 'the turn was never released; nothing but the close ended this run')
+
+  // And the run says what it lost. This note is what a reader has instead of a report: the
+  // routing log shows the instruction going out and nothing coming back, and without this they
+  // cannot tell that from a seat that is still thinking. It was unreachable before #143 -- the
+  // loop never unwound to write it, and on the exception path the re-raised turn had already been
+  // taken off every list the note counts.
+  const unfinished = relay.log.filter((m) => m.kind === 'note' && m.text.startsWith('the run ended with'))
+  assert.equal(unfinished.length, 1, `exactly one unfinished-turn note:\n${relay.log.map((m) => m.text).join('\n')}`)
+  assert.match(unfinished[0]!.text, /1 seat turn\(s\) unfinished: t-1\b/, 'and it names the task whose report was lost')
+  assert.match(unfinished[0]!.text, /never reached the advisor/)
+})
+
+test('a turn_end that arrives during the graceful close is used, not discarded', async (t) => {
+  // The other side of the line #143 draws, and the reason the poll does not leave on `#stopped`.
+  //
+  // `ClaudeSession.close('graceful')` reconciles from the transcript BEFORE it terminates the
+  // pty, so a graceful close is often the thing that ESTABLISHES a verdict for the turn that was
+  // open. A poll that left the instant it saw the stop flag would throw that verdict away -- and
+  // losing a report is worse than the leak it was fixing, because the run can no longer account
+  // for work that is sitting on disk.
+  //
+  // So the session here does what a reconciling adapter does: the held turn ends, with its
+  // verdict, inside `close('graceful')`. The turn must complete normally -- report recorded,
+  // nothing called lost -- even though the relay was already stopped when it arrived.
+  const dir = repo()
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const impl = new ReconcilingSession('impl', 'claude', endlessly('Did step'))
+  impl.holdTurn = 1
+  const relay = await relayOf(dir, new FakeRotationSession('advisor', 'codex', endlessly('Keep going')), impl)
+
+  const run = relay.start('Keep the work moving.')
+  for (let i = 0; i < 600 && !impl.holding; i++) await new Promise((r) => setTimeout(r, 10))
+  assert.ok(impl.holding, 'the child was sent work and has not been allowed to answer')
+
+  await relay.stop()
+
+  assert.equal(run.state, 'ended')
+  assert.equal((await run.result()).reason, 'stopped', 'the run still ended because it was stopped')
+  assert.equal(impl.closedAs, 'graceful')
+  assert.equal(impl.holding, false, 'the close ended the turn rather than abandoning it')
+
+  // The verdict was used: the turn came back, and its report is in the log as a report rather
+  // than as an absence. `t-1` is the only task this run admitted.
+  const reports = relay.log.filter((m) => m.kind === 'report' && m.from === 'implementer')
+  assert.equal(reports.length, 1, `the report reached the log:\n${relay.log.map((m) => `${m.kind}: ${m.text}`).join('\n')}`)
+  assert.equal(reports[0]!.text, 'Did step 2.', 'and it is the prose the turn actually produced')
+
+  // And nothing calls it lost. A note naming `t-1` here would mean the relay had discarded a
+  // verdict it was handed, which is the failure this half of the test exists to catch.
+  const unfinished = relay.log.filter((m) => m.kind === 'note' && m.text.startsWith('the run ended with'))
+  assert.deepEqual(unfinished.map((m) => m.text), [], 'no turn was unfinished: the one that was open ended')
+})
+
+test('a turn_end delivered long after the close returns is still used', async (t) => {
+  // The same verdict, arriving by the slow road.
+  //
+  // `close('graceful')` produces it promptly here and then returns; what takes time is the RELAY's
+  // own forwarding reader handing it on -- 600ms, comfortably past the poll's 250ms cadence. An
+  // implementation that allowed the forwarder a fixed grace and then gave up would lose this
+  // report, and would do it intermittently, which is the worst way to lose one.
+  //
+  // So the wait is a barrier rather than a duration: `stop()` fires the abandonment signal only
+  // once the close has returned AND that reader has drained, which is a fact about the stream
+  // instead of a bet on its speed. `AgentSession.events()` ending with the session is what makes
+  // the barrier terminate, and is now stated in the contract.
+  const dir = repo()
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const impl = new LaggingSession('impl', 'claude', endlessly('Did step'))
+  impl.holdTurn = 1
+  const relay = await relayOf(dir, new FakeRotationSession('advisor', 'codex', endlessly('Keep going')), impl)
+
+  const run = relay.start('Keep the work moving.')
+  for (let i = 0; i < 600 && !impl.holding; i++) await new Promise((r) => setTimeout(r, 10))
+  assert.ok(impl.holding, 'the child was sent work and has not been allowed to answer')
+
+  await relay.stop()
+
+  assert.equal((await run.result()).reason, 'stopped')
+  const reports = relay.log.filter((m) => m.kind === 'report' && m.from === 'implementer')
+  assert.equal(reports.length, 1, `the report reached the log:\n${relay.log.map((m) => `${m.kind}: ${m.text}`).join('\n')}`)
+  assert.equal(reports[0]!.text, 'Did step 2.', 'and it is the prose the turn actually produced')
+  const unfinished = relay.log.filter((m) => m.kind === 'note' && m.text.startsWith('the run ended with'))
+  assert.deepEqual(unfinished.map((m) => m.text), [], 'nothing was lost: the verdict merely took its time arriving')
+})
+
+test('a close that FAILS still hands on what it said before it failed (#143)', async (t) => {
+  // The exceptional path, and the one an independent review found open. `stop()` awaited the
+  // forwarder only when `close()` resolved; a close that rejected went straight to the `finally`
+  // and fired the abandonment signal, so a `turn_end` already in flight across `#attach` was
+  // thrown away by the teardown that provoked it. Discarding a verdict is worse than the leak
+  // this change is about, which is what makes it the failure worth a test of its own.
+  //
+  // A real adapter reaches this shape easily: `close('graceful')` reconciles the transcript --
+  // establishing and emitting the verdict -- and then terminates the pty, stops the receiver, or
+  // drains stdin, any of which can reject after the useful work is done.
+  //
+  // The other half is in the adapters. Each closes its event queue in a `finally` now, so a
+  // throwing close still ends the iteration; without that, draining here on the exceptional path
+  // would have replaced a discarded verdict with a hang.
+  const dir = repo()
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const impl = new LaggingSession('impl', 'claude', endlessly('Did step'))
+  impl.holdTurn = 1
+  impl.closeThrows = 'terminate: pty refused to die'
+  const relay = await relayOf(dir, new FakeRotationSession('advisor', 'codex', endlessly('Keep going')), impl)
+
+  const run = relay.start('Keep the work moving.')
+  for (let i = 0; i < 600 && !impl.holding; i++) await new Promise((r) => setTimeout(r, 10))
+  assert.ok(impl.holding, 'the child was sent work and has not been allowed to answer')
+
+  await assert.rejects(() => relay.stop(), /pty refused to die/, 'the close really did fail')
+
+  // The verdict it produced on its way out is used, exactly as it is when the close succeeds.
+  assert.equal((await run.result()).reason, 'stopped')
+  const reports = relay.log.filter((m) => m.kind === 'report' && m.from === 'implementer')
+  assert.equal(
+    reports.length,
+    1,
+    `the report survived the failed close:\n${relay.log.map((m) => `${m.kind}: ${m.text}`).join('\n')}`,
+  )
+  assert.equal(reports[0]!.text, 'Did step 2.')
+  const unfinished = relay.log.filter((m) => m.kind === 'note' && m.text.startsWith('the run ended with'))
+  assert.deepEqual(unfinished.map((m) => m.text), [], 'nothing was abandoned: the verdict arrived')
 })
 
 test('a run that already ended keeps the reason it ended for', async (t) => {

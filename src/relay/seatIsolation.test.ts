@@ -21,6 +21,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import test from 'node:test'
+import { AsyncQueue } from '../adapters/asyncQueue.ts'
 import type { AgentEvent, AgentSession, CloseMode, SessionSnapshot, SessionState, TurnKey } from '../contract/session.ts'
 import { guaranteesFor, turnKey } from '../contract/session.ts'
 import { AgentRegistry } from '../registry/registry.ts'
@@ -70,8 +71,16 @@ class SeatFakeSession implements AgentSession {
   cwd = ''
   closedAs: CloseMode | undefined
   #replies: string[]
-  #queue: AgentEvent[] = []
-  #waiters: ((e: IteratorResult<AgentEvent>) => void)[] = []
+  /**
+   * The one delivery mechanism, shared with the adapters rather than reimplemented.
+   *
+   * Every double in this project used to carry its own copy of a single-consumer queue, and every
+   * copy had the same hole: nothing ended the iteration, so a consumer's `for await` parked
+   * forever after `close()`. `AgentSession.events()` is required to END once `close()` has
+   * returned -- `Relay.stop()` waits for exactly that before it calls a turn abandoned (#143) --
+   * and a double that cannot do it is a double that cannot be stopped.
+   */
+  #events = new AsyncQueue<AgentEvent>()
   #seq = 0
   #turns: { key: TurnKey; prose: string }[] = []
 
@@ -99,23 +108,11 @@ class SeatFakeSession implements AgentSession {
   }
 
   #emit(e: AgentEvent): void {
-    const w = this.#waiters.shift()
-    if (w) w({ value: e, done: false })
-    else this.#queue.push(e)
+    this.#events.push(e)
   }
 
   events(): AsyncIterable<AgentEvent> {
-    const self = this
-    return {
-      [Symbol.asyncIterator]: () => ({
-        next: () =>
-          new Promise<IteratorResult<AgentEvent>>((resolve) => {
-            const item = self.#queue.shift()
-            if (item) resolve({ value: item, done: false })
-            else self.#waiters.push(resolve)
-          }),
-      }),
-    }
+    return this.#events
   }
 
   async snapshot(): Promise<SessionSnapshot> {
@@ -156,6 +153,9 @@ class SeatFakeSession implements AgentSession {
   async close(mode: CloseMode = 'graceful'): Promise<void> {
     this.closedAs = mode
     this.state = 'terminated'
+    // The stream ENDS with the session, which is the half of the contract every one of these
+    // doubles used to omit. See `#events`.
+    this.#events.close()
   }
 }
 

@@ -8,6 +8,7 @@
  * alive" is the property that matters.
  */
 
+import { AsyncQueue } from '../adapters/asyncQueue.ts'
 import type { Verdict } from '../contract/outcome.ts'
 import type {
   AgentEvent,
@@ -68,8 +69,16 @@ export class FakeRotationSession implements AgentSession {
    * test built on this session could only ever assert that the key existed.
    */
   #turns: { key: TurnKey; prose: string; verdict?: Verdict | undefined }[] = []
-  #queue: AgentEvent[] = []
-  #waiters: ((e: IteratorResult<AgentEvent>) => void)[] = []
+  /**
+   * The one delivery mechanism, shared with the adapters rather than reimplemented.
+   *
+   * Every double in this project used to carry its own copy of a single-consumer queue, and every
+   * copy had the same hole: nothing ended the iteration, so a consumer's `for await` parked
+   * forever after `close()`. `AgentSession.events()` is required to END once `close()` has
+   * returned -- `Relay.stop()` waits for exactly that before it calls a turn abandoned (#143) --
+   * and a double that cannot do it is a double that cannot be stopped.
+   */
+  #events = new AsyncQueue<AgentEvent>()
   #seq = 0
 
   // Assigned in the body rather than as parameter properties: `erasableSyntaxOnly` is on,
@@ -332,9 +341,7 @@ export class FakeRotationSession implements AgentSession {
 
   /** Push an event to whichever reader is waiting, or queue it. Single-consumer, as ever. */
   emit(e: AgentEvent): void {
-    const w = this.#waiters.shift()
-    if (w) w({ value: e, done: false })
-    else this.#queue.push(e)
+    this.#events.push(e)
   }
 
   /** Simulate a compaction: both the snapshot generation and the live revision event. */
@@ -383,17 +390,7 @@ export class FakeRotationSession implements AgentSession {
   async decidePermission(): Promise<void> {}
 
   events(): AsyncIterable<AgentEvent> {
-    const self = this
-    return {
-      [Symbol.asyncIterator]: () => ({
-        next: () =>
-          new Promise<IteratorResult<AgentEvent>>((resolve) => {
-            const item = self.#queue.shift()
-            if (item) resolve({ value: item, done: false })
-            else self.#waiters.push(resolve)
-          }),
-      }),
-    }
+    return this.#events
   }
 
   async snapshot(): Promise<SessionSnapshot> {
@@ -424,9 +421,27 @@ export class FakeRotationSession implements AgentSession {
     throw new Error('not implemented')
   }
 
+  /**
+   * Make `close()` reject AFTER it has said what it had to say, as a real adapter can (#143).
+   *
+   * `close('graceful')` reconciles, terminates the pty and stops the receiver, and any of those
+   * can reject once a verdict has already been established and emitted. The queue still has to
+   * end -- the adapters close theirs in a `finally` for exactly this -- and the relay still has
+   * to drain it before abandoning the turn, or a verdict that was already in flight is thrown
+   * away by the teardown that provoked it.
+   */
+  closeThrows: string | undefined
+
   async close(mode: CloseMode = 'graceful'): Promise<void> {
     this.closedAs = mode
     this.#to('terminated')
+    try {
+      if (this.closeThrows) throw new Error(this.closeThrows)
+    } finally {
+      // The stream ENDS with the session, which is the half of the contract every one of these
+      // doubles used to omit, and it ends however the close went. See `#events`.
+      this.#events.close()
+    }
   }
 }
 
