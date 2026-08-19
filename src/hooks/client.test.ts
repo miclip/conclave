@@ -24,14 +24,19 @@
 
 import { strict as assert } from 'node:assert'
 import { spawn } from 'node:child_process'
-import { mkdtempSync, readFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import test from 'node:test'
+import test, { after } from 'node:test'
 import { HookReceiver } from './receiver.ts'
 
 const CLIENT = join(import.meta.dirname, 'client.ts')
 const SCRATCH = mkdtempSync(join(tmpdir(), 'orch-hook-client-'))
+
+// The attempt journals and receiver journals below are written for the assertions and are
+// worthless afterwards. `force` so a run that failed before writing anything still exits
+// clean, and the hook runs whether the tests passed or not.
+after(() => rmSync(SCRATCH, { recursive: true, force: true }))
 
 interface Run {
   code: number
