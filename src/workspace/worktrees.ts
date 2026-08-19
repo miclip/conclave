@@ -49,7 +49,7 @@
  */
 
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path'
 
 /**
@@ -113,6 +113,80 @@ export function worktreesRoot(repoRoot: string, runId: string): string {
 
 export function manifestPath(repoRoot: string, runId: string): string {
   return join(worktreesRoot(repoRoot, runId), 'manifest.json')
+}
+
+/**
+ * Where a seat worktree sits, and which run root owns it.
+ *
+ * `worktreePath` is the seat checkout itself -- the directory a command run inside the seat
+ * resolves as its repository root. `integrationRoot` is the run root that actually holds the
+ * rendered registrations, and is where a drift check is meaningful.
+ */
+export interface SeatWorktreeIdentity {
+  worktreePath: string
+  integrationRoot: string
+  runId: string
+  slug: string
+  /** The operator-supplied id when the manifest is there to say so; the slug otherwise. */
+  seatId: string
+}
+
+/**
+ * The seat worktree a directory is inside, if it is inside one.
+ *
+ * `config check` is the caller this exists for. A seat is a LINKED checkout of the run root,
+ * and the rendered registrations are generated and git-ignored -- so git never checks them
+ * out into a seat, and a drift check run there reports the run root's registrations as
+ * missing. That reading is accurate and useless: nothing in a seat is what an operator would
+ * install, and every seat would fail a check the run root passes. The command answers
+ * `not_applicable` instead, and this function is the fact it answers on.
+ *
+ * Recognised by LAYOUT plus the linked-worktree fact, not by the manifest. `createSeatWorktrees`
+ * writes the manifest only after every tree exists, and cleanup can remove it while a tree is
+ * retained, so a manifest read would answer "not a seat" during two windows in which the
+ * directory unambiguously is one. The manifest is consulted only to recover the operator's
+ * seat id, which is presentation.
+ */
+export function seatWorktreeAt(dir: string): SeatWorktreeIdentity | undefined {
+  const parts = resolve(dir).split(sep)
+  // The LAST occurrence: a run root that is itself inside some other run's worktrees tree
+  // still has seats of its own, and the innermost pair is the one this directory belongs to.
+  let at = -1
+  for (let n = 0; n + 3 < parts.length; n++) {
+    if (parts[n] === '.conclave' && parts[n + 1] === 'worktrees') at = n
+  }
+  if (at < 0) return undefined
+  const runId = parts[at + 2]!
+  const slug = parts[at + 3]!
+  if (!runId || !slug) return undefined
+  const integrationRoot = parts.slice(0, at).join(sep) || sep
+  const worktreePath = parts.slice(0, at + 4).join(sep)
+  // A linked worktree is exactly the case where `.git` is a FILE pointing into the main
+  // worktree's admin directory. Without this check, a stale directory left under
+  // `.conclave/worktrees/` -- or a project someone laid out this way -- would exempt itself
+  // from a drift check it does need, which is the direction that hides a real problem.
+  const dotGit = join(worktreePath, '.git')
+  if (!existsSync(dotGit) || statSync(dotGit).isDirectory()) return undefined
+  // And ASK GIT, rather than trusting the shape. A `.git` file is a pointer, and nothing above
+  // reads it: a file holding arbitrary text passes every check so far, and so does a real linked
+  // worktree of some entirely different repository that happens to sit at this path. Either one
+  // would exempt itself from a drift check it does need -- the direction that hides a real
+  // problem, and strictly worse than the false failure this exemption exists to stop.
+  //
+  // Two questions, because one is not enough. That git can resolve the directory at all rejects
+  // the invented `.git`; that its common directory is the SAME repository the integration root
+  // resolves to rejects the foreigner. A seat shares its repository with the run root by
+  // construction -- `createSeatWorktrees` cuts it from there -- so a directory that does not is
+  // not a seat, whatever it is called.
+  const seatRepo = tryGit(worktreePath, ['rev-parse', '--path-format=absolute', '--git-common-dir'])
+  if (!seatRepo.ok) return undefined
+  const rootRepo = tryGit(integrationRoot, ['rev-parse', '--path-format=absolute', '--git-common-dir'])
+  if (!rootRepo.ok) return undefined
+  if (resolve(seatRepo.out.trim()) !== resolve(rootRepo.out.trim())) return undefined
+  const seat = readManifest(integrationRoot, runId)?.seats.find(
+    (s) => resolve(s.worktreePath) === worktreePath,
+  )
+  return { worktreePath, integrationRoot, runId, slug, seatId: seat?.seatId ?? slug }
 }
 
 /**

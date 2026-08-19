@@ -499,6 +499,15 @@ the checkout whose hooks would actually run, and says what re-installing would c
 trust hash includes the absolute command path, so rewriting it drops the other checkout's
 trust. To develop hook changes, use a separate clone rather than a worktree.
 
+Registrations are generated and git-ignored, so git never checks them out into a **seat
+worktree** — the per-seat checkouts a run creates under `.conclave/worktrees/`. A drift check
+there would report the run root's files as missing for every seat, always, with no bug behind
+it, and since seats run the suite at their own HEAD that answer would arrive as a seat test
+failure no change could fix. So `config check` declines in a seat instead of answering: it
+reports `not_applicable` with the reason `seat_worktree_has_no_registration`, names the run
+root where the question does apply, and exits zero. The report carries no `drift` field,
+because nothing was compared — `false` would claim the registrations were checked and agreed.
+
 ## Watching a session from somewhere else
 
 Every session — console or relay — writes what it is doing to `.conclave/sessions/<id>/`,

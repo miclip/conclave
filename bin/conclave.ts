@@ -6,12 +6,17 @@
 
 import {
   AGENT_KINDS,
+  formatCheckNotApplicable,
+  formatCheckNotApplicableJson,
   formatInstallResult,
   formatInstallResultJson,
   hasDrift,
   installConfig,
+  notApplicableInSeatWorktree,
+  resolveRepoRoot,
   type AgentKind,
 } from '../src/config/install.ts'
+import { seatWorktreeAt } from '../src/workspace/worktrees.ts'
 import {
   CONFIG_RELATIVE,
   CONFIGURABLE_AGENTS,
@@ -135,7 +140,10 @@ Commands:
                                    registrations differ from the templates. Prefer this
                                    before anything that depends on stable Codex trust.
                                    --json prints the report as JSON on stdout instead of
-                                   prose; the exit code is unchanged.
+                                   prose; the exit code is unchanged. Inside a Conclave
+                                   seat worktree it reports not_applicable and exits zero:
+                                   registrations are git-ignored, so a seat never holds
+                                   them and only the run root can be checked.
   config show    [--json]          Print what this checkout resolves to: the project root,
                                    the Conclave whose hooks would run, the permission mode
                                    in force for each agent, and where each registration
@@ -784,6 +792,20 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
   }
 
   if (command === 'config' && sub === 'check') {
+    // A seat worktree declines the question rather than answering it red. Registrations are
+    // generated and git-ignored, so git never checks them out into a seat -- a check there
+    // reports the RUN ROOT's files as missing for every seat, always, with no bug behind it.
+    // Seats run the suite at their own HEAD, so answering `drift` here would land as a seat
+    // test failure that no change could fix. Exit zero, say `not_applicable`, and name the
+    // root where the question does apply.
+    const seat = seatWorktreeAt(resolveRepoRoot())
+    if (seat) {
+      const declined = notApplicableInSeatWorktree(seat)
+      console.log(
+        rest.includes('--json') ? formatCheckNotApplicableJson(declined) : formatCheckNotApplicable(declined),
+      )
+      return 0
+    }
     const result = await installConfig({
       ...agentsFromFlags(rest),
       dryRun: true,

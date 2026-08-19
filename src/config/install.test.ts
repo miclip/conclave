@@ -335,39 +335,60 @@ test('resolveConclaveRoot survives being reached through a symlink', () => {
   for (const t of TARGETS) assert.ok(existsSync(join(resolveConclaveRoot(), t.template)))
 })
 
-test('the rendered output matches what this checkout currently has installed', async () => {
-  // Guards against the templates drifting from the registrations actually in use --
-  // which would silently invalidate Codex trust the next time anyone ran the installer.
+test('a dry run detects a perturbed registration, and does not repair it', async () => {
+  // This replaces a test that compared THIS CHECKOUT's installed registrations against its
+  // templates. That test was ambient: its verdict came from the directory it happened to run
+  // in rather than from anything the suite set up. In a Conclave seat worktree it failed
+  // unconditionally -- registrations are git-ignored, so a seat checkout never has them, and
+  // every seat reported drift with no change behind it. A test whose result depends on where
+  // it is run cannot be acted on, because a failure does not say what to change.
   //
-  // `dryRun`, and it is not optional. Without it this WROTE the registrations it was
-  // about to assert on: the first run repaired the drift and failed, and every run after
-  // passed because the repair had already happened. A test that heals what it detects
-  // reports a real problem exactly once and then hides it.
+  // The PROPERTY it guarded is real and is kept: a dry run must notice that what is installed
+  // no longer matches what the templates render, and must not fix it on the way past. Here
+  // that is arranged rather than found -- install, perturb, observe.
   //
-  // Worse in this specific case. Rewriting the sidecar re-hashes the Codex handler and
-  // drops the trust decision — which is the hazard `dryRun` exists for, and which the
-  // "dry run reports drift without writing" test above asserts about `config check`. The
-  // suite enforced the rule on the command and broke it itself.
-  //
-  // Found on 2026-08-06 by a two-agent session in a clone whose registrations pointed at
-  // another Conclave. The implementer reported a failure it could not reproduce rather
-  // than dismissing it as noise, which is the only reason it was looked at.
-  const result = await installConfig({
-    projectRoot: REPO,
-    conclaveRoot: REPO,
-    diagnose: false,
-    dryRun: true,
-  })
-  // `sharedWith` is exempt and is NOT a loosening. It means the file holds this same
-  // template rendered against a DIFFERENT Conclave -- which is the normal state of the
-  // Codex sidecar while a linked worktree of this project has registered itself, since one
-  // sidecar is shared by every worktree (#40). The templates have not drifted; the owner
-  // differs. A genuinely drifted template cannot reconstruct as `render(template, X)` for
-  // any X, so it still fails here.
-  assert.ok(
-    result.written.every((w) => !w.changed || w.sharedWith),
-    'templates have drifted from the installed registrations; run `npm run config:install`',
-  )
+  // The live signal that this checkout's own registrations are current now lives in `config
+  // check`, which is a command an operator or CI runs against a specific root, and which
+  // reports `not_applicable` in a seat worktree instead of red. See src/config/checkCli.test.ts.
+  const repo = fixtureRepo()
+  const opts = { projectRoot: repo, conclaveRoot: repo, diagnose: false } as const
+
+  const installed = await installConfig(opts)
+  assert.ok(installed.written.every((w) => w.changed), 'a bare fixture starts unregistered')
+  assert.equal(hasDrift(await installConfig({ ...opts, dryRun: true })), false, 'and is clean after')
+
+  // The Codex sidecar, because it is the one whose rewrite costs a trust decision -- the
+  // reason a check must report rather than repair.
+  const sidecar = join(repo, '.codex', 'hooks.json')
+  const perturbed = readFileSync(sidecar, 'utf8').replace('"timeout": 10', '"timeout": 11')
+  assert.notEqual(perturbed, readFileSync(sidecar, 'utf8'), 'the perturbation must actually change it')
+  writeFileSync(sidecar, perturbed)
+
+  const checked = await installConfig({ ...opts, dryRun: true })
+  assert.equal(hasDrift(checked), true, 'a changed registration is drift')
+  const codex = checked.written.find((w) => w.label === 'Codex sidecar')
+  assert.equal(codex?.changed, true)
+  // Not SHARED: an edited file cannot be reconstructed as this template rendered against any
+  // root, so the ownership exemption must not swallow it.
+  assert.equal(codex?.sharedWith, undefined, 'a perturbed file is drift, not another owner')
+  assert.equal(readFileSync(sidecar, 'utf8'), perturbed, 'a dry run must not repair what it reports')
+})
+
+test('a dry run detects a template that has moved away from what is installed', async () => {
+  // The other direction, and the one the original ambient test was written for: the
+  // registrations are untouched and the TEMPLATE changed, which is what happens when someone
+  // edits config/templates/ and does not re-run the installer.
+  const repo = fixtureRepo()
+  const opts = { projectRoot: repo, conclaveRoot: repo, diagnose: false } as const
+  await installConfig(opts)
+  assert.equal(hasDrift(await installConfig({ ...opts, dryRun: true })), false)
+
+  const template = join(repo, 'config', 'templates', 'codex-hooks.json')
+  writeFileSync(template, readFileSync(template, 'utf8').replace('"timeout": 3', '"timeout": 4'))
+
+  const checked = await installConfig({ ...opts, dryRun: true })
+  assert.equal(hasDrift(checked), true, 'an edited template drifts from the installed file')
+  assert.equal(checked.written.find((w) => w.label === 'Codex sidecar')?.sharedWith, undefined)
 })
 
 test('a registration owned by another Conclave is not reported as drift', () => {

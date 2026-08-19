@@ -359,14 +359,14 @@ test('the console front-end records the same launch, and a run given no args rec
  *
  * Driven through `Relay.start` rather than a front-end, which was once a limitation of the CLI
  * and is now a choice about what this file is for. `--implementer-args` is still ONE flag that
- * applies to every implementer seat (bin/conclave.ts:1146-1149) and project config still carries
+ * applies to every implementer seat (bin/conclave.ts:1168-1171) and project config still carries
  * no per-agent launch args at all (`launchArgsFor` only returns bypass flags,
  * src/config/project.ts:160-163) -- but distinct args per seat ARE now expressible on the
  * command line, inside each `--implementers` entry (#77). That path is proved where it belongs,
  * at the CLI, in src/relay/perSeatArgs.test.ts; what this test is about is the RECORD, so it
  * keeps handing `Relay.start` the specs directly rather than reaching the same place through an
  * argv that could fail for its own reasons. Both documents are
- * still the production ones: `runReport` is what `bin/conclave.ts:1386` prints, and the status
+ * still the production ones: `runReport` is what `bin/conclave.ts:1408` prints, and the status
  * is read back through `main(['status', '--json'])` after the real recorder wrote it.
  */
 test('two seats launched with two different models are recorded apart, in both documents', async () => {

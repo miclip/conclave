@@ -422,15 +422,107 @@ export function hasDrift(r: InstallResult): boolean {
 }
 
 /**
+ * What a `config check` decided, in one word.
+ *
+ * `not_applicable` is a third answer and not a shade of `current`: it says the question was
+ * declined, not that the registrations were compared and agreed. A consumer that treats the
+ * two as one is claiming a check happened where none did.
+ */
+export type CheckStatus = 'current' | 'drift' | 'not_applicable'
+
+/** Why a check declined. Named rather than a boolean, so a later exemption is distinguishable. */
+export type NotApplicableReason = 'seat_worktree_has_no_registration'
+
+/**
+ * A check that did not run, and why.
+ *
+ * The one case today: a Conclave seat worktree. Registrations are generated and git-ignored,
+ * so git never checks them into a seat; a drift check there reports the RUN ROOT's files as
+ * missing, which is accurate and worthless. Every seat would fail a check the run root passes,
+ * and since seats run the suite at their own HEAD that failure would arrive as a seat test
+ * failure with no bug behind it.
+ */
+export interface CheckNotApplicable {
+  status: 'not_applicable'
+  reason: NotApplicableReason
+  // NO `drift` FIELD, deliberately, and this is the one thing about this shape worth
+  // defending. An earlier version emitted `drift: false` so that a consumer gating on it
+  // agreed with the zero exit code. That is a claim the command cannot make: nothing was
+  // compared, so drift here is UNKNOWN, and `false` says the registrations were checked and
+  // agreed. The two facts want different handling by anything that reports on a fleet --
+  // "every root is current" is not what a run of seats establishes. Absent, `drift` reads as
+  // `undefined`: falsy, so a consumer that gates on it still agrees with the exit code, but
+  // distinguishable from `false` by anything that looks. `status` and `reason` carry the rest.
+  /** The seat checkout the command was run in. */
+  projectRoot: string
+  /** The run root that owns the registrations, and where a check does apply. */
+  integrationRoot: string
+  runId: string
+  seat: string
+}
+
+export function notApplicableInSeatWorktree(seat: {
+  worktreePath: string
+  integrationRoot: string
+  runId: string
+  seatId: string
+}): CheckNotApplicable {
+  return {
+    status: 'not_applicable',
+    reason: 'seat_worktree_has_no_registration',
+    projectRoot: seat.worktreePath,
+    integrationRoot: seat.integrationRoot,
+    runId: seat.runId,
+    seat: seat.seatId,
+  }
+}
+
+/**
+ * A path as a single shell word, for a line an operator is meant to copy.
+ *
+ * Printed paths get pasted. An unquoted one breaks on a space and, worse, hands whatever the
+ * path contains to the shell -- so a directory name is enough to run something the reader did
+ * not type. Single quotes take everything literally; the dance around an embedded quote is the
+ * only case that needs care.
+ */
+function shellQuote(p: string): string {
+  return `'${p.split("'").join(`'"'"'`)}'`
+}
+
+export function formatCheckNotApplicableJson(r: CheckNotApplicable): string {
+  return JSON.stringify(r, null, 2)
+}
+
+/**
+ * The same decision for a reader. Both renderings carry the status and the reason verbatim,
+ * so a human and a script quoting this run are quoting the same two words.
+ */
+export function formatCheckNotApplicable(r: CheckNotApplicable): string {
+  return [
+    `project: ${r.projectRoot}`,
+    `  status: not_applicable (${r.reason})`,
+    `  this is a Conclave seat worktree — run ${r.runId}, seat ${r.seat}.`,
+    '  Registrations are generated and git-ignored, so a seat checkout never contains them',
+    '  and a check here would report the run root\'s files as missing rather than drifted.',
+    `  Check the run root instead:  (cd ${shellQuote(r.integrationRoot)} && conclave config check)`,
+  ].join('\n')
+}
+
+/**
  * The same report as `formatInstallResult`, for consumers rather than readers.
  *
  * `drift` is emitted explicitly even though it is derivable from `written`, because it is
  * the field the exit code is computed from. Leaving it out would oblige every consumer to
  * reconstruct that rule, and a consumer that reconstructed it slightly differently would
  * disagree with the process it was reading.
+ *
+ * `status` says the same thing in the vocabulary the declined case needs -- a consumer can
+ * switch on one field across every outcome instead of testing `drift` here and `status`
+ * there, which is how the two would drift apart.
  */
 export function formatInstallResultJson(r: InstallResult): string {
-  return JSON.stringify({ drift: hasDrift(r), ...r }, null, 2)
+  const status: CheckStatus = hasDrift(r) ? 'drift' : 'current'
+  return JSON.stringify({ status, drift: hasDrift(r), ...r }, null, 2)
 }
 
 export function formatInstallResult(r: InstallResult): string {
