@@ -251,13 +251,19 @@ export class FakeRotationSession implements AgentSession {
         withdraw?: 'no_replacement' | Verdict
         /**
          * Which revision reason the withdrawal carries. `late_signal` unless a test says
-         * otherwise, because that is the adapter's own spelling for it.
+         * otherwise, and that default is not a convenience: it is the ONLY spelling the
+         * adapters produce. `Claude#apply` and Codex's equivalent both emit
+         * `reason: 'late_signal'` for every withdrawal, INCLUDING the `resetTranscript` path a
+         * compaction takes -- the reason names the shape of the event, not the cause behind
+         * it, and a revision whose reason is `compaction` carries `replaces: []` and withdraws
+         * nothing.
          *
-         * It exists for `compaction`, which is the withdrawal an operator actually met (#66):
-         * a rewritten transcript no longer contains the evidence a verdict rested on, so
-         * `Tracker.resetTranscript` withdraws the claim. Nothing downstream branches on the
-         * reason -- the relay matches a revision by the sequence it replaces -- and that is
-         * precisely what a test asserting the compaction case has to be able to show.
+         * So `'compaction'` here builds an event no adapter emits, and it does not reach the
+         * console's `/continue` guard if you try: `compaction` is the degradation proxy's own
+         * signal, so the run pauses as `rotation_candidate` -- a different pause, carrying no
+         * supersession -- before the withdrawal can be acted on. The reason-independence of
+         * that guard is stated as a rule instead, over `withdrawnSeatAtPause` in
+         * `session.test.ts`, which is where a claim about a branch nobody takes belongs.
          */
         withdrawReason?: RevisionEvent['reason']
       }
