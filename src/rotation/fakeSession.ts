@@ -337,6 +337,38 @@ export class FakeRotationSession implements AgentSession {
   }
 
   /**
+   * A `turn_start` the child is SEEN making, after the relay has stopped dispatching to it.
+   *
+   * The counterpart to `endTurnLate` for the other end of a turn. `send` is the only other way
+   * to open one and it is the relay's to call, so a test that needs the child observed
+   * beginning a turn while the run is PAUSED -- nothing is being dispatched, and the console is
+   * about to decide whether it may send -- has no other lever.
+   *
+   * That state is not hypothetical: a watchdog calls a long turn `timed_out`, a late signal
+   * withdraws the verdict, and the child, which was working all along, starts its next turn.
+   * Under #66 the withdrawal alone would wave `/continue` through; a `turn_start` after it is
+   * an OBSERVATION and puts the guard back (`ActiveTurn.withdrawn`), and the difference is only
+   * testable if a fixture can produce one.
+   *
+   * Registered as a turn like any other, so `endTurnLate` ends THIS one: a `turn_end` carrying
+   * an older key belongs to an earlier turn, and `activeTurn` is right to leave the open turn
+   * open when it sees one.
+   */
+  startTurnLate(prompt = 'still going'): TurnKey {
+    const key = turnKey(`${this.sessionId}-turn-${this.#turns.length}`)
+    this.#turns.push({ key, prose: '' })
+    this.emit({
+      type: 'turn_start',
+      prompt,
+      turnKey: key,
+      seq: ++this.#seq,
+      at: Date.now(),
+      provisional: false,
+    })
+    return key
+  }
+
+  /**
    * A `turn_end` arriving late for the turn that is currently open.
    *
    * The counterpart to `lateSignal` for the case it cannot express: after a withdrawal with no

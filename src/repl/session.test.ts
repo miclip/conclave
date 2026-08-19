@@ -923,6 +923,37 @@ async function untilText(what: string, text: () => string, re: RegExp, ms = 5000
   }
 }
 
+/**
+ * The child is SEEN starting another turn, and the console can see it too.
+ *
+ * A pause whose verdict was withdrawn with nothing in its place is no longer a mid-turn refusal
+ * on its own (#66): the withdrawal deletes the record of how the turn ended rather than
+ * observing a turn running, so `/continue` is waved through on it. A guard test therefore has
+ * to say WHICH of the two open turns it means, and this is the other one -- the child was
+ * observed beginning a turn, that observation clears `ActiveTurn.withdrawn`, and the refusal is
+ * then about a turn somebody saw rather than a record somebody lost.
+ *
+ * The wait is the load-bearing half. Every event travels fake -> relay pump -> participant
+ * events, and typing `/continue` before one lands tests the previous state and passes or fails
+ * on scheduling. `events.ndjson` is an exact happens-before: `Relay#attach` pushes to
+ * `p.events` and THEN emits the activity this file is written from, so an event in the file is
+ * an event the guard can already see. The seat's `turns` in the status document are NOT that
+ * signal -- the recorder re-reads the snapshot on `turn_end` and `revision` only, deliberately,
+ * so a `turn_start` never moves them.
+ */
+async function observedTurn(impl: FakeRotationSession, dir: string, seat = 'implementer'): Promise<void> {
+  const seen = (): number =>
+    events(dir).filter((e) => e.type === 'activity' && e.participant === seat && e.event?.type === 'turn_start')
+      .length
+  const before = seen()
+  impl.startTurnLate()
+  await untilValue(
+    `${seat}'s turn start to reach the console`,
+    () => (seen() > before ? true : undefined),
+    () => `still ${before} turn_start event(s) for ${seat}`,
+  )
+}
+
 test('a verdict withdrawn while the operator reads the pause is surfaced in the console', async () => {
   const dir = repo()
   const impl = slow('impl', 'claude', ['ack', 'Did it, slowly.', 'And again.'])
@@ -2553,6 +2584,10 @@ test('/continue force is the whole word: force with text after it is a message, 
       f.session.status.pause?.superseded !== undefined &&
       f.session.status.pause?.superseded?.verdict === undefined,
   )
+  // A withdrawn verdict is a bypass now, so the guard only has something to refuse when the
+  // child has been SEEN in a turn. That is what makes the first line below a message rather
+  // than a force: the guard ran, and it had a turn to run on.
+  await observedTurn(impl, dir)
 
   input.write('/continue force it through\n')
   // Refused, because it was not a force: the guard ran and the child is mid-turn. Read off the
@@ -2965,62 +3000,51 @@ test('a withdrawal with no replacement lets /continue through instead of refusin
   await running
 })
 
-test('a compaction-driven withdrawal lets /continue through, the same as any other', async () => {
-  // The withdrawal an operator actually met (#66): `the timed_out verdict this pause was raised
-  // on has been withdrawn (compaction)`. It is the SAME state as the test above -- the relay
-  // matches a revision by the sequence it replaces and never looks at the reason -- and this
-  // test exists to hold that equality, because the report was written about compaction and a
-  // fix that only worked for `late_signal` would read as fixed and not be.
+test('the bypass is decided by what the withdrawal LEFT, not by why it happened (#66)', () => {
+  // The claim the report rests on: the operator met this as `withdrawn (compaction)`, and a fix
+  // that only worked for `late_signal` would read as fixed and not be. `withdrawnSeatAtPause`
+  // never looks at the reason -- it reads whether a replacement verdict exists and whose verdict
+  // it was -- so every reason is one case of the same rule, and they are stated here.
   //
-  // It is also the case where the withdrawal is permanent by construction. A late signal is
-  // followed by its replacement immediately; a compaction that removed the evidence has nothing
-  // left to send.
-  const dir = repo()
-  const impl = slow('impl', 'claude', ['ack', 'Did it, slowly.', 'And again.'])
-  impl.endTurn = { index: 1, verdict: TIMED_OUT, withdraw: 'no_replacement', withdrawReason: 'compaction' }
-  impl.childPid = 1
-  const out = collect()
-  const input = new PassThrough()
-  const running = runSession({
-    cwd: dir,
-    goal: 'Keep the work moving.',
-    lead: 'codex',
-    implementer: 'claude',
-    rounds: 6,
-    checks: [],
-    registry: registryOf({
-      codex: [slow('advisor', 'codex', ['Do it.', 'More.', 'DONE'], 300)],
-      claude: [impl],
-    }),
-    liveness: async () => BUSY_LIVENESS,
-    input,
-    output: out.stream,
+  // NOT driven through a live console, and the reason is worth writing down. Two facts make the
+  // compaction spelling unreachable there:
+  //
+  //   - no adapter emits it. A withdrawal is `reason: 'late_signal'` at both sites that produce
+  //     one (`Claude#apply`, and Codex's equivalent), INCLUDING the `resetTranscript` path that
+  //     compaction takes -- the reason names the shape of the event, not the cause behind it. A
+  //     revision whose reason is `compaction` carries `replaces: []` and withdraws nothing;
+  //   - and a fake made to emit one does not reach this code at all. `compaction` is the
+  //     degradation proxy's own signal, so the run pauses as `rotation_candidate` -- a different
+  //     pause, carrying no supersession -- before `/continue` is ever refused or allowed.
+  //
+  // The console half of #66 is proven on the withdrawal the console can actually be given, in
+  // the test above. What is left over is this rule, and a rule is testable as a rule.
+  const withdrawn = (verdict?: Verdict): RunPause => ({
+    ...pauseFor({ reason: 'turn_incomplete', participant: 'implementer' }, { participant: 'implementer', endSeq: 7 }),
+    superseded: { at: 0, note: 'the timed_out verdict this pause was raised on was withdrawn', ...(verdict ? { verdict } : {}) },
   })
-  const until = async (pred: (f: ReturnType<typeof resolveSession>) => boolean, ms = 10_000) => {
-    const t = Date.now()
-    while (Date.now() - t < ms) {
-      const f = resolveSession(dir)
-      if (pred(f)) return f
-      await new Promise((r) => setTimeout(r, 50))
-    }
-    throw new Error(`timed out; console said:\n${out.text().slice(-700)}`)
-  }
 
-  await until((f) => 'session' in f && f.session.status.state === 'paused')
-  await until(
-    (f) =>
-      'session' in f &&
-      f.session.status.pause?.superseded !== undefined &&
-      f.session.status.pause?.superseded?.verdict === undefined,
+  assert.equal(withdrawnSeatAtPause(withdrawn()), 'implementer', 'a bare withdrawal names its seat')
+  // The three refusals it must keep. A replacement of ANY outcome is a fresh answer about the
+  // turn, and `timed_out` is the one that says in so many words that it is still running.
+  assert.equal(withdrawnSeatAtPause(withdrawn(TIMED_OUT)), undefined, 'a replacement puts the guard back')
+  assert.equal(withdrawnSeatAtPause(withdrawn(COMPLETED)), undefined, 'including a completed one')
+  assert.equal(
+    withdrawnSeatAtPause(pauseFor({ reason: 'turn_incomplete', participant: 'implementer' })),
+    undefined,
+    'a pause with no supersession has nothing to wave through',
   )
-  input.write('/continue\n')
-  const resumed = await until((f) => 'session' in f && f.session.status.state === 'running')
-  assert.ok('session' in resumed)
-  assert.equal(resumed.session.status.pause, undefined, 'a compacted-away verdict must not hold the run')
-  assert.match(out.text(), /reads as mid-turn, and that reading has been withdrawn/)
-
-  input.end()
-  await running
+  // A supersession is only ever recorded on a `turn_incomplete` pause, but the rule must not
+  // depend on that staying true: without `verdictOf` there is no seat to name, and naming the
+  // wrong one would let a supersession about one seat wave through a reading of another.
+  assert.equal(
+    withdrawnSeatAtPause({
+      ...pauseFor({ reason: 'rotation_candidate', participant: 'implementer' }),
+      superseded: { at: 0, note: 'withdrawn' },
+    }),
+    undefined,
+    'no verdictOf is no seat, whatever the pause says was withdrawn',
+  )
 })
 
 test('a refusal to continue is recorded on the paused session status', async () => {
@@ -3065,6 +3089,8 @@ test('a refusal to continue is recorded on the paused session status', async () 
       f.session.status.pause?.superseded !== undefined &&
       f.session.status.pause?.superseded?.verdict === undefined,
   )
+  // A refusal to record, which after #66 needs a turn the child was seen to start.
+  await observedTurn(impl, dir)
   input.write('/continue\n')
   const found = await until((f) => 'session' in f && f.session.status.pause?.refusal !== undefined)
   assert.ok('session' in found)
@@ -3252,6 +3278,9 @@ test('a child mid-turn is refused however idle it reads', async () => {
       f.session.status.pause?.superseded !== undefined &&
       f.session.status.pause?.superseded?.verdict === undefined,
   )
+  // Mid-turn as an OBSERVATION, which is the state this test is about: the child is in a turn
+  // somebody saw it start, and every CPU sample says idle. The refusal has to survive that.
+  await observedTurn(impl, dir)
   input.write('/continue\n')
   const found = await until((f) => 'session' in f && f.session.status.pause?.refusal !== undefined)
   assert.ok('session' in found)
@@ -3531,6 +3560,14 @@ test('a turn that ends lets /continue resume on retry, however busy the child re
   // The guard re-reads rather than remembering the past. A turn that was open the first time
   // and ended the second must resume, or the guard is a wall again -- and it must resume while
   // the CPU sampler is still shouting `working`, because that reading is not what it consults.
+  //
+  // The open turn here is an OBSERVED one, and that is what makes the test still about the
+  // guard after #66. A turn left open by a bare withdrawal is now waved through on sight, so a
+  // fixture that stopped there would exercise the bypass and never reach a refusal. The child
+  // is therefore seen starting a turn after the withdrawal -- which clears
+  // `ActiveTurn.withdrawn` and puts the guard back -- and that turn is what ends before the
+  // retry. It doubles as the boundary of the bypass: an observation outranks a deleted record,
+  // whatever the pause still says about the verdict.
   const dir = repo()
   const impl = slow('impl', 'claude', ['ack', 'Did it, slowly.', 'And again.'])
   impl.endTurn = { index: 1, verdict: TIMED_OUT, withdraw: 'no_replacement' }
@@ -3568,6 +3605,18 @@ test('a turn that ends lets /continue resume on retry, however busy the child re
     throw new Error(`timed out; console said:\n${out.text().slice(-700)}`)
   }
 
+  /**
+   * How the turn's END is waited for. `turn_end` DOES refresh the recorder's snapshot -- unlike
+   * `turn_start`, which is why `observedTurn` reads the event file instead -- so the canonical
+   * side of the seam can be read here: its own answer about how the turn finished, which is
+   * what the retry turns on.
+   */
+  const implTurns = (f: ReturnType<typeof resolveSession>): { count: number; last?: string } => {
+    if (!('session' in f)) return { count: 0 }
+    const seat = f.session.status.participants.find((p) => p.id === 'implementer')
+    return { count: seat?.turns.length ?? 0, ...(seat?.turns.at(-1) ? { last: seat.turns.at(-1)!.state } : {}) }
+  }
+
   await until((f) => 'session' in f && f.session.status.state === 'paused')
   await until(
     (f) =>
@@ -3575,19 +3624,25 @@ test('a turn that ends lets /continue resume on retry, however busy the child re
       f.session.status.pause?.superseded !== undefined &&
       f.session.status.pause?.superseded?.verdict === undefined,
   )
+  // The child was working all along, and is now SEEN starting its next turn. This is the state
+  // the withdrawal cannot speak for: the record of how the last turn ended is gone, but a turn
+  // beginning is a fact nobody retracted.
+  await observedTurn(impl, dir)
+
   input.write('/continue\n')
   await new Promise((r) => setTimeout(r, 300))
   assert.equal(calls, 1, 'the reading is taken once, as colour on the refusal')
   assert.match(out.text(), /not continuing/)
+  assert.doesNotMatch(
+    out.text(),
+    /that reading has been withdrawn/,
+    'the #66 bypass must not fire on a turn the child was seen to start',
+  )
 
-  // The turn ends. Not `completed`, which would make the console bypass its guard altogether
-  // and test the wrong thing.
-  //
-  // Waited for rather than assumed: the end travels fake -> relay pump -> participant events,
-  // and typing `/continue` before it lands would test the previous state and pass or fail on
-  // scheduling. The supersession note is the relay saying it has seen the end.
+  // The observed turn ends. Not `completed`, which would make the console bypass its guard
+  // altogether and test the wrong thing.
   impl.endTurnLate()
-  await until((f) => 'session' in f && f.session.status.pause?.superseded?.verdict !== undefined)
+  await until((f) => implTurns(f).last === 'cancelled')
   input.write('/continue\n')
   await until((f) => 'session' in f && f.session.status.state === 'running')
   assert.equal(calls, 1, 'and no second reading is needed, because the turn is what lifted it')
