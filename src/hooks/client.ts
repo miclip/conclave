@@ -24,12 +24,10 @@ import { exitAfterFlush } from '../process/exit.ts'
 import { HookJournal, mintDeliveryId } from './journal.ts'
 
 /**
- * The variables conclave sets on every child it spawns, in the same breath as
- * ORCH_HOOK_URL -- see `#boot` in `src/adapters/codex.ts` and `src/adapters/claude.ts`,
- * and `#runTurn` in `src/adapters/kimi.ts`. Nothing else writes them.
- *
- * They are the evidence that separates the two ways the URL can be missing. Without a
- * marker of some kind the client cannot tell them apart, and #137 is what that costs.
+ * The variables conclave sets on every child it spawns, alongside ORCH_HOOK_URL -- see
+ * `#boot` in `src/adapters/codex.ts` and `src/adapters/claude.ts`, and `#runTurn` in
+ * `src/adapters/kimi.ts`. Nothing else writes them, so they are the evidence that tells
+ * the two ways the URL can be missing apart.
  */
 const RUN_MARKERS = ['ORCH_HOOK_ATTEMPT_JOURNAL', 'ORCH_HOOK_TIMEOUT_MS'] as const
 
@@ -78,28 +76,20 @@ async function main(): Promise<number> {
      * NO RECEIVER (#137).
      *
      * `conclave config install` registers this client in the PROJECT's hook settings, so
-     * it also runs on every ordinary `codex` or `claude` invocation in that project by a
-     * human who never started a conclave run. Those invocations have no receiver and are
-     * not supposed to have one.
+     * it also runs on every ordinary `codex` or `claude` invocation by someone who never
+     * started a conclave run. No receiver is expected there and no delivery was owed, so
+     * nothing was lost.
      *
-     * Exiting non-zero there was wrong in the plain sense: the exit code is the CLI's
-     * only channel for "this hook did not do its job", and this hook did its job. There
-     * was no delivery to make, nothing was dropped, and no evidence is missing from any
-     * journal. Codex renders the non-zero as `hook: SessionStart Failed` on every
-     * invocation, which is a false report AND an expensive one -- it is the loudest
-     * signal in the transcript, it fires constantly, and it therefore trains a reader to
-     * discount it. #137 records two debugging cycles spent attributing an unrelated fault
-     * to these lines. Worse, a real delivery failure had no way to look different from
-     * this, so the one case the exit code exists to surface was buried under it.
+     * Non-zero is reserved for a delivery that was expected and lost. Spending it here
+     * made the two indistinguishable -- and a hook that reports failure on every
+     * invocation teaches a reader to discount the report when it is finally true.
      *
-     * The condition still gets a stderr line, because a hook silently doing nothing is
-     * its own puzzle for anyone who went looking for a delivery. It says why, so that
-     * seeing it once is enough to understand it.
+     * The stderr line stays, because a hook silently doing nothing is its own puzzle. It
+     * says why, so seeing it once is enough.
      */
     if (RUN_MARKERS.some((name) => process.env[name])) {
-      // The other way the URL can be missing, and it is a genuine fault: conclave spawned
-      // this child -- its markers are in the environment -- but the URL did not survive.
-      // Some delivery IS being lost, so it exits non-zero like any other lost delivery.
+      // The other way the URL can be missing: conclave spawned this child -- its markers
+      // are in the environment -- but the URL did not survive. A delivery IS being lost.
       process.stderr.write(
         `[orch-hook] ${agent}/${payload.hook_event_name}: ORCH_HOOK_URL unset inside a conclave run; delivery lost\n`,
       )
