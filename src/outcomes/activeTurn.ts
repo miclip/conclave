@@ -45,7 +45,7 @@
  * unsafe direction all over again.
  */
 
-import type { AgentEvent, TurnKey } from '../contract/session.ts'
+import type { AgentEvent, RevisionEvent, TurnKey } from '../contract/session.ts'
 
 export interface ActiveTurn {
   /** When the turn's `turn_start` was seen. */
@@ -60,6 +60,25 @@ export interface ActiveTurn {
    * the same false negative as the CPU reading, arriving through a tidier door.
    */
   tool?: string | undefined
+  /**
+   * Set when the ONLY reason this turn reads as open is that the `turn_end` closing it was
+   * withdrawn -- and nothing has happened since.
+   *
+   * An annotation, never part of the answer: the turn is open either way, and a caller that
+   * treated a reopened turn as finished would be making the unsafe read this file exists to
+   * prevent. What it lets a caller ask is a different question -- "is this openness an
+   * observation, or a deleted record?" -- which the console's `/continue` needs and the relay's
+   * peer send does not (#66).
+   *
+   * A later `turn_start` clears it, because that is an observation: the child began a turn, and
+   * the withdrawal has nothing to say about that one. Only `turn_start`. A `tool_use` does NOT
+   * clear it, and the difference is not a subtlety -- the adapters drop the transcript view's
+   * `turn_start`/`turn_end` and forward everything else (`Claude#pollTranscript`), so a
+   * `turn_start` in this stream came from a hook and is real, while a `tool_use` may be the
+   * view re-emitting surviving history after the very rewrite that caused the withdrawal.
+   * Clearing on one of those would answer "is the child working" with "was the file rewritten".
+   */
+  withdrawn?: { at: number; reason: RevisionEvent['reason'] } | undefined
 }
 
 /**
@@ -102,7 +121,8 @@ export function activeTurn(events: readonly AgentEvent[]): ActiveTurn | undefine
       // a revision replacing anything else -- a compaction, a superseded message -- says
       // nothing about whether the child is working.
       if (closedBy && e.replaces.includes(closedBy.seq)) {
-        open = closedBy.turn
+        // Marked, not merely reopened. See `ActiveTurn.withdrawn`.
+        open = { ...closedBy.turn, withdrawn: { at: e.at, reason: e.reason } }
         closedBy = undefined
       }
     }

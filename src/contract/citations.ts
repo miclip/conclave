@@ -150,18 +150,18 @@ export const CITED: Record<string, string> = {
   'src/repl/session.ts:1019': 'logPath: runLogPath,',
   // Moved by #83's edit to the `/continue` refusal, nine lines above it in the same block.
   // Repaired rather than deleted: the call it pins is the one the console still makes.
-  'src/repl/session.ts:1223-1224': "run.pause.refusal = { at: Date.now(), reason,",
+  'src/repl/session.ts:1285-1286': "run.pause.refusal = { at: Date.now(), reason,",
   // Why an in-place amendment to a pause needs an event behind it. Cited by both halves of
   // #101's refresh -- the module that explains the mechanism and the loop that uses it --
   // because the argument was already written here, for `/wait`, and restating it in two more
   // places is how three copies of a reason drift apart.
-  'src/repl/session.ts:2006': 'so an in-place change like `superseded` reaches the file on the next one',
+  'src/repl/session.ts:2068': 'so an in-place change like `superseded` reaches the file on the next one',
   // The falsifier `/continue <message>` is argued against: two commands that already give
   // their trailing text a meaning, so the new rule is narrow by intent rather than by
   // accident. Pinned to the dispatch lines, which is what makes "these are unchanged"
   // checkable rather than a claim about code nobody re-reads.
-  "src/repl/session.ts:2028": "if (word === '/rotate') {",
-  "src/repl/session.ts:2061": "if (word === '/abort') {",
+  "src/repl/session.ts:2090": "if (word === '/rotate') {",
+  "src/repl/session.ts:2123": "if (word === '/abort') {",
 }
 
 /**

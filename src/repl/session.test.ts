@@ -2816,8 +2816,15 @@ test('a refusal to continue re-samples, so it can lift', async () => {
 //
 // The sampler protects against sending into a live turn, but the verdict the pause was raised
 // on can be superseded. A completed replacement means the Stop hook proved the turn ended, so
-// the child may still be alive but process liveness is irrelevant; a withdrawal without a
-// replacement verdict leaves the original concern in place.
+// the child may still be alive but process liveness is irrelevant.
+//
+// A withdrawal with NO replacement verdict is also let through, and that is #66. It used to
+// refuse, on the reading that the original concern was still standing. It is not: the only
+// thing that produces a bare withdrawal is `Tracker.resetTranscript` finding that a rewritten
+// transcript no longer holds the evidence a verdict rested on, so the open turn that refusal
+// read is a deleted record and not an observed turn -- and the only event that could close it
+// again is the one compaction removed. See `withdrawnSeatAtPause` for the rule and `resumeRun`
+// for the argument.
 // ---------------------------------------------------------------------------------------
 
 test('a completed replacement verdict bypasses child liveness sampling on /continue', async () => {
@@ -2878,11 +2885,17 @@ test('a completed replacement verdict bypasses child liveness sampling on /conti
   await running
 })
 
-test('a withdrawal with no replacement leaves the turn open, so /continue still refuses', async () => {
-  // The verdict is gone and the turn is open again, which is the guard's own question answered
-  // exactly: `activeTurn` reads the withdrawal as a turn that never ended, and continuing would
-  // send into it. The CPU sample is still taken -- an operator choosing whether to force wants
-  // to see it -- and it is no longer what decides (#117).
+test('a withdrawal with no replacement lets /continue through instead of refusing forever', async () => {
+  // #66. The verdict is gone and `activeTurn` reads the turn as open again -- correctly, since
+  // the `turn_end` that closed it has been retracted -- and this used to refuse on that reading.
+  // It cannot: a bare withdrawal comes only from `Tracker.resetTranscript`, which withdraws a
+  // verdict when a rewritten transcript no longer holds the evidence it rested on. So the open
+  // turn is a DELETED RECORD, and the only event that could close it is the one that was
+  // deleted. Refusing there is a refusal no amount of waiting can lift, with `/continue force`
+  // -- a flag the operator has to already know -- as the only way out.
+  //
+  // The CPU sampler still runs and still decides nothing: it is printed beside the resumption
+  // so an operator whose child turns out to have been working can see what they were told.
   const dir = repo()
   const impl = slow('impl', 'claude', ['ack', 'Did it, slowly.', 'And again.'])
   impl.endTurn = { index: 1, verdict: TIMED_OUT, withdraw: 'no_replacement' }
@@ -2901,10 +2914,85 @@ test('a withdrawal with no replacement leaves the turn open, so /continue still 
       codex: [slow('advisor', 'codex', ['Do it.', 'More.', 'DONE'], 300)],
       claude: [impl],
     }),
+    // Busy, which is the reading that would have made the old refusal permanent.
     liveness: async () => {
       sampled = true
       return BUSY_LIVENESS
     },
+    input,
+    output: out.stream,
+  })
+  const until = async (pred: (f: ReturnType<typeof resolveSession>) => boolean, ms = 10_000) => {
+    const t = Date.now()
+    while (Date.now() - t < ms) {
+      const f = resolveSession(dir)
+      if (pred(f)) return f
+      await new Promise((r) => setTimeout(r, 50))
+    }
+    throw new Error(`timed out; console said:\n${out.text().slice(-700)}`)
+  }
+
+  const paused = await until((f) => 'session' in f && f.session.status.state === 'paused')
+  // The shape the bypass is keyed on, asserted off the record before it is relied on: a
+  // supersession with no replacement verdict, on a pause that names the seat it is about.
+  assert.ok('session' in paused)
+  await until(
+    (f) =>
+      'session' in f &&
+      f.session.status.pause?.superseded !== undefined &&
+      f.session.status.pause?.superseded?.verdict === undefined,
+  )
+  const withdrawn = resolveSession(dir)
+  assert.ok('session' in withdrawn)
+  assert.equal(withdrawn.session.status.pause!.verdictOf?.participant, 'implementer')
+
+  input.write('/continue\n')
+  const resumed = await until((f) => 'session' in f && f.session.status.state === 'running')
+  assert.ok('session' in resumed)
+  // ABSENCES, off the record rather than off the screen: the run moved, and it did not refuse
+  // on the way. A `doesNotMatch` against the console cannot tell a missing refusal from a
+  // wrapped one.
+  assert.equal(resumed.session.status.pause, undefined, 'the run must resume')
+  assert.equal(sampled, true, 'and the reading is still taken, as colour on the resumption')
+  // What the operator is told. Not the refusal's wording -- this is a resumption -- but it must
+  // name the withdrawal, because proceeding on the absence of evidence is not the same as
+  // proceeding on evidence and the console is the only place that difference is stated.
+  assert.match(out.text(), /reads as mid-turn, and that reading has been withdrawn/)
+  assert.match(out.text(), /record was taken back/)
+  assert.match(out.text(), /deciding nothing/, 'the CPU line is still marked as deciding nothing')
+
+  input.end()
+  await running
+})
+
+test('a compaction-driven withdrawal lets /continue through, the same as any other', async () => {
+  // The withdrawal an operator actually met (#66): `the timed_out verdict this pause was raised
+  // on has been withdrawn (compaction)`. It is the SAME state as the test above -- the relay
+  // matches a revision by the sequence it replaces and never looks at the reason -- and this
+  // test exists to hold that equality, because the report was written about compaction and a
+  // fix that only worked for `late_signal` would read as fixed and not be.
+  //
+  // It is also the case where the withdrawal is permanent by construction. A late signal is
+  // followed by its replacement immediately; a compaction that removed the evidence has nothing
+  // left to send.
+  const dir = repo()
+  const impl = slow('impl', 'claude', ['ack', 'Did it, slowly.', 'And again.'])
+  impl.endTurn = { index: 1, verdict: TIMED_OUT, withdraw: 'no_replacement', withdrawReason: 'compaction' }
+  impl.childPid = 1
+  const out = collect()
+  const input = new PassThrough()
+  const running = runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'claude',
+    rounds: 6,
+    checks: [],
+    registry: registryOf({
+      codex: [slow('advisor', 'codex', ['Do it.', 'More.', 'DONE'], 300)],
+      claude: [impl],
+    }),
+    liveness: async () => BUSY_LIVENESS,
     input,
     output: out.stream,
   })
@@ -2926,18 +3014,10 @@ test('a withdrawal with no replacement leaves the turn open, so /continue still 
       f.session.status.pause?.superseded?.verdict === undefined,
   )
   input.write('/continue\n')
-  await new Promise((r) => setTimeout(r, 300))
-  const found = resolveSession(dir)
-  assert.ok('session' in found)
-  assert.equal(found.session.status.state, 'paused', 'the run must stay paused')
-  assert.equal(sampled, true, 'the CPU reading is still gathered, as colour beside the refusal')
-  assert.match(out.text(), /not continuing/, 'a child mid-turn must refuse the continue')
-  // What it refused ON. The reason is the turn; the CPU line is printed beside it and marked
-  // as deciding nothing, so a reader of the record cannot mistake which was which.
-  const refused = resolveSession(dir)
-  assert.ok('session' in refused)
-  assert.match(refused.session.status.pause!.refusal!.reason, /is mid-turn/)
-  assert.doesNotMatch(refused.session.status.pause!.refusal!.reason, /cpu/)
+  const resumed = await until((f) => 'session' in f && f.session.status.state === 'running')
+  assert.ok('session' in resumed)
+  assert.equal(resumed.session.status.pause, undefined, 'a compacted-away verdict must not hold the run')
+  assert.match(out.text(), /reads as mid-turn, and that reading has been withdrawn/)
 
   input.end()
   await running

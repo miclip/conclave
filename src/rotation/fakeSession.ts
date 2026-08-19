@@ -14,6 +14,7 @@ import type {
   AgentEvent,
   AgentSession,
   CloseMode,
+  RevisionEvent,
   SessionSnapshot,
   SessionState,
   TurnKey,
@@ -243,7 +244,24 @@ export class FakeRotationSession implements AgentSession {
    * `turn_end` and the relay's own reading of it, across the transcript settle wait — and
    * does it deterministically, which a `setTimeout` racing a 250ms poll would not.
    */
-  endTurn: { index: number; verdict: Verdict; withdraw?: 'no_replacement' | Verdict } | undefined
+  endTurn:
+    | {
+        index: number
+        verdict: Verdict
+        withdraw?: 'no_replacement' | Verdict
+        /**
+         * Which revision reason the withdrawal carries. `late_signal` unless a test says
+         * otherwise, because that is the adapter's own spelling for it.
+         *
+         * It exists for `compaction`, which is the withdrawal an operator actually met (#66):
+         * a rewritten transcript no longer contains the evidence a verdict rested on, so
+         * `Tracker.resetTranscript` withdraws the claim. Nothing downstream branches on the
+         * reason -- the relay matches a revision by the sequence it replaces -- and that is
+         * precisely what a test asserting the compaction case has to be able to show.
+         */
+        withdrawReason?: RevisionEvent['reason']
+      }
+    | undefined
 
   /** Seq of the last `turn_end`, so a revision can withdraw it by number as the adapters do. */
   #lastEndSeq: number | undefined
@@ -269,7 +287,10 @@ export class FakeRotationSession implements AgentSession {
       provisional: false,
     })
     if (scripted?.withdraw) {
-      this.lateSignal(scripted.withdraw === 'no_replacement' ? 'none' : scripted.withdraw)
+      this.lateSignal(
+        scripted.withdraw === 'no_replacement' ? 'none' : scripted.withdraw,
+        scripted.withdrawReason ?? 'late_signal',
+      )
     }
   }
 
@@ -282,13 +303,17 @@ export class FakeRotationSession implements AgentSession {
    * A sentinel rather than `undefined`, which a default parameter cannot distinguish from
    * an omitted argument.
    */
-  lateSignal(replacement: Verdict | 'none' = COMPLETED): void {
+  lateSignal(replacement: Verdict | 'none' = COMPLETED, reason: RevisionEvent['reason'] = 'late_signal'): void {
     if (this.#lastEndSeq === undefined) throw new Error('no turn_end to withdraw')
     this.emit({
       type: 'revision',
-      reason: 'late_signal',
+      reason,
       replaces: [this.#lastEndSeq],
-      provenance: [{ source: 'hook', detail: 'stronger evidence superseded the reported verdict' }],
+      provenance: [
+        reason === 'compaction'
+          ? { source: 'transcript', detail: 'the transcript no longer holds the evidence the verdict rested on' }
+          : { source: 'hook', detail: 'stronger evidence superseded the reported verdict' },
+      ],
       seq: ++this.#seq,
       at: Date.now(),
       provisional: false,
