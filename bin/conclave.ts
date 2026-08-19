@@ -25,6 +25,7 @@ import { flagReader, missingValueMessage } from '../src/config/cliFlags.ts'
 import type { CheckSpec } from '../src/rotation/record.ts'
 import type { ProjectConfig } from '../src/config/project.ts'
 import { runReport } from '../src/relay/report.ts'
+import { reportedTargeting } from '../src/relay/targeting.ts'
 import { dryRunPlan, dryRunPlanLines, type DryRunPlanInput } from '../src/relay/dryRunPlan.ts'
 import { RunLogWriter, readRunLog, runLogExists } from '../src/relay/resume.ts'
 import { ceilingSummary, ceilingsFrom, effectiveCeilings, preflightRefusals } from '../src/relay/guardrails.ts'
@@ -1058,6 +1059,23 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
       // deliberately stopped owning, which is the opposite of detaching.
       child.unref()
       closeSync(fd)
+      // Through `reportedTargeting`, not a fourth hand-written block.
+      //
+      // This document is a THIRD serializer of the same rule -- the run report and the recorder
+      // are the other two -- and it is the one an agent operator polls first, in the window
+      // before the child records itself. A rule about when a key exists, written out three
+      // times, is a rule that gets relaxed in two places and kept in the third. So the counters
+      // are zeroed here (a child that has not started has taken no advisor turn) and the
+      // question of whether the key belongs at all is answered by the same function the other
+      // two ask, from the seat list this process just parsed and is about to hand the child.
+      const placeholderTargeting = reportedTargeting({
+        applicable: seatRequests.length > 1,
+        seats: seatRequests.length,
+        // No turns, so every counter the block carries comes out zero without one being named
+        // here. That is the point of the records being the only store: this placeholder cannot
+        // fall out of step with the shape a real run writes, because it does not restate it.
+        records: [],
+      })
       // The parent writes the first status, carrying the CHILD's pid.
       //
       // Without this there is a window -- launching two CLIs, seconds long -- in which the
@@ -1093,6 +1111,16 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
         // that does not report rotation intent at all (#103, #75). Appended last, so it lands
         // where the recorder's own document puts it.
         rotations: [],
+        // Zeroed, and honestly so: a child that has not started has taken no advisor turn. Written
+        // here for the reason `ceilings` and `rotations` are -- an agent operator polls in exactly
+        // the window before the child records itself, and on a run whose child dies during startup
+        // this placeholder is the only report they ever get (#79).
+        //
+        // And absent entirely on a one-seat run, which is the same rule the recorder applies and
+        // is applied here rather than left for the child so the document does not change shape
+        // when the child takes over. See `placeholderTargeting` above for why that rule is asked
+        // of `reportedTargeting` rather than restated here.
+        ...(placeholderTargeting ? { targeting: placeholderTargeting } : {}),
       })
       if (asJson) {
         console.log(JSON.stringify({ detached: true, id, pid: child.pid, dir, stdio: logFile }, null, 2))
@@ -1389,6 +1417,12 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
       // live, and the runs most worth diagnosing are the ones that used to report least.
       say(`=== ${relay.log.length} messages routed`)
       say(`=== ${relay.rotationSummary()}`)
+      // Only when there was a second seat to address (#79). `targetingSummary` returns undefined
+      // on a one-seat run rather than a line saying there is nothing to say: the advisor there was
+      // never given the syntax and could not have used it, and a line that is noise on the common
+      // run is a line an operator learns to skip past on the run where it means something.
+      const targeting = relay.targetingSummary()
+      if (targeting !== undefined) say(`=== ${targeting}`)
       // Last useful line for a human, and the one that makes an abnormal ending recoverable.
       say(`=== run log: ${recordPath}`)
       say(`===   resume with: conclave relay "<goal>" --resume ${recordPath}`)

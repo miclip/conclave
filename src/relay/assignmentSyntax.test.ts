@@ -187,6 +187,65 @@ test('the fallback target is validated too, so a run whose role nothing fills fa
   assert.equal(r.detail, 'no seat fills the role implementer')
 })
 
+test('a refused reply still says which form it was in and which seats it named', () => {
+  // What the refusal carries OUT, which is separate from whether it refuses. The instrument in
+  // `targeting.ts` asks whether the briefing got `@seat`/`@role` out of the advisor at all, and
+  // that is settled here -- before any validation -- so a refusal that dropped it would let a
+  // run report `NONE used @seat/@role` about an advisor that used it on every turn. Nothing
+  // about the refusal changes: `ok` is still false and `decisions` is still absent.
+  //
+  // `named` is UNVALIDATED by construction. On `unknown_target` one of these names is precisely
+  // why the reply failed, and that is the name an operator needs to read to decide whether to
+  // fix the briefing or the seat names in it.
+  const refusals = (reply: string, seats: readonly SeatExecution[] = SEATS) => {
+    const r = parseDecisions(reply, seats, ROLE)
+    assert.equal(r.ok, false, reply)
+    return r.ok ? undefined : { form: r.form, named: r.named, why: r.why }
+  }
+
+  // `stray_prose`: the half-addressed reply, and the case where the failure is NOT about the
+  // target -- the seat it named is real. What comes back is what the advisor ASKED FOR.
+  assert.deepEqual(refusals('Here is the plan.\n@seat implementer: Do the first part.'), {
+    form: 'addressed',
+    named: [{ kind: 'seat', seat: 'implementer' }],
+    why: 'stray_prose',
+  })
+  // Every directive, in order, including the one that caused the refusal.
+  assert.deepEqual(refusals('@seat implementer: Do this.\n@role auditor: And this.'), {
+    form: 'addressed',
+    named: [
+      { kind: 'seat', seat: 'implementer' },
+      { kind: 'role', role: 'auditor' },
+    ],
+    why: 'unknown_target',
+  })
+  assert.deepEqual(refusals('@seat implementer: Do this.\n@seat implementer-2:'), {
+    form: 'addressed',
+    named: [
+      { kind: 'seat', seat: 'implementer' },
+      { kind: 'seat', seat: 'implementer-2' },
+    ],
+    why: 'empty_instruction',
+  })
+  // A keyword ABOVE the first directive fails before `blocks` is built, which is why the names
+  // are collected from the raw lines rather than from the parsed blocks.
+  assert.deepEqual(refusals('DONE\n@seat implementer: Do this.'), {
+    form: 'addressed',
+    named: [{ kind: 'seat', seat: 'implementer' }],
+    why: 'mixed_keyword',
+  })
+
+  // And the unaddressed refusals, which named nobody. The fallback is the ORCHESTRATOR's target,
+  // so a reply refused because nothing fills it still named nobody -- reporting it as a named
+  // target would credit the advisor with syntax it never wrote.
+  assert.deepEqual(refusals('Do the thing.', [seat('reviewer', 'reviewer')]), {
+    form: 'unaddressed',
+    named: [],
+    why: 'unknown_target',
+  })
+  assert.deepEqual(refusals(''), { form: 'unaddressed', named: [], why: 'empty' })
+})
+
 test('a directive must be at the start of a line, so an @ inside prose is prose', () => {
   // An advisor writing about the syntax is talking about code, not addressing anybody.
   //

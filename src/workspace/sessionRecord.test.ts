@@ -1455,6 +1455,34 @@ test('an ended run and an abandoned one are old on purpose, and get no staleness
   )
 })
 
+test('a stand-in that cannot answer gets no targeting block, even on a run that would have had one', async () => {
+  // The structural half of the contract, and TWO seats deliberately: a one-seat run emits no
+  // `targeting` key either way (#79 keeps it off the default document entirely), so a stand-in
+  // with one seat would pass this test without exercising anything. With two, the key WOULD be
+  // written if the relay answered -- so what is pinned is that a stand-in predating #79 still
+  // satisfies `RecordableRelay` and still gets the document it got before, rather than a
+  // recorder inventing a block reporting that its advisor addressed nobody.
+  const root = dir()
+  const relay = fakeRelay({ seats: ['implementer-2'] })
+  const rec = recordSession(relay, {
+    repoRoot: root,
+    id: 'targeting-absent',
+    goal: 'g',
+    front: 'session',
+    startedAt: Date.now(),
+    build: 'test-build',
+  })
+  await rec.refresh()
+  const session = readSession(root, 'targeting-absent')
+  assert.ok(session)
+  assert.equal(session.status.targeting, undefined)
+  assert.ok(!('targeting' in JSON.parse(formatSessionJson(session))), 'no key at all, not an empty one')
+  assert.doesNotMatch(formatSession(session, Date.now()), /targeting:/)
+
+  relay.stream.close()
+  await rec.close()
+})
+
 test('a stand-in that cannot answer gets no ceilings block, rather than one claiming no limits', async () => {
   // The structural half of the contract, and the same rule `rotationOf` follows: absent means
   // "this relay was never asked", which is not the same fact as `null` meaning "no limit". A

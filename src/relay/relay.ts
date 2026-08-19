@@ -110,6 +110,14 @@ import {
   type TaskRuntime,
   type TaskTarget,
 } from './dispatch.ts'
+import {
+  describeTarget,
+  namedTargets,
+  recordTargetingTurn,
+  targetingSummary,
+  type TargetingRecord,
+  type TargetingWatch,
+} from './targeting.ts'
 import { isSubagentTool, worktreePaths } from './subagents.ts'
 import type { ClockSupport } from '../registry/types.ts'
 
@@ -1381,6 +1389,58 @@ interface IncompleteLatch {
 }
 
 /** A pause in front of a human that rests on a turn verdict, and can therefore go stale. */
+/**
+ * What one advisor turn did about assigning work, accumulated as the turn runs (#79).
+ *
+ * The instrument's single source of truth for a turn in progress. Every site that used to write
+ * a `TargetingRecord` now writes a field here instead, and `#finaliseTargeting` reads the whole
+ * of it once, on the turn's way out. The reason is the denominator: three recording sites meant
+ * three paths a turn had to REACH to be counted, and every exit added between them shrank the
+ * count without anyone being wrong about anything. It happened three times.
+ *
+ * Nothing here is a conclusion. `outcome` is not a field, because which of them a turn was
+ * is decided at the finalizer from what actually happened -- including the verdict, which can
+ * still change while the operator reads a pause.
+ */
+interface AdvisorAttempt {
+  /**
+   * Which advisor turn this is, on the run's own numbering — the key its record will carry.
+   *
+   * Held on the attempt rather than only passed to the finalizer because this object IS the
+   * instrument's live view of the turn: `targetingWatch.pending` points at it while the turn is
+   * open (see `TargetingWatch.pending`), and a surface naming the open turn has to be able to
+   * say which one it is.
+   */
+  readonly turn: number
+  /**
+   * The `turn_end` this reply was read from, held rather than re-read off `next`.
+   *
+   * `next` is REASSIGNED inside the turn -- the failure path re-asks, and so does the
+   * notes-only path -- so by the time the finalizer runs, `next.end` can belong to a different
+   * turn entirely. Resolving supersession against that would file one turn's verdict on
+   * another turn's record.
+   */
+  readonly end: TurnEndEvent
+  /**
+   * The verdict the DISPATCH decision was taken on, resolved at the top of the turn.
+   *
+   * Kept beside the finalizer's own reading so the two can be compared: when they differ, the
+   * run acted on a claim its adapter later withdrew, and that is the one thing the record has
+   * to be able to say. See `UnadmittedReason.verdict_superseded`.
+   */
+  readonly heldVerdict: Verdict['outcome']
+  /** Whether the reply used `@seat`/`@role`, off `parseDecisions` and never re-read from prose. */
+  readonly addressed: boolean
+  /** What it named, as written and unvalidated. Empty on the unaddressed form. */
+  readonly targets: string[]
+  /** Which parse rule refused it, if one did. */
+  readonly refusal?: TargetingRecord['refusal']
+  /** Which run ceiling refused the whole batch before admission, if one did. */
+  ceiling?: TargetingRecord['ceiling']
+  /** Set once the batch is past every gate and its instructions are being admitted. */
+  admitted: boolean
+}
+
 interface VerdictPause {
   handle: RunHandle
   participant: string
@@ -1615,6 +1675,19 @@ export class Relay {
     // Set here and nowhere else. Whether rotation was configured cannot depend on how far
     // the run got -- see rotationWatch.armed and issue #31.
     this.rotationWatch.armed = opts.rotation !== undefined
+    // The same rule, for the same reason, one instrument later. Whether the advisor had a
+    // second seat to address is a property of the options and cannot depend on how far the run
+    // got: a run that ends before its first instruction must still report that targeting WAS
+    // applicable, or "not measured" reads as "measured, and the advisor never targeted".
+    //
+    // Counted on ROLE, not on the length of the seat list, because that is what
+    // `#implementers()` counts and `#implementers()` is what gates `MULTI_SEAT_BRIEFING`. The
+    // briefing gate reads this field rather than recomputing the count, so the run that is
+    // MEASURED for using the syntax is exactly the run that was TAUGHT it -- two expressions
+    // that agree today would be an instrument reporting under-use by an advisor that was never
+    // told the syntax exists.
+    this.targetingWatch.seats = implementerSeats(opts).filter((s) => s.role === 'implementer').length
+    this.targetingWatch.applicable = this.targetingWatch.seats > 1
   }
 
   /**
@@ -2575,6 +2648,33 @@ export class Relay {
   }
 
   /**
+   * Whether the advisor actually USED the assignment syntax this run depends on (#79).
+   *
+   * The second instrument in this file that exists because a negative result was unciteable
+   * without one, and it is built to `rotationWatch`'s shape deliberately. Multi-seat dispatch
+   * needs `@seat`/`@role`; `parseDecisions` proves the syntax PARSES and nothing proves the
+   * briefing ELICITS it. An unaddressed reply is routed by fallback and produces an ordinary
+   * task, so "the advisor chose not to parallelise" and "the advisor does not know the syntax"
+   * left the same record -- established rather than assumed: an unaddressed reply and an
+   * `@role`-addressed one are identical at the parser's own output, so no reader downstream
+   * could have told them apart even in memory.
+   *
+   * And it is not only lost parallelism. A `merge_blocked` seat takes nothing but a repair
+   * addressed to it BY NAME (`untargetedTarget` routes around it while any other seat is free),
+   * the advisor is told about the block exactly once (`#tellLead` drains), and the escalation
+   * that would report the stall is gated on a repair attempt that never arrives. So an advisor
+   * that under-uses the syntax can strand a seat for the rest of the run with nothing detecting
+   * it. This is what detects it.
+   *
+   * See `targeting.ts` for what each field means and why the one-seat run counts nothing.
+   */
+  readonly targetingWatch: TargetingWatch = {
+    applicable: false,
+    seats: 0,
+    records: [] as TargetingRecord[],
+  }
+
+  /**
    * Unresolved items participants flagged, in the order raised.
    *
    * A run can legitimately end `done` while carrying one: the caveat that prompted this was
@@ -2898,6 +2998,195 @@ export class Relay {
    */
   rotationRecords(): RotationRecord[] {
     return this.rotationWatch.records.map((r) => ({ ...r }))
+  }
+
+  /**
+   * Record one advisor turn's assignment attempt. THE recording site, and the only one (#79).
+   *
+   * ## Why it is a `finally` and not a call at each ending
+   *
+   * The contract `targetingTurns` states -- "every turn that tried to instruct" -- is a property
+   * of WHERE this runs, not of any arithmetic. It was stated three times before and broken three
+   * times, always the same way: a recorder placed on the path a turn took, and then an exit
+   * added above it. Validation moved above the recorder and every refused turn vanished. The
+   * queue ceiling was hoisted out of the admission loop and every ceiling-refused batch vanished
+   * with it -- `continue advisor` from a check that sits above the recorder is a turn that was
+   * never counted, and the run could then report `NONE used @seat/@role` about an advisor whose
+   * one addressed reply had proved the briefing works.
+   *
+   * So the turn cannot leave without passing here. Every `continue advisor`, every re-ask,
+   * every `return`, every throw, and every exit somebody adds next year. That placement is the
+   * enforcement; nothing else in this file needs to remember anything.
+   *
+   * ## Classification, from the turn's completed state
+   *
+   * Read off `AdvisorAttempt` and the participant's event log at the moment the turn is over,
+   * never from where in the code the turn happened to end:
+   *
+   *   - admitted at all → `admitted`, whatever else also happened;
+   *   - otherwise the turn did not complete → `incomplete`, carrying the SETTLED verdict;
+   *   - otherwise a ceiling refused it → `ceiling`;
+   *   - otherwise the parser refused it → `invalid`;
+   *   - otherwise it was whole, valid and never admitted → `unadmitted`, which is the
+   *     reconciliation and the future-exit net at once. See `UnadmittedReason`.
+   *
+   * ## The verdict is re-resolved HERE, and that is the reconciliation
+   *
+   * `#exchange` settles on the first `turn_end`; a late signal that withdraws it can arrive at
+   * any point afterwards, INCLUDING while the operator is reading the pause this turn raised.
+   * The dispatch decision was already taken by then and cannot be unmade -- but the record can
+   * be written after it, and it is. A turn failed on a `timed_out` that the adapter withdrew
+   * and replaced with `completed` mid-pause is filed as `unadmitted / verdict_superseded`: a
+   * whole valid reply the run had already stopped dispatching. It is NOT filed as `incomplete`,
+   * which is a permanent claim that the advisor's reply could not be trusted, about a turn its
+   * own adapter says ended.
+   *
+   * The names are kept exactly as the reply wrote them -- unvalidated, and on a refusal one of
+   * them is usually why it failed. That is the point: an operator deciding whether to fix the
+   * briefing or the seat names in it needs to read the name the advisor reached for.
+   */
+  #finaliseTargeting(turn: number, lead: RelayParticipant, attempt: AdvisorAttempt | undefined): void {
+    // The live view of this turn ends HERE, whatever the turn was, and before any return below.
+    // One statement, unconditional, in the same synchronous block as the append: a turn cannot be
+    // pending and recorded at once (which would count it twice on every live surface) and cannot
+    // be neither (which would put the run back to reporting NONE off the turns that are over).
+    // Assigned rather than deleted so a reader sees the field go out, and placed above the guard
+    // for the same reason the recording site is where it is -- an exit added below must not be
+    // able to leave a finished turn showing as open.
+    this.targetingWatch.pending = undefined
+    // A turn that assigned nothing: DONE, ESCALATE, or a turn that ended above the parse. It was
+    // never asked to name a seat, so counting it would report under-use by an advisor that was
+    // not assigning anything.
+    if (!attempt) return
+    // The verdict as it stands NOW, which is not always the one the turn was failed on, and is
+    // sometimes not a verdict at all. `supersessionOf` answers in THREE states and all three mean
+    // different things:
+    //
+    //   - `undefined` — no revision names this `turn_end`, so its own verdict stands;
+    //   - a revision WITH a replacement — the adapter withdrew its claim and made another, and
+    //     the replacement is its last word;
+    //   - a revision with NO replacement — the adapter withdrew its claim and has not made
+    //     another. There is no verdict for this turn. It is OPEN.
+    //
+    // The third used to be collapsed into the first by `?.replacement ?? attempt.end`, which
+    // reads the withdrawn `turn_end` back out and files the turn as `incomplete` carrying the
+    // very verdict the adapter retracted -- a permanent claim that the advisor's reply could not
+    // be trusted, sourced to a claim its own adapter took back. `incompleteTurns` is also the
+    // bucket that withholds the under-use finding, so one retracted verdict suppressed a finding
+    // for the rest of the run on evidence that had been withdrawn.
+    //
+    // The pause raised over this turn already handles the no-replacement case explicitly -- see
+    // `preSuperseded` at the guard, which tells the operator the verdict was withdrawn with
+    // nothing put in its place. This is the same fact, reaching the permanent record.
+    const superseded = supersessionOf(lead.events, attempt.end)
+    const settled = superseded === undefined ? attempt.end : superseded.replacement
+    const ended = settled?.verdict.outcome
+    const record: TargetingRecord = attempt.admitted
+      ? { turn, addressed: attempt.addressed, targets: attempt.targets, outcome: 'admitted' }
+      : ended === undefined
+        ? // Withdrawn with nothing behind it: the turn is OPEN, and that is its own outcome. Not
+          // `incomplete`, which would quote the retracted verdict as though it still stood; and
+          // not `unadmitted`, which this branch used to write and which says the opposite of what
+          // is known here -- `unadmitted` means a whole valid reply the run had stopped
+          // dispatching, and what makes such a reply whole is the REPLACEMENT saying the turn
+          // ended `completed` after all. With nothing behind the withdrawal there is no such
+          // statement, so filing it there certified elicitation off a turn its own adapter says
+          // is still open. See `UNDISPATCHED.withdrawn`, which classes it as unsettled evidence.
+          //
+          // Above the ceiling and refusal branches for the same reason the bad-verdict branch is
+          // above them: if the turn never got a verdict, what the run did with its reply is not
+          // what the record should say happened to it.
+          { turn, addressed: attempt.addressed, targets: attempt.targets, outcome: 'withdrawn' }
+        : ended !== 'completed'
+          ? // The verdict wins over a parse refusal when both are wrong. A reply that would not
+            // parse on a turn that also timed out is most likely a truncated reply, and calling it
+            // a refusal would report the advisor as having written something malformed when what
+            // happened is that it never finished writing.
+            { turn, addressed: attempt.addressed, targets: attempt.targets, outcome: 'incomplete', verdict: ended }
+          : attempt.ceiling !== undefined
+            ? { turn, addressed: attempt.addressed, targets: attempt.targets, outcome: 'ceiling', ceiling: attempt.ceiling }
+            : attempt.refusal !== undefined
+              ? { turn, addressed: attempt.addressed, targets: attempt.targets, outcome: 'invalid', refusal: attempt.refusal }
+              : {
+                  turn,
+                  addressed: attempt.addressed,
+                  targets: attempt.targets,
+                  outcome: 'unadmitted',
+                  // Which of the two, decided by whether the run acted on a verdict that no longer
+                  // stands. `unclassified` is unreachable as this file stands and is not dead: it
+                  // is what an exit added between the ceiling and admission will produce, and a
+                  // visibly unexplained record is a defect somebody can find.
+                  unadmitted: attempt.heldVerdict === 'completed' ? 'unclassified' : 'verdict_superseded',
+                }
+    if (!recordTargetingTurn(this.targetingWatch, record)) return
+    // The reconciliation, said out loud. The contemporaneous note above the pause reported the
+    // verdict this turn was failed on; if the adapter has since withdrawn it, a reader comparing
+    // the log with the record would otherwise find them disagreeing with nothing to explain it.
+    // Written rather than the earlier note being edited: a log is an account of what was
+    // believed when, and a line rewritten after the fact is a line nobody can date.
+    if (ended !== attempt.heldVerdict) {
+      this.#record({
+        from: 'orchestrator',
+        fromRank: 'human',
+        to: [],
+        kind: 'note',
+        text:
+          `advisor turn ${turn} was failed on a ${attempt.heldVerdict} verdict that has since been ` +
+          // Said as what happened, because the two are different situations for a reader: one
+          // turn has a new verdict to reconcile against, the other has none at all and is left
+          // open. Writing "replaced with undefined" would be the record admitting it had not
+          // looked.
+          (ended === undefined
+            ? `withdrawn with nothing put in its place, so the turn has no verdict at all and its ` +
+              `targeting record reads ${record.outcome} `
+            : `withdrawn and replaced with ${ended}, so its targeting record reads ${record.outcome} `) +
+          `rather than ${attempt.heldVerdict === 'completed' ? 'invalid' : 'incomplete'} — the reply ` +
+          `was ${attempt.addressed ? `read whole and named ${attempt.targets.join(', ') || 'a target'}` : 'read whole and named nobody'}, ` +
+          `and the run had already stopped dispatching it. Nothing about the turn is re-run; this ` +
+          `is the permanent record being made to agree with the adapter's last word.`,
+      })
+    }
+  }
+
+  /**
+   * One line an operator can read to know whether the advisor used the assignment syntax (#79).
+   *
+   * `undefined` on a one-seat run, and both front-ends print nothing rather than printing that
+   * there is nothing to say. See `targetingSummary` in `targeting.ts` for the argument; the
+   * rendering lives there because it is a pure function of the counters and a summary that
+   * needed a relay to test would be tested against a run instead of against its own cases.
+   */
+  targetingSummary(): string | undefined {
+    return targetingSummary(this.targetingWatch)
+  }
+
+  /**
+   * What the targeting instrument saw, for a reader outside the process.
+   *
+   * Copied, records and all, for the reason `rotationRecords` copies: the status document is
+   * written repeatedly from a live relay, and handing out the array it still owns would let a
+   * reader of an earlier document see a list that moved underneath it.
+   */
+  targeting(): TargetingWatch {
+    const w = this.targetingWatch
+    return {
+      applicable: w.applicable,
+      seats: w.seats,
+      records: this.targetingRecords(),
+      // Projected to the three fields `TargetingPending` declares, never the attempt itself: the
+      // attempt carries this turn's `turn_end` and its dispatch state, both of which keep moving
+      // after this copy is handed out, and one of which is an outcome the turn has not reached.
+      ...(w.pending === undefined
+        ? {}
+        : {
+            pending: { turn: w.pending.turn, addressed: w.pending.addressed, targets: [...w.pending.targets] },
+          }),
+    }
+  }
+
+  /** Every advisor turn that tried to instruct and how it addressed it, copied. See `targeting`. */
+  targetingRecords(): TargetingRecord[] {
+    return this.targetingWatch.records.map((r) => ({ ...r, targets: [...r.targets] }))
   }
 
   /**
@@ -3946,7 +4235,7 @@ export class Relay {
       else if (!shouldWait && offered !== -1) pause.options.splice(offered, 1)
       // The status file is written from the LIVE pause object on any event, so an in-place
       // change reaches disk on the next one -- and a pause is precisely when nothing else is
-      // flowing. Same reasoning as `/wait` in the console (`src/repl/session.ts:2001`), and the
+      // flowing. Same reasoning as `/wait` in the console (`src/repl/session.ts:2006`), and the
       // reader who needs it most is the one polling from outside.
       this.#stream.emit({ type: 'liveness', pause })
       if (last) return stop()
@@ -5349,7 +5638,13 @@ export class Relay {
         // Only when there is more than one seat to address. See MULTI_SEAT_BRIEFING: an advisor
         // that never hears the syntax never writes it, and the default run's briefing is
         // byte-identical to what it has always been.
-        `${seats.length > 1 ? `${MULTI_SEAT_BRIEFING}\n\n` : ''}` +
+        //
+        // Read off `targetingWatch.applicable`, which is `#implementers().length > 1` resolved
+        // from the options at construction (#79). The same condition it always was, asked in
+        // one place: the instrument that counts whether the advisor USED the syntax must be
+        // measuring exactly the runs that were TAUGHT it, and two expressions for one question
+        // is how that stops being true.
+        `${this.targetingWatch.applicable ? `${MULTI_SEAT_BRIEFING}\n\n` : ''}` +
         // Only when a reviewer is declared, for the same reason (#72). The default run pays
         // nothing for this either.
         `${reviewerSeat ? `${REVIEWER_BRIEFING_FOR_ADVISOR}\n\n` : ''}` +
@@ -5730,6 +6025,14 @@ export class Relay {
             : this.#redAware(closing.outcome)
         }
         if (!closing) {
+        // What this turn did about assigning work, and the ONLY thing the instrument reads (#79).
+        //
+        // Declared out here and finalized in the `finally` below, so that every way out of this
+        // block -- the ceilings, the halts, the re-asks, the `return`s, a throw, and whatever
+        // exit is added next -- passes the one recording site. See `#finaliseTargeting`: the
+        // denominator contract is kept by that placement and by nothing else.
+        let attempt: AdvisorAttempt | undefined
+        try {
         // Every ceiling at the dispatch boundary, before anything is admitted or assigned, and
         // never mid-turn. A run cannot be interrupted mid-turn without discarding that turn's
         // work -- the same reason #exchange has no timeout of its own.
@@ -5842,6 +6145,120 @@ export class Relay {
         // guessing at an unrecognised target would let it invent a seat.
         const decisions = parseDecisions(instruction, [...this.#seatState.values()], untargetedTarget())
 
+        // The advisor's verdict may already be stale by the time we read it, exactly as an
+        // implementer's can be -- and until now only the implementer's was resolved.
+        //
+        // `#exchange` settles on the FIRST `turn_end`, and the late signal that withdraws it
+        // lands during the transcript settle window that follows: the same window that exists
+        // because a late `Stop` is expected. The implementer path has read through that
+        // withdrawal since the pause it was written for; the advisor path read `next.end`
+        // directly, so an advisor turn whose `timed_out` was retracted and replaced with
+        // `completed` was still failed, halted on, re-asked, and -- since #79 put a recorder on
+        // that path -- recorded as an `incomplete` targeting attempt. Every one of those is a
+        // decision taken on a verdict the system had already talked itself out of, and the
+        // targeting record is the one that outlives the run: a turn whose reply was whole and
+        // whose adapter said so was filed as evidence that could not be trusted.
+        //
+        // Resolved BEFORE the guard, not beside it, so there is one answer rather than a
+        // dispatch decision and a record that can disagree about which verdict this turn ended
+        // on. With no revision -- every ordinary turn -- `supersessionOf` returns undefined and
+        // `current` is `next.end`, so nothing about the common path moves.
+        const superseded = supersessionOf(lead.events, next.end)
+        const current = superseded?.replacement ?? next.end
+        if (superseded) {
+          this.#record({
+            from: 'orchestrator',
+            fromRank: 'human',
+            to: [],
+            kind: 'note',
+            text:
+              `${lead.id}'s ${next.end.verdict.outcome} verdict was withdrawn (${superseded.revision.reason})` +
+              (superseded.replacement
+                ? ` and replaced with ${formatVerdict(superseded.replacement.verdict)}`
+                : ` with no replacement`),
+          })
+        }
+        // A withdrawal with no replacement leaves any pause below resting on a verdict that is
+        // already retracted, so it says so from the moment it is raised. The implementer path's
+        // `pre`, and the same reasoning: the operator must not be asked to adjudicate a claim
+        // the system has withdrawn without being told it was withdrawn.
+        const preSuperseded: PauseSupersession | undefined =
+          superseded && !superseded.replacement
+            ? {
+                at: Date.now(),
+                note:
+                  `the ${next.end.verdict.outcome} verdict this pause was raised on had already been ` +
+                  `withdrawn (${superseded.revision.reason}) with no replacement`,
+              }
+            : undefined
+
+        // Armed HERE, before anything below can pause, rather than beside the halt it was
+        // written for. `#trackSupersession` keys off this field and nothing else, so a pause
+        // raised while it is unset cannot be amended when the verdict behind it is withdrawn --
+        // and "the halt is the next statement" is a property of today's code, not a rule. It is
+        // cleared after that halt, as it always was: past the pause there is nothing left to
+        // amend, and leaving it armed across the re-ask below would let the NEXT turn's
+        // `turn_end` be read as this one's replacement.
+        //
+        // The verdict branch only. A completed turn has no verdict for a revision to withdraw,
+        // and a pause raised on something else -- an adjudication, an escalation -- is not
+        // resting on this verdict and must not be told that it is.
+        if (handle && current.verdict.outcome !== 'completed') {
+          this.#verdictPause = {
+            handle,
+            participant: lead.id,
+            endSeq: current.seq,
+            outcome: current.verdict.outcome,
+            withdrawn: preSuperseded !== undefined,
+          }
+        }
+
+        // The turn is an assignment attempt from here on, and the instrument's record of it
+        // starts now -- before the guard that can fail it, before the ceiling that can refuse
+        // it, and before anything that can end the run (#79).
+        //
+        // A DONE and an ESCALATE are not attempts: they assigned nothing and were never asked to
+        // name a seat, so `attempt` stays undefined and the finalizer records nothing. A REFUSED
+        // reply is an attempt whatever form it was in -- the parser decides the form before it
+        // validates anything, so `@seat nobody-here: do the thing` is positive evidence that the
+        // briefing elicited the syntax, and an empty reply is a turn the advisor was asked for an
+        // instruction and spent. Both belong in the denominator; only the first is elicitation,
+        // and `addressed` is what keeps them apart.
+        //
+        // Nothing here changes the failure. This observes: the reply still fails whole, the halt
+        // below still happens on the same terms, the advisor is still re-asked, and no name taken
+        // from this attempt is ever routed to.
+        if (!decisions.ok || decisions.decisions.some((d) => d.kind === 'instruct')) {
+          attempt = {
+            turn: advisorTurn,
+            end: next.end,
+            heldVerdict: current.verdict.outcome,
+            // Off `parseDecisions`, never re-read from the prose and never inferred from the
+            // targets: an addressed `@role implementer:` and an unaddressed reply on a run whose
+            // fallback is that same role produce identical targets, so the target cannot answer
+            // this question and a second regex here would be a second answer.
+            addressed: decisions.form === 'addressed',
+            // What the reply ASKED FOR. `namedTargets` reads them off whichever shape this reply
+            // has -- a refusal carries them on `named`, a reply that parsed carries them on the
+            // decisions -- so there is one reader rather than one per site.
+            targets: namedTargets(decisions),
+            ...(decisions.ok ? {} : { refusal: decisions.why }),
+            admitted: false,
+          }
+          // The SAME object, under a second name, and that is the point rather than an oversight.
+          // The instrument's live view of an open turn cannot be a copy: a copy is a second store
+          // of one fact, and this file has just finished removing the last of those. Everything
+          // the projection reads off it -- the turn number, `addressed`, the names -- is fixed
+          // here and never mutated; `ceiling` and `admitted` change below and are deliberately
+          // not part of `TargetingPending`, because they are outcomes and this turn has none yet.
+          //
+          // Cleared in `#finaliseTargeting`, which is the same synchronous block that appends the
+          // record, so the turn is never both pending and recorded and never neither. Not gated
+          // on `applicable`: that rule lives at the recorder and in the renderers, and a second
+          // copy of it here is a rule that gets relaxed once.
+          this.targetingWatch.pending = attempt
+        }
+
         // An advisor turn that ended badly, or produced nothing that can be admitted, must not be
         // forwarded.
         //
@@ -5854,10 +6271,10 @@ export class Relay {
         // Two conditions, because they fail differently. A bad verdict carries a reason worth
         // reporting; an empty body on a clean verdict does not, and is the minimum bar either
         // way -- there is no circumstance in which relaying nothing is the right move.
-        if (next.end.verdict.outcome !== 'completed' || !decisions.ok) {
+        if (current.verdict.outcome !== 'completed' || !decisions.ok) {
           const why =
-            next.end.verdict.outcome !== 'completed'
-              ? `${lead.id} turn ended ${formatVerdict(next.end.verdict)}`
+            current.verdict.outcome !== 'completed'
+              ? `${lead.id} turn ended ${formatVerdict(current.verdict)}`
               : // EVERY parse failure, not just the empty reply: one sentence, and it is the one
                 // an empty instruction has always produced. D4 says an unparseable reply is
                 // treated exactly as an empty instruction is treated today, and a second wording
@@ -5865,7 +6282,7 @@ export class Relay {
                 // only pin as an exact string. `ParseFailure` still carries `why` and `detail`
                 // for whenever surfacing them is a change somebody declares on purpose.
                 `${lead.id} produced no instruction`
-          const evidence = next.end.verdict.provenance.map((v) => `${v.source}: ${v.detail}`)
+          const evidence = current.verdict.provenance.map((v) => `${v.source}: ${v.detail}`)
           this.#record({
             from: 'orchestrator',
             fromRank: 'human',
@@ -5873,6 +6290,79 @@ export class Relay {
             kind: 'note',
             text: [why, ...evidence].join(' — '),
           })
+
+          // A reply that USED the syntax and did not dispatch, counted here rather than lost (#79).
+          //
+          // The instrument used to record only after validation and queue admission, and BOTH
+          // ways a turn can fail leave through this path -- so `@seat nobody-here: do the
+          // thing`, which is positive evidence that the briefing elicited `@seat`, was recorded
+          // as nothing at all and the run could afterwards report "NONE used @seat/@role". That
+          // is the instrument reporting the opposite of what happened, in the direction that
+          // sends a reader to rewrite a briefing that is working when what is wrong is the seat
+          // names in it.
+          //
+          // Both ways, with no exception for the verdict. A turn that timed out holding an
+          // `@seat` line is weaker evidence -- it may have been cut between the directive and
+          // its body -- but excluding it would let a run whose advisor targeted every turn and
+          // finished none report `NONE`, which is the same false negative with a different
+          // cause. So it is recorded as `incomplete` rather than as `invalid`, carrying the
+          // verdict that ended it, and the summary says the reading is uncertain instead of
+          // saying nothing.
+          //
+          // The parser has already decided the form, before it validated anything, so nothing
+          // is re-read from the prose here, and `namedTargets` reads the names off whichever
+          // shape this reply has -- a refusal carries them on `named`, a reply that parsed and
+          // then lost its turn carries them on the decisions.
+          //
+          // Nothing about the failure changes. This observes; the reply still fails whole, the
+          // halt below still happens on the same terms, and the advisor is still re-asked. The
+          // names are rendered for the record and never routed to: on a refusal one of them is
+          // usually why this failed.
+          if (decisions.form === 'addressed') {
+            const named = namedTargets(decisions)
+            // The RESOLVED verdict. A turn whose `timed_out` was withdrawn and replaced with
+            // `completed` is not an incomplete turn, and saying so here would tell a reader the
+            // reply could not be trusted when the adapter had already said otherwise.
+            const failed = current.verdict.outcome
+            // And the same fact in the log, beside the failure it explains. The note above says
+            // the advisor produced no instruction, which is true and is the whole of what a
+            // reader used to get; it does not say that the advisor was TRYING to address a seat,
+            // which is the part that decides what to fix.
+            //
+            // The note is contemporaneous and the RECORD is not: the record is written at the
+            // finalization site at the end of this turn, so that a verdict withdrawn while the
+            // operator reads the pause below is reconciled before anything permanent is written.
+            // When the two end up disagreeing the finalizer says so in its own note rather than
+            // this one being retracted -- a log is an account of what was believed when, and a
+            // line edited after the fact is a line nobody can date.
+            //
+            // Gated on `applicable` rather than on the recorder's answer, which is the same
+            // field the recorder itself gates on: one-seat runs say nothing about targeting
+            // anywhere.
+            if (this.targetingWatch.applicable) {
+              this.#record({
+                from: 'orchestrator',
+                fromRank: 'human',
+                to: [],
+                kind: 'note',
+                text:
+                  `the advisor's reply DID use @seat/@role — it named ${named.join(', ') || 'a target'} — ` +
+                  (failed === 'completed'
+                    ? `and was refused before dispatch (${decisions.ok ? 'refused' : `${decisions.why}: ${decisions.detail}`}). ` +
+                      `Nothing was queued and the advisor is being asked again. This is not an advisor that ` +
+                      `ignored the briefing: the syntax reached it, so the repair is the target it named or ` +
+                      `the form of the reply, not the briefing's prose.`
+                    : `and its turn ended ${failed}, so nothing was queued. Read it as UNCERTAIN and as ` +
+                      `evidence of NEITHER kind: a reply cut off mid-directive may not be the form it ` +
+                      `looks like, so this turn does not count as the briefing having elicited the ` +
+                      `syntax — and it does not count against the briefing either.`),
+              })
+            }
+          }
+
+          // The watch that lets a revision arriving mid-pause amend THIS pause is already
+          // armed -- see the registration above, which happens before anything in this turn can
+          // pause. It is cleared below, after the halt returns.
           const halted = await this.#halt(handle, {
             // The ADVISOR's turn. The scope is the seat whose turn ended badly, which is not
             // always the implementer -- and reading it off `verdictOf` would tie the axis to a
@@ -5881,7 +6371,11 @@ export class Relay {
             detail: why,
             evidence,
             liveness: { participant: lead, emittedBefore: next.emittedBefore },
-            verdictOf: { participant: lead.id, endSeq: next.end.seq },
+            verdictOf: { participant: lead.id, endSeq: current.seq },
+            // Raised already-superseded when the verdict behind it was withdrawn with nothing
+            // put in its place, so the operator is never asked to adjudicate a claim the system
+            // has retracted without being told it was retracted.
+            ...(preSuperseded === undefined ? {} : { superseded: preSuperseded }),
             // The advisor's own seat, and it latches on the same terms the implementer's does
             // (#107). An advisor that keeps tripping the same deadline puts the same question
             // just as often, and the answer is no more informative the ninth time for being
@@ -5892,10 +6386,11 @@ export class Relay {
             // a RE-ASK a few lines down, so latching it would turn a visible stall into a silent
             // loop churning advisor turns at the ceiling. A latch may make a question quieter;
             // it may not make a spin invisible.
-            ...(next.end.verdict.outcome === 'completed'
+            ...(current.verdict.outcome === 'completed'
               ? {}
-              : { latch: { seat: lead, outcome: next.end.verdict.outcome, provenance: next.end.verdict.provenance } }),
+              : { latch: { seat: lead, outcome: current.verdict.outcome, provenance: current.verdict.provenance } }),
           })
+          this.#verdictPause = undefined
           if (halted) {
             closing ??= { kind: 'outcome', outcome: halted }
             continue advisor
@@ -6019,8 +6514,107 @@ export class Relay {
           })
           if (wouldQueue) {
             this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text: wouldQueue.detail })
+
+            // A batch stopped by a ceiling, marked so the finalizer can classify it (#79).
+            //
+            // This was the last place the instrument recorded the opposite of what happened,
+            // and the worst of them, because the evidence it threw away was the best it can
+            // collect short of admission: the reply was written whole, `parseDecisions`
+            // accepted it, every seat it named exists, and the only thing that stopped it is a
+            // limit the operator set. Recording sat BELOW this check, and this check exits the
+            // advisor loop, so a run that ended on the queue ceiling at its first addressed turn
+            // reported that no turn had ever used the syntax. `NONE used @seat/@role` about the
+            // one reply that proved the briefing works.
+            //
+            // The exit is why the mark is here and the write is not. `continue advisor` with
+            // `closing` set is the end of this run's dispatching, and an instrument that has to
+            // remember to write something above every such exit is an instrument that loses a
+            // turn the next time one is added. So this sets a field, and the turn is recorded on
+            // its way out whatever route it takes.
+            //
+            // BOTH forms, which is the change from the version that only marked the addressed
+            // one. An unaddressed batch stopped here is a whole valid reply that named nobody,
+            // and dropping it shrank the denominator that every ratio above is read against.
+            // It is not credited as under-use either -- `unaddressedTurns` means one instruction
+            // went out by fallback, and nothing went out here -- so it lands in
+            // `unaddressedFailedTurns`, counted and credited to nothing.
+            //
+            // Nothing about the ceiling changes. This observes: the batch is still refused
+            // whole, `closing` is still set, and nothing is routed to a name from this record.
+            // WHICH ceiling, from the breach rather than from the call site. This projection
+            // asks every ceiling, so a batch can be stopped here by the duration or the turn
+            // ceiling with its instructions still unadmitted, and a record that hard-coded
+            // `queue_depth` would name the wrong limit to raise.
+            if (attempt) attempt.ceiling = wouldQueue.kind
+            if (decisions.form === 'addressed') {
+              const named = namedTargets(decisions)
+              if (this.targetingWatch.applicable) {
+                this.#record({
+                  from: 'orchestrator',
+                  fromRank: 'human',
+                  to: [],
+                  kind: 'note',
+                  text:
+                    `the advisor's reply DID use @seat/@role — it named ${named.join(', ') || 'a target'} — ` +
+                    `and the ${wouldQueue.kind} ceiling refused the whole batch before any of it was ` +
+                    `admitted, so nothing was queued. The reply was valid and the seats it named exist: ` +
+                    `the briefing is working, and what stopped this run is the ceiling, not the advisor.`,
+                })
+              }
+            }
             closing ??= { kind: 'end', reason: 'ceiling', detail: wouldQueue.detail }
             continue advisor
+          }
+
+          // The batch got past every gate, and the turn state says so (#79).
+          //
+          // Nothing is recorded here. This used to be one of three recording sites -- this one,
+          // the ceiling above it and the failure path above that -- and being three is what kept
+          // going wrong: each sat on a path the turn had to REACH, so every exit added between
+          // them silently shrank the denominator. The ceiling cost this instrument a turn that
+          // way, and the parse refusals did before it. So all three now only mark what happened,
+          // and `#finaliseTargeting` at the foot of the turn writes the record once, on a path
+          // no exit can miss.
+          //
+          // Nothing at all on a one-seat run: it has no second seat to name, its advisor was
+          // never given `MULTI_SEAT_BRIEFING`, and every reply it can write is unaddressed by
+          // construction. A counter that reported under-use there would be reporting on
+          // something that cannot happen, and a line that is noise on the common run is a line
+          // readers stop reading -- including on the run where it means something. The gate is
+          // `applicable`, read here and inside `recordTargetingTurn` from the same field.
+          {
+            const w = this.targetingWatch
+            // Everything below this line is admitted -- the all-or-none ceiling is above it --
+            // so the batch's fate is settled here even though the record is not written until
+            // the finalization site at the end of the turn.
+            if (attempt) attempt.admitted = true
+
+            // And the same fact where an operator reading the run in sequence will see it. The
+            // counters answer "did the briefing work" after the fact; this answers "why is that
+            // seat sitting still" during the run, which is the question actually being asked at
+            // the time. Only the unaddressed case says anything: a note on every addressed turn
+            // would be the orchestrator narrating the advisor doing exactly what it was asked.
+            if (w.applicable && decisions.form === 'unaddressed') {
+              // The target the DECISION carries, not a second call to `untargetedTarget()`. An
+              // unaddressed reply is exactly one decision, and the fallback it was given at the
+              // parse is the one the task is about to be admitted with -- recomputing it here
+              // would be a second answer to a question already settled, and a note naming a
+              // different seat than the work went to is worse than no note.
+              const first = decisions.decisions[0]
+              const to = first?.kind === 'instruct' ? first.target : untargetedTarget()
+              this.#record({
+                from: 'orchestrator',
+                fromRank: 'human',
+                to: [],
+                kind: 'note',
+                text:
+                  `the advisor's reply named no seat: it carries no @seat/@role directive, so its ` +
+                  `one instruction was admitted by fallback routing to ${describeTarget(to)}. This ` +
+                  `run has ${w.seats} implementer seats, and a seat that is blocked takes only the ` +
+                  `repair addressed to it BY NAME -- so a reply that never names one cannot start ` +
+                  `work on a second seat and cannot unblock a stalled one.`,
+              })
+            }
           }
 
           for (const admitting of decisions.decisions) {
@@ -6099,6 +6693,18 @@ export class Relay {
             closing ??= { kind: 'end', reason: 'ceiling', detail: breach.detail }
             continue advisor
           }
+        }
+        } finally {
+          // The turn is over, however it ended.
+          //
+          // A `finally` that throws REPLACES the outcome the turn actually reached -- an
+          // instrument's error standing in for the run's. So this one awaits nothing, touches no
+          // I/O, and calls only `recordTargetingTurn` (an append to an array) and `#record`,
+          // which this turn has already called several times by any route that gets here. Keep
+          // it that way: anything fallible added below this line is a new way for an observer to
+          // lose a real failure. Every number the instrument reports is derived from that array
+          // afterwards, so nothing here computes anything that could fail.
+          this.#finaliseTargeting(advisorTurn, lead, attempt)
         }
         }
         // Everything above is admission and dispatch, and none of it runs once the run has

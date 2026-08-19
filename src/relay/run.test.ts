@@ -826,6 +826,37 @@ test('a withdrawal with no replacement pauses, and says so from the moment it is
   await run.abort()
 })
 
+test("an ADVISOR verdict pause is amended when the verdict behind it is withdrawn", async (t) => {
+  const dir = repo()
+  // The same watch, on the other seat, and it was registered for only one of them. `#halt` is
+  // reached from both paths, but `#verdictPause` -- the field `#trackSupersession` keys off and
+  // the only thing that can match a late revision to a live pause -- was set on the implementer
+  // path alone. So an advisor paused on `timed_out` stayed on the operator's screen unamended
+  // when the late `Stop` proved its turn had ended: the run stayed paused, the state never
+  // changed across it, and the one moment a waiting operator cares about was visible only by
+  // re-reading the status file.
+  //
+  // Turn 0 is the advisor's first reply, because the briefing asks for one.
+  const advisor = new FakeRotationSession('advisor', 'codex', ['Do it.', 'DONE'])
+  advisor.endTurn = { index: 0, verdict: TIMED_OUT }
+  const relay = await relayOf(dir, advisor, [new FakeRotationSession('impl', 'claude', ['ack', 'Did it.'])])
+  t.after(() => relay.stop())
+
+  const run = relay.start('Keep the work moving.')
+  const pause = await run.untilPause()
+  assert.ok(pause)
+  assert.equal(pause.reason, 'turn_incomplete')
+  assert.equal(pause.verdictOf?.participant, 'advisor', 'the pause is about the ADVISOR turn')
+
+  advisor.lateSignal(COMPLETED)
+  await until('the advisor pause to be marked superseded', () => run.pause?.superseded?.verdict)
+  assert.equal(run.pause?.superseded?.verdict?.outcome, 'completed')
+  assert.match(run.pause!.superseded!.note, /withdrawn/)
+  // Surfaced, not decided: the run is still paused, exactly as it is for an implementer.
+  assert.equal(run.state, 'paused', 'withdrawing the reason for a decision is not making it')
+  await run.abort()
+})
+
 test('a compaction revision does not mark a verdict pause superseded', async (t) => {
   const dir = repo()
   const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it, slowly.'])

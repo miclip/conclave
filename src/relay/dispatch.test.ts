@@ -424,18 +424,28 @@ test('an advisor reply naming a target the run does not have fails closed', () =
   const unknownRole = parseDecisions('Do the thing.', seats, { kind: 'role', role: 'reviewer' })
   assert.deepEqual(unknownRole, {
     ok: false,
+    // The fallback is the ORCHESTRATOR's target: this reply named nobody, even though the
+    // refusal is about a target. See `ParseRefusal.named`.
+    form: 'unaddressed',
+    named: [],
     why: 'unknown_target',
     detail: 'no seat fills the role reviewer',
   })
   const unknownSeat = parseDecisions('Do the thing.', seats, { kind: 'seat', seat: 'implementer-2' })
   assert.equal(unknownSeat.ok, false)
 
-  // The same DISCRIMINANT an empty reply produces, which is the whole of what the loop reads.
-  // `why` and `detail` exist for a future change that surfaces them on purpose; nothing
-  // branches on them today, so an unparseable reply and an empty one cannot take different
-  // paths however they came to fail.
+  // The same DISCRIMINANT an empty reply produces, which is the whole of what the DISPATCH path
+  // reads: `ok` is false either way, so an unparseable reply and an empty one still halt and
+  // re-ask identically however they came to fail.
+  //
+  // `form`, `named`, `why` and `detail` ride alongside for the instrument (#79), which does read
+  // them -- an addressed refusal is counted as the advisor having used the syntax. That is an
+  // OBSERVATION and changes no path here; `assignmentSyntax.test.ts` pins what each refusal
+  // carries.
   assert.deepEqual(parseDecisions('', seats, { kind: 'role', role: 'implementer' }), {
     ok: false,
+    form: 'unaddressed',
+    named: [],
     why: 'empty',
     detail: 'the reply carried no instruction',
   })
@@ -477,8 +487,13 @@ test('a reply the dispatcher cannot admit takes the empty-instruction path, in t
 test('DONE and ESCALATE parse as decisions rather than as instructions', () => {
   const seats = [seat()]
   const target = { kind: 'role', role: 'implementer' } as const
+  // `form` rides along on every ok result (#79). `unaddressed` here is not incidental: DONE and
+  // ESCALATE are reachable ONLY from the no-directive path -- an addressed reply carrying either
+  // is a `mixed_keyword` refusal -- so a `done` decision that ever reported `addressed` would
+  // mean the parser had admitted the reply it exists to refuse.
   assert.deepEqual(parseDecisions('DONE', seats, target), {
     ok: true,
+    form: 'unaddressed',
     decisions: [{ kind: 'done', instruction: 'DONE' }],
   })
   // Matched exactly as the exchange loop this replaced matched them: leading keyword, case-insensitive, and a
@@ -486,6 +501,7 @@ test('DONE and ESCALATE parse as decisions rather than as instructions', () => {
   assert.equal(parseDecisions('done: the tests pass', seats, target).ok, true)
   assert.deepEqual(parseDecisions('doneness is not a verdict', seats, target), {
     ok: true,
+    form: 'unaddressed',
     decisions: [{ kind: 'instruct', instruction: 'doneness is not a verdict', target }],
   })
   const escalated = parseDecisions('ESCALATE: the tests contradict the goal', seats, target)

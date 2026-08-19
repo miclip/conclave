@@ -324,7 +324,7 @@ const DECLARED: Record<string, string> = {
     'Authority routing (#56, D2) sends implementer_unanswered to the advisor before the operator, ' +
     'so a default run interrupts the human less than today. Real change at N=1, an improvement, ' +
     'declared rather than discovered. The pause reason exists at src/relay/run.ts:52 and the halt ' +
-    'that raises it is at src/relay/relay.ts:6147.',
+    'that raises it is at src/relay/relay.ts:6753.',
   'status.pause.resolution':
     'Classifying unresolved conditions on both axes (#56, D2) added `resolution` to every RunPause ' +
     '(src/relay/run.ts:244), so `conclave status --json` on a paused default run now carries ' +
@@ -606,7 +606,7 @@ const DECLARED: Record<string, string> = {
     'participant and nobody else, and a conclave or workstream scope samples NOBODY. It used to ' +
     'read pause.verdictOf.participant and fall back to scanning participants by rank for ' +
     'implementers — and verdictOf is set at exactly two halt sites, both turn_incomplete ' +
-    '(src/relay/relay.ts:5884, src/relay/relay.ts:6284), so every other pause reached that rank ' +
+    '(src/relay/relay.ts:6374, src/relay/relay.ts:6890), so every other pause reached that rank ' +
     'scan. WHAT CHANGES AT N=1: on the three pauses whose scope names no participant — ' +
     'operator_requested (/pause), advisor_escalated, authority_conflict — the lone implementer ' +
     'child used to be sampled, so a child that measured busy REFUSED the resume and wrote ' +
@@ -615,15 +615,15 @@ const DECLARED: Record<string, string> = {
     'safety guard rather than presented as a pure N>1 fix. The reason it is the right narrowing: ' +
     'the guard exists because continuing SENDS into a child that cannot accept input mid-turn, ' +
     'and on those three pauses the child it measured is not the child being sent to — resuming ' +
-    'advisor_escalated sends to the ADVISOR (src/relay/relay.ts:5996), resuming ' +
+    'advisor_escalated sends to the ADVISOR (src/relay/relay.ts:6491), resuming ' +
     'authority_conflict queues a constraint that is delivered by the dispatcher on the next ' +
     'dispatch to a free seat, and operator_requested is consumed at an advisor-turn boundary ' +
     'whose own evidence line says no turn is in flight. WHAT IS GIVEN UP, named rather than ' +
     'discovered: the advisor_escalated halt raised when a seat’s turn completed and its report ' +
-    'could not be read (src/relay/relay.ts:6196-6198) is conclave-scoped by design, yet the useful ' +
+    'could not be read (src/relay/relay.ts:6804-6806) is conclave-scoped by design, yet the useful ' +
     'question there is whether THAT seat is still writing; at N=1 the rank scan sampled it by ' +
     'coincidence of it being the only implementer, and now nothing does. The pause still carries ' +
-    'that seat’s liveness evidence from the halt site (src/relay/relay.ts:6207-6209), which is what ' +
+    'that seat’s liveness evidence from the halt site (src/relay/relay.ts:6815-6817), which is what ' +
     'the operator actually reads; restoring a refusal there is a change to that halt’s scope, ' +
     'not to the guard. AT N>1 the old behaviour was unsafe in the other direction: a pause about ' +
     'one seat could be refused because a DIFFERENT seat was mid-turn, and the operator was told ' +
@@ -1311,9 +1311,263 @@ const DECLARED: Record<string, string> = {
     'ends `done` under a ceiling it never spent, and a run that never produces a report still ' +
     'ends — on the duration ceiling when its turns burn time, and on the advisor budget when the ' +
     'clock does not move at all.',
+  'whether the advisor used the assignment syntax, in the run report and in status --json (#79)':
+    'THE DEFAULT RUN GAINS NOTHING, and that is the declared part rather than the absence of ' +
+    'one: every pinned shape above is untouched at N=1, and the entry exists to record that this ' +
+    'was decided rather than overlooked. `targeting` is ' +
+    '`{applicable, seats, addressedTurns, unaddressedTurns, invalidTurns, ceilingTurns, ' +
+    'incompleteTurns, unadmittedTurns, withdrawnTurns, unaddressedFailedTurns, conclusion, records}` and it is ' +
+    'written into the run report and `status --json` ONLY when the run has more than one implementer seat — see ' +
+    'the merge_blocked override in PAUSED_SUBTREE, which is the one document in this file that ' +
+    'carries it. A one-seat run counts nothing, writes no routing-log note, prints no summary ' +
+    'line, and emits no key; its advisor’s briefing is byte-identical, because ' +
+    '`MULTI_SEAT_BRIEFING` was already conditional and now reads its condition off the same ' +
+    'field the instrument does, so the run that is MEASURED for using the syntax is exactly the ' +
+    'run that was TAUGHT it. This file’s rule is that absence is reported, and the exception is ' +
+    'argued rather than assumed: `rotation.armed` and `ceilings` vanish into ambiguity because ' +
+    'nothing else in the document states them, while how many implementer seats a run had is ' +
+    'stated by `participants` in the same document — so a reader finding no `targeting` settles ' +
+    'what that means by counting, not by assuming, and #103’s failure is not reproduced. The ' +
+    'block IS present, with zero counters, on a multi-seat run that instructed nothing, because ' +
+    '“0 addressed of 0 turns” and “0 addressed of 9” are different findings (#31). What it is ' +
+    'FOR: #79 observes that multi-seat dispatch depends on the advisor writing ' +
+    '`@seat`/`@role`, that `parseDecisions` proves only that the syntax PARSES, and that an ' +
+    'unaddressed reply and an `@role`-addressed one are identical at the parser’s own output — ' +
+    'so “the advisor chose not to parallelise” and “the advisor does not know the syntax” left ' +
+    'the same record, and a `merge_blocked` seat the advisor never names by hand stays blocked ' +
+    'for the rest of the run with nothing detecting it, because the escalation is gated on a ' +
+    'repair attempt that never arrives. The form is carried out of `parseDecisions` as ' +
+    '`DecisionForm` rather than re-read from prose in the relay — and it is carried on the ' +
+    'parser’s FAILURES too, alongside the `@seat`/`@role` names as written, which is the second ' +
+    'half of this entry. Recording used to happen only after validation and queue admission, but ' +
+    'the parser decides the form BEFORE it validates, so `@seat nobody-here: do the thing` — ' +
+    'positive evidence that the briefing elicited the syntax, with a bad target — left through ' +
+    'the halt/re-ask path recorded as nothing, and the summary could then read “NONE used ' +
+    '@seat/@role”. That is the instrument reporting the opposite of what happened in the one ' +
+    'direction that misleads, because “rewrite the briefing” and “fix the seat names in it” are ' +
+    'opposite repairs. So an addressed reply the parser refuses is counted as `invalidTurns` ' +
+    'with an `outcome: invalid` record carrying the names it wrote and the `refusal` rule that ' +
+    'rejected it, and the summary says the briefing ELICITED the syntax rather than NONE. ' +
+    'The same correction reaches the QUEUE CEILING, which was the last place recording still sat ' +
+    'below the exit. A valid addressed batch that meets a ceiling is refused whole and ' +
+    '`continue advisor` leaves the loop, so every line below the check — including the recorder ' +
+    '— was unreachable for exactly the turns that had got furthest: the reply parsed, the seats ' +
+    'it named exist, and the run reported that no turn had ever used the syntax. It is now ' +
+    'counted as `ceilingTurns` with an `outcome: ceiling` record carrying the names it wrote and ' +
+    'the `ceiling` KIND that stopped it — `queue_depth` usually, but the projection asks every ' +
+    'ceiling, so the kind is read off the breach rather than assumed from the site. It counts as ' +
+    'elicitation and never as dispatch, and the summary names the ceiling as the repair rather ' +
+    'than the briefing or the seat names. THE CEILING ITSELF IS UNCHANGED: still all-or-none, ' +
+    'still checked before any mutation, still ends the run. ' +
+    '“Whatever happened next” admits no verdict exception either: an addressed reply on a turn ' +
+    'that did not COMPLETE — timed out, transport lost — is counted as `incompleteTurns` with an ' +
+    '`outcome: incomplete` record carrying the `verdict` that ended it, because excluding it ' +
+    'would let a run whose advisor targeted every turn and finished none report NONE, which is ' +
+    'the same false negative with a different cause. But it is NOT elicitation: ' +
+    '`targetingElicited` is `addressedTurns + invalidTurns + ceilingTurns + unadmittedTurns` and ' +
+    'leaves it out, ' +
+    'because a reply cut off mid-directive may not be the form it looks like and counting it ' +
+    'would certify a briefing on text nobody read to the end — the mirror of the failure this ' +
+    'instrument exists to prevent. It is not counted against the briefing either: incomplete is ' +
+    'an uncertainty bucket OUTSIDE both the elicitation and the concurrency conclusions, so a ' +
+    'run whose only targeting evidence is truncated reports INCONCLUSIVE — never ELICITED, never ' +
+    'NONE, and never “the syntax IS reaching the advisor” — in the end-of-run summary and in the ' +
+    'live `conclave status` line alike. It stays in the DENOMINATOR (`targetingTurns`) because ' +
+    'the turn was spent trying to instruct whatever the text says. The verdict wins when ' +
+    'both are wrong: a reply that would not parse on a turn that also died is recorded as ' +
+    'incomplete, not as malformed. The word NONE is reserved for the one reading “the advisor ' +
+    'never wrote the syntax”, so no other summary branch contains it. ' +
+    'THE ADVISOR VERDICT IS RESOLVED THROUGH SUPERSESSION, as the implementer’s already was: ' +
+    '`#exchange` settles on the first `turn_end` and a late signal can withdraw it during the ' +
+    'transcript settle window, so an advisor turn whose `timed_out` was retracted and replaced ' +
+    'with `completed` was being failed, halted on, re-asked and recorded as `incomplete` on a ' +
+    'verdict the system had already talked itself out of. The advisor path now reads `current` ' +
+    '(the replacement, or the original when there is none), notes the withdrawal, raises an ' +
+    'already-superseded pause when a withdrawal had no replacement, and registers `#verdictPause` ' +
+    'before the halt so a revision arriving while the human reads it amends that pause in place. ' +
+    'With no revision — every ordinary turn — `supersessionOf` returns undefined and nothing ' +
+    'about the common path moves. ' +
+    'THE RECORDS ARE THE ONLY STORE. `TargetingWatch` is `{applicable, seats, records}` and holds ' +
+    'no counters at all; every aggregate — the denominator, the addressed/fallback split, the ' +
+    'per-outcome counts and the elicitation sum — is a projection of the records ' +
+    '(`targetingReading`), and the classification behind it is ONE table (`UNDISPATCHED`) with ' +
+    'one row per outcome. This reverses what the file used to say. The counters were held on ' +
+    '`rotationWatch`’s precedent — “a number that started disagreeing with the array it was ' +
+    'computed from would be worse than either alone” — and the wrong conclusion was drawn from ' +
+    'it: two stores that must agree cannot be made safe by writing them together, only by there ' +
+    'not being two. Every repair to this instrument added a counter and threaded it through the ' +
+    'recorder, the two sums, the serializer and both prose surfaces, and the edit that gets ' +
+    'forgotten is the one nothing fails on. A sixth `TargetingOutcome` now fails to compile ' +
+    'until its row exists, and the row is the whole change — which required one more correction ' +
+    'to be TRUE rather than merely claimed. The reading first computed its denominator and its ' +
+    'elicitation sum by adding up the NAMED counters, and those enumerate the outcomes that have ' +
+    'a counter today: a sixth outcome would have landed in its evidence bucket, been quoted in ' +
+    'the prose, and been missing from the total — the reading saying “1 of 1” about a run that ' +
+    'took two turns, which is the same defect the whole restructure exists to prevent, one level ' +
+    'up. `conclusion.turns` is now `records.length` and `elicited` is the dispatched bucket plus ' +
+    'the confirmed one; nothing in the conclusion is a sum of named fields. THE DOCUMENTS STILL ' +
+    'CARRY THE COUNTERS, because a probe reading `status --json` cannot run a projection and ' +
+    'because “0 addressed of 0 turns” and “0 addressed of 9” must be tellable apart without ' +
+    'parsing the record list — but they are a COMPATIBILITY PROJECTION and an input to nothing, ' +
+    'rendered from the records at write time, so a document cannot carry a count that disagrees ' +
+    'with the turns beside it. Pinned as a PARTITION over every cell of the ' +
+    '(addressed x outcome) grid, including the ones no run reaches today: the four buckets ' +
+    'account for every record, the denominator equals the record count, elicitation equals the ' +
+    'dispatched turns plus the confirmed group, and the serialized counters still total the same ' +
+    '— so a sixth outcome with no wire field is a decision somebody is forced to make rather ' +
+    'than a gap a reader finds later by doing arithmetic on a published document. ' +
+    'RECORDING IS ONE UNCONDITIONAL SITE, and that is what the rest of this entry rests on. The ' +
+    'contract `targetingTurns` states — “every turn that tried to instruct” — is a property of ' +
+    'WHERE the record is written, not of any arithmetic, and it was broken three times in exactly ' +
+    'one way: a recorder placed on the path a turn took, and then an exit added above it. ' +
+    'Validation moved above it and the refused turns vanished; the queue ceiling was hoisted out ' +
+    'of the admission loop and the ceiling-refused batches vanished with it. So the three ' +
+    'recording sites are now three field writes on an `AdvisorAttempt`, and one `finally` at the ' +
+    'foot of the advisor turn (`Relay.#finaliseTargeting`) writes the record — past every ' +
+    '`continue advisor`, every re-ask, every `return`, every throw, and every exit added later. ' +
+    'The outcome is CLASSIFIED there from the completed turn state (admitted, else not-completed, ' +
+    'else ceiling, else refusal, else `unadmitted`) rather than from where the code ended, so a ' +
+    'new exit records something honest instead of nothing. No counter was added to make that ' +
+    'true; the placement is the enforcement. ' +
+    'A FIFTH OUTCOME, `unadmitted`, is what the net catches: a whole valid reply that was never ' +
+    'admitted, carrying an `unadmitted` reason of `verdict_superseded` or `unclassified`. Its ' +
+    'reachable case is the reconciliation — a turn failed on a verdict the adapter withdrew and ' +
+    'replaced with `completed` WHILE THE OPERATOR WAS READING THE PAUSE, too late for the ' +
+    'dispatch decision but not too late for the record. Filing that as `incomplete` is a ' +
+    'permanent claim that the reply could not be trusted, about a turn its own adapter says ' +
+    'ended; `unadmitted` says what is true of it — and what makes it true is the REPLACEMENT, an ' +
+    'adapter saying the turn ended `completed` after all. ' +
+    'A SIXTH OUTCOME, `withdrawn`, is the case with no replacement, and it is UNSETTLED ' +
+    'evidence rather than confirmed. `supersessionOf` answers in three states — no revision, a ' +
+    'revision with a replacement, and a revision with none — and the third was collapsed into ' +
+    'the first by `?.replacement ?? attempt.end`, which read the withdrawn `turn_end` back out ' +
+    'and filed the turn as `incomplete` carrying the very verdict the adapter had retracted. ' +
+    'Fixing that by writing `unadmitted / verdict_superseded` was wrong in the other ' +
+    'direction: that outcome is read-whole confirmed evidence and COUNTS AS ELICITATION, so ' +
+    'the instrument certified the briefing off a turn its own adapter says is still open — the ' +
+    'same overclaim as certifying off a truncated reply, reached from a different direction. A ' +
+    'turn whose verdict was withdrawn with nothing put in its place has NO verdict and is open: ' +
+    'it is recorded once as `withdrawn`, carries no verdict field (a retracted claim is not ' +
+    'quoted), reads INCONCLUSIVE, adds nothing to elicitation, and withholds the under-use ' +
+    'finding like any turn that was not read out whole. Its serialized counter is ' +
+    '`withdrawnTurns`, which is in `targetingTurns` and NOT in `targetingElicited`. The pause ' +
+    'already tells the operator the same fact through `preSuperseded`; this is it reaching the ' +
+    'permanent record, and the reconciling note says “withdrawn with nothing put in its place” ' +
+    'rather than “replaced with undefined”. Driven both ways out of that pause: an unattended ' +
+    'run where the halt ends it, and an operator abort during the pause. The RUN’s own ending ' +
+    'is untouched and still quotes the verdict the guard read when it stopped, which is a ' +
+    'contemporaneous account rather than the permanent record. ITS PROSE IS SHARED, NOT ' +
+    'INHERITED: both renderers explained every unsettled turn in the truncated turn’s words — ' +
+    '“a reply that was cut off”, “never finished”, “stopped mid-reply” — which are three ' +
+    'claims about a reply nobody had said anything about when what was withdrawn was the ' +
+    'VERDICT. The shared frame now says only what the two kinds have in common (no settled ' +
+    'readable end, so nothing establishes that the apparent directive was complete) and WHICH ' +
+    'kind a turn was stays in the clause `UNDISPATCHED` writes for it, so the two runs stay ' +
+    'distinguishable to a reader. The finalizer re-resolves supersession against ' +
+    'the turn’s own `turn_end` (held on the attempt, because `next` is reassigned by the ' +
+    're-ask), and writes a routing-log note when the settled verdict differs from the one the ' +
+    'turn was failed on rather than editing the contemporaneous note — a log is an account of ' +
+    'what was believed when. `#verdictPause` is armed at the top of the turn, before anything in ' +
+    'it can pause, and still cleared after the halt so the next turn’s `turn_end` cannot be read ' +
+    'as this one’s replacement. It counts as elicitation when addressed, on the same footing as ' +
+    '`ceiling`: the parser read the reply to the end and accepted it. ' +
+    'UNADDRESSED FAILURES ARE NOW RECORDED, which reverses this entry’s previous position and is ' +
+    'the denominator’s doing. A reply that named nobody and dispatched nothing — empty, refused, ' +
+    'truncated, or stopped whole at a ceiling — used to be dropped entirely, so `targetingTurns` ' +
+    'was not “every turn that tried to instruct” but “every turn that tried to instruct AND ' +
+    'either dispatched or named a seat”, and a run whose advisor produced three empty replies and ' +
+    'one addressed reply reported `1 of 1`. They are counted in `unaddressedFailedTurns`, which ' +
+    'feeds NOTHING: not elicitation (nothing here wrote the syntax) and not under-use ' +
+    '(`unaddressedTurns` means one instruction went out by fallback, and nothing went out). The ' +
+    'one member that IS real negative evidence — a whole valid unaddressed batch a ceiling ' +
+    'refused — is left uncredited with the rest rather than split out, so the weakest reading ' +
+    'cannot borrow its confidence, and it errs toward “not measured” rather than toward a ' +
+    'negative result the run did not earn. A run with nothing but these reads INCONCLUSIVE: not ' +
+    'NONE, because no reply was ever read that could have carried a directive. ' +
+    'ONE DERIVATION, FOUR RENDERERS. `targetingConclusion` decides which of six readings a run ' +
+    'is — `unmeasured`, `dispatched`, `elicited`, `none`, `inconclusive`, `pending` — and the run report, ' +
+    'the console/relay summary and the live `conclave status` line all render THAT. They used to ' +
+    'each decide, and they disagreed: the summary was taught that truncated-only evidence is ' +
+    'inconclusive while the status line went on printing “the syntax IS reaching the advisor” ' +
+    'from the same counters. The reading is serialized as `targeting.conclusion` so a probe reads ' +
+    'it rather than re-implementing it. `inconclusive` OUTRANKS `none`: a truncated turn holding ' +
+    'an `@seat` fragment is uncertainty pointing AT elicitation, so it suppresses the ' +
+    'under-use finding. THE LINE IS “WAS THE REPLY READ TO THE END”, NOT “DID IT ADDRESS ' +
+    'ANYONE”, which is what this rule used to say and is the one correction to it. The two are ' +
+    'indistinguishable on a settled run, and part company on a fragment: `addressed` on a turn ' +
+    'that stopped mid-reply is a fact about the fragment that arrived, not about the reply the ' +
+    'advisor was writing, so a turn cut off after “Right, let’s” named nobody and was one clause ' +
+    'from naming someone. `NONE of N instructing turns used @seat/@role` is a claim about all N ' +
+    'of them, so EVERY cut-off turn withholds it, addressed or not, and a run that reports the ' +
+    'under-use finding is a run whose every recorded turn was read out whole. The rule is keyed ' +
+    'on the outcome table’s `evidence` column (`readWhole`) and NOT on the `unsettled` bucket, ' +
+    'which is about USAGE evidence and also holds whole replies that named nobody — a reply the ' +
+    'parser read and refused is settled evidence of non-use, and suppressing the finding on it ' +
+    'would be the same mistake in the other direction: an instrument that can no longer report ' +
+    'the thing it exists to report. Those turns are still reported beside the finding, in a ' +
+    'clause that claims nothing. ' +
+    'EVERY SENTENCE IS WRITTEN IN `targeting.ts` TOO, and from the same projection. ' +
+    '`targetingSummary` is ' +
+    'the end-of-run line both front-ends write and `targetingStatusLine` is the live status line; ' +
+    '`sessionView.ts` renders one string and decides nothing. It used to rebuild that wording ' +
+    'from the counters, which is how the drift above happened in the first place. And the rule ' +
+    'the wording is held to, which arithmetic alone did not enforce: NO COUNT THAT INCLUDES AN ' +
+    'UNCERTAIN TURN MAY BE DESCRIBED AS USAGE, AND NO CERTIFICATION MAY REST ON ONE. ' +
+    '`targetingElicited` excludes the truncated turns and both prose surfaces then added them ' +
+    'back — “N further turns used @seat/@role without dispatching” counted them, and the status ' +
+    'line hung “so the syntax IS reaching the advisor” off that same total — so a run that ' +
+    'dispatched once and lost one turn to a transport drop certified the briefing on a reply ' +
+    'nobody read to the end. The evidence is now split at the source (`turnClauses`) into what ' +
+    'may carry a usage claim (refused, ceiling-refused, stranded-but-valid) and what may not ' +
+    '(truncated, named-nobody), and the two are JOINED in the output, never summed: the uncertain ' +
+    'turns are reported in a clause that says they settled nothing. ' +
+    'THE OPEN TURN IS REPORTED AND COUNTED NOWHERE, which is the price of recording once. ' +
+    'Writing the record on the turn’s way out is what makes the denominator honest, and it also ' +
+    'makes the record LATE: a `turn_incomplete` pause suspends INSIDE the turn, in front of a ' +
+    'human, for as long as that human takes — and for the whole of that pause the turn holding ' +
+    '`@seat` had no record, so every surface answered from the turns that were over. A run whose ' +
+    'first turn fell back and whose second was paused holding `@seat seat-beta` printed `NONE … ' +
+    'used @seat/@role`: the finding this instrument exists to make legible, printed as a finding, ' +
+    'about the one turn that contradicts it, to the operator who had just been stopped to look at ' +
+    'it. So `TargetingWatch.pending` carries the turn in flight — the relay’s SAME `AdvisorAttempt` ' +
+    'object under a second name, never a copy, published where the attempt is created and cleared ' +
+    'in the same synchronous block of `#finaliseTargeting` that appends the record, so a turn is ' +
+    'never both pending and recorded and never neither. It is an OBSERVATION, not evidence: it is ' +
+    'in no bucket, no counter and no denominator (`conclusion.turns` stays `records.length`), it ' +
+    'is quoted with “appears to name” and never with “used”, and the one thing it decides is that ' +
+    'a NEGATIVE reading is not available yet — `pending` outranks `none` and `inconclusive` for ' +
+    'the reason `inconclusive` outranks `none`, one moment earlier. Settled positive evidence ' +
+    'still outranks it: `dispatched` and `elicited` are facts about turns that are over, and those ' +
+    'runs report their reading with the open turn named beside it. An open turn that named NOBODY ' +
+    'suppresses nothing, the same asymmetry an unreadable record gets, because `addressed` is ' +
+    'fixed by the parser and cannot change when the turn settles. No new recording site and no ' +
+    'held counter: the wording is `targeting.ts`’s single `pendingClause`, and every surface ' +
+    'renders it from the same projection. ' +
+    'DISPATCH BEHAVIOUR IS UNCHANGED: the parser still fails closed, the reply still fails whole, ' +
+    'the run still halts and re-asks, and nothing is ever routed to a name from a refusal. The ' +
+    'ceiling is still all-or-none, still checked before any mutation, still ends the run. N=1 is ' +
+    'still silent everywhere. REPORT_SCHEMA is not bumped: no ' +
+    'key was removed or renamed and no existing key changed meaning. Driven through a real relay ' +
+    'in src/relay/targetingWatch.test.ts — an advisor that always addresses, one that never ' +
+    'does, one that alternates, one whose targeted reply is refused, one whose EVERY targeted ' +
+    'reply is refused, one whose targeted reply TIMED OUT, one whose valid addressed batch the ' +
+    'queue ceiling refuses, one whose UNADDRESSED batch the queue ceiling refuses, one whose ' +
+    'reply was empty, one whose timed-out addressed turn is reconciled by a late `completed` ' +
+    'verdict before the guard, one reconciled by a late `completed` verdict DURING the pause, ' +
+    'one whose UNADDRESSED turn was cut off beside a fallback turn, which reads INCONCLUSIVE on ' +
+    'all four surfaces and NEVER NONE while the same run with both replies read whole still ' +
+    'reports NONE, ' +
+    'one whose addressed turn is PAUSED BEFORE ITS RECORD EXISTS — driven through the pause, the ' +
+    'late replacement landing mid-pause and the resolution afterwards, pinning that the open turn ' +
+    'is reported on all four surfaces, is in no count, never reads NONE, and becomes exactly one ' +
+    'record — and a one-seat run that reports nothing about targeting at all — plus one case that drives ' +
+    'all four surfaces together on truncated-only, dispatched-plus-refused and ' +
+    'dispatched-plus-incomplete evidence, and pins that none of them quotes an uncertain turn as ' +
+    'usage. The console’s own rendering of the summary is pinned against a real console in ' +
+    'src/repl/session.test.ts.',
 }
 
-test('DECLARED contains exactly the routing, pause-resolution, attribution, ceiling-flag, seat-flag, seat-status, launch-record, flag-reader, integration-check, per-seat-rotation, reviewer, resume-guard, mixed-liveness, timestamped-liveness, model-validation, executable-preflight, compaction-survival, rotation-reporting, send-precondition, process-tree-liveness, ceiling-reporting, record-heartbeat, rotation-intent, console-dry-run, flag-reconciliation and paused-time entries', () => {
+test('DECLARED contains exactly the routing, pause-resolution, attribution, ceiling-flag, seat-flag, seat-status, launch-record, flag-reader, integration-check, per-seat-rotation, reviewer, resume-guard, mixed-liveness, timestamped-liveness, model-validation, executable-preflight, compaction-survival, rotation-reporting, send-precondition, process-tree-liveness, ceiling-reporting, record-heartbeat, rotation-intent, console-dry-run, flag-reconciliation, paused-time and advisor-targeting entries', () => {
   assert.deepEqual(Object.keys(DECLARED), [
     'implementer_unanswered -> advisor',
     'status.pause.resolution',
@@ -1342,6 +1596,7 @@ test('DECLARED contains exactly the routing, pause-resolution, attribution, ceil
     '--dry-run on the console, reversing a written parity decision (#134)',
     'the report’s flags are reconciled at the close, and supersededFlags joins them (#131)',
     'the duration ceiling counts active run time, and the report says how long the run was paused (#112)',
+    'whether the advisor used the assignment syntax, in the run report and in status --json (#79)',
   ])
 })
 
@@ -1437,7 +1692,7 @@ async function seatsFromSessionCli(): Promise<{ creates: CreateRecord[]; cwd: st
  * The two machine-readable documents a default run actually emits.
  *
  * Both come out of one `relay --json` run in a temporary repository, through the production
- * call sites: the report is what `bin/conclave.ts:1358` prints, and the status record is what
+ * call sites: the report is what `bin/conclave.ts:1386` prints, and the status record is what
  * `recordSession` wrote during that same run, read back by `main(['status', '--json'])` --
  * which resolves the most recent session in `process.cwd()`, so the record has to have been
  * written where an operator would look for it.
@@ -1690,7 +1945,7 @@ async function provokeReviewBlocked(repo: string): Promise<{ relay: Relay; run: 
  * Drive a real relay into one condition and return the pause it raised.
  *
  * The provocations are the ones `resolution.test.ts`'s own `provoke` already uses, deliberately:
- * the same triggers reaching the same single halt site (src/relay/relay.ts:3608), where the
+ * the same triggers reaching the same single halt site (src/relay/relay.ts:3897), where the
  * classification is computed by production `resolutionFor` from the subject the caller passed.
  * Nothing here writes a `RunPause`.
  *
@@ -1982,9 +2237,9 @@ test('default run works in the run cwd and creates no worktree', async () => {
     assert.equal(c.cwd, fromCli.cwd, `the session CLI must create ${c.id} in the run cwd`)
   }
 
-  // The relay CLI passes process.cwd() as the run cwd: bin/conclave.ts:1276-1278.
-  // The relay hands that same cwd to each participant adapter: src/relay/relay.ts:2091-2097.
-  // The cwd getter simply returns the option: src/relay/relay.ts:1822-1824.
+  // The relay CLI passes process.cwd() as the run cwd: bin/conclave.ts:1304-1306.
+  // The relay hands that same cwd to each participant adapter: src/relay/relay.ts:2164-2170.
+  // The cwd getter simply returns the option: src/relay/relay.ts:1895-1897.
   assert.match(relay, /cwd:\s*process\.cwd\(\)/, 'relay block must start in process.cwd')
   // Both creation sites now pass a NAMED context object rather than an inline literal, because
   // the same object composes the launch args that get recorded -- see
@@ -2027,7 +2282,7 @@ test('default run works in the run cwd and creates no worktree', async () => {
 
   // A default run with no subagents must not create any git worktree. The relay only samples
   // the worktree list for its subagent-use report: src/relay/subagents.ts:68 defines
-  // worktreePaths, and src/relay/relay.ts:2787-2788, :3124 and :5366 read it.
+  // worktreePaths, and src/relay/relay.ts:2887-2888, :3413 and :5661 read it.
   // Prove it by exercising the run in a real temporary repository.
   const repo = mkdtempSync(join(tmpdir(), 'conclave-default-'))
   try {
@@ -2429,6 +2684,25 @@ const PAUSED_SUBTREE: Record<PauseReason, Record<string, string>> = {
     // which is the state this corpus cannot reach because a paused run has no turn in flight.
     'participants[].seat': 'dispatched, state, worktree',
     'participants[].seat.worktree': 'branch, path',
+    // The only document in this corpus whose advisor had a second seat to address, and so the
+    // ONLY one that carries a `targeting` block at all (#79) -- which is why this override
+    // restates the root key list rather than inheriting PAUSED_COMMON's. See DECLARED['whether
+    // the advisor used the assignment syntax, in the run report and in status --json (#79)']:
+    // the key is absent from every one-seat document in this file, and its presence here is
+    // what makes that absence a decision rather than a build that reports nothing.
+    '': 'abandoned, alive, build, ceilings, cwd, eventsPath, front, goal, id, logPath, messages, operator, participants, pause, pid, rotations, schema, startedAt, state, targeting, updatedAt',
+    targeting:
+      'addressedTurns, applicable, ceilingTurns, conclusion, incompleteTurns, invalidTurns, records, ' +
+      'seats, unaddressedFailedTurns, unaddressedTurns, unadmittedTurns, withdrawnTurns',
+    // Four keys per turn: whether it addressed anyone, what it named, and whether the dispatcher
+    // took it. `targets` is an array of plain strings, so it contributes no element path of its
+    // own -- what is pinned is that a record has exactly these fields and that they reach the
+    // JSON at all. `refusal`, `ceiling`, `verdict` and `unadmitted` are further keys carried
+    // only by an `invalid`, a `ceiling`, an `incomplete` and an `unadmitted` record
+    // respectively, and this corpus has none of them: every turn in these documents was
+    // admitted, and those four shapes are pinned against a real relay in
+    // src/relay/targetingWatch.test.ts instead.
+    'targeting.records[]': 'addressed, outcome, targets, turn',
   },
   // Needs a reviewer seat, provoked in its own branch (#72) -- same reason `merge_blocked`
   // above is not a default run either.

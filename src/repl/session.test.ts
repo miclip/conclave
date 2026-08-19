@@ -996,6 +996,68 @@ test('a verdict withdrawn while the operator reads the pause is surfaced in the 
   assert.equal(await running, 0)
 })
 
+test('the console prints the targeting reading, and on truncated-only evidence it is INCONCLUSIVE', async (t) => {
+  const dir = repo()
+  // The CONSOLE renderer of the shared targeting conclusion (#79). Both front-ends write
+  // `relay.targetingSummary()` and nothing else, and this is where that string is pinned as
+  // something an operator actually sees.
+  //
+  // Truncated-only evidence, because that is the reading the surfaces used to disagree about:
+  // the advisor's one instructing turn wrote `@seat` and then did not complete, so `ELICITED`
+  // would certify a briefing on text nobody read to the end and `NONE` would condemn one on the
+  // strength of a fragment. An operator told either at the end of a run acts on it.
+  // Two seats mean linked worktrees cut from a COMMIT, so the console refuses to start with
+  // anything uncommitted. The hook files it installs land untracked in this fixture, so they are
+  // ignored and committed before the run rather than tripping a guard this test is not about.
+  writeFileSync(join(dir, '.gitignore'), '.conclave/\n.claude/\n.codex/\n')
+  execFileSync('git', ['add', '.'], { cwd: dir })
+  execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'ignore agent hook files'], { cwd: dir })
+  // Addressed by the ids the console constructs for a named seat list: `implementer` and
+  // `implementer-2`.
+  const advisor = slow('advisor', 'codex', ['@seat implementer-2: Sweep the docs.', 'DONE', 'DONE', 'DONE'], 200)
+  advisor.endTurn = { index: 0, verdict: TIMED_OUT }
+  const out = collect()
+  const input = new PassThrough()
+  const running = runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'alpha',
+    // Two seats, because targeting is silent at N=1 by design: there is no second seat to
+    // address, the advisor is never taught the syntax, and no line is printed at all.
+    implementers: [
+      { agent: 'alpha', args: [] },
+      { agent: 'beta', args: [] },
+    ],
+    rounds: 6,
+    checks: [],
+    registry: registryOf({
+      codex: [advisor],
+      alpha: [slow('alpha', 'alpha', ['ack', 'Did it.', 'Did it.', 'NONE'], 50)],
+      beta: [slow('beta', 'beta', ['ack', 'Did it.', 'Did it.', 'NONE'], 50)],
+    }),
+    input,
+    output: out.stream,
+  })
+  t.after(async () => {
+    input.end()
+    await running
+  })
+
+  await untilText('the pause on the advisor turn', out.text, /paused/)
+  input.write('/continue\n')
+  assert.equal(await running, 0)
+
+  // PRESENTATION, at CONSOLE_COLUMNS: this is a console-only line -- no record carries the
+  // summary -- so the claim belongs here. The word is short enough that no wrap can fall inside
+  // it, which is what makes the negative assertions below meaningful at this width.
+  const text = out.text()
+  assert.match(text, /advisor targeting: INCONCLUSIVE/, text.slice(-2000))
+  assert.doesNotMatch(text, /the briefing ELICITED/, 'text nobody read to the end does not certify a briefing')
+  assert.doesNotMatch(text, /NONE of/, 'and a fragment beginning @seat is not an advisor that never wrote it')
+  assert.doesNotMatch(text, /IS reaching the advisor/, 'which is the same certification in other clothes')
+})
+
 test('another timeout on the still-running turn is shown as the turn still running', async () => {
   const dir = repo()
   const impl = slow('impl', 'claude', ['ack', 'Did it, slowly.', 'And again.'])
@@ -3164,7 +3226,7 @@ test('a participant-scoped pause samples that seat and no other, at every reason
   assert.deepEqual(sampled(pauseFor({ reason: 'rotation_candidate', participant: 'implementer-2' })), ['implementer-2'])
   assert.deepEqual(sampled(pauseFor({ reason: 'implementer_unanswered', participant: 'implementer-2' })), ['implementer-2'])
   // The ADVISOR is a participant like any other, and its own bad turn pauses the run
-  // (src/relay/relay.ts:5880). A rank scan for implementers sampled the wrong child here too.
+  // (src/relay/relay.ts:6370). A rank scan for implementers sampled the wrong child here too.
   assert.deepEqual(
     sampled(pauseFor({ reason: 'turn_incomplete', participant: 'advisor' }, { participant: 'advisor', endSeq: 2 })),
     ['advisor'],
@@ -3173,13 +3235,13 @@ test('a participant-scoped pause samples that seat and no other, at every reason
 
 test('a conclave- or workstream-scoped pause samples nobody, with no fall back to rank', () => {
   // Both conclave-scoped reasons. Resuming an `advisor_escalated` pause sends to the ADVISOR
-  // (src/relay/relay.ts:5996), so measuring implementer children was never the question; and
+  // (src/relay/relay.ts:6491), so measuring implementer children was never the question; and
   // `operator_requested` is consumed at an advisor-turn boundary that states no turn is in
   // flight. Neither has anything for this guard to sample.
   assert.deepEqual(sampled(pauseFor({ reason: 'advisor_escalated' })), [])
   assert.deepEqual(sampled(pauseFor({ reason: 'operator_requested' })), [])
   // Workstream scope, and the id deliberately COLLIDES with a seat id -- at N=1 the workstream
-  // is named after the seat carrying the instruction (src/relay/relay.ts:6060), which is exactly
+  // is named after the seat carrying the instruction (src/relay/relay.ts:6654), which is exactly
   // the coincidence a guard could read as "so sample that seat". A workstream is not a seat.
   assert.deepEqual(sampled(pauseFor({ reason: 'authority_conflict', workstream: 'implementer' })), [])
 })
@@ -3195,7 +3257,7 @@ test('a scope naming a seat that is gone samples nobody rather than falling back
 test('a rotation_candidate pause on one seat resumes while the OTHER seat is genuinely mid-turn', async (t) => {
   // The production shape of the N>1 case the rank scan got wrong, and the reason it has to be
   // this shape: `rotation_candidate` carries NO `verdictOf` -- that field is set at two halt
-  // sites, both turn_incomplete (src/relay/relay.ts:5884, src/relay/relay.ts:6284) -- so under
+  // sites, both turn_incomplete (src/relay/relay.ts:6374, src/relay/relay.ts:6890) -- so under
   // the old expression this pause fell through to the rank scan and sampled EVERY implementer.
   // A simpler `turn_incomplete` fixture cannot show that: it populates the field, takes the
   // named-seat branch, and passes against the code being replaced.
@@ -3247,7 +3309,7 @@ test('a rotation_candidate pause on one seat resumes while the OTHER seat is gen
     ],
     rounds: 6,
     // ARMS ROTATION, which is what makes degradation a pause instead of an ended run
-    // (src/relay/relay.ts:4153-4155). A command that exits 0 immediately: what the checks DO is
+    // (src/relay/relay.ts:4444-4446). A command that exits 0 immediately: what the checks DO is
     // not what this test is about, only that a replacement would have something to reproduce.
     checks: ['true'],
     registry: registryOf({

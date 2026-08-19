@@ -585,7 +585,55 @@ export type ParseFailure = {
   detail: string
 }
 
-export type ParseResult = { ok: true; decisions: Decision[] } | { ok: false } & ParseFailure
+/**
+ * WHICH of the two forms a reply was written in, carried out of the parser rather than
+ * re-derived by its caller.
+ *
+ * The caller cannot recover this from the decisions. `@role implementer: do X` and a bare
+ * `do X` on a run whose lead implementer fills that role produce the SAME `TaskTarget`, so a
+ * relay reading the target back would call an addressed reply unaddressed whenever the
+ * advisor addressed the role the fallback already points at. Reading the prose a second time
+ * would be worse: two regexes for one question, in two files, and the one that drifts is the
+ * one nothing dispatches on.
+ *
+ * So the parser says it, because the parser is what decided it (`first === -1` below).
+ */
+export type DecisionForm = 'addressed' | 'unaddressed'
+
+/**
+ * A reply the parser refused, and what it was TRYING to say.
+ *
+ * `form` and `named` are on the failure for the same reason they are on the success: the
+ * instrument in `targeting.ts` asks whether the advisor used `@seat`/`@role` AT ALL, and that
+ * question is settled here -- by `first === -1` -- strictly BEFORE any of the checks that can
+ * refuse the reply. Dropping them on the way out lost the answer in the one direction that
+ * misleads: `@seat nobody-here: do the thing` is POSITIVE evidence that the briefing elicited
+ * the syntax, with a bad target, and a record that kept nothing about it let the run afterwards
+ * report that no turn ever used the syntax. "The advisor never learned it" and "the advisor
+ * used it and named a seat this run does not have" need opposite responses -- rewrite the
+ * briefing, versus fix the seat names in it -- and a reader has to be able to tell them apart.
+ *
+ * This changes nothing about the refusal. The reply still fails whole, the caller still halts
+ * and re-asks, and `named` is never routed to: it is what the reply ASKED FOR, unvalidated by
+ * construction, since the reason this failure exists may be that one of these names is not a
+ * seat. Nothing may pass it to the scheduler.
+ */
+export type ParseRefusal = ParseFailure & {
+  ok: false
+  /** Which form the reply was written in, decided before it was refused. */
+  form: DecisionForm
+  /**
+   * Every `@seat`/`@role` the reply named, in order, exactly as written and NOT validated.
+   *
+   * Empty on the unaddressed form, which named nobody. On the addressed form this is every
+   * directive in the reply including the one that caused the refusal, because the operator
+   * question is which names the advisor reached for -- and on `stray_prose` the directives that
+   * DID parse are the evidence that the reply was half in the addressed form.
+   */
+  named: readonly TaskTarget[]
+}
+
+export type ParseResult = { ok: true; form: DecisionForm; decisions: Decision[] } | ParseRefusal
 
 /**
  * A line that addresses one seat or one role, and everything after it until the next such line.
@@ -632,7 +680,8 @@ export function parseDecisions(
   seats: readonly SeatExecution[],
   fallback: TaskTarget,
 ): ParseResult {
-  if (instruction === '') return { ok: false, why: 'empty', detail: 'the reply carried no instruction' }
+  if (instruction === '')
+    return { ok: false, form: 'unaddressed', named: [], why: 'empty', detail: 'the reply carried no instruction' }
 
   // WHICH FORM this is, decided before anything is read for meaning.
   //
@@ -647,15 +696,21 @@ export function parseDecisions(
   if (first === -1) {
     // The unaddressed form, unchanged down to the regexes: a reply that ended a run yesterday
     // must end one today, and this is the only form a default run's advisor can write.
-    if (/^DONE\b/i.test(instruction)) return { ok: true, decisions: [{ kind: 'done', instruction }] }
+    if (/^DONE\b/i.test(instruction)) {
+      return { ok: true, form: 'unaddressed', decisions: [{ kind: 'done', instruction }] }
+    }
     if (/^ESCALATE\b/i.test(instruction)) {
-      return { ok: true, decisions: [{ kind: 'escalate', instruction }] }
+      return { ok: true, form: 'unaddressed', decisions: [{ kind: 'escalate', instruction }] }
     }
     // Validated against the run's CONFIGURED seats, not against the free ones: a task for a busy
     // seat is a scheduling wait, and a task for a seat that does not exist is a parse failure.
     if (seatsFor(seats, fallback).length === 0) {
       return {
         ok: false,
+        form: 'unaddressed',
+        // The fallback is the ORCHESTRATOR's target, not one the advisor named, so this reply
+        // named nobody even though a target appears in the refusal.
+        named: [],
         why: 'unknown_target',
         detail:
           fallback.kind === 'seat'
@@ -663,12 +718,28 @@ export function parseDecisions(
             : `no seat fills the role ${fallback.role}`,
       }
     }
-    return { ok: true, decisions: [{ kind: 'instruct', instruction, target: fallback }] }
+    return { ok: true, form: 'unaddressed', decisions: [{ kind: 'instruct', instruction, target: fallback }] }
+  }
+
+  // Every directive the reply wrote, collected BEFORE any of it is validated.
+  //
+  // Before, because from here on every exit is a refusal that would otherwise throw the answer
+  // away, and the answer is the one `targeting.ts` needs: this reply used `@seat`/`@role`,
+  // whatever became of it. Collected from the raw lines rather than from `blocks` below,
+  // because two of the refusals -- a keyword above the first directive, and stray preamble --
+  // happen before `blocks` is built, and a reply that is HALF in the addressed form is exactly
+  // the one whose evidence of elicitation would otherwise be lost.
+  const named: TaskTarget[] = []
+  for (const line of lines) {
+    const m = DIRECTIVE.exec(line)
+    if (m) named.push(m[1]! === 'seat' ? { kind: 'seat', seat: m[2]! } : { kind: 'role', role: m[2]! })
   }
 
   /** The refusal both keyword checks below produce. One wording, one rule. */
   const mixed = (line: string): ParseResult => ({
     ok: false,
+    form: 'addressed',
+    named,
     why: 'mixed_keyword',
     detail:
       `${line.trim().split(/\s/)[0]!.toUpperCase()} appears in a reply that also addresses seats. ` +
@@ -694,6 +765,8 @@ export function parseDecisions(
   if (preamble !== '') {
     return {
       ok: false,
+      form: 'addressed',
+      named,
       why: 'stray_prose',
       detail: `text before the first @seat/@role directive: ${JSON.stringify(preamble.slice(0, 80))}`,
     }
@@ -716,6 +789,8 @@ export function parseDecisions(
     if (body === '') {
       return {
         ok: false,
+        form: 'addressed',
+        named,
         why: 'empty_instruction',
         detail: `@${block.kind} ${block.name} was addressed and given no instruction`,
       }
@@ -730,6 +805,8 @@ export function parseDecisions(
     if (seatsFor(seats, target).length === 0) {
       return {
         ok: false,
+        form: 'addressed',
+        named,
         why: 'unknown_target',
         detail:
           target.kind === 'seat' ? `no seat named ${target.seat}` : `no seat fills the role ${target.role}`,
@@ -737,5 +814,5 @@ export function parseDecisions(
     }
     decisions.push({ kind: 'instruct', instruction: body, target })
   }
-  return { ok: true, decisions }
+  return { ok: true, form: 'addressed', decisions }
 }

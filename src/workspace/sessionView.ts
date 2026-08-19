@@ -11,6 +11,7 @@
  */
 
 import { ceilingSummary } from '../relay/guardrails.ts'
+import { targetingStatusLine } from '../relay/targeting.ts'
 import { SESSION_HEARTBEAT_MS, sessionStaleness, type ReadSession } from './sessionRecord.ts'
 
 export function elapsed(ms: number): string {
@@ -120,6 +121,22 @@ export function formatSession(s: ReadSession, now: number): string {
   for (const r of st.rotations ?? []) {
     lines.push(`  rotated:   ${r.seat} (${r.intent}) — ${r.reason}`)
   }
+  // Whether the advisor is using the assignment syntax, on a run that had a second seat to
+  // address and has instructed something (#79).
+  //
+  // BOTH conditions belong to `targetingStatusLine`, and this renderer decides neither. It used
+  // to decide the second one and to build every word of the line from the counters, and that is
+  // what let this surface and the end-of-run summary drift: the summary was taught that
+  // truncated-only evidence settles nothing while this line went on printing "the syntax IS
+  // reaching the advisor" from the same numbers, and whichever an operator happened to read
+  // decided whether they rewrote a briefing that works. One derivation, one wording, one file --
+  // see `targeting.ts`, where the argument for every clause lives beside the counters it quotes.
+  //
+  // Live, and phrased for someone deciding whether to intervene RIGHT NOW: an advisor naming no
+  // seat is dispatching to one seat at a time and cannot reach a blocked one, and until this
+  // line that presented as a seat sitting idle for reasons the document could not separate.
+  const targeting = st.targeting === undefined ? undefined : targetingStatusLine(st.targeting)
+  if (targeting !== undefined) lines.push(`  targeting: ${targeting}`)
   if (st.outcome) {
     lines.push(`  outcome:   ${st.outcome.reason}${st.outcome.detail ? ` — ${st.outcome.detail}` : ''}`)
   }

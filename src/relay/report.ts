@@ -31,6 +31,7 @@ import type { Confidence, Provenance } from '../contract/outcome.ts'
 import type { ParticipantLaunch } from '../registry/launch.ts'
 import type { RunOutcome } from './run.ts'
 import type { RotationRecord } from './rotationIntent.ts'
+import { reportedTargeting, type ReportedTargeting } from './targeting.ts'
 import type { Relay, RunDeadlines } from './relay.ts'
 
 /**
@@ -183,6 +184,23 @@ export interface RunReport {
     records: RotationRecord[]
   }
   /**
+   * Whether the advisor used the assignment syntax multi-seat dispatch depends on (#79).
+   *
+   * The one field in this report that is ABSENT rather than reported when it has nothing to
+   * say, and the exception is argued in `targeting.ts` rather than assumed here. In short: the
+   * rule at the top of this file exists because a reader could not otherwise tell "nothing to
+   * report" from "this build does not report it", and that reasoning does not reach this key,
+   * because whether targeting was applicable is recoverable from `participants` in this very
+   * document -- count the seats whose `role` is `implementer`. A one-seat run has no `@seat` to
+   * use and its advisor was never given the syntax, so a block there would be an instrument
+   * reading on a quantity that does not exist.
+   *
+   * Present with zeros on a MULTI-seat run that instructed nothing, which is the reading that
+   * must not be lost: `0 addressed of 0 turns` is a run that ended before the question could be
+   * asked, and it is a different finding from `0 addressed of 9`.
+   */
+  targeting?: ReportedTargeting | undefined
+  /**
    * Whether subagents were used, and whether any worktree appeared while they were.
    *
    * The briefing tells a subagent that MODIFIES anything to work in its own worktree. Nothing
@@ -277,6 +295,10 @@ export async function runReport(relay: Relay, input: ReportInput): Promise<RunRe
   }
 
   const endedAt = input.endedAt ?? Date.now()
+  // Built once, because it decides whether a KEY exists and not merely what its value is. Two
+  // calls could not disagree today, and a test asserting `'targeting' in report` against a
+  // condition evaluated twice is a test one refactor away from meaning nothing.
+  const targeting = reportedTargeting(relay.targetingWatch)
   return {
     schema: REPORT_SCHEMA,
     goal: input.goal,
@@ -314,6 +336,15 @@ export async function runReport(relay: Relay, input: ReportInput): Promise<RunRe
       // caller who may keep it must not share an array the relay still owns.
       records: relay.rotationRecords(),
     },
+    // Spread away entirely on a one-seat run, rather than written as a block of zeros. The
+    // decision is `reportedTargeting`'s and is made in one place for both documents: a rule
+    // about when a key exists, relaxed in one serializer and not the other, is how a default
+    // run starts carrying a key that alleges nothing.
+    //
+    // Not built field by field here, which `rotation` above is: that shape is declared inline
+    // in this file and so could silently widen, while this one is a named type with a single
+    // constructor, and widening it means editing `ReportedTargeting`.
+    ...(targeting ? { targeting } : {}),
     subagents: relay.subagentUse(),
     // Through the relay's own views, which apply the reconciliation. Splitting `relay.flags`
     // here would be a second answer to "is this still outstanding", and the rule at the top of

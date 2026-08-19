@@ -74,6 +74,7 @@ import type { RunCeilings } from '../relay/guardrails.ts'
 import type { RelayEvent } from '../relay/observe.ts'
 import type { RunOutcome, RunPause } from '../relay/run.ts'
 import type { RotationRecord } from '../relay/rotationIntent.ts'
+import { reportedTargeting, type ReportedTargeting, type TargetingWatch } from '../relay/targeting.ts'
 // The two accessors, not a third copy of them. A check is a bare string or a pair, and a
 // reader that re-implemented that fork would eventually disagree with the one the checks are
 // actually RUN through.
@@ -485,6 +486,43 @@ export interface SessionStatus {
    * the empty array's "asked, and nothing has rotated".
    */
   rotations?: RotationRecord[] | undefined
+  /**
+   * Whether the advisor has been using the assignment syntax this run's concurrency depends on.
+   *
+   * The live half of #79, and the reason it is here rather than only in the final report: the
+   * failure it detects is one an operator can still do something about. An advisor that names
+   * no seat dispatches to one seat at a time and cannot send a repair to a blocked one, and
+   * until now that presented as a seat sitting idle -- a symptom with three or four causes, none
+   * of which the status document could tell apart. `unaddressedTurns` climbing while
+   * `addressedTurns` stays at zero says which one it is, while the run is still going.
+   *
+   * And `invalidTurns` or `ceilingTurns` climbing there instead says something else again: the
+   * advisor IS writing `@seat`/`@role`, whole and readably, and nothing is reaching a seat --
+   * which is repaired in the seat names or the ceilings rather than in the briefing.
+   * `incompleteTurns` climbing alone is a fourth reading and settles nothing: the turns that
+   * would have answered were cut off, so the live line calls it INCONCLUSIVE rather than
+   * picking a side. Four zero-dispatched readings, and an operator deciding whether to intervene
+   * needs the one that is actually happening.
+   *
+   * ABSENT on a one-seat run, which is the one key in this file whose absence is not the
+   * "producer was never asked" that `ceilings` and `rotations` argue for. The argument is in
+   * `targeting.ts` and turns on this: how many implementer seats a run has is stated by
+   * `participants` in this same document, so a reader who finds no `targeting` can settle what
+   * that means by counting, rather than having to assume. Nothing else here is recoverable that
+   * way, which is why nothing else here vanishes.
+   *
+   * Present with zeros on a MULTI-seat run that has not instructed yet, and that is the state an
+   * agent operator polls in most: `{applicable: true, addressedTurns: 0}` on a run that has been
+   * going an hour is the finding; on a run thirty seconds old it is nothing at all, and the two
+   * are told apart by `unaddressedTurns` beside it, not by the key's presence.
+   *
+   * Written by BOTH producers, like `ceilings` and `rotations`: the recorder from
+   * `RecordableRelay.targeting`, and the detached parent into the placeholder it records for a
+   * child that does not exist yet. The parent has resolved the seat list by then, so it knows
+   * whether the key belongs at all, and its zeros are honest -- a child that has not started has
+   * taken no advisor turns.
+   */
+  targeting?: ReportedTargeting | undefined
 }
 
 /** A status plus what could only be learned from outside it. */
@@ -1029,6 +1067,18 @@ export interface RecordableRelay {
    * rather than an empty one claiming this run rotated nothing when it was never asked.
    */
   rotationRecords?(): readonly RotationRecord[]
+  /**
+   * Whether the advisor has been addressing its instructions, as the relay has counted them.
+   *
+   * A method for the same reason `rotationRecords` is one: it GROWS during the run, and a
+   * property would be a live object the recorder serialises -- the shared-state hazard
+   * `report.ts` copies to avoid. `Relay.targeting()` already returns a copy.
+   *
+   * OPTIONAL and structural like the rest: a stand-in written before #79 still satisfies the
+   * contract and gets the document it got before, with no `targeting` key rather than one
+   * claiming this run's advisor addressed nothing when it was never asked.
+   */
+  targeting?(): TargetingWatch
   seats?(): readonly { seat: string; state: string; current?: string | undefined; dispatched: number }[]
   tasks?(): readonly { task: { id: string; instruction: string }; runtime: { state: string } }[]
   readonly worktrees?: { seats: readonly { seatId: string; worktreePath: string; branch: string }[] } | undefined
@@ -1178,6 +1228,29 @@ export function recordSession(
     return records === undefined ? {} : { rotations: [...records] }
   }
 
+  /**
+   * The same, for what the advisor has been addressing (#79).
+   *
+   * Grows during the run exactly as `rotations` does -- the counters move on every advisor turn
+   * that produces work -- so it is a call made wherever the document is rewritten, and it is
+   * spread in at every one of those places rather than only at construction. A block written
+   * once would report `0 addressed` for the whole life of a run whose advisor addressed every
+   * turn, which is worse than not reporting it.
+   *
+   * `undefined` when the relay does not answer, spread away rather than written as zeros: a
+   * stand-in that was never asked has not said this run's advisor named nobody.
+   */
+  const targeting = (): { targeting: ReportedTargeting } | Record<string, never> => {
+    const w = relay.targeting?.()
+    // TWO reasons to write nothing, and they are different facts that happen to look alike from
+    // outside. `w === undefined` is a stand-in that was never asked. A `w` that is not
+    // `applicable` is a one-seat run, where the question does not arise -- and `reportedTargeting`
+    // owns that second decision so this file and `report.ts` cannot come to disagree about when
+    // the key exists.
+    const block = w === undefined ? undefined : reportedTargeting(w)
+    return block === undefined ? {} : { targeting: block }
+  }
+
   const recorder = new SessionRecorder(opts.repoRoot, {
     id: opts.id,
     pid: process.pid,
@@ -1199,6 +1272,9 @@ export function recordSession(
     // After `ceilings`, so the key is appended to the document rather than inserted among the
     // ones already there -- the same rule, for the same reason.
     ...rotations(),
+    // After `rotations`, for the same reason it comes after `ceilings`: appended to the
+    // document rather than inserted among the keys already there.
+    ...targeting(),
   })
 
   /**
@@ -1249,7 +1325,7 @@ export function recordSession(
     if (gen < applied) return
     applied = gen
     for (const [id, ts] of fresh) turns.set(id, ts)
-    recorder.update({ messages: relay.log.length, participants: seats(), ...rotations() })
+    recorder.update({ messages: relay.log.length, participants: seats(), ...rotations(), ...targeting() })
   }
 
   /**
@@ -1272,6 +1348,7 @@ export function recordSession(
       pause: extra?.pause,
       outcome: lastOutcome,
       ...rotations(),
+      ...targeting(),
     })
     // Detached: `set` is called from the run loop and a lifecycle change must not wait on a
     // transcript read. The state above is written immediately; the turns catch up.
@@ -1324,7 +1401,7 @@ export function recordSession(
       // Every event refreshes the participant block, so a permission prompt appears in the
       // status file at the moment it appears in the stream rather than at the next
       // lifecycle change -- which for a seat stopped at a prompt would be never.
-      recorder.update({ messages: relay.log.length, participants: seats(), ...rotations() })
+      recorder.update({ messages: relay.log.length, participants: seats(), ...rotations(), ...targeting() })
     }
   })()
 
