@@ -220,7 +220,7 @@ export const LIVENESS_REFRESH_EVERY_MS = 30_000
  * How many times, at most. After this the evidence stops updating and says so.
  *
  * 60 at the interval above is thirty minutes, chosen against the one deadline the product
- * already has: `/wait` defaults to fifteen (`src/repl/session.ts:2068`), so the refresh has to
+ * already has: `/wait` defaults to fifteen (`src/repl/session.ts:2074`), so the refresh has to
  * outlive a default wait or an operator who took the non-destructive option would find the
  * evidence frozen underneath them at the moment they came back to it. Twice that is the margin.
  *

@@ -551,29 +551,6 @@ function renderPause(p: RunPause, width: number): string {
  *
  * Generic over the participant so the rule can be tested without constructing one.
  */
-/**
- * The seat whose verdict was withdrawn with nothing put in its place, if there is one (#66).
- *
- * `/continue`'s mid-turn guard stands aside for this seat, and the argument for that is written
- * where it is acted on -- see `resumeRun`. What lives here is the RULE, exported so every shape
- * it has to tell apart can be stated as a case rather than reached through a live console.
- *
- * Three conditions, all necessary:
- *
- *   - the pause carries a supersession at all. Only a `turn_incomplete` pause ever does, so the
- *     other four seat-scoped reasons are untouched;
- *   - it carries NO replacement verdict. A replacement of any outcome is a fresh answer about
- *     the turn -- `timed_out` says it is still running -- and the guard belongs back;
- *   - the pause names the seat whose verdict it was. `verdictOf` is set at both halt sites that
- *     can produce a supersession, and reading it here means a supersession about one seat can
- *     never wave through a reading of another.
- */
-export function withdrawnSeatAtPause(pause: RunPause | undefined): string | undefined {
-  const superseded = pause?.superseded
-  if (!superseded || superseded.verdict !== undefined) return undefined
-  return pause?.verdictOf?.participant
-}
-
 export function seatsToSampleAtPause<T extends { id: string }>(
   pause: RunPause | undefined,
   participants: readonly T[],
@@ -1231,29 +1208,34 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     // one. What is gone is the evidence either way, so this is the operator's call and the
     // console says so before it resumes, with the CPU reading beside it as colour.
     //
-    // Narrow on purpose, so the guard survives everywhere it is still answering a question.
-    // Three conditions, and each one is a case it must NOT wave through:
+    // Read off the SEAT'S OWN EVENTS, not off the pause, and that is a correction to the first
+    // cut of this fix rather than a detail. Keying it on `pause.superseded` looked tighter and
+    // was wrong: a `compaction` revision is also the degradation signal, so on a run with no
+    // rotation checks the seat's bare withdrawal raises a `rotation_candidate` pause FIRST --
+    // a pause with no `verdictOf` and no supersession, sitting in front of an operator whose
+    // seat's turn is open only because a record was deleted. The pause-keyed version refused
+    // that one forever, which is #66 again wearing a different reason. Found by the test, not
+    // by reading.
     //
-    //   - ONE seat, the one whose verdict was withdrawn (`verdictOf`). A supersession is only
-    //     ever recorded for a `turn_incomplete` pause, the only reason that populates that
-    //     field (`src/relay/relay.ts:6374`, `:6890`), so the other four seat-scoped reasons --
-    //     `rotation_candidate`, `implementer_unanswered`, `merge_blocked`, `review_blocked` --
-    //     carry no supersession at all and refuse a mid-turn seat exactly as before;
-    //   - no replacement verdict, of any outcome. `timed_out` says in so many words that the
-    //     turn is still running, and every other outcome ended it;
-    //   - and the open turn must be the one the withdrawal REOPENED (`ActiveTurn.withdrawn`),
-    //     not one that started after it. A `turn_start` is an observation -- the adapters drop
-    //     the transcript view's lifecycle events and forward only content, so any `turn_start`
-    //     here came from a hook -- and a child observed starting a turn is a child to refuse,
-    //     whatever was withdrawn beforehand.
+    // So the question is asked of the thing it is about: is THIS seat's open turn an
+    // observation or a deleted record? Two conditions, and each is a case it must not wave
+    // through:
+    //
+    //   - the open turn must be the one a withdrawal REOPENED (`ActiveTurn.withdrawn`), not
+    //     one that started after it. A `turn_start` is an observation -- the adapters drop the
+    //     transcript view's lifecycle events and forward only content, so any `turn_start`
+    //     here came from a hook -- and a child seen starting a turn is a child to refuse,
+    //     whatever was withdrawn beforehand;
+    //   - and no replacement verdict, which this gets for free rather than by testing for it:
+    //     a replacement IS a `turn_end`, so it closes the turn and there is no open turn left
+    //     to bypass. `timed_out` -- the replacement that says the turn is still running -- is
+    //     the case that matters, and it re-arms the guard on the next reading by itself.
     //
     // Which children to sample is the pause's own question, answered by its scope rather than
     // by a rank scan here -- see `seatsToSampleAtPause`, which is where that argument is
     // written down and where the removed rank fallback is accounted for.
     const children = seatsToSampleAtPause(run.pause, relay.participants)
-    const superseded = run.pause?.superseded
-    const supersededCompleted = superseded?.verdict?.outcome === 'completed'
-    const withdrawnSeat = withdrawnSeatAtPause(run.pause)
+    const supersededCompleted = run.pause?.superseded?.verdict?.outcome === 'completed'
     if (!runOpts.force && !supersededCompleted) {
       const sample = opts.liveness ?? sampleLiveness
       for (const child of children) {
@@ -1290,10 +1272,10 @@ export async function runSession(opts: SessionOptions): Promise<number> {
         // because the evidence model actively cleared it; this one proceeds on the absence of
         // evidence, and an operator whose child turns out to have been working is entitled to
         // find out from the console rather than from a `transport_failed` run.
-        if (child.id === withdrawnSeat && turn.withdrawn) {
+        if (turn.withdrawn) {
           write(yellow(`  ${child.id} reads as mid-turn, and that reading has been withdrawn.`))
-          write(`  ${superseded?.note ?? 'the verdict this pause rested on was withdrawn with no replacement'}`)
-          write(`  the turn is open only because that record was taken back, not because a turn was seen to start,`)
+          write(`  the verdict that closed its turn was taken back (${turn.withdrawn.reason}) and nothing replaced it.`)
+          write(`  the turn is open only because that record was deleted, not because a turn was seen to start,`)
           write(`  and nothing will close it — so continuing rather than refusing forever.`)
           if (colour) write(dim(`  for colour only, deciding nothing: ${describeLiveness(colour, undefined)}`))
           continue
@@ -2061,7 +2043,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
       // FALSIFIER, stated because it is the strongest argument against this shape: the
       // console has no general "trailing text is a message" rule and does not gain one here.
       // `/rotate <text>` and `/abort <text>` consume their text as a REASON
-      // (`src/repl/session.ts:2090`, `src/repl/session.ts:2123`) and `/pause`, `/queue`, `/audit` ignore
+      // (`src/repl/session.ts:2096`, `src/repl/session.ts:2129`) and `/pause`, `/queue`, `/audit` ignore
       // whatever follows them. So an operator who learns this from `/continue` and carries
       // it to `/pause I'll be back` still loses the sentence. That inconsistency is not
       // repaired by making `/continue` a third behaviour; it is narrowed by it, and the

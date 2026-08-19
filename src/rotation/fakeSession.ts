@@ -337,6 +337,51 @@ export class FakeRotationSession implements AgentSession {
   }
 
   /**
+   * A `turn_start` for a turn the child begins on its own, after a withdrawal.
+   *
+   * The fixture for the case the #66 bypass must NOT wave through, and the reason it needs its
+   * own method: after `lateSignal('none')` the withdrawn turn reads as open again, and that
+   * openness is a deleted record. A `turn_start` on top of it is the opposite -- an observation
+   * that the child began work -- so `activeTurn` drops the `withdrawn` mark and the console's
+   * `/continue` refuses on a live turn exactly as it always did.
+   *
+   * Hook-derived by construction, which is what makes it the right fixture: the adapters drop
+   * the transcript view's `turn_start`/`turn_end` and forward only content (`Claude#pollTranscript`),
+   * so a `turn_start` reaching a consumer never came from a rewritten file.
+   *
+   * The `tool_use` after it is not decoration. `turn_start` alone changes nothing a test can
+   * wait on -- the session record refreshes on `turn_end` and `revision`, not on a turn opening
+   * -- whereas a tool call draws a console line, and the relay's forwarder appends to
+   * `p.events` BEFORE it emits to observers (`Relay#attach`). So a test that has seen the tool
+   * on screen knows the `turn_start` is already in the list the guard reads, which is the
+   * difference between a fixture and a race.
+   */
+  startTurnLate(tool = 'Bash'): void {
+    const key = turnKey(`${this.sessionId}-turn-${this.#turns.length}`)
+    this.#turns.push({ key, prose: '' })
+    this.#lastKey = key
+    this.#lastEndSeq = undefined
+    this.emit({
+      type: 'turn_start',
+      prompt: '(began on its own)',
+      turnKey: key,
+      seq: ++this.#seq,
+      at: Date.now(),
+      provisional: false,
+    })
+    this.emit({
+      type: 'tool_use',
+      tool,
+      input: undefined,
+      failed: false,
+      turnKey: key,
+      seq: ++this.#seq,
+      at: Date.now(),
+      provisional: false,
+    })
+  }
+
+  /**
    * A `turn_end` arriving late for the turn that is currently open.
    *
    * The counterpart to `lateSignal` for the case it cannot express: after a withdrawal with no

@@ -128,6 +128,11 @@ export const CITED: Record<string, string> = {
   'src/relay/relay.ts:6815-6817': "knowing whether the child is still writing changes what the operator does.",
   'src/relay/relay.ts:6886': "subject: { reason: 'turn_incomplete', participant: seat.id }",
   'src/relay/relay.ts:6890': 'verdictOf: { participant: seat.id, endSeq: current.seq },',
+  // The one sentence #66's bypass rests on: a verdict withdrawn with no replacement can come
+  // from nowhere but `resetTranscript`, so the open turn the console stops refusing on is a
+  // deleted record rather than an observed one. If that ever stops being true, the guard's
+  // argument stops being true with it, and this is what says so out loud.
+  'src/outcomes/tracker.ts:23-27': 'only possible via `resetTranscript`',
   'src/relay/resolution.ts:190': 'export function resolutionFor',
   'src/relay/run.ts:52': "| 'implementer_unanswered'",
   'src/relay/run.ts:216-230': 'reason: PauseReason',
@@ -150,18 +155,18 @@ export const CITED: Record<string, string> = {
   'src/repl/session.ts:1019': 'logPath: runLogPath,',
   // Moved by #83's edit to the `/continue` refusal, nine lines above it in the same block.
   // Repaired rather than deleted: the call it pins is the one the console still makes.
-  'src/repl/session.ts:1285-1286': "run.pause.refusal = { at: Date.now(), reason,",
+  'src/repl/session.ts:1291-1292': "run.pause.refusal = { at: Date.now(), reason,",
   // Why an in-place amendment to a pause needs an event behind it. Cited by both halves of
   // #101's refresh -- the module that explains the mechanism and the loop that uses it --
   // because the argument was already written here, for `/wait`, and restating it in two more
   // places is how three copies of a reason drift apart.
-  'src/repl/session.ts:2068': 'so an in-place change like `superseded` reaches the file on the next one',
+  'src/repl/session.ts:2074': 'so an in-place change like `superseded` reaches the file on the next one',
   // The falsifier `/continue <message>` is argued against: two commands that already give
   // their trailing text a meaning, so the new rule is narrow by intent rather than by
   // accident. Pinned to the dispatch lines, which is what makes "these are unchanged"
   // checkable rather than a claim about code nobody re-reads.
-  "src/repl/session.ts:2090": "if (word === '/rotate') {",
-  "src/repl/session.ts:2123": "if (word === '/abort') {",
+  "src/repl/session.ts:2096": "if (word === '/rotate') {",
+  "src/repl/session.ts:2129": "if (word === '/abort') {",
 }
 
 /**

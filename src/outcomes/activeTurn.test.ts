@@ -12,7 +12,7 @@
 
 import { strict as assert } from 'node:assert'
 import test from 'node:test'
-import type { AgentEvent, TurnKey } from '../contract/session.ts'
+import type { AgentEvent, RevisionEvent, TurnKey } from '../contract/session.ts'
 import { turnKey } from '../contract/session.ts'
 import { activeTurn, describeActiveTurn } from './activeTurn.ts'
 
@@ -45,9 +45,9 @@ const tool = (name: string, at = 1_500): AgentEvent => ({
   at,
   provisional: false,
 })
-const withdraws = (endSeq: number, at = 2_100): AgentEvent => ({
+const withdraws = (endSeq: number, at = 2_100, reason: RevisionEvent['reason'] = 'late_signal'): AgentEvent => ({
   type: 'revision',
-  reason: 'late_signal',
+  reason,
   replaces: [endSeq],
   provenance: [{ source: 'hook', detail: 'stronger evidence superseded the reported verdict' }],
   seq: ++seq,
@@ -104,6 +104,40 @@ test('a withdrawn verdict puts the turn back, and a replacement takes it away ag
     undefined,
     'and the replacement end closes it',
   )
+})
+
+test('a reopened turn is MARKED as reopened, and only a turn_start clears the mark', () => {
+  // The distinction the console's `/continue` resumes on (#66). The turn is open either way --
+  // that answer does not change and must not -- but "open because a record was deleted" and
+  // "open because the child was seen to begin" are different facts, and only one of them is
+  // evidence that a send would land mid-turn.
+  const opened = start(T1)
+  const closed = end(T1)
+
+  const reopened = activeTurn([opened, closed, withdraws(closed.seq, 2_100, 'compaction')])
+  assert.ok(reopened)
+  assert.deepEqual(reopened.withdrawn, { at: 2_100, reason: 'compaction' }, 'the mark carries when and why')
+
+  // An ordinary open turn carries no mark, so a caller cannot mistake one for the other by
+  // reading a field that is merely absent for a different reason.
+  assert.equal(activeTurn([start(T1)])?.withdrawn, undefined)
+
+  // A `turn_start` after the withdrawal clears it: the child was OBSERVED beginning a turn, and
+  // the deleted record has nothing to say about that one. This is the case that keeps the
+  // mid-turn refusal alive after #66.
+  const began = activeTurn([opened, closed, withdraws(closed.seq), start(T2, 5_000)])
+  assert.ok(began)
+  assert.equal(began.turnKey, T2)
+  assert.equal(began.withdrawn, undefined, 'a turn the child began is not a withdrawn one')
+
+  // A `tool_use` does NOT clear it, and that is deliberate rather than an omission: after a
+  // rewrite the transcript view re-emits surviving history, and the adapters forward its
+  // content events while dropping its lifecycle events. So a tool call may be a replay of the
+  // very history the withdrawal came from, where a `turn_start` cannot be.
+  const withTool = activeTurn([opened, closed, withdraws(closed.seq), tool('Bash', 5_000)])
+  assert.ok(withTool)
+  assert.equal(withTool.tool, 'Bash', 'the label still lands')
+  assert.ok(withTool.withdrawn, 'and the mark survives it')
 })
 
 test('a revision that withdraws something else leaves the turn closed', () => {
