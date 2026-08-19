@@ -62,6 +62,7 @@ export const CITED: Record<string, string> = {
   // `withdrawReason` rests on the difference between them: only one withdraws anything. Cited by
   // line because the claim is about these exact two emissions, not about `Tracker` in general.
   'src/transcript/reconcile.ts:217': "reason: fresh > 0 ? 'compaction' : 'rewrite',",
+  'src/transcript/reconcile.ts:218': 'replaces: replaced,',
   'src/transcript/reconcile.ts:288': 'replaces: [],',
   // The two per-command flag helpers are gone (#81), and with them the four citations that
   // pinned their bodies and the one that pinned `value.startsWith('--')` -- the line recording

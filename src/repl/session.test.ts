@@ -211,8 +211,11 @@ function events(dir: string): Record<string, any>[] {
  * so the console can tell the two apart. What still refuses is the child SEEN beginning a turn,
  * which clears that mark.
  *
- * Waits on the event file rather than on console text. A rendered line is a proxy for the event
- * the guard actually folds over; the event is the thing, so it is what this waits for.
+ * Waits on the SESSION RECORD rather than on console text. Not the same as waiting for the
+ * console to have drawn anything -- it has not necessarily -- but it is the stronger wait for
+ * what this is for: the relay appends to the participant's events before it broadcasts, and the
+ * recorder appends synchronously on that broadcast, so an entry in the file means the list the
+ * guard folds over already holds the `turn_start`.
  */
 async function observedTurn(impl: FakeRotationSession, dir: string, seat = 'implementer'): Promise<void> {
   const seen = (): number =>
@@ -221,7 +224,7 @@ async function observedTurn(impl: FakeRotationSession, dir: string, seat = 'impl
   const before = seen()
   impl.startTurnLate()
   await untilValue(
-    `${seat}'s turn start to reach the console`,
+    `${seat}'s turn start to reach the session record`,
     () => (seen() > before ? true : undefined),
     () => `still ${before} turn_start event(s) for ${seat}`,
   )
@@ -2854,8 +2857,10 @@ test('a refusal to continue re-samples, so it can lift', async () => {
 // thing that produces a bare withdrawal is `Tracker.resetTranscript` finding that a rewritten
 // transcript no longer holds the evidence a verdict rested on, so the open turn that refusal
 // read is a deleted record and not an observed turn -- and the only event that could close it
-// again is the one compaction removed. See `withdrawnSeatAtPause` for the rule and `resumeRun`
-// for the argument.
+// again is the one compaction removed. See `resumeRun` in src/repl/session.ts for the rule and
+// the argument both: the guard reads the SEAT'S OWN EVENTS (`ActiveTurn.withdrawn`) rather than
+// the pause record, because one compaction raises two pauses and a pause-keyed bypass clears the
+// wrong one.
 // ---------------------------------------------------------------------------------------
 
 test('a completed replacement verdict bypasses child liveness sampling on /continue', async () => {
@@ -3123,8 +3128,34 @@ test('a compaction-driven withdrawal lets /continue through, the same as any oth
   assert.ok(readings[0]!.samples.every((c) => c > IDLE_CPU_PERCENT), 'every sample over the line')
   // NOTHING was refused on the way, at either pause. The pause under test is gone by now, so
   // this is read off what was collected while walking rather than off the final record.
-  assert.deepEqual(refusals, [], 'no pause raised by this compaction may refuse an ordinary /continue')
+  // BOTH pauses, and that is the assertion the rest of this test rests on. The order they
+  // arrive in is not ours to choose, so meeting only `turn_incomplete` proves nothing about the
+  // other one: if `rotation_candidate` comes second, the walk above has already stopped and the
+  // exact rejected design -- a bypass keyed on the PAUSE, which clears this one and refuses that
+  // one forever -- passes a test written to kill it. So walk on until it has been met too.
+  if (!reasons.has('rotation_candidate')) {
+    const t = Date.now()
+    let answered: string | undefined
+    while (Date.now() - t < 20_000 && !reasons.has('rotation_candidate')) {
+      const f = resolveSession(dir)
+      if ('session' in f && f.session.status.state === 'paused') {
+        const p = f.session.status.pause
+        if (p) {
+          reasons.add(p.reason)
+          if (p.refusal) refusals.push(`${p.reason}: ${p.refusal.reason}`)
+          if (answered !== p.reason) {
+            answered = p.reason
+            input.write('/continue\n')
+          }
+        }
+      }
+      await new Promise((r) => setTimeout(r, 50))
+    }
+  }
   assert.ok(reasons.has('turn_incomplete'), `the withdrawn-verdict pause was met; saw ${[...reasons]}`)
+  assert.ok(reasons.has('rotation_candidate'), `and so was the degradation pause; saw ${[...reasons]}`)
+  // Read AFTER both have been walked, so it speaks for both.
+  assert.deepEqual(refusals, [], 'no pause raised by this compaction may refuse an ordinary /continue')
 
   // Answer whatever the run raises next before closing the console. A paused run with nothing
   // left to read its input is a hung test rather than a failing one.

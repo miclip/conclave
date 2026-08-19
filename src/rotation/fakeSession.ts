@@ -255,15 +255,20 @@ export class FakeRotationSession implements AgentSession {
          * Codex's equivalent both emit `reason: 'late_signal'` when a verdict is withdrawn.
          *
          * `'compaction'` is the other one worth writing, and it is not synthetic. The reason
-         * comes from the transcript layer rather than an adapter, and `Tracker` emits it two
-         * ways that differ in exactly the respect that matters here:
+         * comes from the transcript layer rather than an adapter: `TranscriptSessionView` emits
+         * it two ways, and only one of them can withdraw anything.
          *
          *   - a transcript that DECLARES a compaction yields `replaces: []`
          *     (`src/transcript/reconcile.ts:288`), which withdraws nothing;
-         *   - a rewrite that dropped content yields `reason: fresh > 0 ? 'compaction' :
-         *     'rewrite'` with a populated `replaces` (`src/transcript/reconcile.ts:217`) -- a compaction that
-         *     DOES withdraw, and the one an operator met in #66: the evidence a verdict rested
-         *     on is no longer in the file, so the claim goes with it.
+         *   - a rewrite yields `reason: fresh > 0 ? 'compaction' : 'rewrite'`
+         *     (`src/transcript/reconcile.ts:217`) over whatever it found already emitted
+         *     (`src/transcript/reconcile.ts:218`).
+         *
+         * So `compaction` WITH a withdrawal is one shape rather than a guarantee of the rewrite
+         * path: a fresh compaction marker, and a verdict already emitted for the rewrite to
+         * find. That shape is #66 -- the evidence a verdict rested on is no longer in the file,
+         * so the claim goes with it. A rewrite with no fresh marker is `'rewrite'`, and one that
+         * finds nothing emitted replaces nothing, neither of which is this case.
          *
          * Nothing downstream branches on the reason -- the relay matches a revision by the
          * sequence it replaces -- which is what a test asserting the compaction case has to be
@@ -394,6 +399,10 @@ export class FakeRotationSession implements AgentSession {
     const turn = this.#turns.at(-1)
     if (!turn) throw new Error(`${this.sessionId} has no turn to end`)
     turn.verdict = verdict
+    // The snapshot key moves with the stream. `lateSignal` withdraws by SEQUENCE and mutates the
+    // turn named by `#lastKey`; leaving an older key here would have it rewrite a turn the
+    // withdrawal is not about.
+    this.#lastKey = turn.key
     this.#lastEndSeq = ++this.#seq
     this.emit({
       type: 'turn_end',
