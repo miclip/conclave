@@ -521,7 +521,7 @@ function renderPause(p: RunPause, width: number): string {
  *
  * This used to read `pause.verdictOf.participant` instead, and that field is narrower than it
  * looks: it is set at exactly two halt sites, both `turn_incomplete`
- * (`src/relay/relay.ts:6374` and `src/relay/relay.ts:6890`). So FOUR of the five seat-scoped
+ * (`src/relay/relay.ts:6414` and `src/relay/relay.ts:6930`). So FOUR of the five seat-scoped
  * reasons -- `rotation_candidate`, `implementer_unanswered`, `merge_blocked`, `review_blocked`
  * -- named a seat in their scope and were sampled by rank anyway, because the field the guard
  * read was empty. The scope is the field that is always populated, which is the other half of
@@ -535,16 +535,16 @@ function renderPause(p: RunPause, width: number): string {
  * pause never mentioned. The rank fallback's own comment argued it was right "only because
  * there is one of them", which is an argument for deriving the seat from the pause instead of
  * from a rank. Worse than useless on one of them: resuming an `advisor_escalated` pause sends
- * to the ADVISOR (`src/relay/relay.ts:6491`), so the fallback measured children that were not
+ * to the ADVISOR (`src/relay/relay.ts:6531`), so the fallback measured children that were not
  * about to be sent to at all.
  *
  * What that gives up, stated rather than discovered: the `advisor_escalated` halt raised when a
- * seat's turn completed and its report could not be read (`src/relay/relay.ts:6804-6806`) is
+ * seat's turn completed and its report could not be read (`src/relay/relay.ts:6844-6846`) is
  * conclave-scoped by design -- "the reason names who is being asked to take it, and the scope
  * follows the reason" -- yet the thing an operator wants to know there is whether THAT seat's
  * child is still writing. Under the rank fallback that seat was sampled at N=1 by coincidence
  * of being the only implementer. It is not sampled now. The pause still carries its own
- * liveness EVIDENCE from the halt site (`src/relay/relay.ts:6815-6817`), which is what the operator
+ * liveness EVIDENCE from the halt site (`src/relay/relay.ts:6855-6857`), which is what the operator
  * reads;
  * what is gone is a refusal derived from a rank scan. Narrowing that halt's scope, if the
  * refusal is wanted back, is a change to the halt site rather than to this guard.
@@ -1399,6 +1399,10 @@ export async function runSession(opts: SessionOptions): Promise<number> {
         // too, and an operator who was present for the turn is not thereby guaranteed to
         // have registered a single sentence 300 lines ago.
         write(summaryLine('===', relay.rotationSummary(), width))
+        // What `--checks` actually reached, on both front-ends for the same reason the
+        // rotation summary is on both (#153).
+        const integration = relay.integrationSummary()
+        if (integration !== undefined) write(summaryLine('===', integration, width))
         // Whether the advisor used the assignment syntax, on both front-ends for the same
         // reason the rotation summary is on both (#79). Undefined -- and so unprinted -- on a
         // one-seat run, where there was no second seat to address and nothing is alleged.
@@ -2043,7 +2047,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
       // FALSIFIER, stated because it is the strongest argument against this shape: the
       // console has no general "trailing text is a message" rule and does not gain one here.
       // `/rotate <text>` and `/abort <text>` consume their text as a REASON
-      // (`src/repl/session.ts:2096`, `src/repl/session.ts:2129`) and `/pause`, `/queue`, `/audit` ignore
+      // (`src/repl/session.ts:2100`, `src/repl/session.ts:2133`) and `/pause`, `/queue`, `/audit` ignore
       // whatever follows them. So an operator who learns this from `/continue` and carries
       // it to `/pause I'll be back` still loses the sentence. That inconsistency is not
       // repaired by making `/continue` a third behaviour; it is narrowed by it, and the

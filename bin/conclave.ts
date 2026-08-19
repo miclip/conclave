@@ -1439,6 +1439,10 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
       // live, and the runs most worth diagnosing are the ones that used to report least.
       say(`=== ${relay.log.length} messages routed`)
       say(`=== ${relay.rotationSummary()}`)
+      // What `--checks` actually reached (#153). Undefined -- and so unprinted -- when nothing
+      // was configured, because the rotation line above already covers that case.
+      const integration = relay.integrationSummary()
+      if (integration !== undefined) say(`=== ${integration}`)
       // Only when there was a second seat to address (#79). `targetingSummary` returns undefined
       // on a one-seat run rather than a line saying there is nothing to say: the advisor there was
       // never given the syntax and could not have used it, and a line that is noise on the common

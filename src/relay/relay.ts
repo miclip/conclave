@@ -88,7 +88,7 @@ import {
 } from './authority.ts'
 import { assess, ComplaintLedger, topicOf, type Assessment } from '../rotation/degradation.ts'
 import { rotate, type RotationResult } from '../rotation/rotate.ts'
-import type { CheckSpec } from '../rotation/record.ts'
+import { checkCommand, type CheckSpec } from '../rotation/record.ts'
 import { buildReviewContext, reviewPrompt } from '../rotation/review.ts'
 import { resumeBriefing } from './resume.ts'
 import { breached, type CeilingBreach, type CeilingState, type Ceilings, effectiveCeilings, type RunCeilings } from './guardrails.ts'
@@ -2932,6 +2932,46 @@ export class Relay {
     return lines
   }
 
+  /**
+   * Whether the tree was ever measured against the configured checks, and if not, why not.
+   *
+   * `--checks` feeds two stations. It arms rotation, which is what it has always meant, and
+   * since #80 it also measures the integration checkout after a merge. Only the second one is
+   * about whether the WORK is any good, and it needs a merge to happen at -- so a
+   * single-implementer run, which has no seat worktrees by design and therefore no merge
+   * boundary, never reaches it. That is deliberate: a single-seat run must not acquire a
+   * per-task CI step from a flag that used to mean rotation alone.
+   *
+   * What was not deliberate is that the run then reported `done` in exactly the words it uses
+   * when every check passed (#153). An operator arms the flag precisely so the run does not
+   * have to be taken on trust, and the summary let them believe it had been measured. Nothing
+   * about the behaviour changes here; what changes is that the run says which of the two
+   * stations the flag reached.
+   *
+   * Undefined when there is nothing to disclaim: with no checks configured the rotation line
+   * above already reports the detector unarmed for want of them, and a second line saying it
+   * again is one an operator learns to skip past on the common run -- which is what would make
+   * it useless on the run where it matters. Same reasoning as `targetingSummary` staying
+   * silent with one seat.
+   */
+  integrationSummary(): string | undefined {
+    const checks = this.#opts.rotation?.checks
+    if (!checks || checks.length === 0) return undefined
+    const commands = checks.map((c) => `\`${checkCommand(c)}\``).join(', ')
+    if (this.#worktrees) {
+      const measured = this.#merges.length
+      return measured === 0
+        ? `integration: ${commands} armed, but nothing merged, so the tree was never measured`
+        : `integration: ${commands} measured after each of ${measured} merge${measured === 1 ? '' : 's'}` +
+          `${this.#integrationRed ? ' — the tree is RED' : ''}`
+    }
+    return (
+      `integration: NOT MEASURED — ${commands} armed rotation only. One implementer works in ` +
+      `the operator's checkout, so there is no merge for the integration check to run at. ` +
+      `Run it yourself, or use a second seat.`
+    )
+  }
+
   /** One line an operator can read to know whether the detector was live and what it saw. */
   rotationSummary(): string {
     const w = this.rotationWatch
@@ -4235,7 +4275,7 @@ export class Relay {
       else if (!shouldWait && offered !== -1) pause.options.splice(offered, 1)
       // The status file is written from the LIVE pause object on any event, so an in-place
       // change reaches disk on the next one -- and a pause is precisely when nothing else is
-      // flowing. Same reasoning as `/wait` in the console (`src/repl/session.ts:2074`), and the
+      // flowing. Same reasoning as `/wait` in the console (`src/repl/session.ts:2078`), and the
       // reader who needs it most is the one polling from outside.
       this.#stream.emit({ type: 'liveness', pause })
       if (last) return stop()

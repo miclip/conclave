@@ -348,6 +348,12 @@ test('one seat runs the configured checks exactly as often as it did before: nev
         false,
         'a single-seat run must not acquire a per-task CI step from a flag that used to mean rotation alone',
       )
+      // And the run SAYS so (#153). The behaviour above is deliberate; what was not is that
+      // the run then reported `done` in the same words it uses when every check passed, so an
+      // operator who armed the flag to avoid taking the run on trust was invited to trust it.
+      const summary = relay.integrationSummary()
+      assert.match(summary ?? '', /NOT MEASURED/, 'the run must not imply the tree was checked')
+      assert.match(summary ?? '', /no merge for the integration check to run at/, 'and must say why')
     } finally {
       await relay.stop()
     }
@@ -384,6 +390,12 @@ test('a green integration tree changes nothing about the run', async () => {
       const outcome = await relay.run('Keep the work moving.')
       assert.equal(outcome.reason, 'done', 'a green tree must end exactly as it did before this existed')
       assert.doesNotMatch(orchestratorNotices(advisor), /fails its configured checks/)
+      // The other half of #153: where the tree WAS measured, the run says that too, and how
+      // often. A line that only ever appears to disclaim is one nobody reads on the run where
+      // it reports a real measurement.
+      const measured = relay.integrationSummary() ?? ''
+      assert.match(measured, /measured after each of \d+ merge/, 'a measured tree says it was measured')
+      assert.doesNotMatch(measured, /NOT MEASURED|RED/, 'and neither disclaims nor alarms when green')
     } finally {
       await relay.stop()
     }
