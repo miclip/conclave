@@ -251,13 +251,23 @@ export class FakeRotationSession implements AgentSession {
         withdraw?: 'no_replacement' | Verdict
         /**
          * Which revision reason the withdrawal carries. `late_signal` unless a test says
-         * otherwise, because that is the adapter's own spelling for it.
+         * otherwise, because that is the spelling the ADAPTERS produce: `Claude#apply` and
+         * Codex's equivalent both emit `reason: 'late_signal'` when a verdict is withdrawn.
          *
-         * It exists for `compaction`, which is the withdrawal an operator actually met (#66):
-         * a rewritten transcript no longer contains the evidence a verdict rested on, so
-         * `Tracker.resetTranscript` withdraws the claim. Nothing downstream branches on the
-         * reason -- the relay matches a revision by the sequence it replaces -- and that is
-         * precisely what a test asserting the compaction case has to be able to show.
+         * `'compaction'` is the other one worth writing, and it is not synthetic. The reason
+         * comes from the transcript layer rather than an adapter, and `Tracker` emits it two
+         * ways that differ in exactly the respect that matters here:
+         *
+         *   - a transcript that DECLARES a compaction yields `replaces: []`
+         *     (`src/transcript/reconcile.ts:288`), which withdraws nothing;
+         *   - a rewrite that dropped content yields `reason: fresh > 0 ? 'compaction' :
+         *     'rewrite'` with a populated `replaces` (`src/transcript/reconcile.ts:217`) -- a compaction that
+         *     DOES withdraw, and the one an operator met in #66: the evidence a verdict rested
+         *     on is no longer in the file, so the claim goes with it.
+         *
+         * Nothing downstream branches on the reason -- the relay matches a revision by the
+         * sequence it replaces -- which is what a test asserting the compaction case has to be
+         * able to show, and what the console test above shows end to end.
          */
         withdrawReason?: RevisionEvent['reason']
       }
@@ -337,48 +347,35 @@ export class FakeRotationSession implements AgentSession {
   }
 
   /**
-   * A `turn_start` for a turn the child begins on its own, after a withdrawal.
+   * A `turn_start` the child is SEEN making, after the relay has stopped dispatching to it.
    *
-   * The fixture for the case the #66 bypass must NOT wave through, and the reason it needs its
-   * own method: after `lateSignal('none')` the withdrawn turn reads as open again, and that
-   * openness is a deleted record. A `turn_start` on top of it is the opposite -- an observation
-   * that the child began work -- so `activeTurn` drops the `withdrawn` mark and the console's
-   * `/continue` refuses on a live turn exactly as it always did.
+   * The counterpart to `endTurnLate` for the other end of a turn. `send` is the only other way
+   * to open one and it is the relay's to call, so a test that needs the child observed
+   * beginning a turn while the run is PAUSED -- nothing is being dispatched, and the console is
+   * about to decide whether it may send -- has no other lever.
    *
-   * Hook-derived by construction, which is what makes it the right fixture: the adapters drop
-   * the transcript view's `turn_start`/`turn_end` and forward only content (`Claude#pollTranscript`),
-   * so a `turn_start` reaching a consumer never came from a rewritten file.
+   * That state is not hypothetical: a watchdog calls a long turn `timed_out`, a late signal
+   * withdraws the verdict, and the child, which was working all along, starts its next turn.
+   * Under #66 the withdrawal alone would wave `/continue` through; a `turn_start` after it is
+   * an OBSERVATION and puts the guard back (`ActiveTurn.withdrawn`), and the difference is only
+   * testable if a fixture can produce one.
    *
-   * The `tool_use` after it is not decoration. `turn_start` alone changes nothing a test can
-   * wait on -- the session record refreshes on `turn_end` and `revision`, not on a turn opening
-   * -- whereas a tool call draws a console line, and the relay's forwarder appends to
-   * `p.events` BEFORE it emits to observers (`Relay#attach`). So a test that has seen the tool
-   * on screen knows the `turn_start` is already in the list the guard reads, which is the
-   * difference between a fixture and a race.
+   * Registered as a turn like any other, so `endTurnLate` ends THIS one: a `turn_end` carrying
+   * an older key belongs to an earlier turn, and `activeTurn` is right to leave the open turn
+   * open when it sees one.
    */
-  startTurnLate(tool = 'Bash'): void {
+  startTurnLate(prompt = 'still going'): TurnKey {
     const key = turnKey(`${this.sessionId}-turn-${this.#turns.length}`)
     this.#turns.push({ key, prose: '' })
-    this.#lastKey = key
-    this.#lastEndSeq = undefined
     this.emit({
       type: 'turn_start',
-      prompt: '(began on its own)',
+      prompt,
       turnKey: key,
       seq: ++this.#seq,
       at: Date.now(),
       provisional: false,
     })
-    this.emit({
-      type: 'tool_use',
-      tool,
-      input: undefined,
-      failed: false,
-      turnKey: key,
-      seq: ++this.#seq,
-      at: Date.now(),
-      provisional: false,
-    })
+    return key
   }
 
   /**

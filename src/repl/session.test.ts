@@ -202,6 +202,31 @@ function events(dir: string): Record<string, any>[] {
     .map((l) => JSON.parse(l) as Record<string, any>)
 }
 
+
+/**
+ * Drive the child to be OBSERVED starting a turn, and wait until that observation has landed.
+ *
+ * The fixture the #66 guard tests need. A withdrawal on its own no longer refuses -- it is a
+ * deleted record, not an observation, and `activeTurn` marks the turn it reopens as `withdrawn`
+ * so the console can tell the two apart. What still refuses is the child SEEN beginning a turn,
+ * which clears that mark.
+ *
+ * Waits on the event file rather than on console text. A rendered line is a proxy for the event
+ * the guard actually folds over; the event is the thing, so it is what this waits for.
+ */
+async function observedTurn(impl: FakeRotationSession, dir: string, seat = 'implementer'): Promise<void> {
+  const seen = (): number =>
+    events(dir).filter((e) => e.type === 'activity' && e.participant === seat && e.event?.type === 'turn_start')
+      .length
+  const before = seen()
+  impl.startTurnLate()
+  await untilValue(
+    `${seat}'s turn start to reach the console`,
+    () => (seen() > before ? true : undefined),
+    () => `still ${before} turn_start event(s) for ${seat}`,
+  )
+}
+
 test('a session runs to completion and reports the outcome', async () => {
   const dir = repo()
   const out = collect()
@@ -2558,16 +2583,7 @@ test('/continue force is the whole word: force with text after it is a message, 
       f.session.status.pause?.superseded !== undefined &&
       f.session.status.pause?.superseded?.verdict === undefined,
   )
-  // A LIVE turn, and the reason the fixture needs one. The withdrawal on its own no longer
-  // refuses (#66): it is a deleted record, not an observation, and `activeTurn` marks the turn
-  // it reopens as `withdrawn` so the console can tell the two apart. What still refuses -- what
-  // this test is about -- is the child OBSERVED beginning a turn, which clears that mark.
-  //
-  // Waited for on screen rather than assumed: the relay appends to the participant's events
-  // before it emits to observers, so a tool call visible in the console is already in the list
-  // the guard folds over.
-  impl.startTurnLate()
-  await untilText('the child to begin a turn of its own', out.text, /Bash/)
+  await observedTurn(impl, dir)
 
   input.write('/continue force it through\n')
   // Refused, because it was not a force: the guard ran and the child is mid-turn. Read off the
@@ -3163,16 +3179,7 @@ test('a refusal to continue is recorded on the paused session status', async () 
       f.session.status.pause?.superseded !== undefined &&
       f.session.status.pause?.superseded?.verdict === undefined,
   )
-  // A LIVE turn, and the reason the fixture needs one. The withdrawal on its own no longer
-  // refuses (#66): it is a deleted record, not an observation, and `activeTurn` marks the turn
-  // it reopens as `withdrawn` so the console can tell the two apart. What still refuses -- what
-  // this test is about -- is the child OBSERVED beginning a turn, which clears that mark.
-  //
-  // Waited for on screen rather than assumed: the relay appends to the participant's events
-  // before it emits to observers, so a tool call visible in the console is already in the list
-  // the guard folds over.
-  impl.startTurnLate()
-  await untilText('the child to begin a turn of its own', out.text, /Bash/)
+  await observedTurn(impl, dir)
   input.write('/continue\n')
   const found = await until((f) => 'session' in f && f.session.status.pause?.refusal !== undefined)
   assert.ok('session' in found)
@@ -3365,16 +3372,7 @@ test('a child mid-turn is refused however idle it reads', async () => {
       f.session.status.pause?.superseded !== undefined &&
       f.session.status.pause?.superseded?.verdict === undefined,
   )
-  // A LIVE turn, and the reason the fixture needs one. The withdrawal on its own no longer
-  // refuses (#66): it is a deleted record, not an observation, and `activeTurn` marks the turn
-  // it reopens as `withdrawn` so the console can tell the two apart. What still refuses -- what
-  // this test is about -- is the child OBSERVED beginning a turn, which clears that mark.
-  //
-  // Waited for on screen rather than assumed: the relay appends to the participant's events
-  // before it emits to observers, so a tool call visible in the console is already in the list
-  // the guard folds over.
-  impl.startTurnLate()
-  await untilText('the child to begin a turn of its own', out.text, /Bash/)
+  await observedTurn(impl, dir)
   input.write('/continue\n')
   const found = await until((f) => 'session' in f && f.session.status.pause?.refusal !== undefined)
   assert.ok('session' in found)
@@ -3702,16 +3700,7 @@ test('a turn that ends lets /continue resume on retry, however busy the child re
       f.session.status.pause?.superseded !== undefined &&
       f.session.status.pause?.superseded?.verdict === undefined,
   )
-  // A LIVE turn, and the reason the fixture needs one. The withdrawal on its own no longer
-  // refuses (#66): it is a deleted record, not an observation, and `activeTurn` marks the turn
-  // it reopens as `withdrawn` so the console can tell the two apart. What still refuses -- what
-  // this test is about -- is the child OBSERVED beginning a turn, which clears that mark.
-  //
-  // Waited for on screen rather than assumed: the relay appends to the participant's events
-  // before it emits to observers, so a tool call visible in the console is already in the list
-  // the guard folds over.
-  impl.startTurnLate()
-  await untilText('the child to begin a turn of its own', out.text, /Bash/)
+  await observedTurn(impl, dir)
   input.write('/continue\n')
   await new Promise((r) => setTimeout(r, 300))
   assert.equal(calls, 1, 'the reading is taken once, as colour on the refusal')
