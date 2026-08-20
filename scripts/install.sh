@@ -1,7 +1,7 @@
 #!/bin/sh
 # Install conclave: fetch a checkout, build its one native dependency, put `conclave` on PATH.
 #
-#   curl -fsSL https://raw.githubusercontent.com/miclip/conclave/v0.4.0/scripts/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/miclip/conclave/v0.5.0/scripts/install.sh | sh
 #
 # NOT a zip of built artefacts. Node 24 strips types natively, so there is nothing to
 # build except `node-pty` — which is a native module and has to be compiled against the
