@@ -78,8 +78,7 @@ comma cannot be written here — put it in `.conclave/config.json`, which is key
 That is a different MODEL in the same harness, which is not the same thing as a different
 REPL — the OpenCode system prompt, tool set and agent loop still apply. `kimi` is the Kimi
 REPL itself, with its own prompt, tools and agent loop; point it at a provider with
-`--implementer-args "--config-file ~/.kimi-conclave.toml"`. Maincode's Matilda is
-[#25](https://github.com/miclip/conclave/issues/25).
+`--implementer-args "--config-file ~/.kimi-conclave.toml"`.
 
 **A Kimi seat needs a provider, and says so badly.** With none configured the CLI exits 1
 having printed `LLM not set`, and conclave grades that `unknown_abnormal_end (assumed)` from
