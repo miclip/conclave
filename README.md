@@ -125,7 +125,7 @@ symlinks `conclave` into `~/.local/bin`. Re-running upgrades in place.
 it lands.
 
 ```sh
-CONCLAVE_REF=v0.1.0 sh install.sh
+CONCLAVE_REF=v0.5.0 sh install.sh
 ```
 
 By hand:
@@ -375,9 +375,16 @@ together with `--bypass` there, because applying that would leave a permission m
 an invocation that started nothing and skipping it would print launch arguments the real run
 would not use. `relay`
 refuses to run outside a git repository unless you pass `--force` — attribution and rotation
-both diff the tree, so neither means anything without one. `--max-turns` and `--max-minutes`
-stop a run that is still going and exit non-zero; a silent stop is indistinguishable from a
-run that simply finished.
+both diff the tree, so neither means anything without one. `--rounds` bounds how many
+times the advisor gets to steer — one pass of the loop is one advisor turn — and it is the
+only bound a run has unless you set another. `--max-turns` and `--max-minutes` are separate
+ceilings: they stop a run that is still going and exit non-zero, because a silent stop is
+indistinguishable from a run that simply finished. Passing `--max-turns` when you meant
+`--rounds` is accepted and bounds something else, so every launch now prints what each
+ceiling is set to and `status --json` carries them. `--max-minutes` counts the time the run
+is WORKING: time suspended at a pause, waiting on an operator who may be asleep, is not
+charged to it. The ceilings bound
+a run that has gone wrong, and a run interrupted overnight has not.
 
 Every message is recorded to `.conclave/runs/` as it happens, and `--resume <log>` replays it
 into both seats. `relay` ends at every pause point by design, so the normal way a long run
@@ -518,7 +525,10 @@ conclave relay "<goal>" --detach   # prints a session id and gives you your term
 conclave sessions                  # every session in this project, newest first
 conclave status                    # what the most recent one is doing; a prefix picks another
 conclave events <id> --follow      # its NDJSON stream: routed messages and adapter events
+conclave guard                     # are participants live, and what changed since they started
 ```
+
+`guard` exits non-zero while a participant is live, so a commit helper can gate on it.
 
 `status` reports who is in each seat, what each is working on, whether either is stopped at a
 permission prompt, the current pause with its evidence and options, and the outcome once
@@ -530,6 +540,13 @@ process is gone shows as **abandoned**, not as whatever it last claimed. That di
 the point: a session that looks busy because nothing has updated it is otherwise
 indistinguishable from one that is busy, and telling a retry from a double start depends on
 it.
+
+A live session rewrites its record every 30 seconds whether anything changed or not, so
+`updatedAt` means when the file was last WRITTEN rather than when the state last changed —
+poll an idle run twice and that field moves. The beat is what makes a stopped record
+legible: `status --json` grows a `stale` key when the record has stopped moving, and only
+then, so `if (doc.stale)` cannot misread an absent key. It also republishes a pause that a
+failed write lost, so a full disk no longer costs you a question nobody was asked.
 
 A detached run's stdout and stderr go to `stdio.log` in the same directory. A crash before
 the relay starts appears nowhere else.
