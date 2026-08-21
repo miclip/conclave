@@ -218,19 +218,59 @@ function base(token: string): string {
  * prose words are included only when distinctive enough to be worth matching — the aside
  * that motivated this named `two.txt`, and the earlier one named a `ZQX_` prefix.
  */
+function clean(raw: string): string {
+  return raw.trim().replace(/^[`'"]|[`'".,;:]$/g, '')
+}
+
+/** Long enough to identify something, and not a word every message contains. */
+function admissible(token: string): boolean {
+  return token.length >= 3 && !NOISE.has(token.toLowerCase())
+}
+
+/**
+ * Is this slash-bearing span a path, or is it English with a slash in it? (#157)
+ *
+ * `booleans/counts` and `and/or` are prose. The old rule could not tell them from
+ * `v1/ops/status`, so a finding whose remedy read "return booleans/counts instead" put
+ * `booleans/counts` -- and, via the basename pass, the bare word `counts` -- into the token
+ * set, and every later instruction mentioning counts matched an aside about access scopes.
+ *
+ * A single unmarked slash between two plain words is the ambiguous case and the only one
+ * refused. Four shapes still read as a path:
+ *
+ *   marked        `env/config` in backticks or quotes never reaches here; an author marking
+ *                 something is naming it, which is signal the prose case lacks.
+ *   rooted        a leading `/`, `./` or `../` is a filesystem, not a sentence.
+ *   multi-segment two or more slashes. `and/or` has one; `v1/ops/status` has two.
+ *   filename      the last segment carries an extension -- `src/compat.ts`.
+ *
+ * The cost is real and is accepted: an unmarked `src/relay` in prose is no longer a token,
+ * which is under-detection, the direction this module says it must not fail in. Two things
+ * bound it. Findings and instructions that mean a path usually mark it, and attribution
+ * supplies the paths a restricted message actually caused through `artifacts`, which
+ * `detectConflict` matches independently of anything extracted from prose.
+ */
+function looksLikePath(span: string): boolean {
+  if (/^\.{0,2}\//.test(span)) return true
+  if ((span.match(/\//g) ?? []).length >= 2) return true
+  return /\.[A-Za-z]{1,6}$/.test(span)
+}
+
 export function extractTokens(text: string): string[] {
   const out = new Set<string>()
   const add = (raw: string) => {
-    const t = raw.trim().replace(/^[`'"]|[`'".,;:]$/g, '')
-    if (t.length < 3) return
-    if (NOISE.has(t.toLowerCase())) return
-    out.add(t)
+    const t = clean(raw)
+    if (admissible(t)) out.add(t)
   }
   // Backticked and quoted spans: an author marking something is naming it.
   for (const m of text.matchAll(/`([^`\n]{2,80})`/g)) add(m[1]!)
   for (const m of text.matchAll(/"([^"\n]{2,80})"/g)) add(m[1]!)
-  // Paths and filenames.
-  for (const m of text.matchAll(/\b[\w.-]*\/[\w./-]+\b/g)) add(m[1] ?? m[0]!)
+  // Paths and filenames. The leading `/` is part of the span now, because whether a path is
+  // rooted is one of the things `looksLikePath` has to be able to see.
+  for (const m of text.matchAll(/(?:\.{0,2}\/)?[\w.-]+(?:\/[\w.-]+)+/g)) {
+    const t = clean(m[0]!)
+    if (looksLikePath(t)) add(t)
+  }
   for (const m of text.matchAll(/\b[\w-]+\.[A-Za-z]{1,6}\b/g)) add(m[0]!)
   // Identifiers: snake_case, camelCase, SCREAMING, or a distinctive prefix like `ZQX_`.
   for (const m of text.matchAll(/\b[A-Za-z][A-Za-z0-9]*(?:[_-][A-Za-z0-9]+)+\b/g)) add(m[0]!)
@@ -248,13 +288,122 @@ export function extractTokens(text: string): string[] {
     const isSegment = paths.some((p) => p !== t && p.includes(t) && base(p) !== t)
     if (!isSegment) keep.add(t)
   }
-  for (const p of paths) keep.add(base(p))
+  // Through the same filters every other token passes. Adding `base(p)` directly let
+  // `base('and/or')` -> `or` into the set below the three-character floor the rest of this
+  // module enforces, and would let a noise word in the same way.
+  for (const p of paths) {
+    const b = base(p)
+    if (admissible(b)) keep.add(b)
+  }
   return [...keep]
 }
 
 /** Verbs that undo rather than change. `restore` is included: it reverses a removal. */
 const REVERSAL =
   /\b(remove|removing|delete|deleting|revert|reverting|undo|undoing|roll ?back|drop|dropping|strip|stripping|discard|discarding|back out|take out|get rid of|restore|restoring|unwind|revert to)\b/i
+
+/** Removal-shaped: the text asks for something to stop existing. */
+const REMOVAL =
+  /\b(remove|removing|delete|deleting|drop|dropping|strip|stripping|discard|discarding|omit|omitting|back out|take out|get rid of)\b/i
+
+/** Restoration-shaped: the text asks for something removed to come back. */
+const RESTORATION = /\b(restore|restoring|reinstate|reinstating|re-?add|re-?adding|bring back|put back)\b/i
+
+/**
+ * A prohibition is removal-shaped without using a removal verb.
+ *
+ * "do not emit raw scope strings" asks for an output to stop existing as squarely as
+ * "delete the scope strings" does, and code-review findings are written the first way far
+ * more often than the second. Without this, the finding that produced #157 classified as
+ * having no direction at all, and no instruction could ever align with it.
+ */
+const PROHIBITION =
+  /\b(?:do not|don't|do n't|never|no longer|stop|cease|avoid)\s+(?:\w+\s+){0,2}(?:emit|emitting|return|returning|expose|exposing|include|including|output|outputting|send|sending|surface|surfacing|leak|leaking|print|printing|log|logging|store|storing|write|writing|pass|passing)\b/i
+
+/**
+ * Additive or preservative: the text asks for something to exist, or to go on existing.
+ *
+ * Read only to DISQUALIFY a removal reading, never to establish one, so it is allowed to be
+ * broad. It deliberately does not include `return` or `emit`: "return booleans/counts
+ * instead" is how a removal-shaped remedy names its replacement, and treating that as
+ * additive would make every such finding ambiguous and put #157 back.
+ */
+const ADDITIVE =
+  /\b(?:add|adds|adding|re-?add|keep|keeps|keeping|retain|retains|retaining|preserve|preserves|preserving|create|creates|creating|introduce|introduces|introducing|reinstate|reinstates|restore|restores|restoring|ensure|ensures|ensuring|make sure|leave in place|leave unchanged|must (?:still )?(?:have|include|contain|expose))\b/i
+
+type ActionDirection = 'removal' | 'restoration' | 'mixed' | 'none'
+
+/**
+ * Which way a text pushes: toward something existing, or toward it not existing.
+ *
+ * Narrower than `REVERSAL` on purpose, and deliberately not a partition of it. `revert`,
+ * `undo` and `roll back` are direction-AMBIGUOUS -- reverting a deletion restores, reverting
+ * an addition removes -- so they land in `none` and can never establish alignment. That is
+ * the conservative failure: an unclassifiable direction pauses.
+ *
+ * Restoration is tested first because a restoring instruction routinely explains itself with
+ * a removal verb ("Restore src/compat.ts -- removing it broke the build").
+ *
+ * `mixed` is the false-negative guard. A restricted message can say two things at once --
+ * "keep these three fields, and do not emit `raw_token`" -- and reading only the prohibition
+ * classifies the whole message as removal-shaped. An advisor then deleting the KEPT fields
+ * quotes the message heavily and uses a removal verb, so it would suppress as propagation
+ * while actually reversing the additive half. A message that pushes both ways is not
+ * unambiguously removal-shaped, and alignment is refused rather than guessed at.
+ */
+function actionDirection(text: string): ActionDirection {
+  if (RESTORATION.test(text)) return 'restoration'
+  const removal = REMOVAL.test(text) || PROHIBITION.test(text)
+  if (removal) return ADDITIVE.test(text) ? 'mixed' : 'removal'
+  return 'none'
+}
+
+/** At least this many of the origin's tokens, and at least this share of them. */
+const PROPAGATION_MIN_TOKENS = 3
+const PROPAGATION_MIN_SHARE = 0.5
+
+/**
+ * Is the advisor carrying the restricted instruction onward rather than opposing it? (#157)
+ *
+ * A finding of the form "stop emitting X" has an unavoidable signature under the plain
+ * detector: an instruction that CARRIES IT OUT quotes it (high overlap) and removes
+ * something (a reversal verb), which is exactly the shape of an instruction that UNDOES it.
+ * Three false pauses in one live session came from that, all on the same finding.
+ *
+ * Suppression requires both halves, because either alone is a real conflict:
+ *
+ *   containment  substantial and multi-token. A relay reproduces the message; a coincidence
+ *                shares an identifier. One shared token is never a quotation no matter what
+ *                fraction of a one-token origin it is, so a count floor sits beside the
+ *                share floor rather than being implied by it.
+ *   alignment    the RESTRICTED message must itself be UNAMBIGUOUSLY removal-shaped, and
+ *                the instruction must push the same way. Read from the human's text, not the
+ *                advisor's -- the question is whether the human asked for this, and only the
+ *                human's own words answer it. A message carrying an additive directive
+ *                alongside a prohibition classifies `mixed` and never aligns, because the
+ *                advisor may be relaying one half while reversing the other.
+ *
+ * A matched ARTIFACT vetoes suppression outright. An artifact is a file the restricted work
+ * is shown to have put in the tree, so an instruction removing it is undoing something that
+ * happened, whatever the surrounding prose quotes.
+ *
+ * What this deliberately is not: a latch on the operator's first answer. Suppressing later
+ * pauses for an origin once one was approved treats the symptom -- and would silence a
+ * genuine reversal arriving later with the same overlap, which is the one case the guard
+ * exists for.
+ */
+function isPropagation(
+  origin: RestrictedOrigin,
+  instruction: string,
+  matched: string[],
+): boolean {
+  if (matched.some((m) => origin.artifacts.includes(m))) return false
+  if (origin.tokens.length === 0) return false
+  const tokenMatches = matched.filter((m) => origin.tokens.includes(m))
+  if (tokenMatches.length < PROPAGATION_MIN_TOKENS) return false
+  if (tokenMatches.length / origin.tokens.length < PROPAGATION_MIN_SHARE) return false
+  return actionDirection(origin.text) === 'removal' && actionDirection(instruction) === 'removal'
+}
 
 /**
  * Would this advisor instruction reverse something a restricted message caused?
@@ -277,9 +426,12 @@ export function detectConflict(
       const b = base(c).toLowerCase()
       return b.length >= 3 && haystack.includes(b)
     })
-    if (matched.length > 0) {
-      return { origin, instruction, verb: verbMatch[0]!, matched: [...new Set(matched)] }
-    }
+    if (matched.length === 0) continue
+    const unique = [...new Set(matched)]
+    // Relaying the human's own removal is not reversing it. `continue`, not `return`: a
+    // later origin may still be genuinely opposed by this same instruction.
+    if (isPropagation(origin, instruction, unique)) continue
+    return { origin, instruction, verb: verbMatch[0]!, matched: unique }
   }
   return undefined
 }

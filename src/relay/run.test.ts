@@ -569,6 +569,91 @@ test('an advisor instruction that would undo an aside pauses BEFORE it is delive
   assert.ok(delivered.includes('not the advisor overriding me'))
 })
 
+test('relaying a removal-shaped restricted finding runs to the end without pausing (#157)', async (t) => {
+  // The counterpart to the test above, and the case #157 reported. The aside is a
+  // code-review finding whose remedy is itself a removal ("do not emit raw scope strings"),
+  // so the advisor carrying it out quotes it heavily AND uses a removal verb -- the exact
+  // signature of an instruction that undoes it. Live, this paused three times in one
+  // session, all false, and the risk the issue names is habituation: an operator who has
+  // waved through three false pauses waves through the fourth.
+  //
+  // Three instructions, worded three different ways, because the issue reports it firing on
+  // EVERY downstream instruction touching the same terms, not just the first. The unit-level
+  // reconstruction of this finding lives in `authorityPropagation.test.ts`; this proves the
+  // run does not stop.
+  const finding = [
+    'Code-review finding (restricted): in `src/thread/access/ops.py`, `render_status` emits the raw',
+    'allow-listed scope strings — confluence_spaces, jira_projects, figma_files, atlassian_site, and the',
+    'operator-pasted AHA_DOMAIN — straight out of the `aha_domain/products`, `v1/ops/status` and `env/config`',
+    'handlers. Anything token-shaped or basic-auth reaches the dt-access response body verbatim.',
+    'Remedy: do not emit raw scope strings; return booleans/counts instead.',
+  ].join('\n')
+
+  const first =
+    'Apply the restricted finding in src/thread/access/ops.py: delete confluence_spaces, jira_projects, ' +
+    'figma_files and atlassian_site from the render_status payload so nothing token-shaped or basic-auth ' +
+    'reaches dt-access.'
+  const second =
+    'Now strip AHA_DOMAIN and the operator-pasted, allow-listed values out of v1/ops/status and env/config, ' +
+    'and drop the same token-shaped fields from aha_domain/products and render_status in ops.py before they ' +
+    'reach dt-access.'
+  const third =
+    'Finally, remove the remaining raw scope strings from src/thread/access/ops.py — confluence_spaces, ' +
+    'jira_projects, figma_files, atlassian_site and AHA_DOMAIN — and do not emit them from render_status ' +
+    'or dt-access.'
+
+  const dir = repo()
+  const impl = new FakeRotationSession('impl', 'claude', [
+    'ack',
+    'Removed the four scope strings.',
+    'Stripped the rest.',
+    'Done with the last of them.',
+    'NONE',
+  ])
+  const advisor = new FakeRotationSession('advisor', 'codex', [first, second, third, 'DONE'])
+  // Five, not four: four advisor replies need a budget strictly greater than four, or the
+  // run ends `budget` and the `done` assertion below would be measuring the wrong thing.
+  const relay = await relayOf(dir, advisor, [impl], { maxAdvisorTurns: 5 })
+  t.after(() => relay.stop())
+
+  const run = relay.start('Keep the work moving.')
+  relay.say(finding, { only: 'implementer' }, 'aside')
+
+  assert.equal(await run.untilPause(), undefined, 'no pause; the run ended instead')
+  assert.equal((await run.result()).reason, 'done')
+  assert.equal(run.state, 'ended')
+
+  // Not one conflict, on any of the three.
+  assert.deepEqual(
+    relay.log.filter((m) => m.text.startsWith('paused (authority_conflict')).map((m) => m.text),
+    [],
+  )
+  // Nor a conflict that was raised and adjudicated away. The relay's `#adjudicated` latch
+  // already suppresses a REPEATED instruction for the same origin, so a test using the same
+  // wording three times would pass on the latch rather than on the fix -- which is why the
+  // three above are distinct restatements. This asserts the other half: the human-rank
+  // adjudication that rides with a resumed instruction never appears, so no pause was
+  // raised and silently resolved.
+  assert.ok(
+    !impl.received.some((m) => m.includes('I am allowing the advisor')),
+    'no conflict was raised at all, rather than raised and adjudicated',
+  )
+  assert.equal(relay.log.filter((m) => m.kind === 'instruction').length, 3)
+
+  // And all three actually reached the implementer, rather than the run being quiet because
+  // it stalled. Delivery is the half a suppression bug would also break.
+  for (const [n, instruction] of [first, second, third].entries()) {
+    assert.ok(
+      impl.received.some((m) => m.includes(instruction)),
+      `instruction ${n + 1} was delivered`,
+    )
+    assert.ok(
+      relay.log.some((m) => m.kind === 'instruction' && m.text.includes(instruction)),
+      `instruction ${n + 1} was recorded as delivered`,
+    )
+  }
+})
+
 test('an adjudicated conflict is not raised again for the same instruction', async (t) => {
   // Same rule as a declined rotation candidate: a decision the human has already made must
   // not re-present itself, or the pause becomes noise and stops being read.
