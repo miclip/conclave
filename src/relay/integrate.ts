@@ -55,8 +55,11 @@
  */
 
 import { execFileSync, spawnSync } from 'node:child_process'
+import type { Verdict } from '../contract/outcome.ts'
 import { checkCommand, checkRelevance, type CheckRelevance, type CheckSpec } from '../rotation/record.ts'
 import {
+  renderTreeState,
+  treeState,
   writeManifest,
   type SeatWorktree,
   type WorktreeManifest,
@@ -70,6 +73,65 @@ export interface BoundaryMeta {
   seq: number
   /** `Task.origin` — the advisor turn whose reply produced this task. */
   advisorTurn: number
+  /**
+   * How the turn that produced this work ended, already resolved through supersession.
+   *
+   * `TaskRuntime.end.verdict` and nothing else -- passed IN rather than read here, because the
+   * only correct answer to "how did that turn end" is the one the relay already graded. A
+   * boundary that re-read the latest event would sometimes disagree with the run's own record,
+   * and the case it would disagree on is exactly the one this field exists for: a verdict a
+   * late revision withdrew.
+   *
+   * Optional because a caller may not have one, and an absent verdict adds nothing rather than
+   * being guessed at. See `turnEndTrailer`.
+   */
+  turnEnd?: Verdict | undefined
+}
+
+/**
+ * The trailer a commit earns when the turn behind it ended UNCERTAIN, or nothing.
+ *
+ * The boundary commit is a snapshot. It has to be: no bounded signal can prove a child has
+ * stopped writing, so a boundary that waited for one would wait forever on exactly the turns
+ * that need it most. What can be recorded is that the snapshot was taken under that doubt --
+ * and recorded in the one place that outlives the run, is immutable, and travels with the work
+ * rather than beside it.
+ *
+ * Deliberately NOT a gate. Refusing to merge an uncertain turn would strand every one of them
+ * on a condition nothing can ever discharge, which is a worse failure than a merge carrying a
+ * caveat: the work would be neither integrated nor recoverable without an operator reading a
+ * manifest. The trailer says what is true and lets the run continue.
+ *
+ * Only `uncertain`, and precisely because of what that confidence means: absence of terminal
+ * evidence. Nothing said the turn ended. The other three all rest on something -- `proven` on a
+ * positive signal from the child, `inferred` on a composite of signals, `assumed` on the
+ * orchestrator's own bookkeeping, which is explicitly unverifiable from the child but is still
+ * a record of something this process DID. Only `uncertain` rests on nothing at all, and that is
+ * the case a commit has to carry. A trailer on every commit would be noise a reader learns to
+ * skip, which is how the one that mattered gets skipped too.
+ */
+export function turnEndTrailer(verdict: Verdict | undefined): string {
+  if (verdict?.confidence !== 'uncertain') return ''
+  return `Conclave-Turn-End: ${verdict.outcome} (uncertain)\n`
+}
+
+/**
+ * The same fact, for the operator notice rather than for the commit.
+ *
+ * A trailer is found by someone already reading `git log`. The notice is what reaches a human
+ * who is not, and a merge reported without this reads as an ordinary one.
+ */
+export function uncertainSnapshotNote(verdict: Verdict | undefined): string {
+  if (verdict?.confidence !== 'uncertain') return ''
+  // Boundary-neutral, because the same caveat has to be true on paths where NO commit exists:
+  // a boundary that found a clean tree, and one that threw before `commitSeatWork` ran. Saying
+  // "what was committed is a snapshot" on those was a claim about an object that was never
+  // created -- a false sentence attached to a true warning, which is how a warning stops being
+  // read. What is true on every path is that the boundary ran at all.
+  return (
+    ` Its turn ended ${verdict.outcome} (uncertain), so the boundary ran after an end nothing ` +
+    `confirmed: the child may still have been writing, and any commit it made may be mid-edit or incomplete.`
+  )
 }
 
 /** One configured integration check, as it actually ran against the integration checkout. */
@@ -133,7 +195,11 @@ export function runIntegrationChecks(
 
 export type MergeResult =
   /** The seat wrote nothing this task. Not a failure, and not a merge either. */
-  | { status: 'nothing_to_merge' }
+  | {
+      status: 'nothing_to_merge'
+      /** When the `git status` behind this answer returned. See `observeTree`. */
+      checkedAt: number
+    }
   | {
       status: 'merged'
       seatCommit: string
@@ -186,9 +252,35 @@ function must(cwd: string, args: string[]): string {
   return r.out
 }
 
-/** Anything at all, tracked or not, that this seat has not committed. */
-function dirty(root: string): boolean {
-  return must(root, ['status', '--porcelain', '--untracked-files=all']).trim() !== ''
+/**
+ * One reading of a seat's tree, and the instant it finished.
+ *
+ * A VALUE rather than a question, and that is the whole point of the type. Everything the
+ * boundary decides about a tree -- whether to commit, what to report, what instant to date the
+ * report from -- has to come from the same reading, or the boundary reports one tree while
+ * having acted on another. Two reads a few milliseconds apart look equivalent right up until
+ * the case this module exists for: a child that has not stopped writing.
+ *
+ * The time is stamped when the command RETURNS, so it is when the answer was known rather than
+ * when it was asked for. A timestamp applied later is a different instant wearing this one's
+ * clothes.
+ */
+export interface TreeObservation {
+  /** Anything at all, tracked or not, that this seat has not committed. */
+  dirty: boolean
+  /** When the `git status` behind `dirty` returned. */
+  at: number
+}
+
+/**
+ * Read the tree once.
+ *
+ * Throws, like everything else in this module that reads a tree it is about to act on. A
+ * boundary that cannot see the tree must not proceed as though it had seen an empty one.
+ */
+export function observeTree(root: string): TreeObservation {
+  const out = must(root, ['status', '--porcelain', '--untracked-files=all'])
+  return { dirty: out.trim() !== '', at: Date.now() }
 }
 
 /**
@@ -199,11 +291,30 @@ function dirty(root: string): boolean {
  * be swept into whatever came next. `.gitignore` is still honoured -- this is the seat's own
  * checkout, so what it ignores is the project's own rule.
  *
- * Returns the new commit, or `undefined` when the seat changed nothing. A read-only task is
- * an ordinary outcome at any N and must not look like a failed boundary.
+ * Returns the new commit, or `undefined` when the tree held nothing uncommitted AT THE MOMENT
+ * IT WAS CHECKED. That is weaker than "the seat changed nothing" and the difference matters: a
+ * child that had not finished writing looks identical to one with nothing to say. A read-only
+ * task is an ordinary outcome at any N and must not look like a failed boundary.
+ *
+ * `observed` is that moment, and a caller with one of its own MUST pass it. `integrateSeat`
+ * does, because it reports that observation to an operator: reading the tree here a second
+ * time would let this return `undefined` on the strength of a reading the caller never saw,
+ * and the caller would then date its "no changes were present" notice from the reading that
+ * said the opposite. The default is for direct callers, who have no such second answer to
+ * contradict -- they get their own reading, and it is the only one.
+ *
+ * When the passed observation says dirty and the tree has since gone clean, `git commit` finds
+ * nothing to commit and this THROWS. That is the honest outcome and it is deliberate: the run
+ * cannot say what happened in that window, and a boundary that reported a tidy no-op would be
+ * claiming it could. The relay's error path already handles it -- the seat blocks, the tree is
+ * retained, and the operator is told what is in it.
  */
-export function commitSeatWork(seat: SeatWorktree, meta: BoundaryMeta): string | undefined {
-  if (!dirty(seat.worktreePath)) return undefined
+export function commitSeatWork(
+  seat: SeatWorktree,
+  meta: BoundaryMeta,
+  observed: TreeObservation = observeTree(seat.worktreePath),
+): string | undefined {
+  if (!observed.dirty) return undefined
   must(seat.worktreePath, ['add', '-A'])
   // Trailers rather than prose: the point is that `git log` alone attributes a commit to a
   // decision, and a reader grepping for a task id should not have to parse a sentence.
@@ -212,7 +323,8 @@ export function commitSeatWork(seat: SeatWorktree, meta: BoundaryMeta): string |
     `Conclave-Task: ${meta.taskId}\n` +
     `Conclave-Task-Seq: ${meta.seq}\n` +
     `Conclave-Seat: ${seat.seatId}\n` +
-    `Conclave-Advisor-Turn: ${meta.advisorTurn}\n`
+    `Conclave-Advisor-Turn: ${meta.advisorTurn}\n` +
+    turnEndTrailer(meta.turnEnd)
   must(seat.worktreePath, ['commit', '--no-verify', '-m', message])
   return must(seat.worktreePath, ['rev-parse', 'HEAD']).trim()
 }
@@ -310,7 +422,10 @@ export interface IntegrationChecks {
  * Checks run only after a merge that SUCCEEDED, and only when they are configured. A blocked
  * merge left the checkout exactly where it was, so checking it would be checking the previous
  * merge's result a second time and reporting the answer against this seat's task; and a
- * boundary with nothing to merge changed nothing at all.
+ * boundary that found nothing to merge left the integration checkout untouched, so there is
+ * nothing about it that a check has not already answered. That is a statement about the
+ * CHECKOUT, not about the seat: what the seat did or did not do is not established by one
+ * `git status`, and `commitSeatWork` says why.
  */
 export function integrateSeat(
   manifest: WorktreeManifest,
@@ -319,7 +434,14 @@ export function integrateSeat(
   integration: IntegrationChecks = {},
 ): MergeResult {
   const repoRoot = manifest.integrationRoot
-  const seatCommit = commitSeatWork(seat, meta)
+  // ONE reading, and it is the one everything below is built from: whether there was anything
+  // to commit, and the instant `nothing_to_merge` is dated from. Passing it into
+  // `commitSeatWork` rather than letting that function read again is the whole of it -- with
+  // two readings, a tree that went clean in between would return `undefined` from the second
+  // while this outcome carried the timestamp of the first, and the notice would report an
+  // observation of "no changes" at an instant when the tree was full of them.
+  const observed = observeTree(seat.worktreePath)
+  const seatCommit = commitSeatWork(seat, meta, observed)
 
   // A read-only task on a seat that is already contained in the integration HEAD has nothing
   // to cross this boundary. Said as its own outcome rather than run through `git merge` for an
@@ -328,7 +450,7 @@ export function integrateSeat(
   const contained = run(repoRoot, ['merge-base', '--is-ancestor', seat.branch, 'HEAD']).ok
   if (seatCommit === undefined && contained) {
     writeManifest(manifest)
-    return { status: 'nothing_to_merge' }
+    return { status: 'nothing_to_merge', checkedAt: observed.at }
   }
 
   const result = mergeIntoIntegration(repoRoot, seat, meta)
@@ -352,8 +474,25 @@ export function integrateSeat(
   // `baseSha` is NOT touched. It records the integration HEAD this worktree was created from
   // and it is the fixed point a recovering operator diffs against; moving it forward with the
   // run would make `baseSha..branch` empty on a seat that is full of work.
-  if (dirty(seat.worktreePath)) {
-    notes.push(`${seat.seatId} was still dirty after its boundary commit; left on its own branch`)
+  //
+  // Read ONCE, and the same value both decides and describes. `dirty()` followed by a separate
+  // render was two readings: the branch could be taken on a tree that held work and the
+  // sentence written from a tree that no longer did, producing "was still dirty ... nothing
+  // else is uncommitted" -- a note contradicting itself inside one line.
+  const after = treeState(seat.worktreePath)
+  if (!after.readable) {
+    // The same posture as `observeTree`. A tree this cannot see is not a tree it may reset.
+    throw new Error(`git status --porcelain failed in ${seat.worktreePath} after the boundary commit`)
+  }
+  if (after.unclean.length > 0) {
+    // Named, by the same renderer every other tree notice uses. "still dirty" was true and
+    // useless: it is reported on the MERGED path, where everything else the operator reads
+    // says the work went through, so a line that does not say what was left behind is a line
+    // that reads as a formality.
+    notes.push(
+      `${seat.seatId} was still dirty after its boundary commit and is left on its own branch: ` +
+        `${renderTreeState(after, seat.worktreePath)}`,
+    )
   } else if (must(seat.worktreePath, ['rev-parse', 'HEAD']).trim() !== head) {
     const reset = run(seat.worktreePath, ['reset', '--hard', head])
     if (!reset.ok) notes.push(`${seat.seatId} could not be reset onto ${head}: ${reset.out}`)

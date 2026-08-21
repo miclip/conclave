@@ -36,12 +36,19 @@ import {
   nextRunId,
   recoveryLines,
   seatCwd,
+  uncommittedClause,
   unwindSeatWorktrees,
   writeManifest,
   type WorktreeManifest,
 } from '../workspace/worktrees.ts'
 import { CheckLane } from './checkLane.ts'
-import { failedRequired, integrateSeat, integrationHead, type IntegrationCheckResult } from './integrate.ts'
+import {
+  failedRequired,
+  integrateSeat,
+  integrationHead,
+  uncertainSnapshotNote,
+  type IntegrationCheckResult,
+} from './integrate.ts'
 import {
   envelope,
   type Audience,
@@ -5313,8 +5320,11 @@ export class Relay {
    * moved their HEAD without saying so is indistinguishable from one that did nothing.
    *
    * A conflict does NOT stop the run and does not pause it. Only that seat is marked; its
-   * branch and tree are untouched, its work is committed and intact, and resolution is work
-   * the advisor has to dispatch back to that seat. Blocking every other seat on one seat's
+   * branch and tree are untouched, what it committed is intact, and resolution is work
+   * the advisor has to dispatch back to that seat. What the notices say about the tree is
+   * READ from the tree at the moment they are written -- see `uncommittedClause` -- because a
+   * seat's child goes on writing after its boundary commit and a notice that asserted
+   * otherwise would be the reason an operator stopped looking. Blocking every other seat on one seat's
    * conflict would be lockstep again, reached from a different direction. Making the blocked
    * seat undispatchable, and raising this onto a decision queue the advisor services, is the
    * seat-block machinery — not built here.
@@ -5346,6 +5356,18 @@ export class Relay {
    * -- nothing can interleave inside this -- and it is also why a check command freezes every
    * other seat's I/O for as long as it runs, which is a separate problem this does not fix.
    */
+  /**
+   * The snapshot caveat as an evidence LINE, or nothing at all.
+   *
+   * `evidence` is a list of statements a human reads at a pause, so the caveat arrives as its
+   * own entry rather than glued to the end of another one -- an operator scanning the list
+   * would not find it inside a sentence about branches. Trimmed of the leading space the prose
+   * form carries for its own call sites.
+   */
+  #snapshotEvidence(note: string): string[] {
+    return note === '' ? [] : [note.trim()]
+  }
+
   #mergeAndCheck(task: Task, seatId: string): BoundaryOutcome {
     const manifest = this.#worktrees
     if (!manifest) return { kind: 'clear' }
@@ -5354,6 +5376,19 @@ export class Relay {
     const note = (text: string): void => {
       this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text })
     }
+    // The verdict the run GRADED, not the latest event. `#grade` resolves supersession before
+    // any boundary runs -- a withdrawn `timed_out` that a late Stop replaced is already the
+    // replacement by now -- so reading it here is reading the run's own answer rather than
+    // asking git's caller to form a second opinion. Absent when a caller reached the boundary
+    // without one, and an absent verdict adds nothing rather than being guessed at.
+    const turnEnd = this.#taskRuntime.get(task.id)?.end?.verdict
+    // Said once, so the commit trailer and every notice below cannot describe different turns.
+    // The rule is uniform on purpose: EVERY surface this function uses to tell a human or the
+    // advisor what a boundary did carries the caveat when the turn was uncertain. A caveat on
+    // the routing note alone is worse than none, because the two readers who can act on it --
+    // the advisor dispatching the repair, and the operator reading a halt -- are the two who
+    // would not have seen it.
+    const snapshot = uncertainSnapshotNote(turnEnd)
     try {
       const result = integrateSeat(
         manifest,
@@ -5362,6 +5397,7 @@ export class Relay {
           taskId: task.id,
           seq: task.seq,
           advisorTurn: task.origin,
+          turnEnd,
         },
         // The run's already-configured checks, against the tree the merge just produced. No
         // second option to arm: an operator who has said what "working" means for this
@@ -5374,9 +5410,19 @@ export class Relay {
       )
       if (result.status !== 'blocked') {
         if (result.status === 'nothing_to_merge') {
-          note(`${seatId} changed nothing for ${task.id}; nothing to integrate`)
+          // NOT "changed nothing", which is a claim about the whole turn and was never checked.
+          // What was checked is one `git status` at one instant, and a child that had not
+          // finished writing is indistinguishable from one with nothing to say -- so the note
+          // says what was observed and when, and nothing more.
+          note(
+            `${seatId} had no uncommitted changes when the boundary read its tree at ` +
+              `${new Date(result.checkedAt).toISOString()} for ${task.id}; nothing was integrated.${snapshot}`,
+          )
         } else {
-          note(`${seatId}'s work for ${task.id} merged into ${manifest.integrationRoot} at ${result.integrationSha.slice(0, 12)}`)
+          note(
+            `${seatId}'s work for ${task.id} merged into ${manifest.integrationRoot} at ` +
+              `${result.integrationSha.slice(0, 12)}.${snapshot}`,
+          )
           for (const n of result.notes) note(n)
         }
         // A boundary that got through IS the repair, whatever the instruction that produced it
@@ -5401,9 +5447,15 @@ export class Relay {
         attempts: repeat ? prior.attempts + 1 : 1,
       })
       const conflicting = result.paths.length > 0 ? ` Conflicting: ${result.paths.join(', ')}.` : ''
+      // Read the tree, once, and say what is in it. A conflict is aborted some time after the
+      // boundary commit and the seat's child has been alive throughout, so "its work is
+      // committed and nothing has been discarded" -- what all three of these notices used to
+      // say -- was a claim nothing had checked. Read here rather than per notice so the note,
+      // the advisor's instruction and the halt evidence cannot describe different trees.
+      const held = uncommittedClause(tree.worktreePath)
       note(
         `${seatId}'s work for ${task.id} could not be merged and the integration checkout was ` +
-          `left as it was. Its work is committed on ${tree.branch} and nothing has been discarded.` +
+          `left as it was. What it committed is intact on ${tree.branch}, and ${held}.${snapshot}` +
           `${conflicting} ${result.detail}`,
       )
       if (!repeat) {
@@ -5411,11 +5463,11 @@ export class Relay {
         // the terms it has to act in: the conflict is the seat's to resolve, in the seat's own
         // tree, and the next instruction goes there whether or not the advisor names it.
         this.#tellLead(
-          `${seatId}'s work is committed on ${tree.branch} but will not merge into the integration ` +
+          `${seatId}'s committed work is on ${tree.branch} but will not merge into the integration ` +
             `checkout.${conflicting} It is blocked and takes no other work until this clears. Your next ` +
             `instruction goes to ${seatId}: tell it to merge the current integration HEAD into its own ` +
             `branch, resolve the conflict IN ITS OWN WORKTREE, verify whatever you think that needs, and ` +
-            `report. Nothing has been lost and no other seat is affected.${this.#addressBlocked(seatId)}`,
+            `report. As of now ${held}.${snapshot} No other seat is affected.${this.#addressBlocked(seatId)}`,
         )
       }
       return {
@@ -5427,8 +5479,9 @@ export class Relay {
           `after a resolution turn.${conflicting}`,
         evidence: [
           `attempt ${repeat ? prior.attempts + 1 : 1} against the same integration parent ${result.parent.slice(0, 12)}`,
-          `the work is committed on ${tree.branch} and its worktree ${tree.worktreePath} is retained`,
+          `what it committed is on ${tree.branch}, and ${held}; that worktree is retained`,
           `no other seat is blocked by this`,
+          ...this.#snapshotEvidence(snapshot),
         ],
       }
     } catch (e) {
@@ -5439,7 +5492,12 @@ export class Relay {
       // unknown boundary is treated exactly as a failed one, because the safe reading of "I
       // could not tell" is not "it was fine".
       const detail = (e as Error).message
-      note(`${seatId}'s boundary for ${task.id} did not complete: ${detail}`)
+      // The same read as the conflict path, and here it carries more: a boundary that THREW
+      // may not have got as far as the commit at all, so the tree is the only account of what
+      // the seat still holds. Taken before the manifest write, so the note and the manifest
+      // describe the same moment.
+      const held = uncommittedClause(tree.worktreePath)
+      note(`${seatId}'s boundary for ${task.id} did not complete: ${detail}. ${held}.${snapshot}`)
       // Best-effort, and its failure is not fatal: the tree is retained either way by the
       // cleanup rules, and a manifest that could not be written is one more thing the operator
       // is told about rather than a reason to lose the seat state.
@@ -5458,8 +5516,8 @@ export class Relay {
       this.#blocked.set(seatId, { parent, paths: [], attempts: repeat ? prior.attempts + 1 : 1 })
       if (!repeat) {
         this.#tellLead(
-          `${seatId}'s work could not be integrated: the boundary itself failed (${detail}). Its work is ` +
-            `on ${tree.branch} and nothing has been discarded. It is blocked and takes no other work ` +
+          `${seatId}'s work could not be integrated: the boundary itself failed (${detail}). Whatever it ` +
+            `committed is on ${tree.branch}, and ${held}.${snapshot} It is blocked and takes no other work ` +
             `until this clears. Your next instruction goes to ${seatId}: tell it to get its branch into ` +
             `a state that merges cleanly, working IN ITS OWN WORKTREE, and report.${this.#addressBlocked(seatId)}`,
         )
@@ -5472,7 +5530,8 @@ export class Relay {
         evidence: [
           `attempt ${repeat ? prior.attempts + 1 : 1} against integration parent ${parent.slice(0, 12)}`,
           `the boundary raised an error rather than reporting a conflict, so what merged is unknown`,
-          `${tree.worktreePath} is retained and its branch ${tree.branch} is untouched`,
+          `its branch ${tree.branch} is untouched, its worktree is retained, and ${held}`,
+          ...this.#snapshotEvidence(snapshot),
         ],
       }
     }

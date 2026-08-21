@@ -323,3 +323,57 @@ test('mergeIntoIntegration on its own reports the merge without touching the man
     assert.equal(readManifest(repo, manifest.runId)?.seats[0]?.mergeState, 'clean')
   })
 })
+
+/**
+ * The one fact a `nothing_to_merge` boundary has, dated from inside the boundary.
+ *
+ * The outcome says the tree held nothing uncommitted, and that is true of an INSTANT rather
+ * than of the turn: after an uncertain end a child that had not finished writing looks exactly
+ * like one with nothing to say. So the instant is part of the answer, and it has to be the one
+ * the `git status` behind it returned at -- a caller stamping `Date.now()` while formatting the
+ * notice would report a different moment wearing this one's clothes.
+ */
+test('a boundary that found nothing dates the observation from inside the boundary', () => {
+  withSeats(['a'], (repo, manifest, seats) => {
+    const before = Date.now()
+    const result = integrateSeat(manifest, seats.a!, META)
+    const after = Date.now()
+
+    assert.equal(result.status, 'nothing_to_merge')
+    assert.ok(result.status === 'nothing_to_merge' && typeof result.checkedAt === 'number')
+    const at = (result as { checkedAt: number }).checkedAt
+    assert.ok(at >= before && at <= after, 'the time must come from the call, not from its caller')
+  })
+})
+
+/**
+ * And when the boundary DID commit, what it left behind is named rather than counted.
+ *
+ * This is the merged path, where every other line an operator reads says the work went through.
+ * A note that says only "still dirty" there is the single line saying otherwise, and it does
+ * not say what was left -- so it reads as a formality and gets treated as one.
+ */
+test('a tree left dirty after its boundary commit is reported by name', () => {
+  withSeats(['a'], (repo, manifest, seats) => {
+    // `post-commit` survives `commit --no-verify`, so this fires in the one window the
+    // post-merge check exists to guard: after `add -A` has taken its snapshot, before the
+    // boundary reports. `add -A` cannot have swept up something written later.
+    writeFileSync(
+      join(repo, '.git', 'hooks', 'post-commit'),
+      `#!/bin/sh\n[ "$(git rev-parse --abbrev-ref HEAD)" = "${seats.a!.branch}" ] || exit 0\necho late > post-commit-write.txt\n`,
+      { mode: 0o755 },
+    )
+    writeFileSync(join(seats.a!.worktreePath, 'shared.txt'), 'seat work\n')
+
+    const result = integrateSeat(manifest, seats.a!, META)
+    assert.equal(result.status, 'merged', 'the work still merges; the dirt is beside it, not in the way')
+    const notes = (result.status === 'merged' ? result.notes : []).join('\n')
+    assert.match(notes, /still dirty after its boundary commit/)
+    assert.ok(notes.includes('post-commit-write.txt'), 'the note must name what it found')
+    assert.match(notes, /1 untracked/)
+    assert.ok(notes.includes(seats.a!.worktreePath), 'and say which tree it read')
+
+    // Kept, not swept: the seat is left on its own branch rather than reset onto the merge.
+    assert.equal(readFileSync(join(seats.a!.worktreePath, 'post-commit-write.txt'), 'utf8'), 'late\n')
+  })
+})

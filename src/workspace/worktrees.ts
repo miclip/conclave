@@ -218,7 +218,12 @@ function tryGit(cwd: string, args: string[]): { ok: boolean; out: string } {
 
 /** `git status --porcelain`, unfiltered and un-swallowed. One reader, so the rules agree. */
 function porcelain(root: string): { code: string; path: string }[] {
-  return git(root, ['status', '--porcelain', '--untracked-files=all'])
+  return parseStatus(git(root, ['status', '--porcelain', '--untracked-files=all']))
+}
+
+/** The parse alone, so the throwing reader and the best-effort one cannot disagree. */
+function parseStatus(out: string): { code: string; path: string }[] {
+  return out
     .split('\n')
     .filter((l) => l.trim())
     .map((l) => ({ code: l.slice(0, 2), path: l.slice(3) }))
@@ -246,9 +251,78 @@ function classify(code: string): UncleanPath['kind'] {
  * worktrees themselves live there, so counting it would make the first run block the second.
  */
 export function uncleanPaths(repoRoot: string): UncleanPath[] {
-  return porcelain(repoRoot)
-    .filter((e) => !e.path.startsWith(OWN_STATE))
-    .map((e) => ({ code: e.code, path: e.path, kind: classify(e.code) }))
+  return described(porcelain(repoRoot).filter((e) => !e.path.startsWith(OWN_STATE)))
+}
+
+/** The shared classify step, so both readers describe the same line the same way. */
+function described(entries: { code: string; path: string }[]): UncleanPath[] {
+  return entries.map((e) => ({ code: e.code, path: e.path, kind: classify(e.code) }))
+}
+
+/**
+ * What a tree holds that is not committed, read now, without throwing.
+ *
+ * `uncleanPaths` is the version for a caller that is about to refuse a start: git failing
+ * there IS the answer and an exception is the right shape for it. This one exists for the
+ * callers that are already reporting a failure -- a kept worktree, an aborted merge, a
+ * boundary that threw -- where a second exception would replace the diagnosis with its own.
+ * `readable: false` is a distinct answer from "clean", and the notices keep it distinct.
+ */
+export interface TreeState {
+  /** False when `git status` could not be run in the tree at all. */
+  readable: boolean
+  /** Empty when the tree is clean, and also when it could not be read. Check `readable`. */
+  unclean: UncleanPath[]
+}
+
+export function treeState(worktreePath: string): TreeState {
+  const r = tryGit(worktreePath, ['status', '--porcelain', '--untracked-files=all'])
+  if (!r.ok) return { readable: false, unclean: [] }
+  // Unfiltered, unlike `uncleanPaths`. That function drops `.conclave/` because a run must not
+  // block the next one on its own bookkeeping; this one is reporting to an operator who is
+  // about to decide whether a tree can go, and the retain rule below already keys off the raw
+  // status. Describing a smaller set than the one that caused the retain would be the same
+  // kind of untruth this whole change is removing.
+  return { readable: true, unclean: described(parseStatus(r.out)) }
+}
+
+/** How many paths a notice names before it stops naming them. */
+const NAMED = 10
+
+/**
+ * One clause about a seat's tree, for a notice that would otherwise assert its work is safe.
+ *
+ * Every kept-worktree and merge-conflict notice used to end in some form of "the work is
+ * committed on its branch and nothing has been discarded". That sentence is a claim about a
+ * tree NOBODY READ. A seat's boundary commit is a snapshot: the child is still alive and can
+ * write after it, a merge that conflicts is aborted long after the commit, and `.gitignore`d
+ * files are never in the commit at all. So an operator who was told "nothing has been
+ * discarded" and then ran `git worktree remove --force` on the strength of it could lose real
+ * work -- the notice would have been the reason they stopped looking.
+ *
+ * This reads the tree at the moment the notice is written and says what is actually in it.
+ * A fragment rather than a sentence: it is appended after a semicolon at four call sites, and
+ * one shared renderer is what stops those four from drifting apart.
+ */
+export function uncommittedClause(worktreePath: string): string {
+  return renderTreeState(treeState(worktreePath), worktreePath)
+}
+
+/** The wording alone, for a caller that has already read the tree and must not read it twice. */
+export function renderTreeState(state: TreeState, worktreePath: string): string {
+  if (!state.readable) return `whether it still holds uncommitted work could not be read from ${worktreePath}`
+  if (state.unclean.length === 0) return `nothing else in ${worktreePath} is uncommitted`
+  const counts: string[] = []
+  for (const kind of ['staged', 'modified', 'untracked'] as const) {
+    const n = state.unclean.filter((u) => u.kind === kind).length
+    if (n > 0) counts.push(`${n} ${kind}`)
+  }
+  const named = state.unclean.slice(0, NAMED).map((u) => u.path)
+  const more = state.unclean.length > named.length ? `, and ${state.unclean.length - named.length} more` : ''
+  return (
+    `${worktreePath} ALSO holds uncommitted work that no commit and no merge carries: ` +
+    `${counts.join(', ')} (${named.join(', ')}${more})`
+  )
 }
 
 /**
@@ -490,7 +564,15 @@ function recovery(repoRoot: string, seat: SeatWorktree): string[] {
  */
 function blockedFrom(repoRoot: string, seat: SeatWorktree): string | undefined {
   if (seat.mergeState === 'merge_blocked') {
-    return 'its merge conflicted and was aborted; the work is committed on its branch and nothing has been discarded'
+    // The tree is READ here rather than described from the manifest. `merge_blocked` records
+    // what happened at the boundary; it says nothing about what the seat's child wrote in the
+    // seconds after its boundary commit, and the sentence this used to return -- "the work is
+    // committed on its branch and nothing has been discarded" -- was a claim about a tree
+    // nobody had looked at since.
+    return (
+      'its merge conflicted and was aborted; what it committed is intact on its branch, and ' +
+      uncommittedClause(seat.worktreePath)
+    )
   }
   if (seat.mergeState === 'retained') return 'it was already retained by an earlier cleanup'
   if (!existsSync(seat.worktreePath)) {
@@ -498,9 +580,12 @@ function blockedFrom(repoRoot: string, seat: SeatWorktree): string | undefined {
     // network mount or a half-finished checkout, and the branch may still hold the only copy.
     return 'its directory is missing, which this cannot tell apart from a mount that is not there yet'
   }
-  const status = tryGit(seat.worktreePath, ['status', '--porcelain', '--untracked-files=all'])
-  if (!status.ok) return 'its worktree could not be read, so whether it holds work is unknown'
-  if (status.out.trim() !== '') return 'it still holds uncommitted work'
+  const state = treeState(seat.worktreePath)
+  if (!state.readable) return 'its worktree could not be read, so whether it holds work is unknown'
+  // Named, not counted. "it still holds uncommitted work" told an operator to go looking
+  // without saying where, and a retained tree they cannot triage in one command is a tree
+  // they eventually remove unexamined.
+  if (state.unclean.length > 0) return renderTreeState(state, seat.worktreePath)
   if (!mergedIntoHead(repoRoot, seat.branch)) {
     return 'its branch holds commits the integration checkout does not have'
   }

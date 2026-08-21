@@ -1118,7 +1118,7 @@ export class ClaudePtyHookAdapter implements AgentSession {
       this.#pendingPrompt = { resolve, reject, prompt: message }
     })
     // Serialized against cancel() and decidePermission() by the shared queue.
-    const before = await this.#transcriptTurns()
+    const before = await this.#promptOccurrences(message)
     await this.#input.submit(message)
 
     // Did it actually arrive? `submit()` resolving means this process TYPED -- the pty took the
@@ -1141,7 +1141,7 @@ export class ClaudePtyHookAdapter implements AgentSession {
       keyed.then(() => 'hooked' as const),
       new Promise<'late'>((r) => setTimeout(() => r('late'), SUBMIT_LANDED_MS)),
     ])
-    if (early === 'late' && !(await this.#promptLanded(before, 0))) {
+    if (early === 'late' && !(await this.#promptLanded(message, before, 0))) {
       // A modal ate it. Checked before either repair, because both of them type at whatever has
       // focus, and typing a prompt into a settings dialog is how a keystroke gets turned into a
       // configuration change nobody asked for. Esc declines and returns focus to the composer.
@@ -1158,10 +1158,10 @@ export class ClaudePtyHookAdapter implements AgentSession {
         })
         await new Promise((r) => setTimeout(r, 500))
         await this.#input.submit(message, 're-typed: a setup modal had swallowed the send')
-        if (await this.#promptLanded(before, SUBMIT_REPAIR_MS)) return await keyed
+        if (await this.#promptLanded(message, before, SUBMIT_REPAIR_MS)) return await keyed
       }
       await this.#input.submit('', 'bare Enter: prompt had not reached the transcript')
-      if (!(await this.#promptLanded(before, SUBMIT_REPAIR_MS))) {
+      if (!(await this.#promptLanded(message, before, SUBMIT_REPAIR_MS))) {
         // Now, and only now, re-type the whole message. The two checks above have established
         // what makes this safe: the text is not in the composer, because if it were, the bare
         // Enter would have submitted it and the transcript would show a turn. So there is
@@ -1169,7 +1169,7 @@ export class ClaudePtyHookAdapter implements AgentSession {
         // the composer empty rather than holding an unsubmitted line, so the weaker repair
         // cannot recover it and the stronger one cannot duplicate.
         await this.#input.submit(message, 're-typed: composer was empty after bare Enter')
-        if (!(await this.#promptLanded(before, SUBMIT_REPAIR_MS))) {
+        if (!(await this.#promptLanded(message, before, SUBMIT_REPAIR_MS))) {
           throw new Error(SEND_NOT_ACCEPTED)
         }
       }
@@ -1189,28 +1189,48 @@ export class ClaudePtyHookAdapter implements AgentSession {
   }
 
   /**
-   * Turns the child's own transcript currently shows.
+   * How many turns the child's transcript shows whose prompt is EXACTLY this message.
    *
-   * Zero before the view exists, which is correct rather than convenient: a send before the
-   * transcript is readable cannot be verified, and `#promptLanded` treats "cannot see" as
+   * `undefined` before the view exists, which is correct rather than convenient: a send before
+   * the transcript is readable cannot be verified, and `#promptLanded` treats "cannot see" as
    * "landed" so an unverifiable send behaves exactly as it did before this check existed.
+   *
+   * A count of matches rather than an index, because the transcript is not append-only from
+   * this side of it: a compaction rewrites the view, and an index captured before a send would
+   * point somewhere else afterwards. A count of a specific string survives that, and it also
+   * gives the right answer for the case an index cannot express -- the same instruction sent
+   * twice, where the second send's witness is a SECOND occurrence and not the first one.
    */
-  async #transcriptTurns(): Promise<number | undefined> {
+  async #promptOccurrences(message: string): Promise<number | undefined> {
     if (!this.#view) return undefined
     try {
-      return (await this.#view.snapshot()).turns.length
+      return (await this.#view.snapshot()).turns.filter((t) => t.prompt === message).length
     } catch {
       return undefined
     }
   }
 
-  /** Whether a new turn has appeared since `before`, polled until `budgetMs` runs out. */
-  async #promptLanded(before: number | undefined, budgetMs: number): Promise<boolean> {
+  /**
+   * Whether THIS prompt has appeared in the transcript since `before`, polled until `budgetMs`.
+   *
+   * The count used to be of turns, not of this prompt, and that is a different claim: it says
+   * the transcript grew, and a transcript grows for reasons that have nothing to do with the
+   * send. The case that matters is the one this check exists for -- a prior turn that ended
+   * UNCERTAIN and is in fact still generating. Such a turn goes on appending to the transcript
+   * while the new prompt is being typed into a child that is not accepting input, so a
+   * turn-count check sees growth, calls the send landed, and hands back the exact false
+   * positive #120 was about: the text was swallowed, nothing is wrong with the hooks, and the
+   * run is told the child accepted it.
+   *
+   * Matching the prompt text is what makes the witness independent of the prior turn. Nothing
+   * the still-generating turn writes carries the new message as its `prompt`.
+   */
+  async #promptLanded(message: string, before: number | undefined, budgetMs: number): Promise<boolean> {
     // No baseline means no view, and a check that cannot run must not fail the send.
     if (before === undefined) return true
     const deadline = Date.now() + budgetMs
     for (;;) {
-      const now = await this.#transcriptTurns()
+      const now = await this.#promptOccurrences(message)
       if (now === undefined || now > before) return true
       if (Date.now() >= deadline) return false
       await new Promise((r) => setTimeout(r, 400))

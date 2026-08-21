@@ -378,3 +378,136 @@ test('every seat worktree can be given the empty .codex trigger, idempotently', 
     assert.deepEqual(uncleanPaths(repo), [])
   })
 })
+
+/**
+ * The retain notices are the operator's only account of a tree, so they have to be read FROM
+ * the tree.
+ *
+ * A seat commits at its boundary and then goes on living: its child is still running, and a
+ * conflict is detected and aborted some time after the commit that produced it. So the state
+ * recorded in the manifest -- `merge_blocked` -- is a fact about a moment that has passed, and
+ * the sentence this used to return, "the work is committed on its branch and nothing has been
+ * discarded", was a claim about a tree nobody had looked at since. An operator who believed it
+ * and ran `git worktree remove --force` would lose whatever arrived afterwards, and the notice
+ * would be the reason they stopped looking.
+ *
+ * Every write below happens AFTER the seat's commit, which is the case the old wording got
+ * wrong. The assertions are on content that can only have come from reading the tree: file
+ * names the notice could not have guessed.
+ */
+test('a blocked seat is described from its tree, not from its manifest state', () => {
+  withRepo((repo) => {
+    const manifest = createSeatWorktrees({ repoRoot: repo, runId: 'r1', seatIds: ['blocked'] })
+    const seat = manifest.seats[0]!
+
+    // The boundary commit. Everything the seat had at this instant IS on the branch.
+    writeFileSync(join(seat.worktreePath, 'work.txt'), 'done\n')
+    git(seat.worktreePath, 'add', '-A')
+    git(seat.worktreePath, 'commit', '-m', 'seat work', '--quiet')
+    seat.mergeState = 'merge_blocked'
+
+    // And then the seat keeps working, which is the whole point: three kinds of change, none
+    // of them in the commit above and none of them in any merge.
+    writeFileSync(join(seat.worktreePath, 'staged-after.txt'), 'staged after the commit\n')
+    git(seat.worktreePath, 'add', 'staged-after.txt')
+    writeFileSync(join(seat.worktreePath, 'work.txt'), 'done, then changed again\n')
+    writeFileSync(join(seat.worktreePath, 'untracked-after.txt'), 'never added\n')
+
+    const report = cleanupSeatWorktrees(manifest)
+    assert.deepEqual(report.removed, [], 'a blocked seat is retained whatever its tree holds')
+    const why = report.retained[0]!.why
+
+    assert.match(why, /conflicted/, 'the reason it was kept is still the reason it was kept')
+    assert.ok(
+      !/nothing has been discarded/.test(why),
+      'a reassurance about a tree nothing read is exactly what this must never say again',
+    )
+    // Named, because a count sends an operator looking without saying where.
+    assert.match(why, /1 staged, 1 modified, 1 untracked/)
+    for (const named of ['staged-after.txt', 'work.txt', 'untracked-after.txt']) {
+      assert.ok(why.includes(named), `the notice must name ${named}, which only the tree knows`)
+    }
+    assert.ok(why.includes(seat.worktreePath), 'and say which tree it read')
+
+    // Nothing was removed to produce that sentence.
+    assert.equal(readFileSync(join(seat.worktreePath, 'untracked-after.txt'), 'utf8'), 'never added\n')
+    assert.ok(recoveryLines(report).join('\n').includes('untracked-after.txt'))
+  })
+})
+
+/**
+ * The other half: a blocked seat whose tree really is clean must not be described as if it
+ * were dirty. A notice that cried wolf on every retained tree would be ignored on the one that
+ * mattered, which is the same failure from the other side.
+ */
+test('a blocked seat with a clean tree says so, and says which tree it read', () => {
+  withRepo((repo) => {
+    const manifest = createSeatWorktrees({ repoRoot: repo, runId: 'r1', seatIds: ['blocked'] })
+    const seat = manifest.seats[0]!
+    writeFileSync(join(seat.worktreePath, 'work.txt'), 'done\n')
+    git(seat.worktreePath, 'add', '-A')
+    git(seat.worktreePath, 'commit', '-m', 'seat work', '--quiet')
+    seat.mergeState = 'merge_blocked'
+
+    const why = cleanupSeatWorktrees(manifest).retained[0]!.why
+    assert.match(why, /conflicted/)
+    assert.match(why, /what it committed is intact on its branch/)
+    assert.ok(why.includes(`nothing else in ${seat.worktreePath} is uncommitted`))
+    assert.ok(!/ALSO holds/.test(why), 'a clean tree must not be reported as holding work')
+  })
+})
+
+/**
+ * A tree that cannot be read is its own answer, and must not collapse into "clean".
+ *
+ * `merge_blocked` returns before the missing-directory check, so this is the path that would
+ * otherwise assert the work was safe on a branch while the tree it names is not there.
+ */
+test('a blocked seat whose tree cannot be read says that, rather than nothing', () => {
+  withRepo((repo) => {
+    const manifest = createSeatWorktrees({ repoRoot: repo, runId: 'r1', seatIds: ['blocked'] })
+    const seat = manifest.seats[0]!
+    seat.mergeState = 'merge_blocked'
+    rmSync(seat.worktreePath, { recursive: true, force: true })
+
+    const why = cleanupSeatWorktrees(manifest).retained[0]!.why
+    assert.match(why, /could not be read/)
+    assert.ok(why.includes(seat.worktreePath))
+    assert.ok(!/nothing has been discarded/.test(why))
+  })
+})
+
+/**
+ * The generic dirty-retain notice names paths too. "it still holds uncommitted work" was true
+ * and useless: an operator who cannot triage a retained tree in one command eventually removes
+ * it unexamined, which is the loss the retain existed to prevent.
+ */
+test('a retained dirty tree names what is in it, by kind', () => {
+  withRepo((repo) => {
+    const manifest = createSeatWorktrees({ repoRoot: repo, runId: 'r1', seatIds: ['a'] })
+    const seat = manifest.seats[0]!
+    writeFileSync(join(seat.worktreePath, 'README.md'), '# changed\n')
+    writeFileSync(join(seat.worktreePath, 'only-copy.txt'), 'the only copy\n')
+
+    const why = cleanupSeatWorktrees(manifest).retained[0]!.why
+    assert.match(why, /1 modified, 1 untracked/)
+    assert.ok(why.includes('README.md') && why.includes('only-copy.txt'))
+    assert.ok(why.includes(seat.worktreePath))
+  })
+})
+
+/**
+ * Long lists are capped, and the cap SAYS it capped. A notice that silently showed ten of
+ * forty would read as a complete account of the tree.
+ */
+test('a tree holding more than the notice names says how many it left out', () => {
+  withRepo((repo) => {
+    const manifest = createSeatWorktrees({ repoRoot: repo, runId: 'r1', seatIds: ['a'] })
+    const seat = manifest.seats[0]!
+    for (let i = 0; i < 14; i++) writeFileSync(join(seat.worktreePath, `f${i}.txt`), `${i}\n`)
+
+    const why = cleanupSeatWorktrees(manifest).retained[0]!.why
+    assert.match(why, /14 untracked/, 'the count is of everything, not of what was named')
+    assert.match(why, /and 4 more/)
+  })
+})

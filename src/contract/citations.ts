@@ -87,21 +87,21 @@ export const CITED: Record<string, string> = {
   // and `#join` (#71). Repaired rather than deleted: each still points at the thing it was
   // written about, and the one whose LINE no longer says what it said -- `#join` now passes a
   // named context object rather than an inline literal -- is pinned on the new spelling.
-  'src/relay/relay.ts:1895-1897': 'get cwd(): string',
-  'src/relay/relay.ts:2164-2170': 'const ctx = { cwd, watchdogMs: this.#opts.turnWatchdogMs }',
-  'src/relay/relay.ts:2887-2888': "this.#worktreesSeen.add(w)\n    return {",
-  'src/relay/relay.ts:2988': 'NOT ARMED (no checks configured)',
-  'src/relay/relay.ts:3453': 'if (this.#worktreesAtStart) for (const w of worktreePaths',
-  'src/relay/relay.ts:3937': 'resolutionFor(p.subject, { rotationArmed: armed })',
-  'src/relay/relay.ts:4484-4486': 'No rotation checks are configured',
-  'src/relay/relay.ts:333': "onDegradation ?? 'candidate'",
+  'src/relay/relay.ts:1902-1904': 'get cwd(): string',
+  'src/relay/relay.ts:2171-2177': 'const ctx = { cwd, watchdogMs: this.#opts.turnWatchdogMs }',
+  'src/relay/relay.ts:2894-2895': "this.#worktreesSeen.add(w)\n    return {",
+  'src/relay/relay.ts:2995': 'NOT ARMED (no checks configured)',
+  'src/relay/relay.ts:3460': 'if (this.#worktreesAtStart) for (const w of worktreePaths',
+  'src/relay/relay.ts:3944': 'resolutionFor(p.subject, { rotationArmed: armed })',
+  'src/relay/relay.ts:4490-4492': 'No rotation checks are configured',
+  'src/relay/relay.ts:340': "onDegradation ?? 'candidate'",
   // The console's status line, cited by `activeTurn` for the claim its own doc rests on: the
   // footer's notion of "working" is `turn_start` until `turn_end`, and `tool_use` only relabels
   // a turn that is already running. If that ever stops being true, the predicate the relay and
   // `/continue` both send on is no longer the thing the operator is watching.
   'src/repl/session.ts:1062-1075': 'progress.start(e.participant)',
-  'src/relay/relay.ts:5701': 'this.#worktreesAtStart = worktreePaths(this.#opts.cwd)',
-  'src/relay/relay.ts:6410': "subject: { reason: 'turn_incomplete', participant: lead.id }",
+  'src/relay/relay.ts:5760': 'this.#worktreesAtStart = worktreePaths(this.#opts.cwd)',
+  'src/relay/relay.ts:6469': "subject: { reason: 'turn_incomplete', participant: lead.id }",
   // The five below are what the console's `/continue` liveness guard cites for reading a
   // pause's SCOPE rather than `verdictOf` or a rank scan (`seatsToSampleAtPause` in
   // src/repl/session.ts). Two of them pin the ONLY sites that populate `verdictOf` -- the
@@ -115,13 +115,13 @@ export const CITED: Record<string, string> = {
   // below always has, so both sites quote the SAME resolved end. The claim this pin supports is
   // untouched -- these are still the only two that populate `verdictOf`, both `turn_incomplete`
   // -- and the token moved with the thing it points at rather than the pin being dropped.
-  'src/relay/relay.ts:6414': 'verdictOf: { participant: lead.id, endSeq: current.seq },',
-  'src/relay/relay.ts:6531': 'The human has seen your escalation and asked you to continue.',
+  'src/relay/relay.ts:6473': 'verdictOf: { participant: lead.id, endSeq: current.seq },',
+  'src/relay/relay.ts:6590': 'The human has seen your escalation and asked you to continue.',
   // The workstream a conflicted instruction belongs to, named after the seat when exactly one
   // seat could take it -- the N=1 coincidence a scope reader must not mistake for a seat.
-  'src/relay/relay.ts:6694': "reason: 'authority_conflict', workstream:",
-  'src/relay/relay.ts:6793': "subject: { reason: 'implementer_unanswered', participant: seat.id }",
-  'src/relay/relay.ts:6844-6846': "its report could not be read, so there is",
+  'src/relay/relay.ts:6753': "reason: 'authority_conflict', workstream:",
+  'src/relay/relay.ts:6852': "subject: { reason: 'implementer_unanswered', participant: seat.id }",
+  'src/relay/relay.ts:6903-6905': "its report could not be read, so there is",
   // Repaired rather than deleted, and it now pins a DESCRIPTOR rather than a call: #101 moved
   // the measurement inside `#halt`, so the halt site says which seat to measure and no longer
   // builds the sentence itself. The claim the citation supports is unchanged -- this halt does
@@ -131,9 +131,9 @@ export const CITED: Record<string, string> = {
   // `turn_incomplete` halt below, so only a shift of exactly the distance between the two would
   // slip past. There is nothing unique on the line to pin instead. It is also why this entry
   // is never auto-relocated -- two matches is not a pin, and `planRepairs` refuses it by rule.
-  'src/relay/relay.ts:6855-6857': "knowing whether the child is still writing changes what the operator does.",
-  'src/relay/relay.ts:6926': "subject: { reason: 'turn_incomplete', participant: seat.id }",
-  'src/relay/relay.ts:6930': 'verdictOf: { participant: seat.id, endSeq: current.seq },',
+  'src/relay/relay.ts:6914-6916': "knowing whether the child is still writing changes what the operator does.",
+  'src/relay/relay.ts:6985': "subject: { reason: 'turn_incomplete', participant: seat.id }",
+  'src/relay/relay.ts:6989': 'verdictOf: { participant: seat.id, endSeq: current.seq },',
   // The one sentence #66's bypass rests on: a verdict withdrawn with no replacement can come
   // from nowhere but `resetTranscript`, so the open turn the console stops refusing on is a
   // deleted record rather than an observed one. If that ever stops being true, the guard's

@@ -22,6 +22,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import test from 'node:test'
 import { AsyncQueue } from '../adapters/asyncQueue.ts'
+import type { Verdict } from '../contract/outcome.ts'
 import type { AgentEvent, AgentSession, CloseMode, SessionSnapshot, SessionState, TurnKey } from '../contract/session.ts'
 import { guaranteesFor, turnKey } from '../contract/session.ts'
 import { AgentRegistry } from '../registry/registry.ts'
@@ -61,6 +62,14 @@ class SeatFakeSession implements AgentSession {
   state: SessionState = 'running'
   onSend: ((message: string) => void) | undefined
   /**
+   * How a given turn ends, 1-based, when a test needs something other than a clean completion.
+   *
+   * A double that can only end turns `completed (proven)` cannot reach the code that runs when
+   * one does not, and "the boundary commits anyway after an uncertain end" is a claim about
+   * exactly that code.
+   */
+  verdictFor: ((turn: number) => Verdict | undefined) | undefined
+  /**
    * The directory the registry was told to create this participant in.
    *
    * Set from `CreateParticipantContext.cwd` and nowhere else, so a test that writes through
@@ -95,10 +104,18 @@ class SeatFakeSession implements AgentSession {
     this.onSend?.(message)
     const key = turnKey(`${this.sessionId}-turn-${this.#turns.length}`)
     this.#turns.push({ key, prose: this.#replies.shift() ?? 'NONE' })
+    const override = this.verdictFor?.(this.#turns.length)
+    const verdict: Verdict = override ?? {
+      outcome: 'completed',
+      confidence: 'proven',
+      provenance: [{ source: 'hook', detail: 'Stop' }],
+    }
     this.#emit({
       type: 'turn_end',
-      verdict: { outcome: 'completed', confidence: 'proven', provenance: [{ source: 'hook', detail: 'Stop' }] },
-      synthesized: false,
+      verdict,
+      // An overridden verdict stands in for one the orchestrator CONCLUDED -- a watchdog, a
+      // process check -- so it is synthesized. The default came from a Stop hook and is not.
+      synthesized: override !== undefined,
       turnKey: key,
       seq: ++this.#seq,
       at: Date.now(),
@@ -1028,6 +1045,588 @@ test('an untargeted instruction goes to a free seat rather than to the blocked o
         ],
         'both seats end dispatchable, so nothing was stranded',
       )
+    } finally {
+      await relay.stop()
+    }
+  } finally {
+    rmSync(repo, { recursive: true, force: true })
+  }
+})
+
+/**
+ * A write that lands AFTER a seat's boundary commit, from git's own post-commit hook.
+ *
+ * This is the hazard the boundary notices used to describe wrongly, reproduced exactly rather
+ * than simulated. `commitSeatWork` runs `git commit --no-verify`, which bypasses `pre-commit`
+ * and `commit-msg` and NOT `post-commit`; the hook therefore fires at the one instant that
+ * matters -- after the snapshot the notice calls "its work", before the merge that judges it.
+ * A real seat does the same thing without a hook, because its child is still running.
+ *
+ * Installed in the shared `.git/hooks` (a linked worktree has no hooks of its own) and guarded
+ * on the branch, so the integration checkout's own merge commits do not trip it.
+ */
+function writeAfterEveryCommitOn(repo: string, branch: string, script: string): void {
+  writeFileSync(
+    join(repo, '.git', 'hooks', 'post-commit'),
+    `#!/bin/sh\n[ "$(git rev-parse --abbrev-ref HEAD)" = "${branch}" ] || exit 0\n${script}\n`,
+    { mode: 0o755 },
+  )
+}
+
+/**
+ * What the conflict notices say about a tree has to come FROM the tree.
+ *
+ * All three of them -- the orchestrator's note, the advisor's instruction, and the halt
+ * evidence -- used to end in some form of "its work is committed on its branch and nothing has
+ * been discarded". Nothing had read the tree. A seat commits at its boundary and keeps
+ * working; the merge that conflicts is attempted and aborted afterwards. So the reassurance
+ * was issued about a moment that had already passed, to the one reader in a position to act on
+ * it, and an operator who believed it and ran `git worktree remove --force` would lose
+ * whatever had arrived since -- with the notice as the reason they stopped looking.
+ *
+ * The assertion is on a filename the notice could not have produced without reading the tree.
+ */
+test('a conflict notice names what the seat wrote after its boundary commit', async () => {
+  const repo = tempRepo()
+  try {
+    const { relay, alpha, beta, lead } = await conflictingRun(
+      repo,
+      { alpha: ['ack', 'Set it to one.', 'NONE'], beta: ['ack', 'Set it to two.', 'Reconciled.', 'NONE'] },
+      ['Set it to one.', 'Set it to two.', '@seat seat-beta: Resolve the conflict.', 'DONE'],
+    )
+    try {
+      const tree = relay.worktrees!.seats.find((s) => s.seatId === 'seat-beta')!
+      writeAfterEveryCommitOn(repo, tree.branch, 'echo late > late-write.txt')
+      alpha.onSend = () => writeFileSync(join(alpha.cwd, 'shared.txt'), 'one\n')
+      let turn = 0
+      beta.onSend = () => {
+        turn += 1
+        writeFileSync(join(beta.cwd, 'shared.txt'), turn <= 2 ? 'two\n' : 'one\n')
+      }
+
+      const outcome = await relay.run('Keep the work moving.')
+      assert.equal(outcome.reason, 'done')
+
+      const conflict = relay.log
+        .filter((m) => m.kind === 'note')
+        .map((m) => m.text)
+        .find((t) => /could not be merged/.test(t))
+      assert.ok(conflict, 'the conflict is still recorded')
+      assert.ok(
+        conflict.includes('late-write.txt'),
+        'the note must name the file the seat wrote after its commit — no template can guess it',
+      )
+      assert.match(conflict, /ALSO holds uncommitted work that no commit and no merge carries: 1 untracked/)
+      assert.ok(conflict.includes(tree.worktreePath), 'and say which tree it read')
+      assert.ok(!/nothing has been discarded/.test(conflict), 'the claim nothing checked is gone')
+
+      // The advisor is the one who dispatches the repair, so it gets the same account.
+      const told = lead.received.find((m) => /blocked and takes no other work/.test(m))
+      assert.ok(told)
+      assert.ok(told.includes('late-write.txt'), 'the advisor must not be told a tidier story than the note')
+      assert.ok(!/Nothing has been lost/.test(told))
+
+      // The file is still there. The notice reports; it does not tidy.
+      assert.equal(readFileSync(join(tree.worktreePath, 'late-write.txt'), 'utf8'), 'late\n')
+    } finally {
+      await relay.stop()
+    }
+  } finally {
+    rmSync(repo, { recursive: true, force: true })
+  }
+})
+
+/**
+ * The same read reaches the halt, which is the notice an operator actually decides on.
+ *
+ * `evidence` is what a paused run puts in front of a human. It said "the work is committed on
+ * <branch> and its worktree is retained" whatever the worktree held, so the one reader with
+ * the authority to discard the tree was the one reader given a reason not to look at it.
+ */
+test('the merge_blocked halt evidence is read from the tree too', async () => {
+  const repo = tempRepo()
+  try {
+    const { relay, alpha, beta } = await conflictingRun(
+      repo,
+      { alpha: ['ack', 'Set it to one.', 'NONE'], beta: ['ack', 'Set it to two.', 'Still stuck.', 'NONE'] },
+      ['Set it to one.', 'Set it to two.', '@seat seat-beta: Resolve the conflict.', 'DONE'],
+    )
+    try {
+      const tree = relay.worktrees!.seats.find((s) => s.seatId === 'seat-beta')!
+      // A distinct file per commit: the second boundary commits the first one's, so a fixed
+      // name would be tracked and unmodified by the time the escalation notice is written --
+      // and the test would pass on a notice that had read nothing.
+      writeAfterEveryCommitOn(repo, tree.branch, 'echo late > "late-$(git rev-parse --short HEAD).txt"')
+      alpha.onSend = () => writeFileSync(join(alpha.cwd, 'shared.txt'), 'one\n')
+      beta.onSend = () => writeFileSync(join(beta.cwd, 'shared.txt'), 'two\n')
+
+      const run = relay.start('Keep the work moving.')
+      const pause = await run.untilPause()
+      assert.ok(pause)
+      assert.equal(pause.reason, 'merge_blocked')
+
+      const held = pause.evidence.find((e) => /that worktree is retained/.test(e))
+      assert.ok(held, 'the evidence must still say the tree was kept')
+      assert.match(held, /1 untracked \(late-[0-9a-f]+\.txt\)/, 'and say what was in it when it said so')
+      assert.ok(held.includes(tree.branch))
+      assert.ok(!/the work is committed on/.test(held))
+
+      await run.abort()
+    } finally {
+      await relay.stop()
+    }
+  } finally {
+    rmSync(repo, { recursive: true, force: true })
+  }
+})
+
+/**
+ * The boundary that THREW is where the old wording was furthest from true.
+ *
+ * "Its work is on <branch> and nothing has been discarded" was said on the one path that
+ * reaches the catch without knowing whether the commit happened at all. Here it did not: the
+ * seat's index is locked, so `git add -A` fails and the boundary raises before committing
+ * anything. The seat's whole turn is sitting uncommitted in its tree, and the notice that told
+ * the advisor otherwise was not merely unverified but wrong.
+ *
+ * A lock file rather than a deleted tree (the existing throw test deletes one): a tree that is
+ * gone can only be reported as unreadable, which proves the notice handles absence and not
+ * that it reads content.
+ */
+test('a boundary that throws reports the work still sitting in the tree', async () => {
+  const repo = tempRepo()
+  try {
+    const { relay, alpha, lead } = await conflictingRun(
+      repo,
+      { alpha: ['ack', 'Did it.', 'NONE'], beta: ['ack', 'NONE'] },
+      ['Do the thing.', 'DONE'],
+    )
+    try {
+      const tree = relay.worktrees!.seats.find((s) => s.seatId === 'seat-alpha')!
+      alpha.onSend = (message) => {
+        if (!message.includes('Do the thing')) return
+        writeFileSync(join(tree.worktreePath, 'shared.txt'), 'the turn that never got committed\n')
+        writeFileSync(join(tree.worktreePath, 'new-file.txt'), 'nor this\n')
+        // `git status` still answers under a stale lock; `git add` does not. So the boundary
+        // throws at the commit, and the tree it leaves behind is fully readable.
+        writeFileSync(join(git(tree.worktreePath, 'rev-parse', '--absolute-git-dir').trim(), 'index.lock'), '')
+      }
+
+      const outcome = await relay.run('Keep the work moving.')
+      assert.equal(outcome.reason, 'done', 'a broken boundary must not take the run down with it')
+
+      const notes = relay.log.filter((m) => m.kind === 'note').map((m) => m.text)
+      const threw = notes.find((t) => /did not complete/.test(t))
+      assert.ok(threw)
+      assert.match(threw, /1 modified, 1 untracked/, 'nothing was committed, and the note says so')
+      assert.ok(threw.includes('shared.txt') && threw.includes('new-file.txt'))
+
+      const told = lead.received.find((m) => /the boundary itself failed/.test(m))
+      assert.ok(told, 'the advisor is told, because the repair is work it has to dispatch')
+      assert.ok(!/nothing has been discarded/.test(told), 'least of all on the path that knows least')
+      assert.ok(told.includes('shared.txt'), 'it is told what is actually in the tree')
+      assert.match(told, /Whatever it committed is on/, 'and not told that anything definitely was')
+
+      // Still there, uncommitted, exactly as reported.
+      assert.equal(readFileSync(join(tree.worktreePath, 'new-file.txt'), 'utf8'), 'nor this\n')
+      assert.equal(git(tree.worktreePath, 'log', '--oneline', `${tree.baseSha}..HEAD`).trim(), '')
+    } finally {
+      await relay.stop()
+    }
+  } finally {
+    rmSync(repo, { recursive: true, force: true })
+  }
+})
+
+/**
+ * And the halt the error path escalates to, which is the last of the four notices.
+ *
+ * A second throw against the same integration parent is what reaches the operator, and its
+ * evidence used to end "its branch is untouched" -- true, and beside the point, because the
+ * branch is not where the work is when the boundary never got as far as committing.
+ */
+test('a repeated boundary failure escalates with the tree state in its evidence', async () => {
+  const repo = tempRepo()
+  try {
+    const { relay, alpha } = await conflictingRun(
+      repo,
+      { alpha: ['ack', 'Did it.', 'Tried again.', 'NONE'], beta: ['ack', 'NONE'] },
+      ['Do the thing.', '@seat seat-alpha: Get your branch mergeable.', 'DONE'],
+    )
+    try {
+      const tree = relay.worktrees!.seats.find((s) => s.seatId === 'seat-alpha')!
+      const lock = join(git(tree.worktreePath, 'rev-parse', '--absolute-git-dir').trim(), 'index.lock')
+      alpha.onSend = () => {
+        writeFileSync(join(tree.worktreePath, 'stranded.txt'), 'never committed, twice over\n')
+        // Left in place, so the repair turn's boundary fails the same way against the same
+        // parent — which is the only thing that escalates.
+        writeFileSync(lock, '')
+      }
+
+      const run = relay.start('Keep the work moving.')
+      const pause = await run.untilPause()
+      assert.ok(pause, 'two failed boundaries against one parent must reach the operator')
+      assert.equal(pause.reason, 'merge_blocked')
+
+      const held = pause.evidence.find((e) => /is untouched/.test(e))
+      assert.ok(held, 'the evidence must still say the branch was not disturbed')
+      assert.ok(held.includes('stranded.txt'), 'and name the work that never reached it')
+      assert.match(held, /1 untracked/)
+      assert.ok(pause.evidence.some((e) => /what merged is unknown/.test(e)))
+
+      await run.abort()
+    } finally {
+      await relay.stop()
+    }
+  } finally {
+    rmSync(repo, { recursive: true, force: true })
+  }
+})
+
+/**
+ * An uncertain turn end is recorded on the commit it produced, and the run keeps going.
+ *
+ * No bounded signal can prove a child has stopped writing. A watchdog verdict is the absence
+ * of evidence, not evidence of absence, so the boundary commit taken after one is a SNAPSHOT --
+ * possibly mid-edit, possibly not all of the work. That is unavoidable, and the two ways of
+ * responding to it are both worse than saying so: waiting for certainty waits forever, and
+ * refusing to merge strands every uncertain task on a condition nothing can ever discharge,
+ * leaving the work neither integrated nor recoverable without reading a manifest by hand.
+ *
+ * So the boundary records the doubt instead of acting on it. `Conclave-Turn-End` is immutable,
+ * travels with the work rather than beside it, and outlives the run -- and it gates nothing.
+ *
+ * The rest of this test is the incident that makes the trailer worth having: the child goes on
+ * writing AFTER the commit, and the notice about the tree has to stay true while the notice
+ * about the turn is added beside it. Both facts appear in one operator notice, because an
+ * operator who has to assemble them from two places will assemble them wrong.
+ */
+test('an uncertain turn end is trailered on the commit and named in the notice', async () => {
+  const repo = tempRepo()
+  try {
+    const { relay, alpha, beta, lead } = await conflictingRun(
+      repo,
+      { alpha: ['ack', 'Set it to one.', 'NONE'], beta: ['ack', 'Set it to two.', 'NONE'] },
+      ['Set it to one.', 'Set it to two.', 'DONE'],
+    )
+    try {
+      const tree = relay.worktrees!.seats.find((s) => s.seatId === 'seat-beta')!
+      // The work turn, ended by a clock rather than by the child. `uncertain` is the whole
+      // point: it is the confidence that means "nothing said so", and the only one trailered.
+      beta.verdictFor = (turn) =>
+        turn === 2
+          ? {
+              outcome: 'timed_out',
+              confidence: 'uncertain',
+              provenance: [{ source: 'watchdog', detail: 'no signal within the deadline' }],
+            }
+          : undefined
+      writeAfterEveryCommitOn(repo, tree.branch, 'echo mid-edit > still-writing.txt')
+      alpha.onSend = () => writeFileSync(join(alpha.cwd, 'shared.txt'), 'one\n')
+      beta.onSend = () => writeFileSync(join(beta.cwd, 'shared.txt'), 'two\n')
+
+      const run = relay.start('Keep the work moving.')
+      // The turn that did not complete is the human's call, and it is raised BEFORE the
+      // boundary. Continuing is what lets the boundary commit the snapshot at all.
+      const pause = await run.untilPause()
+      assert.ok(pause, 'an uncertain turn end must reach the operator before anything is merged')
+      assert.equal(pause.reason, 'turn_incomplete')
+      assert.deepEqual(pause.resolution.scope, { kind: 'participant', participantId: 'seat-beta' })
+      assert.equal(
+        git(tree.worktreePath, 'log', '--oneline', `${tree.baseSha}..HEAD`).trim(),
+        '',
+        'nothing may be committed while the operator is still deciding',
+      )
+
+      await run.continue()
+      const settled = await run.settled()
+      assert.equal(settled.kind, 'ended', 'the trailer records the doubt; it does not act on it')
+      assert.equal(settled.kind === 'ended' ? settled.outcome.reason : '', 'done')
+
+      // The commit exists, and it says how the turn that produced it ended.
+      const body = git(repo, 'log', '--format=%B', `${tree.baseSha}..${tree.branch}`)
+      assert.match(body, /Conclave-Seat: seat-beta/, 'the existing attribution is untouched')
+      assert.match(
+        body,
+        /^Conclave-Turn-End: timed_out \(uncertain\)$/m,
+        'an uncertain end must be on the commit, where it outlives the run',
+      )
+
+      // ... and the conflict notice carries both halves: what is in the tree now, and that
+      // what was committed was never known to be finished.
+      const conflict = relay.log
+        .filter((m) => m.kind === 'note')
+        .map((m) => m.text)
+        .find((t) => /could not be merged/.test(t))
+      assert.ok(conflict)
+      assert.ok(conflict.includes('still-writing.txt'), 'the post-commit write is still reported')
+      assert.match(conflict, /turn ended timed_out \(uncertain\)/)
+      assert.match(conflict, /may be mid-edit or incomplete/)
+
+      // And the advisor gets it too. It is the party that dispatches the repair, so a caveat
+      // it never sees is a caveat that cannot change what happens next.
+      const told = lead.received.find((m) => /blocked and takes no other work/.test(m))
+      assert.ok(told)
+      assert.match(told, /turn ended timed_out \(uncertain\)/)
+      assert.ok(told.includes('still-writing.txt'), 'both halves reach the advisor, not one each')
+
+      // Nothing was gated and nothing was lost: the file the child wrote after the commit is
+      // exactly where it was left.
+      assert.equal(readFileSync(join(tree.worktreePath, 'still-writing.txt'), 'utf8'), 'mid-edit\n')
+    } finally {
+      await relay.stop()
+    }
+  } finally {
+    rmSync(repo, { recursive: true, force: true })
+  }
+})
+
+/**
+ * The control, and it is not a formality: a trailer on every commit is a trailer nobody reads.
+ *
+ * A turn that ended `completed (proven)` has a positive signal behind it. Recording doubt there
+ * would train an operator to skip the line, which is how the one that mattered gets skipped.
+ */
+test('an ordinary completed turn earns no turn-end trailer and no snapshot caveat', async () => {
+  const repo = tempRepo()
+  try {
+    const { relay, alpha } = await conflictingRun(
+      repo,
+      { alpha: ['ack', 'Did it.', 'NONE'], beta: ['ack', 'NONE'] },
+      ['Do the thing.', 'DONE'],
+    )
+    try {
+      const tree = relay.worktrees!.seats.find((s) => s.seatId === 'seat-alpha')!
+      alpha.onSend = () => writeFileSync(join(alpha.cwd, 'shared.txt'), 'one\n')
+
+      const outcome = await relay.run('Keep the work moving.')
+      assert.equal(outcome.reason, 'done')
+
+      const merged = relay.log
+        .filter((m) => m.kind === 'note')
+        .map((m) => m.text)
+        .find((t) => /merged into/.test(t) && t.includes('seat-alpha'))
+      assert.ok(merged, 'the merge is still recorded')
+      assert.ok(!/uncertain/.test(merged), 'a proven completion is not a snapshot to warn about')
+
+      const body = git(repo, 'log', '--format=%B', `${tree.baseSha}..HEAD`)
+      assert.match(body, /Conclave-Seat: seat-alpha/)
+      assert.ok(!/Conclave-Turn-End/.test(body), 'the trailer is for the uncertain case alone')
+    } finally {
+      await relay.stop()
+    }
+  } finally {
+    rmSync(repo, { recursive: true, force: true })
+  }
+})
+
+/**
+ * The caveat reaches the halt, which is the notice a human actually decides on.
+ *
+ * A pause is where someone chooses whether to keep the work, and "the commit may be mid-edit"
+ * changes that choice. Carried as its own evidence entry rather than appended to a sentence
+ * about branches, because an operator scanning a list does not read into the middle of one.
+ */
+test('a merge_blocked halt raised on an uncertain turn says the commit is a snapshot', async () => {
+  const repo = tempRepo()
+  try {
+    const { relay, alpha, beta } = await conflictingRun(
+      repo,
+      { alpha: ['ack', 'Set it to one.', 'NONE'], beta: ['ack', 'Set it to two.', 'Still stuck.', 'NONE'] },
+      ['Set it to one.', 'Set it to two.', '@seat seat-beta: Resolve the conflict.', 'DONE'],
+    )
+    try {
+      // Every turn of beta's after the kickoff ends the same way. The ESCALATING boundary is
+      // the repair's, not the original's, so an uncertain first turn alone would prove nothing
+      // about the halt -- the evidence is built from the task that failed the second time.
+      beta.verdictFor = (turn) =>
+        turn >= 2
+          ? {
+              outcome: 'timed_out',
+              confidence: 'uncertain',
+              provenance: [{ source: 'watchdog', detail: 'no signal within the deadline' }],
+            }
+          : undefined
+      alpha.onSend = () => writeFileSync(join(alpha.cwd, 'shared.txt'), 'one\n')
+      beta.onSend = () => writeFileSync(join(beta.cwd, 'shared.txt'), 'two\n')
+
+      const run = relay.start('Keep the work moving.')
+      // Each uncertain turn raises its own pause before its boundary. Continue through them
+      // until the one this test is about, rather than pinning an exact sequence.
+      let pause = await run.untilPause()
+      for (let i = 0; i < 6 && pause && pause.reason !== 'merge_blocked'; i++) {
+        await run.continue()
+        pause = await run.untilPause()
+      }
+      assert.ok(pause, 'a repair that did not repair must still reach the operator')
+      assert.equal(pause.reason, 'merge_blocked')
+
+      assert.ok(
+        pause.evidence.some((e) => /^Its turn ended timed_out \(uncertain\)/.test(e)),
+        'the caveat must be its own line, not buried inside another',
+      )
+      assert.ok(pause.evidence.some((e) => /may be mid-edit or incomplete/.test(e)))
+      // The evidence it was added to is untouched.
+      assert.ok(pause.evidence.some((e) => /against the same integration parent/.test(e)))
+
+      await run.abort()
+    } finally {
+      await relay.stop()
+    }
+  } finally {
+    rmSync(repo, { recursive: true, force: true })
+  }
+})
+
+/**
+ * A boundary that found nothing does not get to say the seat did nothing.
+ *
+ * `nothing_to_merge` used to be recorded as `changed nothing`, which is a claim about the whole
+ * turn. What was actually checked is one `git status` at one instant, and after an uncertain
+ * end that instant carries no weight at all: a child that had not finished writing is
+ * indistinguishable from one with nothing to say. An operator who read "changed nothing" and
+ * removed the tree would have removed work that arrived a second later, and the run would have
+ * been the reason they were confident.
+ *
+ * So the note is a timestamped observation plus the uncertainty, and cleanup is left to be the
+ * thing that decides -- which it does here, on the file that arrived after the check.
+ */
+test('a boundary that found nothing reports when it looked, and does not certify a no-op', async () => {
+  const repo = tempRepo()
+  try {
+    const { relay, alpha } = await conflictingRun(
+      repo,
+      { alpha: ['ack', 'Nothing to do.', 'NONE'], beta: ['ack', 'NONE'] },
+      ['Do the thing.', 'DONE'],
+    )
+    try {
+      const tree = relay.worktrees!.seats.find((s) => s.seatId === 'seat-alpha')!
+      // No `onSend`: the tree is clean when the boundary reads it, which is the whole setup.
+      alpha.verdictFor = (turn) =>
+        turn === 2
+          ? {
+              outcome: 'timed_out',
+              confidence: 'uncertain',
+              provenance: [{ source: 'watchdog', detail: 'no signal within the deadline' }],
+            }
+          : undefined
+
+      const run = relay.start('Keep the work moving.')
+      const pause = await run.untilPause()
+      assert.ok(pause)
+      assert.equal(pause.reason, 'turn_incomplete')
+      await run.continue()
+      const settled = await run.settled()
+      assert.equal(settled.kind, 'ended')
+
+      const found = relay.log
+        .filter((m) => m.kind === 'note')
+        .map((m) => m.text)
+        .find((t) => /nothing was integrated/.test(t))
+      assert.ok(found, 'a boundary with nothing to merge is still recorded')
+      assert.ok(
+        !/changed nothing/.test(found),
+        'a durable claim about the turn is exactly what one `git status` cannot support',
+      )
+      assert.match(found, /had no uncommitted changes when the boundary read its tree at/)
+      assert.match(found, /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z/, 'an observation is worth nothing undated')
+      assert.match(found, /turn ended timed_out \(uncertain\)/)
+      assert.match(found, /may be mid-edit or incomplete/)
+      // The caveat has to be true HERE, where no commit exists at all. Describing one would be
+      // a false sentence attached to a true warning, which is how a warning stops being read.
+      assert.ok(
+        !/what was committed/.test(found),
+        'nothing was committed on this path, so the caveat must not describe a commit',
+      )
+      assert.equal(
+        git(tree.worktreePath, 'log', '--oneline', `${tree.baseSha}..HEAD`).trim(),
+        '',
+        'nothing was committed, which is the premise the note must not overstate',
+      )
+
+      // The child, still going, writing after the boundary had already read the tree. Written
+      // here rather than by the seat double for the reason the note now admits: there is no
+      // moment after an uncertain end at which anything can say the child has stopped.
+      writeFileSync(join(tree.worktreePath, 'late-arrival.txt'), 'written after the boundary looked\n')
+
+      await relay.stop()
+      // Cleanup is what decides, and it decides on the tree rather than on the note.
+      const log = relay.log.map((m) => m.text).join('\n')
+      assert.match(log, /kept rather than removed/, 'a tree holding late work must not be removed')
+      assert.ok(log.includes('late-arrival.txt'), 'and the operator must be told what is in it')
+      assert.equal(
+        readFileSync(join(tree.worktreePath, 'late-arrival.txt'), 'utf8'),
+        'written after the boundary looked\n',
+      )
+    } finally {
+      await relay.stop()
+    }
+  } finally {
+    rmSync(repo, { recursive: true, force: true })
+  }
+})
+
+/**
+ * The merged path has the same hole, and it is the easier one to miss.
+ *
+ * On a conflict everything the operator reads already says something went wrong. On a merge
+ * that SUCCEEDED, every other line says the work went through -- so a note reading only "still
+ * dirty after its boundary commit" is the one line saying otherwise, and it does not say what
+ * was left. An operator who merged, saw green, and removed the tree would have removed it.
+ *
+ * Here the child writes after the commit and the merge still goes through, which is the exact
+ * combination: the work is integrated, the trailer records that the turn was never confirmed,
+ * and a named file is sitting in a tree everything else describes as finished with.
+ */
+test('a merged boundary names what the child wrote after its commit', async () => {
+  const repo = tempRepo()
+  try {
+    const { relay, alpha } = await conflictingRun(
+      repo,
+      { alpha: ['ack', 'Did it.', 'NONE'], beta: ['ack', 'NONE'] },
+      ['Do the thing.', 'DONE'],
+    )
+    try {
+      const tree = relay.worktrees!.seats.find((s) => s.seatId === 'seat-alpha')!
+      alpha.verdictFor = (turn) =>
+        turn === 2
+          ? {
+              outcome: 'timed_out',
+              confidence: 'uncertain',
+              provenance: [{ source: 'watchdog', detail: 'no signal within the deadline' }],
+            }
+          : undefined
+      // Nobody else touches shared.txt, so this merge succeeds. The dirt arrives after the
+      // commit that produced the merge, which is what the post-merge check is looking for.
+      alpha.onSend = () => writeFileSync(join(tree.worktreePath, 'shared.txt'), 'one\n')
+      writeAfterEveryCommitOn(repo, tree.branch, 'echo late > late-on-merge.txt')
+
+      const run = relay.start('Keep the work moving.')
+      const pause = await run.untilPause()
+      assert.ok(pause)
+      assert.equal(pause.reason, 'turn_incomplete')
+      await run.continue()
+      const settled = await run.settled()
+      assert.equal(settled.kind, 'ended')
+
+      const notes = relay.log.filter((m) => m.kind === 'note').map((m) => m.text)
+      const merged = notes.find((t) => /merged into/.test(t) && t.includes('seat-alpha'))
+      assert.ok(merged, 'the merge happened and is recorded')
+      assert.match(merged, /turn ended timed_out \(uncertain\)/, 'a merge on an uncertain turn is still one')
+
+      // The line that used to say nothing.
+      const leftBehind = notes.find((t) => /still dirty after its boundary commit/.test(t))
+      assert.ok(leftBehind, 'a tree left dirty by the boundary must still be reported')
+      assert.ok(
+        leftBehind.includes('late-on-merge.txt'),
+        'and must name the file, which is the whole difference between a report and a formality',
+      )
+      assert.match(leftBehind, /1 untracked/)
+      assert.ok(leftBehind.includes(tree.worktreePath), 'and say which tree it read')
+
+      // The commit that merged carries the doubt, and the late file is still there.
+      assert.match(git(repo, 'log', '--format=%B', '-n', '20'), /^Conclave-Turn-End: timed_out \(uncertain\)$/m)
+      assert.equal(readFileSync(join(tree.worktreePath, 'late-on-merge.txt'), 'utf8'), 'late\n')
     } finally {
       await relay.stop()
     }
