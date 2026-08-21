@@ -7,14 +7,16 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync } from 'node:fs'
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { AgentRegistry } from '../registry/registry.ts'
 import { NO_DEADLINE_CLOCKS } from '../registry/types.ts'
 import { FakeRotationSession } from '../rotation/fakeSession.ts'
+import { newSessionId, recordSession, sessionDir } from '../workspace/sessionRecord.ts'
 import { Relay } from './relay.ts'
+import type { RunPause } from './run.ts'
 
 function repo(): string {
   const dir = mkdtempSync(join(tmpdir(), 'conclave-review-relay-'))
@@ -203,6 +205,149 @@ test('a REJECTed review admits an automatic repair addressed to the producing se
     for (const line of advisor.received) {
       assert.doesNotMatch(line, /@seat reviewer/)
       assert.doesNotMatch(line, /@seat implementer: .*needs a test/)
+    }
+  } finally {
+    await relay.stop()
+  }
+})
+
+/**
+ * The `review_blocked` halt reads the producing seat's tree instead of asserting a commit
+ * nothing in the relay made (#158).
+ *
+ * The invariant on this path is narrow and it is about the ORCHESTRATOR, not the tree: no
+ * boundary has run. A REJECT crosses none -- `#awaitReview` leaves the task `reported`, and
+ * `#crossBoundary` runs from `crossAndSettle` only on ACCEPT -- so `commitSeatWork` has not
+ * been called for this work. What the tree holds is then whatever the seat's own child left
+ * there, which the relay does not control: an implementer that commits for itself leaves a
+ * clean tree, and a repair that changed nothing leaves it as it was.
+ *
+ * That is why the old evidence line -- "the work is committed and its tree is retained" --
+ * is not simply a false statement to be replaced with the opposite one. It was an UNOBSERVED
+ * statement, printed identically whether it happened to hold or not, at the one moment an
+ * operator is deciding whether a tree is disposable. The repair is to read.
+ *
+ * A regression test cannot assert every branch of "whatever the child left", so it pins the
+ * case that costs an operator work: a seat that reported without committing, holding the
+ * rejected work uncommitted when the halt is written. What is proved is that the line is a
+ * READING of that seat's tree -- it names the file that is really there -- and not a stored
+ * sentence. The clean-tree case is the same one call rendering a different answer.
+ *
+ * Driven through the real escalation, two REJECTs on the same work with the second landing on
+ * a task whose `purpose` is already `review_resolution`, rather than by constructing a pause.
+ * The evidence is read back out of the RECORDED pause (`status.json`, written by the same
+ * `recordSession` both front-ends use) rather than out of anything the console prints: a
+ * console-level assertion would pass on a renderer that invented the line.
+ *
+ * Two implementer seats, so the seats have real worktrees and `#rootOf` has a wrong answer
+ * available to it: `this.#opts.cwd` is the integration checkout, a different directory holding
+ * different uncommitted paths. Each seat writes its own uniquely named untracked file, and the
+ * assertions below require the evidence to name the PRODUCING seat's file and to name neither
+ * the other seat's nor the integration checkout's.
+ */
+test('a review_blocked halt names the uncommitted work actually sitting in the producing seat tree', async () => {
+  const dir = repo()
+  execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: dir })
+  execFileSync('git', ['config', 'user.name', 'Test'], { cwd: dir })
+
+  const advisor = new FakeRotationSession('advisor', 'codex', ['Write the answer.', 'DONE', 'DONE', 'DONE', 'DONE'])
+  const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Wrote it.', 'Wrote it again.'])
+  const impl2 = new FakeRotationSession('impl2', 'claude', ['ack', 'Wrote it.', 'Wrote it again.'])
+  // Rejected twice on the same work: the repair carries `purpose: 'review_resolution'`, and
+  // rejecting THAT is what `resolveReview` escalates instead of repairing a third time.
+  const reviewer = new FakeRotationSession('reviewer', 'claude', [
+    'ack',
+    'REJECT: not good enough.',
+    'REJECT: still not good enough.',
+  ])
+
+  const relay = await Relay.start({
+    registry: registryOf({ codex: [advisor], claude: [impl, impl2, reviewer] }),
+    cwd: dir,
+    lead: { id: 'advisor', agent: 'codex', role: 'advisor' },
+    implementer: { id: 'implementer', agent: 'claude', role: 'implementer' },
+    implementers: [
+      { id: 'implementer', agent: 'claude', role: 'implementer' },
+      { id: 'implementer-2', agent: 'claude', role: 'implementer' },
+    ],
+    reviewer: { id: 'reviewer', agent: 'claude', role: 'reviewer' },
+    maxAdvisorTurns: 8,
+  })
+  try {
+    const trees = Object.fromEntries(relay.worktrees!.seats.map((s) => [s.seatId, s.worktreePath]))
+    assert.equal(Object.keys(trees).length, 2, 'two implementer seats must have two real worktrees')
+    // Real uncommitted work, written into the tree the seat actually runs in. Nothing commits
+    // it: the fake seat is a scripted session with no child of its own, and no boundary runs
+    // on a rejected task. Written on every send so it is there at the moment the halt reads
+    // the tree, which is the only moment that matters.
+    const held: Record<string, string> = {}
+    for (const [seatId, session] of [
+      ['implementer', impl],
+      ['implementer-2', impl2],
+    ] as const) {
+      const path = join(trees[seatId]!, `held-by-${seatId}.ts`)
+      held[seatId] = path
+      session.onSend = () => writeFileSync(path, `export const seat = '${seatId}'\n`)
+    }
+
+    const recording = recordSession(relay, {
+      repoRoot: dir,
+      id: newSessionId(Date.now(), process.pid),
+      goal: 'Keep the work moving.',
+      front: 'session',
+      startedAt: Date.now(),
+      build: 'test',
+    })
+    try {
+      const run = relay.start('Keep the work moving.')
+      const pause = await run.untilPause()
+      assert.ok(pause, 'two rejections of the same work must escalate to a pause')
+      assert.equal(pause.reason, 'review_blocked')
+      // The path really was the second rejection: a repair was admitted and then rejected in
+      // its turn, which is the only way `resolveReview` reaches this halt.
+      const repair = relay.tasks().find(({ task }) => task.purpose === 'review_resolution')
+      assert.ok(repair, 'the escalation must have gone through a real automatic repair')
+      assert.equal(repair.runtime.state, 'failed', 'the repair is what the second REJECT failed')
+      // What the console does at a pause, and the only reason the pause reaches a reader.
+      recording.set('paused', { pause })
+
+      const producing = (pause.resolution.scope as { participantId?: string }).participantId
+      assert.ok(producing && producing in held, `the pause must name a producing seat, got ${producing}`)
+      const other = producing === 'implementer' ? 'implementer-2' : 'implementer'
+
+      const raw = readFileSync(join(sessionDir(dir, recording.id), 'status.json'), 'utf8')
+      const recorded = (JSON.parse(raw) as { pause?: RunPause }).pause
+      assert.ok(recorded, 'the pause must be in the status document a reader actually opens')
+      const evidence = recorded.evidence
+
+      // The claim the issue is about is gone, from every line, not just from the one it was on.
+      for (const line of evidence) assert.doesNotMatch(line, /the work is committed/)
+
+      const clause = evidence.find((e) => e.startsWith(`${trees[producing]!} `))
+      assert.ok(
+        clause,
+        `no evidence line is about ${trees[producing]}, the tree holding ${held[producing]} ` +
+          `uncommitted right now: ${JSON.stringify(evidence)}`,
+      )
+      // The file by name (the clause names paths relative to the tree it is about), and named
+      // AS uncommitted, with the count that says how much is there.
+      assert.ok(clause.includes(`held-by-${producing}.ts`), `the clause does not name the held file: ${clause}`)
+      assert.match(clause, /ALSO holds uncommitted work that no commit and no merge carries/)
+      assert.match(clause, /1 untracked/)
+      // Retention survives the repair, and is asserted separately because it is true on its
+      // own terms rather than as part of the reading: nothing removes a seat worktree while
+      // the run is up, so the tree just named is there to be inspected.
+      assert.ok(clause.endsWith('; that worktree is retained'), `the retention fact was dropped: ${clause}`)
+
+      // The wrong roots, ruled out by name: the other seat's tree, and the integration
+      // checkout that `#rootOf` falls back to when it is handed something it cannot place.
+      for (const line of evidence) {
+        assert.ok(!line.includes(`held-by-${other}`), `evidence describes the wrong seat's tree: ${line}`)
+        assert.ok(!line.startsWith(`${dir} `), `evidence describes the integration checkout, not the seat: ${line}`)
+        assert.ok(!line.includes(`in ${dir} is uncommitted`), `evidence describes the integration checkout: ${line}`)
+      }
+    } finally {
+      await recording.close()
     }
   } finally {
     await relay.stop()

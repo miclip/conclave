@@ -324,10 +324,10 @@ const DECLARED: Record<string, string> = {
     'Authority routing (#56, D2) sends implementer_unanswered to the advisor before the operator, ' +
     'so a default run interrupts the human less than today. Real change at N=1, an improvement, ' +
     'declared rather than discovered. The pause reason exists at src/relay/run.ts:52 and the halt ' +
-    'that raises it is at src/relay/relay.ts:6852.',
+    'that raises it is at src/relay/relay.ts:6877.',
   'status.pause.resolution':
     'Classifying unresolved conditions on both axes (#56, D2) added `resolution` to every RunPause ' +
-    '(src/relay/run.ts:244), so `conclave status --json` on a paused default run now carries ' +
+    '(src/relay/run.ts:257), so `conclave status --json` on a paused default run now carries ' +
     'pause.resolution = {reason, authority, scope} and pause.resolution.scope = {kind}. Additive and ' +
     'recorded rather than acted on: authority and scope are computed at the halt site from the reason ' +
     'and the run configuration (src/relay/resolution.ts:190), and a request whose authority is ' +
@@ -335,7 +335,7 @@ const DECLARED: Record<string, string> = {
     'resolve one and dropping the pause first would lose the decision point rather than automate it. ' +
     '`reason` is deliberately duplicated between pause.reason and pause.resolution.reason: the loose ' +
     'field is what every existing reader is written against and the nested one is the whole ' +
-    'classification (src/relay/run.ts:216-230). Nothing an existing consumer read changed value.',
+    'classification (src/relay/run.ts:229-243). Nothing an existing consumer read changed value.',
   'per-seat artifact attribution':
     'Artifact attribution (#62) is now scoped to the ROOT a participant works in, and records ' +
     'which seat each attributed path came from. `RestrictedOrigin` gains one key, ' +
@@ -606,7 +606,7 @@ const DECLARED: Record<string, string> = {
     'participant and nobody else, and a conclave or workstream scope samples NOBODY. It used to ' +
     'read pause.verdictOf.participant and fall back to scanning participants by rank for ' +
     'implementers — and verdictOf is set at exactly two halt sites, both turn_incomplete ' +
-    '(src/relay/relay.ts:6473, src/relay/relay.ts:6989), so every other pause reached that rank ' +
+    '(src/relay/relay.ts:6498, src/relay/relay.ts:7014), so every other pause reached that rank ' +
     'scan. WHAT CHANGES AT N=1: on the three pauses whose scope names no participant — ' +
     'operator_requested (/pause), advisor_escalated, authority_conflict — the lone implementer ' +
     'child used to be sampled, so a child that measured busy REFUSED the resume and wrote ' +
@@ -615,15 +615,15 @@ const DECLARED: Record<string, string> = {
     'safety guard rather than presented as a pure N>1 fix. The reason it is the right narrowing: ' +
     'the guard exists because continuing SENDS into a child that cannot accept input mid-turn, ' +
     'and on those three pauses the child it measured is not the child being sent to — resuming ' +
-    'advisor_escalated sends to the ADVISOR (src/relay/relay.ts:6590), resuming ' +
+    'advisor_escalated sends to the ADVISOR (src/relay/relay.ts:6615), resuming ' +
     'authority_conflict queues a constraint that is delivered by the dispatcher on the next ' +
     'dispatch to a free seat, and operator_requested is consumed at an advisor-turn boundary ' +
     'whose own evidence line says no turn is in flight. WHAT IS GIVEN UP, named rather than ' +
     'discovered: the advisor_escalated halt raised when a seat’s turn completed and its report ' +
-    'could not be read (src/relay/relay.ts:6903-6905) is conclave-scoped by design, yet the useful ' +
+    'could not be read (src/relay/relay.ts:6928-6930) is conclave-scoped by design, yet the useful ' +
     'question there is whether THAT seat is still writing; at N=1 the rank scan sampled it by ' +
     'coincidence of it being the only implementer, and now nothing does. The pause still carries ' +
-    'that seat’s liveness evidence from the halt site (src/relay/relay.ts:6914-6916), which is what ' +
+    'that seat’s liveness evidence from the halt site (src/relay/relay.ts:6939-6941), which is what ' +
     'the operator actually reads; restoring a refusal there is a change to that halt’s scope, ' +
     'not to the guard. AT N>1 the old behaviour was unsafe in the other direction: a pause about ' +
     'one seat could be refused because a DIFFERENT seat was mid-turn, and the operator was told ' +
@@ -725,7 +725,7 @@ const DECLARED: Record<string, string> = {
     'and concluded evidence is not re-derived BETWEEN pauses. It cannot be. The loop is ' +
     'suspended inside #halt for the whole pause, so #halt cannot run again, and a watchdog ' +
     'revision or replacement turn_end arriving meanwhile amends THE SAME RunPause in place ' +
-    '(src/relay/run.ts:734). There was one pause, read twice — the same defect by a shorter ' +
+    '(src/relay/run.ts:747). There was one pause, read twice — the same defect by a shorter ' +
     'path than the report proposed. ' +
     'Covered in src/relay/pauseLiveness.test.ts, which watches the recorded evidence change ' +
     'after the injected reading changes, and in src/outcomes/liveness.test.ts on the prose.',

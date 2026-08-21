@@ -70,11 +70,24 @@ export type PauseReason =
    * different direction.
    *
    * This is the SECOND failure against the same integration parent — the repair was dispatched,
-   * came back, and the merge still will not go. Nothing has changed that another turn could
-   * change, so continuing would spend the advisor's budget re-asking a question the seat has
-   * already failed to answer. The work is committed on the seat's branch and its tree is
-   * retained; what the operator gets is a decision point rather than a run that quietly stops
-   * making progress.
+   * came back, and the boundary still will not go through. Nothing has changed that another
+   * turn could change, so continuing would spend the advisor's budget re-asking a question the
+   * seat has already failed to answer. What the operator gets is a decision point rather than
+   * a run that quietly stops making progress.
+   *
+   * TWO conditions reach this reason, and they know different amounts about the seat's work.
+   * A boundary that RETURNED a conflict has already crossed the commit step: `integrateSeat`
+   * commits the seat's tree and only then merges, so a `blocked` result means the work is on
+   * the seat's branch and the merge that failed came after it. A boundary that THREW may never
+   * have got that far — the throw can come from reading the tree or from the commit itself —
+   * so on that path nothing may have been committed at all.
+   *
+   * This doc used to assert "the work is committed on the seat's branch" for both, which is
+   * an unobserved claim on the second one (#158, and the same defect as #150/#151). Neither
+   * path asserts it now: the pause evidence reports the tree as it was READ at the moment the
+   * halt was written, through `uncommittedClause`, so a clean tree and a tree still holding
+   * work are told apart by observation rather than described by a stored sentence. Retention
+   * is stated flatly alongside it because it does not depend on that reading.
    */
   | 'merge_blocked'
   /**

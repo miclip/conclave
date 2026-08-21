@@ -4163,7 +4163,7 @@ export class Relay {
    * writing down because it points at a different mechanism: the loop is suspended at `await
    * deciding` above for the whole pause, so `#halt` cannot run again, and a watchdog `revision`
    * or replacement `turn_end` arriving meanwhile goes to `#trackSupersession`, which amends THE
-   * SAME `RunPause` in place (`src/relay/run.ts:734`). There was one pause, read twice. The
+   * SAME `RunPause` in place (`src/relay/run.ts:747`). There was one pause, read twice. The
    * evidence was not re-derived because nothing had re-derived it since it was captured -- which
    * is the same defect, reached by a shorter path than the report proposed.
    *
@@ -6090,7 +6090,32 @@ export class Relay {
           evidence: [
             `the first rejection produced an automatic repair, which was dispatched and returned`,
             `the repair was rejected again by the same reviewer`,
-            `the work is committed and its tree is retained`,
+            // This line used to read "the work is committed and its tree is retained" (#158).
+            // What is actually known here is narrower than that: NO BOUNDARY HAS RUN. A
+            // rejection crosses none -- `#awaitReview` leaves the task `reported`, and
+            // `#crossBoundary` runs from `crossAndSettle` only on ACCEPT -- so nothing this
+            // orchestrator does has called `commitSeatWork` for this work.
+            //
+            // What the tree therefore holds is not something the relay determines, and the
+            // old line was not a false claim so much as an UNOBSERVED one. It can happen to
+            // be true: an implementer that commits its own work leaves the tree clean, and a
+            // repair that changed nothing leaves it as it was. It can equally be false, which
+            // is the ordinary case: a seat that reported without committing is holding the
+            // rejected work uncommitted right now. The line said the same thing either way,
+            // having read nothing -- and it said it at the one moment an operator is deciding
+            // whether the tree is disposable, which is when being wrong costs them the work.
+            //
+            // So read the tree and say what is in it, the same way the merge-conflict and
+            // boundary-error notices now do (#150, #151). Retention is kept, as a suffix,
+            // because it is true on its own terms and the operator needs it: nothing removes
+            // a seat worktree mid-run -- `#cleanupWorktrees` runs from `stop()`, after the
+            // children are closed -- so the tree named above is on disk to be inspected while
+            // this pause stands. What that later cleanup does is governed by `blockedFrom`,
+            // which removes a tree only when it is present, clean, and holds no commit the
+            // integration checkout lacks; anything the read above found is itself a reason to
+            // keep it. The suffix therefore does not depend on the read, which is exactly why
+            // it can be stated flatly next to a clause that does.
+            `${uncommittedClause(this.#rootOf(producingSeatId))}; that worktree is retained`,
           ],
         })
         if (halted) {

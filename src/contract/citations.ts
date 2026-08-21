@@ -101,7 +101,7 @@ export const CITED: Record<string, string> = {
   // `/continue` both send on is no longer the thing the operator is watching.
   'src/repl/session.ts:1062-1075': 'progress.start(e.participant)',
   'src/relay/relay.ts:5760': 'this.#worktreesAtStart = worktreePaths(this.#opts.cwd)',
-  'src/relay/relay.ts:6469': "subject: { reason: 'turn_incomplete', participant: lead.id }",
+  'src/relay/relay.ts:6494': "subject: { reason: 'turn_incomplete', participant: lead.id }",
   // The five below are what the console's `/continue` liveness guard cites for reading a
   // pause's SCOPE rather than `verdictOf` or a rank scan (`seatsToSampleAtPause` in
   // src/repl/session.ts). Two of them pin the ONLY sites that populate `verdictOf` -- the
@@ -115,13 +115,13 @@ export const CITED: Record<string, string> = {
   // below always has, so both sites quote the SAME resolved end. The claim this pin supports is
   // untouched -- these are still the only two that populate `verdictOf`, both `turn_incomplete`
   // -- and the token moved with the thing it points at rather than the pin being dropped.
-  'src/relay/relay.ts:6473': 'verdictOf: { participant: lead.id, endSeq: current.seq },',
-  'src/relay/relay.ts:6590': 'The human has seen your escalation and asked you to continue.',
+  'src/relay/relay.ts:6498': 'verdictOf: { participant: lead.id, endSeq: current.seq },',
+  'src/relay/relay.ts:6615': 'The human has seen your escalation and asked you to continue.',
   // The workstream a conflicted instruction belongs to, named after the seat when exactly one
   // seat could take it -- the N=1 coincidence a scope reader must not mistake for a seat.
-  'src/relay/relay.ts:6753': "reason: 'authority_conflict', workstream:",
-  'src/relay/relay.ts:6852': "subject: { reason: 'implementer_unanswered', participant: seat.id }",
-  'src/relay/relay.ts:6903-6905': "its report could not be read, so there is",
+  'src/relay/relay.ts:6778': "reason: 'authority_conflict', workstream:",
+  'src/relay/relay.ts:6877': "subject: { reason: 'implementer_unanswered', participant: seat.id }",
+  'src/relay/relay.ts:6928-6930': "its report could not be read, so there is",
   // Repaired rather than deleted, and it now pins a DESCRIPTOR rather than a call: #101 moved
   // the measurement inside `#halt`, so the halt site says which seat to measure and no longer
   // builds the sentence itself. The claim the citation supports is unchanged -- this halt does
@@ -131,9 +131,9 @@ export const CITED: Record<string, string> = {
   // `turn_incomplete` halt below, so only a shift of exactly the distance between the two would
   // slip past. There is nothing unique on the line to pin instead. It is also why this entry
   // is never auto-relocated -- two matches is not a pin, and `planRepairs` refuses it by rule.
-  'src/relay/relay.ts:6914-6916': "knowing whether the child is still writing changes what the operator does.",
-  'src/relay/relay.ts:6985': "subject: { reason: 'turn_incomplete', participant: seat.id }",
-  'src/relay/relay.ts:6989': 'verdictOf: { participant: seat.id, endSeq: current.seq },',
+  'src/relay/relay.ts:6939-6941': "knowing whether the child is still writing changes what the operator does.",
+  'src/relay/relay.ts:7010': "subject: { reason: 'turn_incomplete', participant: seat.id }",
+  'src/relay/relay.ts:7014': 'verdictOf: { participant: seat.id, endSeq: current.seq },',
   // The one sentence #66's bypass rests on: a verdict withdrawn with no replacement can come
   // from nowhere but `resetTranscript`, so the open turn the console stops refusing on is a
   // deleted record rather than an observed one. If that ever stops being true, the guard's
@@ -141,12 +141,12 @@ export const CITED: Record<string, string> = {
   'src/outcomes/tracker.ts:23-27': 'only possible via `resetTranscript`',
   'src/relay/resolution.ts:190': 'export function resolutionFor',
   'src/relay/run.ts:52': "| 'implementer_unanswered'",
-  'src/relay/run.ts:216-230': 'reason: PauseReason',
-  'src/relay/run.ts:244': 'resolution: ResolutionRequest',
+  'src/relay/run.ts:229-243': 'reason: PauseReason',
+  'src/relay/run.ts:257': 'resolution: ResolutionRequest',
   // The pause is amended IN PLACE while it is held. #101's report read a repeated status as a
   // second pause replaying the first one's samples; this is the line that says it cannot be
   // one, because there is only ever the one object.
-  'src/relay/run.ts:734': 'this.#pause.superseded = info',
+  'src/relay/run.ts:747': 'this.#pause.superseded = info',
   'src/relay/subagents.ts:68': 'export function worktreePaths',
   'src/repl/session.ts:250-262': 'turnWatchdogMs?: number | undefined',
   // The console's liveness seam, cited by the relay's own copy of it (#101). Two front-ends
