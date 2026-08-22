@@ -58,6 +58,9 @@ process.stdout.write('\\x1b[?2004h')
 
 let buf = ''
 let turns = 0
+// One prompt at a time. The await below only orders anything if a second chunk cannot begin
+// posting while the first is still waiting on its own POST.
+let queue = Promise.resolve()
 process.stdin.on('data', function (d) {
   buf += d.toString()
   const m = /[\\r\\n]/.exec(buf)
@@ -67,23 +70,31 @@ process.stdin.on('data', function (d) {
   if (!prompt.trim()) return
   turns += 1
   const id = 'fake-turn-' + turns
-  // ORCH_FAKE_SPEAK posts BEFORE the submit on purpose. Hooks are independent POSTs that
-  // nobody orders, and a loaded Linux runner delivered them this way round while macOS did
-  // not -- which made the adapter drop the evidence that the child had spoken. Forcing the
-  // order here keeps that reproducible instead of leaving it to the machine.
-  if (process.env.ORCH_FAKE_SPEAK) {
-    post('PermissionRequest', { prompt_id: id, turn_id: id, tool_name: 'Bash', tool_input: { command: 'ls' } })
-  }
-  post('UserPromptSubmit', { prompt_id: id, turn_id: id, prompt })
-  // ORCH_FAKE_SPEAK: say ONE thing and then go quiet, which is a turn that stopped rather than
-  // a child that never started. A PermissionRequest is used because it is the only child-sourced
-  // event this stand-in can produce without writing a transcript.
-  if (stopAfter > 0) {
-    setTimeout(function () {
-      post('Stop', { prompt_id: id, turn_id: id, last_assistant_message: 'done' })
-    }, stopAfter)
-  }
-  // Otherwise: nothing, ever. This is the hang the watchdog exists for.
+  queue = queue.then(async function () {
+    // ORCH_FAKE_SPEAK posts BEFORE the submit on purpose, and AWAITS it. Hooks are independent
+    // POSTs that nobody orders, and a loaded Linux runner delivered them this way round while
+    // macOS did not -- which made the adapter drop the evidence that the child had spoken.
+    //
+    // The await is what makes that order causal rather than likely. The receiver dispatches a
+    // delivery to the adapter before the client can observe the response completing, so a
+    // resolved fetch here means the speech is already recorded before the submit that arms the
+    // watchdog is sent. Two unawaited fetches would merely tend to arrive this way round --
+    // which is the race this test claims to have removed, run under load.
+    //
+    // Say ONE thing and then go quiet: a turn that stopped, rather than a child that never
+    // started. A PermissionRequest is used because it is the only child-sourced event this
+    // stand-in can produce without writing a transcript.
+    if (process.env.ORCH_FAKE_SPEAK) {
+      await post('PermissionRequest', { prompt_id: id, turn_id: id, tool_name: 'Bash', tool_input: { command: 'ls' } })
+    }
+    await post('UserPromptSubmit', { prompt_id: id, turn_id: id, prompt })
+    if (stopAfter > 0) {
+      setTimeout(function () {
+        post('Stop', { prompt_id: id, turn_id: id, last_assistant_message: 'done' })
+      }, stopAfter)
+    }
+    // Otherwise: nothing, ever. This is the hang the watchdog exists for.
+  })
 })
 
 post('SessionStart', { transcript_path: process.env.ORCH_FAKE_TRANSCRIPT })
@@ -104,22 +115,19 @@ writeFileSync(TRANSCRIPT, '')
 process.env['PATH'] = `${RUN}:${process.env['PATH'] ?? ''}`
 process.env['ORCH_FAKE_TRANSCRIPT'] = TRANSCRIPT
 
-const WATCHDOG_MS = 400
-
 /**
- * The deadline for the tests where the child must SPEAK before it goes quiet.
+ * One deadline for every test here, including the ones whose precondition is that the child
+ * SPOKE first.
  *
- * 400ms is fine for a child that says nothing -- there is nothing to race. It is not fine
- * when the test's precondition is an event that arrives through the hook, because every hook
- * event spawns a process, and two spawns against a 400ms deadline is a race that macOS wins
- * and a loaded Linux runner loses. That is exactly how this file went red on main while
- * passing on the PR.
- *
- * Not a raised wait budget hiding contention -- `session.tty.test.ts` records why that is the
- * wrong fix. This is the deadline of the thing under test, and the test needs the speech
- * delivered before it. The margin is against process spawn latency, not against load.
+ * That used to need its own raised deadline: the speech and the submit were two unawaited
+ * POSTs, so "spoke before the clock started" was a race that macOS won and a loaded Linux
+ * runner lost. The stand-in now awaits the speech POST, and the receiver dispatches a delivery
+ * to the adapter before the client can observe the response completing -- so the precondition
+ * is recorded before the submit that arms the watchdog is even sent. Ordering is established by
+ * causality, not by leaving 5 seconds for it to probably happen, and a deadline that only ever
+ * measured spawn latency has nothing left to measure.
  */
-const SPOKE_WATCHDOG_MS = 5_000
+const WATCHDOG_MS = 400
 
 /** Collect events until `done`, or give up. Returns what it saw either way. */
 async function collect(
@@ -304,7 +312,7 @@ test('claude: a turn that spoke and then went quiet is not blamed on its model',
     cwd: RUN,
     role: 'implementer',
     args: ['--model', 'opus-5'],
-    watchdogMs: SPOKE_WATCHDOG_MS,
+    watchdogMs: WATCHDOG_MS,
     readyTimeoutMs: 20_000,
   })
   try {

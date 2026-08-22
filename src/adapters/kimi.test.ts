@@ -12,7 +12,7 @@
  */
 
 import { strict as assert } from 'node:assert'
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -22,6 +22,41 @@ import { KimiPrintAdapter, parseRecord, sessionIdFrom, textOf } from './kimi.ts'
 
 const REPO = fileURLToPath(new URL('../..', import.meta.url))
 const FIXTURE = join(REPO, 'spikes/kimi/fixtures/edit-turn.ndjson')
+
+/**
+ * The real `setTimeout`, captured at module load.
+ *
+ * The two tests whose precondition is that the child SPOKE freeze the adapter's clock with
+ * `t.mock.timers`, so the deadline can be advanced deliberately rather than waited out. That
+ * replaces the global, and they still have to wait in real time for a real process -- which is
+ * the one thing the frozen clock must not be used for.
+ */
+const realSetTimeout = globalThis.setTimeout
+const realSleep = (ms: number): Promise<void> => new Promise((r) => realSetTimeout(() => r(), ms))
+
+/**
+ * Wait until the stub has written its bytes, then let the adapter read them.
+ *
+ * Two halves answering different questions. The marker answers "has the child written yet",
+ * which is the part that blows out under load -- fork, exec, shell startup, a `cat`. The yields
+ * answer "has the parent read what is sitting in the pipe": `setImmediate` runs in the check
+ * phase, so each turn traverses poll, where pipe data is delivered.
+ *
+ * It does NOT prove the adapter counted anything -- `turn.heard` is private and `snapshot()`
+ * does not expose it. Same limitation, and same reasoning, as the OpenCode copy of this; see
+ * `docs/NOTES.md`.
+ */
+async function heardWhatWasWritten(wrote: string): Promise<void> {
+  const deadline = Date.now() + 20_000
+  while (!existsSync(wrote)) {
+    if (Date.now() > deadline) throw new Error(`stub never finished writing: ${wrote}`)
+    await realSleep(2)
+  }
+  for (let turn = 0; turn < 50; turn++) {
+    await new Promise((r) => setImmediate(r))
+    if (turn % 10 === 9) await realSleep(1)
+  }
+}
 const STDERR = join(REPO, 'spikes/kimi/fixtures/edit-turn.stderr.txt')
 
 function stub(stdout: string, stderr = '', code = 0): { command: string; argvLog: string } {
@@ -196,97 +231,159 @@ test('a binary that is not on PATH is a verdict, not a crash', async () => {
   await s.close()
 })
 
-/** Emits nothing on either stream and never exits, so only the watchdog can end the turn. */
+/**
+ * Emits nothing on either stream and never exits, so only the watchdog can end the turn.
+ *
+ * `exec sleep`, not `sleep`: otherwise the shell stays alive as the parent and `sleep` is a
+ * grandchild holding the inherited stdout pipe, so SIGTERM ends the shell and leaves the stream
+ * open. That is a real adapter case with its own test; here it only makes every hang test wait
+ * out the adapter's post-exit grace for nothing. Measured: with the plain `sleep`, six copies of
+ * this file under load had all reported and still would not exit.
+ */
 function hangingStub(): string {
   const dir = mkdtempSync(join(tmpdir(), 'kimi-hang-'))
   const command = join(dir, 'kimi-hang')
-  writeFileSync(command, '#!/bin/sh\nsleep 30\n')
+  writeFileSync(command, '#!/bin/sh\nexec sleep 30\n')
   chmodSync(command, 0o755)
   return command
 }
 
-/** Writes `err` to stderr, says nothing on stdout, and hangs. */
-function hangingStubOnStderr(err: string): string {
+/**
+ * Writes `err` to stderr, says nothing on stdout, and hangs.
+ *
+ * `wrote` is created after the write returns. It is content-neutral by construction -- a file on
+ * disk, no bytes into the adapter, no record -- so a test can wait on it without changing what
+ * the child is heard to have said.
+ */
+function hangingStubOnStderr(err: string): { command: string; wrote: string } {
   const dir = mkdtempSync(join(tmpdir(), 'kimi-hang-err-'))
   const errPath = join(dir, 'err.txt')
   writeFileSync(errPath, err)
+  const wrote = join(dir, 'wrote')
   const command = join(dir, 'kimi-hang-err')
-  writeFileSync(command, `#!/bin/sh\ncat ${JSON.stringify(errPath)} >&2\nsleep 30\n`)
+  writeFileSync(
+    command,
+    `#!/bin/sh\ncat ${JSON.stringify(errPath)} >&2\n: > ${JSON.stringify(wrote)}\nexec sleep 30\n`,
+  )
   chmodSync(command, 0o755)
-  return command
+  return { command, wrote }
 }
 
-test('stderr is output too: a child that printed an error and hung is not blamed on its model', async () => {
+test('stderr is output too: a child that printed an error and hung is not blamed on its model', async (t) => {
   // On this adapter stderr is where a provider or config failure appears AT ALL -- the structured
   // stream carries the conversation and nothing else -- so a gate that counted only records and
   // hooks would name the model on precisely the turn the child had explained itself.
+  //
+  // Frozen clock and a fixture barrier (#154). The precondition is that the stderr byte reached
+  // the adapter before the deadline, and against a real 600ms timer that is a race with process
+  // spawn: six copies of this file under load lost it in every run, which turns the assertion
+  // below into its opposite, because a child that was never heard IS blamed on its model. The
+  // deadline itself is unchanged -- it simply no longer has to win anything.
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  // Restored on the way out however this test ends. A mocked clock is a GLOBAL: if an
+  // assertion throws before a manual reset, the frozen `setTimeout` leaks into whatever runs
+  // next, and the next test that waits on a real deadline never wakes. Measured -- that is
+  // exactly what a failing negative control did here, hanging the file until it was killed.
+  t.after(() => t.mock.timers.reset())
+  const stub = hangingStubOnStderr('error: no such model on this provider\n')
   const session = await KimiPrintAdapter.start({
     cwd: REPO,
     role: 'implementer',
-    command: hangingStubOnStderr('error: no such model on this provider\n'),
+    command: stub.command,
     watchdogMs: 600,
   })
-  await session.send('go', { kind: 'orchestrator' })
-  const events = await nextTurn(session)
-  assert.deepEqual(events.filter((e) => e.type === 'message' || e.type === 'tool_use'), [])
-  const end = events.find((e) => e.type === 'turn_end') as TurnEndEvent
-  assert.equal(end.verdict.outcome, 'timed_out')
-  assert.equal(
-    end.verdict.provenance.find((p) => p.source === 'orchestrator' && /first run/.test(p.detail)),
-    undefined,
-    'the child spoke, so the launch is not named',
-  )
-  assert.ok(
-    end.verdict.provenance.some((p) => /no such model on this provider/.test(p.detail)),
-    `the child's own answer must survive into the verdict: ${JSON.stringify(end.verdict.provenance)}`,
-  )
-  await session.close()
+  // `finally`, because this adapter holds a HookReceiver -- a listening server closed only by
+  // `close()`. An assertion that throws past an unguarded close leaks it, and the test process
+  // then never exits: measured, six copies of this file sat for ten minutes with every test
+  // already reported. A failing test must fail, not hang.
+  try {
+    await session.send('go', { kind: 'orchestrator' })
+    await heardWhatWasWritten(stub.wrote)
+    t.mock.timers.tick(600)
+    const events = await nextTurn(session)
+    assert.deepEqual(events.filter((e) => e.type === 'message' || e.type === 'tool_use'), [])
+    const end = events.find((e) => e.type === 'turn_end') as TurnEndEvent
+    assert.equal(end.verdict.outcome, 'timed_out')
+    assert.equal(
+      end.verdict.provenance.find((p) => p.source === 'orchestrator' && /first run/.test(p.detail)),
+      undefined,
+      'the child spoke, so the launch is not named',
+    )
+    assert.ok(
+      end.verdict.provenance.some((p) => /no such model on this provider/.test(p.detail)),
+      `the child's own answer must survive into the verdict: ${JSON.stringify(end.verdict.provenance)}`,
+    )
+  } finally {
+    await session.close()
+  }
 })
 
-/** Emits `body` and then never exits, so only the watchdog can end the turn. */
-function hangingStubEmitting(body: string): string {
+/** Emits `body` and then never exits, so only the watchdog can end the turn. Marker as above. */
+function hangingStubEmitting(body: string): { command: string; wrote: string } {
   const dir = mkdtempSync(join(tmpdir(), 'kimi-hang-say-'))
   const out = join(dir, 'out.ndjson')
   writeFileSync(out, body)
+  const wrote = join(dir, 'wrote')
   const command = join(dir, 'kimi-hang-say')
-  writeFileSync(command, `#!/bin/sh\ncat ${JSON.stringify(out)}\nsleep 30\n`)
+  writeFileSync(
+    command,
+    `#!/bin/sh\ncat ${JSON.stringify(out)}\n: > ${JSON.stringify(wrote)}\nexec sleep 30\n`,
+  )
   chmodSync(command, 0o755)
-  return command
+  return { command, wrote }
 }
 
-test('a record carrying no content still suppresses the launch diagnosis (#82)', async () => {
+test('a record carrying no content still suppresses the launch diagnosis (#82)', async (t) => {
   // The repair. `textBlocks` and `toolCalls` are CONTENT, and this adapter leaves both empty for
   // records that plainly came from the child: a `role: "tool"` result is deliberately never
   // re-emitted, and an assistant message with no text and no calls is the completion signal
   // itself. Reading emptiness off them called both of those "produced nothing at all".
+  //
+  // Frozen clock and the same content-neutral fixture barrier as the stderr test above (#154):
+  // the record has to reach the adapter before the deadline, and against a real timer that was
+  // a race this machine lost under load in every run.
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  // Restored on the way out however this test ends. A mocked clock is a GLOBAL: if an
+  // assertion throws before a manual reset, the frozen `setTimeout` leaks into whatever runs
+  // next, and the next test that waits on a real deadline never wakes. Measured -- that is
+  // exactly what a failing negative control did here, hanging the file until it was killed.
+  t.after(() => t.mock.timers.reset())
   for (const [why, body] of [
     ['a tool result', '{"role":"tool","tool_call_id":"call_1","content":"ok"}\n'],
     ['an assistant message with nothing in it', '{"role":"assistant","content":[]}\n'],
   ] as const) {
+    const stub = hangingStubEmitting(body)
     const session = await KimiPrintAdapter.start({
       cwd: REPO,
       role: 'implementer',
-      command: hangingStubEmitting(body),
+      command: stub.command,
       watchdogMs: 600,
     })
-    await session.send('go', { kind: 'orchestrator' })
-    const events = await nextTurn(session)
-    // The gap this closes, pinned: neither record produces a content event, so `textBlocks` and
-    // `toolCalls` are empty on a child that plainly spoke -- which is exactly what the old check
-    // read, and why it called this silence.
-    assert.deepEqual(
-      events.filter((e) => e.type === 'message' || e.type === 'tool_use'),
-      [],
-      `${why}: this record produces no content event, which is why the old check missed it`,
-    )
-    const end = events.find((e) => e.type === 'turn_end') as TurnEndEvent
-    assert.equal(end.verdict.outcome, 'timed_out', `${why}: it still times out`)
-    assert.equal(
-      end.verdict.provenance.find((p) => p.source === 'orchestrator' && /first run/.test(p.detail)),
-      undefined,
-      `${why}: the child spoke, so the launch is not named`,
-    )
-    await session.close()
+    // `finally`: see the stderr test above -- an unguarded close leaks this adapter's
+    // HookReceiver on a failing assertion, and the process then hangs instead of failing.
+    try {
+      await session.send('go', { kind: 'orchestrator' })
+      await heardWhatWasWritten(stub.wrote)
+      t.mock.timers.tick(600)
+      const events = await nextTurn(session)
+      // The gap this closes, pinned: neither record produces a content event, so `textBlocks`
+      // and `toolCalls` are empty on a child that plainly spoke -- which is exactly what the old
+      // check read, and why it called this silence.
+      assert.deepEqual(
+        events.filter((e) => e.type === 'message' || e.type === 'tool_use'),
+        [],
+        `${why}: this record produces no content event, which is why the old check missed it`,
+      )
+      const end = events.find((e) => e.type === 'turn_end') as TurnEndEvent
+      assert.equal(end.verdict.outcome, 'timed_out', `${why}: it still times out`)
+      assert.equal(
+        end.verdict.provenance.find((p) => p.source === 'orchestrator' && /first run/.test(p.detail)),
+        undefined,
+        `${why}: the child spoke, so the launch is not named`,
+      )
+    } finally {
+      await session.close()
+    }
   }
 })
 

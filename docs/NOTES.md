@@ -272,3 +272,214 @@ structure has to come from a hook or a tool call instead.
 
 **Do not report an empty `flags` array as a measurement** until one of these paths has been
 observed working in a live run. Today it means "nobody volunteered anything".
+
+
+---
+
+## A shared test-fixture race across three adapters (#154)
+
+**Current state, not a chronology.** Everything below is measured on this machine unless it
+says otherwise. One question is left unanswered by all of it, and it is named at the end.
+
+### The report that started it, and the correction to it
+
+The issue records two flakes under full-suite load, in unrelated files, neither touched by
+the branch it failed on, both green when re-run in isolation:
+
+- `a red integration tree mid-run is repaired: a task is dispatched, taken, merged, and the
+  tree measured green` (`src/relay/integrationRed.test.ts`), which took 14943ms failing;
+- `a run that produced records and then stalled is not blamed on its model`, attributed there
+  to `src/adapters/watchdogWiring.test.ts`.
+
+**That second attribution cannot be right as written.** No test of that name has ever existed
+in `watchdogWiring.test.ts` on any branch (`git log --all -S`). The name belongs to
+`src/adapters/opencode.test.ts`, where it has lived since `7f29ac9`. `watchdogWiring.test.ts`
+has a sibling test with the same intent under a different name — `claude: a turn that spoke and
+then went quiet is not blamed on its model` — so #154 pairs one test's name with the other
+test's file, and the record does not say which half is accurate. Both files turned out to carry
+the defect, so the investigation did not depend on resolving it; the ambiguity is recorded
+because a citation nobody can check is the failure this repo already has a guard for.
+
+**The falsifier, established early and still standing.** `integrationRed.test.ts` drives
+`FakeRotationSession` and registers `NO_DEADLINE_CLOCKS`. It constructs neither PTY adapter nor
+a `TranscriptSessionView`, so no watchdog timing, no deadline reconciliation and no transcript
+serialization executes anywhere inside it. Nothing found below can reach it. Treat the two
+halves of #154 as two investigations that happen to share an issue number.
+
+### One mechanism, three adapters
+
+Every adapter's `#82` tests ask the same question — did the child produce ANYTHING before its
+deadline, because a first turn that produced nothing makes the model it was launched with a
+suspect — and each one left the precondition to a race:
+
+| adapter | the precondition | what it raced |
+|---|---|---|
+| `ClaudePtyHookAdapter` | a `PermissionRequest` hook recorded before `UserPromptSubmit` arms the watchdog | two unawaited `fetch` POSTs, ordered by nothing |
+| `OpenCodeRunAdapter` | `turn.heard > 0` from a parsed record or a stderr byte | a real 600ms deadline vs. fork + exec + shell startup + parsing |
+| `KimiPrintAdapter` | the same, on its own record and stderr paths | the same |
+
+The shape is worth recognising on sight: **if a test's precondition arrives through the same
+clock the test is measuring, it is a race, and a loaded machine will find it before review
+does.** All six were test defects. None was an adapter defect.
+
+It was already being paid for. `watchdogWiring.test.ts` carried a bespoke 5-second deadline for
+its spoken-turn test where every other test in the file used 400ms, with a comment arguing that
+enough time makes the right order likely.
+
+### Reproduced deterministically, then fixed
+
+Six simultaneous copies of a file against 14 CPU burners on a 10-core machine. At that load
+these stop being flakes and fail in every run:
+
+| file | `HEAD` | fixed | load avg |
+|---|---|---|---|
+| `src/adapters/opencode.test.ts` | **4 of 18 fail**, 6 runs of 6 | **0**, 6 of 6 | 6.7 → 12.8 |
+| `src/adapters/kimi.test.ts` | **2 of 13 fail**, 6 of 6 | **0**, 6 of 6 | ~19 |
+
+The OpenCode arm was run as a factorial, and the middle row is what makes the two fixes
+independent rather than one covering for the other:
+
+| tree | fail / 18 |
+|---|---|
+| `HEAD` | 4, 6 of 6 |
+| + stalled-run and provider fixes | 2, 6 of 6 |
+| + the fixture barrier | 0, 6 of 6 |
+
+Confirmed harder on the last arm: eight simultaneous copies against 20 burners, load average
+15.1, **18/18 in all eight runs**. `watchdogWiring.test.ts` was verified the same way — 24 runs
+up to six-way against 14 burners, all green, with its spoken test collapsing from 6.2s into a
+1619–1640ms band.
+
+**No deadline was raised.** Every fix takes the precondition out of competition with a real
+deadline — the clock no longer runs while the test is waiting for the thing it depends on. That
+is the property all six share, and it is weaker than causality in two of the three cases. What
+each fix actually establishes differs, and the difference is worth keeping straight:
+
+- **Claude — causal.** The fake CLI awaits its `PermissionRequest` POST before sending the
+  submit. The receiver dispatches a delivery to the adapter before the client can observe the
+  response completing, so a resolved fetch in the child means the speech is already recorded in
+  the parent. There is no window left: the submit cannot be sent until the precondition holds.
+  The bespoke 5-second deadline is deleted and the file runs on one 400ms deadline again.
+- **OpenCode's stalled-run test — causal.** `node:test` mock timers freeze the clock; the test
+  consumes events until a `tool_use` arrives, and only then advances exactly 600ms. The event IS
+  the precondition, observed in the adapter's own output, so waiting on it proves the thing the
+  assertion needs rather than standing in for it.
+- **The four no-content tests** (two OpenCode, two Kimi) — **not causal; a bounded assumption.**
+  They cannot use the proof above: their whole premise is that the child's output produces NO
+  event, and `turn.heard` is private with `snapshot()` not exposing it, so there is nothing
+  observable to wait on. Instead the fixture reports on itself — a marker file the stub touches
+  after its writes return, content-neutral by construction — and the test then yields a bounded
+  number of event-loop turns before advancing the frozen clock. The marker PROVES the child
+  finished writing. It does not prove the adapter read or counted those bytes; that step rests
+  on available pipe data being delivered within those turns. See "What the fixture barrier does
+  not establish" below.
+
+So the first two remove the race outright, and the last four replace a race against process
+spawn — fork, exec, shell startup, a `cat` — with an assumption about pipe delivery into an
+already-parked event loop. Both are large improvements over a fixed deadline, and they are not
+the same kind of claim.
+
+All `no message/tool_use event exists` assertions and all verdict/provenance assertions are
+unchanged; that is what keeps these tests pinning the gap they were written for.
+
+### Mutation evidence
+
+Each path was proven by deleting the line it depends on and confirming the right test fails on
+the right assertion. Every control was restored byte-for-byte, verified by sha256:
+
+| removed | fails | on |
+|---|---|---|
+| `ClaudePtyHookAdapter`'s `#producedBeforeTurn` handling | `claude: a turn that spoke and then went quiet …`, alone | the launch-caveat assertion |
+| `turn.heard += 1` in `OpenCodeRunAdapter.#onRecord` | its record test and its stalled-run test | the launch-caveat assertion |
+| `turn.heard += 1` in OpenCode's stderr callback | its stderr test, alone | the launch-caveat assertion |
+| `turn.heard += 1` in `KimiPrintAdapter.#onRecord` | its record test, alone | the launch-caveat assertion |
+| `turn.heard += 1` in Kimi's stderr callback | its stderr test, alone | the launch-caveat assertion |
+
+The stdout and stderr halves of `heard` are separately pinned in both adapters — neither
+control disturbed the other's test.
+
+### What the fixture barrier does not establish
+
+It covers the part that blows out under load: fork, exec, shell startup, a `cat`. It does not
+PROVE the adapter counted the bytes, because there is no observable to assert on. What follows
+the marker is a bounded number of event-loop turns with the data already readable in the pipe —
+a far smaller and far less load-sensitive assumption than the one it replaces, but an
+assumption. If these flake again, that is the line to look at, and the answer is an observable
+for `heard`, not more yields.
+
+### A second defect in the same file, unrelated to any clock
+
+`a provider failure the child announced reaches the verdict` failed on `the turn must settle`,
+and that test sets no `watchdogMs` at all. It collected events from a detached `for await` loop,
+slept a flat 600ms, and asserted the turn had ended — a guess about how fast the machine is
+(spawn `sh`, print two records, exit 1, settle) rather than a wait for the event it was about.
+It now does `await nextTurn(session)` and asserts against the returned events; every verdict and
+provenance assertion is unchanged, and it went from 603ms to 166ms.
+
+### Three fixture defects found on the way, all worth keeping
+
+- **A failing Kimi test hung instead of failing.** `KimiPrintAdapter` starts a `HookReceiver`, a
+  listening server closed only by `close()`, and these tests called `close()` on the success
+  path only. An assertion that threw leaked it and the process never exited: six copies sat for
+  ten minutes with all thirteen tests already reported, and a negative control could not be read
+  until this was fixed. Both now close in `finally`. OpenCode's file holds no receiver and was
+  never affected.
+- **A mocked clock leaked out of a failing test.** `t.mock.timers.enable()` replaces a global,
+  and a manual `reset()` at the end of a body is skipped when an assertion throws — so the
+  frozen `setTimeout` reached whatever ran next, and the next test waiting on a real deadline
+  never woke. All five mocked-clock tests restore through `t.after()`, which runs on both paths.
+  A guard that fails by hanging is a guard that gets re-run rather than read.
+- **`exec sleep`, not `sleep`, in every hanging stub.** Otherwise the shell stays alive as the
+  parent and `sleep` is a grandchild holding the inherited stdout pipe, so SIGTERM ends the
+  shell and leaves the stream open. That is a real adapter case with its own dedicated test and
+  a real grandchild; in these stubs it only made every hang test wait out the adapter's 250ms
+  post-exit grace for nothing. Unloaded, `kimi.test.ts` went from 35.2s to 2.3s.
+
+### Whole suite, and the one thing still unexplained
+
+`npm test` on the four-file change, run against the pristine-main loop for load: **1257 tests,
+1231 pass, 0 fail, 26 skipped, 359.1s**, no failure text of any kind. Every hardened case is
+green and faster than it was — Claude's spoken test 1828ms, OpenCode's four at 207/283/417/736ms,
+Kimi's two at 391/841ms.
+
+`integrationRed` passed at **4114ms**, against 11166ms in the previous full run on this tree and
+11771–12882ms across ten runs on pristine `main` below. The suite as a whole went 461.4s →
+359.1s over the same interval. That is consistent with `exec sleep` freeing a
+`--test-concurrency=4` slot roughly 33 seconds earlier and easing contention for everything
+sharing the run, but it is one sample with differing background load and is not established.
+None of these durations bears on why the original run failed; see the paragraph on why total
+duration is non-diagnostic, below.
+
+**The 10-run loop on pristine `main` did not reproduce anything.** It has now run, and the
+result is a clean negative:
+
+| | |
+|---|---|
+| runs | 10 of 10, `status=0` |
+| per run | 1257 tests, 1231 pass, **0 fail**, 26 skipped |
+| red tests, all runs | **none** — no `✖`, no `AssertionError`, no failure text anywhere |
+| suite duration | 549–568s (mean 557) |
+| `integrationRed` | passed 10/10, **11771–12882ms** (mean 12304) |
+| `a run that produced records and then stalled …` | passed 10/10, 854–856ms |
+
+**What that does and does not tell us.** It did not reproduce `integrationRed`, and it did not
+reproduce the OpenCode test #154 names. The second of those is expected and is not evidence of
+anything: this loop runs one suite at a time, and the fixture races above need roughly six
+concurrent copies of a file to go red — a green result here is a statement about this
+configuration, not about whether those races exist. They demonstrably do; see the rates above.
+
+For `integrationRed` it is a genuine 0/10, and it leaves the original occurrence unexplained.
+The durations above are recorded as raw measurements and nothing is inferred from them. In
+particular, that they sit below the 14943ms of the failing run does NOT argue the failure was or
+was not slowness: without the assertion text, a total duration cannot say where inside the test
+the time went, or which assertion failed, or whether the run failed early on a missed window or
+late after slow work. Total duration is non-diagnostic here.
+
+So: `integrationRed` has now passed 10/10 full-suite runs on pristine `main`, 12/12 simultaneous
+targeted runs, and one run with its entire event loop held under `SIGSTOP` for 16 seconds inside
+the window where it previously failed (19.4s total) — which rules out a comparable missed-timer
+window and nothing more. **The cause of the original failure remains unknown**, and on the
+present evidence it is a single unreproduced occurrence rather than a diagnosed defect.
+
+The one thing that would have settled it was never captured: what the failure actually was. If
+it appears again, keep the assertion text and the file it came from before anything else.

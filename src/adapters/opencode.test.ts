@@ -16,7 +16,7 @@
  */
 
 import { strict as assert } from 'node:assert'
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -26,6 +26,16 @@ import { OpenCodeRunAdapter, parseRecord } from './opencode.ts'
 
 const REPO = fileURLToPath(new URL('../..', import.meta.url))
 const FIXTURE = join(REPO, 'spikes/opencode/fixtures/edit-turn.ndjson')
+
+/**
+ * The real `setTimeout`, captured at module load.
+ *
+ * Three tests below freeze the adapter's clock with `t.mock.timers` so a deadline can be
+ * advanced deliberately instead of waited out. That replaces the global, and two of them still
+ * need to wait in real time for a child process -- which is the one thing the frozen clock must
+ * not be used for, since the whole point is that the deadline does not advance while it happens.
+ */
+const realSetTimeout = globalThis.setTimeout
 
 /**
  * A stand-in for the `opencode` binary that emits `body` and exits with `code`.
@@ -337,12 +347,15 @@ test('a provider failure the child announced reaches the verdict', async () => {
   const { command } = stub(`${error}\n${second}\n`, 1)
 
   const session = await OpenCodeRunAdapter.start({ cwd: REPO, role: 'implementer', command })
-  const events: AgentEvent[] = []
-  void (async () => {
-    for await (const e of session.events()) events.push(e)
-  })()
   await session.send('go', { kind: 'orchestrator' })
-  await new Promise((r) => setTimeout(r, 600))
+  // Waited for, not slept through. This test sets no `watchdogMs`, so there is no deadline in
+  // play at all and nothing here is about timing: it collected events into an array from a
+  // detached loop and then gave the child a flat 600ms to spawn, print two records and exit 1.
+  // That is a guess about how fast a machine is, and on a loaded one it is wrong -- six copies
+  // of this file at load average ~9.5 failed `the turn must settle` in every run, on an adapter
+  // that was working correctly and simply had not finished yet. `nextTurn` returns when the
+  // turn ENDS, which is the event the assertions below are about.
+  const events = await nextTurn(session)
 
   const end = events.find((e): e is TurnEndEvent => e.type === 'turn_end')
   assert.ok(end, 'the turn must settle')
@@ -362,20 +375,62 @@ test('a provider failure the child announced reaches the verdict', async () => {
  *
  * Separate from `stub` above rather than a flag on it: everything else in this file is about a
  * child that finishes, and a `sleep` in the common helper would be a trap for the next test.
+ *
+ * `exec sleep`, not `sleep`: without it the shell stays alive as the parent and `sleep` is a
+ * grandchild holding the inherited stdout pipe, so SIGTERM ends the shell and leaves the stream
+ * open -- the exact case the adapter's 250ms post-exit grace exists to survive. Replacing the
+ * shell means one process owns the pipe, and killing it closes the stream directly. The
+ * adapter's grace path is unchanged and still covered by a real child; this stub simply stops
+ * making every hang test pay 250ms to prove something it is not about.
  */
-function hangingStub(body: string, err = ''): string {
+function hangingStub(body: string, err = ''): { command: string; wrote: string } {
   const dir = mkdtempSync(join(tmpdir(), 'oc-hang-'))
   const payload = join(dir, 'payload.ndjson')
   const errPath = join(dir, 'err.txt')
   writeFileSync(payload, body)
   writeFileSync(errPath, err)
+  const wrote = join(dir, 'wrote')
   const command = join(dir, 'opencode-hang')
+  // The marker is created AFTER both writes return, and it is the only thing about this stub
+  // that is not the child's own output -- a file on disk, carrying no bytes into the adapter
+  // and producing no record, so a test can wait on it without altering what the adapter hears.
   writeFileSync(
     command,
-    `#!/bin/sh\ncat ${JSON.stringify(payload)}\ncat ${JSON.stringify(errPath)} >&2\nsleep 30\n`,
+    `#!/bin/sh\ncat ${JSON.stringify(payload)}\ncat ${JSON.stringify(errPath)} >&2\n` +
+      `: > ${JSON.stringify(wrote)}\nexec sleep 30\n`,
   )
   chmodSync(command, 0o755)
-  return command
+  return { command, wrote }
+}
+
+/**
+ * Wait until the stub has written its bytes, then let the adapter read them.
+ *
+ * Two halves, because they answer different questions. The marker answers "has the child
+ * written yet", which is the part that blows out under load: it covers fork, exec, shell
+ * startup and two `cat`s, and it is what a fixed deadline was really betting against. The
+ * yields answer "has the parent read what is sitting in the pipe", which is a handful of
+ * event-loop turns with the fd already readable -- `setImmediate` runs in the check phase, so
+ * each turn traverses poll, where pipe data is delivered.
+ *
+ * `realSleep` is the pre-mock `setTimeout`, captured before `t.mock.timers.enable()` replaced
+ * the global. The adapter's clock has to be frozen for the deadline to be advanced
+ * deliberately, and this still has to wait in real time.
+ *
+ * What this does NOT do is prove the adapter counted anything: `turn.heard` is private and
+ * `snapshot()` does not expose it, so unlike the `tool_use` proof in the stalled-run test
+ * there is no observable to assert on. See the note in `docs/NOTES.md`.
+ */
+async function heardWhatWasWritten(wrote: string, realSleep: (ms: number) => Promise<void>): Promise<void> {
+  const deadline = Date.now() + 20_000
+  while (!existsSync(wrote)) {
+    if (Date.now() > deadline) throw new Error(`stub never finished writing: ${wrote}`)
+    await realSleep(2)
+  }
+  for (let turn = 0; turn < 50; turn++) {
+    await new Promise((r) => setImmediate(r))
+    if (turn % 10 === 9) await realSleep(1)
+  }
 }
 
 /** The `orchestrator` caveat #82 adds to a deadline verdict, or undefined when absent. */
@@ -389,7 +444,9 @@ test('a first run that produced no records at all names the model it was launche
   const session = await OpenCodeRunAdapter.start({
     cwd: REPO,
     role: 'implementer',
-    command: hangingStub(''),
+    // No barrier and no mocked clock: this stub writes nothing, so there is no precondition
+    // to establish -- the assertion IS that nothing was heard.
+    command: hangingStub('').command,
     args: ['-m', 'opencode/not-a-model'],
     watchdogMs: 300,
   })
@@ -401,24 +458,42 @@ test('a first run that produced no records at all names the model it was launche
   await session.close()
 })
 
-test('a record the child sent but this adapter records no CONTENT for still suppresses the diagnosis', async () => {
+test('a record the child sent but this adapter records no CONTENT for still suppresses the diagnosis', async (t) => {
   // The repair. `steps`, `textBlocks` and `toolCalls` all stay empty for an `error` record and
   // for a type this adapter has no case for -- so reading emptiness off them called a child that
   // had already announced a provider failure "silent", and named its model as the suspect over
   // the top of the child's own answer. Both shapes, because they miss the content fields for
   // different reasons: one is handled and stored somewhere else, one is not handled at all.
+  //
+  // The clock is mocked and the fixture carries a barrier (#154). The precondition is that the
+  // child's record reached the adapter before the deadline; against a real 600ms timer that was
+  // a race with process spawn, and a loaded machine lost it 6 runs out of 6 -- turning this
+  // assertion into its opposite, because a child that was never heard IS blamed on its model.
+  // The barrier is content-neutral: a marker file the stub touches after its writes return,
+  // which the adapter never sees.
+  const realSleep = (ms: number): Promise<void> =>
+    new Promise((r) => realSetTimeout(() => r(), ms))
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  // Restored on the way out however this test ends. A mocked clock is a GLOBAL: if an
+  // assertion throws before a manual reset, the frozen `setTimeout` leaks into whatever runs
+  // next, and the next test that waits on a real deadline never wakes. Measured -- that is
+  // exactly what a failing negative control did here, hanging the file until it was killed.
+  t.after(() => t.mock.timers.reset())
   for (const [why, body] of [
     ['an announced error', '{"type":"error","error":{"name":"ProviderError","data":{"message":"upstream 502"}}}\n'],
     ['a record type this adapter does not know', '{"type":"some_future_record","part":{}}\n'],
   ] as const) {
+    const stub = hangingStub(body)
     const session = await OpenCodeRunAdapter.start({
       cwd: REPO,
       role: 'implementer',
-      command: hangingStub(body),
+      command: stub.command,
       args: ['-m', 'opencode/not-a-model'],
       watchdogMs: 600,
     })
     await session.send('go', { kind: 'orchestrator' })
+    await heardWhatWasWritten(stub.wrote, realSleep)
+    t.mock.timers.tick(600)
     const events = await nextTurn(session)
     // The gap this closes, pinned: NO content event was emitted for either record, so the three
     // content fields the check used to read are empty on a child that plainly spoke. Without
@@ -435,20 +510,35 @@ test('a record the child sent but this adapter records no CONTENT for still supp
   }
 })
 
-test('stderr is output too: a child that printed an error and hung is not blamed on its model', async () => {
+test('stderr is output too: a child that printed an error and hung is not blamed on its model', async (t) => {
   // The acceptance condition is "no output whatsoever", which is a claim about BYTES rather than
   // about the structured stream. A child that names a provider failure on stderr and then hangs
   // has already answered, and speculating about its model on top of that answer buries the one
   // line an operator needed. The verdict must carry that line, too -- it used to be discarded on
   // the killed path, so a watchdog kill reported the clock and the signal and nothing else.
+  //
+  // Mocked clock and the same content-neutral barrier as above (#154): the stderr byte has to
+  // reach the adapter before the deadline, and against a real timer that was a race this
+  // machine lost under load in every run.
+  const realSleep = (ms: number): Promise<void> =>
+    new Promise((r) => realSetTimeout(() => r(), ms))
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  // Restored on the way out however this test ends. A mocked clock is a GLOBAL: if an
+  // assertion throws before a manual reset, the frozen `setTimeout` leaks into whatever runs
+  // next, and the next test that waits on a real deadline never wakes. Measured -- that is
+  // exactly what a failing negative control did here, hanging the file until it was killed.
+  t.after(() => t.mock.timers.reset())
+  const stub = hangingStub('', 'error: provider returned 502 for opencode/not-a-model\n')
   const session = await OpenCodeRunAdapter.start({
     cwd: REPO,
     role: 'implementer',
-    command: hangingStub('', 'error: provider returned 502 for opencode/not-a-model\n'),
+    command: stub.command,
     args: ['-m', 'opencode/not-a-model'],
     watchdogMs: 600,
   })
   await session.send('go', { kind: 'orchestrator' })
+  await heardWhatWasWritten(stub.wrote, realSleep)
+  t.mock.timers.tick(600)
   const events = await nextTurn(session)
   // Nothing was parsed and no content event exists: the ONLY thing this child produced is the
   // stderr line, which is what makes this the case the record counter alone still gets wrong.
@@ -463,20 +553,60 @@ test('stderr is output too: a child that printed an error and hung is not blamed
   await session.close()
 })
 
-test('a run that produced records and then stalled is not blamed on its model', async () => {
+test('a run that produced records and then stalled is not blamed on its model', async (t) => {
   // The control, and the distinction: identical deadline, identical model, one difference --
   // this child spoke before it stopped.
+  //
+  // The deadline is MOCKED rather than waited out. What this test asserts is an ORDER -- the
+  // child's records were parsed before the clock fired -- and against a real timer that order
+  // is a race between 600ms and a process spawn plus three lines of parsing, which a loaded
+  // machine can lose. It did: this is one of the two flakes recorded in #154, and losing it
+  // turns the assertion below into its opposite, because an unheard child IS blamed on its
+  // model.
+  //
+  // So the clock does not run until the precondition is PROVEN. `tool_use` is that proof --
+  // the fixture's second record parsed all the way through to an event -- and only then is
+  // the deadline advanced, deliberately, by exactly its own length. 600ms is unchanged; the
+  // fix is that the number no longer has to beat anything.
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  // Restored on the way out however this test ends. A mocked clock is a GLOBAL: if an
+  // assertion throws before a manual reset, the frozen `setTimeout` leaks into whatever runs
+  // next, and the next test that waits on a real deadline never wakes. Measured -- that is
+  // exactly what a failing negative control did here, hanging the file until it was killed.
+  t.after(() => t.mock.timers.reset())
   const session = await OpenCodeRunAdapter.start({
     cwd: REPO,
     role: 'implementer',
-    command: hangingStub(readFileSync(FIXTURE, 'utf8').split('\n').slice(0, 3).join('\n') + '\n'),
+    command: hangingStub(readFileSync(FIXTURE, 'utf8').split('\n').slice(0, 3).join('\n') + '\n').command,
     args: ['-m', 'opencode/not-a-model'],
     watchdogMs: 600,
   })
+  // One iterator across both phases: `AsyncQueue` is single-consumer, and a second `for await`
+  // over `events()` would wait for events the first had already taken.
+  const stream = session.events()[Symbol.asyncIterator]()
+  const until = async (want: AgentEvent['type']): Promise<AgentEvent[]> => {
+    const seen: AgentEvent[] = []
+    for (let n = await stream.next(); !n.done; n = await stream.next()) {
+      seen.push(n.value)
+      if (n.value.type === want) break
+    }
+    return seen
+  }
+
   await session.send('go', { kind: 'orchestrator' })
-  const events = await nextTurn(session)
-  const end = events.find((e) => e.type === 'turn_end') as TurnEndEvent
+  // Nothing can end this turn while the only clock in the adapter is stopped, so this waits
+  // for the child rather than racing it.
+  const spoke = await until('tool_use')
+  assert.ok(
+    spoke.some((e) => e.type === 'tool_use'),
+    'the recorded run must have been parsed, or the control proves nothing',
+  )
+
+  t.mock.timers.tick(600)
+
+  const end = (await until('turn_end')).find((e) => e.type === 'turn_end') as TurnEndEvent
   assert.equal(end.verdict.outcome, 'timed_out', 'it still times out; only the diagnosis differs')
   assert.equal(launchCaveat(end), undefined)
+  // Restored before `close()`, which has timers of its own and no reason to be tested here.
   await session.close()
 })
