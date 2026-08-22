@@ -246,13 +246,31 @@ Commands:
                                    lost -- because the alternative is ending the run holding
                                    no account of work already on disk.
                                    --turn-timeout SECONDS bounds one turn, and what that
-                                   buys depends on the seat. Claude and Codex already stop a
-                                   turn at 45min, and call one that has gone QUIET hung after
-                                   12min; this replaces the 45 and leaves the 12 alone. Kimi
-                                   and OpenCode run no deadline unless you set one and have
-                                   no silence clock at all, so there it is the only thing
-                                   that ever ends a hung turn. What each seat ended up on is
-                                   in the --json report under deadlines, per participant.
+                                   buys depends on the seat. On Claude and Codex it bounds
+                                   what the RUN waits for and nothing more: they already
+                                   stop waiting at 45min however busy the turn is, and call
+                                   one that has gone QUIET hung after 12min; this replaces
+                                   the 45 and leaves the 12 alone. Neither clock reaches the
+                                   child. What they produce is a timed_out verdict, and the
+                                   seat stays unsendable until you cancel it, the transcript
+                                   or a hook shows the turn ended, or the child exits.
+                                   Kimi and OpenCode run no deadline unless you set one and
+                                   have no silence clock at all, and there the deadline does
+                                   end the turn -- they run one process per turn and it is
+                                   killed -- so there it is the only thing that ever ends a
+                                   hung one.
+                                   Output pushes out the QUIET clock only; the whole-turn
+                                   one is refreshed by nothing and fires however busy the
+                                   turn is. When either fires, the seat's transcript is
+                                   read: a turn it shows as finished is corrected to
+                                   completed, so a lost end-of-turn signal no longer holds
+                                   the run up. A turn still WORKING when the whole-turn
+                                   clock lands is not corrected -- its transcript says
+                                   in progress, which is not evidence it ended -- and is
+                                   reported timed_out. Raise --turn-timeout if your turns
+                                   are legitimately longer than that.
+                                   What each seat ended up on is in the --json report under
+                                   deadlines, per participant.
                                    Every pause point ENDS the run, because a call that
                                    returns an outcome has nowhere to suspend to.
                                    --detach hands the run to a background process and

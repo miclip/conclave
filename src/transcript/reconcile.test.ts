@@ -27,6 +27,7 @@ import test from 'node:test'
 import { TranscriptSessionView } from './reconcile.ts'
 import { parseClaude, parseCodex } from './parse.ts'
 import { guaranteesFor } from '../contract/session.ts'
+import type { AgentEvent, SessionSnapshot } from '../contract/session.ts'
 import { assess, detectDegradation } from '../rotation/degradation.ts'
 import { RewriteAwareTail, parseJsonLine } from './tail.ts'
 
@@ -199,6 +200,58 @@ test('SYNTHETIC: truncation is treated as a rewrite', async () => {
   const after = await tail.poll()
   assert.equal(after.rewritten, true)
   assert.equal(after.all?.length, 1)
+})
+
+test('SYNTHETIC: re-emitted history is marked as replay, and fresh output is not', async () => {
+  // The distinction a consumer cannot draw for itself. On the rewrite path `#emitted` is
+  // cleared, so the whole transcript is emitted again -- every message and every tool call the
+  // child ever made, in one burst, at a moment the FILE chose. Downstream, two readers treat
+  // child output as a sign of life: the watchdog's silence clock and #82's launch diagnosis.
+  // Neither can tell an hours-old record from a fresh one by its shape, and both were wrong
+  // about a stalled turn every time a transcript was rewritten under it.
+  const p = join(SCRATCH, 'replay-flag.jsonl')
+  const user = (c: string) => JSON.stringify({ type: 'user', message: { content: c } }) + '\n'
+  const spoke = (t: string) =>
+    JSON.stringify({
+      type: 'assistant',
+      message: { content: [{ type: 'text', text: t }, { type: 'tool_use', name: 'Bash', input: { command: 'ls' } }] },
+    }) + '\n'
+
+  writeFileSync(p, user('turn one') + spoke('working on it'))
+  const v = view(p, 'claude')
+
+  const fresh = await v.poll()
+  assert.ok(
+    fresh.some((e) => e.type === 'message'),
+    'precondition: the append path must have produced child output',
+  )
+  assert.ok(
+    fresh.every((e) => e.replay === undefined),
+    'the append path emits only what is new, so nothing there is a replay',
+  )
+
+  // A consumed record MUTATED -- not appended to. That is what `#reserialized` refuses to
+  // forgive, and it is what sends the poll down the withdraw-and-re-emit path.
+  writeFileSync(p, user('turn one, rewritten') + spoke('working on it'))
+  const after = await v.poll()
+
+  assert.ok(
+    after.some((e) => e.type === 'revision' && e.reason === 'rewrite'),
+    'precondition: this must be the rewrite path, not a reserialization',
+  )
+  const replayed = after.filter((e) => e.type !== 'revision')
+  assert.ok(replayed.length > 0, 'the surviving history must still be re-emitted')
+  assert.ok(
+    replayed.every((e) => e.replay === true),
+    `every re-emitted event is history: ${JSON.stringify(replayed.map((e) => [e.type, e.replay]))}`,
+  )
+  assert.ok(
+    replayed.some((e) => e.type === 'message') && replayed.some((e) => e.type === 'tool_use'),
+    'including the two kinds a liveness reader would otherwise have counted',
+  )
+  // The revision itself is not replayed history; it is news about the file, and it is the one
+  // event in this batch that describes something that just happened.
+  assert.equal(after.find((e) => e.type === 'revision')!.replay, undefined)
 })
 
 test('SYNTHETIC: compaction withdraws prior events and re-emits surviving history', async () => {
@@ -423,6 +476,10 @@ test('SYNTHETIC: a rewrite raises no rotation candidate; a declared compaction d
   writeFileSync(churn, user('one') + user('two'))
   const v = view(churn, 'claude')
   const baseline = (await v.snapshot()).compactionGeneration
+  // Take delivery of what the baseline read produced. A snapshot runs the same read as a poll
+  // and banks the events for whoever asks next, so without this the `poll()` below would hand
+  // back the baseline's two turns instead of the rewrite -- the history, not the change.
+  await v.poll()
 
   // A byte-level rewrite with no marker anywhere in the result.
   writeFileSync(churn, user('two') + user('three'))
@@ -452,6 +509,7 @@ test('SYNTHETIC: a rewrite raises no rotation candidate; a declared compaction d
   writeFileSync(real, user('one') + user('two'))
   const w = view(real, 'claude')
   const realBaseline = (await w.snapshot()).compactionGeneration
+  await w.poll()
 
   writeFileSync(real, marker + user('two'))
   const realEvents = await w.poll()
@@ -570,4 +628,139 @@ test('an APPENDED compaction marker raises the generation (#10)', async () => {
   assert.equal(session.compactionGeneration, 2)
   await session.poll()
   assert.equal(session.compactionGeneration, 2, 'an append with no new marker changes nothing')
+})
+
+// --- concurrent reads: SYNTHETIC ----------------------------------------------------
+
+test('SYNTHETIC: concurrent poll() and snapshot() neither duplicate nor skip records', async () => {
+  // A view has two readers in a live session and always did: the adapter's tail loop calls
+  // `poll()` on an interval, and the deadline re-check calls `snapshot()` whenever a turn's
+  // clock fires. Nothing made those two take turns, and neither one is atomic --
+  // `RewriteAwareTail.poll()` awaits a stat, then a prefix digest, then a range read, and only
+  // then advances its offset.
+  //
+  // Land a second reader anywhere inside that window and it reads the same range as the first:
+  // both return the same records, both push them into `#records`, and the parser is handed a
+  // history in which the child said everything twice. Land it the other way, after the offset
+  // moved but before the caller's own stat, and it consumes nothing while believing it has
+  // caught up -- the same records, skipped.
+  //
+  // Both directions are checked here from the OUTSIDE, on the events and the snapshot, because
+  // that is where a consumer would meet them: a duplicated turn is a turn the relay believes
+  // happened twice, and a skipped one is prose the peer never receives.
+  const p = join(SCRATCH, 'concurrent-reads.jsonl')
+  const user = (text: string) => JSON.stringify({ type: 'user', message: { role: 'user', content: text } }) + '\n'
+  const done = (text: string) =>
+    JSON.stringify({
+      type: 'assistant',
+      message: { stop_reason: 'end_turn', content: [{ type: 'text', text }] },
+    }) + '\n'
+
+  const TURNS = 12
+  const prompts = Array.from({ length: TURNS }, (_, i) => `prompt ${i}`)
+  const answers = Array.from({ length: TURNS }, (_, i) => `answer ${i}`)
+
+  // Half the history before the first read, half appended while reads are in flight: the first
+  // half exercises the duplicate direction (many readers over the same unconsumed range) and the
+  // second the skip direction (readers arriving either side of an append).
+  const half = TURNS / 2
+  const chunk = (from: number, to: number) =>
+    prompts.slice(from, to).map((q, i) => user(q) + done(answers[from + i]!)).join('')
+  writeFileSync(p, chunk(0, half))
+
+  const v = view(p, 'claude')
+  const events: AgentEvent[] = []
+  const snapshots: SessionSnapshot[] = []
+
+  // Started in one tick and never awaited between: this is the interleaving, not a simulation of
+  // one. `Promise.all` over already-created promises -- calling them lazily inside the map would
+  // still start them all before the first await resolves, but starting them explicitly here
+  // makes it impossible to mistake for a sequential loop.
+  //
+  // The view now answers all of them from ONE read -- callers attach to the operation in flight
+  // rather than each starting their own (`reconcile.ts`, `#inflight`) -- so the duplicate
+  // direction is closed by construction here rather than by winning a race. The skip direction
+  // is not: the append below lands under a read that is already running, and whether those
+  // records are picked up by that read or the next one, the deltas still have to add up.
+  const inFlight: Promise<unknown>[] = []
+  for (let i = 0; i < 8; i++) {
+    inFlight.push(v.poll().then((e) => events.push(...e)))
+    inFlight.push(v.snapshot().then((s) => snapshots.push(s)))
+  }
+  // Written from underneath the readers, mid-flight, with no coordination at all.
+  appendFileSync(p, chunk(half, TURNS))
+  for (let i = 0; i < 8; i++) {
+    inFlight.push(v.poll().then((e) => events.push(...e)))
+    inFlight.push(v.snapshot().then((s) => snapshots.push(s)))
+  }
+  await Promise.all(inFlight)
+
+  // Drain anything the last append left unread, so the accounting below covers the whole file
+  // rather than however much the concurrent burst happened to reach.
+  events.push(...(await v.poll()))
+  const final = await v.snapshot()
+
+  // --- not duplicated ---------------------------------------------------------------
+  //
+  // Claude keys transcript turns positionally, so a record consumed twice is not a repeated key
+  // -- it is EXTRA keys, and the count is the tell.
+  assert.equal(final.turns.length, TURNS, `the file holds ${TURNS} turns and the view must hold ${TURNS}`)
+  assert.deepEqual(
+    final.turns.map((t) => t.prompt),
+    prompts,
+    'in order, once each: a doubled read shows up here as the whole history repeated',
+  )
+
+  const starts = events.filter((e) => e.type === 'turn_start')
+  assert.equal(starts.length, TURNS, 'every turn is announced exactly once across every reader')
+  assert.deepEqual(
+    starts.map((e) => e.prompt),
+    prompts,
+    'and in file order, whichever reader happened to see each one first',
+  )
+
+  const seqs = events.map((e) => e.seq)
+  assert.equal(new Set(seqs).size, seqs.length, 'no sequence number is issued twice')
+
+  // --- not skipped ------------------------------------------------------------------
+  //
+  // Message events are DELTAS against what has already been emitted, so concatenating them per
+  // turn reconstructs exactly what the child wrote -- if nothing was lost, and if nothing was
+  // counted twice. Either failure shows up as a mismatch here, which is why this is the check
+  // that covers both directions at once.
+  const said = new Map<string, string>()
+  for (const e of events) {
+    if (e.type !== 'message') continue
+    said.set(String(e.turnKey), (said.get(String(e.turnKey)) ?? '') + e.text)
+  }
+  assert.deepEqual(
+    final.turns.map((t) => said.get(String(t.key)) ?? ''),
+    answers,
+    'the deltas add up to what the child wrote, once',
+  )
+
+  const ends = events.filter((e) => e.type === 'turn_end')
+  assert.equal(ends.length, TURNS, 'each completed turn ends exactly once')
+
+  // --- every snapshot was a real state ----------------------------------------------
+  //
+  // A snapshot taken while another read was mid-flight must still be a prefix of the file, in
+  // order: never a partial rebuild, never a history with a hole in it.
+  for (const snap of [...snapshots, final]) {
+    assert.deepEqual(
+      snap.turns.map((t) => t.prompt),
+      prompts.slice(0, snap.turns.length),
+      'a snapshot is the file up to some point, and nothing else',
+    )
+  }
+  assert.equal(snapshots.length, 16, 'precondition: every concurrent caller was answered, none rejected')
+  assert.ok(
+    snapshots.some((s) => s.turns.length >= half),
+    'precondition: the burst ran against a view that had really read the file',
+  )
+  assert.equal(
+    final.turns.length,
+    TURNS,
+    'and the append made under the readers is picked up, by that read or by the next one',
+  )
 })

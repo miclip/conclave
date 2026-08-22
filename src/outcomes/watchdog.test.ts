@@ -260,25 +260,78 @@ test('a turn that keeps producing events is not called hung', async () => {
   w.disarmAll()
 })
 
-test('the absolute deadline still bounds a turn that never stops talking', async () => {
-  // Both clocks are kept. A participant emitting a heartbeat forever without finishing would
-  // otherwise never be bounded at all -- a worse failure, because it looks like progress.
+test('repeated output cannot extend the absolute deadline', async () => {
+  // The rule a fix for #36 briefly removed, and the reason it is back. Retiring the absolute
+  // clock at the child's first output left a producing turn with nothing that would ever stop
+  // the run waiting on it, and that is an unbounded RUN: `--max-turns` and `--max-minutes` are
+  // checked at turn boundaries and nowhere else (`guardrails.breached`), and the relay reaches
+  // a boundary only by ceasing to await an exchange -- so a turn nothing will stop waiting for
+  // is a ceiling that never fires. That is worse than the false positive it was avoiding.
+  //
+  // "Stop waiting" throughout, and not "end": what fires below is a verdict. The child is not
+  // touched, the transport is not closed, and the seat is not sendable afterwards.
+  //
+  // The false positive is still here, and this test is where it is written down. #36 is a
+  // PARTIAL fix: when a deadline fires the adapters re-read the child's transcript, which
+  // recovers a lost `Stop` (the transcript is terminal, so the verdict is superseded to
+  // `completed`) and moves an ordinary hang onto the twelve-minute silence clock instead of the
+  // forty-five-minute cap. Neither recovery reaches the turn below. This turn is WORKING, so
+  // its transcript reads `in_progress` -- which is not evidence it ended -- and the
+  // `timed_out (uncertain)` it earns here stands.
+  //
+  // Which clock produced that verdict is knowable HERE, from the provenance on the update
+  // asserted below, and nowhere afterwards. The finished run's JSON records the two budgets a
+  // seat was configured with (`ParticipantDeadlines`) and keeps no per-turn trigger, so this
+  // test is the only place the distinction is pinned.
   const { updates, onUpdate } = collector()
-  const w = new TurnWatchdog<Turn>(MS * 2, onUpdate, 10_000)
-  const turn = turnAt(Date.now())
-  turn.lastActivityAt = Date.now()
+  // Silence cannot be the clock that fires here: the idle window is longer than the whole test
+  // and every touch pushes it further out. Whatever fires here is the absolute cap -- and what
+  // firing means is a verdict on a turn that is still running, not a turn that has stopped.
+  const w = new TurnWatchdog<Turn>(MS * 4, onUpdate, 60_000)
+  const turn = turnAt(Date.now(), { ms: MS * 4 })
   w.arm(turn.key, turn)
 
-  for (let i = 0; i < 4; i++) {
+  // Busy the whole way, in steps far shorter than the idle window, for well past the cap.
+  for (let i = 0; i < 12; i++) {
     await sleep(MS)
     w.touch(turn.key)
   }
-  assert.ok(updates.length >= 1, 'the absolute cap fires despite continuous activity')
+
+  assert.equal(updates.length, 1, 'the absolute cap must fire despite continuous output')
+  const v = updates[0]!.verdict!
+  assert.equal(v.outcome, 'timed_out')
+  assert.ok(
+    v.provenance.every((p) => !/no output for/.test(p.detail)),
+    `it must be the DURATION finding, not silence: this turn was never quiet\n${JSON.stringify(v.provenance)}`,
+  )
+  assert.ok(
+    turn.tracker.evidence.elapsedSeconds > (MS * 4) / 1000,
+    'and the elapsed time reported is the age of the TURN, measured past the cap',
+  )
+  // The touches did move the silence clock -- the point is that they moved only that one. Both
+  // halves are asserted, because a version that moved neither would also pass the check above
+  // and would have silently retired the twelve-minute diagnosis #36 exists to deliver.
+  assert.ok(
+    turn.lastActivityAt !== undefined && turn.lastActivityAt > turn.startedAt,
+    'output must refresh the SILENCE clock: that is the whole mechanism that reaches a hang early',
+  )
+  assert.ok(
+    turn.lastActivityAt! - turn.startedAt >= MS * 2,
+    'and refreshed it REPEATEDLY, not once: a single touch would not show that every step of a ' +
+      'busy turn keeps pushing silence out while the cap stays exactly where it was',
+  )
+  // Nothing revives it either: a touch after the deadline must not buy a second verdict.
+  w.touch(turn.key)
+  await sleep(MS * 2)
+  assert.equal(updates.length, 1, 'a touch after the deadline has fired is not a new lease')
   w.disarmAll()
 })
 
 test('a target that never records activity keeps the absolute deadline', async () => {
   // Targets predating `lastActivityAt` must keep working rather than becoming immortal.
+  //
+  // The case where a duration IS the finding: a turn the child never spoke in. Silence and the
+  // absolute cap both run from `startedAt` here, and `--turn-timeout` sets the shorter one.
   const { updates, onUpdate } = collector()
   const w = new TurnWatchdog<Turn>(MS, onUpdate, 10_000)
   const turn = turnAt(Date.now()) // no lastActivityAt
@@ -311,27 +364,53 @@ test('an idle deadline that fires early re-arms on ITSELF, not on the absolute o
   w.disarmAll()
 })
 
-test('activity refreshes the live turn even when the event key differs', async () => {
-  // The regression this exists to catch. Adapters emit events keyed by whatever produced
-  // them: on Claude Code the watchdog is armed under the hook's prompt_id while transcript
-  // events carry `claude-transcript-turn-N`. A keyed touch matched nothing, so every Claude
-  // turn was capped at the idle deadline however busy it was.
+test('a touch refreshes the turn it names, and only that one', async () => {
+  // What replaced `touchAll()`. Adapters emit events keyed by whatever produced them -- on
+  // Claude Code the watchdog is armed under the hook's `prompt_id` while transcript events
+  // carry `claude-transcript-turn-N` -- so a touch keyed off the EVENT matched nothing and
+  // every Claude turn was capped at the idle deadline however busy it was. The blanket refresh
+  // that fixed it could not tell whose activity it was extending; the adapter can, because it
+  // knows which turn is live and which key it armed under, so the key is its job to supply.
   const { updates, onUpdate } = collector()
   // The idle window is TEN touch intervals, not two. It was two, which is not a margin: a
-  // `sleep(40)` overrunning to 80ms on a loaded runner fired the deadline between touches
-  // and failed a release. The property under test is that `touchAll` refreshes a turn armed
-  // under a different key -- nothing about it needs the margin to be tight, and a test whose
-  // result depends on how busy the machine is proves something other than what it claims.
+  // `sleep(40)` overrunning to 80ms on a loaded runner fired the deadline between touches and
+  // failed a release. Nothing here needs the margin to be tight, and a test whose result
+  // depends on how busy the machine is proves something other than what it claims.
   const w = new TurnWatchdog<Turn>(10_000, onUpdate, MS * 10)
   const turn = turnAt(Date.now())
   turn.lastActivityAt = Date.now()
   w.arm('hook-key-prompt_id', turn)
 
-  // Busy for well past the idle window, reported under a key the watchdog has never seen.
   for (let i = 0; i < 5; i++) {
     await sleep(MS)
-    w.touchAll()
+    w.touch('hook-key-prompt_id')
   }
-  assert.deepEqual(updates, [], 'a busy turn must not be called hung')
+  assert.deepEqual(updates, [], 'a busy turn touched under its own key must not be called hung')
+  w.disarmAll()
+})
+
+test('a touch under a key that was never armed refreshes nothing', async () => {
+  // The safety property a blanket refresh could not offer, and the reason the adapter now
+  // resolves the key instead of the watchdog guessing. A transcript-derived key, a stale key
+  // from a previous turn, an event belonging to another seat -- none of them may hold a
+  // deadline open, because none of them is evidence about the turn that is armed.
+  const { updates, onUpdate } = collector()
+  const w = new TurnWatchdog<Turn>(10_000, onUpdate, MS * 4)
+  const turn = turnAt(Date.now())
+  turn.lastActivityAt = Date.now()
+  w.arm('hook-key-prompt_id', turn)
+
+  // Busy under the WRONG key for longer than the idle window.
+  for (let i = 0; i < 8; i++) {
+    await sleep(MS)
+    w.touch('claude-transcript-turn-1')
+  }
+
+  assert.equal(updates.length, 1, 'the silence deadline must still land')
+  assert.match(
+    updates[0]!.verdict!.provenance[0]!.detail,
+    /no output for/,
+    'and it must be the silence finding: nothing touched the turn that was armed',
+  )
   w.disarmAll()
 })

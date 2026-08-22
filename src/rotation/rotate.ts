@@ -47,6 +47,7 @@ import {
   handoffPrompt,
   parseClaimedChecks,
   parseHandoff,
+  UNKNOWN_GENERATION,
   type ClaimedCheck,
   type Handoff,
 } from './handoff.ts'
@@ -165,8 +166,42 @@ export interface Acceptance {
 export type FailureReason =
   /** The advisor could not produce a handoff with the sections a replacement needs. */
   | 'handoff_incomplete'
+  /**
+   * Something between quiescing and starting the replacement threw, so there is no handoff.
+   *
+   * The stage that threw is named in `detail`, and the stages are the notification that the
+   * session was frozen, the advisor's exchange, the snapshot taken off the original, the
+   * repository capture, and the test-only barrier. They
+   * share a reason because they share the only thing a caller can act on: the original was
+   * frozen, nothing was created or destroyed, and it has been put back. Distinguishing them in
+   * the TYPE would invite a caller to branch on a difference that changes nothing it does.
+   *
+   * It exists at all because these used to throw straight out of `rotate()`, past the rollback,
+   * leaving the original quiesced -- alive, holding everything it knew, and unable to accept
+   * work -- with no caller anywhere holding the knowledge that it had to be unquiesced. A
+   * transcript read that gave up, a `git` that was not on PATH, or an advisor whose transport
+   * died was enough to strand the seat that way.
+   */
+  | 'handoff_not_recorded'
   /** The replacement session could not be started at all. */
   | 'replacement_start_failed'
+  /**
+   * The original refused to enter `rotating`, so the transaction never opened.
+   *
+   * The one failure whose two sessions are both live when it happens: the handoff is written
+   * and the replacement is already started, and the only thing that did not happen is the
+   * original's own transition out of `quiesced`. So it cannot share `replacement_start_failed`
+   * -- nothing is wrong with the replacement, and a caller told that would look in the wrong
+   * place -- and it cannot share `handoff_not_recorded`, because the handoff WAS recorded and
+   * is returned with this.
+   *
+   * Both are put back: the original is unquiesced and the replacement, which has proved
+   * nothing and been told nothing, is closed as abandoned. What it says to a caller is that
+   * the ORIGINAL is the unhealthy one, which is worth knowing before rotating it again --
+   * `beginRotation()` is a state-machine transition, and a session that cannot make it is
+   * unlikely to survive the acceptance turn either.
+   */
+  | 'rotation_not_begun'
   /** The repository no longer produces what was recorded. Nobody's fault; still fatal. */
   | 'repository_diverged'
   /** The replacement did not report in a comparable form, or reported what is not so. */
@@ -222,18 +257,40 @@ export type RotationResult =
  *
  * Ordering matters. The original is restored first, so a failure while tearing down the
  * replacement still leaves a working session — the opposite order can lose both.
+ *
+ * The restore is attempted first and the teardown happens either way. A rollback reached from
+ * the rotation transition is a rollback of a session whose state machine has just refused
+ * something, so "unquiesce also throws" is a live possibility there rather than a theoretical
+ * one -- and a replacement left running because the ORIGINAL could not be restored is a second
+ * live child nobody holds a reference to. The restore failure still propagates: a caller told
+ * `rolled_back` is being told the original is back in service, and swallowing this would make
+ * that a lie in the one case where it matters.
+ *
+ * Its own narration cannot throw. Everything in here runs while something else has already
+ * failed, and there is nothing left to undo if the reporting of it fails too — this is the
+ * one place in the file where a `note` is guarded rather than covered.
  */
 async function rollback(
   old: AgentSession,
   replacement: AgentSession | undefined,
   deps: RotationDeps,
 ): Promise<void> {
-  await old.unquiesce()
-  if (replacement) {
+  const say = (text: string): void => {
     try {
-      await replacement.close('abandoned')
-    } catch (err) {
-      deps.note?.(`replacement teardown failed after rollback: ${(err as Error).message}`)
+      deps.note?.(text)
+    } catch {
+      // Deliberately nothing: see above.
+    }
+  }
+  try {
+    await old.unquiesce()
+  } finally {
+    if (replacement) {
+      try {
+        await replacement.close('abandoned')
+      } catch (err) {
+        say(`replacement teardown failed after rollback: ${(err as Error).message}`)
+      }
     }
   }
 }
@@ -291,44 +348,100 @@ export async function rotate(opts: {
 
   // 1. Quiesce. From here the old session accepts no work but knows everything it knew.
   await old.quiesce()
-  note('implementer quiesced')
 
   // 2. The handoff. The advisor writes the narrative; the record is captured here so the
   //    checkable half never depends on a participant's account of it.
-  const authored = await deps.exchange(advisor, handoffPrompt(opts.reason))
-  const parsed = parseHandoff(authored)
-  if (!parsed.narrative) {
-    // Nothing has been destroyed yet, which is why the parse happens before the start.
+  /**
+   * Everything from here to the replacement's start is inside the rollback's care.
+   *
+   * The original is frozen from the line above, and a session left quiesced is not a session
+   * that merely failed to rotate -- it is one that cannot be given work and that nobody is
+   * going to unfreeze, because the only code that knows it was frozen is this function. So
+   * every step between the freeze and the start has to end in either a handoff or a rollback,
+   * and `stage` is what lets the reason say which step did not.
+   *
+   * The advisor exchange is in here too, not only the snapshot and the capture. It is the
+   * first thing that happens after the freeze and it talks to a child process over a
+   * transport that dies; leaving it outside would leave the widest window of all uncovered.
+   *
+   * So is the line that merely SAYS the session was frozen. `note` is the caller's function --
+   * it writes to a REPL, a log, a stream something else may have closed -- and a throw from it
+   * one statement after `quiesce()` stranded the seat in exactly the state this whole block
+   * exists to prevent. Narration is not allowed to be the reason a session cannot be given
+   * work again, and the way to make sure of that is to cover it, not to trust it.
+   */
+  let handoff: Handoff
+  let stage = 'the post-quiesce notification'
+  try {
+    note('implementer quiesced')
+
+    stage = "the advisor's handoff exchange"
+    const authored = await deps.exchange(advisor, handoffPrompt(opts.reason))
+    const parsed = parseHandoff(authored)
+    if (!parsed.narrative) {
+      // Nothing has been destroyed yet, which is why the parse happens before the start.
+      await rollback(old, undefined, deps)
+      return {
+        status: 'rolled_back',
+        reason: 'handoff_incomplete',
+        detail: `the advisor's handoff is missing required section(s): ${parsed.missing.join(', ')}`,
+        restored: old,
+      }
+    }
+
+    stage = 'the snapshot of the original session'
+    const snap = await old.snapshot()
+    /**
+     * A contained fallback is an answer, not a reading.
+     *
+     * `snapshot()` on both adapters is contained: when the transcript will not answer it hands back
+     * the last projection the view managed to build rather than rejecting, which is what keeps
+     * a wedged transcript from stranding a session that has already been quiesced. The turns
+     * in it are as true as they were at that read. `compactionGeneration` is not the same kind
+     * of fact: it is the mechanical evidence the participant lost context, the handoff is where
+     * it is recorded for anyone reviewing the rotation afterwards, and a generation from a read
+     * that could not be repeated is a claim about a transcript state nobody observed. So the
+     * rotation proceeds -- it was decided elsewhere, on other grounds -- and records that the
+     * signal could not be established rather than a number that would be believed.
+     */
+    const generation = snap.containedFallback ? UNKNOWN_GENERATION : snap.compactionGeneration
+    if (snap.containedFallback) {
+      // Says only what is true of BOTH conditions the flag now covers: nothing was read just
+      // now. A stale projection was read earlier; a never-read never was, and calling that a
+      // "fallback" would name a prior read it does not have.
+      note('compaction generation unverified: nothing in this snapshot was read just now')
+    }
+    stage = 'the repository capture'
+    const record = capture({
+      root: deps.root,
+      files: [...new Set([...parsed.narrative.files, ...(deps.files ?? [])])],
+      checks: deps.checks,
+      ...(deps.checkTimeoutMs === undefined ? {} : { checkTimeoutMs: deps.checkTimeoutMs }),
+    })
+    handoff = {
+      narrative: parsed.narrative,
+      record,
+      constraints: deps.constraints ?? [],
+      authoredBy: advisor.sessionId,
+      from: { sessionId: old.sessionId, agent: old.agent },
+      compactionGeneration: generation,
+      at: Date.now(),
+    }
+    note(`handoff recorded: ${record.checks.length} check(s), ${record.files.length} file(s)`)
+    // Test instrumentation only. Awaited here so that everything after this point -- the
+    // replacement, its own run of the checks, and the acceptance capture -- observes the
+    // same world, and it is not the world the record was taken from.
+    stage = 'the post-capture barrier'
+    if (deps.hooks?.afterCapture) await deps.hooks.afterCapture()
+  } catch (err) {
     await rollback(old, undefined, deps)
     return {
       status: 'rolled_back',
-      reason: 'handoff_incomplete',
-      detail: `the advisor's handoff is missing required section(s): ${parsed.missing.join(', ')}`,
+      reason: 'handoff_not_recorded',
+      detail: `${stage} failed: ${(err as Error).message}`,
       restored: old,
     }
   }
-
-  const snap = await old.snapshot()
-  const record = capture({
-    root: deps.root,
-    files: [...new Set([...parsed.narrative.files, ...(deps.files ?? [])])],
-    checks: deps.checks,
-    ...(deps.checkTimeoutMs === undefined ? {} : { checkTimeoutMs: deps.checkTimeoutMs }),
-  })
-  const handoff: Handoff = {
-    narrative: parsed.narrative,
-    record,
-    constraints: deps.constraints ?? [],
-    authoredBy: advisor.sessionId,
-    from: { sessionId: old.sessionId, agent: old.agent },
-    compactionGeneration: snap.compactionGeneration,
-    at: Date.now(),
-  }
-  note(`handoff recorded: ${record.checks.length} check(s), ${record.files.length} file(s)`)
-  // Test instrumentation only. Awaited here so that everything after this point -- the
-  // replacement, its own run of the checks, and the acceptance capture -- observes the
-  // same world, and it is not the world the record was taken from.
-  if (deps.hooks?.afterCapture) await deps.hooks.afterCapture()
 
   // 3. Start the replacement.
   let replacement: AgentSession
@@ -344,7 +457,28 @@ export async function rotate(opts: {
       handoff,
     }
   }
-  await old.beginRotation()
+  /**
+   * The point of no return, and the last place both sessions are still recoverable.
+   *
+   * `beginRotation()` rejects if the original is not in `quiesced` -- which it is, from step 1
+   * -- and can reject for transport reasons besides. Left unguarded it threw out of `rotate()`
+   * with the original frozen AND the replacement running: the one failure that loses both
+   * sessions at once, and the exact shape the rollback exists to make impossible. It is
+   * outside the block below rather than inside it because everything in there assumes the
+   * transaction is open.
+   */
+  try {
+    await old.beginRotation()
+  } catch (err) {
+    await rollback(old, replacement, deps)
+    return {
+      status: 'rolled_back',
+      reason: 'rotation_not_begun',
+      detail: `the original could not enter 'rotating': ${(err as Error).message}`,
+      restored: old,
+      handoff,
+    }
+  }
 
   try {
     /**
@@ -393,11 +527,11 @@ export async function rotate(opts: {
 
     const observed = capture({
       root: deps.root,
-      files: record.files.map((f) => f.path),
+      files: handoff.record.files.map((f) => f.path),
       checks: deps.checks,
       ...(deps.checkTimeoutMs === undefined ? {} : { checkTimeoutMs: deps.checkTimeoutMs }),
     })
-    const divergences = compare(record, observed)
+    const divergences = compare(handoff.record, observed)
 
     const claimMismatches: string[] = []
     const advisoryMismatches: string[] = []
@@ -419,7 +553,7 @@ export async function rotate(opts: {
     }
 
     const carriedFailures = observed.checks.filter(
-      (c) => c.exitCode !== 0 && record.checks.find((r) => r.command === c.command)?.exitCode !== 0,
+      (c) => c.exitCode !== 0 && handoff.record.checks.find((r) => r.command === c.command)?.exitCode !== 0,
     )
     const acceptance: Acceptance = {
       observed,
@@ -457,11 +591,39 @@ export async function rotate(opts: {
 
     // 5. Commit. Only now is the old session's context actually given up.
     await old.close('graceful')
-    note(`rotation complete; ${old.sessionId} terminated`)
-    for (const d of divergences) note(`advisory: ${d.detail}`)
-    for (const m of advisoryMismatches) note(`advisory: ${m}`)
+
+    /**
+     * Past the commit, narration cannot fail the rotation it is narrating.
+     *
+     * `note` is the caller's function -- a REPL, a log, a stream something else may have closed
+     * -- and every line below runs AFTER the original has been terminated. A throw from one of
+     * them was caught by the acceptance handler, which did the only thing it knows how to do:
+     * roll back. That means `unquiesce()` on a session that has just been closed, which throws
+     * `cannot unquiesce a terminated session`, which escapes `rotate()` entirely. The caller
+     * then gets an exception for a rotation that SUCCEEDED -- the old session terminated, the
+     * replacement live and holding the handoff, and no reference to it returned to anybody.
+     *
+     * Rolling back is not a weaker option here, it is an incoherent one: there is nothing left
+     * to roll back to. So these are guarded rather than covered, which is the same rule
+     * `rollback()` follows and for the same reason -- when there is nothing left to undo, the
+     * reporting of a problem must not become one.
+     *
+     * Each line is guarded on its own, so one closed stream does not silence the rest. Failures
+     * BEFORE this point are untouched and still roll back: that is what the try/catch is for,
+     * and it still covers everything up to and including `close()` itself.
+     */
+    const report = (text: string): void => {
+      try {
+        note(text)
+      } catch {
+        // Deliberately nothing: see above.
+      }
+    }
+    report(`rotation complete; ${old.sessionId} terminated`)
+    for (const d of divergences) report(`advisory: ${d.detail}`)
+    for (const m of advisoryMismatches) report(`advisory: ${m}`)
     for (const c of carriedFailures) {
-      note(`carried forward failing: \`${c.command}\` exits ${c.exitCode}, as it did at handoff`)
+      report(`carried forward failing: \`${c.command}\` exits ${c.exitCode}, as it did at handoff`)
     }
     return { status: 'rotated', replacement, handoff, acceptance }
   } catch (err) {

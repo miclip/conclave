@@ -491,7 +491,8 @@ test('a run that never produces a report still burns the duration ceiling while 
   const impl = new FakeRotationSession('impl', 'claude', endlessly('Still going'))
   alwaysTimesOut(impl)
   const timesOut = impl.onSend!
-  // Every turn takes four minutes of real work before the deadline ends it.
+  // Every turn takes four minutes of real work before the deadline gives up waiting on it and
+  // reports timed_out.
   impl.onSend = (m) => {
     timesOut(m)
     clock.advance(4 * MINUTE)
@@ -600,13 +601,17 @@ test('a run that never produces a report still ends when no clock moves at all',
   assert.equal(relay.activeMs, 0, 'and it ended with no active time at all, so no duration ceiling could have')
 })
 
-test('a turn ended by an expired deadline is charged exactly what a completed turn is charged', async (t) => {
+test('a turn abandoned at its deadline is charged exactly what a completed turn is charged', async (t) => {
+  // "Abandoned at", not "ended by": the deadline releases the run's wait and emits a verdict,
+  // and the child is not stopped by it. What is being charged is the wait, which is the whole
+  // reason it costs what a completed turn costs.
+  //
   // The decision this change did NOT make, pinned so it is a decision rather than an oversight.
   // #112 offers "do not charge a turn that produced no report" as a candidate. It is refused:
-  // such a turn ran a child for the whole of its watchdog and produced nothing, which makes it
-  // the most expensive turn a run can take, and a run wedged in a loop of them takes no other
-  // kind. Exempting it is precisely the change that would convert a bounded failure into an
-  // unbounded one, so `--max-turns` counts it like any other and ends the run.
+  // such a turn held this run waiting for the whole of its watchdog and produced nothing, which
+  // makes it the most expensive turn a run can take, and a run wedged in a loop of them takes no
+  // other kind. Exempting it is precisely the change that would convert a bounded failure into
+  // an unbounded one, so `--max-turns` counts it like any other and ends the run.
   const dir = repo()
   t.after(() => rmSync(dir, { recursive: true, force: true }))
   const clock = clockFrom()

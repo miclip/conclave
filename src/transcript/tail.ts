@@ -27,6 +27,32 @@ export interface TailPoll<T> {
   all?: T[]
   /** True on the first successful poll, when there is nothing to rewrite yet. */
   first: boolean
+  /**
+   * The read was abandoned before it committed anything, and this is a NON-ANSWER rather than
+   * a poll result: the offset did not move, the digest was not replaced, and `appended` and
+   * `all` are empty because nothing was consumed rather than because nothing was there.
+   *
+   * A caller must not read it as "the file is unchanged". See `ReadLease`.
+   */
+  abandoned?: boolean
+}
+
+/**
+ * Handed to a poll so it can be told, mid-read, that nobody is listening any more.
+ *
+ * Structurally identical to `adapters/boundedReconcile.ts`'s `Abandonment`, and deliberately a
+ * separate type: that one bounds how long an ADAPTER waits for a re-check, this one bounds how
+ * long one read may hold up every other read on the same tail. They expire on different clocks
+ * for different reasons, and a shared type would invite passing one where the other belongs --
+ * quite apart from the transcript layer having no business importing from the adapter layer.
+ *
+ * A live reading, not a stored flag, for the reason spelled out on `Abandonment`: the parsing
+ * that follows a read is synchronous, so a blocked loop resumes into the job's own microtask
+ * continuations BEFORE any overdue timer callback, and a flag a timer writes still reads
+ * `false` at the exact moment the guard consults it.
+ */
+export interface ReadLease {
+  readonly abandoned: boolean
 }
 
 export class RewriteAwareTail<T> {
@@ -78,19 +104,50 @@ export class RewriteAwareTail<T> {
     return createHash('sha256').update(head).digest('hex') === this.#prefixDigest
   }
 
-  async poll(): Promise<TailPoll<T>> {
+  /** A read that gave up: nothing consumed, nothing advanced, nothing claimed. */
+  #nonAnswer(): TailPoll<T> {
+    return { appended: [], rewritten: false, first: !this.#started, abandoned: true }
+  }
+
+  /**
+   * Read what is new, and say what kind of change it was.
+   *
+   * `lease`, when given, is checked after every await that precedes a mutation of `#offset` or
+   * `#prefixDigest`. An abandoned read must commit NOTHING -- not a partial advance, not a
+   * fresh digest -- because its replacement is going to read from the same offset, and a half
+   * committed abandoned read would either hand the records it consumed to nobody at all or
+   * hand the same range to two readers. Committing nothing makes it a pure waste of I/O, which
+   * is the only safe thing for it to be.
+   *
+   * The caller is responsible for the other half of it: at most one NON-abandoned poll may be
+   * in flight at a time, and the lease must be monotone, so a read abandoned once can never come
+   * back and commit.
+   *
+   * `TranscriptSessionView` passes no lease at all, and is entitled to: it never authorises a
+   * second read while the first is unresolved -- see its `#inflight` -- so "two readers
+   * committing" is not a race it has to win but a state it cannot reach, and a read of its that
+   * overruns is a slow read holding records nobody else has. The parameter is here for a caller
+   * that CAN have a rival, which is the only situation where discarding a completed read is
+   * better than keeping it.
+   */
+  async poll(lease?: ReadLease): Promise<TailPoll<T>> {
     let size: number
     try {
       size = (await stat(this.path)).size
     } catch {
       return { appended: [], rewritten: false, first: !this.#started }
     }
+    if (lease?.abandoned) return this.#nonAnswer()
 
     const first = !this.#started
+    // Not a commit, and the one piece of state an abandoned read is allowed to leave behind:
+    // it records that this TAIL has successfully stat'd its file at least once, which is true
+    // however the read that established it ended, and it feeds nothing but `first`.
     this.#started = true
 
     if (!(await this.#prefixIntact(size))) {
       const whole = await this.#readRange(0, size)
+      if (lease?.abandoned) return this.#nonAnswer()
       this.#offset = size
       this.#prefixDigest = createHash('sha256').update(whole).digest('hex')
       return { appended: [], rewritten: true, all: this.#parseAll(whole.toString('utf8')), first }
@@ -108,6 +165,7 @@ export class RewriteAwareTail<T> {
     const complete = text.slice(0, lastNewline + 1)
     const consumed = Buffer.byteLength(complete, 'utf8')
     const head = await this.#readRange(0, this.#offset + consumed)
+    if (lease?.abandoned) return this.#nonAnswer()
     this.#offset += consumed
     this.#prefixDigest = createHash('sha256').update(head).digest('hex')
 

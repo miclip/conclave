@@ -281,6 +281,20 @@ export async function runReport(relay: Relay, input: ReportInput): Promise<RunRe
       // a shared array would let a reader of a finished run see a list the relay still owns.
       launch: { args: [...p.launch.args], model: p.launch.model },
       sessionId: snap.sessionId,
+      // Deliberately NOT gated on `snap.containedFallback`, unlike the rotation trigger in
+      // `relay.ts` and the handoff record in `rotation/rotate.ts`. Those two ACT on this number
+      // -- they treat it as the mechanical proof that a participant lost context, and one of
+      // them spends a session on it -- so a generation from a read that could not be repeated is
+      // a claim they must not make. A report only DESCRIBES, and describing is the case
+      // `snapshotOrLastBuilt()`'s containment was written for: the last generation the view
+      // could build is the truest answer available, and the alternative is a report that omits
+      // a field or refuses to render because the transcript was busy.
+      //
+      // And it re-reads: this asks the session afresh every time a report is assembled rather
+      // than quoting a number some earlier caller kept. Nothing downstream latches the value --
+      // no baseline moves, no branch is taken on it -- so a stale reading here is a stale line
+      // in one document, corrected by the next read of the same session, and not a decision the
+      // run then carries.
       compactionGeneration: snap.compactionGeneration,
       turns: snap.turns.map((t) => ({
         key: String(t.key),

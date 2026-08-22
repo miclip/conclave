@@ -34,6 +34,15 @@ export class FakeRotationSession implements AgentSession {
   closedAs: CloseMode | undefined
   compactionGeneration = 0
   /**
+   * Answer `snapshot()` the way a real adapter does when the transcript will not answer:
+   * the last projection it was in a position to build, flagged as unverified.
+   *
+   * A boolean rather than a wedge because what is under test downstream is what a consumer
+   * DOES with the flag, and the machinery that produces it has its own tests over the real
+   * view (`transcript/readLease.test.ts`) and the real adapters (`adapters/containedSnapshot.test.ts`).
+   */
+  containedFallback = false
+  /**
    * Make the Nth `send` throw, simulating a transport failure.
    *
    * Real adapters do this when a send is never acknowledged by a hook: the child took the
@@ -259,10 +268,10 @@ export class FakeRotationSession implements AgentSession {
          * it two ways, and only one of them can withdraw anything.
          *
          *   - a transcript that DECLARES a compaction yields `replaces: []`
-         *     (`src/transcript/reconcile.ts:288`), which withdraws nothing;
+         *     (`src/transcript/reconcile.ts:679`), which withdraws nothing;
          *   - a rewrite yields `reason: fresh > 0 ? 'compaction' : 'rewrite'`
-         *     (`src/transcript/reconcile.ts:217`) over whatever it found already emitted
-         *     (`src/transcript/reconcile.ts:218`).
+         *     (`src/transcript/reconcile.ts:593`) over whatever it found already emitted
+         *     (`src/transcript/reconcile.ts:594`).
          *
          * So `compaction` WITH a withdrawal is one shape rather than a guarantee of the rewrite
          * path: a fresh compaction marker, and a verdict already emitted for the rewrite to
@@ -452,7 +461,18 @@ export class FakeRotationSession implements AgentSession {
     this.#to('running')
   }
 
+  /**
+   * Make `beginRotation()` reject without moving the state, as a real adapter can.
+   *
+   * The transition is not just a field assignment on a real session -- it is announced over the
+   * same transport as everything else -- so it can fail on a session that quiesced perfectly
+   * well a moment earlier. That is the one failure with both a frozen original and a started
+   * replacement live at once, and it cannot be provoked through the state machine alone.
+   */
+  beginRotationThrows: string | undefined
+
   async beginRotation(): Promise<void> {
+    if (this.beginRotationThrows) throw new Error(this.beginRotationThrows)
     if (this.#state !== 'quiesced') {
       throw new Error(`cannot begin rotation from '${this.#state}': quiesce the session first`)
     }
@@ -490,6 +510,7 @@ export class FakeRotationSession implements AgentSession {
       guarantees: this.guarantees,
       compactionGeneration: this.compactionGeneration,
       builtAt: Date.now(),
+      ...(this.containedFallback ? { containedFallback: true } : {}),
     }
   }
 

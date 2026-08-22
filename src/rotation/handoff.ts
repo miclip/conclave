@@ -45,6 +45,14 @@ export interface HandoffNarrative {
   raw: string
 }
 
+/**
+ * What is recorded when the generation could not be established. A distinct value rather than
+ * `0` or `-1`, both of which are numbers a reader would compare.
+ */
+export const UNKNOWN_GENERATION = 'unknown'
+
+export type CompactionGeneration = number | typeof UNKNOWN_GENERATION
+
 export interface Handoff {
   narrative: HandoffNarrative
   record: RepoRecord
@@ -52,8 +60,18 @@ export interface Handoff {
   constraints: RelayMessage[]
   authoredBy: string
   from: { sessionId: string; agent: string }
-  /** Compaction generation of the session being replaced: the mechanical degradation signal. */
-  compactionGeneration: number
+  /**
+   * Compaction generation of the session being replaced: the mechanical degradation signal.
+   *
+   * `UNKNOWN_GENERATION` when the snapshot rotation took was a contained fallback -- the last
+   * projection the view had, handed back because the transcript would not answer. The rotation still
+   * happens: it was decided before this point and on other evidence, and a wedged transcript
+   * reader is not a reason to leave a quiesced session frozen. But the number would be the
+   * generation as of some earlier read, recorded as though it described the session being
+   * replaced, and a handoff is the one document nobody re-derives. Saying "not verified" is
+   * worse to read and the only thing that is true.
+   */
+  compactionGeneration: CompactionGeneration
   at: number
 }
 

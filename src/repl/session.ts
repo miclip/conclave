@@ -249,6 +249,13 @@ export interface SessionOptions {
   /**
    * The absolute per-turn deadline handed to each adapter's watchdog.
    *
+   * "Absolute" is measured from the turn's start and not from its last output, and no output
+   * moves it: it bounds the whole turn -- meaning what the run WAITS for, not the turn itself.
+   * `idleMs` (12min of silence) runs alongside it and is what catches an ordinary hang first;
+   * this one is what guarantees the run stops waiting at all. Neither ends a turn or reaches
+   * the child: they produce a `timed_out` verdict, and the seat stays unsendable until a
+   * cancellation, terminal evidence, or the child's exit. See `outcomes/watchdog.ts`.
+   *
    * The CLI has parsed `--turn-timeout` into this since it was written and the console never
    * had a field to receive it: `bin/conclave.ts` built `{ turnWatchdogMs }` inside a
    * conditional spread, which slips past TypeScript's excess-property check, so it was
@@ -521,7 +528,7 @@ function renderPause(p: RunPause, width: number): string {
  *
  * This used to read `pause.verdictOf.participant` instead, and that field is narrower than it
  * looks: it is set at exactly two halt sites, both `turn_incomplete`
- * (`src/relay/relay.ts:6498` and `src/relay/relay.ts:7014`). So FOUR of the five seat-scoped
+ * (`src/relay/relay.ts:6597` and `src/relay/relay.ts:7113`). So FOUR of the five seat-scoped
  * reasons -- `rotation_candidate`, `implementer_unanswered`, `merge_blocked`, `review_blocked`
  * -- named a seat in their scope and were sampled by rank anyway, because the field the guard
  * read was empty. The scope is the field that is always populated, which is the other half of
@@ -535,16 +542,16 @@ function renderPause(p: RunPause, width: number): string {
  * pause never mentioned. The rank fallback's own comment argued it was right "only because
  * there is one of them", which is an argument for deriving the seat from the pause instead of
  * from a rank. Worse than useless on one of them: resuming an `advisor_escalated` pause sends
- * to the ADVISOR (`src/relay/relay.ts:6615`), so the fallback measured children that were not
+ * to the ADVISOR (`src/relay/relay.ts:6714`), so the fallback measured children that were not
  * about to be sent to at all.
  *
  * What that gives up, stated rather than discovered: the `advisor_escalated` halt raised when a
- * seat's turn completed and its report could not be read (`src/relay/relay.ts:6928-6930`) is
+ * seat's turn completed and its report could not be read (`src/relay/relay.ts:7025-7027`) is
  * conclave-scoped by design -- "the reason names who is being asked to take it, and the scope
  * follows the reason" -- yet the thing an operator wants to know there is whether THAT seat's
  * child is still writing. Under the rank fallback that seat was sampled at N=1 by coincidence
  * of being the only implementer. It is not sampled now. The pause still carries its own
- * liveness EVIDENCE from the halt site (`src/relay/relay.ts:6939-6941`), which is what the operator
+ * liveness EVIDENCE from the halt site (`src/relay/relay.ts:7036-7038`), which is what the operator
  * reads;
  * what is gone is a refusal derived from a rank scan. Narrowing that halt's scope, if the
  * refusal is wanted back, is a change to the halt site rather than to this guard.
@@ -1284,7 +1291,22 @@ export async function runSession(opts: SessionOptions): Promise<number> {
         write(`  ${describeActiveTurn(turn)}`)
         write(`  continuing SENDS, and neither CLI accepts input mid-turn.`)
         if (colour) write(dim(`  for colour only, deciding nothing: ${describeLiveness(colour, undefined)}`))
-        write(`  wait for the turn to end, or /continue force to send anyway.`)
+        // "Wait for it to end" is the right advice for a turn that is merely long and the wrong
+        // advice for this one -- though not because a clock ended the turn. The deadline never
+        // reached the child: it released this run's wait and emitted a verdict, and the child
+        // went on doing whatever it was doing. What that leaves is a turn nothing is waiting on
+        // any more, so the only things that can still close it are the child stopping or an ESC.
+        // An operator told to wait for something that cannot happen reads the guard as broken,
+        // and the next thing they learn is `force`, which is the one option here that can still
+        // land a prompt in a working child.
+        if (turn.timedOut) {
+          write(`  its deadline already expired, so waiting will not end it: nothing has OBSERVED`)
+          write(`  the child stop, and the verdict you were shown is this run giving up rather`)
+          write(`  than an observation. /rotate replaces the seat, which cancels the turn first;`)
+          write(`  /continue force sends anyway, into a child that may still be working.`)
+        } else {
+          write(`  wait for the turn to end, or /continue force to send anyway.`)
+        }
         // The run stays paused, so a watcher polling `state` sees no change. Record the
         // refusal so an external reader can see why `/continue` did not move the run.
         if (run.pause) {
@@ -2047,7 +2069,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
       // FALSIFIER, stated because it is the strongest argument against this shape: the
       // console has no general "trailing text is a message" rule and does not gain one here.
       // `/rotate <text>` and `/abort <text>` consume their text as a REASON
-      // (`src/repl/session.ts:2100`, `src/repl/session.ts:2133`) and `/pause`, `/queue`, `/audit` ignore
+      // (`src/repl/session.ts:2122`, `src/repl/session.ts:2155`) and `/pause`, `/queue`, `/audit` ignore
       // whatever follows them. So an operator who learns this from `/continue` and carries
       // it to `/pause I'll be back` still loses the sentence. That inconsistency is not
       // repaired by making `/continue` a third behaviour; it is narrowed by it, and the

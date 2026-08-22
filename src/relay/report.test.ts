@@ -204,6 +204,76 @@ test('--turn-timeout moves the absolute clock on both seats, and invents neither
   })
 })
 
+test('the report keeps the two clock POLICIES apart, because #36 fixed only one of them', async () => {
+  // Two clocks, two budgets, two different questions, and the JSON says so in two fields that
+  // are never derived from each other:
+  //
+  //   absolute   the whole turn, however busy. Refreshed by NOTHING -- child output moves the
+  //              other one and never this. `outcomes/watchdog.test.ts` proves that end of it
+  //              ("repeated output cannot extend the absolute deadline").
+  //   silence    how long the turn may say nothing. The only one output pushes out, and the
+  //              one an ordinary hang meets first, because a child that stopped working also
+  //              stopped writing.
+  //
+  // The reason this is worth a test of its own rather than a comment is what it means for a
+  // reader of a finished run. #36 is a PARTIAL fix: when a deadline fires the adapters re-read
+  // the transcript, which recovers a lost end-of-turn signal (superseded to `completed`, never
+  // reported) and moves an ordinary hang onto the shorter clock -- the incident #36 was
+  // actually filed about. A turn that is genuinely still working reads `in_progress`, which is
+  // not evidence it ended, so it is reported `timed_out` on the absolute cap and nothing
+  // corrects it.
+  //
+  // What the artifact can and cannot do for that reader, stated exactly, because the gap is
+  // easy to read past:
+  //
+  //   CAN     say what each seat was measured against -- both budgets, per participant,
+  //           including the seats enforcing neither. The run-wide single number this replaced
+  //           could not, and would have claimed 45/12 for a seat honouring neither.
+  //   CANNOT  say which of the two clocks produced any particular `timed_out`. That
+  //           provenance is on the watchdog update at the moment it fires; nothing carries it
+  //           into the report, and no field here is a proxy for it. So these numbers narrow
+  //           what a verdict could mean and never settle it.
+  const unasked = await mixedDeadlines()
+  const pty = unasked.deadlines.participants.find((p) => p.id === 'advisor')!
+
+  assert.deepEqual(pty.absolute, { status: 'enforced', ms: 2_700_000 })
+  assert.deepEqual(pty.silence, { status: 'enforced', ms: 720_000 })
+  assert.notDeepEqual(
+    pty.absolute,
+    pty.silence,
+    'two independent budgets: neither is the other scaled, and a report that collapsed them ' +
+      'would be telling a reader the seat is on one clock when it is on two',
+  )
+
+  // Every seat carries BOTH keys, whatever its adapter supports. A clock that vanished when it
+  // had nothing to say could not be told from one a reader forgot to look for -- which is the
+  // same rule `pausedMs` is kept to, and the reason `unsupported` is a status rather than an
+  // absent field.
+  for (const seat of unasked.deadlines.participants) {
+    assert.ok('absolute' in seat && 'silence' in seat, `${seat.id} must report both clocks`)
+  }
+
+  // And the configured knob addresses exactly one of the two policies. `configuredAbsoluteMs`
+  // is named for the clock it reaches: it moves every supported absolute clock and leaves every
+  // silence clock at whatever its adapter decided, so the field name and the effect agree.
+  const asked = await mixedDeadlines(90_000)
+  assert.equal(asked.deadlines.configuredAbsoluteMs, 90_000)
+  assert.deepEqual(
+    asked.deadlines.participants.map((p) => p.absolute),
+    [
+      { status: 'enforced', ms: 90_000 },
+      { status: 'enforced', ms: 90_000 },
+    ],
+    'the request reaches the whole-turn clock on every seat that has one',
+  )
+  assert.deepEqual(
+    asked.deadlines.participants.map((p) => p.silence),
+    unasked.deadlines.participants.map((p) => p.silence),
+    'and reaches no silence clock at all: asking for a longer turn must not also buy a longer ' +
+      'permitted silence, which would quietly undo the half of #36 that works',
+  )
+})
+
 test('rotation state is reported even when nothing happened', async () => {
   const { report } = await reportOf()
   // The whole point of rotationWatch: a null is only evidence if the instrument was live.

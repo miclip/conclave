@@ -564,7 +564,8 @@ const settle = () => new Promise((r) => setTimeout(r, 10))
 test('a permission request can be answered, and reaches the session', async () => {
   // Both adapters implement `decidePermission` down to the keystroke, and nothing above
   // them ever called it. The console rendered `awaiting a permission decision` and offered
-  // no way to answer, so the turn sat at the prompt until a watchdog ended it.
+  // no way to answer, so the turn sat at the prompt until a watchdog gave up waiting on it and
+  // emitted a verdict -- which released the run and left the child standing at the same prompt.
   const { relay, impl } = await twoParty(['DONE'], ['ack'])
   await relay.run('a goal')
 

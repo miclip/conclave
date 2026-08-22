@@ -91,14 +91,27 @@ export interface ClockSupport {
 }
 
 /**
- * Both clocks a turn can die on, as this adapter implements them.
+ * Both clocks a turn is measured against, as this adapter implements them.
  *
  * Declared here rather than worked out from the agent's id at the call site. An id check is
  * a copy of this table that no one updates, and it lands in whichever module happened to
  * need the answer first; `Relay.deadlines` resolves it through the registry instead.
  */
 export interface DeadlineSupport {
-  /** The whole turn, however busy it is. */
+  /**
+   * The whole turn, however busy it is.
+   *
+   * Refreshed by nothing -- output moves `silence`, never this -- because this is the clock
+   * that guarantees the RUN stops waiting on a turn, and the run's ceilings are checked only
+   * between turns.
+   *
+   * Stops waiting, which on the pty adapters is all it does: it emits a `timed_out` verdict
+   * and releases the exchange, leaving the turn running and the seat unsendable until a
+   * cancellation, terminal transcript or hook evidence, or the child exiting. The adapters
+   * that run one process per turn kill that process when this fires, so there it ends the turn
+   * too -- which is exactly why this is declared per adapter rather than assumed. The clock
+   * `--turn-timeout` configures.
+   */
   absolute: ClockSupport
   /**
    * How long a turn may produce NOTHING before it is called hung.

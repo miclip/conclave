@@ -21,7 +21,53 @@ export const OUTCOMES = [
   'permission_refused',
   /** The child process is gone. */
   'process_exited',
-  /** A deadline expired. Says completion is uncertain -- never says why. */
+  /**
+   * A deadline expired AND the child's own transcript does not show the turn finishing.
+   *
+   * ## #36 is a PARTIAL fix, and this is where that shows
+   *
+   * The clock alone could not tell a child stuck mid-work from one that finished normally and
+   * whose `Stop` hook never arrived -- both produce silence, and the two want opposite
+   * responses: the first must not be sent to, the second is simply done. So the adapters ask
+   * the transcript when a clock fires (`Claude#reconsiderDeadline`). That recovered two
+   * populations, and left a third that no verified incident has yet produced but the mechanism
+   * plainly still admits:
+   *
+   *   RECOVERED  a hang that stops writing. A child that stopped working also stopped
+   *              appending to its transcript, so the SILENCE clock reaches it at twelve
+   *              minutes instead of the absolute one at forty-five. The verdict is the same
+   *              label; what changed is that it arrives while it is still worth acting on.
+   *
+   *   RECOVERED  a lost `Stop`. The transcript is terminal, so the tracker supersedes the
+   *              deadline verdict with `completed` through an ordinary `late_signal` revision
+   *              and it never reaches a reader as this at all.
+   *
+   *   NOT FIXED  a turn that keeps working. Substantive child output refreshes the silence
+   *              clock and nothing else, so a continuously productive turn runs into the
+   *              absolute deadline, which is refreshed by nothing and fires unconditionally at
+   *              forty-five minutes. Its transcript at that moment says `in_progress` -- which
+   *              is not evidence the turn ended -- so the re-check changes nothing and the run
+   *              reports a working turn as `timed_out`.
+   *
+   *              Derived from the mechanism, not from an incident. The observed #36 report is
+   *              the static-transcript hang in the first row: a child took a tool result, went
+   *              quiet, and the run sat ~44 minutes. This row is what the two clocks and the
+   *              re-check still allow, and it has not been seen in the wild. Recorded anyway,
+   *              because a reader deciding what a `timed_out` means needs the whole set --
+   *              but not to be cited as the thing #36 was filed about.
+   *
+   * The absolute clock is kept rather than retired at the child's first output, and that is a
+   * decision rather than an omission: `--max-turns` and `--max-minutes` are checked at turn
+   * boundaries and nowhere else, so a turn output can extend without limit is a run no ceiling
+   * can end. See `DEFAULT_WATCHDOG_MS` for the attempt and the revert.
+   *
+   * What survives to be reported as `timed_out`, therefore, is a turn with NO evidence that it
+   * ended: one still working, one wedged, or one whose evidence could not be read -- and those
+   * are deliberately the same answer here. See `#reconsiderDeadline` for the cases and why "no
+   * evidence" must not mean "finished".
+   *
+   * Still says completion is uncertain, and still never says why.
+   */
   'timed_out',
   /** An observation channel went away. Says nothing about the turn itself. */
   'transport_lost',

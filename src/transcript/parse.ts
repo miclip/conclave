@@ -152,6 +152,17 @@ export function parseClaude(records: Record<string, any>[]): ParsedTranscript {
   return { turns, declaredCompaction: compactions > 0, compactions, sessionId }
 }
 
+/**
+ * How an errored `task_complete` announces itself in a turn's provenance.
+ *
+ * Exported and matched on rather than re-typed, because two places read it: the parser writes
+ * it, and the Codex adapter recovers the error text from it when rebuilding transcript evidence
+ * for the tracker. A prose string matched by `startsWith` in one file and written in another is
+ * a rename away from silently classifying an errored turn as an ordinary one -- which is #35
+ * arriving a second time, through the reconciliation path instead of the parser.
+ */
+export const TASK_COMPLETE_ERROR = 'task_complete carried an error -- '
+
 // --- Codex -------------------------------------------------------------------------
 
 export function parseCodex(records: Record<string, any>[]): ParsedTranscript {
@@ -256,7 +267,7 @@ export function parseCodex(records: Record<string, any>[]): ParsedTranscript {
               rec.provenance = [
                 {
                   source: 'transcript',
-                  detail: `task_complete carried an error -- ${info}${err.message ?? 'no message'}`,
+                  detail: `${TASK_COMPLETE_ERROR}${info}${err.message ?? 'no message'}`,
                 },
               ]
               // Deliberately no `report`. There is no assistant message, and inventing one

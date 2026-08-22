@@ -34,7 +34,7 @@ import type {
   TurnKey,
   TurnRecord,
 } from '../contract/session.ts'
-import { guaranteesFor, turnKey } from '../contract/session.ts'
+import { guaranteesFor, isChildOutput, turnKey } from '../contract/session.ts'
 import { emptyTranscriptState } from '../outcomes/classify.ts'
 import { TurnVerdictTracker, type VerdictUpdate } from '../outcomes/tracker.ts'
 import type { Verdict } from '../contract/outcome.ts'
@@ -50,6 +50,7 @@ import { HookReceiver } from '../hooks/receiver.ts'
 import type { HookDelivery } from '../hooks/journal.ts'
 import { TranscriptSessionView } from '../transcript/reconcile.ts'
 import { AsyncQueue } from './asyncQueue.ts'
+import { BoundedSingleFlight, type Abandonment } from './boundedReconcile.ts'
 
 const CLIENT = join(import.meta.dirname, '..', 'hooks', 'client.ts')
 /**
@@ -66,15 +67,6 @@ const HOOK_EVENTS = [
   'Stop',
   'SessionEnd',
 ]
-
-/**
- * Event types that mean the CHILD produced something.
- *
- * The complement is the interesting half: `turn_start` is emitted by this adapter the moment it
- * arms a clock, and `revision`/`error` are this adapter reporting on itself, so none of them
- * distinguishes a child that is working from one that has never said a word.
- */
-const CHILD_OUTPUT = new Set<AgentEvent['type']>(['message', 'tool_use', 'permission_requested'])
 
 interface TurnState {
   key: TurnKey
@@ -178,7 +170,33 @@ export interface ClaudeAdapterOptions {
    */
   command?: string | undefined
   readyTimeoutMs?: number | undefined
-  /** How long an unmatched turn may run before the watchdog calls it uncertain. */
+  /**
+   * Overrides the view's `READ_LEASE_MS` for this session's transcript reads.
+   *
+   * A TEST seam, and it is here rather than in a test's own prototype patch because the thing
+   * worth exercising is the real adapter over the real view: what a caller does when a read
+   * does not answer is scheduling behaviour, and a stand-in for the view is a stand-in for the
+   * behaviour under test. The production default is ten seconds, chosen to sit far above any
+   * read that is merely slow (`READ_LEASE_MS`), and a suite that has to wait it out several
+   * times over spends most of its life asleep for nothing: nothing in those tests is about the
+   * VALUE, only about what happens once it is spent.
+   *
+   * Not for production use. A lease short enough to be convenient is short enough to abandon
+   * healthy reads on a loaded machine, which turns a slow filesystem into a stream of callers
+   * being told the transcript could not be read.
+   */
+  readLeaseMs?: number | undefined
+  /**
+   * How long a turn may run in total before the watchdog calls it uncertain.
+   *
+   * The whole turn, a busy one included: no child output extends it. `idleMs` runs alongside
+   * it and is the clock that catches an ordinary hang -- twelve minutes of silence rather than
+   * forty-five of anything -- while this one is what guarantees the run stops WAITING on the
+   * turn at all. It ends no turn and touches no child: what it produces is a `timed_out`
+   * verdict, and the transport stays open until a cancellation, terminal evidence, or the
+   * child's exit. The released wait is still what the run needs, because its ceilings are
+   * checked at turn boundaries and nowhere else.
+   */
   watchdogMs?: number | undefined
   /**
    * How long a turn may produce nothing before it is called hung. Defaults to
@@ -215,6 +233,115 @@ const SEND_HOOK_TIMEOUT =
  */
 const SEND_NOT_ACCEPTED =
   "the text was typed but never became a prompt: it is absent from the child's transcript after a re-submit, so this is swallowed input rather than a hook failure. Nothing is wrong with the hooks -- `conclave config check` and `--settle` will not help. The turn was not started, so no work was lost."
+
+/**
+ * A second `send()` while the first has not yet become a turn.
+ *
+ * `#pendingPrompt` is ONE slot and the second send overwrote it, so the first caller's promise
+ * was left for nobody to resolve: it waited out the hook timeout and then reported a hook
+ * failure for a prompt the child had accepted. The keystrokes interleave too -- `InputQueue`
+ * serialises typing, not sends -- so the composer can end up holding two prompts spliced
+ * together, which is a corrupted turn rather than a slow one.
+ *
+ * Rejecting is the only honest answer available here. Queueing the second send would mean
+ * holding a prompt whose turn the caller is already awaiting, and the caller is the relay,
+ * which has its own idea of when a turn may start.
+ */
+const SEND_ALREADY_SENDING =
+  'a send is already in flight on this session and has not yet been acknowledged by a hook; wait for it to resolve or fail before sending again'
+
+/**
+ * A `send()` while a turn is still open.
+ *
+ * Neither CLI accepts input mid-turn, and a send that lands there does not queue -- it ends the
+ * run (#117). The relay already waits (`#awaitSendable`), so this refuses a caller that did not,
+ * rather than duplicating a guard that was working.
+ *
+ * It is also what makes the watchdog's per-turn touch correct: exactly one turn is open at a
+ * time, so activity belongs to the live turn and nowhere else.
+ *
+ * How long the refusal can last is a separate question, and the absolute deadline is not the
+ * answer to it. That clock bounds what the RUN waits for -- it emits a `timed_out` verdict and
+ * releases the exchange (`outcomes/watchdog.ts`) -- and it neither ends the turn nor reopens the
+ * transport, so a send is still refused after it fires, which is #117 rather than an oversight.
+ * What lifts this refusal is a cancellation, terminal evidence in the transcript or a hook, or
+ * the child exiting.
+ */
+const SEND_TURN_IN_FLIGHT =
+  'a turn is already open on this session; neither CLI accepts input mid-turn, so this send would be spliced into the running turn rather than queued'
+
+/**
+ * How long the deadline's transcript re-check may take before it is abandoned.
+ *
+ * The read itself cannot hang on the child, and that is the property this bound is NOT relying
+ * on: `TranscriptSessionView.snapshot()` reads the transcript FILE and parses it. It never
+ * writes to the pty, never waits on a hook, and never takes the input queue -- so it cannot
+ * block on the unresponsive child whose silence produced the deadline in the first place. A
+ * check that could would be a deadlock in the mechanism meant to rescue the run from one.
+ *
+ * What the bound is for is the filesystem: a transcript on a network mount, or one large enough
+ * that parsing it is measurable -- the largest in evidence is 57,493 records. Two seconds is far
+ * past either and far short of anything an operator would notice, because nothing is waiting on
+ * this: the `timed_out` verdict has already been emitted by the time it runs.
+ *
+ * ## What the bound does NOT promise
+ *
+ * It does not promise the check is over in two seconds, and it does not promise the process is
+ * responsive during it. Nothing here cancels anything: the filesystem read keeps running to
+ * completion, and the parsing and view rebuilding that follow it are SYNCHRONOUS -- they hold
+ * the event loop for as long as they take. A re-check that spends four seconds inside one parse
+ * takes four seconds, and nothing can shorten it. The LATENCY bound is soft, irreducibly. The
+ * 57,493-record transcript is the size at which that stops being theoretical.
+ *
+ * What it does promise is that past two seconds the answer is not ACTED ON, however long the
+ * loop was blocked. An abandoned re-check may finish updating the session view -- that work is
+ * already paid for, and throwing it away only makes the next poll redo it -- but it may not
+ * close the transport and it may not emit a `late_signal` revision. Letting it would mean a
+ * verdict minted from evidence the deadline had already given up on, landing at an arbitrary
+ * later moment: the run would declare a turn finished and a seat sendable long after it
+ * concluded the opposite, with nothing in the event stream to say why the order came out that
+ * way. Expiry also frees the single-flight slot, so a later deadline starts a fresh attempt
+ * instead of attaching to a re-check that has already been written off -- and that attempt is
+ * answered rather than parked, because the session view tells a caller its lease is spent
+ * instead of leaving it waiting on a read that may never come back. What the fresh attempt does
+ * NOT get is a fresh read: the view will not start a second one while the first is unresolved,
+ * so an attempt made inside the wedge is told it got no answer, which is the truth.
+ *
+ * That promise deliberately does not rest on the bound's timer, and it cannot. Microtasks drain
+ * before the timers phase, so when a blocked job finally yields, its own continuations run
+ * BEFORE the overdue timer callback -- a flag that timer writes still reads `false` at the exact
+ * moment the guard consults it, which is precisely the synchronous-parse case above. So
+ * abandonment is computed from a deadline captured when the run started and evaluated when READ,
+ * and is therefore already true the instant control resumes. See `Abandonment` and
+ * `BoundedSingleFlight`.
+ */
+const DEADLINE_TRANSCRIPT_MS = 2_000
+
+/**
+ * The outcomes a DEADLINE can mint, and therefore the ones worth re-reading the transcript for.
+ *
+ * `timed_out` is the ordinary one. `unknown_abnormal_end` is the same clock under external input
+ * ownership: when the orchestrator is not the only writer, the deadline rule degrades its own
+ * verdict, because a direct keystroke could have ended the turn unseen and it will not claim
+ * otherwise (`classify`, rule 7).
+ *
+ * Gating on `timed_out` alone therefore skipped the transcript re-check on exactly the sessions
+ * where a human is sitting at the same terminal -- so an externally-owned seat whose `Stop` was
+ * lost stayed stuck, and #36's recovery quietly did not apply to it.
+ *
+ * That degradation is about ATTRIBUTION of an unseen ending, and this check does not depend on
+ * attribution. A transcript record saying the turn finished is positive proof from the child
+ * itself; who else could type at it changes nothing about what it wrote down. So the weakened
+ * verdict is re-checked exactly like the strong one, and the recovery it finds is just as good.
+ *
+ * A set rather than a comparison chain because this is the whole enumeration, and it is
+ * meaningful ONLY at this call site: `#reconsiderDeadline` runs from the watchdog callback and
+ * nowhere else, so every update it sees came from a clock. `unknown_abnormal_end` reached any
+ * other way -- an errored `task_complete`, say (#35) -- is not a deadline and must never be
+ * re-read as one.
+ */
+const DEADLINE_OUTCOMES = new Set(['timed_out', 'unknown_abnormal_end'])
+
 
 /** How long to wait for a submitted prompt to appear in the transcript before repairing. */
 const SUBMIT_LANDED_MS = 6_000
@@ -516,7 +643,13 @@ export class ClaudePtyHookAdapter implements AgentSession {
     // `synthesized: true` -- nothing from the child said this.
     this.#watchdog = new TurnWatchdog<TurnState>(
       opts.watchdogMs ?? DEFAULT_WATCHDOG_MS,
-      (turn, update) => this.#apply(turn, this.#withScreenTail(update), true),
+      (turn, update) => {
+        const applied = this.#withScreenTail(update)
+        this.#apply(turn, applied, true)
+        // Then ask the transcript whether the clock was right. Fire-and-forget on purpose: the
+        // verdict is already out, and nothing downstream waits on this. See `#reconsiderDeadline`.
+        void this.#reconsiderDeadline(applied)
+      },
       opts.idleMs,
     )
   }
@@ -700,7 +833,7 @@ export class ClaudePtyHookAdapter implements AgentSession {
     return ++this.#seq
   }
 
-/**
+  /**
    * Tail the transcript while a turn is in flight, so its events exist while they matter.
    *
    * The transcript view emits `message` deltas and `tool_use` as they appear — the running
@@ -758,20 +891,40 @@ export class ClaudePtyHookAdapter implements AgentSession {
   }
 
   #emit(e: AgentEvent): void {
-    // Any event is a sign of life for its turn, so the idle deadline moves with it. Without
-    // this the only clock is the absolute one, and a turn that goes silent mid-work waits it
-    // out in full -- issue #36, where a session sat idle ~44 minutes producing nothing.
-    // `touchAll`, not `touch(e.turnKey)`: the key on an event depends on what produced it,
-    // and a transcript-sourced event does not carry the hook key the watchdog is armed under.
-    if (e.type !== 'turn_end') this.#watchdog.touchAll()
-    // The child SPOKE, as opposed to the turn merely existing. `turn_start` is this adapter
-    // announcing that it armed a clock, and `revision`/`error` are this adapter reporting on
-    // itself; none of the three is evidence the child produced anything. Recorded once per
-    // turn -- the tracker is asked only on the transition -- because this runs on the hot
-    // event path, and because a repeat says nothing the first one did not.
-    if (CHILD_OUTPUT.has(e.type)) {
-      const turn = this.#latestLiveTurn()
-      if (turn && !turn.produced) {
+    // The child SPOKE, as opposed to the turn merely existing. `isChildOutput` owns which events
+    // count and why -- it is the contract's answer rather than this adapter's, because #82's
+    // launch diagnosis asks the same question of the same events.
+    //
+    // What makes the ones it accepts safe to refresh a deadline on is that every one of them is
+    // a STRUCTURED transcript record or hook delivery, and neither can exist without new content
+    // from the child. The tailer runs on a timer and finds nothing to emit from a silent
+    // transcript, so polling cannot manufacture one; and no amount of terminal repaint -- a
+    // spinner frame, a keepalive byte, a redrawn status line -- ever becomes one, because
+    // nothing here is derived from pty bytes. Those are exactly the signals that would keep a
+    // hung turn looking alive, and none of them reaches this branch.
+    if (isChildOutput(e)) {
+      // The live turn, by the key THIS adapter armed -- not `e.turnKey`, which is whatever
+      // produced the event and does not agree: a transcript-sourced event carries the
+      // transcript's positional key, never the hook's `prompt_id`. That mismatch is why this
+      // was a blanket `touchAll()`; it is a keyed touch again now that `send()` refuses to
+      // open a second turn, so "the live turn" names exactly one and the adapter knows which.
+      //
+      // A sign of life, so the SILENCE deadline moves out. Not the absolute one, which no
+      // event refreshes: what the run WAITS for stays bounded even on a turn that keeps
+      // producing, because the run's ceilings are only checked between turns (#36). Bounding
+      // the wait is not ending the turn -- see `outcomes/watchdog.ts`.
+      // The OPEN turn, not the unsettled one: after a deadline fires, output still belongs to
+      // the turn that produced it, and crediting it to `#latestLiveTurn()` -- which is now
+      // undefined, or worse the NEXT turn -- is how a turn gets marked as having spoken on
+      // evidence from its predecessor.
+      const turn = this.#openTurn()
+      if (turn) this.#watchdog.touch(String(turn.key))
+      // Recorded once per turn -- the tracker is asked only on the transition -- because this
+      // runs on the hot event path, and because a repeat says nothing the first one did not.
+      // Not on a settled turn. The tracker would reclassify and hand back an update that this
+      // path discards, leaving a verdict in the tracker that no `turn_end` ever carried -- so
+      // `events()` and `snapshot()` would disagree about a turn already reported.
+      if (turn && !turn.tracker.settled && !turn.produced) {
         turn.produced = true
         turn.tracker.observeLaunch({ produced: true })
       } else if (!turn) {
@@ -799,6 +952,70 @@ export class ClaudePtyHookAdapter implements AgentSession {
    */
   #producedBeforeTurn = false
 
+  /**
+   * The turn the CHILD is still executing, as far as anything observed can say.
+   *
+   * Deliberately NOT `tracker.settled`, which is what `#liveTurns()` means by live. A verdict is
+   * this process's conclusion about a turn; transport openness is a fact about the child, and the
+   * watchdog is precisely the case where the two disagree. `timed_out` is synthesized from a
+   * clock running out with nothing arriving -- it is not evidence that the child stopped, and the
+   * turn it describes may still be editing files. Sending there types a prompt into a composer
+   * that is not accepting input: not queued behind the turn, spliced into it, which is the
+   * failure #117 is about.
+   *
+   * Opened by `UserPromptSubmit` and closed only by something that OBSERVED the child stop:
+   *
+   *   Stop            the child's own hook, for this turn and not an earlier one
+   *   SessionEnd      the session is over, so no turn in it is running
+   *   child exit      the strongest form of the same statement
+   *   cancel()        ESC typed and the input queue drained -- a completed cancellation
+   *
+   * A deadline expiring closes none of them, which is the whole point.
+   *
+   * The consequence is deliberate and worth stating: a turn whose `Stop` is LOST stays open here
+   * until something cancels it, and sends to that seat are refused meanwhile. That is the same
+   * answer `Relay#awaitSendable` already gives a busy seat -- cancel it and close it rather than
+   * send into it -- and the recovery is the same call, so the state is escapable.
+   */
+  #openTurnKey: string | undefined
+
+  /**
+   * Refuse a send that would overlap another. Both halves are races, not caller stupidity:
+   * see `SEND_ALREADY_SENDING` and `SEND_TURN_IN_FLIGHT`.
+   *
+   * Checked before `#pendingPrompt` is claimed, so a refused send leaves every piece of state
+   * belonging to the send already in flight exactly as it found it.
+   */
+  #refuseOverlappingSend(): void {
+    if (this.#pendingPrompt) throw new Error(SEND_ALREADY_SENDING)
+    // Transport openness, not `#liveTurns()`. A watchdog verdict settles the tracker while the
+    // child carries on; asking the tracker here would hand the next prompt to a busy composer
+    // on exactly the turns most likely to be busy. See `#openTurnKey`.
+    const open = this.#openTurn()
+    if (open) throw new Error(`${SEND_TURN_IN_FLIGHT} (turn ${String(open.key)})`)
+  }
+
+  /**
+   * The turn the child may still be executing. See `#openTurnKey`.
+   *
+   * Undefined once something observed the child stop, whatever any verdict says.
+   */
+  #openTurn(): TurnState | undefined {
+    return this.#openTurnKey === undefined ? undefined : this.#turns.get(this.#openTurnKey)
+  }
+
+  /**
+   * Note that the child has stopped working on `key`, if that is the turn that was open.
+   *
+   * Keyed rather than unconditional: a `Stop` carrying an earlier turn's key is a late signal
+   * about a turn already accounted for, and reading it as the end of the turn in flight is how a
+   * relay comes to send into a child that is still working -- the same mistake
+   * `outcomes/activeTurn.ts` documents on the event stream.
+   */
+  #closeTransport(key: string | undefined): void {
+    if (key === undefined || key === this.#openTurnKey) this.#openTurnKey = undefined
+  }
+
   #turnFor(key: string): TurnState | undefined {
     return this.#turns.get(key)
   }
@@ -815,6 +1032,7 @@ export class ClaudePtyHookAdapter implements AgentSession {
             sessionId: this.#sessionId,
             cwd: this.#opts.cwd,
             guarantees: this.guarantees,
+            ...(this.#opts.readLeaseMs === undefined ? {} : { readLeaseMs: this.#opts.readLeaseMs }),
           })
         }
         this.#ready = true
@@ -851,6 +1069,8 @@ export class ClaudePtyHookAdapter implements AgentSession {
         }
         this.#turns.set(String(key), turn)
         this.#order.push(String(key))
+        // The child is now working on this. Nothing but an observed stop closes it again.
+        this.#openTurnKey = String(key)
         this.#watchdog.arm(String(key), turn)
         // A turn is running: tail the transcript so its narration and tool use exist while
         // they are useful, not in a burst after it ends.
@@ -894,10 +1114,15 @@ export class ClaudePtyHookAdapter implements AgentSession {
         if (d.payload.last_assistant_message && !turn.assistantText) {
           turn.assistantText = String(d.payload.last_assistant_message)
         }
+        // The child's own statement that it is done, which is the only routine way this
+        // closes. Keyed, so a late Stop for an earlier turn does not free a running one.
+        this.#closeTransport(String(turn.key))
         this.#apply(turn, turn.tracker.observeHook('Stop', d.payload), false)
         return
       }
       case 'SessionEnd': {
+        // The session is over, so nothing in it is still running.
+        this.#closeTransport(undefined)
         // Session-level, not turn-level. Recorded as evidence on turns still open.
         for (const t of this.#liveTurns()) {
           this.#apply(t, t.tracker.observeHook('SessionEnd', d.payload), true)
@@ -973,6 +1198,12 @@ export class ClaudePtyHookAdapter implements AgentSession {
       type: 'turn_end',
       verdict: update.verdict,
       synthesized,
+      // Whether the CHILD was seen to stop, which no verdict answers. Read straight off the
+      // transport state rather than derived from the outcome: a deadline verdict leaves this
+      // true, and the transcript re-check that follows it (`#reconsiderDeadline`) is what can
+      // turn it false -- by proving the turn ended, which then emits a fresh `turn_end` with
+      // this absent. See `TurnEndEvent.transportOpen`.
+      ...(this.#openTurnKey === String(turn.key) ? { transportOpen: true } : {}),
       turnKey: turn.key,
       seq,
       at: Date.now(),
@@ -1001,21 +1232,132 @@ export class ClaudePtyHookAdapter implements AgentSession {
    * assistant entry with stop_reason=end_turn is correlation evidence that the turn
    * completed even though its hook never arrived.
    */
-  async #reconcileFromTranscript(): Promise<void> {
+/**
+   * The transcript check that decides what a deadline verdict MEANS (#36).
+   *
+   * `timed_out` is minted by a clock, and a clock cannot tell two very different children apart:
+   * one stuck mid-work, and one that finished normally and whose `Stop` hook never arrived. Both
+   * produce exactly the same event -- silence -- and no predicate over the event stream
+   * separates them. The child's own transcript does: a turn it finished carries
+   * `stop_reason=end_turn`, and a turn it is still working on does not.
+   *
+   * That evidence was already parsed and already polled, and nothing consulted it at the one
+   * moment it decides something. `#reconcileFromTranscript` ran on exit and on close, so a run
+   * learned the truth about a lost `Stop` only once the session was over.
+   *
+   * So the deadline now asks. If the transcript proves the turn finished, the tracker supersedes
+   * `timed_out` with `completed` and the ordinary `late_signal` revision goes out -- the same
+   * path a late `Stop` hook takes, because it is the same fact arriving by a different road. If
+   * it does not, nothing changes: the verdict stands and the turn stays transport-open, which is
+   * what keeps a genuinely hung child from being sent to (#117).
+   *
+   * ## What this does NOT fix
+   *
+   * A turn that keeps working. This runs when a CLOCK fires, and the two clocks answer
+   * different questions: substantive child output refreshes the silence deadline and nothing
+   * else, so a continuously productive turn sails past it and meets the absolute cap, which is
+   * refreshed by nothing (`outcomes/watchdog.ts`). At that moment the transcript says the turn
+   * is `in_progress` -- correctly, because it is -- and `in_progress` is not evidence the turn
+   * ended, so this changes nothing and a working turn is reported `timed_out`.
+   *
+   * That case is open, and it is a gap DERIVED from the mechanism rather than one anybody has
+   * reported: the verified #36 incident is the static-transcript hang, where a child took a
+   * tool result, produced nothing further and no `Stop`, and the run sat ~44 minutes. What #36
+   * did recover is that hang -- the silence clock now reaches it at twelve minutes rather than
+   * the absolute one at forty-five -- and a turn whose transcript is terminal because its
+   * `Stop` was lost, which is superseded to `completed` here. Nothing below should be read as
+   * covering a turn that is genuinely still working.
+   *
+   * ## What happens when the transcript cannot answer
+   *
+   * Deliberately, in every case: the deadline's verdict stands and the transport stays open.
+   * (`timed_out`, or `unknown_abnormal_end` when input ownership is external and the clock
+   * degraded its own claim -- see `DEADLINE_OUTCOMES`. Both are re-checked; neither is
+   * strengthened by a read that failed.)
+   *
+   *   no transcript known    `#view` is unset -- no `SessionStart` has told us where it is
+   *   unreadable             a read that throws; `#reconcileFromTranscript` swallows it
+   *   still in progress      the turn has no terminal record, which is a real answer: hung
+   *   ambiguous              fewer completed records than turns claiming them, so the
+   *                          positional credit does not reach this turn
+   *   too slow               the bound above expires before the read returns, and the
+   *                          abandoned re-check is barred from acting on what it later finds
+   *
+   * The alternative -- treating "no evidence" as completion -- would reopen #117 on exactly the
+   * runs where the evidence is hardest to get, which is not a coincidence: an unreadable
+   * transcript and a wedged child have causes in common.
+   */
+  async #reconsiderDeadline(update: VerdictUpdate | undefined): Promise<void> {
+    if (!DEADLINE_OUTCOMES.has(update?.verdict?.outcome as string)) return
+    // Everything else happens inside: the reconcile emits its own revision through `#apply`,
+    // and closes the transport for any turn the transcript proves ended -- which it must do
+    // before applying, so the replacement verdict does not go out still claiming the child may
+    // be running.
+    await this.#boundedReconcile()
+  }
+
+  /**
+   * In-flight deadline reconcile, so two clocks firing at once do not double-read the file --
+   * and, past `DEADLINE_TRANSCRIPT_MS`, so a third can try again instead of waiting on a read
+   * that has already been abandoned.
+   */
+  #reconciling = new BoundedSingleFlight(DEADLINE_TRANSCRIPT_MS)
+
+  /** `#reconcileFromTranscript` under `DEADLINE_TRANSCRIPT_MS`, and never more than one at a time. */
+  async #boundedReconcile(): Promise<void> {
+    await this.#reconciling.run((token) => this.#reconcileFromTranscript(token))
+  }
+
+  async #reconcileFromTranscript(token?: Abandonment): Promise<void> {
     if (!this.#view) return
 
     let snap: SessionSnapshot
     try {
-      snap = await this.#view.snapshot()
+      // The bound goes IN, not just around: expiry has to reach the view, or this caller waits
+      // out the view's ten-second lease instead of its own two seconds and the slot it exists to
+      // free is not freed on time. It does not buy a read -- there is one operation in flight,
+      // and this call attaches to it rather than racing it. See `TranscriptSessionView.snapshot`.
+      snap = await this.#view.snapshot(token)
     } catch {
-      return // transcript unreadable; leave existing evidence alone rather than guess
+      // Unreadable, or a read this caller stopped waiting on before it answered
+      // (`TranscriptReadAbandoned`). Both are the same thing here: no evidence arrived, so
+      // leave the evidence we already have alone rather than guess.
+      return
     }
+
+    // The bound expired while that read was outstanding, so this run is observationally
+    // abandoned. The view above is updated and stays updated -- that work is done and discarding
+    // it would only make the next poll redo it -- but nothing past this line may be observed by
+    // anyone: no transport is closed, no verdict is superseded, no `late_signal` goes out. The
+    // deadline already concluded it had no answer, and an answer arriving afterwards would
+    // contradict that conclusion at a moment chosen by the filesystem.
+    //
+    // Read here, and again inside the loop below, and each reading answers for the moment it is
+    // taken rather than for the last time a timer got a turn. That matters most in the case
+    // this guard exists for: the snapshot above parses synchronously, so the loop can be
+    // blocked straight through the bound and this line can be the first thing to run
+    // afterwards -- before any overdue timer. See `Abandonment`.
+    //
+    // `token` is undefined on the exit and close paths, which are not bounded and must run to
+    // completion.
+    if (token?.abandoned) return
+
     const completedInTranscript = snap.turns.filter((t) => t.state === 'completed').length
 
     // Only as many turns as the transcript actually evidences may claim completion.
     let credits = Math.max(0, completedInTranscript - this.#provenCompletedCount())
 
-    this.#allTurns().forEach((turn, i) => {
+    const turns = this.#allTurns()
+    for (let i = 0; i < turns.length; i++) {
+      // Asked once per turn, not once before the loop. Every iteration is separately
+      // observable -- it can close a transport and emit a replacement verdict -- and the loop
+      // is synchronous, so on a session with many turns the bound can expire partway down it.
+      // A single check at the top would then let every remaining turn act on an answer the
+      // deadline had already written off, which is the thing the bound promises will not
+      // happen. Stopping here leaves the turns already updated updated, and that is honest:
+      // each of those was decided while this run was still wanted.
+      if (token?.abandoned) return
+      const turn = turns[i]!
       // The peer receives ALL prose, not just the closing message, so the transcript is
       // the source of truth here: parseClaude concatenates every text block in the turn,
       // which is the running narration a reader following along actually sees. The Stop
@@ -1027,6 +1369,11 @@ export class ClaudePtyHookAdapter implements AgentSession {
 
       const recovered = !turn.tracker.evidence.hooks.includes('Stop') && credits > 0
       if (recovered) credits--
+      // The child's own file saying this turn ended is an OBSERVATION of the child, so it may
+      // close the transport -- and it must do so BEFORE the update is applied, or the
+      // replacement `turn_end` goes out still claiming the child may be running and every
+      // consumer of `transportOpen` keeps refusing to send to a turn that is demonstrably over.
+      if (recovered) this.#closeTransport(String(turn.key))
       const update = turn.tracker.resetTranscript({
         ...emptyTranscriptState(),
         exists: true,
@@ -1034,7 +1381,7 @@ export class ClaudePtyHookAdapter implements AgentSession {
         finalStopReason: recovered ? 'end_turn' : undefined,
       })
       this.#apply(turn, update, true)
-    })
+    }
   }
 
   /** Turns whose completion is proven by a Stop, so they need no transcript credit. */
@@ -1047,6 +1394,8 @@ export class ClaudePtyHookAdapter implements AgentSession {
     // child dies would otherwise hang forever.
     this.#pendingPrompt?.reject(new Error(`claude exited (${reason}) before accepting the prompt`))
     this.#pendingPrompt = undefined
+    // A dead child is executing nothing. The strongest form of an observed stop.
+    this.#closeTransport(undefined)
 
     // The child is gone: whatever the turns are, they are not still running. The deadline
     // has nothing left to say and must not fire against a dead session.
@@ -1114,9 +1463,25 @@ export class ClaudePtyHookAdapter implements AgentSession {
       throw new Error(`session is ${this.#state}; it is not accepting work`)
     }
     if (!this.acceptsInput) throw new Error('session is not accepting input')
+    this.#refuseOverlappingSend()
     const keyed = new Promise<TurnKey>((resolve, reject) => {
       this.#pendingPrompt = { resolve, reject, prompt: message }
     })
+    try {
+      return await this.#submit(message, keyed)
+    } catch (e) {
+      // Release the slot on the way out. A send that failed still claimed it, and leaving it
+      // claimed would make the guard above refuse every later send on this session -- turning
+      // one failed prompt into a seat that can never be spoken to again. The turn, if the hook
+      // does arrive late, is created by `#onHook` from the hook's own payload and does not need
+      // this promise; nothing but this method ever awaited it.
+      this.#pendingPrompt = undefined
+      throw e
+    }
+  }
+
+  /** The body of `send()`, after the guards and the pending-prompt slot are settled. */
+  async #submit(message: string, keyed: Promise<TurnKey>): Promise<TurnKey> {
     // Serialized against cancel() and decidePermission() by the shared queue.
     const before = await this.#promptOccurrences(message)
     await this.#input.submit(message)
@@ -1240,6 +1605,11 @@ export class ClaudePtyHookAdapter implements AgentSession {
   async cancel(): Promise<TurnKey | undefined> {
     const turn = this.#latestLiveTurn()
     await this.#input.cancel(turn ? String(turn.key) : 'no live turn')
+    // A completed cancellation: ESC is typed and the input queue has drained, so the child has
+    // been told to stop by the only means available. This is the escape from a turn whose `Stop`
+    // never arrives -- the transport reopens here and nowhere else, so a seat the watchdog gave
+    // up on can be recovered rather than being unsendable for the rest of the run.
+    this.#closeTransport(undefined)
     if (!turn) return undefined
     // Cancellation produces no signal from the child at all. Give the UI a moment to
     // settle, then conclude from our own record of having sent ESC -- which is why the
@@ -1282,9 +1652,18 @@ export class ClaudePtyHookAdapter implements AgentSession {
         guarantees: this.guarantees,
         compactionGeneration: 0,
         builtAt: Date.now(),
+        // No view means no read has EVER happened here, which the guards must not mistake for a
+        // read that found nothing. `compactionGeneration: 0` below is synthesized, not observed.
+        containedFallback: true,
       }
     }
-    const snap = await this.#view.snapshot()
+    // Contained, not bounded. This is the session contract's snapshot: the report, the seat
+    // record, the relay's compaction checks and rotation's record-at-quiesce all arrive here,
+    // none of them carrying a bound and none of them able to do anything useful with "the
+    // transcript did not answer". It falls back to the last projection built from records that
+    // were actually read, stamped with when that was. The deadline re-check above keeps the
+    // rejection, because there it is the signal.
+    const snap = await this.#view.snapshotOrLastBuilt()
 
     const turns = mergeKnownTurns(
       snap.turns,
@@ -1299,6 +1678,10 @@ export class ClaudePtyHookAdapter implements AgentSession {
         }
       }),
     )
+    // Spread first, so everything the view said about this projection survives the turn merge
+    // -- `builtAt` and `containedFallback` above all. The merge changes what the TURNS are; it
+    // does not make an unverified snapshot into a read one, and rotation reads that flag to
+    // decide whether the compaction generation in here is evidence.
     return { ...snap, turns, role: this.#opts.role }
   }
 
@@ -1327,6 +1710,19 @@ export class ClaudePtyHookAdapter implements AgentSession {
       // deliberately choosing.
       this.#watchdog.disarmAll()
 
+      // Stop reading before deciding what to read. The tailer is on an interval and would
+      // otherwise be free to start the view's next read between here and the reconcile below.
+      this.#stopTailing()
+      // And stop waiting on whatever read is already in flight. `close()` reconciles with no
+      // bound of its own, so a read that never returns used to park a shutdown forever rather
+      // than delay it, and even a lease is longer than a shutdown should wait.
+      //
+      // It does not stop the read -- nothing can -- so the reconcile below is refused for as
+      // long as that operation lasts, and skipped if it never lands. What it does not lose is
+      // evidence: the read commits what it found whenever it lands. See
+      // `TranscriptSessionView.abandonReads`.
+      this.#view?.abandonReads()
+
       if (mode === 'graceful' && this.#pty.alive) {
         await this.#input.drain()
         // Reconcile BEFORE terminating. A verdict already established by stronger evidence
@@ -1354,7 +1750,6 @@ export class ClaudePtyHookAdapter implements AgentSession {
         if (this.#pty.alive) await this.#pty.terminate()
       }
 
-      this.#stopTailing()
       await this.#receiver.stop()
       this.#state = 'terminated'
     } finally {

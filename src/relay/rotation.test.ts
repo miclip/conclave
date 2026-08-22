@@ -348,6 +348,154 @@ test('a run rotates automatically when the implementer compacts, if opted in', a
   assert.ok(relay.log.some((m) => m.text.includes('did not say so')))
 })
 
+/**
+ * The rotation trigger, on a snapshot no read confirmed.
+ *
+ * `snapshot()` on both adapters is contained: a transcript that will not answer produces the
+ * last projection the view could build, flagged `containedFallback`, rather than a rejection.
+ * That containment is what keeps a wedged transcript from stranding a report or a quiesced
+ * rotation -- and it means the `compactionGeneration` in that projection is a number from a read
+ * that could not be repeated.
+ *
+ * `rotation/rotate.ts` already declines to write such a generation into a handoff record. That
+ * left the trigger as the hole: the relay would START a rotation -- quiesce a working session,
+ * spend an advisor handoff turn, launch a replacement -- on exactly the number the transaction
+ * would then refuse to record as evidence.
+ *
+ * The generation is set directly rather than through `compact()`, and that is the point of the
+ * test: `compact()` moves BOTH channels, and this is about the one that depends on a read having
+ * happened. `degradation.ts` reads the snapshot generation and the live `revision` events
+ * independently, and only the first of them is in doubt here.
+ */
+test('a compaction generation from a contained fallback does not start a rotation', async (t) => {
+  const dir = repo()
+  const advisor = new FakeRotationSession('advisor', 'codex', ['Do the first thing.', HANDOFF, 'DONE'])
+  const old = new FakeRotationSession('old', 'claude', ['ack', 'Did the first thing.'])
+  const fresh = new FakeRotationSession('fresh', 'claude', [ACCEPTED, 'Carried on.'])
+
+  const relay = await relayOf(dir, advisor, [old, fresh], { maxAdvisorTurns: 3 })
+  t.after(() => relay.stop())
+
+  // A compaction that shows up ONLY in a snapshot the view could not confirm.
+  old.compactionGeneration = 1
+  old.containedFallback = true
+
+  const outcome = await relay.run('Keep the work moving.')
+
+  assert.equal(outcome.reason, 'done')
+  assert.equal(old.state, 'running', 'an unverified number must not spend a working session')
+  assert.equal(relay.participants.find((p) => p.rank === 'implementer')!.session, old)
+  assert.equal(relay.rotationWatch.rotations, 0)
+  assert.equal(relay.rotationWatch.candidates, 0, 'and must not even be raised as a candidate')
+
+  // Withheld is not the same as unseen. The whole justification for not acting is that the
+  // signal is recorded and weighed again later; if it left no trace, this would be a run that
+  // silently stopped watching.
+  const note = relay.log.find((m) => m.kind === 'note' && /was NOT counted as rotation evidence/.test(m.text))
+  assert.ok(note, `the withheld generation must be recorded:\n${relay.log.map((m) => m.text).join('\n---\n')}`)
+  assert.match(note!.text, /contained fallback/, 'and the record must say WHY it was not counted')
+  assert.match(note!.text, /generation 1 \(baseline 0\)/, 'and name the number it declined to believe')
+
+  // The evidence is deferred, not consumed. `#acknowledge` moves the baseline so one compaction
+  // is raised once -- doing that here would swallow the compaction for good, and the next turn
+  // whose read succeeds would see no delta and say nothing. This assertion is the difference
+  // between "not yet" and "never".
+  assert.equal(
+    relay.participants.find((p) => p.rank === 'implementer')!.baselineGeneration,
+    0,
+    'the baseline must not move on evidence that was never weighed',
+  )
+})
+
+/**
+ * The control for the test above, and the reason it is worth anything.
+ *
+ * Identical in every respect except the flag. Without this, a mistake that broke the snapshot
+ * channel outright -- or an `assess` call that stopped reading the generation at all -- would
+ * leave the test above passing while the feature it guards was gone.
+ */
+test('the same generation rotates when the read behind it answered', async (t) => {
+  const dir = repo()
+  const advisor = new FakeRotationSession('advisor', 'codex', ['Do the first thing.', HANDOFF, 'DONE'])
+  const old = new FakeRotationSession('old', 'claude', ['ack', 'Did the first thing.'])
+  const fresh = new FakeRotationSession('fresh', 'claude', [ACCEPTED, 'Carried on.'])
+
+  const relay = await relayOf(dir, advisor, [old, fresh], { maxAdvisorTurns: 3 })
+  t.after(() => relay.stop())
+
+  old.compactionGeneration = 1
+  // and `containedFallback` stays false: this snapshot is a read, not the last thing built.
+
+  const outcome = await relay.run('Keep the work moving.')
+
+  assert.equal(outcome.reason, 'done')
+  assert.equal(old.state, 'terminated', 'a verified generation is evidence and still rotates')
+  assert.equal(relay.participants.find((p) => p.rank === 'implementer')!.session, fresh)
+  assert.ok(
+    !relay.log.some((m) => /was NOT counted as rotation evidence/.test(m.text)),
+    'and nothing is withheld, so nothing says it was',
+  )
+})
+
+/**
+ * Only the snapshot channel is withheld.
+ *
+ * A `revision` event is a live signal that already arrived on the session's own stream. It does
+ * not become doubtful because a later read of the transcript did not answer, and treating the
+ * fallback flag as a blanket veto over `detectDegradation` would throw away the one channel that
+ * is still telling the truth -- turning a wedged transcript into a blind spot rather than a
+ * delayed one.
+ */
+test('a contained fallback does not silence the revision-event channel', async (t) => {
+  const dir = repo()
+  const advisor = new FakeRotationSession('advisor', 'codex', ['Do the first thing.', HANDOFF, 'DONE'])
+  const old = new FakeRotationSession('old', 'claude', ['ack', 'Did the first thing.'])
+  const fresh = new FakeRotationSession('fresh', 'claude', [ACCEPTED, 'Carried on.'])
+
+  const relay = await relayOf(dir, advisor, [old, fresh], { maxAdvisorTurns: 3 })
+  t.after(() => relay.stop())
+
+  // Both channels move, and then the transcript stops answering.
+  old.compact()
+  old.containedFallback = true
+
+  const outcome = await relay.run('Keep the work moving.')
+
+  assert.equal(outcome.reason, 'done')
+  assert.equal(old.state, 'terminated', 'the event is evidence on its own and still rotates')
+  assert.equal(relay.participants.find((p) => p.rank === 'implementer')!.session, fresh)
+  // The note is still written: the rotation was decided on the event, and the record has to say
+  // that the number beside it in the log was not part of that decision.
+  assert.ok(relay.log.some((m) => /was NOT counted as rotation evidence/.test(m.text)))
+})
+
+/**
+ * A fallback with nothing to withhold writes nothing.
+ *
+ * A wedged transcript is read on every advisor turn, so a note keyed to the FLAG rather than to
+ * the flag mattering would append a paragraph per turn to a log an operator is supposed to read.
+ * The note exists to be noticed; one that fires on every turn of a normal long run is one nobody
+ * reads, and that costs the same as not writing it.
+ */
+test('a contained fallback whose generation has not moved records nothing', async (t) => {
+  const dir = repo()
+  const advisor = new FakeRotationSession('advisor', 'codex', ['Do the thing.', 'DONE'])
+  const old = new FakeRotationSession('old', 'claude', ['ack', 'Done that.'])
+
+  const relay = await relayOf(dir, advisor, [old], { maxAdvisorTurns: 2 })
+  t.after(() => relay.stop())
+
+  old.containedFallback = true
+
+  await relay.run('Keep the work moving.')
+
+  assert.equal(old.state, 'running')
+  assert.ok(
+    !relay.log.some((m) => /was NOT counted as rotation evidence/.test(m.text)),
+    'nothing was withheld, so there is nothing to report',
+  )
+})
+
 test('a complaint with nothing behind it continues, and is counted', async (t) => {
   const dir = repo()
   const advisor = new FakeRotationSession('advisor', 'codex', ['Do the thing.', 'DONE'])

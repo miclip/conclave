@@ -330,3 +330,113 @@ test('the TS classifier has one rule the Python reference lacks', () => {
   )
   assert.equal(pythonWouldSay.state, 'completed')
 })
+
+// --- an errored task_complete (#35) ------------------------------------------------
+
+test('an errored task_complete is terminal, proven, and not a completion (#35)', () => {
+  // Observed live on Codex: `task_complete` with `error.codex_error_info = usage_limit_exceeded`
+  // and `last_agent_message: null`. The turn's machinery finished; what it produced is a
+  // failure. Two facts, both true, and collapsing them either way is a bug -- calling it
+  // `completed` forwards an empty message as a report, and calling it `in_progress` leaves a
+  // turn open that the child has already closed.
+  const got = classify(
+    evidence({
+      agent: 'codex',
+      transcript: {
+        ...emptyTranscriptState(),
+        exists: true,
+        taskComplete: true,
+        taskCompleteError: 'usage_limit_exceeded: out of credits',
+      },
+    }),
+  )
+  assert.equal(got.state, 'unknown_abnormal_end', 'terminal: the child said the turn ended')
+  assert.equal(got.confidence, 'proven', 'the transcript says so directly; nothing is inferred')
+  assert.ok(
+    got.provenance!.some((p) => p.source === 'transcript' && /usage_limit_exceeded/.test(p.detail)),
+    `the reason must survive into the verdict: ${JSON.stringify(got.provenance)}`,
+  )
+  assert.ok(
+    got.provenance!.some((p) => p.caveat && /no report/.test(p.detail)),
+    'and the absence of a report must be stated, since there is nothing to forward',
+  )
+})
+
+test('an errored task_complete outranks a Stop that fired alongside it (#35)', () => {
+  // The ordering that IS the fix. Codex reaches a turn boundary on an errored completion too,
+  // so a `Stop` is very likely present -- and rule 3 reads a `Stop` as `completed/proven`. Let
+  // that rule see it first and the relay is handed an empty message to forward, the implementer
+  // asks for a resend, and the run burns advisor turns on a failure nobody was shown.
+  const got = classify(
+    evidence({
+      agent: 'codex',
+      hooks: ['UserPromptSubmit', 'Stop'],
+      transcript: {
+        ...emptyTranscriptState(),
+        exists: true,
+        taskComplete: true,
+        taskCompleteError: 'usage_limit_exceeded: out of credits',
+      },
+    }),
+  )
+  assert.equal(got.outcome, 'unknown_abnormal_end', 'the error outranks the boundary signal')
+  assert.ok(
+    got.provenance!.some((p) => p.caveat && p.source === 'hook' && /terminal boundary/.test(p.detail)),
+    'and says what the Stop actually proved, rather than dropping it silently',
+  )
+})
+
+test('a turn_aborted still outranks an errored task_complete', () => {
+  // The other side of the ordering. An abort is a more specific account of an ending than "it
+  // ended badly", and on Codex a denied permission is IMPLEMENTED as an abort -- so ranking the
+  // error above it would report a refusal as a vendor failure.
+  const got = classify(
+    evidence({
+      agent: 'codex',
+      transcript: {
+        ...emptyTranscriptState(),
+        exists: true,
+        taskComplete: true,
+        taskCompleteError: 'usage_limit_exceeded: out of credits',
+        turnAbortedReason: 'interrupted',
+      },
+    }),
+  )
+  assert.equal(got.outcome, 'cancelled')
+  assert.equal(got.confidence, 'proven')
+})
+
+test('an errored task_complete outranks a deadline, and is not weakened by input ownership', () => {
+  // Two claims in one, because they are the same claim. This is POSITIVE evidence from the
+  // child about how its turn ended, so it must supersede a verdict a clock minted from silence
+  // -- and it must not degrade when someone else can type at the terminal, because who else
+  // could type changes nothing about what the child wrote down.
+  const state: TranscriptState = {
+    ...emptyTranscriptState(),
+    exists: true,
+    taskComplete: true,
+    taskCompleteError: 'usage_limit_exceeded: out of credits',
+  }
+  const timedOut = classify(
+    evidence({ agent: 'codex', transcript: state, idleSeconds: 900, watchdogSeconds: 2_700 }),
+  )
+  assert.equal(timedOut.outcome, 'unknown_abnormal_end')
+  assert.equal(timedOut.confidence, 'proven', 'a clock reading cannot weaken a written record')
+  assert.ok(
+    timedOut.provenance!.every((p) => !/no output for/.test(p.detail)),
+    'and the verdict is the error, not the silence that happened to be measured beside it',
+  )
+
+  const external = classify(
+    evidence({
+      agent: 'codex',
+      transcript: state,
+      orchestrator: { sentCancel: false, inputIsMediated: false },
+    }),
+  )
+  assert.deepEqual(
+    { outcome: external.outcome, confidence: external.confidence },
+    { outcome: 'unknown_abnormal_end', confidence: 'proven' },
+    'external input ownership weakens attribution of an UNSEEN ending, not a recorded one',
+  )
+})
