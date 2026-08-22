@@ -4,6 +4,14 @@ node_modules
 tmp/
 coverage/
 
+# JUnit XML from `npm test`. Every invocation that reaches `node --test` truncates this
+# single file, so it describes exactly one suite run -- the last one to actually start on
+# this machine. A run that dies in typecheck never opens the reporter and leaves whatever
+# was here before, so an unexpectedly old file means the suite did not run, not that it
+# passed. Either way it is a local diagnostic, not a record the repo should carry; the
+# durable copy is the artifact CI uploads when a suite fails.
+test-results.xml
+
 # Secrets and machine-specific configuration
 .env
 .env.*

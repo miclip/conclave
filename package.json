@@ -9,7 +9,7 @@
     "node": ">=24.0.0"
   },
   "scripts": {
-    "test": "npm run typecheck && node --test --test-concurrency=4 'src/**/*.test.ts'",
+    "test": "npm run typecheck && node --test --test-concurrency=4 --test-reporter=spec --test-reporter-destination=stdout --test-reporter=junit --test-reporter-destination=test-results.xml 'src/**/*.test.ts'",
     "test:live": "ORCH_LIVE=1 node --test src/adapters/claude.live.test.ts",
     "conformance": "node src/conformance/report.ts",
     "postinstall": "node scripts/fix-node-pty.cjs",

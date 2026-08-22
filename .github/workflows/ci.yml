@@ -31,3 +31,18 @@ jobs:
       # it says rather than depending on which test ran before it.
       - run: node bin/conclave.ts config install --no-diagnose
       - run: npm test
+
+      # The step above writes this file whenever it gets as far as running the suite, pass
+      # or fail; only a failure is worth keeping. It is deliberately not `always()`: a red
+      # run that never reached the suite -- a typecheck failure, or `config install` above
+      # it -- has no XML to upload, and this step warns and stays green rather than
+      # reporting a second, misleading failure. CI's own logs already carry the same spec
+      # output, so the artifact buys discoverability rather than rescue: a red run on a
+      # branch nobody watched still has its assertion text attached when someone comes
+      # back. Named per-OS because both matrix legs upload.
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.os }}
+          path: test-results.xml
+          if-no-files-found: warn
