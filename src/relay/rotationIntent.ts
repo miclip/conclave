@@ -42,6 +42,7 @@
  *   node --test src/relay/rotationIntent.test.ts
  */
 
+import type { SessionState } from '../contract/session.ts'
 import type { RunPause } from './run.ts'
 
 /**
@@ -84,6 +85,21 @@ export interface RotationRecord {
   reason: string
   /** The session that took the seat. Opaque; the adapter's own id. */
   replacement: string
+  /**
+   * Set when the OUTGOING session could not be confirmed disposed of (`rotated_cleanup_failed`).
+   *
+   * The rotation is recorded either way, and belongs here either way: a replacement proved
+   * itself and took the seat, which is exactly what this array counts. What the field adds is
+   * the half the count cannot carry -- the loser's teardown rejected, so there may be a child
+   * still holding a pty or a worktree, and an analysis reading this array as "N clean handovers"
+   * would be reading past it.
+   *
+   * `outgoingState` is how far `close()` got and nothing more: `terminated` means it reached the
+   * state assignment, `rotating` means it did not. Neither says whether a process survived. See
+   * `rotated_cleanup_failed` in `rotation/rotate.ts`, and #146 for why the adapters cannot
+   * currently answer the question it leaves open.
+   */
+  cleanupFailure?: { detail: string; outgoingState: SessionState } | undefined
   at: number
 }
 

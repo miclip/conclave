@@ -40,7 +40,7 @@
  * while that holds -- so those two get different reasons, and the second names what it saw.
  */
 
-import type { AgentSession } from '../contract/session.ts'
+import type { AgentSession, SessionState } from '../contract/session.ts'
 import { envelope, type RelayMessage } from '../relay/message.ts'
 import {
   acceptancePrompt,
@@ -231,6 +231,83 @@ export type RotationResult =
       replacement: AgentSession
       handoff: Handoff
       acceptance: Acceptance
+    }
+  /**
+   * The transfer succeeded and the ORIGINAL could not be confirmed disposed of.
+   *
+   * A third outcome rather than a flag on either of the other two, because it is a different
+   * claim from both and the two it sits between are the two things a caller acts on.
+   *
+   * ## Why this is not `rolled_back`
+   *
+   * `rolled_back` means one thing to every caller: the original is back in service and the
+   * replacement has been abandoned. Neither half is true here. The replacement passed the
+   * acceptance gate -- it reproduced the recorded state, against the arbiter's own run of the
+   * checks -- and `old.close('graceful')` is the COMMIT, one statement past the last decision
+   * the transaction makes. A close that rejects has not un-proved anything.
+   *
+   * Reporting it as a rollback is not merely pessimistic, it is false in the direction that
+   * loses work: the caller promotes nobody, the proven replacement is closed as abandoned, and
+   * the original it is told to keep using is the session whose teardown just failed. That was
+   * the observed behaviour on the mid-teardown path, and it ended with both seats gone and the
+   * caller told one of them was working.
+   *
+   * ## Why it is not plain `rotated` either
+   *
+   * Because the disposal is genuinely unknown, and nothing downstream can find out.
+   *
+   * All four adapters -- `claude`, `codex`, `kimi`, `opencode` -- assign `#state = 'terminated'`
+   * as the LAST statement of `close()`'s `try`, after the pty is terminated, the receiver
+   * stopped, and, on `kimi`, the run directory removed. Established by reading them rather than
+   * assumed. Two things follow, and only the first is about the state:
+   *
+   *   - the observable state after a rejecting close is whatever it was on entry, which on this
+   *     path is `rotating`. `terminated` is not reachable on any adapter in this tree today: the
+   *     only statement past the assignment is the `finally` that ends the event queue, and
+   *     `AsyncQueue.close()` cannot throw.
+   *
+   *   - the PHYSICAL disposal is unknowable either way, and that is the part `oldState` cannot
+   *     help with. Every step before the assignment can reject AFTER doing its work --
+   *     `#pty.terminate()` may have killed the child with `#receiver.stop()` rejecting behind
+   *     it, or the terminate may be what failed and the child is still holding a pty, a port, or
+   *     a worktree. Nothing out here distinguishes those.
+   *
+   * So `oldState` is carried as evidence of how far the teardown GOT, never as a claim about
+   * what survived it. Folding this into `rotated` would hand the caller a success with no field
+   * to hang either fact on, and the thing an operator has to be told -- there may be an orphaned
+   * child, go and look -- would exist nowhere. A leaked child is not hypothetical here: it is
+   * the failure `close()`'s own comments describe, where a rollback left a Claude CLI running
+   * and the node process could not exit for 26 minutes.
+   *
+   * A caller must therefore promote and use `replacement` exactly as it would for `rotated`,
+   * and separately record that the outgoing session's disposal is unconfirmed.
+   *
+   * This does NOT settle #146. That issue is about the adapters: `close('graceful')` does not
+   * guarantee a terminal `turn_end` for a live turn on any of them, neither one-shot adapter
+   * escalates past SIGTERM, and the 3s cap drops a verdict silently. Those are the reasons a
+   * close fails and a child survives it. This outcome only stops the orchestrator from
+   * MISREPORTING the result when it does.
+   */
+  | {
+      status: 'rotated_cleanup_failed'
+      replacement: AgentSession
+      handoff: Handoff
+      acceptance: Acceptance
+      /** What `close('graceful')` rejected with. */
+      detail: string
+      /**
+       * The original's state as read AFTER the failed close, not as it was assumed to be.
+       *
+       * `rotating` on every adapter in this tree: they record `terminated` last, so a close that
+       * rejects has not reached it, and the session is left sitting in a transaction it will
+       * never leave. `terminated` would mean an adapter recorded the state before its teardown
+       * finished -- none does, and the contract does not forbid one, so the field carries the
+       * value rather than asserting it away.
+       *
+       * Read rather than inferred, and evidence of how far `close()` got rather than of what
+       * survived it. Neither value says whether a child is still running.
+       */
+      oldState: SessionState
     }
   | {
       status: 'rolled_back'
@@ -590,7 +667,48 @@ export async function rotate(opts: {
     }
 
     // 5. Commit. Only now is the old session's context actually given up.
-    await old.close('graceful')
+    /**
+     * The commit, and the one statement in the block whose failure is not a failed transfer.
+     *
+     * It was covered by the acceptance handler, which did the only thing that handler knows how
+     * to do. Both of its outcomes were wrong, and differently wrong:
+     *
+     *   close rejects mid-teardown -- the shape today's adapters actually produce, since all
+     *   four assign `#state = 'terminated'` as the last statement of the `try`. The state never
+     *   left `rotating`, `unquiesce()` accepts that, and the rollback SUCCEEDS. The result says
+     *   `rolled_back` with the original `restored` and reading `running`, over a transport that
+     *   has just been disposed of, and the replacement that proved itself is closed as
+     *   abandoned. Both seats gone and the caller told one of them is working.
+     *
+     *   close rejects with the state already `terminated` -- not reachable on any adapter in
+     *   this tree, and handled anyway because it is a legal `AgentSession`: `rollback()` calls
+     *   `unquiesce()`, the state machine refuses it, and the throw is raised from inside the
+     *   catch block, so it escapes `rotate()` rather than becoming a result. The caller gets an
+     *   exception for a transfer that succeeded, and the rollback has already abandoned the
+     *   replacement it would have needed a reference to.
+     *
+     * So it is caught here, where the difference between "the transfer failed" and "the
+     * transfer succeeded and the loser would not die" is still visible. See
+     * `rotated_cleanup_failed`.
+     */
+    let cleanupFailure: string | undefined
+    try {
+      await old.close('graceful')
+    } catch (err) {
+      /**
+       * Normalised rather than cast, because this string is the FLAG as well as the message.
+       *
+       * Everywhere else in this file `(err as Error).message` produces a bad sentence when the
+       * throw is not an `Error` -- a `detail` reading `acceptance failed: undefined`. Here it
+       * produces a bad OUTCOME: `cleanupFailure` stays `undefined`, the check below is false,
+       * and a close that rejected is reported as `rotated` with nothing anywhere saying the
+       * outgoing session was never disposed of. A rejected promise, a thrown string, or a
+       * `throw undefined` from a transport layer is enough. The one thing this must never do is
+       * turn a failure into a clean success, so the value is made a string before it is trusted
+       * as evidence that there was one.
+       */
+      cleanupFailure = err instanceof Error ? err.message : String(err)
+    }
 
     /**
      * Past the commit, narration cannot fail the rotation it is narrating.
@@ -619,11 +737,32 @@ export async function rotate(opts: {
         // Deliberately nothing: see above.
       }
     }
-    report(`rotation complete; ${old.sessionId} terminated`)
+    if (cleanupFailure === undefined) {
+      report(`rotation complete; ${old.sessionId} terminated`)
+    } else {
+      // Said in the completion line rather than appended as an advisory, because it is not
+      // advisory: an operator reading `terminated` on a session that may still be holding a pty
+      // has been told the opposite of what happened.
+      report(
+        `rotation complete; ${old.sessionId} could NOT be confirmed disposed of: ${cleanupFailure}. ` +
+          `Its state reads '${old.state}'; the child may still be running. The replacement is live ` +
+          `and holds the handoff.`,
+      )
+    }
     for (const d of divergences) report(`advisory: ${d.detail}`)
     for (const m of advisoryMismatches) report(`advisory: ${m}`)
     for (const c of carriedFailures) {
       report(`carried forward failing: \`${c.command}\` exits ${c.exitCode}, as it did at handoff`)
+    }
+    if (cleanupFailure !== undefined) {
+      return {
+        status: 'rotated_cleanup_failed',
+        replacement,
+        handoff,
+        acceptance,
+        detail: cleanupFailure,
+        oldState: old.state,
+      }
     }
     return { status: 'rotated', replacement, handoff, acceptance }
   } catch (err) {

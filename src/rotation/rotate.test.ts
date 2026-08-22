@@ -588,6 +588,183 @@ test('a note that throws AFTER the commit cannot undo a rotation that already ha
   )
 })
 
+test('a close that fails with the original already terminated does not escape as an exception', async () => {
+  /**
+   * The INTERFACE edge, not an adapter reproduction. See the test below for what the adapters do.
+   *
+   * No adapter in this tree can currently reject from this position: all four assign
+   * `#state = 'terminated'` as the last statement of their `try`, and the only thing past it is
+   * the `finally` that ends the event queue, which cannot throw. Read, not assumed. So this
+   * test is about `AgentSession` rather than about `claude.ts` -- nothing in the contract
+   * requires an adapter to record `terminated` last, an embedder's adapter need not, and one of
+   * ours could stop in a refactor nobody thinks of as behavioural.
+   *
+   * What it pins is that the transaction survives the state machine's own refusal. `note` was
+   * guarded because a throw from it was caught by the acceptance handler, which rolled back a
+   * rotation that had already happened. `old.close('graceful')` is one statement EARLIER and was
+   * still inside that handler, and against a session in `terminated` the handler's `rollback()`
+   * calls `unquiesce()`, which is refused. That throw is raised from inside the catch block, so
+   * it does not become a `rolled_back` result: it escapes `rotate()` entirely. The caller gets a
+   * rejected promise for a transfer that SUCCEEDED, and no reference to the replacement it is
+   * now responsible for -- the exact failure the guarded `report()` was added to prevent, one
+   * line up.
+   *
+   * What is right here is what was right there: the transfer is done. The original's context is
+   * given up either way, the replacement has proved it can reproduce the recorded state, and a
+   * failure to tear down cleanly is a fact to report, not a reason to pretend the rotation did
+   * not happen -- there is nothing left to roll back to.
+   *
+   * `rotated_cleanup_failed` rather than plain `rotated` even here, where the state DID reach
+   * `terminated`: that says the assignment was reached, never that the child died. Any step
+   * before it can reject after doing its work, so the disposal is unknown from either state
+   * (see #146), and a caller told `rotated` has nowhere to read that from.
+   */
+  const dir = repo()
+  const old = new FakeRotationSession('old', 'claude')
+  old.closeThrows = 'terminate: pty refused to die'
+  const fresh = new FakeRotationSession('fresh', 'claude', [HONEST])
+
+  const r = await rotate({
+    old,
+    advisor: new FakeRotationSession('advisor', 'codex', [HANDOFF]),
+    reason: 'context exhausted',
+    deps: deps(dir, fresh),
+  })
+
+  assert.equal(
+    r.status,
+    'rotated_cleanup_failed',
+    'a teardown that failed after the commit does not unmake the transfer, and is not silent either',
+  )
+  if (r.status !== 'rotated_cleanup_failed') return
+  assert.equal(r.replacement, fresh, 'and the caller is handed the session it is now responsible for')
+  assert.equal(r.detail, 'terminate: pty refused to die', 'the close error travels with the result')
+  assert.equal(r.oldState, 'terminated', 'and what the outgoing session read AFTER the failed close')
+  // The rest of a successful rotation is present, because that is what this outcome is.
+  assert.ok(r.handoff)
+  assert.ok(r.acceptance)
+
+  // Directly off the objects, not off the result: the result is the claim under test.
+  assert.equal(old.state, 'terminated', 'the original stays committed rather than being dragged back')
+  assert.equal(old.closedAs, 'graceful')
+  assert.equal(old.transportDisposed, true, 'precondition: the fixture ran its teardown before it rejected')
+  assert.deepEqual(
+    old.transitions,
+    ['quiesced', 'rotating', 'terminated'],
+    'nothing tried to put a terminated session back into service',
+  )
+  assert.equal(fresh.state, 'running', 'the replacement is live')
+  assert.equal(fresh.closedAs, undefined, 'and was not abandoned by a rollback of a rotation that happened')
+})
+
+test('a close that fails with the transport already gone does not report the original restored', async () => {
+  /**
+   * The same failure with the adapters' own ordering, which is the one that lies rather than throws.
+   *
+   * All four adapters record `#state = 'terminated'` as the LAST statement of the close, after
+   * the pty is terminated, the receiver stopped, and -- on `kimi` -- the run directory removed.
+   * So the likely shape of a failed close is not "terminated, and then something threw": it is
+   * "the transport is gone, and the state never moved". On this path the state it never moved
+   * from is `rotating`.
+   *
+   * `rotating` accepts `unquiesce()`. So the acceptance handler rolls back, the rollback
+   * succeeds, and `rotate()` returns `rolled_back` with `restored: old` and `old.state` reading
+   * `running` -- a session advertised as back in service whose pty has just been killed. The
+   * replacement, which proved it could reproduce the state, is closed as abandoned on the way
+   * out. Both seats are gone and the caller is told one of them is working, which is strictly
+   * worse than the escaping throw above: an exception is at least visible.
+   *
+   * `transportDisposed` is the assertion that makes this testable at all, and it is a fact about
+   * the FIXTURE rather than evidence any consumer could read: it says this double ran its
+   * teardown and then rejected, which is the sub-case where `state` actively misleads. Asserting
+   * only `state` would accept a restored session with nothing left to restore -- the same
+   * mistake as the code under test, made in the test.
+   *
+   * The transitions stay `['quiesced', 'rotating']`. Nothing manufactures a `terminated` the
+   * adapter never recorded: the state IS the evidence this outcome carries, and writing the
+   * value the teardown failed to reach would destroy the one signal saying how far it got.
+   */
+  const dir = repo()
+  const old = new FakeRotationSession('old', 'claude')
+  old.closeThrowsBeforeTerminated = 'receiver.stop: the socket is already gone'
+  const fresh = new FakeRotationSession('fresh', 'claude', [HONEST])
+
+  const r = await rotate({
+    old,
+    advisor: new FakeRotationSession('advisor', 'codex', [HANDOFF]),
+    reason: 'context exhausted',
+    deps: deps(dir, fresh),
+  })
+
+  assert.equal(
+    r.status,
+    'rotated_cleanup_failed',
+    'the replacement proved itself; a broken teardown is not its failure, and not a rollback',
+  )
+  if (r.status !== 'rotated_cleanup_failed') return
+  assert.equal(r.replacement, fresh)
+  assert.equal(r.detail, 'receiver.stop: the socket is already gone')
+  assert.equal(
+    r.oldState,
+    'rotating',
+    'the state is reported as READ -- the adapter never reached the `terminated` assignment',
+  )
+  assert.ok(r.handoff)
+  assert.ok(r.acceptance)
+
+  assert.equal(old.transportDisposed, true, 'precondition: the fixture ran its teardown before it rejected')
+  assert.notEqual(old.state, 'running', 'a session whose transport has been disposed of is not in service')
+  assert.deepEqual(
+    old.transitions,
+    ['quiesced', 'rotating'],
+    'the transaction is not reopened by a teardown that failed inside it',
+  )
+  assert.equal(fresh.state, 'running', 'the replacement is not abandoned for the original’s failure to die')
+  assert.equal(fresh.closedAs, undefined)
+})
+
+test('a close that rejects with something that is not an Error is still a cleanup failure', async () => {
+  /**
+   * The one place in this file where `(err as Error).message` was not merely untidy.
+   *
+   * Elsewhere a non-`Error` throw produces a bad sentence -- `detail: 'acceptance failed:
+   * undefined'` -- and the outcome is unchanged. At the commit the message IS the flag: it is
+   * what `cleanupFailure !== undefined` is testing, so a `throw undefined` left it nullish, the
+   * check read false, and a close that failed came back as plain `rotated`. Silent, and silent
+   * in the direction this whole outcome exists to prevent: nothing anywhere would say the
+   * outgoing session had never been disposed of.
+   *
+   * Both shapes, because they fail differently. A thrown string has to survive as itself rather
+   * than becoming `undefined`; a thrown `undefined` has to become a string rather than staying
+   * nullish. Neither is exotic -- a rejected promise carries whatever it was rejected with, and
+   * node-pty, a fetch, and an HTTP server's `close` callback are under every adapter here.
+   */
+  for (const [label, value, expected] of [
+    ['a thrown string', 'EPIPE', 'EPIPE'],
+    ['a thrown undefined', undefined, 'undefined'],
+  ] as const) {
+    const dir = repo()
+    const old = new FakeRotationSession('old', 'claude')
+    old.closeRejectsWith = { value }
+    const fresh = new FakeRotationSession('fresh', 'claude', [HONEST])
+
+    const r = await rotate({
+      old,
+      advisor: new FakeRotationSession('advisor', 'codex', [HANDOFF]),
+      reason: 'context exhausted',
+      deps: deps(dir, fresh),
+    })
+
+    assert.equal(r.status, 'rotated_cleanup_failed', `${label} must not be reported as a clean rotation`)
+    if (r.status !== 'rotated_cleanup_failed') return
+    assert.equal(r.detail, expected, `${label} reaches the caller as text rather than as nothing`)
+    assert.equal(r.oldState, 'rotating')
+    assert.equal(r.replacement, fresh)
+    assert.equal(old.transportDisposed, true)
+    assert.equal(fresh.state, 'running', 'the replacement is promoted on both shapes')
+  }
+})
+
 test('an exchange that throws mid-acceptance does not strand the original in `rotating`', async () => {
   const dir = repo()
   const old = new FakeRotationSession('old', 'claude')

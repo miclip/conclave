@@ -3067,7 +3067,16 @@ export class Relay {
     const byIntent = new Map<RotationIntent, number>()
     for (const r of records) byIntent.set(r.intent, (byIntent.get(r.intent) ?? 0) + 1)
     const counts = [...byIntent].map(([intent, n]) => `${n} ${intent}`).join(', ')
-    return `\n  rotation intent: ${counts}${records.map((r) => `\n    ${r.seat} (${r.intent}) — ${r.reason}`).join('')}`
+    // A rotation whose loser would not die is still a rotation and still counted above -- the
+    // replacement proved itself and took the seat. What the count cannot say is that something
+    // may still be running, and this is the line a human actually reads at the end of a run. An
+    // orphaned child holding a worktree is not a detail to leave in the routing log 300 lines up.
+    const cleanup = (r: RotationRecord): string =>
+      r.cleanupFailure
+        ? `\n      outgoing session NOT confirmed disposed of (state '${r.cleanupFailure.outgoingState}'): ` +
+          `${r.cleanupFailure.detail} — check for an orphaned process`
+        : ''
+    return `\n  rotation intent: ${counts}${records.map((r) => `\n    ${r.seat} (${r.intent}) — ${r.reason}${cleanup(r)}`).join('')}`
   }
 
   /**
@@ -4323,7 +4332,7 @@ export class Relay {
       else if (!shouldWait && offered !== -1) pause.options.splice(offered, 1)
       // The status file is written from the LIVE pause object on any event, so an in-place
       // change reaches disk on the next one -- and a pause is precisely when nothing else is
-      // flowing. Same reasoning as `/wait` in the console (`src/repl/session.ts:2100`), and the
+      // flowing. Same reasoning as `/wait` in the console (`src/repl/session.ts:2113`), and the
       // reader who needs it most is the one polling from outside.
       this.#stream.emit({ type: 'liveness', pause })
       if (last) return stop()
@@ -4718,7 +4727,13 @@ export class Relay {
     // indistinguishable from evidence. This is the one call site that knows better, and it is
     // inside the class that owns the record.
     const result = await this.#rotateSeatDeclaring(impl.id, detail, 'degradation_automatic')
-    if (result.status === 'rotated') return undefined
+    // Both outcomes that replaced the seat. `rotated_cleanup_failed` is a successful transfer
+    // whose loser could not be confirmed dead, so there is nothing for the loop to decide and
+    // nothing to halt for: the seat holds a proven replacement and carries on. The disposal
+    // ambiguity is recorded by `#rotateSeatTransaction` and printed in the run report, which is
+    // where an operator can act on it -- halting the run over it would stop the work to report
+    // a process that may not exist.
+    if (result.status === 'rotated' || result.status === 'rotated_cleanup_failed') return undefined
     if (result.reason === 'acceptance_unobservable') {
       // The one rollback that is not an invitation to try again. `rotateSeat` has latched it and
       // recorded the evidence; this puts it in front of the human with the remedy named, because
@@ -7553,7 +7568,22 @@ export class Relay {
     // The audition either became the seat or is gone; either way its root is no longer anyone's.
     if (audition) this.#rootOverride.delete(audition.id)
 
-    if (result.status === 'rotated' && audition) {
+    /**
+     * Promotion, on both outcomes that produced a proven replacement.
+     *
+     * `rotated_cleanup_failed` differs from `rotated` in exactly one respect: whether the
+     * OUTGOING session could be confirmed disposed of. Nothing in this block is about the
+     * outgoing session -- it swaps a proven replacement into the seat, moves the audition's
+     * flags and events onto it, and clears the answers that belonged to the session leaving.
+     * Every one of those is as necessary when the loser would not die as when it did.
+     *
+     * Branching here instead would leave the seat holding a session whose transport this
+     * transaction has already torn down, with a live, proven, unreferenced replacement beside
+     * it -- the shape the whole rollback protocol exists to make impossible, reintroduced by
+     * the code that reports the protocol worked. The cleanup failure is recorded below, beside
+     * the rotation note, where it is a fact about the run rather than a reason to lose a seat.
+     */
+    if ((result.status === 'rotated' || result.status === 'rotated_cleanup_failed') && audition) {
       // Swap the session in place, so the participant id, rank and routing history survive
       // the replacement. A rotation that changed the implementer's id would break every
       // reference to it in the log that already exists.
@@ -7616,9 +7646,36 @@ export class Relay {
         intent,
         reason,
         replacement: result.replacement.sessionId,
+        // Recorded on the record rather than only in the routing log, because this array is what
+        // an analysis outside the process reads (`rotationRecords()`, and the run report through
+        // it). A run whose rotations all left a child behind and one whose rotations were clean
+        // read identically without it.
+        ...(result.status === 'rotated_cleanup_failed'
+          ? { cleanupFailure: { detail: result.detail, outgoingState: result.oldState } }
+          : {}),
         at: Date.now(),
       })
       this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text: `${impl.id} rotated into ${result.replacement.sessionId} (${intent})` })
+      if (result.status === 'rotated_cleanup_failed') {
+        // Recorded at human rank like the rotation itself, and in its own note rather than as a
+        // clause on the line above. What it asks for is an action -- go and look for an orphaned
+        // child -- and an operator scanning the log for rotations should not have to read to the
+        // end of a success line to find out that something is still running. The disposal is
+        // genuinely unknown rather than known-bad: `state` is the only evidence there is, and it
+        // says how far `close()` got, not whether a process survived it. See #146 for why the
+        // adapters cannot currently answer that.
+        this.#record({
+          from: 'orchestrator',
+          fromRank: 'human',
+          to: [],
+          kind: 'note',
+          text:
+            `the outgoing session could NOT be confirmed disposed of: ${result.detail}. Its state ` +
+            `reads '${result.oldState}' and the child may still be running -- check for an orphaned ` +
+            `process holding this seat's tree. The rotation itself stands: the replacement proved ` +
+            `it could reproduce the record and is in service.`,
+        })
+      }
       // A replacement proved itself, so whatever made an earlier acceptance unobservable is
       // not holding now. Cleared on the evidence rather than on a timer: the latch's whole
       // claim is "no replacement can pass while this holds", and one just did.

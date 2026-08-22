@@ -3458,7 +3458,7 @@ test('a participant-scoped pause samples that seat and no other, at every reason
   assert.deepEqual(sampled(pauseFor({ reason: 'rotation_candidate', participant: 'implementer-2' })), ['implementer-2'])
   assert.deepEqual(sampled(pauseFor({ reason: 'implementer_unanswered', participant: 'implementer-2' })), ['implementer-2'])
   // The ADVISOR is a participant like any other, and its own bad turn pauses the run
-  // (src/relay/relay.ts:6593). A rank scan for implementers sampled the wrong child here too.
+  // (src/relay/relay.ts:6608). A rank scan for implementers sampled the wrong child here too.
   assert.deepEqual(
     sampled(pauseFor({ reason: 'turn_incomplete', participant: 'advisor' }, { participant: 'advisor', endSeq: 2 })),
     ['advisor'],
@@ -3467,13 +3467,13 @@ test('a participant-scoped pause samples that seat and no other, at every reason
 
 test('a conclave- or workstream-scoped pause samples nobody, with no fall back to rank', () => {
   // Both conclave-scoped reasons. Resuming an `advisor_escalated` pause sends to the ADVISOR
-  // (src/relay/relay.ts:6714), so measuring implementer children was never the question; and
+  // (src/relay/relay.ts:6729), so measuring implementer children was never the question; and
   // `operator_requested` is consumed at an advisor-turn boundary that states no turn is in
   // flight. Neither has anything for this guard to sample.
   assert.deepEqual(sampled(pauseFor({ reason: 'advisor_escalated' })), [])
   assert.deepEqual(sampled(pauseFor({ reason: 'operator_requested' })), [])
   // Workstream scope, and the id deliberately COLLIDES with a seat id -- at N=1 the workstream
-  // is named after the seat carrying the instruction (src/relay/relay.ts:6877), which is exactly
+  // is named after the seat carrying the instruction (src/relay/relay.ts:6892), which is exactly
   // the coincidence a guard could read as "so sample that seat". A workstream is not a seat.
   assert.deepEqual(sampled(pauseFor({ reason: 'authority_conflict', workstream: 'implementer' })), [])
 })
@@ -3489,7 +3489,7 @@ test('a scope naming a seat that is gone samples nobody rather than falling back
 test('a rotation_candidate pause on one seat resumes while the OTHER seat is genuinely mid-turn', async (t) => {
   // The production shape of the N>1 case the rank scan got wrong, and the reason it has to be
   // this shape: `rotation_candidate` carries NO `verdictOf` -- that field is set at two halt
-  // sites, both turn_incomplete (src/relay/relay.ts:6597, src/relay/relay.ts:7113) -- so under
+  // sites, both turn_incomplete (src/relay/relay.ts:6612, src/relay/relay.ts:7128) -- so under
   // the old expression this pause fell through to the rank scan and sampled EVERY implementer.
   // A simpler `turn_incomplete` fixture cannot show that: it populates the field, takes the
   // named-seat branch, and passes against the code being replaced.
@@ -3541,7 +3541,7 @@ test('a rotation_candidate pause on one seat resumes while the OTHER seat is gen
     ],
     rounds: 6,
     // ARMS ROTATION, which is what makes degradation a pause instead of an ended run
-    // (src/relay/relay.ts:4588-4590). A command that exits 0 immediately: what the checks DO is
+    // (src/relay/relay.ts:4597-4599). A command that exits 0 immediately: what the checks DO is
     // not what this test is about, only that a replacement would have something to reproduce.
     checks: ['true'],
     registry: registryOf({
@@ -3810,6 +3810,134 @@ test('a bare /rotate away from a rotation candidate asks why, and the next line 
   const note = routed(dir, 'rotating implementer:')
   assert.ok(note, `the rotation must be attempted with a reason: ${JSON.stringify(routedAll(dir).map((r) => r.text))}`)
   assert.match(note.text, /rotating implementer: a fresh reader applying the committed criterion is a stronger test/)
+
+  input.write('/continue\n')
+  input.end()
+  await running
+})
+
+/**
+ * A handoff with every section a replacement needs, so the transaction gets past the parse.
+ *
+ * The other rotation tests in this file deliberately hand the advisor prose with no headings:
+ * they are about what the operator was PROMPTED, and the transaction rolling back immediately
+ * is the cheapest way to reach the assertion. One test here needs the far side -- a transfer
+ * that actually completes -- and this is the only fixture that gets there.
+ */
+const CONSOLE_HANDOFF = `## BRIEF
+Keep the work moving.
+
+## STATE
+Half done.
+
+## DECISIONS
+- none
+
+## EVIDENCE
+The implementer says the check passes.
+
+## FILES
+- work.ts
+
+## DISAGREEMENT
+- none
+
+## NEXT
+Carry on.`
+
+/** What a replacement says when it has run the one configured check and agrees with the record. */
+const CONSOLE_ACCEPTED = 'CHECK 1: exit 0\n\nRead work.ts and ran the check. It matches the handoff.'
+
+test('a rotation with an unconfirmed disposal warns the operator at the pause (#155)', async () => {
+  /**
+   * The console half of `rotated_cleanup_failed`, and the reason it is said HERE and not only
+   * in the run report.
+   *
+   * The operator is standing in front of this transaction. An orphaned CLI still holding this
+   * seat's tree is something they can go and look for now, with the pause on screen; the same
+   * sentence at the end of the run is about a process they stopped thinking about an hour ago.
+   *
+   * Two claims, and the second is the one a regression would break quietly. The warning has to
+   * appear -- and everything the console does for a plain `rotated` has to keep happening around
+   * it, because the branch that prints this is the branch that promotes the replacement. A
+   * console that reported the warning INSTEAD of the rotation would be describing a rollback
+   * that did not occur.
+   */
+  const dir = repo()
+  const out = collect()
+  const input = new PassThrough()
+  // The failure at the position the adapters actually fail from: `terminated` is their last
+  // statement, so a close that rejects leaves the state at `rotating`.
+  //
+  // The injected message names a step AFTER the pty terminate, to stay consistent with what the
+  // fixture records: `FakeRotationSession` marks its teardown complete before it rejects, so a
+  // message claiming the pty is known to be alive would contradict the very double producing it.
+  // The honest shape is a later step failing over a teardown that already ran -- and even then
+  // nobody outside can tell that from a terminate that failed, which is why the console says
+  // "could not be confirmed" rather than naming a state of the child.
+  const old = slow('impl', 'claude', ['ack', 'Did it.', 'And again.', 'NONE'])
+  old.closeThrowsBeforeTerminated = 'receiver.stop: the event server was already closed'
+  const running = runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'claude',
+    rounds: 6,
+    // ARMS ROTATION, and `true` is what the replacement reports on below.
+    checks: ['true'],
+    registry: registryOf({
+      // Every reply after the first IS the handoff, so the test does not depend on how many
+      // advisor turns happen to have been spent by the time `/rotate` is typed. That count is a
+      // function of turn timing, and a fixture that pins it is an intermittent waiting to
+      // happen -- the transaction takes whichever turn it takes, and this way it always parses.
+      codex: [slow('advisor', 'codex', ['Do it.', CONSOLE_HANDOFF, CONSOLE_HANDOFF, CONSOLE_HANDOFF, CONSOLE_HANDOFF])],
+      claude: [old, slow('fresh', 'claude', [CONSOLE_ACCEPTED, 'Carried on.', 'NONE'])],
+    }),
+    input,
+    output: out.stream,
+  })
+  await untilText('the first instruction', out.text, /Do it\./)
+  input.write('/pause\n')
+  await untilText('the pause', out.text, /● paused operator_requested/)
+
+  input.write('/rotate the session is wedged\n')
+  await untilText('the rotation to finish', out.text, /rotated into|rolled back/)
+
+  /**
+   * Asserted on the console's OWN wording, not on any phrase the routed notes also carry.
+   *
+   * The relay records the disposal ambiguity too, and the console prints every routed note
+   * through `markdown()` -- which wraps at the terminal width, so a phrase assertion that could
+   * be satisfied by one of those is satisfied or not depending on where a line break lands
+   * (#109). Measured, not guessed: an earlier draft of this test asserted `the rotation itself
+   * stands`, and it passed against a build with `rotateNow`'s warning deleted entirely, because
+   * the routed note happened to carry the same words.
+   *
+   * So each of these keys on something only `rotateNow` writes -- `WARNING:`, the `still
+   * paused` tail, the lower-case `its state reads` with an em dash -- and those go through
+   * `write()`, which emits the string verbatim.
+   */
+  assert.match(out.text(), /rotated into fresh; still paused/, 'the rotation is reported as the success it is')
+  assert.match(
+    out.text(),
+    /WARNING: the outgoing session could NOT be confirmed disposed of: receiver.stop: the event server was already closed/,
+  )
+  assert.match(out.text(), /its state reads 'rotating' — check for an orphaned process holding this seat's tree/)
+  assert.match(
+    out.text(),
+    /\(the rotation itself stands; only the teardown of the session it replaced failed\)/,
+    'and it is not dressed up as a rollback',
+  )
+
+  // ABSENCE off the RECORD, never off the console: a negative assertion against wrapped output
+  // is satisfied by a line break landing inside the phrase (#109).
+  assert.equal(
+    routed(dir, 'rolled back'),
+    undefined,
+    `nothing was rolled back: ${JSON.stringify(routedAll(dir).map((r) => r.text))}`,
+  )
+  // And the seat really did change hands, which is the half a warning-only regression would lose.
+  assert.ok(routed(dir, 'rotated into fresh'), 'the swap is in the record, not just on screen')
 
   input.write('/continue\n')
   input.end()

@@ -234,6 +234,92 @@ test('a failed rotation leaves the original in service and says so in the log', 
   )
 })
 
+test('a rotation whose outgoing disposal is unconfirmed still promotes the replacement (#155)', async (t) => {
+  /**
+   * `rotated_cleanup_failed` through the relay, which is where it either loses a seat or does not.
+   *
+   * The transaction's own tests prove the outcome is produced. What only exists here is what the
+   * relay DOES with it, and the promotion block was a `result.status === 'rotated'` check: a
+   * third variant walked straight past it, leaving the seat holding a session this transaction
+   * had already torn the transport off, with a live, proven, unreferenced replacement beside it.
+   * The compiler could not see that -- the branch is truthiness on a string, not exhaustiveness
+   * -- so it is pinned here instead.
+   *
+   * The failure is injected at the position the adapters actually fail from: `terminated` is
+   * their last statement, so a close that rejects leaves the state at `rotating`. `unquiesce()`
+   * accepts `rotating`, which is why this used to come back as `rolled_back` with the original
+   * reported restored -- over a session that could not answer, and might or might not still have
+   * a child behind it. Neither this test nor the code can tell which; that is the point.
+   */
+  const dir = repo()
+  const advisor = new FakeRotationSession('advisor', 'codex', [HANDOFF])
+  const old = new FakeRotationSession('old', 'claude')
+  old.closeThrowsBeforeTerminated = 'receiver.stop: the socket is already gone'
+  const fresh = new FakeRotationSession('fresh', 'claude', [ACCEPTED])
+
+  const relay = await relayOf(dir, advisor, [old, fresh])
+  t.after(() => relay.stop())
+
+  const r = await relay.rotateImplementer('context exhausted')
+  assert.equal(r.status, 'rotated_cleanup_failed')
+
+  // 1. The replacement is promoted exactly as for `rotated`: same seat id, same object.
+  const impl = relay.participants.find((p) => p.rank === 'implementer')!
+  assert.equal(impl.id, 'implementer', 'the seat keeps the identity the log already refers to')
+  assert.equal(impl.session, fresh, 'the proven replacement holds the seat')
+  assert.equal(fresh.state, 'running')
+  assert.equal(fresh.closedAs, undefined, 'and was not abandoned by a rollback of a rotation that happened')
+  assert.equal(relay.rotationWatch.rotations, 1, 'it is a rotation, and the counter every report quotes says so')
+
+  // 2. The outgoing session is NOT reported back into service. Its transport is gone; nothing
+  //    unquiesced it, and it does not hold the seat.
+  assert.notEqual(old.state, 'running', 'a session whose transport has been disposed of is not restored')
+  assert.equal(old.transportDisposed, true, 'precondition: the fixture ran its teardown before it rejected')
+  assert.notEqual(impl.session, old)
+
+  // 3. The record an analysis outside the process reads carries it. Without this a run whose
+  //    rotations all left a child behind reads identically to one whose rotations were clean.
+  const records = relay.rotationRecords()
+  assert.equal(records.length, 1)
+  assert.ok(records[0]!.cleanupFailure, 'the record says the loser was not confirmed disposed of')
+  assert.match(records[0]!.cleanupFailure!.detail, /socket is already gone/)
+  assert.equal(records[0]!.cleanupFailure!.outgoingState, 'rotating')
+
+  // 4. The routing log says it, at human rank, in its own note. The rotation note beside it is
+  //    unchanged: this is an addition to the record, not a replacement of the success.
+  assert.ok(
+    relay.log.some((m) => m.text.includes('rotated into fresh')),
+    'the rotation itself is still recorded as one',
+  )
+  //    Two notes say it, from the two layers that know different halves: the transaction's own
+  //    completion line (through `deps.note`), which used to read `old terminated` and would have
+  //    been the false one, and the relay's, which is the one that names an action.
+  const disposal = relay.log.filter((m) => m.text.includes('NOT be confirmed disposed of'))
+  assert.equal(disposal.length, 2, `both layers must say it: ${JSON.stringify(relay.log.map((m) => m.text))}`)
+  assert.ok(
+    disposal.every((m) => m.fromRank === 'human'),
+    'at the rank the rotation itself is recorded at, not buried as orchestrator chatter',
+  )
+  assert.ok(
+    disposal.some((m) => m.text.includes(`old could NOT be confirmed disposed of`)),
+    'the transaction names the session, where it used to claim it was terminated',
+  )
+  const orphan = relay.log.find((m) => m.text.includes('orphaned process'))
+  assert.ok(orphan, 'the relay names what the operator should go and look for')
+  assert.match(orphan.text, /state reads 'rotating'/, 'and reports the state as read')
+  assert.match(orphan.text, /rotation itself stands/, 'while saying plainly that the transfer happened')
+  assert.ok(
+    !relay.log.some((m) => m.text.includes('rolled back')),
+    'and it is not described as a rollback, because nothing was rolled back',
+  )
+
+  // 5. The end-of-run summary both front-ends print. The routing log is 300 lines up by then.
+  const summary = relay.rotationSummary()
+  assert.match(summary, /1 rotations/, 'still counted as a rotation')
+  assert.match(summary, /outgoing session NOT confirmed disposed of \(state 'rotating'\)/)
+  assert.match(summary, /check for an orphaned process/)
+})
+
 test('human constraints are replayed to the replacement at human rank', async (t) => {
   const dir = repo()
   const advisor = new FakeRotationSession('advisor', 'codex', [HANDOFF])
@@ -346,6 +432,46 @@ test('a run rotates automatically when the implementer compacts, if opted in', a
   assert.equal(relay.participants.find((p) => p.rank === 'implementer')!.session, fresh)
   assert.ok(relay.log.some((m) => m.text.includes('rotating implementer')))
   assert.ok(relay.log.some((m) => m.text.includes('did not say so')))
+})
+
+test('an automatic rotation with an unconfirmed disposal carries the run on rather than halting (#155)', async (t) => {
+  /**
+   * The unattended consumer of `rotated_cleanup_failed`, and the branch a third variant could
+   * silently fall out of.
+   *
+   * The degradation path reads the transaction's result to decide whether the loop continues:
+   * `rotated` returns and the run carries on, anything else escalates to a halt. A new outcome
+   * that is a SUCCESS would have been read as an escalation -- an unattended run stopping to put
+   * a pause in front of a human who is not there, over a session the transaction had already
+   * replaced.
+   *
+   * Halting is also the wrong remedy on its own terms. There may be an orphaned child; there may
+   * equally not be, because a step that rejects may have completed its work first. Stopping the
+   * work to report a process that may not exist trades a run for a note the record already
+   * carries -- which is why the ambiguity goes in the routing log and the run report, and the
+   * loop does not act on it.
+   */
+  const dir = repo()
+  const advisor = new FakeRotationSession('advisor', 'codex', ['Do the first thing.', HANDOFF, 'DONE'])
+  const old = new FakeRotationSession('old', 'claude', ['ack', 'Did the first thing.'])
+  old.closeThrowsBeforeTerminated = 'receiver.stop: the socket is already gone'
+  const fresh = new FakeRotationSession('fresh', 'claude', [ACCEPTED, 'Carried on.'])
+
+  const relay = await relayOf(dir, advisor, [old, fresh], { maxAdvisorTurns: 3 })
+  t.after(() => relay.stop())
+
+  old.compact()
+  const outcome = await relay.run('Keep the work moving.')
+
+  assert.equal(outcome.reason, 'done', 'the run finishes; a failed teardown is not a reason to stop working')
+  assert.equal(relay.participants.find((p) => p.rank === 'implementer')!.session, fresh)
+  assert.notEqual(old.state, 'running', 'and the session with no transport left is not back in service')
+  assert.equal(relay.rotationWatch.rotations, 1)
+  assert.equal(relay.rotationRecords()[0]!.intent, 'degradation_automatic', 'still the detector‘s population')
+  assert.ok(relay.rotationRecords()[0]!.cleanupFailure, 'and the record carries what could not be confirmed')
+  // The evidence reaches the unattended operator the only way it can: the record they read after.
+  assert.ok(relay.log.some((m) => m.text.includes('orphaned process')))
+  assert.match(relay.rotationSummary(), /outgoing session NOT confirmed disposed of/)
 })
 
 /**

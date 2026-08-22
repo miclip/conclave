@@ -528,7 +528,7 @@ function renderPause(p: RunPause, width: number): string {
  *
  * This used to read `pause.verdictOf.participant` instead, and that field is narrower than it
  * looks: it is set at exactly two halt sites, both `turn_incomplete`
- * (`src/relay/relay.ts:6597` and `src/relay/relay.ts:7113`). So FOUR of the five seat-scoped
+ * (`src/relay/relay.ts:6612` and `src/relay/relay.ts:7128`). So FOUR of the five seat-scoped
  * reasons -- `rotation_candidate`, `implementer_unanswered`, `merge_blocked`, `review_blocked`
  * -- named a seat in their scope and were sampled by rank anyway, because the field the guard
  * read was empty. The scope is the field that is always populated, which is the other half of
@@ -542,16 +542,16 @@ function renderPause(p: RunPause, width: number): string {
  * pause never mentioned. The rank fallback's own comment argued it was right "only because
  * there is one of them", which is an argument for deriving the seat from the pause instead of
  * from a rank. Worse than useless on one of them: resuming an `advisor_escalated` pause sends
- * to the ADVISOR (`src/relay/relay.ts:6714`), so the fallback measured children that were not
+ * to the ADVISOR (`src/relay/relay.ts:6729`), so the fallback measured children that were not
  * about to be sent to at all.
  *
  * What that gives up, stated rather than discovered: the `advisor_escalated` halt raised when a
- * seat's turn completed and its report could not be read (`src/relay/relay.ts:7025-7027`) is
+ * seat's turn completed and its report could not be read (`src/relay/relay.ts:7040-7042`) is
  * conclave-scoped by design -- "the reason names who is being asked to take it, and the scope
  * follows the reason" -- yet the thing an operator wants to know there is whether THAT seat's
  * child is still writing. Under the rank fallback that seat was sampled at N=1 by coincidence
  * of being the only implementer. It is not sampled now. The pause still carries its own
- * liveness EVIDENCE from the halt site (`src/relay/relay.ts:7036-7038`), which is what the operator
+ * liveness EVIDENCE from the halt site (`src/relay/relay.ts:7051-7053`), which is what the operator
  * reads;
  * what is gone is a refusal derived from a rank scan. Narrowing that halt's scope, if the
  * refusal is wanted back, is a change to the halt site rather than to this guard.
@@ -1374,8 +1374,21 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     }
     write('  rotating the seat this pause is about — the advisor writes a handoff, then a replacement must reproduce the record')
     const result = await run.rotateImplementer(reason || undefined)
-    if (result.status === 'rotated') {
+    if (result.status === 'rotated' || result.status === 'rotated_cleanup_failed') {
       write(`  rotated into ${result.replacement.sessionId}; still paused — /continue when ready`)
+      // Said here rather than only in the run report, and said in the same breath as the
+      // success. The operator is standing in front of this transaction: an orphaned CLI holding
+      // this seat's tree is something they can go and look for NOW, and a line 300 lines later
+      // at the end of the run is a line about a process they have stopped thinking about.
+      //
+      // Not a rollback and not phrased as one. The replacement proved it could reproduce the
+      // record and is in the seat; what failed is the disposal of the session it replaced, and
+      // `state` says only how far the teardown got, never whether a child survived it (see #146).
+      if (result.status === 'rotated_cleanup_failed') {
+        write(`  WARNING: the outgoing session could NOT be confirmed disposed of: ${result.detail}`)
+        write(`  its state reads '${result.oldState}' — check for an orphaned process holding this seat's tree`)
+        write(dim('  (the rotation itself stands; only the teardown of the session it replaced failed)'))
+      }
       for (const c of result.acceptance.carriedFailures) {
         write(`  carried forward failing: \`${c.command}\` exits ${c.exitCode}, as it did at handoff`)
       }
@@ -2069,7 +2082,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
       // FALSIFIER, stated because it is the strongest argument against this shape: the
       // console has no general "trailing text is a message" rule and does not gain one here.
       // `/rotate <text>` and `/abort <text>` consume their text as a REASON
-      // (`src/repl/session.ts:2122`, `src/repl/session.ts:2155`) and `/pause`, `/queue`, `/audit` ignore
+      // (`src/repl/session.ts:2135`, `src/repl/session.ts:2168`) and `/pause`, `/queue`, `/audit` ignore
       // whatever follows them. So an operator who learns this from `/continue` and carries
       // it to `/pause I'll be back` still loses the sentence. That inconsistency is not
       // repaired by making `/continue` a third behaviour; it is narrowed by it, and the

@@ -519,20 +519,100 @@ export class FakeRotationSession implements AgentSession {
   }
 
   /**
-   * Make `close()` reject AFTER it has said what it had to say, as a real adapter can (#143).
+   * Make `close()` reject with the state ALREADY `terminated`.
    *
-   * `close('graceful')` reconciles, terminates the pty and stops the receiver, and any of those
-   * can reject once a verdict has already been established and emitted. The queue still has to
-   * end -- the adapters close theirs in a `finally` for exactly this -- and the relay still has
-   * to drain it before abandoning the turn, or a verdict that was already in flight is thrown
-   * away by the teardown that provoked it.
+   * NOT an adapter reproduction, and it must not be read as one. All four adapters assign
+   * `#state = 'terminated'` as the last statement of their `try`, and the only thing past it is
+   * the `finally` that ends the event queue -- which cannot throw. So no adapter in this tree
+   * can reject from this position at all; `closeThrowsBeforeTerminated` is the one that models
+   * what they do. What a real adapter CAN do is reject from a close, and #143 is about the
+   * consequence this field was originally added for: the event queue has to end however the
+   * close went, and the relay has to drain it before abandoning a turn, or a verdict already in
+   * flight is thrown away by the teardown that provoked it. That property does not depend on
+   * where in the close the rejection happened, which is why the older caller can use this one.
+   *
+   * It is kept because it is a legal `AgentSession`. Nothing in `contract/session.ts` requires
+   * an adapter to record `terminated` last, an embedder's adapter may not, and one of ours may
+   * stop doing so in a refactor nobody thinks of as behavioural. What the position exposes is a
+   * state-machine edge rather than an adapter bug: the session is gone and says so, so anything
+   * reaching for `unquiesce()` on the strength of the rejection is reaching for a transition
+   * that will be refused -- and the code that reached for it did not survive the refusal.
    */
   closeThrows: string | undefined
 
+  /**
+   * Make `close()` reject with the transport gone but `terminated` NOT yet recorded.
+   *
+   * This is the ordering all four adapters have, established by reading them. `#state =
+   * 'terminated'` is the last statement of the `try`, after the pty has been terminated, the
+   * receiver stopped and -- on `kimi` -- the generated run directory removed. Every one of those
+   * can reject, and when one does the session is left holding whatever state it had when
+   * `close()` was entered: `rotating`, on the only path that closes a session mid-transaction.
+   * So this, not `closeThrows`, is what a real close failure looks like from outside.
+   *
+   * Which of those steps rejected is not modelled, and cannot be: this fixture reproduces the
+   * ONE sub-case where the rejecting step had already done its work, so `transportDisposed` is
+   * set before the throw. A real close could equally have rejected AT the terminate with the
+   * transport untouched. Both leave the same state and the same rejection, which is the whole
+   * problem -- see `transportDisposed` and `rotated_cleanup_failed` in `rotation/rotate.ts`.
+   *
+   * The state is then a lie in the direction that matters. `rotating` and `quiesced` both accept
+   * `unquiesce()`, so a rollback reached from here is told the original is back in service by a
+   * session that cannot answer. Nothing about `state` can see that, which is what
+   * `transportDisposed` is for -- and neither field can say whether the CHILD survived, because
+   * a step that rejects may have completed its work first (see #146).
+   */
+  closeThrowsBeforeTerminated: string | undefined
+
+  /**
+   * Reject `close()` mid-teardown with a value that is NOT an `Error`.
+   *
+   * Wrapped in an object so `{ value: undefined }` is expressible: `throw undefined` is the case
+   * that matters, because `(err as Error).message` on it is `undefined`, and a consumer using
+   * that message as its "did the close fail" flag reads the failure as a clean success. A bare
+   * `unknown` field could not say the difference between "throw undefined" and "not set".
+   *
+   * Not a hypothetical shape. A rejected promise carries whatever it was rejected with, and the
+   * layers under an adapter -- node-pty, a fetch, an HTTP server's `close` callback -- are not
+   * all obliged to reject with an `Error`.
+   */
+  closeRejectsWith: { value: unknown } | undefined
+
+  /**
+   * A TEST FACT: this fixture's teardown ran, whatever `state` says.
+   *
+   * Not a general claim about closes, and specifically not the claim that a real close which
+   * rejects has disposed of its transport. It has not necessarily done anything -- the
+   * rejection may have come FROM the terminate. What this fixture reproduces is the other
+   * sub-case, the one that is invisible from outside: the step that rejected had already done
+   * its work, so the transport is gone and the state was never updated to say so.
+   *
+   * That sub-case is worth a fixture because it is the one where `state` actively misleads.
+   * The adapters record `terminated` LAST, so `state` still reads `rotating`, `unquiesce()`
+   * accepts `rotating`, and a rollback is told the original is back in service by a session
+   * with nothing behind it. A test asserting only `state` would accept that. This field is how
+   * such a test says "and there was nothing left to restore" -- a statement about the fixture it
+   * set up, never evidence a consumer could have read.
+   *
+   * Nothing in production reads it, and nothing should: the whole point of
+   * `rotated_cleanup_failed` is that no consumer CAN know this.
+   */
+  transportDisposed = false
+
   async close(mode: CloseMode = 'graceful'): Promise<void> {
     this.closedAs = mode
-    this.#to('terminated')
     try {
+      // Teardown first, then the state, in that order -- the adapters' order, and the reason a
+      // failed close is not the same thing as a session that is still there.
+      //
+      // Unconditional, which is a fixture choice rather than a model of every close: it puts
+      // this double in the sub-case where the teardown completed and the rejection came after.
+      // A close that rejected AT the terminate is equally real and leaves the same state; it is
+      // simply not what any test here needs to set up. See `transportDisposed`.
+      this.transportDisposed = true
+      if (this.closeRejectsWith) throw this.closeRejectsWith.value
+      if (this.closeThrowsBeforeTerminated) throw new Error(this.closeThrowsBeforeTerminated)
+      this.#to('terminated')
       if (this.closeThrows) throw new Error(this.closeThrows)
     } finally {
       // The stream ENDS with the session, which is the half of the contract every one of these

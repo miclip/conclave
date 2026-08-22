@@ -91,17 +91,17 @@ export const CITED: Record<string, string> = {
   'src/relay/relay.ts:2210-2216': 'const ctx = { cwd, watchdogMs: this.#opts.turnWatchdogMs }',
   'src/relay/relay.ts:2928-2929': "this.#worktreesSeen.add(w)\n    return {",
   'src/relay/relay.ts:3029': 'NOT ARMED (no checks configured)',
-  'src/relay/relay.ts:3501': 'if (this.#worktreesAtStart) for (const w of worktreePaths',
-  'src/relay/relay.ts:3985': 'resolutionFor(p.subject, { rotationArmed: armed })',
-  'src/relay/relay.ts:4588-4590': 'No rotation checks are configured',
+  'src/relay/relay.ts:3510': 'if (this.#worktreesAtStart) for (const w of worktreePaths',
+  'src/relay/relay.ts:3994': 'resolutionFor(p.subject, { rotationArmed: armed })',
+  'src/relay/relay.ts:4597-4599': 'No rotation checks are configured',
   'src/relay/relay.ts:340': "onDegradation ?? 'candidate'",
   // The console's status line, cited by `activeTurn` for the claim its own doc rests on: the
   // footer's notion of "working" is `turn_start` until `turn_end`, and `tool_use` only relabels
   // a turn that is already running. If that ever stops being true, the predicate the relay and
   // `/continue` both send on is no longer the thing the operator is watching.
   'src/repl/session.ts:1062-1075': 'progress.start(e.participant)',
-  'src/relay/relay.ts:5859': 'this.#worktreesAtStart = worktreePaths(this.#opts.cwd)',
-  'src/relay/relay.ts:6593': "subject: { reason: 'turn_incomplete', participant: lead.id }",
+  'src/relay/relay.ts:5874': 'this.#worktreesAtStart = worktreePaths(this.#opts.cwd)',
+  'src/relay/relay.ts:6608': "subject: { reason: 'turn_incomplete', participant: lead.id }",
   // The five below are what the console's `/continue` liveness guard cites for reading a
   // pause's SCOPE rather than `verdictOf` or a rank scan (`seatsToSampleAtPause` in
   // src/repl/session.ts). Two of them pin the ONLY sites that populate `verdictOf` -- the
@@ -115,13 +115,13 @@ export const CITED: Record<string, string> = {
   // below always has, so both sites quote the SAME resolved end. The claim this pin supports is
   // untouched -- these are still the only two that populate `verdictOf`, both `turn_incomplete`
   // -- and the token moved with the thing it points at rather than the pin being dropped.
-  'src/relay/relay.ts:6597': 'verdictOf: { participant: lead.id, endSeq: current.seq },',
-  'src/relay/relay.ts:6714': 'The human has seen your escalation and asked you to continue.',
+  'src/relay/relay.ts:6612': 'verdictOf: { participant: lead.id, endSeq: current.seq },',
+  'src/relay/relay.ts:6729': 'The human has seen your escalation and asked you to continue.',
   // The workstream a conflicted instruction belongs to, named after the seat when exactly one
   // seat could take it -- the N=1 coincidence a scope reader must not mistake for a seat.
-  'src/relay/relay.ts:6877': "reason: 'authority_conflict', workstream:",
-  'src/relay/relay.ts:6976': "subject: { reason: 'implementer_unanswered', participant: seat.id }",
-  'src/relay/relay.ts:7025-7027': "its report could not be read, so there is",
+  'src/relay/relay.ts:6892': "reason: 'authority_conflict', workstream:",
+  'src/relay/relay.ts:6991': "subject: { reason: 'implementer_unanswered', participant: seat.id }",
+  'src/relay/relay.ts:7040-7042': "its report could not be read, so there is",
   // Repaired rather than deleted, and it now pins a DESCRIPTOR rather than a call: #101 moved
   // the measurement inside `#halt`, so the halt site says which seat to measure and no longer
   // builds the sentence itself. The claim the citation supports is unchanged -- this halt does
@@ -131,9 +131,9 @@ export const CITED: Record<string, string> = {
   // `turn_incomplete` halt below, so only a shift of exactly the distance between the two would
   // slip past. There is nothing unique on the line to pin instead. It is also why this entry
   // is never auto-relocated -- two matches is not a pin, and `planRepairs` refuses it by rule.
-  'src/relay/relay.ts:7036-7038': "knowing whether the child is still writing changes what the operator does.",
-  'src/relay/relay.ts:7109': "subject: { reason: 'turn_incomplete', participant: seat.id }",
-  'src/relay/relay.ts:7113': 'verdictOf: { participant: seat.id, endSeq: current.seq },',
+  'src/relay/relay.ts:7051-7053': "knowing whether the child is still writing changes what the operator does.",
+  'src/relay/relay.ts:7124': "subject: { reason: 'turn_incomplete', participant: seat.id }",
+  'src/relay/relay.ts:7128': 'verdictOf: { participant: seat.id, endSeq: current.seq },',
   // The one sentence #66's bypass rests on: a verdict withdrawn with no replacement can come
   // from nowhere but `resetTranscript`, so the open turn the console stops refusing on is a
   // deleted record rather than an observed one. If that ever stops being true, the guard's
@@ -166,13 +166,13 @@ export const CITED: Record<string, string> = {
   // #101's refresh -- the module that explains the mechanism and the loop that uses it --
   // because the argument was already written here, for `/wait`, and restating it in two more
   // places is how three copies of a reason drift apart.
-  'src/repl/session.ts:2100': 'so an in-place change like `superseded` reaches the file on the next one',
+  'src/repl/session.ts:2113': 'so an in-place change like `superseded` reaches the file on the next one',
   // The falsifier `/continue <message>` is argued against: two commands that already give
   // their trailing text a meaning, so the new rule is narrow by intent rather than by
   // accident. Pinned to the dispatch lines, which is what makes "these are unchanged"
   // checkable rather than a claim about code nobody re-reads.
-  "src/repl/session.ts:2122": "if (word === '/rotate') {",
-  "src/repl/session.ts:2155": "if (word === '/abort') {",
+  "src/repl/session.ts:2135": "if (word === '/rotate') {",
+  "src/repl/session.ts:2168": "if (word === '/abort') {",
 }
 
 /**
