@@ -558,7 +558,7 @@ export interface RelayOptions {
    * this seam the whole of #101 -- the measurement, its timestamp, and the re-measurement that
    * makes the timestamp move -- is unreachable from any test that does not spawn a real CLI.
    * The console already carries the identical seam for its `/continue` guard
-   * (`src/repl/session.ts:325`), and the two are deliberately the same shape.
+   * (`src/repl/session.ts:332`), and the two are deliberately the same shape.
    */
   liveness?: ((pid: number) => Promise<ChildLiveness>) | undefined
   /**
@@ -903,9 +903,42 @@ export interface ParticipantDeadlines {
   /** The seat, not the agent: ids are what the turns in the report are keyed by. */
   id: string
   agent: string
-  /** The whole turn, however busy. */
+  /**
+   * The whole turn, however busy. Refreshed by NOTHING.
+   *
+   * Child output pushes out `silence` and never this, so a turn that keeps producing still
+   * reaches this number -- and what happens when it does is that the run stops awaiting that
+   * exchange and reports `timed_out`. Not that the turn ends: nothing here reaches the child,
+   * and the seat stays unsendable until a cancellation, terminal transcript or hook evidence,
+   * or the process exiting. The released wait is what the run needs, because `--max-turns` and
+   * `--max-minutes` are checked at turn boundaries and nowhere else, so a turn output could
+   * extend without limit would be a run no ceiling could end.
+   *
+   * A `timed_out` from THIS clock is the case #36 did not fix. The adapters re-read the
+   * transcript when a deadline fires, but a working turn's transcript says `in_progress`,
+   * which is not evidence it ended, so the verdict stands on a turn that was fine. A reader
+   * seeing `timed_out` on a seat whose turns are legitimately long should suspect this number
+   * before suspecting the child.
+   *
+   * Suspect, not confirm. This is the CONFIGURED budget and nothing else: neither this field
+   * nor any other in the report says which of the two clocks actually produced a given
+   * verdict. That provenance exists on the watchdog's update at the moment it fires and is not
+   * retained here, so the artifact answers "what was this seat measured against" and cannot
+   * answer "which clock produced this verdict" -- and neither question is "what ended this
+   * turn", which is not something either clock does.
+   */
   absolute: DeadlineClock
-  /** How long the turn may say NOTHING. A different question, not a tighter version. */
+  /**
+   * How long the turn may say NOTHING. A different question, not a tighter version.
+   *
+   * The only one of the two that substantive child output pushes out, and the one that reaches
+   * an ordinary hang: a child that stopped working stopped writing, so this fires at its own
+   * budget rather than leaving the turn to the absolute cap. That is the part of #36 that was
+   * fixed, against the incident actually reported -- the wait went from ~44 information-free
+   * minutes to this number.
+   *
+   * A configured budget, like the field above it, and equally silent about which clock fired.
+   */
   silence: DeadlineClock
 }
 
@@ -2247,9 +2280,10 @@ export class Relay {
    *
    * Both adapters implement `decidePermission` down to the keystroke, and nothing above
    * them ever called it: the console rendered `awaiting a permission decision` and offered
-   * no way to answer, so the turn sat there until a watchdog ended it. The event was
-   * already on the stream — what was missing was somewhere to remember it and something
-   * able to reply.
+   * no way to answer, so the turn sat there until a watchdog gave up on it -- releasing this
+   * run's wait and emitting a verdict, while the child went on standing at the same prompt
+   * nobody could answer. The event was already on the stream — what was missing was somewhere
+   * to remember it and something able to reply.
    */
   #awaitingPermission = new Map<string, { tool: string }>()
 
@@ -3282,9 +3316,16 @@ export class Relay {
    *
    * The whole turn is in `#exchangeTurn`; this is only the bracket. Split rather than wrapped in
    * place so the release sits in a `finally` that no later edit inside a 150-line method can slip
-   * past: a turn that throws -- a transport fault, a watchdog, a session closed underneath it --
-   * must leave the participant rotatable, or one lost turn would make the seat permanently
-   * unrotatable and the refusal would outlive the condition it describes.
+   * past: a turn that throws -- a transport fault, a session closed underneath it (#143) -- must
+   * leave the participant rotatable, or one lost turn would make the seat permanently unrotatable
+   * and the refusal would outlive the condition it describes.
+   *
+   * An expired deadline is deliberately NOT in that list. It throws nothing and ends nothing:
+   * `#exchangeTurn` runs no clock of its own, the adapter's watchdog emits a `timed_out` verdict
+   * as an ordinary event, this method stops waiting and RETURNS a result, and the child goes on
+   * doing whatever it was doing. The `finally` covers it either way, so the distinction costs
+   * nothing here -- but a reader who takes a deadline for a thrower will go looking for a
+   * cancellation that this code does not perform.
    */
   async #exchange(p: RelayParticipant, text: string): Promise<TurnResult> {
     this.#exchanges.set(p.id, (this.#exchanges.get(p.id) ?? 0) + 1)
@@ -4282,7 +4323,7 @@ export class Relay {
       else if (!shouldWait && offered !== -1) pause.options.splice(offered, 1)
       // The status file is written from the LIVE pause object on any event, so an in-place
       // change reaches disk on the next one -- and a pause is precisely when nothing else is
-      // flowing. Same reasoning as `/wait` in the console (`src/repl/session.ts:2078`), and the
+      // flowing. Same reasoning as `/wait` in the console (`src/repl/session.ts:2100`), and the
       // reader who needs it most is the one polling from outside.
       this.#stream.emit({ type: 'liveness', pause })
       if (last) return stop()
@@ -4371,10 +4412,45 @@ export class Relay {
     handle: RunHandle | undefined,
   ): Promise<RunOutcome | undefined> {
     const snap = await impl.session.snapshot()
+    /**
+     * A generation nobody could re-read does not start a rotation.
+     *
+     * `snapshot()` on both adapters is contained: when the transcript will not answer it hands
+     * back the last projection the view was in a position to build, flagged `containedFallback`,
+     * rather than rejecting. That is right for the consumers that are DESCRIBING a session, and
+     * this is not one of them. `compactionGeneration` is the mechanical evidence that the
+     * participant lost context, and this is the code that ACTS on it -- it quiesces a working
+     * session, spends an advisor handoff turn and starts a replacement. `rotation/rotate.ts`
+     * already refuses to write an unverified generation into the handoff record; this is the
+     * other half of the same rule, and without it a rotation could still be STARTED by the
+     * number the handoff would then decline to record.
+     *
+     * Only the SNAPSHOT channel is withheld. `detectDegradation` reads two independent things,
+     * and a `revision` event is a live signal that already arrived -- it does not become
+     * doubtful because a later read of the file did not answer. So the events still speak for
+     * themselves, and what is suppressed is the generation comparison alone. Handing `assess`
+     * the baseline as the current generation is how that is said: no delta, so no evidence from
+     * this channel, and every other input to the verdict is untouched.
+     *
+     * The evidence is DEFERRED, not discarded. Nothing on this path moves the baseline, so the
+     * same generation is weighed again next advisor turn, and the first turn whose read succeeds
+     * raises the candidate that was withheld here. The cost of being wrong is lateness; the cost
+     * of the opposite was rotating a working session on a number nobody read.
+     */
+    const unverified = snap.containedFallback === true
+    // Withheld only where it would have MATTERED. A fallback whose generation is still the
+    // baseline has nothing to withhold, and a note on every turn of a wedged transcript is noise
+    // an operator learns to scroll past -- which is how a record stops being read at all.
+    const withheld = unverified && snap.compactionGeneration > impl.baselineGeneration
     // Counted before the decision, so the tally proves the detector RAN regardless of what
     // it concluded. That is the whole point: a zero here means "looked and saw nothing",
     // and its absence would mean "never looked".
     this.rotationWatch.assessments += 1
+    // NOT gated on `unverified`. This is a high-water mark of what has been observed, not an
+    // input to a decision, and the number in a fallback was read at some point -- the generation
+    // only ever rises (`reconcile.ts` takes `max(0, ...)` fresh markers), so the peak cannot be
+    // overstated by a stale reading. An operator seeing a peak here with no candidate against it
+    // is seeing exactly the condition the note below explains.
     this.rotationWatch.peakGeneration = Math.max(
       this.rotationWatch.peakGeneration,
       snap.compactionGeneration,
@@ -4383,7 +4459,7 @@ export class Relay {
       participant: impl.id,
       prose,
       baselineGeneration: impl.baselineGeneration,
-      currentGeneration: snap.compactionGeneration,
+      currentGeneration: unverified ? impl.baselineGeneration : snap.compactionGeneration,
       events: impl.events.slice(impl.degradationCursor),
       ledger: this.complaints,
       at: Date.now(),
@@ -4391,6 +4467,27 @@ export class Relay {
 
     if (verdict.degraded) this.rotationWatch.degradationsSeen += 1
     if (verdict.complained) this.rotationWatch.complaintsSeen += 1
+
+    // Recorded before the branches, so it is written whatever the verdict turns out to be. The
+    // usual outcome is that nothing else fires and this note is the ONLY trace that a compaction
+    // signal was seen and set aside -- so it has to name the number, the baseline it was measured
+    // against, and the reason it did not count, or an operator reading the log afterwards cannot
+    // tell a withheld candidate from one that was never raised.
+    if (withheld) {
+      this.#record({
+        from: 'orchestrator',
+        fromRank: 'human',
+        to: [],
+        kind: 'note',
+        text:
+          `${impl.id}: compaction generation ${snap.compactionGeneration} (baseline ` +
+          `${impl.baselineGeneration}) was NOT counted as rotation evidence -- the snapshot is a ` +
+          `contained fallback, the last projection the view could build rather than a read taken ` +
+          `just now, so the generation is a claim about a transcript state nobody has confirmed. ` +
+          `Rotation consideration is DEFERRED, not declined for good: the baseline is unchanged, ` +
+          `so the same generation is weighed again on the next turn whose read answers.`,
+      })
+    }
 
     if (verdict.decision === 'continue') {
       if (verdict.reason === 'unbacked') {

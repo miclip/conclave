@@ -38,6 +38,20 @@ export interface TranscriptState {
   /** Codex only. Claude Code writes no equivalent record anywhere. */
   turnAbortedReason?: string | undefined
   taskComplete: boolean
+  /**
+   * Codex only: the error an otherwise-terminal `task_complete` carried (#35).
+   *
+   * Separate from `taskComplete` rather than a flag on it, because the two facts are both true
+   * at once and they mean opposite things. The turn's machinery reached its end -- so the
+   * record IS terminal, and treating it as "still going" would leave the turn open forever --
+   * but what it produced is a failure, and grading that `completed` is what made an errored
+   * turn indistinguishable from one that legitimately said nothing. Observed live as
+   * `usage_limit_exceeded` with `last_agent_message: null`.
+   *
+   * Holds the message rather than a boolean so the verdict can say WHY without the classifier
+   * having to reach back into the transcript for it.
+   */
+  taskCompleteError?: string | undefined
 }
 
 /**
@@ -179,6 +193,47 @@ export function classify(ev: Evidence): { state: TurnLiveness } & Partial<Verdic
     return { state: 'cancelled', ...verdict('cancelled', 'proven', p) }
   }
 
+  // 2b. `task_complete` that carried an ERROR (#35).
+  //
+  //     Terminal, `proven`, and NOT `completed`. The record is the child's own statement that
+  //     the turn's machinery finished; the error is its statement that what came out is a
+  //     failure. Both are the transcript speaking directly, which is why this is `proven`
+  //     rather than inferred from an absence.
+  //
+  //     Ranked HERE, and the position is the whole rule. Below `turn_aborted`, because an
+  //     abort says the turn was cancelled, which is a more specific account of an ending than
+  //     "it ended badly". Above `Stop`, because Codex reaches a turn boundary on an errored
+  //     completion too -- so a `Stop` is very likely present, and letting rule 3 see it first
+  //     grades the turn `completed/proven` and hands the relay an empty message to forward.
+  //     That is #35 exactly: the run churned advisor turns toward its budget asking for a
+  //     resend of a turn that had failed for a reason nobody was shown.
+  //
+  //     Above the deadline rule for the same reason it is above `Stop`: this is positive
+  //     evidence from the child about how the turn ended, and it must supersede a verdict a
+  //     clock minted from silence rather than be buried by one.
+  if (ev.transcript.taskCompleteError !== undefined) {
+    p.push({
+      source: 'transcript',
+      detail: `task_complete carried an error -- ${ev.transcript.taskCompleteError}`,
+    })
+    if (ev.hooks.includes('Stop')) {
+      p.push({
+        source: 'hook',
+        detail: 'Stop also fired: a terminal boundary was reached, not that the turn succeeded',
+        caveat: true,
+      })
+    }
+    p.push({
+      source: 'transcript',
+      // Said out loud because the absence is the operationally important part: there is no
+      // report to forward, and inventing one from the error text would put the vendor's words
+      // into the participant's mouth and route them onward as though it had said them.
+      detail: 'the turn produced no report; the error is the only account of what happened',
+      caveat: true,
+    })
+    return { state: 'unknown_abnormal_end', ...verdict('unknown_abnormal_end', 'proven', p) }
+  }
+
   // 3. Positive completion, with no abort record to outrank it.
   if (ev.hooks.includes('Stop')) {
     p.push({ source: 'hook', detail: 'Stop' })
@@ -277,6 +332,13 @@ export function classify(ev: Evidence): { state: TurnLiveness } & Partial<Verdic
 
   // 7. Deadline, deliberately last and deliberately never `cancelled`. Silence does not
   //    distinguish a long turn from an abandoned one.
+  //
+  //    Nor does it distinguish a stuck child from a finished one whose `Stop` was lost, and this
+  //    rule cannot: it sees a clock reading and no transcript. That question is settled OUTSIDE
+  //    the classifier, by the adapters, which consult the child's transcript the moment a
+  //    deadline fires and feed any proof of completion back through `resetTranscript` -- so a
+  //    turn that really finished is superseded by rule 5 before anyone reads this one. What
+  //    reaches here is a deadline with no surviving evidence of an ending. See `Outcome`.
   if (ev.elapsedSeconds > ev.watchdogSeconds || ev.idleSeconds > 0) {
     p.push(
       ev.idleSeconds > 0

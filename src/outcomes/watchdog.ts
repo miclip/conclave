@@ -38,10 +38,13 @@ export interface WatchdogTarget {
   /** When the turn began, by the same clock the deadline is measured against. */
   startedAt: number
   /**
-   * When this turn last showed any sign of life, by the same clock.
+   * When this turn last produced SUBSTANTIVE content, by the same clock.
    *
-   * Maintained by the adapter through `touch()`. Absent on a target that predates the idle
-   * deadline, in which case only the absolute one applies.
+   * Maintained by the adapter through `touch()`, which it calls only for output that came
+   * from the child. Absent until the child has spoken at all, in which case silence is
+   * measured from `startedAt` -- a turn that never says a word is still measured by something,
+   * and which clock measures it must not depend on the adapter having happened to touch it
+   * once. Measured, not stopped: neither clock ends a turn. See `#nextDelay`.
    */
   lastActivityAt?: number
   tracker: TurnVerdictTracker
@@ -66,11 +69,26 @@ export const TAIL_INTERVAL_MS = 400
  * `late_signal` revision. The evidence model recovered, but the run had already paused and
  * asked a human to adjudicate a turn that was merely long.
  *
- * Forty-five minutes still bounds a genuinely hung turn -- which is all this is for -- and
- * stops manufacturing pauses out of ordinary work. Override with `--turn-timeout <seconds>`,
+ * Forty-five minutes still bounds the wait a genuinely hung turn imposes on this run -- which
+ * is all this is for; the turn itself it does not bound, and cannot -- and stops manufacturing
+ * pauses out of ordinary work. Override with `--turn-timeout <seconds>`,
  * on either front-end. It is a default of THIS clock rather than of the system: the adapters
  * that run no absolute deadline unless asked never reach it, which is why the terminal record
  * reports each seat's resolved clocks instead of this number.
+ *
+ * It bounds the WHOLE turn, a busy one included -- and what it bounds is what this RUN waits
+ * for, not the turn. Nothing here reaches the child: the deadline emits a `timed_out` verdict,
+ * the relay stops awaiting that exchange, and the child goes on doing whatever it was doing.
+ * The seat stays unsendable afterwards until something makes it sendable -- a cancellation,
+ * terminal evidence in the transcript or a hook, or the process exiting.
+ *
+ * Retiring it at the child's first output was tried and reverted, and the released wait is why:
+ * `--max-turns` and `--max-minutes` are checked at TURN BOUNDARIES and nowhere else
+ * (`guardrails.breached`), and the relay reaches one only when it stops awaiting an exchange.
+ * So a turn no clock will stop waiting for is a run no ceiling can end, and one child talking
+ * forever takes the whole run with it. Forty-five minutes is the concession to the false
+ * positive instead -- long enough that ordinary work does not reach it, and what it produces is
+ * `timed_out (uncertain)`, which a `late_signal` revision supersedes if the turn does finish.
  */
 export const DEFAULT_WATCHDOG_MS = 45 * 60 * 1000
 
@@ -118,13 +136,32 @@ export class TurnWatchdog<T extends WatchdogTarget> {
   }
 
   /**
-   * Record that the turn showed a sign of life, and push the idle deadline out.
+   * Record that the CHILD produced something, and push the SILENCE deadline out.
    *
-   * Cheap on purpose: adapters call this from their event path, which is hot. It does no
-   * work beyond a timestamp and a timer reset, and it never extends the ABSOLUTE deadline --
-   * a turn that keeps talking forever is still bounded.
+   * That deadline only. Nothing here moves the absolute one, which is measured from
+   * `startedAt` and refreshed by nothing -- so what the run WAITS for is bounded even on a turn
+   * that keeps talking forever, and has to be, because the run's ceilings are only ever checked
+   * between turns. Bounding the wait is not ending the turn; see `#nextDelay`.
+   *
+   * Callers must still reserve this for substantive child output -- `message`, `tool_use`,
+   * `permission_requested`. It is not a liveness ping: anything an adapter can emit about
+   * ITSELF (arming a clock, a revision, an error) or anything a stalled child still produces
+   * (a repainted spinner, a keepalive byte, a poll that found nothing) would hold the silence
+   * clock open on a turn that stopped working, and silence is the clock that catches a hang
+   * in twelve minutes rather than forty-five.
+   *
+   * Cheap on purpose: adapters call this from their event path, which is hot. It does no work
+   * beyond a timestamp and a timer reset.
    */
   touch(key: string): void {
+    // Keyed, and unknown keys are a no-op. This was a blanket `touchAll()` for a while, because
+    // adapters emit events keyed by whatever produced them and those keys do NOT agree: on
+    // Claude Code the watchdog is armed under the hook's `prompt_id` while transcript-sourced
+    // events carry `claude-transcript-turn-N`, so a keyed touch silently matched nothing and
+    // every Claude turn was capped at the idle deadline however busy it was. The fix belonged
+    // in the adapter rather than here: it knows which turn is live and which key it armed under,
+    // and `send()` now refuses to open a second turn, so "the live turn" names exactly one.
+    // Blanket-refreshing every armed turn was a guess that happened to be right.
     const target = this.#targets.get(key)
     if (!target || !this.#timers.has(key)) return
     target.lastActivityAt = Date.now()
@@ -134,36 +171,33 @@ export class TurnWatchdog<T extends WatchdogTarget> {
   }
 
   /**
-   * Refresh every armed turn.
+   * Whichever deadline comes first: silence, or the absolute cap. Both run all turn.
    *
-   * Adapters emit events keyed by whatever produced them, and those keys do NOT agree. On
-   * Claude Code the watchdog is armed under the hook's `prompt_id` while transcript-sourced
-   * events carry `claude-transcript-turn-N`, so a keyed `touch` silently matched nothing and
-   * every Claude turn was capped at the idle deadline however busy it was -- a tighter
-   * version of the false positive the absolute budget was raised from 10 to 45 minutes to
-   * stop.
+   * Silence is the useful one, and the one nearly every hang meets first. It is measured from
+   * `lastActivityAt ?? startedAt`, so a turn the child never spoke in is bounded by the twelve
+   * minutes rather than the forty-five, and there is no state in which it has no base to
+   * measure from.
    *
-   * A session runs one turn at a time -- both adapters refuse a second send while one is in
-   * flight -- so "every armed turn" is "the live one", and this cannot refresh a turn that is
-   * not the one producing the activity.
-   */
-  touchAll(): void {
-    for (const key of [...this.#timers.keys()]) this.touch(key)
-  }
-
-  /**
-   * Whichever deadline comes first: silence, or the absolute cap.
+   * The absolute cap sits behind it, refreshed by nothing. Its job is not to judge whether a
+   * busy turn has run too long -- at forty-five minutes it rarely gets the chance, and "has
+   * this run long" does not distinguish working from hung. Its job is to guarantee this run
+   * STOPS WAITING, which is a different claim and worth keeping separate from the obvious
+   * misreading of it: what fires here produces a `timed_out` verdict and releases the exchange
+   * the relay was awaiting. It does not end the turn, close the transport, force the child or
+   * observe it stopping, and the seat is still unsendable one line later -- until a
+   * cancellation, terminal transcript or hook evidence, or process exit says otherwise.
    *
-   * Both are kept. The idle deadline is the useful one, and the absolute one still bounds a
-   * turn that emits a heartbeat forever without ever finishing.
+   * A released wait is nevertheless the whole point: `--max-turns` and `--max-minutes` are
+   * checked at turn boundaries and nowhere else (`guardrails.breached`), and the relay reaches
+   * a boundary only by ceasing to await an exchange. So a turn that output can extend without
+   * limit is a run whose ceilings can never fire. Retiring this clock at the child's first
+   * output was tried, and it traded a false positive on one long turn for a run nothing could
+   * stop -- the worse of the two, and the one an operator has no way to see coming.
    */
   #nextDelay(target: T): number {
     const now = Date.now()
     const absolute = this.#ms - (now - target.startedAt)
-    const idle =
-      target.lastActivityAt === undefined
-        ? Number.POSITIVE_INFINITY
-        : this.#idleMs - (now - target.lastActivityAt)
+    const idle = this.#idleMs - (now - (target.lastActivityAt ?? target.startedAt))
     return Math.max(0, Math.min(absolute, idle))
   }
 
@@ -210,7 +244,7 @@ export class TurnWatchdog<T extends WatchdogTarget> {
     const now = Date.now()
 
     const elapsedMs = now - target.startedAt
-    const idleMs = target.lastActivityAt === undefined ? undefined : now - target.lastActivityAt
+    const idleMs = now - (target.lastActivityAt ?? target.startedAt)
 
     // Which deadline has ACTUALLY passed, checked before either is acted on.
     //
@@ -220,7 +254,7 @@ export class TurnWatchdog<T extends WatchdogTarget> {
     // deadline for the rest of the turn. That is the same silent-never-fires-again failure
     // this module's header describes, reintroduced by the fix for it, and it reproduced only
     // on Linux where timers ran early.
-    const idlePassed = idleMs !== undefined && idleMs >= this.#idleMs
+    const idlePassed = idleMs >= this.#idleMs
     const absolutePassed = elapsedMs > this.#ms
 
     if (!idlePassed && !absolutePassed) {
@@ -230,8 +264,11 @@ export class TurnWatchdog<T extends WatchdogTarget> {
       return
     }
 
+    // Silence first when BOTH have passed. A turn that stopped talking an hour ago and also
+    // ran past its cap is diagnosed by the more specific finding: "no output for 720s" says
+    // where it stopped, "3600s with no Stop" only says it was long.
     if (idlePassed) {
-      this.#onUpdate(target, target.tracker.observeIdle(idleMs! / 1000))
+      this.#onUpdate(target, target.tracker.observeIdle(idleMs / 1000))
       return
     }
 

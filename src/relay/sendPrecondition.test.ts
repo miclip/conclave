@@ -161,6 +161,37 @@ class TurnSession implements AgentSession {
     })
   }
 
+  /**
+   * The watchdog's verdict on the OPEN turn, emitted without the child stopping.
+   *
+   * The distinction the whole of this is about, and the reason `#open` is deliberately left set:
+   * a deadline expiring is the adapter giving up on a turn, not the child finishing one. On a
+   * real seat the CLI carries on executing, which is why `send()` below still throws -- so a
+   * relay that reads this verdict as the end of the turn does not merely make a bookkeeping
+   * error, it ends the run.
+   */
+  timeOutOpenTurn(): void {
+    const key = this.#open
+    if (!key) throw new Error(`${this.sessionId} has no open turn to time out`)
+    this.#emit({
+      type: 'turn_end',
+      verdict: {
+        outcome: 'timed_out',
+        confidence: 'uncertain',
+        provenance: [{ source: 'watchdog', detail: 'no output for 720s, and no Stop' }],
+      },
+      synthesized: true,
+      // The claim that makes this a hang rather than a finished turn: the child was never seen
+      // to stop. A real adapter sets it from its own transport state, and only after asking the
+      // transcript and finding no proof the turn ended. See `TurnEndEvent.transportOpen`.
+      transportOpen: true,
+      turnKey: key,
+      seq: ++this.#seq,
+      at: Date.now(),
+      provisional: false,
+    })
+  }
+
   /** A tool call inside the open turn, so a refusal can say what the child is doing. */
   useTool(tool: string): void {
     this.#emit({ type: 'tool_use', tool, input: {}, seq: ++this.#seq, at: Date.now(), provisional: false })
@@ -515,6 +546,71 @@ test('the precondition is read on the target, not carried over from the previous
       `no wait may be attributed to the advisor:\n${notes.join('\n')}`,
     )
     assert.equal((outcome.detail ?? '').startsWith('implementer '), true, 'the run ends on the seat that was busy')
+  } finally {
+    await relay.stop()
+    rmSync(repo, { recursive: true, force: true })
+  }
+})
+
+test('a turn the watchdog timed out is still a live turn, so the next dispatch never sends', async () => {
+  // The relay half of the rule the adapters enforce internally. A watchdog verdict settles this
+  // run's opinion of a turn; it observes nothing about the child, and the child it is most often
+  // minted for is one that went quiet mid-work. `activeTurn` used to close the turn on it, so
+  // `#awaitSendable` returned immediately and the relay sent into a live child -- #117 exactly,
+  // reached through the one event that means "we gave up waiting".
+  //
+  // Driven ATTENDED, because that is the only way the next dispatch happens at all: a `timed_out`
+  // verdict escalates first, and an unattended run ends there. So the sequence under test is the
+  // real one -- the deadline fires, the operator is asked, the operator says carry on -- and what
+  // must happen then is the path the relay already has for a busy seat: wait out the
+  // precondition, cancel the child, close the session, end `peer_busy`. Not `transport_failed`:
+  // nothing is wrong with the transport, and that ending is what sent four operators to look at
+  // their CLI and their provider for a child that was simply still working.
+  const repo = tempRepo()
+  const impl = new TurnSession('implementer', 'impl-1', [...IMPL_REPLIES])
+  impl.childPid = 4242
+  // The work turn opens and never ends. Its watchdog fires 50ms in -- the whole event stream a
+  // real seat shows for a hang -- and nothing else ever arrives.
+  impl.holdFrom = 1
+  impl.onSend = (_message, index) => {
+    if (index !== 1) return
+    setTimeout(() => impl.timeOutOpenTurn(), 50).unref()
+  }
+  const advisor = new TurnSession('advisor', 'advisor-1', [...ADVISOR_REPLIES])
+  const relay = await twoParty(repo, impl, advisor, { sendPreconditionMs: 400 })
+  try {
+    const run = relay.start('Keep the work moving.')
+    const pause = await run.untilPause()
+    assert.ok(pause, 'the deadline must reach the operator before anything else happens')
+    assert.equal(pause.reason, 'turn_incomplete', 'the deadline is what stopped the run here')
+    assert.match(pause.detail, /timed_out/, `the pause must be the deadline's: ${pause.detail}`)
+
+    // The operator carries on, which is the decision this test exists for. The child has said
+    // nothing since; nothing has observed it stop.
+    await run.continue()
+    const outcome = await run.result()
+
+    assert.equal(
+      impl.sentWhileBusy,
+      0,
+      'a timed_out verdict must not be read as permission to send into a turn that is still open',
+    )
+    assert.equal(
+      outcome.reason,
+      'peer_busy',
+      `the run must end on the busy path, not the transport one: ${JSON.stringify(outcome)}`,
+    )
+    // The child is dealt with rather than abandoned: #117's other cost was a run that ended
+    // while a CLI kept writing into the working tree with nothing watching it.
+    assert.equal(impl.cancelled, 1, 'the live turn must be cancelled')
+    assert.equal(impl.closedAs, 'graceful', 'and the session closed')
+    // And the run says why, in terms an operator can act on.
+    const notes = relay.log.filter((m) => m.kind === 'note' && /mid-turn/.test(m.text)).map((m) => m.text)
+    assert.ok(notes.length > 0, `the refusal must be recorded:\n${relay.log.map((m) => m.text).join('\n')}`)
+    assert.ok(
+      notes.some((t) => /timed_out/.test(t)),
+      `the note must name the deadline as the reason the turn reads as open:\n${notes.join('\n')}`,
+    )
   } finally {
     await relay.stop()
     rmSync(repo, { recursive: true, force: true })

@@ -79,6 +79,23 @@ export interface EventBase {
    * provisional event must be re-derivable.
    */
   provisional: boolean
+  /**
+   * This event is HISTORY being re-emitted, not something the child has just done.
+   *
+   * Set only by `TranscriptSessionView` on the prefix-rewrite path: everything already told to
+   * consumers is withdrawn by a `revision`, and the surviving history is then emitted again so
+   * a consumer that follows `events()` ends up agreeing with `snapshot()`. The records behind
+   * those events can be hours old. The only thing that happened NOW is that the file changed
+   * underneath us.
+   *
+   * Distinct from `provisional`, which says an event may later be wrong. A replay is not wrong;
+   * it is old, and old is what the liveness readers get wrong. Two of them treat child output
+   * as a sign of life -- the watchdog's silence clock and #82's "this turn never spoke"
+   * diagnosis -- and a replay is the one case where that reading is false: a rewrite the turn
+   * had no part in would push out the deadline of a turn that has been stalled for ten minutes.
+   * `isChildOutput` is where that is decided, so neither reader has to remember.
+   */
+  replay?: boolean | undefined
 }
 
 export interface TurnStartEvent extends EventBase {
@@ -118,6 +135,35 @@ export interface TurnEndEvent extends EventBase {
    * from process state, a watchdog, or our own input bookkeeping.
    */
   synthesized: boolean
+  /**
+   * The emitter cannot rule out that the child is STILL EXECUTING this turn.
+   *
+   * A verdict and a transport are different claims, and this is the only place the difference
+   * is expressed to anyone downstream. A verdict is what the emitter concluded about a turn;
+   * this says whether the child was seen to stop. They come apart in exactly one place and it
+   * is the place that matters: a `timed_out` minted by a clock running out with nothing
+   * arriving. Nothing observed the child stop -- that is what a deadline IS -- and the child
+   * most likely to be still working is the one that has gone quiet mid-work.
+   *
+   * Consumers about to put bytes into that child need the second claim, not the first. Neither
+   * CLI accepts input mid-turn, so a send there is not queued: it is spliced into a running
+   * turn, and #117 is four runs lost to exactly that. `outcomes/activeTurn.ts` is the predicate
+   * both of them ask, and this field is what it reads.
+   *
+   * ## Adapters must set it, and absent means CLOSED
+   *
+   * Stated plainly because the default is the unsafe direction and that is a deliberate,
+   * uncomfortable choice. Absent has to mean "the turn is over" -- a transport that mints no
+   * such signal would otherwise leave every turn open forever, which hangs a run rather than
+   * risking one. So an adapter that can leave a child running past a verdict MUST set this, and
+   * `ClaudePtyHookAdapter#apply` / `CodexPtyHookAdapter#apply` do, from the transport state they
+   * already keep (`#openTurnKey`).
+   *
+   * The one-shot adapters (`kimi.ts`, `opencode.ts`) do not, and that is correct rather than an
+   * omission: a turn there IS a process invocation, so a turn that has ended is a process that
+   * has exited and there is nothing left executing to protect.
+   */
+  transportOpen?: boolean | undefined
 }
 
 /**
@@ -158,6 +204,44 @@ export type AgentEvent =
   | TurnEndEvent
   | RevisionEvent
   | AdapterErrorEvent
+
+/**
+ * Whether this event is evidence that the CHILD produced something.
+ *
+ * Replayed events are never child output, whatever they carry. See `EventBase.replay`: the
+ * child did not just produce a record that has been sitting in the transcript for ten minutes,
+ * and this predicate is asked precisely by the readers that would mistake the two.
+ *
+ * Two callers depend on the answer and both act on it silently: `#82`'s launch diagnosis
+ * ("this turn never spoke, so suspect the model it was launched with") and the watchdog, where
+ * each true pushes the SILENCE deadline out. Getting it wrong in either direction goes
+ * unnoticed -- a false positive holds the silence clock open on a turn that has stopped and
+ * clears the model of blame it deserved; a false negative kills a turn that was working.
+ *
+ * A PREDICATE rather than a set of type tags, which is what this was. `message` carries a role
+ * and the contract permits `user`: the adapters emit assistant text today and nothing more, but
+ * that is a fact about `transcript/reconcile.ts` this month rather than anything the type
+ * system holds them to, and the tag alone cannot see the difference. A user message is the
+ * ORCHESTRATOR's own bytes coming back -- the prompt this turn was started with -- so counting
+ * it would let a turn prove it was alive by being asked a question.
+ *
+ * The complement is the interesting half. `turn_start` is an adapter announcing that it armed a
+ * clock; `revision` and `error` are an adapter reporting on itself; `turn_end` is the verdict
+ * rather than evidence for one. None of the four distinguishes a child that is working from one
+ * that has never said a word, and each can be emitted while the child is hung.
+ */
+export function isChildOutput(e: AgentEvent): boolean {
+  if (e.replay) return false
+  switch (e.type) {
+    case 'message':
+      return e.role === 'assistant'
+    case 'tool_use':
+    case 'permission_requested':
+      return true
+    default:
+      return false
+  }
+}
 
 // --- snapshot ----------------------------------------------------------------------
 
@@ -226,6 +310,20 @@ export interface SessionSnapshot {
   rewriteGeneration?: number | undefined
   /** When this snapshot was rebuilt from the transcript. */
   builtAt: number
+  /**
+   * Set when this snapshot is the last projection the view was in a position to build rather
+   * than one read just now -- the contained fallback `snapshotOrLastBuilt()` hands back when
+   * the transcript would not answer in time. Absent means the read succeeded.
+   *
+   * `builtAt` already says HOW OLD the answer is, and that is enough for a consumer deciding
+   * whether to re-ask. It is not enough for one deciding whether a number in here is EVIDENCE:
+   * a fallback is stamped from a read that did happen, so an old `builtAt` on a session nobody
+   * has prompted in a while is indistinguishable from a current one. Rotation records
+   * `compactionGeneration` as the mechanical proof that the participant lost context, and a
+   * generation carried out of a snapshot that could not be verified is a claim about the
+   * transcript nobody read. This is the flag that lets it say so instead.
+   */
+  containedFallback?: boolean | undefined
 }
 
 // --- the interface -----------------------------------------------------------------

@@ -16,6 +16,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 import type { RelayMessage } from '../relay/message.ts'
 import { fakeExchange, FakeRotationSession } from './fakeSession.ts'
+import { UNKNOWN_GENERATION } from './handoff.ts'
 import { rotate, type RotationDeps } from './rotate.ts'
 import { checkCommand, checkRelevance } from './record.ts'
 
@@ -102,6 +103,57 @@ test('the handoff carries the advisor’s narrative and the orchestrator’s rec
   assert.equal(r.handoff.compactionGeneration, 2, 'the degradation signal travels with the handoff')
 })
 
+test('a snapshot that could not be re-read records the generation as unknown, and still rotates', async () => {
+  /**
+   * The handoff is the one document nobody re-derives.
+   *
+   * `snapshot()` on both adapters is contained: a transcript that will not answer hands back the last
+   * projection the view built rather than rejecting, which is what stops a wedged transcript
+   * from stranding a session that has already been quiesced. Rotation snapshots the original
+   * right there, at quiesce, on the path most likely to meet that fallback.
+   *
+   * The turns in a fallback are as true as they were at the last read. `compactionGeneration`
+   * is a different kind of claim -- it is the mechanical evidence that the participant lost
+   * context, the reason the rotation is defensible at all -- and taking it from a read that
+   * could not be repeated records a transcript state nobody observed as though it had been
+   * checked. It is also stale in the one direction that matters: a compaction that happened
+   * while the reader was wedged is exactly what is missing from it.
+   *
+   * Recording that it is unknown does NOT abort. The decision to rotate was made before this
+   * point and on other grounds, and refusing here would leave a frozen session that only this
+   * function knows is frozen.
+   */
+  const dir = repo()
+  const old = new FakeRotationSession('old', 'claude')
+  old.compactionGeneration = 2
+  old.containedFallback = true
+  const notes: string[] = []
+
+  const r = await rotate({
+    old,
+    advisor: new FakeRotationSession('advisor', 'codex', [HANDOFF]),
+    reason: 'context exhausted',
+    deps: deps(dir, new FakeRotationSession('fresh', 'claude', [HONEST]), { note: (m) => notes.push(m) }),
+  })
+
+  assert.equal(r.status, 'rotated', 'an unverifiable signal is not a reason to strand a quiesced session')
+  if (r.status !== 'rotated') return
+  assert.equal(
+    r.handoff.compactionGeneration,
+    UNKNOWN_GENERATION,
+    'the stale 2 is not recorded as the degradation signal of the session being replaced',
+  )
+  assert.notEqual(r.handoff.compactionGeneration, 2)
+  assert.ok(
+    notes.some((n) => n.includes('unverified')),
+    `and the operator is told why, rather than finding "unknown" in a document: ${JSON.stringify(notes)}`,
+  )
+  // Everything else in the handoff is unaffected: the narrative and the record do not come
+  // from the snapshot, and the turns in a fallback are still what the last real read saw.
+  assert.equal(r.handoff.narrative.nextAction, 'Write the rollback path.')
+  assert.equal(r.handoff.record.files[0]!.path, 'work.ts')
+})
+
 test('an unparseable handoff rolls back before any replacement is started', async () => {
   // The parse happens before the start precisely so this case costs nothing: no session
   // has been created and none has been destroyed.
@@ -152,6 +204,217 @@ test('a replacement that cannot start leaves the original working', async () => 
   assert.equal(old.state, 'running')
   // The handoff survives the failure: it was authored, and the next attempt need not
   // spend another advisor turn re-deriving it.
+  assert.ok(r.handoff)
+})
+
+// --- the window between the freeze and the start ------------------------------------------
+
+/**
+ * From `quiesce()` to `startReplacement()` nothing was inside the rollback's care.
+ *
+ * A quiesced session is alive, holds everything it knew, and refuses work. That is what makes
+ * rotation a transaction -- and it is also what makes an escaped throw in this window worse
+ * than a failed rotation: the only code that knows the seat was frozen is `rotate()` itself, so
+ * a throw past its own rollback leaves a session nobody will ever unfreeze. The relay's seat is
+ * then permanently unable to accept a turn, and nothing in the run reports why.
+ *
+ * Three real things throw here. The advisor's exchange travels a transport that dies. The
+ * snapshot reads the child's transcript, and a read the view has given up on rejects rather
+ * than answering. `capture()` shells out to `git` and to the project's own checks.
+ */
+
+test('a snapshot that cannot be taken rolls back rather than leaving the original quiesced', async () => {
+  // The transcript read the view abandoned, arriving at the one caller with the most to lose.
+  // `rotate()` takes this snapshot AFTER the freeze, to carry the compaction generation into
+  // the handoff, and before this it went straight out of the function.
+  const dir = repo()
+  const old = new FakeRotationSession('old', 'claude')
+  old.snapshot = async () => {
+    throw new Error('transcript read abandoned after 10000ms without answering')
+  }
+  let started = false
+
+  const r = await rotate({
+    old,
+    advisor: new FakeRotationSession('advisor', 'codex', [HANDOFF]),
+    reason: 'context exhausted',
+    deps: deps(dir, new FakeRotationSession('fresh', 'claude', [HONEST]), {
+      startReplacement: async () => {
+        started = true
+        return new FakeRotationSession('fresh', 'claude', [HONEST])
+      },
+    }),
+  })
+
+  assert.equal(r.status, 'rolled_back')
+  if (r.status !== 'rolled_back') return
+  assert.equal(r.reason, 'handoff_not_recorded')
+  assert.ok(r.detail.includes('snapshot'), `the reason must name the stage that failed: ${r.detail}`)
+  assert.equal(started, false, 'nothing is created against a handoff that was never recorded')
+  assert.equal(old.state, 'running', 'the original is back in service, not stranded frozen')
+  assert.deepEqual(old.transitions, ['quiesced', 'running'])
+})
+
+test('an advisor whose transport dies mid-handoff rolls back', async () => {
+  // The widest part of the window: the first thing after the freeze, and a whole model turn
+  // long. `handoff_incomplete` covers an advisor that ANSWERED badly; this is one that did not
+  // answer at all, which is a different fault and used to be no result at all.
+  const dir = repo()
+  const old = new FakeRotationSession('old', 'claude')
+
+  const r = await rotate({
+    old,
+    advisor: new FakeRotationSession('advisor', 'codex', [HANDOFF]),
+    reason: 'context exhausted',
+    deps: deps(dir, new FakeRotationSession('fresh', 'claude', [HONEST]), {
+      exchange: async () => {
+        throw new Error('transport lost')
+      },
+    }),
+  })
+
+  assert.equal(r.status, 'rolled_back')
+  if (r.status !== 'rolled_back') return
+  assert.equal(r.reason, 'handoff_not_recorded')
+  assert.ok(r.detail.includes('transport lost'))
+  assert.equal(old.state, 'running')
+  assert.deepEqual(old.transitions, ['quiesced', 'running'])
+})
+
+test('the guarded window reaches all the way to the replacement’s start', async () => {
+  // The far edge of it. `afterCapture` is the last thing that happens before
+  // `startReplacement()`, and it is strictly after `capture()` inside the same block -- so a
+  // throw here rolling back is also the answer for the capture, which shells out to `git` and
+  // to the project's checks and can fail for reasons that have nothing to do with either
+  // session. There is no cheap portable way to make `capture()` itself throw: it tolerates a
+  // missing repository and a missing file by recording them as absent, which is deliberate.
+  const dir = repo()
+  const old = new FakeRotationSession('old', 'claude')
+  let started = false
+
+  const r = await rotate({
+    old,
+    advisor: new FakeRotationSession('advisor', 'codex', [HANDOFF]),
+    reason: 'context exhausted',
+    deps: deps(dir, new FakeRotationSession('fresh', 'claude', [HONEST]), {
+      startReplacement: async () => {
+        started = true
+        return new FakeRotationSession('fresh', 'claude', [HONEST])
+      },
+      hooks: {
+        afterCapture: async () => {
+          throw new Error('the barrier gave way')
+        },
+      },
+    }),
+  })
+
+  assert.equal(r.status, 'rolled_back')
+  if (r.status !== 'rolled_back') return
+  assert.equal(r.reason, 'handoff_not_recorded')
+  assert.ok(r.detail.includes('the barrier gave way'))
+  assert.equal(started, false)
+  assert.equal(old.state, 'running')
+  assert.deepEqual(old.transitions, ['quiesced', 'running'])
+})
+
+test('the guarded window reaches back to the line that merely SAYS the session was frozen', async () => {
+  /**
+   * The near edge of it, and the narrowest gap in the whole transaction: one statement.
+   *
+   * `note` is the caller's function. It writes to a REPL, a log, a stream something else may
+   * have closed, and it was called immediately after `quiesce()` with nothing around it -- so a
+   * throw from the NARRATION left the original frozen, alive, holding everything it knew, and
+   * unable to accept work, with no caller anywhere holding the knowledge that it had to be
+   * unquiesced. The same strand `handoff_not_recorded` exists to prevent, reached by the one
+   * line in the block that does no work.
+   *
+   * Only this message throws. The later notes must still be delivered normally, or the test
+   * would pass for the wrong reason.
+   */
+  const dir = repo()
+  const old = new FakeRotationSession('old', 'claude')
+  let started = false
+  const delivered: string[] = []
+
+  const r = await rotate({
+    old,
+    advisor: new FakeRotationSession('advisor', 'codex', [HANDOFF]),
+    reason: 'context exhausted',
+    deps: deps(dir, new FakeRotationSession('fresh', 'claude', [HONEST]), {
+      startReplacement: async () => {
+        started = true
+        return new FakeRotationSession('fresh', 'claude', [HONEST])
+      },
+      note: (text) => {
+        if (text.includes('quiesced')) throw new Error('the log stream is closed')
+        delivered.push(text)
+      },
+    }),
+  })
+
+  assert.equal(r.status, 'rolled_back')
+  if (r.status !== 'rolled_back') return
+  assert.equal(r.reason, 'handoff_not_recorded')
+  assert.ok(
+    r.detail.includes('the post-quiesce notification'),
+    `the stage that threw has to be nameable, or "handoff_not_recorded" says nothing: ${r.detail}`,
+  )
+  assert.ok(r.detail.includes('the log stream is closed'), r.detail)
+  assert.equal(started, false, 'nothing was created: the failure is before the advisor is even asked')
+  assert.equal(old.state, 'running')
+  assert.deepEqual(old.transitions, ['quiesced', 'running'], 'frozen and put straight back')
+  assert.deepEqual(delivered, [], 'and the run got no further: no handoff was recorded either')
+})
+
+test('a rotation that cannot BEGIN puts both sessions back', async () => {
+  /**
+   * The only failure with two live sessions in it.
+   *
+   * `beginRotation()` sits between the replacement's start and the acceptance block, and it was
+   * bare: `await old.beginRotation()`, no handler. On a real adapter that transition is
+   * announced over the same transport as everything else and can reject on a session that
+   * quiesced perfectly well a moment earlier -- and when it did, the throw left `rotate()` with
+   * the original still frozen AND the replacement running and unreferenced. Both lost at once,
+   * which is the precise shape every other rollback in this file exists to make impossible.
+   *
+   * It is also not `replacement_start_failed`: nothing is wrong with the replacement. The
+   * unhealthy session is the original, and that is what a caller deciding whether to try again
+   * needs to be told.
+   */
+  const dir = repo()
+  const old = new FakeRotationSession('old', 'claude')
+  old.beginRotationThrows = 'the pty is gone'
+  let replacement: FakeRotationSession | undefined
+
+  const r = await rotate({
+    old,
+    advisor: new FakeRotationSession('advisor', 'codex', [HANDOFF]),
+    reason: 'context exhausted',
+    deps: deps(dir, new FakeRotationSession('fresh', 'claude', [HONEST]), {
+      startReplacement: async () => {
+        replacement = new FakeRotationSession('fresh', 'claude', [HONEST])
+        return replacement
+      },
+    }),
+  })
+
+  assert.equal(r.status, 'rolled_back')
+  if (r.status !== 'rolled_back') return
+  assert.equal(r.reason, 'rotation_not_begun')
+  assert.notEqual(r.reason, 'replacement_start_failed', 'the replacement started fine; the original refused')
+  assert.ok(r.detail.includes('the pty is gone'), r.detail)
+
+  assert.equal(old.state, 'running', 'the original is back in service, not left frozen')
+  assert.deepEqual(old.transitions, ['quiesced', 'running'], 'and it never entered `rotating`')
+
+  assert.ok(replacement, 'precondition: the replacement really was started before this failed')
+  assert.equal(replacement.state, 'terminated', 'the one that was started is not left running unreferenced')
+  assert.equal(replacement.closedAs, 'abandoned', 'abandoned rather than graceful: it proved nothing')
+  assert.deepEqual(replacement.received, [], 'and it was never told anything, so nothing is half-transferred')
+
+  // The handoff is authored and captured by this point, and a retry should not have to spend
+  // another advisor turn re-deriving it.
   assert.ok(r.handoff)
 })
 
@@ -254,6 +517,75 @@ test('a check failing identically before and after is a reproduced state, not a 
   assert.equal(r.acceptance.carriedFailures[0]!.exitCode, 3)
   assert.ok(notes.some((n) => n.includes('carried forward failing')))
   assert.ok(r.handoff.narrative.evidence.includes('suite green'))
+})
+
+test('a note that throws AFTER the commit cannot undo a rotation that already happened', async () => {
+  /**
+   * The last window in the transaction, and the only one where rolling back is incoherent.
+   *
+   * Everything between the quiesce and the commit ends in a handoff or a rollback -- that is
+   * what the guarded block is for, and three tests above pin it. Past `old.close('graceful')`
+   * there is nothing to roll back TO: the original's context is given up, the replacement has
+   * proved it can reproduce the state, and the transfer is done.
+   *
+   * The reporting lines sat inside the same handler anyway. So a `note` that threw -- a REPL, a
+   * log, a stream something else had closed -- was caught by the acceptance catch, which called
+   * `rollback()`, which called `unquiesce()` on a session that had just been terminated, which
+   * throws, which escapes `rotate()`. The caller got an exception for a rotation that had
+   * SUCCEEDED, and no reference to the live replacement it was now responsible for.
+   *
+   * Only the completion message throws here. That is deliberate: it is the first line past the
+   * commit, so it proves the guard is on the near side of the window rather than somewhere
+   * later, and the carried-failure line after it proves one broken write does not silence the
+   * rest of the report.
+   */
+  const dir = repo()
+  const old = new FakeRotationSession('old', 'claude')
+  // A check that fails identically on both sides, so there is a carried-failure note to deliver
+  // after the one that throws. Without it nothing follows the completion line and "the rest of
+  // the report survives" would be untested.
+  const fresh = new FakeRotationSession('fresh', 'claude', [
+    'CHECK 1: exit 3\n\nThe suite is red, and the handoff calls it green. Flagging that.',
+  ])
+  const delivered: string[] = []
+
+  const r = await rotate({
+    old,
+    advisor: new FakeRotationSession('advisor', 'codex', [HANDOFF]),
+    reason: 'context exhausted',
+    deps: deps(dir, fresh, {
+      checks: ['exit 3'],
+      note: (text) => {
+        if (text.includes('rotation complete')) throw new Error('the log stream is closed')
+        delivered.push(text)
+      },
+    }),
+  })
+
+  assert.equal(r.status, 'rotated', 'the rotation happened, and saying so badly does not unmake it')
+  if (r.status !== 'rotated') return
+
+  // Both sessions are where a successful rotation leaves them. Under the old handler the
+  // original would have been asked to unquiesce here, from `terminated`.
+  assert.equal(old.state, 'terminated', 'the original stays committed, not dragged back')
+  assert.equal(old.closedAs, 'graceful')
+  assert.deepEqual(old.transitions, ['quiesced', 'rotating', 'terminated'])
+  assert.equal(fresh.state, 'running', 'and the replacement is live and returned to the caller')
+  assert.equal(r.replacement, fresh)
+
+  // The result is whole: a caller that has to take over this replacement gets what it needs.
+  assert.ok(r.handoff)
+  assert.equal(r.acceptance.carriedFailures.length, 1)
+
+  // One broken write, not a silenced report.
+  assert.ok(
+    delivered.some((n) => n.includes('carried forward failing')),
+    `reporting continues past the line that threw: ${JSON.stringify(delivered)}`,
+  )
+  assert.ok(
+    !delivered.some((n) => n.includes('rotation complete')),
+    'precondition: the completion message really did throw rather than being delivered',
+  )
 })
 
 test('an exchange that throws mid-acceptance does not strand the original in `rotating`', async () => {
