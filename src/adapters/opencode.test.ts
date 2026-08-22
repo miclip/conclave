@@ -189,6 +189,49 @@ test('exit 0 without a stop record is NOT a completion', async () => {
   await session.close()
 })
 
+test('a stream that ends on a tool call leaves no report, and says so rather than inventing one', async () => {
+  // The shape observed live in session 20260822-075223-56541, the first run with an OpenCode
+  // ADVISOR (#163). Three of its turns ended this way: the model's last act was a tool call,
+  // `opencode` exited 0, and no `step-finish reason=stop` ever arrived. Turns whose last act
+  // was an assistant message completed normally in the same run, so the discriminator is what
+  // the model did last, not the adapter and not the exit code.
+  //
+  // Distinct from `exit 0 without a stop record is NOT a completion` above, which filters the
+  // stop records out of a good fixture and therefore KEEPS the closing text. That is a stream
+  // that spoke and lost its terminator. This one never spoke: no closing message exists, which
+  // is why there is nothing to rebuild a report from -- the half that costs a run, and the half
+  // a verdict-only assertion cannot see.
+  const lines = readFileSync(FIXTURE, 'utf8').split('\n').filter((l) => l.trim())
+  const lastTool = lines.reduce((at, l, i) => (parseRecord(l)?.part?.type === 'tool' ? i : at), -1)
+  assert.ok(lastTool >= 0, 'the fixture must contain a tool record for this test to truncate at')
+  const { command } = stub(lines.slice(0, lastTool + 1).join('\n'), 0)
+
+  const session = await OpenCodeRunAdapter.start({ cwd: REPO, role: 'advisor', command })
+  await session.send('go', { kind: 'orchestrator' })
+  const events = await nextTurn(session)
+
+  const end = events.find((e) => e.type === 'turn_end') as TurnEndEvent
+  assert.equal(end.verdict.outcome, 'unknown_abnormal_end')
+  assert.equal(end.verdict.confidence, 'assumed', 'exit 0 is not evidence the turn finished')
+  assert.equal(end.synthesized, true, 'nothing announced this, so it is ours')
+
+  // The operator-facing half. A tool call was recorded, so the child was heard and #82 must
+  // not name the model -- but no assistant message exists, so a caller has no report and must
+  // be told that rather than handed silence dressed as a completed turn.
+  const before = events.filter((e) => e.type !== 'turn_end')
+  assert.ok(
+    before.some((e) => e.type === 'tool_use'),
+    'the child spoke -- a tool call is output, and the turn must not read as having produced nothing',
+  )
+  assert.equal(
+    before.filter((e) => e.type === 'message').length,
+    0,
+    'no closing message: this is why there is nothing to rebuild a report from',
+  )
+  assert.equal(before.at(-1)?.type, 'tool_use', 'the last thing the child did was call a tool')
+  await session.close()
+})
+
 test('per-step token accounting survives to the caller', async () => {
   const { command } = stub(readFileSync(FIXTURE, 'utf8'))
   const session = await OpenCodeRunAdapter.start({ cwd: REPO, role: 'implementer', command })
