@@ -483,3 +483,27 @@ present evidence it is a single unreproduced occurrence rather than a diagnosed 
 
 The one thing that would have settled it was never captured: what the failure actually was. If
 it appears again, keep the assertion text and the file it came from before anything else.
+
+---
+
+## #156's premise does not hold on main — the unverified-generation guards live only in the uncommitted fix-36 worktree
+
+**Subject: #156's premise does not hold on main — the unverified-generation guards live only in the uncommitted fix-36 worktree.**
+
+1. The defect shape is real on main: both PTY adapters answer `snapshot()` from a synthesized object before the transcript view exists (`src/adapters/claude.ts:1274-1286`, `src/adapters/codex.ts:708-720`), carrying `compactionGeneration: 0` with nothing distinguishing "not looked" from "looked, none". But the guards the issue says it passes — `containedFallback`, `UNKNOWN_GENERATION` at `rotate.ts:407`, the `#considerRotation` withholding — exist only as uncommitted work in the fix-36 worktree (`containedFallback` appears in no ref; `git grep` on main finds neither symbol). The issue was filed against that state.
+
+2. Every consumer of a snapshot's `compactionGeneration` on main, and whether a pre-view snapshot can reach it:
+
+   - `#considerRotation` (`src/relay/relay.ts:4373`, plus downstream `#acknowledge`/`#answeredByReplacement` at `4536/4581/4604/4639/4646`): runs only after a completed implementer turn (`relay.ts:7034`). A completed first turn means Codex's `SessionStart` hook already delivered `transcript_path` (`codex.ts:366-376`); Claude's view is created at boot (`claude.ts:806-819`). Cannot observe pre-view — and would be inert anyway, since `baselineGeneration` starts at 0 (`relay.ts:2180`) and `assess()` would see no delta.
+
+   - `runReport` (`src/relay/report.ts:274-284`): reachable — a never-prompted Codex participant is snapshotted pre-view and the report records 0. But a session that never received a turn has no context and nothing to compact, so a verified read would also return 0; the report is descriptive, nothing acts on it, and it already carries the documented permanent-0 limitation from `KimiPrintAdapter`/`OpenCodeRunAdapter` (`kimi.ts:727`, `opencode.ts:709`).
+
+   - `rotateSeat` (`src/rotation/rotate.ts:311-324`): reachable — both adapters initialize `#state = 'running'` (`claude.ts:1080`, `codex.ts:600`), so rotating an idle never-prompted Codex seat records `handoff.compactionGeneration: 0` from a pre-view snapshot. On main that field is written once and read nowhere in production (`handoff.ts:56` is the definition; only tests read it). Dead data unless an external embedder reads it — and again the value equals what a verified read of a never-prompted session would produce.
+
+   - Snapshot reads at `src/workspace/sessionRecord.ts:1309` and `relay.ts:3525-3571` consume only `snap.turns`; unaffected.
+
+   **Conclusion:** there is no live misstatement of fact on main today. What is missing is provenance — a 0 meaning "not looked" is indistinguishable from "looked, none" — and no consumer on main acts on that distinction.
+
+3. The falsifier answer, recorded for whoever lands fix-36: there, `containedFallback` is documented as "this snapshot is the last projection the view was in a position to build rather than one read just now" — a STALE-read marker, set when a bounded transcript read fails and a prior verified projection is served. "No view yet" is a NEVER-read: no projection exists and none ever did. Flagging the pre-view returns with it folds a second, distinct condition into the flag — a widening, not a restatement. If fix-36 does that, its contract doc must say the flag now covers both, and the guard comments (which reason about a fallback of a prior read) must be re-checked against a case with no prior read.
+
+4. No behaviour change was made; #156 stays open.
