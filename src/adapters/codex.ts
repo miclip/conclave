@@ -311,10 +311,34 @@ export class CodexPtyHookAdapter implements AgentSession {
       if (turn && !turn.produced) {
         turn.produced = true
         turn.tracker.observeLaunch({ produced: true })
+      } else if (!turn) {
+        // The child spoke before its own UserPromptSubmit reached us.
+        //
+        // Defensive here, unlike on Claude where it is the observed bug (#82). Codex 0.147.0
+        // cannot lose this race: `config/templates/codex-hooks.json` declares the hook
+        // `async: false`, `hook_runtime.rs::inspect_pending_input` awaits
+        // `run_user_prompt_submit`, and `turn.rs::run_hooks_and_record_inputs` has returned
+        // before sampling can produce the tool call a `PermissionRequest` reports. So the
+        // submit is delivered first by construction -- of that version, which is a fact about
+        // a CLI we do not own and cannot pin.
+        //
+        // Dropping it is not neutral. It is the difference between "this turn produced
+        // nothing, so the model it was launched with is a suspect" and the opposite, so
+        // losing the race would make conclave blame a model for a turn that spoke.
+        this.#producedBeforeTurn = true
       }
     }
     this.#events.push(e)
   }
+
+  /**
+   * A child-output event arrived with no live turn to attribute it to.
+   *
+   * Consumed by the next turn this session opens, once. Not a queue: what matters is only
+   * whether the child has spoken at all, and a second early event says nothing the first
+   * did not.
+   */
+  #producedBeforeTurn = false
 
   #newTracker(): TurnVerdictTracker {
     return new TurnVerdictTracker({
@@ -367,6 +391,11 @@ export class CodexPtyHookAdapter implements AgentSession {
           endSeq: undefined,
           assistantText: undefined,
           produced: false,
+        }
+        if (this.#producedBeforeTurn) {
+          this.#producedBeforeTurn = false
+          turn.produced = true
+          turn.tracker.observeLaunch({ produced: true })
         }
         this.#turns.set(String(key), turn)
         this.#order.push(String(key))

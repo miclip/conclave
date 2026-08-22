@@ -350,3 +350,38 @@ test('codex: a first turn that produced NOTHING names the model it was launched 
     await session.close()
   }
 })
+
+test('codex: a turn that spoke and then went quiet is not blamed on its model', async () => {
+  // The Codex half of the same distinction, and the control for the test above it.
+  //
+  // Also the watchdog on the adapter's latch: ORCH_FAKE_SPEAK posts the speech BEFORE the
+  // submit and awaits it, so the early event is recorded while no turn exists to hold it.
+  // Codex 0.147.0 orders its own hooks and would pass this without the latch; a Codex that
+  // stops doing so fails here rather than in a verdict nobody reads.
+  process.env['ORCH_FAKE_SPEAK'] = '1'
+  const session = await CodexPtyHookAdapter.start({
+    cwd: RUN,
+    role: 'implementer',
+    args: ['-c', 'model=gpt-5-imaginary'],
+    watchdogMs: WATCHDOG_MS,
+    readyTimeoutMs: 20_000,
+  })
+  try {
+    await session.send('speak then hang', { kind: 'orchestrator' })
+    const events = await collect(session, (e) => endOf(e) !== undefined, 10_000)
+    assert.ok(
+      events.some((e) => e.type === 'permission_requested'),
+      'the fake CLI must actually have spoken, or this proves nothing',
+    )
+    const end = endOf(events)
+    assert.equal(end?.verdict.outcome, 'timed_out', 'it still times out; only the diagnosis differs')
+    assert.equal(launchCaveat(end), undefined, 'a turn that emitted and stopped must not blame the launch')
+
+    const snap = await session.snapshot()
+    const turn = snap.turns.find((t) => String(t.key) === String(end?.turnKey))
+    assert.equal(turn?.state, 'timed_out', 'snapshot() must agree with what events() said')
+  } finally {
+    delete process.env['ORCH_FAKE_SPEAK']
+    await session.close()
+  }
+})
