@@ -1652,6 +1652,9 @@ export class ClaudePtyHookAdapter implements AgentSession {
         guarantees: this.guarantees,
         compactionGeneration: 0,
         builtAt: Date.now(),
+        // No view means no read has EVER happened here, which the guards must not mistake for a
+        // read that found nothing. `compactionGeneration: 0` below is synthesized, not observed.
+        containedFallback: true,
       }
     }
     // Contained, not bounded. This is the session contract's snapshot: the report, the seat

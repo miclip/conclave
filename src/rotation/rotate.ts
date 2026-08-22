@@ -406,7 +406,10 @@ export async function rotate(opts: {
      */
     const generation = snap.containedFallback ? UNKNOWN_GENERATION : snap.compactionGeneration
     if (snap.containedFallback) {
-      note('compaction generation unverified: the snapshot is a contained fallback, not a fresh read')
+      // Says only what is true of BOTH conditions the flag now covers: nothing was read just
+      // now. A stale projection was read earlier; a never-read never was, and calling that a
+      // "fallback" would name a prior read it does not have.
+      note('compaction generation unverified: nothing in this snapshot was read just now')
     }
     stage = 'the repository capture'
     const record = capture({

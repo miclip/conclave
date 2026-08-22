@@ -4447,7 +4447,9 @@ export class Relay {
     // and its absence would mean "never looked".
     this.rotationWatch.assessments += 1
     // NOT gated on `unverified`. This is a high-water mark of what has been observed, not an
-    // input to a decision, and the number in a fallback was read at some point -- the generation
+    // input to a decision. A stale fallback's number was read at some point; a NEVER-read's was
+    // not, and is a synthesized zero -- which is safe here only because zero cannot raise a
+    // high-water mark. It would not be safe in anything that averaged or counted. The generation
     // only ever rises (`reconcile.ts` takes `max(0, ...)` fresh markers), so the peak cannot be
     // overstated by a stale reading. An operator seeing a peak here with no candidate against it
     // is seeing exactly the condition the note below explains.

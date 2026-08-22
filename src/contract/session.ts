@@ -311,9 +311,21 @@ export interface SessionSnapshot {
   /** When this snapshot was rebuilt from the transcript. */
   builtAt: number
   /**
-   * Set when this snapshot is the last projection the view was in a position to build rather
-   * than one read just now -- the contained fallback `snapshotOrLastBuilt()` hands back when
-   * the transcript would not answer in time. Absent means the read succeeded.
+   * Set when the numbers in this snapshot are not evidence: nothing here was read just now.
+   * TWO conditions reach it, and they are not the same shape.
+   *
+   *   A STALE projection -- the contained fallback `snapshotOrLastBuilt()` hands back when the
+   *   transcript would not answer in time. A read DID happen, earlier, and `builtAt` says when.
+   *
+   *   A NEVER read -- the adapter has no view at all, so `snapshot()` synthesizes an empty one.
+   *   No read has ever happened, `builtAt` is the moment of synthesis rather than of any
+   *   observation, and `compactionGeneration: 0` means "not looked" rather than "looked, none".
+   *
+   * The second was added after the first: a consumer that cannot tell an unread number from a
+   * verified one will believe a synthesized zero, and both guards below already refuse a
+   * flagged number, so folding it here is what makes the never-read safe. Anything reasoning
+   * about WHEN the underlying read happened must therefore check `turns` rather than assume
+   * one occurred. Absent still means the read succeeded.
    *
    * `builtAt` already says HOW OLD the answer is, and that is enough for a consumer deciding
    * whether to re-ask. It is not enough for one deciding whether a number in here is EVIDENCE:
