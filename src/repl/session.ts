@@ -817,6 +817,44 @@ export async function runSession(opts: SessionOptions): Promise<number> {
   }
 
   /**
+   * What stops the run, and what each seat is measured against — resolved ONCE, above the dry
+   * run, for the banner and the plan both.
+   *
+   * They were resolved inline in the `banner(...)` call below, which a dry run never reaches,
+   * so the console's plan could only have carried them by resolving them a second time. Two
+   * resolutions of one run is the failure `dryRunPlan.ts` exists to prevent -- and it would be
+   * the worse version of it here, because the second copy would live in the branch nobody
+   * watches run. Hoisted instead: the plan and the banner read the same two objects, and a
+   * change to either resolution reaches both or neither.
+   *
+   * Neither reads the lock, spawns anything or writes anything. `boundOf` and
+   * `effectiveCeilings` are arithmetic over options, and `resolveDeadlines` reads the registry
+   * entries for seats already resolved above, so moving them up moves nothing observable
+   * across the dry run's boundary.
+   */
+  const runCeilings = effectiveCeilings({
+    // Resolved through `boundOf`, the same reader the loop uses, rather than printed straight
+    // off `opts.rounds`. The two agree today because `maxAdvisorTurns: opts.rounds` is two
+    // hundred lines below -- and a banner that quoted the option while the loop quoted the
+    // resolution would be the same silent disagreement #119 is about, one layer up.
+    advisorTurns: boundOf({ maxAdvisorTurns: opts.rounds }),
+    ...(opts.ceilings ? { ceilings: opts.ceilings } : {}),
+  })
+  // The same seats handed to `Relay.start` below, read through the same registry, resolved
+  // by the same function the relay's own `deadlines` getter delegates to. The banner cannot
+  // ask the relay -- it does not exist yet -- so agreement is made structural instead of
+  // asserted: there is one precedence, and both callers go through it.
+  const runDeadlines = resolveDeadlines({
+    requestedAbsoluteMs: opts.turnWatchdogMs,
+    requestedSilenceMs: opts.silenceWatchdogMs,
+    seats: [leadSpec, ...implSpecs, ...(reviewerSpec ? [reviewerSpec] : [])].map((spec) => ({
+      id: spec.id,
+      agent: spec.agent,
+      declared: registry.get(spec.agent).deadlines,
+    })),
+  })
+
+  /**
    * Resolved everything, started nothing — the last point at which that is still true.
    *
    * Everything above is resolution (#130) or reads that leave nothing behind: the project
@@ -855,6 +893,10 @@ export async function runSession(opts: SessionOptions): Promise<number> {
       seatsNamed: opts.implementers !== undefined,
       ...(reviewerSpec ? { reviewer: { agent: reviewerSpec.agent, args: reviewerSpec.args ?? [] } } : {}),
       checks: opts.checks,
+      // The objects the banner prints from, not a second resolution for the plan's benefit.
+      // See the two consts above.
+      ceilings: runCeilings,
+      deadlines: runDeadlines,
     })) {
       write(line)
     }
@@ -881,23 +923,8 @@ export async function runSession(opts: SessionOptions): Promise<number> {
       // off `opts.rounds`. The two agree today because `maxAdvisorTurns: opts.rounds` is two
       // hundred lines below -- and a banner that quoted the option while the loop quoted the
       // resolution would be the same silent disagreement #119 is about, one layer up.
-      ceilings: effectiveCeilings({
-        advisorTurns: boundOf({ maxAdvisorTurns: opts.rounds }),
-        ...(opts.ceilings ? { ceilings: opts.ceilings } : {}),
-      }),
-      // The same seats handed to `Relay.start` below, read through the same registry, resolved
-      // by the same function the relay's own `deadlines` getter delegates to. The banner cannot
-      // ask the relay -- it does not exist yet -- so agreement is made structural instead of
-      // asserted: there is one precedence, and both callers go through it.
-      deadlines: resolveDeadlines({
-        requestedAbsoluteMs: opts.turnWatchdogMs,
-        requestedSilenceMs: opts.silenceWatchdogMs,
-        seats: [leadSpec, ...implSpecs, ...(reviewerSpec ? [reviewerSpec] : [])].map((spec) => ({
-          id: spec.id,
-          agent: spec.agent,
-          declared: registry.get(spec.agent).deadlines,
-        })),
-      }),
+      ceilings: runCeilings,
+      deadlines: runDeadlines,
     }),
   )
   if (opts.checks.length === 0) {
@@ -2113,7 +2140,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
       // FALSIFIER, stated because it is the strongest argument against this shape: the
       // console has no general "trailing text is a message" rule and does not gain one here.
       // `/rotate <text>` and `/abort <text>` consume their text as a REASON
-      // (`src/repl/session.ts:2166`, `src/repl/session.ts:2199`) and `/pause`, `/queue`, `/audit` ignore
+      // (`src/repl/session.ts:2193`, `src/repl/session.ts:2226`) and `/pause`, `/queue`, `/audit` ignore
       // whatever follows them. So an operator who learns this from `/continue` and carries
       // it to `/pause I'll be back` still loses the sentence. That inconsistency is not
       // repaired by making `/continue` a third behaviour; it is narrowed by it, and the

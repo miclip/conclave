@@ -12,7 +12,7 @@
  */
 
 import { ceilingSummary, type RunCeilings } from '../relay/guardrails.ts'
-import { silenceSummary, type RunDeadlines } from '../relay/deadlines.ts'
+import { absoluteSummary, silenceSummary, type RunDeadlines } from '../relay/deadlines.ts'
 import type { CheckSpec } from '../rotation/record.ts'
 
 export interface Style {
@@ -231,10 +231,13 @@ export function banner(opts: {
    * The banner prints before any seat is launched, so it is `resolveDeadlines` -- the function
    * `Relay.deadlines` itself delegates to -- that makes the two agree by construction.
    *
-   * Only silence, and only here. The absolute clock has been reportable since `--turn-timeout`
-   * shipped and is in the run report per seat; what was missing at LAUNCH was any statement
-   * that a seat has no silence clock at all -- a seat that can go quiet forever and produce no
-   * verdict, which is the reading worth having before there is work to lose.
+   * BOTH clocks, one line each. Silence came first and was argued for alone, on the grounds
+   * that the absolute clock had been reportable since `--turn-timeout` shipped -- which was
+   * true of the run report and `status --json` and false of the launch, because both of those
+   * describe a run that already exists. So an operator who mistyped the number, or who seated
+   * an adapter running no absolute clock, found out from a turn rather than from this banner.
+   * That is the same gap the silence line closed, and it is closed on the same terms: named
+   * per seat, with `unsupported` printed rather than omitted.
    */
   deadlines: RunDeadlines
 }): string {
@@ -253,9 +256,12 @@ export function banner(opts: {
     `        ${dim('you')} · ${cyan(`advisor ${opts.advisor}`)} · ${green(`implementer ${opts.implementer}`)}`,
     `        ${dim(opts.cwd)}`,
     `        ${dim('ceilings:')} ${ceilingSummary(opts.ceilings)}`,
-    // One space more than the labels either side of it: `ceilings:` and `rotation:` are nine
-    // characters and this is eight, so without the pad its value starts a column left of theirs
-    // and the three lines stop reading as a block.
+    // The two clocks, absolute first, because that is the order they are declared in and the
+    // order `resolveDeadlines` reports them. Both padded to the column `ceilings:` and
+    // `rotation:` set: those labels are nine characters, `turn:` is five and `silence:` is
+    // eight, so without the pad each value would start a column left of theirs and the block
+    // would stop reading as one.
+    `        ${dim('turn:')}     ${absoluteSummary(opts.deadlines)}`,
     `        ${dim('silence:')}  ${silenceSummary(opts.deadlines)}`,
     `        ${dim('rotation:')} ${rotation}`,
     '',

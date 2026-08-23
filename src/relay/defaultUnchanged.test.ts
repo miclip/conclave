@@ -688,7 +688,7 @@ const DECLARED: Record<string, string> = {
     'The sentence is repaired rather than left standing, on this entry’s own rule. Everything ' +
     'else above is still true: the three readings, the wording, the event count as an input, and ' +
     'the pause menu’s `wait` option, which still asks reportsChildOnCpu. No assertion in this ' +
-    'file was relaxed; one citation moved with the code it pins (src/repl/session.ts:1344-1345). ' +
+    'file was relaxed; one citation moved with the code it pins (src/repl/session.ts:1371-1372). ' +
     'Covered in src/outcomes/liveness.test.ts on the reported numbers, and end to end through ' +
     'the console’s refusal path in src/repl/session.test.ts.',
   'a paused run keeps measuring the child, and its evidence says when it was measured (#101)':
@@ -1629,9 +1629,70 @@ const DECLARED: Record<string, string> = {
     'the field is optional, as it must be -- and `--turn-timeout` reaching a console option ' +
     'that did not exist, compiling, and doing nothing for its whole life is the standing ' +
     'example of what that costs (src/repl/session.ts:258-270).',
+  'the launch surfaces name the absolute cap, and the dry-run plan carries what bounds the run (#162)':
+    'NO FLAG IS ADDED on either front-end, no default moves, and nothing about how a run is '
+    + 'measured changes: `--turn-timeout`, `--silence-timeout`, `--rounds` and the four ceiling '
+    + 'flags parse and resolve exactly as they did, through the same `effectiveCeilings` and '
+    + '`resolveDeadlines`. What changes is what a default run SAYS, on three surfaces, which is '
+    + 'why it is declared. '
+    + '(1) THE LAUNCH SURFACES gain a `turn:` line beside the `silence:` line, on the console '
+    + 'banner and on the relay launch output. The silence line was argued for alone on the '
+    + 'grounds that the absolute clock had been reportable per seat since `--turn-timeout` '
+    + 'shipped -- true of the run report and of `status --json`, and false of the launch, '
+    + 'because both of those describe a run that already exists. So an operator who mistyped '
+    + 'the number, or who seated an adapter declaring `absolute: {supported: false}`, learned '
+    + 'it from a turn that ran to the wrong bound or never stopped waiting. Same shape as the '
+    + 'silence line: seats named individually, `unsupported` printed rather than omitted, and '
+    + 'both lines rendered by one function (`clockSummary`) so the pair cannot word one '
+    + 'resolution two ways. '
+    + 'ON A RELAY DRY RUN THE PREAMBLE SUPPRESSES ALL THREE, because the plan below it prints '
+    + 'the same three from the same two objects. Printing both said each bound twice, three '
+    + 'lines apart, in two column alignments -- and the second copy buys nothing, since the '
+    + 'two blocks are rendered from one resolution and cannot disagree, which is precisely '
+    + 'what a reader comparing them cannot tell by looking. The console never had the '
+    + 'duplicate (`runSession` returns above its banner), so suppressing is also what makes '
+    + 'the two commands\' dry runs read alike. A REAL relay launch keeps the preamble: it '
+    + 'prints no plan, so those lines are the only place any of it appears. '
+    + '(2) THE DRY-RUN PROSE gains three lines -- `ceilings:`, `turn:`, `silence:` -- on BOTH '
+    + 'front-ends, from the one shared renderer, and they are the whole reason this is not '
+    + 'merely a banner change. The plan described who would be launched and with what '
+    + 'arguments, which is the half an operator could work out from their own argv, and said '
+    + 'nothing about the half they could not: what ends the run, and whether the seats they '
+    + 'chose run the clocks they configured. `session` has no `--json` at all, so for a console '
+    + 'operator these lines are the only place any of it appears. '
+    + '(3) THE DRY-RUN JSON gains `ceilings` and `deadlines`, APPENDED after every key it has '
+    + 'carried since `--dry-run` shipped, so a reader parsing the old document reads the same '
+    + 'values in the same order and finds two more keys after them. They are the `RunCeilings` '
+    + 'and `RunDeadlines` blocks VERBATIM -- field for field what `status --json` and the run '
+    + 'report already write -- rather than a dry-run-shaped flattening, so diffing a plan '
+    + 'against the status of the run it planned compares values instead of serializers. '
+    + 'The dry-run report shape is separate from the status document and stays separate: they '
+    + 'answer different questions (what WOULD run, what IS running) and share the two blocks '
+    + 'that mean the same thing in both. '
+    + 'REQUIRED, NOT OPTIONAL, on `DryRunPlanInput`. An optional key would let one front-end '
+    + 'omit what the other prints while both stayed green, which is the failure `dryRunPlan.ts` '
+    + 'exists to prevent; the compiler refuses it instead. Both front-ends pass the objects '
+    + 'their own launch surface prints from -- relay hoists `runDeadlines` beside the '
+    + '`runCeilings` it already hoisted, and `runSession` hoists both above its dry-run return '
+    + '-- so no plan resolves anything a second time for its own benefit. '
+    + 'ONE DIVERGENCE IS EXPOSED RATHER THAN INTRODUCED, and it is worth the record: the two '
+    + 'commands default `--rounds` differently, 4 on relay and 8 on the console, so a plan '
+    + 'built from an invocation that names no budget reports different ceilings on each. '
+    + 'The parity test names `--rounds` rather than being arranged around the gap. Whether the '
+    + 'defaults should agree is a separate decision and is not taken here. '
+    + 'No assertion in this file was relaxed: the flag sets, the report keys and the status '
+    + 'keys are untouched, because none of them changed. Covered in '
+    + 'src/relay/dryRunBounds.test.ts (configured and unset values, and the per-seat '
+    + 'enforced/disabled/unsupported resolution, all read off the parsed payload), in '
+    + 'src/relay/frontEndParity.test.ts (the prose, line for line, from both front-ends) and '
+    + 'in src/repl/session.test.ts (the banner line, on a run whose advisor lacks the clock '
+    + 'its implementer has). The single-occurrence count is asserted over every output sink in '
+    + 'write order rather than over stdout, with a real launch as the control -- a fix that '
+    + 'moved one copy to stderr, or that deleted the plan lines instead of the preamble ones, '
+    + 'passes a stdout-only count and fails both.',
 }
 
-test('DECLARED contains exactly the routing, pause-resolution, attribution, ceiling-flag, seat-flag, seat-status, launch-record, flag-reader, integration-check, per-seat-rotation, reviewer, resume-guard, mixed-liveness, timestamped-liveness, model-validation, executable-preflight, compaction-survival, rotation-reporting, send-precondition, process-tree-liveness, ceiling-reporting, record-heartbeat, rotation-intent, console-dry-run, flag-reconciliation, paused-time, advisor-targeting and silence-timeout entries', () => {
+test('DECLARED contains exactly the routing, pause-resolution, attribution, ceiling-flag, seat-flag, seat-status, launch-record, flag-reader, integration-check, per-seat-rotation, reviewer, resume-guard, mixed-liveness, timestamped-liveness, model-validation, executable-preflight, compaction-survival, rotation-reporting, send-precondition, process-tree-liveness, ceiling-reporting, record-heartbeat, rotation-intent, console-dry-run, flag-reconciliation, paused-time, advisor-targeting, silence-timeout and launch-bounds entries', () => {
   assert.deepEqual(Object.keys(DECLARED), [
     'implementer_unanswered -> advisor',
     'status.pause.resolution',
@@ -1662,6 +1723,7 @@ test('DECLARED contains exactly the routing, pause-resolution, attribution, ceil
     'the duration ceiling counts active run time, and the report says how long the run was paused (#112)',
     'whether the advisor used the assignment syntax, in the run report and in status --json (#79)',
     '--silence-timeout on both front-ends',
+    'the launch surfaces name the absolute cap, and the dry-run plan carries what bounds the run (#162)',
   ])
 })
 
@@ -1854,7 +1916,7 @@ async function seatsFromSessionCli(): Promise<{ creates: CreateRecord[]; cwd: st
  * The two machine-readable documents a default run actually emits.
  *
  * Both come out of one `relay --json` run in a temporary repository, through the production
- * call sites: the report is what `bin/conclave.ts:1526` prints, and the status record is what
+ * call sites: the report is what `bin/conclave.ts:1564` prints, and the status record is what
  * `recordSession` wrote during that same run, read back by `main(['status', '--json'])` --
  * which resolves the most recent session in `process.cwd()`, so the record has to have been
  * written where an operator would look for it.
@@ -1899,7 +1961,7 @@ async function defaultRunDocuments(): Promise<{ report: unknown; status: unknown
  * blind to that subtree is claiming more than it checks.
  *
  * Built through the real recorder: `recordSession` is what both front-ends call, and
- * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:1344-1345
+ * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:1371-1372
  * with the same object -- a `RunPause` the run handle raised, not one written here. Read back
  * through `main(['status', '--json'])`, so the serialisation and the reconciliation against
  * the pid are the production ones.
@@ -2195,7 +2257,7 @@ async function provoke(
  * The status document of a run paused for one given reason.
  *
  * Built through the real recorder: `recordSession` is what both front-ends call, and
- * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:1344-1345
+ * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:1371-1372
  * with the same object -- a `RunPause` the relay raised, not one written here. Read back
  * through `main(['status', '--json'])`, so the serialisation and the reconciliation against
  * the pid are the production ones.
@@ -2215,7 +2277,7 @@ async function pausedStatusDocument(reason: PauseReason): Promise<unknown> {
     goal: 'a default goal',
     front: 'session',
     startedAt: Date.now(),
-    // Passed because the console always passes one (src/repl/session.ts:1057), so the status
+    // Passed because the console always passes one (src/repl/session.ts:1084), so the status
     // documents this file pins differ only in what a pause actually changes.
     logPath: join(repo, '.conclave', 'runs', 'session-test.ndjson'),
     build: 'test',
@@ -2399,7 +2461,7 @@ test('default run works in the run cwd and creates no worktree', async () => {
     assert.equal(c.cwd, fromCli.cwd, `the session CLI must create ${c.id} in the run cwd`)
   }
 
-  // The relay CLI passes process.cwd() as the run cwd: bin/conclave.ts:1434-1436.
+  // The relay CLI passes process.cwd() as the run cwd: bin/conclave.ts:1472-1474.
   // The relay hands that same cwd to each participant adapter: src/relay/relay.ts:2153-2159.
   // The cwd getter simply returns the option: src/relay/relay.ts:1876-1878.
   assert.match(relay, /cwd:\s*process\.cwd\(\)/, 'relay block must start in process.cwd')

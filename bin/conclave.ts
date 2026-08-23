@@ -34,7 +34,7 @@ import { reportedTargeting } from '../src/relay/targeting.ts'
 import { dryRunPlan, dryRunPlanLines, type DryRunPlanInput } from '../src/relay/dryRunPlan.ts'
 import { RunLogWriter, readRunLog, runLogExists } from '../src/relay/resume.ts'
 import { ceilingSummary, ceilingsFrom, effectiveCeilings, preflightRefusals } from '../src/relay/guardrails.ts'
-import { resolveDeadlines, silenceSummary } from '../src/relay/deadlines.ts'
+import { absoluteSummary, resolveDeadlines, silenceSummary } from '../src/relay/deadlines.ts'
 import { ensureCodexHooksTrusted } from '../src/deployment/ensureTrust.ts'
 import type { ReadSession } from '../src/workspace/sessionRecord.ts'
 import { execFileSync, spawn } from 'node:child_process'
@@ -1061,6 +1061,12 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
       maxQueueDepth: flag('max-queue-depth', ''),
       maxConcurrentSeats: flag('max-concurrent-seats', ''),
     })
+    // Read once, because two things consult it: the launch preamble, which is suppressed when
+    // the plan is about to say the same lines, and the short-circuit that prints the plan.
+    // Spelled as an `includes` over `rest` because that is the form `frontEndParity.test.ts`
+    // scans for -- a flag read in a shape the guard cannot see is a flag that quietly leaves
+    // the compared surface.
+    const isDryRun = rest.includes('--dry-run')
     const runCeilings = effectiveCeilings({
       advisorTurns: boundOf({ maxAdvisorTurns: Number(flag('rounds', '4')) }),
       ...(ceilings ? { ceilings } : {}),
@@ -1301,33 +1307,59 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
     // uncommitted insertions that survived only because a human was watching. The flag typed
     // was valid and the flag meant was absent, so nothing anywhere could have said so. This
     // line could have, before any work existed to lose.
-    say(`  ceilings: ${ceilingSummary(runCeilings)}`)
+    //
+    // NOT PRINTED ON A DRY RUN, and neither are the two deadline lines below it. The plan
+    // prints the same three, from the same objects, through the renderer both front-ends
+    // share -- so a relay dry run that printed the preamble too would say each of them twice,
+    // three lines apart, in slightly different column alignment. Which is worse than noise: an
+    // operator comparing two near-identical blocks has to check whether they agree, and the
+    // answer is that they cannot disagree, which is exactly what the reader cannot tell by
+    // looking. The console has never had the duplicate -- `runSession` returns above its
+    // banner -- so suppressing here is also what makes the two commands' dry runs read alike.
+    //
+    // A REAL LAUNCH KEEPS THEM. It prints no plan, so these lines are the only place any of it
+    // appears, and they are the reading #119 is about: told before there is work to lose.
+    if (!isDryRun) say(`  ceilings: ${ceilingSummary(runCeilings)}`)
 
     // Beside the ceilings line, above rotation, for the reason the ceilings line gives: these
     // are the lines that describe the LAUNCH, and a policy an operator is told about before
-    // any work exists is one they can still change for free. What this adds that the ceilings
-    // line cannot is the per-seat word `unsupported` -- a seat whose adapter runs no silence
-    // clock produces NO verdict when it goes quiet, and an operator who assumed otherwise waits
-    // on a timeout that is not coming.
+    // any work exists is one they can still change for free. What these add that the ceilings
+    // line cannot is the per-seat word `unsupported` -- a seat whose adapter runs no clock
+    // produces NO verdict when that clock's condition is met, and an operator who assumed
+    // otherwise waits on a timeout that is not coming.
+    //
+    // BOTH clocks, absolute first. Only silence was printed here at first, on the grounds that
+    // `--turn-timeout` had been reportable since it shipped; it was reportable in the run
+    // report and in `status --json`, which are documents of a run that already exists, and
+    // there is nothing to change for free by the time either is written.
     //
     // Resolved by `resolveDeadlines` from the specs this command just validated, through the
     // same registry and the same precedence `Relay.deadlines` uses -- so the line printed here
     // and the block in the run report cannot be two different answers.
-    say(
-      `  silence:  ${silenceSummary(
-        resolveDeadlines({
-          ...(flag('turn-timeout', '') ? { requestedAbsoluteMs: Number(flag('turn-timeout', '')) * 1000 } : {}),
-          ...(flag('silence-timeout', '')
-            ? { requestedSilenceMs: Number(flag('silence-timeout', '')) * 1000 }
-            : {}),
-          seats: [leadSpec, ...implSpecs, ...(reviewerSpec ? [reviewerSpec] : [])].map((spec) => ({
-            id: spec.id,
-            agent: spec.agent,
-            declared: registry.get(spec.agent).deadlines,
-          })),
-        }),
-      )}`,
-    )
+    //
+    // Bound to a const rather than resolved inline, because the dry-run plan below needs the
+    // SAME answer and a second `resolveDeadlines` call beside it would be two resolutions of
+    // one run -- the exact failure `dryRunPlan.ts` exists to prevent, reintroduced one level
+    // above the module that prevents it. `runCeilings` is hoisted for the same reason four
+    // hundred lines up.
+    const runDeadlines = resolveDeadlines({
+      ...(flag('turn-timeout', '') ? { requestedAbsoluteMs: Number(flag('turn-timeout', '')) * 1000 } : {}),
+      ...(flag('silence-timeout', '')
+        ? { requestedSilenceMs: Number(flag('silence-timeout', '')) * 1000 }
+        : {}),
+      seats: [leadSpec, ...implSpecs, ...(reviewerSpec ? [reviewerSpec] : [])].map((spec) => ({
+        id: spec.id,
+        agent: spec.agent,
+        declared: registry.get(spec.agent).deadlines,
+      })),
+    })
+    // Suppressed on a dry run with the ceilings line above, and for the reason given there.
+    // The RESOLUTION is not suppressed -- `runDeadlines` is built either way, because the plan
+    // is handed this object rather than resolving its own.
+    if (!isDryRun) {
+      say(`  turn:     ${absoluteSummary(runDeadlines)}`)
+      say(`  silence:  ${silenceSummary(runDeadlines)}`)
+    }
 
     say(
       checks.length > 0
@@ -1335,7 +1367,7 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
         : '  rotation NOT armed — no --checks, so degradation escalates instead of rotating',
     )
 
-    if (rest.includes('--dry-run')) {
+    if (isDryRun) {
       // Everything above this line is resolution: config read, checks parsed, args composed.
       // Nothing below it is, so this is the last point at which nothing has been spawned.
       //
@@ -1357,6 +1389,12 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
         // `reviewer` key it never had a reason to carry.
         ...(reviewerSpec ? { reviewer: { agent: reviewerSpec.agent, args: reviewerSpec.args ?? [] } } : {}),
         checks,
+        // The same two objects the launch lines above were printed from, and the same ones
+        // `Relay.start` is handed below -- not a re-resolution for the plan. A dry run's whole
+        // claim is that the plan is the run, and a plan that resolved its own ceilings would be
+        // making that claim about numbers nothing else in this block had seen.
+        ceilings: runCeilings,
+        deadlines: runDeadlines,
       }
       if (asJson) {
         console.log(JSON.stringify(dryRunPlan(plan), null, 2))

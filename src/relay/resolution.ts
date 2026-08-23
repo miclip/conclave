@@ -173,7 +173,7 @@ export interface ResolutionConfig {
    * `--checks` IS the operator pre-delegating rotation authority, by supplying the
    * verification method that makes the decision mechanical: without it the console says a
    * degraded implementer "escalates to you rather than being replaced"
-   * (`src/repl/session.ts:907`) and the run reports `rotation: NOT ARMED (no checks
+   * (`src/repl/session.ts:934`) and the run reports `rotation: NOT ARMED (no checks
    * configured)` (`src/relay/relay.ts:2972`).
    */
   rotationArmed: boolean

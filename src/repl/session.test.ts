@@ -2896,6 +2896,77 @@ test('the banner says what each seat’s silence clock resolved to, including th
   assert.ok(rotationAt > silenceAt, 'and before the rotation line')
 })
 
+test('the banner says what each seat’s absolute cap resolved to, beside the silence line', async () => {
+  // The other clock, and the last launch surface that was silent about it. The argument for
+  // printing only silence was that `--turn-timeout` had been reportable per seat since the
+  // report block was written -- true of the run REPORT and of `status --json`, and both of
+  // those are documents of a run that already exists. Before the run there was nothing, so an
+  // operator who mistyped the number, or who seated an adapter running no absolute clock at
+  // all, learned it from a turn that ran to the wrong bound or never stopped waiting.
+  //
+  // The mixed pairing again, and inverted from the silence test on purpose: here it is the
+  // IMPLEMENTER that has the clock and the advisor that does not, so a line that reported the
+  // silence resolution twice under two labels would fail rather than read plausibly.
+  const dir = repo()
+  const out = collect()
+  await runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'claude',
+    rounds: 3,
+    checks: [],
+    turnWatchdogMs: 600_000,
+    registry: registryOf(
+      {
+        codex: [new FakeRotationSession('advisor', 'codex', ['Do it.', 'DONE'])],
+        claude: [new FakeRotationSession('impl', 'claude', ['ack', 'Did it.'])],
+      },
+      undefined,
+      {
+        codex: { absolute: { supported: false }, silence: { supported: true } },
+        claude: { absolute: { supported: true }, silence: { supported: true } },
+      },
+    ),
+    input: script([]),
+    output: out.stream,
+  })
+  const text = out.text()
+  const line = text.split('\n').find((l) => l.includes('turn:'))
+  assert.ok(line, `the banner must carry a turn line; it said:\n${text}`)
+
+  // What was asked of the absolute clock, named by the flag that asks it.
+  assert.match(line, /--turn-timeout 600s/)
+  // And what each seat did with the request, including the seat it could not reach.
+  assert.match(line, /advisor unsupported/)
+  assert.match(line, /implementer 600s/)
+
+  // The silence line is still its own line and still says what IT resolved to. One line
+  // reporting both clocks would have to pick a number per seat, and the two are different
+  // questions rather than two precisions of one.
+  const silence = text.split('\n').find((l) => l.includes('silence:'))
+  assert.ok(silence, 'the silence line must survive the absolute one arriving beside it')
+  assert.match(silence, /--silence-timeout unset/)
+  // `off`, not `unsupported`: these doubles declare the silence clock and no default for it,
+  // and this run asked for nothing. A clock the seat HAS and this run left off is a different
+  // fact from one it does not have, and the advisor is `unsupported` on the line above and
+  // `off` on this one -- which is the pair that would collapse if either line were rendered
+  // from the other's field.
+  assert.match(silence, /advisor off/)
+  assert.match(silence, /implementer off/)
+
+  // Between the ceilings line and the rotation line, with silence: the same placement
+  // argument the ceilings line makes, and the same block an operator reads before there is
+  // work to lose.
+  const ceilingsAt = text.indexOf('ceilings:')
+  const turnAt = text.indexOf('turn:')
+  const silenceAt = text.indexOf('silence:')
+  const rotationAt = text.indexOf('rotation:')
+  assert.ok(ceilingsAt > 0 && turnAt > ceilingsAt, 'the turn line comes after the ceilings line')
+  assert.ok(silenceAt > turnAt, 'before the silence line -- absolute first, as declared')
+  assert.ok(rotationAt > silenceAt, 'and the pair sits above the rotation line')
+})
+
 test('a refusal to continue re-samples, so it can lift', async () => {
   // The deadlock. The first version matched the liveness line in `pause.evidence` — a string
   // captured when the pause was RAISED — so the check deciding "is it safe NOW" was made

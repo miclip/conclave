@@ -389,6 +389,29 @@ test('both front-ends describe the same plan, line for line, from one invocation
     'npm test',
     '--checks-informational',
     'npm run lint',
+    // NAMED rather than defaulted, and this is the one argument in the list that has to be.
+    // The plan reports what stops the run, and the two commands DEFAULT that differently --
+    // `relay` to 4 advisor turns and `session` to 8 -- so a plan built from an invocation
+    // that did not say would differ here for a reason that is nothing to do with the
+    // rendering this test is about. What is compared is one invocation resolved twice; the
+    // defaults diverging is a separate fact about the two front-ends and needs its own
+    // decision, not a line-for-line comparison quietly arranged to hide it.
+    '--rounds',
+    '6',
+    // A ceiling too, and one whose value travels a different route on each side: `relay`
+    // builds `runCeilings` from `ceilingsFrom` in its own block, the console builds
+    // `SessionOptions.ceilings` there and resolves it inside `runSession`. Two routes to one
+    // line is exactly what this file exists to compare, and without a ceiling set the line
+    // would read `none` on both sides whether or not either route works.
+    '--max-turns',
+    '40',
+    // Both clocks, configured, against seats declared with none of them (`NO_DEADLINE_CLOCKS`
+    // in `knownAgents` above). So the plan's two deadline lines carry a request that reached
+    // nothing -- the case the lines exist for -- and both front-ends must say so identically.
+    '--turn-timeout',
+    '900',
+    '--silence-timeout',
+    '300',
     '--dry-run',
   ]
 
@@ -451,6 +474,14 @@ test('both front-ends describe the same plan, line for line, from one invocation
     '  implementer: opencode --auto --print --model a',
     '  implementer-2: opencode --auto --print --model b',
     '  reviewer   : opencode --auto -q',
+    // What stops the run and what each seat is measured against, resolved by each front-end
+    // from its own block and rendered here identically. The deadline lines say `unsupported`
+    // four times against a request of 900s and 300s, which is a resolution neither command
+    // could have arrived at from the argv alone -- it comes from the registry, through
+    // `resolveDeadlines`, on both sides.
+    '  ceilings:    --rounds 6 · --max-turns 40 · --max-minutes none · --max-queue-depth none · --max-concurrent-seats none',
+    '  turn:        --turn-timeout 900s — advisor unsupported · implementer unsupported · implementer-2 unsupported · reviewer unsupported',
+    '  silence:     --silence-timeout 300s — advisor unsupported · implementer unsupported · implementer-2 unsupported · reviewer unsupported',
     '  checks:      npm test [required], npm run lint [informational]',
     '  goal:        a goal both front-ends resolve identically',
   ])

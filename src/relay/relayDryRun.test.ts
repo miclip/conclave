@@ -439,8 +439,20 @@ test('the relay dry run returns above every side effect the command has', () => 
   assert.ok(start > 0 && end > start, 'the relay command block must be locatable')
   const block = src.slice(start, end)
 
-  const returns = block.indexOf("if (rest.includes('--dry-run')) {")
+  // `isDryRun` rather than the `rest.includes('--dry-run')` this used to look for. The flag is
+  // read once into a const now, because the launch preamble consults it too -- it suppresses
+  // the three bounds lines the plan is about to print -- and a second `includes` beside the
+  // first is the kind of duplicate that drifts. Asserted UNIQUE for the same reason the calls
+  // below are: a second short-circuit on the same flag would satisfy the comparisons while
+  // being the thing they rule out. The `if (!isDryRun)` guards above it do not match this
+  // spelling, which is what keeps the pin on the return rather than on the first guard.
+  const returns = block.indexOf('if (isDryRun) {')
   assert.ok(returns > 0, 'the dry-run block must be locatable in the relay command')
+  assert.equal(
+    returns,
+    block.lastIndexOf('if (isDryRun) {'),
+    'the dry-run short-circuit must appear once, or every comparison below it lies',
+  )
 
   for (const [call, what] of [
     ['applyBypassFlag(', 'a permission mode is written into the project'],

@@ -180,22 +180,55 @@ function clockText(c: DeadlineClock): string {
 }
 
 /**
- * The SILENCE policy, as one line at launch.
+ * One clock, as one line: the flag that sets it, what was asked of it, and what each seat
+ * resolved to.
  *
- * Only the silence clock, because only it is new here and a launch line that restated both
- * would double in width to repeat what `--turn-timeout` has said since it shipped. The full
- * pair, per seat, is in the run report and in `status --json`; this is the reading an operator
- * needs BEFORE the work exists to lose it -- which is the same argument the ceilings line makes
- * three lines above it.
+ * Both public summaries below are this function with a different flag name and a different
+ * field read off each participant, because the two lines sit next to each other wherever
+ * either appears -- the launch banner, and the dry-run plan -- and a reader comparing them is
+ * comparing the numbers, not the punctuation. Two formatters would eventually differ in the
+ * separator, the word for "nobody asked", or whether an unsupported seat is named at all, and
+ * the last of those is the one that matters.
  *
  * Seats are named individually rather than collapsed when they agree, and `unsupported` is
  * printed rather than omitted. Both follow `ceilingSummary`: a line that listed only the seats
- * with something to say would be silent exactly on the run where a seat has NO silence clock,
- * and that seat -- one that can go quiet forever and produce no verdict at all -- is the one an
- * operator most needs to see named.
+ * with something to say would be silent exactly on the run where a seat has NO clock, and that
+ * seat -- one that can go quiet forever and produce no verdict at all -- is the one an operator
+ * most needs to see named.
+ */
+function clockSummary(
+  flag: string,
+  askedMs: number | null,
+  d: RunDeadlines,
+  of: (p: ParticipantDeadlines) => DeadlineClock,
+): string {
+  const asked = askedMs === null ? 'unset' : secs(askedMs)
+  const seats = d.participants.map((p) => `${p.id} ${clockText(of(p))}`).join(' · ')
+  return seats ? `${flag} ${asked} — ${seats}` : `${flag} ${asked}`
+}
+
+/**
+ * The SILENCE policy, as one line at launch.
+ *
+ * The full pair, per seat, is in the run report and in `status --json`; this is the reading an
+ * operator needs BEFORE the work exists to lose it -- which is the same argument the ceilings
+ * line makes three lines above it.
  */
 export function silenceSummary(d: RunDeadlines): string {
-  const asked = d.configuredSilenceMs === null ? 'unset' : secs(d.configuredSilenceMs)
-  const seats = d.participants.map((p) => `${p.id} ${clockText(p.silence)}`).join(' · ')
-  return seats ? `--silence-timeout ${asked} — ${seats}` : `--silence-timeout ${asked}`
+  return clockSummary('--silence-timeout', d.configuredSilenceMs, d, (p) => p.silence)
+}
+
+/**
+ * The ABSOLUTE policy, the same way, and the half the launch surfaces used to leave out.
+ *
+ * The argument for omitting it was that `--turn-timeout` has been reportable since it shipped
+ * and a launch line restating both would double in width. That was wrong about where it was
+ * reportable: the run report and `status --json` carry it, and BOTH are documents of a run that
+ * already exists. Before the run there was nothing -- so an operator who mistyped
+ * `--turn-timeout`, or who seated an adapter that runs no absolute clock at all, learned it
+ * from a turn that ran to the wrong bound or never stopped waiting. That is the same failure
+ * the silence line was added for, one clock over, and the width is worth it.
+ */
+export function absoluteSummary(d: RunDeadlines): string {
+  return clockSummary('--turn-timeout', d.configuredAbsoluteMs, d, (p) => p.absolute)
 }

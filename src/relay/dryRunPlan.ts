@@ -18,6 +18,8 @@
  * showing as a blank field.
  */
 
+import { absoluteSummary, silenceSummary, type RunDeadlines } from './deadlines.ts'
+import { ceilingSummary, type RunCeilings } from './guardrails.ts'
 import type { CheckSpec } from '../rotation/record.ts'
 
 /** One implementer seat, as it would be launched. */
@@ -54,6 +56,32 @@ export interface DryRunPlanInput {
   /** Opt-in (#72). Absent means no reviewer seat and no `reviewer` key. */
   reviewer?: { agent: string; args: string[] } | undefined
   checks: CheckSpec[]
+  /**
+   * What would stop the run, already resolved by `effectiveCeilings`.
+   *
+   * REQUIRED, not optional, and that is the whole of the guarantee. Every other field here is
+   * something a front-end has; this is something a front-end could compute and forget to, and
+   * an optional key would let one of them omit it while both tests and the plan stayed green.
+   * A dry run whose plan is silent about the bound that ends the run is #119 with the extra
+   * insult of having been asked -- the operator typed the command whose entire purpose is to
+   * say what would happen, and it did not say.
+   *
+   * Passed in rather than derived here for the reason the whole module exists: `relay` reads
+   * `--rounds` and the ceiling flags in its CLI block and the console reads them through
+   * `SessionOptions`, so a resolution performed HERE would be a third one, able to disagree
+   * with the two that are actually handed to `Relay.start`.
+   */
+  ceilings: RunCeilings
+  /**
+   * What each seat would be measured against, already resolved by `resolveDeadlines`.
+   *
+   * Both clocks and every seat, including the seats that resolve to `unsupported`. Required
+   * for the same reason as `ceilings`, and with one more of its own: `unsupported` is a fact
+   * no amount of correct typing can change, so it is the one line of a plan an operator cannot
+   * derive from their own argv. A plan that omitted it would be accurate about everything the
+   * operator already knew and silent about the only part they could not have worked out.
+   */
+  deadlines: RunDeadlines
 }
 
 /** A check as the plan reports it: relevance is always explicit, never implied by shape. */
@@ -85,6 +113,17 @@ export function dryRunPlan(input: DryRunPlanInput): Record<string, unknown> {
       : {}),
     ...(input.reviewer ? { reviewer: input.reviewer } : {}),
     checks: normalizedChecks(input.checks),
+    // Appended, after every key this document has carried since `--dry-run` shipped, so a
+    // reader parsing the old shape reads the same values in the same order and finds two more
+    // keys after them.
+    //
+    // The BLOCKS VERBATIM, not a flattening: these are the same `RunCeilings` and
+    // `RunDeadlines` objects `status --json` and the run report write, field for field, so an
+    // operator can diff a plan against the status of the run it planned and have the
+    // difference mean something. A dry-run-shaped rearrangement of the same numbers would make
+    // that diff a comparison of two serializers.
+    ceilings: input.ceilings,
+    deadlines: input.deadlines,
   }
 }
 
@@ -117,6 +156,20 @@ export function dryRunPlanLines(input: DryRunPlanInput): string[] {
   if (input.reviewer) {
     lines.push(`  reviewer   : ${seatLine(input.reviewer.agent, input.reviewer.args)}`)
   }
+  // What would stop the run, and what each seat would be measured against, in the order the
+  // launch banner prints them: the run-wide bound, then the two per-seat clocks, then the
+  // rotation line (`checks`, here). Same three summaries the banner calls, so the plan and the
+  // banner of the run it describes cannot word the same resolution two ways.
+  //
+  // Each value NAMES ITS FLAG -- `--rounds`, `--max-turns`, `--turn-timeout`,
+  // `--silence-timeout` -- rather than restating the label as a field name. The reader is an
+  // operator deciding whether what they typed took effect, which is the argument
+  // `ceilingSummary` makes and the reason #119 was invisible: `--rounds 8 · --max-turns 40` is
+  // three words that show the budget raised was not the budget meant, and `advisor turns: 8`
+  // is not.
+  lines.push(`  ceilings:    ${ceilingSummary(input.ceilings)}`)
+  lines.push(`  turn:        ${absoluteSummary(input.deadlines)}`)
+  lines.push(`  silence:     ${silenceSummary(input.deadlines)}`)
   const checks = normalizedChecks(input.checks)
   lines.push(
     `  checks:      ${
