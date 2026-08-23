@@ -362,7 +362,7 @@ export interface RunOutcome {
  * `undefined` when the run is ended out from under it — and that absence is deliberately not a
  * third `Decision`. See `pauseAt` for the argument.
  */
-export type Decision = { kind: 'continue'; force?: boolean | undefined } | { kind: 'abort'; detail: string }
+export type Decision = { kind: 'continue' } | { kind: 'abort'; detail: string }
 
 /**
  * What the handle is allowed to do to the relay.
@@ -571,15 +571,8 @@ export class RunHandle {
   }
 
   /** Resume from a pause. Throws if the run is not paused — silence would be worse. */
-  async continue(force?: boolean): Promise<void> {
-    this.#release({ kind: 'continue', force })
-  }
-
-  /** The decision that released the last pause, for callers that need to know whether it was forced. */
-  #lastDecision: Decision | undefined
-
-  lastDecision(): Decision | undefined {
-    return this.#lastDecision
+  async continue(): Promise<void> {
+    this.#release({ kind: 'continue' })
   }
 
   /**
@@ -722,7 +715,6 @@ export class RunHandle {
     this.#decide = undefined
     this.#pause = undefined
     this.#state = 'running'
-    this.#lastDecision = d
     // Before the loop is let go, so no part of the interval that follows can be charged to the
     // suspension. `abort` comes through here too and closes the ledger the same way.
     this.#resumeClock()

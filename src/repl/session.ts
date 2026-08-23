@@ -1410,7 +1410,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
         return
       }
     }
-    await run.continue(runOpts.force)
+    await run.continue()
     wake()
   }
 
