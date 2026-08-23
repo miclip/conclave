@@ -18,7 +18,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        # Every platform `release.yml` PACKAGES, so a platform-specific failure is found on a
+        # branch rather than on a tag. v0.5.3 shipped with no binaries because `macos-15-intel`
+        # was packaged but never tested: its slower runner blew a timing bound that ubuntu and
+        # macos-arm64 both passed, the package job failed, and the gated release job never ran
+        # (#169). Keep this list equal to that matrix.
+        os: [ubuntu-latest, macos-latest, macos-15-intel]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4

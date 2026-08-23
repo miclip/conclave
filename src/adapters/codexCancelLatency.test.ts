@@ -101,14 +101,28 @@ const ABSOLUTE_MS = 300_000
  * scheduling hiccup is larger than the quantity under test, at which point the bounds stop
  * being able to fail and the file passes without checking anything.
  *
- * The factor is set so the lease lands on 60ms, the same one `containedSnapshot.test.ts` uses,
- * which leaves 15ms of slack. That is not a guess: measured over six concurrent runs of this
- * file, the first test came in 1-3ms off its expected 129ms and the second landed at 149-153ms
- * inside a 126-169.5ms window. The jitter these bounds have to absorb is about 3ms and they are
- * given 15 -- a real margin, and still tight enough that a regression in any of the three
- * quantities moves elapsed straight through it.
+ * The factor lands the lease on 3s. An earlier version put it on 60ms, calibrated against six
+ * concurrent runs on one machine where the jitter measured 1-3ms against 15ms of slack. That
+ * calibration was local, and the paragraph above predicted what happened next: on the
+ * `macos-15-intel` runner -- which `release.yml` packages and `ci.yml` does not test -- the same
+ * test came in at 183ms against an expected 129ms, and the release shipped with no binaries
+ * (#169).
+ *
+ * The overhead that broke it is roughly constant: it is the code around the sleeps, not the
+ * sleeps, which are wall-clock and take the same time everywhere. So the fix is not more slack
+ * at the same scale -- a slack wide enough to absorb 54ms would also swallow a whole extra
+ * lease, and the bounds would stop being able to fail. It is a scale at which that constant is
+ * small. At 60ms it was most of the quantity; at 3s it is under 2%, while a regression still
+ * costs a whole 3s lease and clears the 750ms slack four times over.
+ *
+ * The second test needs it more than the first, and for a different reason: it places its switch
+ * half a poll interval before the budget, which at the old scale was 2.25ms. No CI machine
+ * places anything to 2ms. It is now 112ms.
+ *
+ * The cost is about 14s of suite time. Calibrate against the SLOWEST platform that packages, not
+ * the fastest one that develops.
  */
-const SCALE = 60 / READ_LEASE_MS
+const SCALE = 3_000 / READ_LEASE_MS
 
 /** The view's read lease for these sessions. Production is `READ_LEASE_MS`. */
 const LEASE_MS = READ_LEASE_MS * SCALE
