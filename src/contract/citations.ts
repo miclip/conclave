@@ -40,6 +40,9 @@ export const REPO = join(import.meta.dirname, '..', '..')
 /** Scanned for citations. */
 export const SOURCE_ROOTS = ['src', 'bin']
 
+/** Scanned for live-claim sections. */
+export const DOCS_ROOTS = ['docs']
+
 /**
  * The two files that carry citations as DATA rather than as claims.
  *
@@ -173,6 +176,61 @@ export const CITED: Record<string, string> = {
   // checkable rather than a claim about code nobody re-reads.
   "src/repl/session.ts:2193": "if (word === '/rotate') {",
   "src/repl/session.ts:2226": "if (word === '/abort') {",
+
+  // Live-claim section in docs/NOTES.md: #156's premise and the unverified-generation guards.
+  // These citations assert current fact in a section marked `## LIVE:`, so they are checked even
+  // though the rest of docs/** is frozen design record.
+  'src/adapters/claude.ts:1644-1657': 'containedFallback: true,',
+  'src/adapters/codex.ts:1205-1218': 'containedFallback: true,',
+  'src/rotation/rotate.ts:484':
+    'const generation = snap.containedFallback ? UNKNOWN_GENERATION : snap.compactionGeneration',
+  'src/relay/relay.ts:4361': 'async #considerRotation(',
+  'src/relay/relay.ts:4584-4588':
+    "      // RETIRED session's, and acknowledging it against the replacement would hand a session at\n" +
+    "      // generation 0 a baseline of 1.\n" +
+    "      return replaced\n" +
+    "        ? this.#answeredByReplacement(impl, snap.compactionGeneration)\n" +
+    "        : this.#acknowledge(impl, snap.compactionGeneration)",
+  'src/relay/relay.ts:4629-4633':
+    "      // As above (#128): `snap` describes the session that was in the seat when the question was\n" +
+    "      // put, and the operator may have answered it by replacing that session.\n" +
+    "      return replaced\n" +
+    "        ? this.#answeredByReplacement(impl, snap.compactionGeneration)\n" +
+    "        : this.#acknowledge(impl, snap.compactionGeneration)",
+  'src/relay/relay.ts:4655': 'return this.#acknowledge(impl, snap.compactionGeneration)',
+  'src/relay/relay.ts:4686-4696':
+    "        detail:\n" +
+    "          `rotation could not be accepted and ROTATION IS NOT THE REMEDY: ${result.detail} ` +\n" +
+    "          `${impl.id} is back in service and no further rotation will be attempted this run.`,\n" +
+    "        evidence: [\n" +
+    "          ...verdict.evidence,\n" +
+    "          ...(result.evidence ?? []),\n" +
+    "          'the original implementer is back in service',\n" +
+    "          'a replacement cannot demonstrate itself while the transport it would demonstrate over is not working',\n" +
+    "        ],\n" +
+    "      })\n" +
+    "      return halted ?? this.#acknowledge(impl, (await impl.session.snapshot()).compactionGeneration)",
+  'src/relay/relay.ts:4700-4703':
+    "      detail: `rotation failed (${result.reason}): ${result.detail}`,\n" +
+    "      evidence: [...verdict.evidence, 'the original implementer is back in service'],\n" +
+    "    })\n" +
+    "    return halted ?? this.#acknowledge(impl, (await impl.session.snapshot()).compactionGeneration)",
+  'src/relay/relay.ts:7091':
+    'const rotated = await this.#considerRotation(seat, report.prose, handle)',
+  'src/adapters/codex.ts:556-562': 'this.#view = new TranscriptSessionView({',
+  'src/adapters/claude.ts:1025-1029': 'this.#view = new TranscriptSessionView({',
+  'src/relay/relay.ts:2156':
+    'const p: RelayParticipant = { id: spec.id, agent: spec.agent, rank, role: spec.role, launch, session, events: [], baselineGeneration: 0, degradationCursor: 0 }',
+  'src/relay/report.ts:274-284': 'const snap = await p.session.snapshot()',
+  'src/adapters/kimi.ts:727': 'compactionGeneration: 0,',
+  'src/adapters/opencode.ts:709': 'compactionGeneration: 0,',
+  'src/rotation/rotate.ts:412': 'export async function rotate(',
+  'src/adapters/claude.ts:1429': "#state: SessionState = 'running'",
+  'src/adapters/codex.ts:1013': "#state: SessionState = 'running'",
+  'src/rotation/handoff.ts:74': 'compactionGeneration: CompactionGeneration',
+  'src/workspace/sessionRecord.ts:1356-1359': 'snap.turns.map(',
+  'src/relay/relay.ts:3526':
+    "const unsettled = snap.turns.at(-1)?.state === 'in_progress'",
 }
 
 /**
@@ -274,6 +332,35 @@ export function sourceFiles(): string[] {
   return out.map((p) => relative(REPO, p)).filter((p) => !SELF.has(p))
 }
 
+/** Walk `docs/**` for `.md` files and return citations inside `## LIVE:` sections. */
+export function docsLiveClaimCitations(root: string = REPO): Found[] {
+  const out: Found[] = []
+  const walk = (dir: string): void => {
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      const p = join(dir, e.name)
+      if (e.isDirectory()) walk(p)
+      else if (e.name.endsWith('.md')) {
+        const file = relative(root, p)
+        let inLive = false
+        readFileSync(p, 'utf8')
+          .split('\n')
+          .forEach((line, i) => {
+            if (/^##\s+/.test(line)) {
+              inLive = /^##\s+LIVE:\s+/.test(line)
+            }
+            if (inLive) {
+              for (const c of citationsInLine(line)) {
+                out.push({ cite: c.text, path: c.path, start: c.start, end: c.end, at: `${file}:${i + 1}` })
+              }
+            }
+          })
+      }
+    }
+  }
+  for (const docsRoot of DOCS_ROOTS) walk(join(root, docsRoot))
+  return out
+}
+
 export function allCitations(): Found[] {
   const out: Found[] = []
   for (const file of sourceFiles()) {
@@ -285,6 +372,7 @@ export function allCitations(): Found[] {
         }
       })
   }
+  out.push(...docsLiveClaimCitations())
   return out
 }
 

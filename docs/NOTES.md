@@ -486,21 +486,21 @@ it appears again, keep the assertion text and the file it came from before anyth
 
 ---
 
-## #156's premise does not hold on main — the unverified-generation guards live only in the uncommitted fix-36 worktree
+## LIVE: #156's premise does not hold on main — the unverified-generation guards live only in the uncommitted fix-36 worktree
 
 **Subject: #156's premise does not hold on main — the unverified-generation guards live only in the uncommitted fix-36 worktree.**
 
-1. The defect shape is real on main: both PTY adapters answer `snapshot()` from a synthesized object before the transcript view exists (`src/adapters/claude.ts:1274-1286`, `src/adapters/codex.ts:708-720`), carrying `compactionGeneration: 0` with nothing distinguishing "not looked" from "looked, none". But the guards the issue says it passes — `containedFallback`, `UNKNOWN_GENERATION` at `rotate.ts:407`, the `#considerRotation` withholding — exist only as uncommitted work in the fix-36 worktree (`containedFallback` appears in no ref; `git grep` on main finds neither symbol). The issue was filed against that state.
+1. The defect shape is real on main: both PTY adapters answer `snapshot()` from a synthesized object before the transcript view exists (`src/adapters/claude.ts:1644-1657`, `src/adapters/codex.ts:1205-1218`), carrying `compactionGeneration: 0` with nothing distinguishing "not looked" from "looked, none". But the guards the issue says it passes — `containedFallback`, `UNKNOWN_GENERATION` at `src/rotation/rotate.ts:484`, the `#considerRotation` withholding — exist only as uncommitted work in the fix-36 worktree (`containedFallback` appears in no ref; `git grep` on main finds neither symbol). The issue was filed against that state.
 
 2. Every consumer of a snapshot's `compactionGeneration` on main, and whether a pre-view snapshot can reach it:
 
-   - `#considerRotation` (`src/relay/relay.ts:4373`, plus downstream `#acknowledge`/`#answeredByReplacement` at `4536/4581/4604/4639/4646`): runs only after a completed implementer turn (`relay.ts:7034`). A completed first turn means Codex's `SessionStart` hook already delivered `transcript_path` (`codex.ts:366-376`); Claude's view is created at boot (`claude.ts:806-819`). Cannot observe pre-view — and would be inert anyway, since `baselineGeneration` starts at 0 (`relay.ts:2180`) and `assess()` would see no delta.
+   - `#considerRotation` (`src/relay/relay.ts:4361`, plus downstream `#acknowledge`/`#answeredByReplacement` at `src/relay/relay.ts:4584-4588, :4629-4633, :4655, :4686-4696, :4700-4703`): runs only after a completed implementer turn (`src/relay/relay.ts:7091`). A completed first turn means Codex's `SessionStart` hook already delivered `transcript_path` (`src/adapters/codex.ts:556-562`); Claude's view is created at boot (`src/adapters/claude.ts:1025-1029`). Cannot observe pre-view — and would be inert anyway, since `baselineGeneration` starts at 0 (`src/relay/relay.ts:2156`) and `assess()` would see no delta.
 
-   - `runReport` (`src/relay/report.ts:274-284`): reachable — a never-prompted Codex participant is snapshotted pre-view and the report records 0. But a session that never received a turn has no context and nothing to compact, so a verified read would also return 0; the report is descriptive, nothing acts on it, and it already carries the documented permanent-0 limitation from `KimiPrintAdapter`/`OpenCodeRunAdapter` (`kimi.ts:727`, `opencode.ts:709`).
+   - `runReport` (`src/relay/report.ts:274-284`): reachable — a never-prompted Codex participant is snapshotted pre-view and the report records 0. But a session that never received a turn has no context and nothing to compact, so a verified read would also return 0; the report is descriptive, nothing acts on it, and it already carries the documented permanent-0 limitation from `KimiPrintAdapter`/`OpenCodeRunAdapter` (`src/adapters/kimi.ts:727`, `src/adapters/opencode.ts:709`).
 
-   - `rotateSeat` (`src/rotation/rotate.ts:311-324`): reachable — both adapters initialize `#state = 'running'` (`claude.ts:1080`, `codex.ts:600`), so rotating an idle never-prompted Codex seat records `handoff.compactionGeneration: 0` from a pre-view snapshot. On main that field is written once and read nowhere in production (`handoff.ts:56` is the definition; only tests read it). Dead data unless an external embedder reads it — and again the value equals what a verified read of a never-prompted session would produce.
+   - `rotate` (`src/rotation/rotate.ts:412`): reachable — both adapters initialize `#state = 'running'` (`src/adapters/claude.ts:1429`, `src/adapters/codex.ts:1013`), so rotating an idle never-prompted Codex seat records `handoff.compactionGeneration: 0` from a pre-view snapshot. On main that field is written once and read nowhere in production (`src/rotation/handoff.ts:74` is the definition; only tests read it). Dead data unless an external embedder reads it — and again the value equals what a verified read of a never-prompted session would produce.
 
-   - Snapshot reads at `src/workspace/sessionRecord.ts:1309` and `relay.ts:3525-3571` consume only `snap.turns`; unaffected.
+   - Snapshot reads at `src/workspace/sessionRecord.ts:1356-1359` and `src/relay/relay.ts:3526` consume only `snap.turns`; unaffected.
 
    **Conclusion:** there is no live misstatement of fact on main today. What is missing is provenance — a 0 meaning "not looked" is indistinguishable from "looked, none" — and no consumer on main acts on that distinction.
 

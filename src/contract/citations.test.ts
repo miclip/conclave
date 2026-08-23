@@ -33,10 +33,10 @@
  * most-cited documentation in the tree unenforced. The cost is that fixture data mentioning a
  * `path:line` is caught too; there are two, and they are named in `NOT_CITATIONS` with why.
  *
- * `docs/**` is deliberately out of scope. Those files carry ~150 more citations, most of them
- * bare filenames (`relay.ts:1818`) that no root resolves, and the design records among them are
- * snapshots of a decision rather than claims about today. Enforcing them is a separate piece of
- * work with a separate answer to "what should a frozen document cite".
+ * `docs/**` is deliberately out of scope for frozen design records, which carry ~150 more
+ * citations, most of them bare filenames (`relay.ts:1818`) that no root resolves. Sections
+ * marked `## LIVE:` are now scanned because they assert current fact and their citations must
+ * not rot silently; the frozen records around them stay as they are.
  *
  * The registry and the scanner live in `citations.ts`, because `scripts/fix-citations.ts` needs
  * both and a second copy of a parser is the failure `439cf05` is about. What stays here is the
@@ -44,7 +44,7 @@
  */
 
 import { strict as assert } from 'node:assert'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -55,6 +55,7 @@ import {
   allCitations,
   citationFault,
   citationsInLine,
+  docsLiveClaimCitations,
   exemptKey,
   planRepairs,
   relocate,
@@ -117,6 +118,50 @@ test('the registry and its fixtures are not scanned as sources', () => {
   assert.ok(!files.includes('src/contract/citations.ts'), 'the registry is not a source')
   assert.ok(!files.includes('src/contract/citations.test.ts'), 'nor are its fixtures')
   assert.ok(files.includes('src/relay/relay.ts'), 'and the tree it guards still is')
+})
+
+test('the scanner only enforces citations inside docs `## LIVE:` sections', () => {
+  // Frozen design records in docs/** are intentionally out of scope. The guard must still catch
+  // live claims, which are marked by a `## LIVE:` heading and end at the next sibling `## `.
+    const root = mkdtempSync(join(tmpdir(), 'conclave-citations-docs-'))
+    try {
+      const docs = join(root, 'docs')
+      mkdirSync(docs)
+      const liveFile = join(docs, 'live.md')
+    writeFileSync(
+      liveFile,
+      [
+        '# Frozen document',
+        '',
+        '## Frozen: a section that is not live',
+        'This is a frozen claim `src/relay/relay.ts:1`.',
+        '',
+        '## LIVE: a section that asserts current fact',
+        'This is a live claim `src/relay/relay.ts:2`.',
+        '',
+        '### A subsection does not exit the live section',
+        'Still live, so `src/relay/relay.ts:3` is enforced too.',
+        '',
+        '## Another frozen section',
+        'Not live again `src/relay/relay.ts:4`.',
+        '',
+      ].join('\n'),
+    )
+
+    const found = docsLiveClaimCitations(root)
+      .filter((c) => c.at.startsWith('docs/live.md'))
+      .sort((a, b) => a.start - b.start)
+    assert.deepEqual(
+      found.map((c) => ({ cite: c.cite, at: c.at })),
+      [
+        { cite: 'src/relay/relay.ts:2', at: 'docs/live.md:7' },
+        { cite: 'src/relay/relay.ts:3', at: 'docs/live.md:10' },
+      ],
+      'only the live section and its subsection are returned',
+    )
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
 })
 
 test('the scanner sees both citation forms, so neither can be added unnoticed', () => {
