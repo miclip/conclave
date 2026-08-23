@@ -34,6 +34,7 @@ import { reportedTargeting } from '../src/relay/targeting.ts'
 import { dryRunPlan, dryRunPlanLines, type DryRunPlanInput } from '../src/relay/dryRunPlan.ts'
 import { RunLogWriter, readRunLog, runLogExists } from '../src/relay/resume.ts'
 import { ceilingSummary, ceilingsFrom, effectiveCeilings, preflightRefusals } from '../src/relay/guardrails.ts'
+import { resolveDeadlines, silenceSummary } from '../src/relay/deadlines.ts'
 import { ensureCodexHooksTrusted } from '../src/deployment/ensureTrust.ts'
 import type { ReadSession } from '../src/workspace/sessionRecord.ts'
 import { execFileSync, spawn } from 'node:child_process'
@@ -170,6 +171,7 @@ Commands:
                  [--max-turns N] [--max-minutes N] [--max-queue-depth N]
                  [--max-concurrent-seats N] [--strict-goal] [--operator agent]
                  [--bypass [agent]] [--detach] [--turn-timeout SECONDS]
+                 [--silence-timeout SECONDS]
                                    Run a two-agent session unattended and print the
                                    routing log. --json prints a structured record of the
                                    run on stdout instead — outcome, per-turn verdicts with
@@ -269,8 +271,26 @@ Commands:
                                    in progress, which is not evidence it ended -- and is
                                    reported timed_out. Raise --turn-timeout if your turns
                                    are legitimately longer than that.
+                                   --silence-timeout SECONDS moves the QUIET clock -- the 12
+                                   minutes above -- and leaves the whole-turn one alone. It is
+                                   usually the one you want: a child that stopped working
+                                   stopped writing, so silence is what a real hang trips
+                                   first, and lowering it shortens the wait a hang costs
+                                   without shortening the budget a long BUSY turn gets.
+                                   Substantive child output pushes it out; nothing the
+                                   adapter says about itself does.
+                                   Accepted on every seat, honoured only where the adapter
+                                   has such a clock: Kimi and OpenCode have none, and a run
+                                   mixing them with Claude or Codex applies it to the seats
+                                   that can and reports the others as unsupported rather than
+                                   refusing the flag or claiming a deadline that will never
+                                   fire. unsupported means a seat that goes quiet forever
+                                   produces NO verdict, which is worth reading before you
+                                   wait on one.
                                    What each seat ended up on is in the --json report under
-                                   deadlines, per participant.
+                                   deadlines, per participant -- configuredSilenceMs is what
+                                   you asked for, null if you asked for nothing, and each
+                                   participant's silence block is what that seat resolved to.
                                    Every pause point ENDS the run, because a call that
                                    returns an outcome has nowhere to suspend to.
                                    --detach hands the run to a background process and
@@ -325,7 +345,8 @@ Commands:
                    [--checks-unrelated "..."] [--advisor-args "..."] [--implementer-args "..."]
                    [--bypass [agent]] [--operator agent] [--settle SECONDS]
                    [--salvage SECONDS] [--record <path>] [--resume <log>] [--force]
-                   [--turn-timeout SECONDS] [--max-turns N] [--max-minutes N]
+                   [--turn-timeout SECONDS] [--silence-timeout SECONDS]
+                   [--max-turns N] [--max-minutes N]
                    [--max-queue-depth N] [--max-concurrent-seats N] [--dry-run]
                                    The same session, interactively. The goal is optional:
                                    without one the console waits and the first thing you
@@ -376,6 +397,10 @@ Commands:
                                    run that hits a pause is held open for you, where relay
                                    would end again at the first one.
                                    --settle / --salvage / --turn-timeout as in relay.
+                                   --silence-timeout as in relay: it moves the 12-minute
+                                   QUIET clock rather than the whole-turn one, applies to
+                                   the seats whose adapter runs it, and reports the rest
+                                   as unsupported instead of refusing.
                                    --max-turns / --max-minutes / --max-queue-depth /
                                    --max-concurrent-seats as in relay. Worth setting when
                                    driving with --operator agent: nobody is watching that
@@ -463,6 +488,7 @@ const RELAY_VALUED_FLAGS: readonly string[] = [
   'rounds',
   'salvage',
   'settle',
+  'silence-timeout',
   'turn-timeout',
 ]
 
@@ -1116,6 +1142,30 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
         // fall out of step with the shape a real run writes, because it does not restate it.
         records: [],
       })
+      // What each seat will be measured against, from the argv this process just parsed and is
+      // about to hand the child verbatim -- through the same `resolveDeadlines` and the same
+      // registry the child itself will use, so the placeholder cannot describe a policy the
+      // run will not be under. Seat ids come from `implementerSpecsFor`, the same builder the
+      // real specs are built with below, so the ids in this document are the ids the child
+      // records. Launch arguments are irrelevant to a deadline and are not composed here.
+      const placeholderDeadlines = (() => {
+        try {
+          return resolveDeadlines({
+            ...(flag('turn-timeout', '') ? { requestedAbsoluteMs: Number(flag('turn-timeout', '')) * 1000 } : {}),
+            ...(flag('silence-timeout', '')
+              ? { requestedSilenceMs: Number(flag('silence-timeout', '')) * 1000 }
+              : {}),
+            seats: [
+              { id: 'advisor', agent: lead },
+              ...implementerSpecsFor(seatRequests, () => []).map((sp) => ({ id: sp.id, agent: sp.agent })),
+              ...(flag('reviewer', '') ? [{ id: 'reviewer', agent: flag('reviewer', '') }] : []),
+            ].map((seat) => ({ ...seat, declared: registry.get(seat.agent).deadlines })),
+          })
+        } catch {
+          return undefined
+        }
+      })()
+
       // The parent writes the first status, carrying the CHILD's pid.
       //
       // Without this there is a window -- launching two CLIs, seconds long -- in which the
@@ -1145,6 +1195,20 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
         // absent at the moment it is most needed, and worse, a run whose child dies during
         // startup keeps this document forever -- so this is the ONLY report those runs get.
         ceilings: runCeilings,
+        // Resolved here too, for the reason `ceilings` above is: this document is the ONLY
+        // report a detached run whose child dies during startup ever produces, and the window
+        // before the child records itself is exactly when an agent operator polls. A
+        // `deadlines` block that appeared only once the relay was up would be missing at the
+        // moment it is most needed -- and on this front-end, permanently.
+        //
+        // Wrapped, and omitted rather than thrown on failure. The seat specs are not VALIDATED
+        // until further down (`registry.resolve`), so an argv naming an unknown agent reaches
+        // here first, and `registry.get` would throw -- turning a run the child refuses with
+        // the registry's own sentence into a parent-side stack trace, on a path that used to
+        // detach cleanly. Omitting the block leaves the document exactly as it was before this
+        // existed, which is what the field's optionality already means, and the child writes
+        // the real one moments later on every run that is going to start at all.
+        ...(placeholderDeadlines ? { deadlines: placeholderDeadlines } : {}),
         // Empty, and honestly so: a child that has not started has rotated nothing. Written
         // here for the same reason `ceilings` is -- the key has to exist at the moment an agent
         // operator polls, or a probe reading it gets a falsy value it cannot tell from a build
@@ -1238,6 +1302,32 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
     // was valid and the flag meant was absent, so nothing anywhere could have said so. This
     // line could have, before any work existed to lose.
     say(`  ceilings: ${ceilingSummary(runCeilings)}`)
+
+    // Beside the ceilings line, above rotation, for the reason the ceilings line gives: these
+    // are the lines that describe the LAUNCH, and a policy an operator is told about before
+    // any work exists is one they can still change for free. What this adds that the ceilings
+    // line cannot is the per-seat word `unsupported` -- a seat whose adapter runs no silence
+    // clock produces NO verdict when it goes quiet, and an operator who assumed otherwise waits
+    // on a timeout that is not coming.
+    //
+    // Resolved by `resolveDeadlines` from the specs this command just validated, through the
+    // same registry and the same precedence `Relay.deadlines` uses -- so the line printed here
+    // and the block in the run report cannot be two different answers.
+    say(
+      `  silence:  ${silenceSummary(
+        resolveDeadlines({
+          ...(flag('turn-timeout', '') ? { requestedAbsoluteMs: Number(flag('turn-timeout', '')) * 1000 } : {}),
+          ...(flag('silence-timeout', '')
+            ? { requestedSilenceMs: Number(flag('silence-timeout', '')) * 1000 }
+            : {}),
+          seats: [leadSpec, ...implSpecs, ...(reviewerSpec ? [reviewerSpec] : [])].map((spec) => ({
+            id: spec.id,
+            agent: spec.agent,
+            declared: registry.get(spec.agent).deadlines,
+          })),
+        }),
+      )}`,
+    )
 
     say(
       checks.length > 0
@@ -1376,6 +1466,16 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
       // costs the most, because nobody is there to notice it and stop the run by hand.
       ...(flag('turn-timeout', '')
         ? { turnWatchdogMs: Number(flag('turn-timeout', '')) * 1000 }
+        : {}),
+      // The OTHER clock, and the one a hang actually trips. --turn-timeout bounds the whole
+      // turn; this bounds how long it may say nothing, which is the reading #36 was about --
+      // a turn that took a tool result and went quiet, waited out at the absolute cap because
+      // silence had no flag of its own. Accepted on any run, including one seating an adapter
+      // that runs no silence clock: refusing would throw away a setting the other seats can
+      // honour, and `Relay.deadlines` reports the unsupported seats as `unsupported` rather
+      // than as enforcing a number they will never fire.
+      ...(flag('silence-timeout', '')
+        ? { silenceWatchdogMs: Number(flag('silence-timeout', '')) * 1000 }
         : {}),
       // The routing log is the only complete account of the session, so it is printed as
       // it happens rather than assembled at the end.
@@ -1553,6 +1653,7 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
     const record = flag('record', '')
     const resume = flag('resume', '')
     const turnTimeout = flag('turn-timeout', '')
+    const silenceTimeout = flag('silence-timeout', '')
     // Ceilings, console-side for the first time. `--operator agent` already makes this an
     // unattended run, and an unattended run with no ceiling of any kind is the live gap this
     // closes -- not a provision for N>1. Same builder as `relay`, so the two cannot drift.
@@ -1642,6 +1743,7 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
       ...(reviewerArgs.length > 0 ? { reviewerArgs } : {}),
       version: version(),
       ...(turnTimeout ? { turnWatchdogMs: Number(turnTimeout) * 1000 } : {}),
+      ...(silenceTimeout ? { silenceWatchdogMs: Number(silenceTimeout) * 1000 } : {}),
       ...(ceilings ? { ceilings } : {}),
       // Testing seams, and nothing production passes. Wiring one into `relay` and not here
       // is the mistake this codebase keeps making, and this time it made the console CLI

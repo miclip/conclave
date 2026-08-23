@@ -71,6 +71,7 @@ import {
 import { join, resolve, sep } from 'node:path'
 import type { Confidence, Provenance } from '../contract/outcome.ts'
 import type { RunCeilings } from '../relay/guardrails.ts'
+import type { RunDeadlines } from '../relay/deadlines.ts'
 import type { RelayEvent } from '../relay/observe.ts'
 import type { RunOutcome, RunPause } from '../relay/run.ts'
 import type { RotationRecord } from '../relay/rotationIntent.ts'
@@ -460,6 +461,33 @@ export interface SessionStatus {
    * first for the second, which is why the unset limits are spelled out rather than left off.
    */
   ceilings?: RunCeilings | undefined
+  /**
+   * What each seat's TURNS are measured against -- both clocks, resolved per seat.
+   *
+   * `ceilings` above bounds the run; this bounds a turn, and the two are answered by different
+   * machinery to different readers. An agent operator polling this document is the caller with
+   * no console to read, and the fact it could not previously get here is the one that decides
+   * whether waiting is worth anything: a seat whose adapter declares no silence clock produces
+   * NO verdict when it goes quiet, so a poller watching for `timed_out` on that seat is
+   * watching for something that cannot arrive.
+   *
+   * Per seat rather than per run, because the verdict is -- two seats can be on different
+   * clocks or on none. `configuredSilenceMs` and `configuredAbsoluteMs` carry what the
+   * invocation ASKED for beside what the seats resolved to, `null` where nothing was asked, so
+   * the gap between a request and its effect is readable rather than inferred. That gap is the
+   * whole reason `--silence-timeout` is accepted on a seat that cannot honour it: the setting
+   * is kept for the seats that can, and this block is where the rest say `unsupported`.
+   *
+   * Written by the recorder from `RecordableRelay.deadlines`, resolved by the relay because
+   * the relay holds both halves -- the registry's support table and this run's configuration.
+   * NOT rebuilt from the front-end's flags, for the reason `ceilings` gives: a document built
+   * from what the caller believes it passed agrees with the caller rather than with the run.
+   *
+   * OPTIONAL for the same single case as `ceilings`: a `RecordableRelay` stand-in that predates
+   * it and answers nothing. Absent means "never asked", which is not what an `unsupported`
+   * clock states, and the two must not be read as one.
+   */
+  deadlines?: RunDeadlines | undefined
   /**
    * Every accepted rotation this run has made, and WHY each one happened.
    *
@@ -1056,6 +1084,20 @@ export interface RecordableRelay {
    */
   readonly ceilings?: RunCeilings | undefined
   /**
+   * What each seat's turns are measured against, resolved by the relay.
+   *
+   * Read whole, like `ceilings`, and for the same reason: the relay is what holds the registry's
+   * support table AND this run's configuration, so it is the only thing that can resolve one
+   * against the other. A document built from the front-end's own flags would agree with the
+   * caller instead of with the run -- and on this field the disagreement has a specific shape,
+   * because a flag can be accepted and still not reach a seat whose adapter has no such clock.
+   *
+   * OPTIONAL and structural, like `rotationOf` and `ceilings`: a stand-in written before this
+   * existed still satisfies the contract and gets the document it got before, with no
+   * `deadlines` key rather than one claiming a run measures nothing when it was never asked.
+   */
+  readonly deadlines?: RunDeadlines | undefined
+  /**
    * Every accepted rotation and WHY, as the relay recorded it at the moment it accepted one.
    *
    * A method rather than a property because it grows during the run, and the recorder rewrites
@@ -1269,6 +1311,11 @@ export function recordSession(
     // that can only ever produce the same answer. Last among the fields this passes, so the
     // key is appended to the document rather than inserted among the ones already there.
     ...(relay.ceilings ? { ceilings: relay.ceilings } : {}),
+    // Beside `ceilings` and written once for the same reason: a seat's clocks are fixed for
+    // the run's whole life, so re-resolving them on every event could only ever produce the
+    // same answer. Appended after it so the key lands at the end of the document rather than
+    // among the ones already there.
+    ...(relay.deadlines ? { deadlines: relay.deadlines } : {}),
     // After `ceilings`, so the key is appended to the document rather than inserted among the
     // ones already there -- the same rule, for the same reason.
     ...rotations(),

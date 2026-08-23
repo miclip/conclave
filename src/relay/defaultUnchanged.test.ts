@@ -137,6 +137,20 @@ class DefaultRunFakeSession implements AgentSession {
 interface CreateRecord {
   id: string
   cwd: string
+  /**
+   * The two turn clocks as this seat was actually handed them, straight off
+   * `CreateParticipantContext`.
+   *
+   * Recorded because the run report cannot prove this and never could. It reports the policy
+   * the relay RESOLVED, which is computed from the same options -- so a context that dropped
+   * the value on the floor would still be reported correctly, and the seat would be running a
+   * clock nobody configured. That is not hypothetical: `--turn-timeout` was parsed into a
+   * console option that did not exist, compiled through a conditional spread, and did nothing
+   * for its whole life (src/repl/session.ts:258-270). This is the observation that would have
+   * caught it.
+   */
+  watchdogMs: number | undefined
+  idleMs: number | undefined
 }
 
 function defaultRegistry(
@@ -165,7 +179,7 @@ function defaultRegistry(
       deadlines: NO_DEADLINE_CLOCKS,
       launch: { command: agent, baseArgs: [] },
       async create(resolved: ResolvedParticipant, ctx: CreateParticipantContext) {
-        records.push({ id: resolved.spec.id, cwd: ctx.cwd })
+        records.push({ id: resolved.spec.id, cwd: ctx.cwd, watchdogMs: ctx.watchdogMs, idleMs: ctx.idleMs })
         return session
       },
     })
@@ -324,7 +338,7 @@ const DECLARED: Record<string, string> = {
     'Authority routing (#56, D2) sends implementer_unanswered to the advisor before the operator, ' +
     'so a default run interrupts the human less than today. Real change at N=1, an improvement, ' +
     'declared rather than discovered. The pause reason exists at src/relay/run.ts:52 and the halt ' +
-    'that raises it is at src/relay/relay.ts:6991.',
+    'that raises it is at src/relay/relay.ts:6934.',
   'status.pause.resolution':
     'Classifying unresolved conditions on both axes (#56, D2) added `resolution` to every RunPause ' +
     '(src/relay/run.ts:257), so `conclave status --json` on a paused default run now carries ' +
@@ -606,7 +620,7 @@ const DECLARED: Record<string, string> = {
     'participant and nobody else, and a conclave or workstream scope samples NOBODY. It used to ' +
     'read pause.verdictOf.participant and fall back to scanning participants by rank for ' +
     'implementers — and verdictOf is set at exactly two halt sites, both turn_incomplete ' +
-    '(src/relay/relay.ts:6612, src/relay/relay.ts:7128), so every other pause reached that rank ' +
+    '(src/relay/relay.ts:6555, src/relay/relay.ts:7071), so every other pause reached that rank ' +
     'scan. WHAT CHANGES AT N=1: on the three pauses whose scope names no participant — ' +
     'operator_requested (/pause), advisor_escalated, authority_conflict — the lone implementer ' +
     'child used to be sampled, so a child that measured busy REFUSED the resume and wrote ' +
@@ -615,15 +629,15 @@ const DECLARED: Record<string, string> = {
     'safety guard rather than presented as a pure N>1 fix. The reason it is the right narrowing: ' +
     'the guard exists because continuing SENDS into a child that cannot accept input mid-turn, ' +
     'and on those three pauses the child it measured is not the child being sent to — resuming ' +
-    'advisor_escalated sends to the ADVISOR (src/relay/relay.ts:6729), resuming ' +
+    'advisor_escalated sends to the ADVISOR (src/relay/relay.ts:6672), resuming ' +
     'authority_conflict queues a constraint that is delivered by the dispatcher on the next ' +
     'dispatch to a free seat, and operator_requested is consumed at an advisor-turn boundary ' +
     'whose own evidence line says no turn is in flight. WHAT IS GIVEN UP, named rather than ' +
     'discovered: the advisor_escalated halt raised when a seat’s turn completed and its report ' +
-    'could not be read (src/relay/relay.ts:7040-7042) is conclave-scoped by design, yet the useful ' +
+    'could not be read (src/relay/relay.ts:6983-6985) is conclave-scoped by design, yet the useful ' +
     'question there is whether THAT seat is still writing; at N=1 the rank scan sampled it by ' +
     'coincidence of it being the only implementer, and now nothing does. The pause still carries ' +
-    'that seat’s liveness evidence from the halt site (src/relay/relay.ts:7051-7053), which is what ' +
+    'that seat’s liveness evidence from the halt site (src/relay/relay.ts:6994-6996), which is what ' +
     'the operator actually reads; restoring a refusal there is a change to that halt’s scope, ' +
     'not to the guard. AT N>1 the old behaviour was unsafe in the other direction: a pause about ' +
     'one seat could be refused because a DIFFERENT seat was mid-turn, and the operator was told ' +
@@ -674,7 +688,7 @@ const DECLARED: Record<string, string> = {
     'The sentence is repaired rather than left standing, on this entry’s own rule. Everything ' +
     'else above is still true: the three readings, the wording, the event count as an input, and ' +
     'the pause menu’s `wait` option, which still asks reportsChildOnCpu. No assertion in this ' +
-    'file was relaxed; one citation moved with the code it pins (src/repl/session.ts:1313-1314). ' +
+    'file was relaxed; one citation moved with the code it pins (src/repl/session.ts:1344-1345). ' +
     'Covered in src/outcomes/liveness.test.ts on the reported numbers, and end to end through ' +
     'the console’s refusal path in src/repl/session.test.ts.',
   'a paused run keeps measuring the child, and its evidence says when it was measured (#101)':
@@ -718,7 +732,7 @@ const DECLARED: Record<string, string> = {
     'not idle, because continuing SENDS and a reading up to 30s old is not a reading of now. It ' +
     'does not read pause.liveness, and that is stated at both ends. ' +
     'TWO RELAY OPTIONS ARE ADDED FOR TESTS ONLY — liveness (the same seam the console already ' +
-    'has at src/repl/session.ts:332) and livenessRefreshMs/livenessRefreshLimit. No CLI flag ' +
+    'has at src/repl/session.ts:349) and livenessRefreshMs/livenessRefreshLimit. No CLI flag ' +
     'exposes them; a default run reads the constants. ' +
     'ONE CLAIM IN THE ISSUE IS FALSIFIED and recorded here because it points at the mechanism: ' +
     'the reporter saw a byte-identical evidence line on what looked like two consecutive pauses ' +
@@ -1565,9 +1579,59 @@ const DECLARED: Record<string, string> = {
     'dispatched-plus-incomplete evidence, and pins that none of them quotes an uncertain turn as ' +
     'usage. The console’s own rendering of the summary is pinned against a real console in ' +
     'src/repl/session.test.ts.',
+  '--silence-timeout on both front-ends':
+    'The optional flag surface grows by one on each command: --silence-timeout SECONDS, which ' +
+    'moves the SILENCE clock -- how long a turn may produce nothing before the watchdog calls ' +
+    'it hung -- and leaves the absolute per-turn deadline that --turn-timeout configures alone. ' +
+    'The two are separate budgets against separate questions ("has this stopped" against "has ' +
+    'this run long"), an adapter can implement one without the other, and until now only the ' +
+    'second could be configured. #36 is the incident: an implementer took a tool result, ' +
+    'produced no further output and no Stop, and the session sat idle ~44 information-free ' +
+    'minutes until the ABSOLUTE deadline fired. The silence clock was added for that and fixed ' +
+    'at DEFAULT_IDLE_MS, twelve minutes, so the only way to shorten the wait a hang costs was ' +
+    'to shorten the budget a long BUSY turn gets -- which is the false positive the 45-minute ' +
+    'default exists to avoid. ' +
+    'Declared rather than merely added, on four counts. (1) THE FLAG SET: optional and valued ' +
+    'on both commands, with no default, so a run that does not pass it is measured exactly as ' +
+    'before -- DEFAULT_IDLE_MS is untouched and `resolveClock` falls back to the adapter\'s own ' +
+    'default when nothing is requested. D1 forbids an optional flag becoming required and ' +
+    'forbids the default run changing; neither happens. (2) THE REPORT: RunDeadlines gains ' +
+    '`configuredSilenceMs`, beside the `configuredAbsoluteMs` that has been there since the ' +
+    'block existed and spelled the same way -- `null` for "nobody asked", never absent and ' +
+    'never 0. (3) STATUS --JSON gains a `deadlines` block it never had. It could report what ' +
+    'bounds the RUN (ceilings, #119) and nothing about what bounds a TURN, so the interface an ' +
+    'agent operator polls could not be asked the one question that decides whether waiting on ' +
+    'a quiet seat is worth anything. (4) THE LAUNCH SURFACES: a `silence:` line joins the ' +
+    'console banner and the relay launch line, beside the ceilings line and by the same ' +
+    'argument -- a policy an operator is told about before any work exists is one they can ' +
+    'still change for free. ' +
+    'WHAT THE FLAG DOES ON A SEAT THAT CANNOT HONOUR IT is the design decision worth recording. ' +
+    'Two of the four built-in adapters (kimi, opencode) declare `silence: {supported: false}`: ' +
+    'they run one process per turn and track no activity within one, so there is nothing a ' +
+    'silence clock could be measured against. The flag is ACCEPTED on those seats and on runs ' +
+    'that mix them, and each such seat is reported `unsupported`. Refusing was considered and ' +
+    'rejected: a run of two Claude seats and one Kimi would lose a valid setting on both Claude ' +
+    'seats in order to state a fact about the third, and the operator would have no way to ' +
+    'configure the seats that can honour it. Silently applying it was rejected for the opposite ' +
+    'reason -- it would report a deadline that will never fire. Per-seat resolution keeps both ' +
+    'truths, and `unsupported` is the reading that matters: such a seat going quiet forever ' +
+    'produces NO verdict at all, so a poller watching for `timed_out` there is watching for ' +
+    'something that cannot arrive. `resolveClock` already returned `unsupported` regardless of ' +
+    'what was requested, so this is the existing precedence being used rather than a new rule. ' +
+    'THE FALSIFIER, recorded because it was tested and did not redirect the fix: the claim was ' +
+    'that these incidents lose a partial transcript the run could have recovered, which would ' +
+    'make the fix a salvage problem rather than a clock problem. `#exchangeTurn` already routes ' +
+    '`report ?? assistantText`, so a turn that had produced text would have had it recovered; ' +
+    'in the incidents the child emitted nothing during the long tool/thinking interval, so no ' +
+    'partial transcript existed. The clock is the fix. ' +
+    'No assertion in this file was relaxed to accommodate any of it: the two ctx pins were ' +
+    'TIGHTENED to require `idleMs`, because a context that stops carrying it breaks no type -- ' +
+    'the field is optional, as it must be -- and `--turn-timeout` reaching a console option ' +
+    'that did not exist, compiling, and doing nothing for its whole life is the standing ' +
+    'example of what that costs (src/repl/session.ts:258-270).',
 }
 
-test('DECLARED contains exactly the routing, pause-resolution, attribution, ceiling-flag, seat-flag, seat-status, launch-record, flag-reader, integration-check, per-seat-rotation, reviewer, resume-guard, mixed-liveness, timestamped-liveness, model-validation, executable-preflight, compaction-survival, rotation-reporting, send-precondition, process-tree-liveness, ceiling-reporting, record-heartbeat, rotation-intent, console-dry-run, flag-reconciliation, paused-time and advisor-targeting entries', () => {
+test('DECLARED contains exactly the routing, pause-resolution, attribution, ceiling-flag, seat-flag, seat-status, launch-record, flag-reader, integration-check, per-seat-rotation, reviewer, resume-guard, mixed-liveness, timestamped-liveness, model-validation, executable-preflight, compaction-survival, rotation-reporting, send-precondition, process-tree-liveness, ceiling-reporting, record-heartbeat, rotation-intent, console-dry-run, flag-reconciliation, paused-time, advisor-targeting and silence-timeout entries', () => {
   assert.deepEqual(Object.keys(DECLARED), [
     'implementer_unanswered -> advisor',
     'status.pause.resolution',
@@ -1597,7 +1661,105 @@ test('DECLARED contains exactly the routing, pause-resolution, attribution, ceil
     'the report’s flags are reconciled at the close, and supersededFlags joins them (#131)',
     'the duration ceiling counts active run time, and the report says how long the run was paused (#112)',
     'whether the advisor used the assignment syntax, in the run report and in status --json (#79)',
+    '--silence-timeout on both front-ends',
   ])
+})
+
+
+/**
+ * Both front-ends, driven through `main()`, with whatever extra argv the case needs.
+ *
+ * Returns what each seat was CONSTRUCTED with rather than what the run reported, which is the
+ * distinction the tests below turn on: the report resolves the same options the context is
+ * built from, so it agrees with the caller whether or not the value ever reached a seat.
+ * Only the registry (and the console's streams) is replaced; the argv parsing, the flag
+ * helper and the option object are the production ones.
+ */
+async function createsFromBothClis(extra: string[]): Promise<Record<'relay' | 'session', CreateRecord[]>> {
+  const out = { relay: [] as CreateRecord[], session: [] as CreateRecord[] }
+  for (const front of ['relay', 'session'] as const) {
+    const repo = tempRepo()
+    const before = process.cwd()
+    const creates: CreateRecord[] = []
+    const registry = defaultRegistry(
+      {
+        'fake-lead': new DefaultRunFakeSession('fake-lead', 'lead-1', ['DONE']),
+        'fake-impl': new DefaultRunFakeSession('fake-impl', 'impl-1', []),
+      },
+      creates,
+    )
+    try {
+      process.chdir(repo)
+      const code = await quietly(() =>
+        main(
+          [front, 'a default goal', '--advisor', 'fake-lead', '--implementer', 'fake-impl', '--rounds', '2', ...extra],
+          front === 'relay' ? { registry } : { registry, input: idleInput(), output: sink() },
+        ),
+      )
+      assert.equal(code, 0, `a ${front} run must succeed`)
+    } finally {
+      process.chdir(before)
+      rmSync(repo, { recursive: true, force: true })
+    }
+    out[front] = creates
+  }
+  return out
+}
+
+test('--silence-timeout reaches every seat that is constructed, on both front-ends', async () => {
+  // The anti-`--turn-timeout` test, and the reason it observes the CONSTRUCTION rather than
+  // the report: the report is resolved from the same option the context is built from, so it
+  // would say `enforced: 300000` for a seat that was handed nothing. The flag it is named
+  // after was parsed into a console option that did not exist and did nothing for its whole
+  // life, with the parity guard agreeing because that guard compares which flags EXIST.
+  const creates = await createsFromBothClis(['--silence-timeout', '300'])
+
+  for (const front of ['relay', 'session'] as const) {
+    assert.ok(creates[front].length > 0, `the ${front} CLI must construct seats`)
+    for (const c of creates[front]) {
+      // Seconds in, milliseconds out, at the seat -- not merely somewhere in between.
+      assert.equal(
+        c.idleMs,
+        300_000,
+        `${front} seat ${c.id} must be constructed with the configured silence budget`,
+      )
+      // And the OTHER clock is untouched by it. A `--silence-timeout` that also filled
+      // `watchdogMs` would be a second deadline the operator never typed, arriving on the
+      // clock they were not configuring.
+      assert.equal(c.watchdogMs, undefined, `${front} seat ${c.id} must not gain an absolute budget`)
+    }
+  }
+})
+
+test('the two turn clocks are configured independently, at the seat, on both front-ends', async () => {
+  // Different numbers on the two flags in one invocation. If either were reaching the other's
+  // slot, one of these assertions would carry the other's value -- which no single-flag test
+  // can detect, because one flag setting both looks correct from either side alone.
+  const creates = await createsFromBothClis(['--silence-timeout', '30', '--turn-timeout', '90'])
+
+  for (const front of ['relay', 'session'] as const) {
+    for (const c of creates[front]) {
+      assert.equal(c.idleMs, 30_000, `${front} seat ${c.id} silence budget`)
+      assert.equal(c.watchdogMs, 90_000, `${front} seat ${c.id} absolute budget`)
+    }
+  }
+})
+
+test('a run that passes neither flag constructs its seats exactly as it did before either existed', async () => {
+  // D1's requirement, observed rather than argued. `undefined` is what makes the adapter keep
+  // its OWN default -- DEFAULT_IDLE_MS, twelve minutes, on the two pty adapters -- so a
+  // context arriving with a number here would mean the default run had silently acquired a
+  // budget from the front-end instead. That is a change to the default run whichever number
+  // it is, including one that happens to equal the constant today.
+  const creates = await createsFromBothClis([])
+
+  for (const front of ['relay', 'session'] as const) {
+    assert.ok(creates[front].length > 0, `the ${front} CLI must construct seats`)
+    for (const c of creates[front]) {
+      assert.equal(c.idleMs, undefined, `${front} seat ${c.id} must be handed no silence budget`)
+      assert.equal(c.watchdogMs, undefined, `${front} seat ${c.id} must be handed no absolute budget`)
+    }
+  }
 })
 
 /**
@@ -1692,7 +1854,7 @@ async function seatsFromSessionCli(): Promise<{ creates: CreateRecord[]; cwd: st
  * The two machine-readable documents a default run actually emits.
  *
  * Both come out of one `relay --json` run in a temporary repository, through the production
- * call sites: the report is what `bin/conclave.ts:1426` prints, and the status record is what
+ * call sites: the report is what `bin/conclave.ts:1526` prints, and the status record is what
  * `recordSession` wrote during that same run, read back by `main(['status', '--json'])` --
  * which resolves the most recent session in `process.cwd()`, so the record has to have been
  * written where an operator would look for it.
@@ -1737,7 +1899,7 @@ async function defaultRunDocuments(): Promise<{ report: unknown; status: unknown
  * blind to that subtree is claiming more than it checks.
  *
  * Built through the real recorder: `recordSession` is what both front-ends call, and
- * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:1313-1314
+ * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:1344-1345
  * with the same object -- a `RunPause` the run handle raised, not one written here. Read back
  * through `main(['status', '--json'])`, so the serialisation and the reconciliation against
  * the pid are the production ones.
@@ -1945,7 +2107,7 @@ async function provokeReviewBlocked(repo: string): Promise<{ relay: Relay; run: 
  * Drive a real relay into one condition and return the pause it raised.
  *
  * The provocations are the ones `resolution.test.ts`'s own `provoke` already uses, deliberately:
- * the same triggers reaching the same single halt site (src/relay/relay.ts:3994), where the
+ * the same triggers reaching the same single halt site (src/relay/relay.ts:3937), where the
  * classification is computed by production `resolutionFor` from the subject the caller passed.
  * Nothing here writes a `RunPause`.
  *
@@ -2033,7 +2195,7 @@ async function provoke(
  * The status document of a run paused for one given reason.
  *
  * Built through the real recorder: `recordSession` is what both front-ends call, and
- * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:1313-1314
+ * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:1344-1345
  * with the same object -- a `RunPause` the relay raised, not one written here. Read back
  * through `main(['status', '--json'])`, so the serialisation and the reconciliation against
  * the pid are the production ones.
@@ -2053,7 +2215,7 @@ async function pausedStatusDocument(reason: PauseReason): Promise<unknown> {
     goal: 'a default goal',
     front: 'session',
     startedAt: Date.now(),
-    // Passed because the console always passes one (src/repl/session.ts:1026), so the status
+    // Passed because the console always passes one (src/repl/session.ts:1057), so the status
     // documents this file pins differ only in what a pause actually changes.
     logPath: join(repo, '.conclave', 'runs', 'session-test.ndjson'),
     build: 'test',
@@ -2237,9 +2399,9 @@ test('default run works in the run cwd and creates no worktree', async () => {
     assert.equal(c.cwd, fromCli.cwd, `the session CLI must create ${c.id} in the run cwd`)
   }
 
-  // The relay CLI passes process.cwd() as the run cwd: bin/conclave.ts:1344-1346.
-  // The relay hands that same cwd to each participant adapter: src/relay/relay.ts:2210-2216.
-  // The cwd getter simply returns the option: src/relay/relay.ts:1937-1939.
+  // The relay CLI passes process.cwd() as the run cwd: bin/conclave.ts:1434-1436.
+  // The relay hands that same cwd to each participant adapter: src/relay/relay.ts:2153-2159.
+  // The cwd getter simply returns the option: src/relay/relay.ts:1876-1878.
   assert.match(relay, /cwd:\s*process\.cwd\(\)/, 'relay block must start in process.cwd')
   // Both creation sites now pass a NAMED context object rather than an inline literal, because
   // the same object composes the launch args that get recorded -- see
@@ -2249,6 +2411,13 @@ test('default run works in the run cwd and creates no worktree', async () => {
   // strength and without widening what is claimed. The cwd guarantee for a default run is
   // proved above by observation anyway -- `seatsFromSessionCli` reads it back from the
   // registry -- and this is the text-level echo of it.
+  //
+  // Both now carry `idleMs` as well, and it is pinned rather than allowed to be optional
+  // because the failure it guards is the one `--turn-timeout` already suffered: a flag parsed
+  // into a key nothing read, which compiled and did nothing for its whole life. A context that
+  // stops carrying the silence budget breaks no type -- `idleMs` is optional on
+  // `CreateParticipantContext`, as it must be -- so the only thing that can notice is a pin
+  // here and the record-level test that watches the number arrive at the adapter.
   assert.match(
     RELAY,
     /#join\(spec: ParticipantSpec, rank: Rank, cwd: string = this\.#opts\.cwd\)/,
@@ -2256,8 +2425,8 @@ test('default run works in the run cwd and creates no worktree', async () => {
   )
   assert.match(
     RELAY,
-    /const ctx = \{ cwd, watchdogMs: this\.#opts\.turnWatchdogMs \}\s*const session = await this\.#opts\.registry\.createParticipant\(spec, ctx\)/,
-    'a joining participant must be created in that cwd',
+    /const ctx = \{ cwd, watchdogMs: this\.#opts\.turnWatchdogMs, idleMs: this\.#opts\.silenceWatchdogMs \}\s*const session = await this\.#opts\.registry\.createParticipant\(spec, ctx\)/,
+    'a joining participant must be created in that cwd, on both of this run’s clocks',
   )
   // The rotation replacement's cwd is now the ROTATING SEAT'S root rather than the run's, which
   // at N=1 is the same directory reached by the same expression every other read of a root uses
@@ -2266,8 +2435,8 @@ test('default run works in the run cwd and creates no worktree', async () => {
   // and `root` is the seat's. See DECLARED['per-seat rotation ...'].
   assert.match(
     RELAY,
-    /const ctx = \{ cwd: root, watchdogMs: this\.#opts\.turnWatchdogMs \}\s*const session = await this\.#opts\.registry\.createParticipant\(spec, ctx\)/,
-    'a rotation replacement must be created in the rotating seat’s own root',
+    /const ctx = \{ cwd: root, watchdogMs: this\.#opts\.turnWatchdogMs, idleMs: this\.#opts\.silenceWatchdogMs \}\s*const session = await this\.#opts\.registry\.createParticipant\(spec, ctx\)/,
+    'a rotation replacement must be created in the rotating seat’s own root, on both clocks',
   )
   assert.match(
     RELAY,
@@ -2282,7 +2451,7 @@ test('default run works in the run cwd and creates no worktree', async () => {
 
   // A default run with no subagents must not create any git worktree. The relay only samples
   // the worktree list for its subagent-use report: src/relay/subagents.ts:68 defines
-  // worktreePaths, and src/relay/relay.ts:2928-2929, :3510 and :5874 read it.
+  // worktreePaths, and src/relay/relay.ts:2871-2872, :3453 and :5817 read it.
   // Prove it by exercising the run in a real temporary repository.
   const repo = mkdtempSync(join(tmpdir(), 'conclave-default-'))
   try {
@@ -2381,6 +2550,10 @@ test('both flag helpers fall back when the flag is absent, and each block reads 
       'rounds',
       'salvage',
       'settle',
+      // The declared addition; see DECLARED['--silence-timeout on both front-ends'].
+      // Optional and valued on both, with no default, so a run that does not pass it is
+      // measured exactly as it was before the flag existed.
+      'silence-timeout',
       'strict-goal',
       'turn-timeout',
     ],
@@ -2415,6 +2588,11 @@ test('both flag helpers fall back when the flag is absent, and each block reads 
       'rounds',
       'salvage',
       'settle',
+      // The same declared addition as on relay above, and landing on both front-ends in the
+      // one change is the whole point of it: `--turn-timeout` reached only the console for
+      // years, and the parity guard agreed with it because the guard compares which flags
+      // EXIST. See DECLARED['--silence-timeout on both front-ends'].
+      'silence-timeout',
       'turn-timeout',
     ],
     'session optional flag set must not change without updating the guard',
@@ -2461,7 +2639,11 @@ test('the default relay --json report emits exactly these keys at every depth', 
       // `durationMs - pausedMs`: that subtraction charges the run for the launch, which happens
       // before the ceiling window opens, and assumes both are on the wall clock.
       '': 'activeMs, build, cwd, deadlines, durationMs, endedAt, flags, goal, messages, operator, outcome, participants, pausedMs, restricted, rotation, schema, startedAt, subagents, supersededFlags',
-      deadlines: 'configuredAbsoluteMs, participants',
+      // `configuredSilenceMs` is the declared addition; see
+      // DECLARED['--silence-timeout on both front-ends']. `null` on this run -- nothing asked --
+      // and present anyway, by this file's rule that a key which vanishes when it has nothing
+      // to say cannot be told from a key the reader forgot to look for.
+      deadlines: 'configuredAbsoluteMs, configuredSilenceMs, participants',
       'deadlines.participants[]': 'absolute, agent, id, silence',
       'deadlines.participants[].absolute': 'status',
       'deadlines.participants[].silence': 'status',
@@ -2527,7 +2709,7 @@ test('an ended conclave status --json emits exactly these keys at every depth', 
   assert.deepEqual(
     shapeOf(status),
     {
-      '': 'abandoned, alive, build, ceilings, cwd, eventsPath, front, goal, id, logPath, messages, operator, outcome, participants, pid, rotations, schema, startedAt, state, updatedAt',
+      '': 'abandoned, alive, build, ceilings, cwd, deadlines, eventsPath, front, goal, id, logPath, messages, operator, outcome, participants, pid, rotations, schema, startedAt, state, updatedAt',
       outcome: 'detail, reason',
       // Every ceiling, on a run that configured none of them -- which is exactly when the
       // block has something to say. See DECLARED['every ceiling is reported at launch and in
@@ -2536,6 +2718,20 @@ test('an ended conclave status --json emits exactly these keys at every depth', 
       // would reproduce #103's failure in a second place, a reader taking a missing key for a
       // configured value of none.
       ceilings: 'advisorTurns, maxConcurrentSeats, maxDurationMs, maxQueueDepth, maxTurns',
+      // The declared addition; see DECLARED['--silence-timeout on both front-ends']. The block
+      // arrives here for the first time: `status --json` could report what BOUNDS THE RUN and
+      // never what bounds a TURN, so an agent operator polling this had no way to learn that a
+      // seat's adapter runs no silence clock -- and a seat with none produces no verdict at all
+      // when it goes quiet, which decides whether waiting on it is worth anything. `absolute`
+      // and `silence` carry `status` alone here, with no `ms`, and that is the shape being
+      // pinned rather than an accident of the fixture: this run's seats are registered with
+      // NO_DEADLINE_CLOCKS, so both clocks resolve `unsupported` -- the state that has no
+      // duration to report. A seat on a real adapter emits `ms` too, which is why the union
+      // is read off what is actually emitted rather than declared.
+      deadlines: 'configuredAbsoluteMs, configuredSilenceMs, participants',
+      'deadlines.participants[]': 'absolute, agent, id, silence',
+      'deadlines.participants[].absolute': 'status',
+      'deadlines.participants[].silence': 'status',
       // On the implementer and not on the advisor; see PAUSED_COMMON below for why that
       // disagreement is pinned rather than unioned. This run is UNARMED -- a default
       // invocation passes no `--checks` -- so `checks` is empty and contributes no element
@@ -2572,12 +2768,26 @@ test('an ended conclave status --json emits exactly these keys at every depth', 
  * that the array is there and that its entries are not objects.
  */
 const PAUSED_COMMON = {
-  '': 'abandoned, alive, build, ceilings, cwd, eventsPath, front, goal, id, logPath, messages, operator, participants, pause, pid, rotations, schema, startedAt, state, updatedAt',
+  '': 'abandoned, alive, build, ceilings, cwd, deadlines, eventsPath, front, goal, id, logPath, messages, operator, participants, pause, pid, rotations, schema, startedAt, state, updatedAt',
   // Present on a paused document too, and for the sharper version of the reason: the operator
   // answering a pause is deciding how much run is left, and until #119 the only surface that
   // could tell them was the flags they typed an hour ago. Same five keys at every pause reason,
   // because a ceiling does not depend on why the run stopped.
   ceilings: 'advisorTurns, maxConcurrentSeats, maxDurationMs, maxQueueDepth, maxTurns',
+  // The declared addition; see DECLARED['--silence-timeout on both front-ends']. The block
+  // arrives here for the first time: `status --json` could report what BOUNDS THE RUN and
+  // never what bounds a TURN, so an agent operator polling this had no way to learn that a
+  // seat's adapter runs no silence clock -- and a seat with none produces no verdict at all
+  // when it goes quiet, which decides whether waiting on it is worth anything. `absolute`
+  // and `silence` carry `status` alone here, with no `ms`, and that is the shape being pinned
+  // rather than an accident of the fixture: this run's seats are registered with
+  // NO_DEADLINE_CLOCKS, so both clocks resolve `unsupported` -- the state that has no
+  // duration to report. A seat on a real adapter emits `ms` too, which is why the union is
+  // read off what is actually emitted rather than declared.
+  deadlines: 'configuredAbsoluteMs, configuredSilenceMs, participants',
+  'deadlines.participants[]': 'absolute, agent, id, silence',
+  'deadlines.participants[].absolute': 'status',
+  'deadlines.participants[].silence': 'status',
   // The rotation block, pinned as a DISAGREEMENT for the reason the `merge_blocked` override
   // below gives about `seat`: it is on the implementer and NOT on the advisor, which holds no
   // seat and can never be a rotation subject. A union here would let it appear on the advisor,
@@ -2690,7 +2900,7 @@ const PAUSED_SUBTREE: Record<PauseReason, Record<string, string>> = {
     // the advisor used the assignment syntax, in the run report and in status --json (#79)']:
     // the key is absent from every one-seat document in this file, and its presence here is
     // what makes that absence a decision rather than a build that reports nothing.
-    '': 'abandoned, alive, build, ceilings, cwd, eventsPath, front, goal, id, logPath, messages, operator, participants, pause, pid, rotations, schema, startedAt, state, targeting, updatedAt',
+    '': 'abandoned, alive, build, ceilings, cwd, deadlines, eventsPath, front, goal, id, logPath, messages, operator, participants, pause, pid, rotations, schema, startedAt, state, targeting, updatedAt',
     targeting:
       'addressedTurns, applicable, ceilingTurns, conclusion, incompleteTurns, invalidTurns, records, ' +
       'seats, unaddressedFailedTurns, unaddressedTurns, unadmittedTurns, withdrawnTurns',

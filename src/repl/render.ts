@@ -12,6 +12,7 @@
  */
 
 import { ceilingSummary, type RunCeilings } from '../relay/guardrails.ts'
+import { silenceSummary, type RunDeadlines } from '../relay/deadlines.ts'
 import type { CheckSpec } from '../rotation/record.ts'
 
 export interface Style {
@@ -222,6 +223,20 @@ export function banner(opts: {
    * bound the relay will actually be given instead of re-deriving one that could differ.
    */
   ceilings: RunCeilings
+  /**
+   * What each seat's SILENCE clock resolved to, and what was asked for.
+   *
+   * Resolved and passed in, exactly as `ceilings` is and for the same reason: this line must
+   * report the policy the run will actually be under, not one re-derived beside the printer.
+   * The banner prints before any seat is launched, so it is `resolveDeadlines` -- the function
+   * `Relay.deadlines` itself delegates to -- that makes the two agree by construction.
+   *
+   * Only silence, and only here. The absolute clock has been reportable since `--turn-timeout`
+   * shipped and is in the run report per seat; what was missing at LAUNCH was any statement
+   * that a seat has no silence clock at all -- a seat that can go quiet forever and produce no
+   * verdict, which is the reading worth having before there is work to lose.
+   */
+  deadlines: RunDeadlines
 }): string {
   const legend = `${magenta('●')} ${cyan('●')} ${green('●')}`
   // Relevance is shown, because a banner listing three checks when only one can block the
@@ -238,6 +253,10 @@ export function banner(opts: {
     `        ${dim('you')} · ${cyan(`advisor ${opts.advisor}`)} · ${green(`implementer ${opts.implementer}`)}`,
     `        ${dim(opts.cwd)}`,
     `        ${dim('ceilings:')} ${ceilingSummary(opts.ceilings)}`,
+    // One space more than the labels either side of it: `ceilings:` and `rotation:` are nine
+    // characters and this is eight, so without the pad its value starts a column left of theirs
+    // and the three lines stop reading as a block.
+    `        ${dim('silence:')}  ${silenceSummary(opts.deadlines)}`,
     `        ${dim('rotation:')} ${rotation}`,
     '',
   ].join('\n')

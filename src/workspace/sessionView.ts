@@ -11,6 +11,7 @@
  */
 
 import { ceilingSummary } from '../relay/guardrails.ts'
+import { silenceSummary } from '../relay/deadlines.ts'
 import { targetingStatusLine } from '../relay/targeting.ts'
 import { SESSION_HEARTBEAT_MS, sessionStaleness, type ReadSession } from './sessionRecord.ts'
 
@@ -110,6 +111,12 @@ export function formatSession(s: ReadSession, now: number): string {
   // a run stopped early needs the bound as plainly as a parser does -- and needs it to be the
   // bound the run actually had, not one recomposed here from a different set of fields.
   if (st.ceilings) lines.push(`  ceilings:  ${ceilingSummary(st.ceilings)}`)
+  // Beside it, from the same renderer both launch lines use, for the same reason: a prose
+  // reader deciding whether to keep waiting on a quiet seat needs to read `unsupported` as
+  // plainly as a parser does. That word is the one this line exists for -- a seat with no
+  // silence clock produces no verdict at all when it goes quiet, so waiting on it is waiting
+  // for something that cannot come.
+  if (st.deadlines) lines.push(`  silence:   ${silenceSummary(st.deadlines)}`)
   // Only when something rotated. The JSON carries the empty array because a probe cannot tell an
   // absent key from a false one (#103); a prose reader can tell an absent LINE from a present one
   // perfectly well, and printing `rotations: none` on every run of a feature most runs never

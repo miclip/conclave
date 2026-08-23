@@ -22,7 +22,7 @@ import test from 'node:test'
 import type { Verdict } from '../contract/outcome.ts'
 import type { ChildLiveness } from '../outcomes/liveness.ts'
 import { IDLE_CPU_PERCENT } from '../outcomes/liveness.ts'
-import { NO_DEADLINE_CLOCKS } from '../registry/types.ts'
+import { NO_DEADLINE_CLOCKS, type DeadlineSupport } from '../registry/types.ts'
 import type { AgentSession } from '../contract/session.ts'
 import { AgentRegistry } from '../registry/registry.ts'
 import { FakeRotationSession } from '../rotation/fakeSession.ts'
@@ -50,7 +50,21 @@ function registryOf(
    * had never been checked, which is how `--turn-timeout` reached the console's option
    * object and was dropped before any adapter saw it.
    */
-  onLaunch?: (agent: string, args: string[] | undefined, ctx?: { watchdogMs?: number | undefined }) => void,
+  onLaunch?: (
+    agent: string,
+    args: string[] | undefined,
+    ctx?: { watchdogMs?: number | undefined; idleMs?: number | undefined },
+  ) => void,
+  /**
+   * What each agent's adapter DECLARES, where a test needs the distinction.
+   *
+   * Defaults to `NO_DEADLINE_CLOCKS` below, which is the honest answer for an in-memory
+   * double and what every existing caller relies on. Overridden only by the tests that need
+   * a seat which HAS a clock beside one that does not -- the mixed run is the case
+   * `--silence-timeout` is decided by, and it cannot be built out of doubles that all
+   * declare the same thing.
+   */
+  deadlines?: Record<string, DeadlineSupport>,
 ): AgentRegistry {
   const r = new AgentRegistry()
   for (const [agent, queue] of Object.entries(sessions)) {
@@ -72,8 +86,9 @@ function registryOf(
           unknown_abnormal_end: 'reasoned_but_unverified',
         },
       },
-      // An in-memory double: no child process, so no clock of either kind.
-      deadlines: NO_DEADLINE_CLOCKS,
+      // An in-memory double: no child process, so no clock of either kind, unless this test
+      // declared otherwise.
+      deadlines: deadlines?.[agent] ?? NO_DEADLINE_CLOCKS,
       launch: { command: agent, baseArgs: [] },
       async create(resolved, ctx) {
         onLaunch?.(agent, resolved.spec.args, ctx)
@@ -2788,6 +2803,99 @@ test('--turn-timeout reaches the relay from the console, not just the argv parse
   assert.equal(seen, 4242, 'the console must hand the configured deadline to the adapters')
 })
 
+test('the console hands the configured SILENCE budget to the adapters, not only the absolute one', async () => {
+  // The sibling of the test above, and written the same way for the same reason: on ARRIVAL
+  // at the registry rather than on the source text. `--turn-timeout` was parsed into a console
+  // option that did not exist, slipped past excess-property checking inside a conditional
+  // spread, and did nothing for its whole life -- and a test that grepped either file would
+  // have passed against that. Adding a second flag on the same path without the same test
+  // would be repeating the mistake with the lesson already written down.
+  const dir = repo()
+  const out = collect()
+  let idle: number | undefined
+  let absolute: number | undefined
+  await runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'claude',
+    rounds: 3,
+    checks: [],
+    silenceWatchdogMs: 4242,
+    registry: registryOf(
+      {
+        codex: [new FakeRotationSession('advisor', 'codex', ['Do it.', 'DONE'])],
+        claude: [new FakeRotationSession('impl', 'claude', ['ack', 'Did it.'])],
+      },
+      (_agent, _args, ctx) => {
+        if (typeof ctx?.idleMs === 'number') idle = ctx.idleMs
+        if (typeof ctx?.watchdogMs === 'number') absolute = ctx.watchdogMs
+      },
+    ),
+    input: script([]),
+    output: out.stream,
+  })
+  assert.equal(idle, 4242, 'the console must hand the configured silence budget to the adapters')
+  // And ONLY that one. A silence request that also filled the absolute slot would put a
+  // deadline on a clock the operator was not configuring.
+  assert.equal(absolute, undefined, 'and must not invent an absolute budget from it')
+})
+
+test('the banner says what each seat’s silence clock resolved to, including the seats that have none', async () => {
+  // The launch reading that did not exist. `--turn-timeout` has been reportable per seat in
+  // the run REPORT since that block was written, but a report is read after the run; the
+  // banner is the three lines an operator takes in before there is any work to lose, and it
+  // could say what bounds the RUN (#119's ceilings line) and nothing about what bounds a turn.
+  //
+  // The mixed pairing is the point, and is why this test declares clocks rather than using
+  // the default doubles: the advisor HAS a silence clock and takes the configured budget, the
+  // implementer has none and keeps saying so. A seat with no silence clock that goes quiet
+  // forever produces NO verdict at all, so an operator who read the configured number as
+  // applying everywhere would be waiting on a timeout that cannot arrive.
+  const dir = repo()
+  const out = collect()
+  await runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'claude',
+    rounds: 3,
+    checks: [],
+    silenceWatchdogMs: 90_000,
+    registry: registryOf(
+      {
+        codex: [new FakeRotationSession('advisor', 'codex', ['Do it.', 'DONE'])],
+        claude: [new FakeRotationSession('impl', 'claude', ['ack', 'Did it.'])],
+      },
+      undefined,
+      {
+        codex: { absolute: { supported: true }, silence: { supported: true } },
+        claude: { absolute: { supported: true }, silence: { supported: false } },
+      },
+    ),
+    input: script([]),
+    output: out.stream,
+  })
+  const text = out.text()
+  const line = text.split('\n').find((l) => l.includes('silence:'))
+  assert.ok(line, 'the banner must carry a silence line')
+
+  // What was asked for, and what each seat did with it, on one line.
+  assert.match(line, /--silence-timeout 90s/)
+  assert.match(line, /advisor 90s/)
+  // The word this line exists for.
+  assert.match(line, /implementer unsupported/)
+
+  // IN the banner, between the ceilings line and the rotation line -- the same placement
+  // argument the ceilings line makes: a line that drifted below the rule would be read after
+  // the operator has stopped reading.
+  const ceilingsAt = text.indexOf('ceilings:')
+  const silenceAt = text.indexOf('silence:')
+  const rotationAt = text.indexOf('rotation:')
+  assert.ok(ceilingsAt > 0 && silenceAt > ceilingsAt, 'the silence line comes after the ceilings line')
+  assert.ok(rotationAt > silenceAt, 'and before the rotation line')
+})
+
 test('a refusal to continue re-samples, so it can lift', async () => {
   // The deadlock. The first version matched the liveness line in `pause.evidence` — a string
   // captured when the pause was RAISED — so the check deciding "is it safe NOW" was made
@@ -3458,7 +3566,7 @@ test('a participant-scoped pause samples that seat and no other, at every reason
   assert.deepEqual(sampled(pauseFor({ reason: 'rotation_candidate', participant: 'implementer-2' })), ['implementer-2'])
   assert.deepEqual(sampled(pauseFor({ reason: 'implementer_unanswered', participant: 'implementer-2' })), ['implementer-2'])
   // The ADVISOR is a participant like any other, and its own bad turn pauses the run
-  // (src/relay/relay.ts:6608). A rank scan for implementers sampled the wrong child here too.
+  // (src/relay/relay.ts:6551). A rank scan for implementers sampled the wrong child here too.
   assert.deepEqual(
     sampled(pauseFor({ reason: 'turn_incomplete', participant: 'advisor' }, { participant: 'advisor', endSeq: 2 })),
     ['advisor'],
@@ -3467,13 +3575,13 @@ test('a participant-scoped pause samples that seat and no other, at every reason
 
 test('a conclave- or workstream-scoped pause samples nobody, with no fall back to rank', () => {
   // Both conclave-scoped reasons. Resuming an `advisor_escalated` pause sends to the ADVISOR
-  // (src/relay/relay.ts:6729), so measuring implementer children was never the question; and
+  // (src/relay/relay.ts:6672), so measuring implementer children was never the question; and
   // `operator_requested` is consumed at an advisor-turn boundary that states no turn is in
   // flight. Neither has anything for this guard to sample.
   assert.deepEqual(sampled(pauseFor({ reason: 'advisor_escalated' })), [])
   assert.deepEqual(sampled(pauseFor({ reason: 'operator_requested' })), [])
   // Workstream scope, and the id deliberately COLLIDES with a seat id -- at N=1 the workstream
-  // is named after the seat carrying the instruction (src/relay/relay.ts:6892), which is exactly
+  // is named after the seat carrying the instruction (src/relay/relay.ts:6835), which is exactly
   // the coincidence a guard could read as "so sample that seat". A workstream is not a seat.
   assert.deepEqual(sampled(pauseFor({ reason: 'authority_conflict', workstream: 'implementer' })), [])
 })
@@ -3489,7 +3597,7 @@ test('a scope naming a seat that is gone samples nobody rather than falling back
 test('a rotation_candidate pause on one seat resumes while the OTHER seat is genuinely mid-turn', async (t) => {
   // The production shape of the N>1 case the rank scan got wrong, and the reason it has to be
   // this shape: `rotation_candidate` carries NO `verdictOf` -- that field is set at two halt
-  // sites, both turn_incomplete (src/relay/relay.ts:6612, src/relay/relay.ts:7128) -- so under
+  // sites, both turn_incomplete (src/relay/relay.ts:6555, src/relay/relay.ts:7071) -- so under
   // the old expression this pause fell through to the rank scan and sampled EVERY implementer.
   // A simpler `turn_incomplete` fixture cannot show that: it populates the field, takes the
   // named-seat branch, and passes against the code being replaced.
@@ -3541,7 +3649,7 @@ test('a rotation_candidate pause on one seat resumes while the OTHER seat is gen
     ],
     rounds: 6,
     // ARMS ROTATION, which is what makes degradation a pause instead of an ended run
-    // (src/relay/relay.ts:4597-4599). A command that exits 0 immediately: what the checks DO is
+    // (src/relay/relay.ts:4540-4542). A command that exits 0 immediately: what the checks DO is
     // not what this test is about, only that a replacement would have something to reproduce.
     checks: ['true'],
     registry: registryOf({

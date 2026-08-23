@@ -72,6 +72,16 @@ const RUN_PER_TURN_DEADLINES: DeadlineSupport = {
   silence: { supported: false },
 }
 
+/*
+ * Which is why neither `create` below forwards `ctx.idleMs`, and the omission is the honest
+ * spelling rather than an oversight. `--silence-timeout` is ACCEPTED on a run that seats one
+ * of these -- refusing it would discard a setting the supported seats in the same run are
+ * entitled to -- and what the seat gets is not a silence clock but a report saying it has
+ * none. `resolveClock` returns `unsupported` for a declared `supported: false` however hard
+ * the run configured one, so the truth survives per seat instead of being averaged into a
+ * refusal or, worse, into a number this adapter would never enforce.
+ */
+
 /**
  * Claude Code names its aliases and nothing else, so only aliases are judged.
  *
@@ -117,6 +127,7 @@ export const CLAUDE_AGENT: AgentDefinition = {
       inputOwnership: resolved.inputOwnership,
       args: effectiveLaunchArgs(resolved, ctx),
       watchdogMs: ctx.watchdogMs,
+      idleMs: ctx.idleMs,
       readyTimeoutMs: ctx.readyTimeoutMs,
     })
   },
@@ -189,6 +200,7 @@ export const CODEX_AGENT: AgentDefinition = {
       inputOwnership: resolved.inputOwnership,
       args: effectiveLaunchArgs(resolved, ctx),
       watchdogMs: ctx.watchdogMs,
+      idleMs: ctx.idleMs,
       readyTimeoutMs: ctx.readyTimeoutMs,
     })
   },

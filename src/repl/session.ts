@@ -34,6 +34,7 @@ import { clearLine, createInterface, cursorTo, type Interface } from 'node:readl
 import { suggest } from './complete.ts'
 import { Screen } from './screen.ts'
 import { banner, bold, colorFor, dim, elapsedSince, grey, markdown, Progress, releaseTitleSequence, rule, setColor, speakerColor, summaryLine, titleSequence, yellow } from './render.ts'
+import { resolveDeadlines } from '../relay/deadlines.ts'
 import type { AgentEvent } from '../contract/session.ts'
 import { defaultRegistry } from '../registry/builtin.ts'
 import type { CheckSpec } from '../rotation/record.ts'
@@ -267,6 +268,22 @@ export interface SessionOptions {
    * anywhere, so it agreed with me.
    */
   turnWatchdogMs?: number | undefined
+  /**
+   * How long a turn may produce NOTHING before the watchdog calls it hung.
+   *
+   * The other clock, and the one that catches an ordinary hang first. `turnWatchdogMs` above
+   * bounds the whole turn however busy; this bounds SILENCE, and a child that stopped working
+   * stopped writing -- so #36's ~44 information-free minutes are what the two numbers differ
+   * by in practice.
+   *
+   * Wired on both front-ends in the same change, which is the point rather than a courtesy.
+   * The field above is the standing example of what happens otherwise: the CLI parsed
+   * `--turn-timeout` into a console option that did not exist, a conditional spread let it
+   * compile, and the flag never once worked. So this is declared `| undefined` and ASSIGNED
+   * conditionally at a call site the compiler checks, and there is a test that the number
+   * reaches the seat rather than only that the flag parses.
+   */
+  silenceWatchdogMs?: number | undefined
   /**
    * Resource ceilings for the run: wall clock, total turns, queue depth, concurrent seats.
    *
@@ -528,7 +545,7 @@ function renderPause(p: RunPause, width: number): string {
  *
  * This used to read `pause.verdictOf.participant` instead, and that field is narrower than it
  * looks: it is set at exactly two halt sites, both `turn_incomplete`
- * (`src/relay/relay.ts:6612` and `src/relay/relay.ts:7128`). So FOUR of the five seat-scoped
+ * (`src/relay/relay.ts:6555` and `src/relay/relay.ts:7071`). So FOUR of the five seat-scoped
  * reasons -- `rotation_candidate`, `implementer_unanswered`, `merge_blocked`, `review_blocked`
  * -- named a seat in their scope and were sampled by rank anyway, because the field the guard
  * read was empty. The scope is the field that is always populated, which is the other half of
@@ -542,16 +559,16 @@ function renderPause(p: RunPause, width: number): string {
  * pause never mentioned. The rank fallback's own comment argued it was right "only because
  * there is one of them", which is an argument for deriving the seat from the pause instead of
  * from a rank. Worse than useless on one of them: resuming an `advisor_escalated` pause sends
- * to the ADVISOR (`src/relay/relay.ts:6729`), so the fallback measured children that were not
+ * to the ADVISOR (`src/relay/relay.ts:6672`), so the fallback measured children that were not
  * about to be sent to at all.
  *
  * What that gives up, stated rather than discovered: the `advisor_escalated` halt raised when a
- * seat's turn completed and its report could not be read (`src/relay/relay.ts:7040-7042`) is
+ * seat's turn completed and its report could not be read (`src/relay/relay.ts:6983-6985`) is
  * conclave-scoped by design -- "the reason names who is being asked to take it, and the scope
  * follows the reason" -- yet the thing an operator wants to know there is whether THAT seat's
  * child is still writing. Under the rank fallback that seat was sampled at N=1 by coincidence
  * of being the only implementer. It is not sampled now. The pause still carries its own
- * liveness EVIDENCE from the halt site (`src/relay/relay.ts:7051-7053`), which is what the operator
+ * liveness EVIDENCE from the halt site (`src/relay/relay.ts:6994-6996`), which is what the operator
  * reads;
  * what is gone is a refusal derived from a rank scan. Narrowing that halt's scope, if the
  * refusal is wanted back, is a change to the halt site rather than to this guard.
@@ -868,6 +885,19 @@ export async function runSession(opts: SessionOptions): Promise<number> {
         advisorTurns: boundOf({ maxAdvisorTurns: opts.rounds }),
         ...(opts.ceilings ? { ceilings: opts.ceilings } : {}),
       }),
+      // The same seats handed to `Relay.start` below, read through the same registry, resolved
+      // by the same function the relay's own `deadlines` getter delegates to. The banner cannot
+      // ask the relay -- it does not exist yet -- so agreement is made structural instead of
+      // asserted: there is one precedence, and both callers go through it.
+      deadlines: resolveDeadlines({
+        requestedAbsoluteMs: opts.turnWatchdogMs,
+        requestedSilenceMs: opts.silenceWatchdogMs,
+        seats: [leadSpec, ...implSpecs, ...(reviewerSpec ? [reviewerSpec] : [])].map((spec) => ({
+          id: spec.id,
+          agent: spec.agent,
+          declared: registry.get(spec.agent).deadlines,
+        })),
+      }),
     }),
   )
   if (opts.checks.length === 0) {
@@ -979,6 +1009,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     ...(opts.transcriptSettleMs ? { transcriptSettleMs: opts.transcriptSettleMs } : {}),
     ...(opts.transcriptSalvageMs ? { transcriptSalvageMs: opts.transcriptSalvageMs } : {}),
     ...(opts.turnWatchdogMs ? { turnWatchdogMs: opts.turnWatchdogMs } : {}),
+    ...(opts.silenceWatchdogMs ? { silenceWatchdogMs: opts.silenceWatchdogMs } : {}),
     // Unchanged, deliberately. See `SessionOptions.ceilings`.
     ...(opts.ceilings ? { ceilings: opts.ceilings } : {}),
     // The object that was resolved above, so the seat validated and the seat launched cannot
@@ -2082,7 +2113,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
       // FALSIFIER, stated because it is the strongest argument against this shape: the
       // console has no general "trailing text is a message" rule and does not gain one here.
       // `/rotate <text>` and `/abort <text>` consume their text as a REASON
-      // (`src/repl/session.ts:2135`, `src/repl/session.ts:2168`) and `/pause`, `/queue`, `/audit` ignore
+      // (`src/repl/session.ts:2166`, `src/repl/session.ts:2199`) and `/pause`, `/queue`, `/audit` ignore
       // whatever follows them. So an operator who learns this from `/continue` and carries
       // it to `/pause I'll be back` still loses the sentence. That inconsistency is not
       // repaired by making `/continue` a third behaviour; it is narrowed by it, and the

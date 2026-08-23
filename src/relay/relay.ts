@@ -126,7 +126,7 @@ import {
   type TargetingWatch,
 } from './targeting.ts'
 import { isSubagentTool, worktreePaths } from './subagents.ts'
-import type { ClockSupport } from '../registry/types.ts'
+import { resolveDeadlines, type RunDeadlines } from './deadlines.ts'
 
 export type {
   ObserveOptions,
@@ -521,6 +521,22 @@ export interface RelayOptions {
    */
   turnWatchdogMs?: number
   /**
+   * How long a turn may produce NOTHING before the adapter's watchdog calls it hung.
+   *
+   * The clock `--silence-timeout` configures, and a different question from
+   * `turnWatchdogMs` rather than a tighter version of it: "has this stopped" against "has
+   * this run long". It is the one nearly every real hang meets first -- #36 is a turn that
+   * took a tool result, said nothing more, and sat for ~44 information-free minutes until the
+   * ABSOLUTE deadline fired -- so it is the clock an operator most often actually wants to
+   * move, and until now the only one they could not.
+   *
+   * Optional, like `turnWatchdogMs`, and for the same reason: the run's real per-seat policy
+   * is not readable off this field, because an adapter that declares no silence clock does not
+   * acquire one by being handed a number. Ask `deadlines`, which resolves this against what
+   * each seat's adapter declares and reports `unsupported` where it is unsupported.
+   */
+  silenceWatchdogMs?: number
+  /**
    * How long to wait for the transcript to catch up with a turn the hook says has ended.
    * NOT a turn deadline; see `#exchange`. Default 15s.
    */
@@ -558,7 +574,7 @@ export interface RelayOptions {
    * this seam the whole of #101 -- the measurement, its timestamp, and the re-measurement that
    * makes the timestamp move -- is unreachable from any test that does not spawn a real CLI.
    * The console already carries the identical seam for its `/continue` guard
-   * (`src/repl/session.ts:332`), and the two are deliberately the same shape.
+   * (`src/repl/session.ts:349`), and the two are deliberately the same shape.
    */
   liveness?: ((pid: number) => Promise<ChildLiveness>) | undefined
   /**
@@ -884,94 +900,17 @@ export function reviewerSpecFor(
 }
 
 /**
- * One clock, as one seat will actually run it.
+ * The deadline vocabulary, re-exported from `./deadlines.ts` where it now lives.
  *
- * Tagged rather than `number | undefined`, because the two ways of having no number are not
- * the same fact and a reader acts differently on each. `disabled` means nothing is watching
- * and a deadline COULD be set; `unsupported` means the adapter has no such clock, so a turn
- * that trips it produces no verdict and no configuration will change that. Collapsing them
- * -- or omitting the field, which reads as neither -- leaves a reader waiting for a
- * `timed_out` that cannot arrive.
+ * It moved when `--silence-timeout` landed: the launch banner prints BEFORE `Relay.start`, so
+ * a banner that reports each seat's resolved policy cannot ask a relay for it, and the only
+ * other option was a second copy of `resolveClock`'s precedence sitting beside the printer.
+ * Re-exported rather than relocated at every call site so `report.ts` and every existing
+ * importer of `RunDeadlines` compile unchanged -- the type is the same type, and the move is
+ * about where the RESOLUTION lives.
  */
-export type DeadlineClock =
-  | { status: 'enforced'; ms: number }
-  | { status: 'disabled' }
-  | { status: 'unsupported' }
+export type { DeadlineClock, ParticipantDeadlines, RunDeadlines } from './deadlines.ts'
 
-/** What one seat is measured against. Both clocks, always both present. */
-export interface ParticipantDeadlines {
-  /** The seat, not the agent: ids are what the turns in the report are keyed by. */
-  id: string
-  agent: string
-  /**
-   * The whole turn, however busy. Refreshed by NOTHING.
-   *
-   * Child output pushes out `silence` and never this, so a turn that keeps producing still
-   * reaches this number -- and what happens when it does is that the run stops awaiting that
-   * exchange and reports `timed_out`. Not that the turn ends: nothing here reaches the child,
-   * and the seat stays unsendable until a cancellation, terminal transcript or hook evidence,
-   * or the process exiting. The released wait is what the run needs, because `--max-turns` and
-   * `--max-minutes` are checked at turn boundaries and nowhere else, so a turn output could
-   * extend without limit would be a run no ceiling could end.
-   *
-   * A `timed_out` from THIS clock is the case #36 did not fix. The adapters re-read the
-   * transcript when a deadline fires, but a working turn's transcript says `in_progress`,
-   * which is not evidence it ended, so the verdict stands on a turn that was fine. A reader
-   * seeing `timed_out` on a seat whose turns are legitimately long should suspect this number
-   * before suspecting the child.
-   *
-   * Suspect, not confirm. This is the CONFIGURED budget and nothing else: neither this field
-   * nor any other in the report says which of the two clocks actually produced a given
-   * verdict. That provenance exists on the watchdog's update at the moment it fires and is not
-   * retained here, so the artifact answers "what was this seat measured against" and cannot
-   * answer "which clock produced this verdict" -- and neither question is "what ended this
-   * turn", which is not something either clock does.
-   */
-  absolute: DeadlineClock
-  /**
-   * How long the turn may say NOTHING. A different question, not a tighter version.
-   *
-   * The only one of the two that substantive child output pushes out, and the one that reaches
-   * an ordinary hang: a child that stopped working stopped writing, so this fires at its own
-   * budget rather than leaving the turn to the absolute cap. That is the part of #36 that was
-   * fixed, against the incident actually reported -- the wait went from ~44 information-free
-   * minutes to this number.
-   *
-   * A configured budget, like the field above it, and equally silent about which clock fired.
-   */
-  silence: DeadlineClock
-}
-
-/**
- * The deadlines a run was measured against — per seat, because the verdict is.
- *
- * There is no run-wide answer, and reporting one was wrong: a `timed_out` belongs to a
- * participant, and two seats in the same run can be on different clocks or on none. The
- * adapters differ in what they can KNOW rather than only in how they were wired, so a
- * single pair of numbers here would be an average that neither seat honours.
- */
-export interface RunDeadlines {
-  /**
-   * What the invocation ASKED for, and nothing more. Kept because the gap between this and
-   * `participants` is itself worth seeing -- `--turn-timeout 60` against a seat whose
-   * adapter has no silence clock is a request half of which went nowhere.
-   */
-  configuredAbsoluteMs: number | null
-  participants: ParticipantDeadlines[]
-}
-
-/**
- * Resolve one declared clock against what this run asked for.
- *
- * The only place the precedence lives: an unsupported clock stays unsupported however hard
- * it is configured, a request beats the adapter's default, and an absent default with no
- * request is off rather than infinite.
- */
-function resolveClock(support: ClockSupport, requestedMs: number | undefined): DeadlineClock {
-  if (!support.supported) return { status: 'unsupported' }
-  const ms = requestedMs ?? support.defaultMs
-  return ms === undefined ? { status: 'disabled' } : { status: 'enforced', ms }
-}
 
 /**
  * A participant's own statement that something is unresolved.
@@ -1794,7 +1733,7 @@ export class Relay {
     // `cwd` is the run's for every seat, including seats that will be launched in their own
     // worktree: a seat's directory does not enter its argv (`effectiveLaunchArgs`), and a relative
     // launch command is written relative to where the operator started the run.
-    const modelCtx = { cwd: opts.cwd, watchdogMs: opts.turnWatchdogMs }
+    const modelCtx = { cwd: opts.cwd, watchdogMs: opts.turnWatchdogMs, idleMs: opts.silenceWatchdogMs }
     const specs = [opts.lead, ...seats, ...(opts.reviewer ? [opts.reviewer] : [])]
     const selected = specs.flatMap((spec) => {
       try {
@@ -2057,22 +1996,26 @@ export class Relay {
    * time is in its provenance.
    */
   get deadlines(): RunDeadlines {
-    const requested = this.#opts.turnWatchdogMs
-    return {
-      configuredAbsoluteMs: requested ?? null,
-      participants: this.participants.map((p) => {
-        const declared = this.#opts.registry.get(p.agent).deadlines
-        return {
-          id: p.id,
-          agent: p.agent,
-          absolute: resolveClock(declared.absolute, requested),
-          // No `requested`: `--turn-timeout` is the absolute clock, and passing it here
-          // would silently retune a budget nobody asked to change -- and would report a
-          // silence deadline for adapters that run none.
-          silence: resolveClock(declared.silence, undefined),
-        }
-      }),
-    }
+    // Both requests read from their OWN option. The comment that stood here explained why
+    // `--turn-timeout` must not be passed into the silence slot -- it would silently retune a
+    // budget nobody asked to change. That argument was against sharing one flag between two
+    // clocks, and it survives; what changed is that the silence clock has a flag of its own,
+    // so the honest answer for it is `silenceWatchdogMs` rather than `undefined`.
+    //
+    // Resolved by `resolveDeadlines`, the same function the launch banner calls before any
+    // seat exists. Two resolutions of one precedence is the failure this delegation prevents,
+    // and it is the failure #119 is: a run whose operator was told one bound and got another.
+    // The support table is still read through the REGISTRY, which is what makes an
+    // `agent === 'kimi'` check here unnecessary -- a fifth adapter updates this by existing.
+    return resolveDeadlines({
+      requestedAbsoluteMs: this.#opts.turnWatchdogMs,
+      requestedSilenceMs: this.#opts.silenceWatchdogMs,
+      seats: this.participants.map((p) => ({
+        id: p.id,
+        agent: p.agent,
+        declared: this.#opts.registry.get(p.agent).deadlines,
+      })),
+    })
   }
 
   /**
@@ -2207,7 +2150,7 @@ export class Relay {
     // same function every built-in adapter composes its child's argv with, from the same spec
     // and the same context -- so the record is the launch rather than a reconstruction of it.
     // Read AFTER the session exists, so a seat that failed to start fails exactly as before.
-    const ctx = { cwd, watchdogMs: this.#opts.turnWatchdogMs }
+    const ctx = { cwd, watchdogMs: this.#opts.turnWatchdogMs, idleMs: this.#opts.silenceWatchdogMs }
     const session = await this.#opts.registry.createParticipant(spec, ctx)
     const launch = launchRecordFor(this.#opts.registry.resolve(spec), ctx)
     const p: RelayParticipant = { id: spec.id, agent: spec.agent, rank, role: spec.role, launch, session, events: [], baselineGeneration: 0, degradationCursor: 0 }
@@ -4332,7 +4275,7 @@ export class Relay {
       else if (!shouldWait && offered !== -1) pause.options.splice(offered, 1)
       // The status file is written from the LIVE pause object on any event, so an in-place
       // change reaches disk on the next one -- and a pause is precisely when nothing else is
-      // flowing. Same reasoning as `/wait` in the console (`src/repl/session.ts:2113`), and the
+      // flowing. Same reasoning as `/wait` in the console (`src/repl/session.ts:2144`), and the
       // reader who needs it most is the one polling from outside.
       this.#stream.emit({ type: 'liveness', pause })
       if (last) return stop()
@@ -7520,7 +7463,7 @@ export class Relay {
           // THIS SEAT'S tree, so the replacement is launched where its predecessor worked. A
           // replacement started in the integration checkout would prove itself against files
           // the seat it is replacing never wrote to. At N=1 `root` is the run cwd.
-          const ctx = { cwd: root, watchdogMs: this.#opts.turnWatchdogMs }
+          const ctx = { cwd: root, watchdogMs: this.#opts.turnWatchdogMs, idleMs: this.#opts.silenceWatchdogMs }
           const session = await this.#opts.registry.createParticipant(spec, ctx)
           // Same spec, so the same role: a replacement that changed what the seat is FOR
           // would be a different seat wearing the id, and the handoff it just proved was

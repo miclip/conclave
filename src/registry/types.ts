@@ -55,6 +55,21 @@ export interface CreateParticipantContext {
   /** Extra CLI args for this participant, from configuration. */
   args?: string[] | undefined
   watchdogMs?: number | undefined
+  /**
+   * How long a turn may produce NOTHING before the adapter's watchdog calls it hung.
+   *
+   * Separate from `watchdogMs` because the two clocks answer different questions, and an
+   * adapter can run one without the other -- which is exactly why this is handed to every
+   * `create` and IGNORED by the two that declare `silence: { supported: false }`. Passing it
+   * to an adapter with no silence clock would not turn one on; the run's report says
+   * `unsupported` for that seat instead, and the value is not quietly reinterpreted as an
+   * absolute budget on the way past.
+   *
+   * Absent means the adapter keeps its own default -- `DEFAULT_IDLE_MS`, twelve minutes, on
+   * the two pty adapters. Absent is NOT "no silence clock": that is the declared
+   * `supported: false`, and the two must not collapse.
+   */
+  idleMs?: number | undefined
   readyTimeoutMs?: number | undefined
 }
 

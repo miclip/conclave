@@ -122,7 +122,7 @@ test('the report carries the same claims the prose lines make', async () => {
  * The mixed pairing is the point. A run-wide number would have to describe both, and there
  * is no number that does.
  */
-async function mixedDeadlines(turnWatchdogMs?: number) {
+async function mixedDeadlines(turnWatchdogMs?: number, silenceWatchdogMs?: number) {
   const dir = repo()
   const relay = await Relay.start({
     registry: registryOf(
@@ -137,6 +137,7 @@ async function mixedDeadlines(turnWatchdogMs?: number) {
     implementer: { id: 'implementer', agent: 'kimi', role: 'implementer' },
     maxAdvisorTurns: 2,
     ...(turnWatchdogMs === undefined ? {} : { turnWatchdogMs }),
+    ...(silenceWatchdogMs === undefined ? {} : { silenceWatchdogMs }),
   })
   const startedAt = Date.now()
   const outcome = await relay.run('a goal')
@@ -152,6 +153,10 @@ test('each seat reports the clocks it will actually run, unasked', async () => {
   const report = await mixedDeadlines()
   assert.deepEqual(report.deadlines, {
     configuredAbsoluteMs: null,
+    // Nothing asked of either clock, spelled the same way for both. `null` rather than an
+    // absent key, for the reason the block already keeps `configuredAbsoluteMs`: a key that
+    // vanishes when it has nothing to say cannot be told from one a reader forgot to look for.
+    configuredSilenceMs: null,
     participants: [
       {
         id: 'advisor',
@@ -181,6 +186,10 @@ test('--turn-timeout moves the absolute clock on both seats, and invents neither
     // What was ASKED for, kept beside what each seat did with it. The gap is the point: this
     // request reached the absolute clock on both seats and the silence clock on neither.
     configuredAbsoluteMs: 90_000,
+    // And `--silence-timeout` was NOT passed, which is what makes the seat-level assertions
+    // below load-bearing rather than incidental: the advisor's 720s is its adapter's own
+    // default surviving an absolute request, not a silence request being honoured.
+    configuredSilenceMs: null,
     participants: [
       {
         id: 'advisor',
@@ -202,6 +211,63 @@ test('--turn-timeout moves the absolute clock on both seats, and invents neither
       },
     ],
   })
+})
+
+test('--silence-timeout moves the silence clock on the seat that has one, and invents none', async () => {
+  // 300s asked of the SILENCE clock and nothing asked of the absolute one, which is the
+  // pairing that proves the two are wired separately. The mirror of the test above it: there
+  // an absolute request left every silence clock at its adapter's default, here a silence
+  // request leaves every absolute clock at its adapter's default.
+  const report = await mixedDeadlines(undefined, 300_000)
+
+  assert.equal(report.deadlines.configuredSilenceMs, 300_000)
+  // Untouched, and asserted rather than assumed: a `--silence-timeout` that also moved the
+  // absolute budget would be a second setting nobody typed, which is the objection the
+  // `deadlines` getter used to raise against passing `--turn-timeout` into this slot. The
+  // objection was to sharing ONE flag between two clocks and it survives; what changed is
+  // that the silence clock has a flag of its own.
+  assert.equal(report.deadlines.configuredAbsoluteMs, null)
+
+  const advisor = report.deadlines.participants.find((p) => p.id === 'advisor')!
+  const implementer = report.deadlines.participants.find((p) => p.id === 'implementer')!
+
+  // The seat that HAS the clock is on the requested budget rather than on DEFAULT_IDLE_MS.
+  // Written as literals rather than against the constants, which would agree with themselves
+  // however either moved.
+  assert.deepEqual(advisor.silence, { status: 'enforced', ms: 300_000 })
+  assert.deepEqual(advisor.absolute, { status: 'enforced', ms: 2_700_000 })
+
+  // And the seat that has none is STILL unsupported, on a run that configured one as hard as
+  // it can be configured. This is the whole design decision in one assertion: the flag is
+  // accepted on a mixed run rather than refused, because refusing would discard a valid
+  // setting for the advisor above in order to state a fact about this seat -- and what this
+  // seat gets is the fact, not a number its adapter will never enforce.
+  assert.deepEqual(implementer.silence, { status: 'unsupported' })
+  // Not quietly re-aimed at the clock this seat DOES have, either. A silence request landing
+  // on an absolute budget would be the worst available outcome: a deadline the operator did
+  // not ask for, on a clock they were not configuring, reported as though they had.
+  assert.deepEqual(implementer.absolute, { status: 'disabled' })
+})
+
+test('both clocks configured at once stay two independent budgets', async () => {
+  // Parity, and the case a single shared knob could never produce: different numbers on the
+  // two clocks of one seat. If either flag were reaching the other's slot, one of these two
+  // assertions would carry the other's number.
+  const report = await mixedDeadlines(90_000, 30_000)
+
+  assert.equal(report.deadlines.configuredAbsoluteMs, 90_000)
+  assert.equal(report.deadlines.configuredSilenceMs, 30_000)
+
+  const advisor = report.deadlines.participants.find((p) => p.id === 'advisor')!
+  assert.deepEqual(advisor.absolute, { status: 'enforced', ms: 90_000 })
+  assert.deepEqual(advisor.silence, { status: 'enforced', ms: 30_000 })
+
+  // The unsupported seat takes the absolute request and refuses the silence one, in the same
+  // document, from the same invocation. That is what "reported per seat" buys over a run-wide
+  // answer: there is no single pair of numbers that describes this run.
+  const implementer = report.deadlines.participants.find((p) => p.id === 'implementer')!
+  assert.deepEqual(implementer.absolute, { status: 'enforced', ms: 90_000 })
+  assert.deepEqual(implementer.silence, { status: 'unsupported' })
 })
 
 test('the report keeps the two clock POLICIES apart, because #36 fixed only one of them', async () => {
