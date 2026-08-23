@@ -73,6 +73,7 @@ import {
 import {
   RunHandle,
   type Decision,
+  type ForceRecord,
   type PauseOption,
   type PauseReason,
   type PauseSupersession,
@@ -2091,6 +2092,14 @@ export class Relay {
   }
 
   /**
+   * Turns completed across all participants. The only counter the ceiling checks against; used
+   * by the force ledger as a baseline for what followed the force.
+   */
+  get turnsTaken(): number {
+    return this.#turnsTaken
+  }
+
+  /**
    * The duration ceiling's OWN reading: how long this run has spent running, net of pauses.
    *
    * Exposed rather than left to be reconstructed, because it cannot be reconstructed. The
@@ -3031,6 +3040,17 @@ export class Relay {
    */
   rotationRecords(): RotationRecord[] {
     return this.rotationWatch.records.map((r) => ({ ...r }))
+  }
+
+  /**
+   * Every forced `/continue` and the evidence the guard read at the moment it was applied.
+   *
+   * Through the handle, which already returns a copy, so the relay does not re-copy here. A
+   * stand-in relay never has a handle and never implements this method, which is what lets the
+   * recorder spread it away rather than write an empty array.
+   */
+  forceRecords(): ForceRecord[] {
+    return this.#handle?.forceRecords() ?? []
   }
 
   /**
@@ -4156,7 +4176,7 @@ export class Relay {
    * writing down because it points at a different mechanism: the loop is suspended at `await
    * deciding` above for the whole pause, so `#halt` cannot run again, and a watchdog `revision`
    * or replacement `turn_end` arriving meanwhile goes to `#trackSupersession`, which amends THE
-   * SAME `RunPause` in place (`src/relay/run.ts:747`). There was one pause, read twice. The
+   * SAME `RunPause` in place (`src/relay/run.ts:829`). There was one pause, read twice. The
    * evidence was not re-derived because nothing had re-derived it since it was captured -- which
    * is the same defect, reached by a shorter path than the report proposed.
    *
@@ -4275,7 +4295,7 @@ export class Relay {
       else if (!shouldWait && offered !== -1) pause.options.splice(offered, 1)
       // The status file is written from the LIVE pause object on any event, so an in-place
       // change reaches disk on the next one -- and a pause is precisely when nothing else is
-      // flowing. Same reasoning as `/wait` in the console (`src/repl/session.ts:2171`), and the
+      // flowing. Same reasoning as `/wait` in the console (`src/repl/session.ts:2201`), and the
       // reader who needs it most is the one polling from outside.
       this.#stream.emit({ type: 'liveness', pause })
       if (last) return stop()

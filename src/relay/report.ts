@@ -29,7 +29,7 @@
 
 import type { Confidence, Provenance } from '../contract/outcome.ts'
 import type { ParticipantLaunch } from '../registry/launch.ts'
-import type { RunOutcome } from './run.ts'
+import type { ForceRecord, RunOutcome } from './run.ts'
 import type { RotationRecord } from './rotationIntent.ts'
 import { reportedTargeting, type ReportedTargeting } from './targeting.ts'
 import type { Relay, RunDeadlines } from './relay.ts'
@@ -183,6 +183,14 @@ export interface RunReport {
      */
     records: RotationRecord[]
   }
+  /**
+   * Every forced `/continue` and the evidence the guard read at the moment it was applied.
+   *
+   * Present and empty on a run that never forced a continue, so a reader can tell "no forces"
+   * from "this build does not report forces" (#103). The handle already returns a copy, so the
+   * report uses `relay.forceRecords()` directly rather than re-copying here.
+   */
+  forces: ForceRecord[]
   /**
    * Whether the advisor used the assignment syntax multi-seat dispatch depends on (#79).
    *
@@ -391,5 +399,8 @@ export async function runReport(relay: Relay, input: ReportInput): Promise<RunRe
         confidence: a.confidence,
       })),
     })),
+    // The force ledger. Added last so it does not shift the line numbers cited for the fields
+    // above. The handle already returns a copy.
+    forces: relay.forceRecords(),
   }
 }

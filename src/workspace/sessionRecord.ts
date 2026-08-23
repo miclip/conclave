@@ -73,7 +73,7 @@ import type { Confidence, Provenance } from '../contract/outcome.ts'
 import type { RunCeilings } from '../relay/guardrails.ts'
 import type { RunDeadlines } from '../relay/deadlines.ts'
 import type { RelayEvent } from '../relay/observe.ts'
-import type { RunOutcome, RunPause } from '../relay/run.ts'
+import type { ForceRecord, RunOutcome, RunPause } from '../relay/run.ts'
 import type { RotationRecord } from '../relay/rotationIntent.ts'
 import { reportedTargeting, type ReportedTargeting, type TargetingWatch } from '../relay/targeting.ts'
 // The two accessors, not a third copy of them. A check is a bare string or a pair, and a
@@ -514,6 +514,23 @@ export interface SessionStatus {
    * the empty array's "asked, and nothing has rotated".
    */
   rotations?: RotationRecord[] | undefined
+  /**
+   * Every forced `/continue` and what the guard read at the moment it was applied.
+   *
+   * The live half of #125. A force clears the pause, so without this field the refusal it
+   * answered evaporates from the record. The entry carries the per-seat evidence the guard had
+   * at the time and whether the operator had already been refused, so the two populations stay
+   * separable afterwards.
+   *
+   * Present and EMPTY on a run that has forced nothing, for the same reason `rotations` above is
+   * present and empty: a probe reading a missing key cannot tell an empty record from a build
+   * that does not report the field.
+   *
+   * OPTIONAL for the same one case as `rotations`: a `RecordableRelay` stand-in that predates
+   * this and answers nothing. Absent there means "never asked", which is a different fact from
+   * the empty array's "asked, and nothing has forced".
+   */
+  forces?: ForceRecord[] | undefined
   /**
    * Whether the advisor has been using the assignment syntax this run's concurrency depends on.
    *
@@ -1110,6 +1127,18 @@ export interface RecordableRelay {
    */
   rotationRecords?(): readonly RotationRecord[]
   /**
+   * Every forced `/continue` and the evidence the guard read at the moment it was applied.
+   *
+   * A method for the same reason `rotationRecords` is one: it GROWS during the run, and a
+   * property would be a live array the recorder serialises -- the shared-state hazard
+   * `report.ts` copies to avoid. `RunHandle.forceRecords()` already returns a copy.
+   *
+   * OPTIONAL and structural like the rest: a stand-in written before #125 still satisfies the
+   * contract and gets the document it got before, with no `forces` key rather than an empty one
+   * claiming this run forced nothing when it was never asked.
+   */
+  forceRecords?(): readonly ForceRecord[]
+  /**
    * Whether the advisor has been addressing its instructions, as the relay has counted them.
    *
    * A method for the same reason `rotationRecords` is one: it GROWS during the run, and a
@@ -1271,6 +1300,23 @@ export function recordSession(
   }
 
   /**
+   * The force ledger, re-read on every write rather than captured once.
+   *
+   * Grows during the run exactly as `rotations` does -- a force is recorded the moment it is
+   * applied -- so it is a call made wherever the document is rewritten, and it is spread in
+   * at every one of those places rather than only at construction. A block written once would
+   * report no forces for the whole life of a run where one happened early and that is the
+   * indistinguishability #125 exists to fix.
+   *
+   * `undefined` when the relay does not answer, spread away rather than written as an empty
+   * array: a stand-in that was never asked has not said this run forced nothing.
+   */
+  const forces = (): { forces: ForceRecord[] } | Record<string, never> => {
+    const records = relay.forceRecords?.()
+    return records === undefined ? {} : { forces: [...records] }
+  }
+
+  /**
    * The same, for what the advisor has been addressing (#79).
    *
    * Grows during the run exactly as `rotations` does -- the counters move on every advisor turn
@@ -1320,6 +1366,9 @@ export function recordSession(
     // ones already there -- the same rule, for the same reason.
     ...rotations(),
     // After `rotations`, for the same reason it comes after `ceilings`: appended to the
+    // document rather than inserted among the keys already there.
+    ...forces(),
+    // After `forces`, for the same reason it comes after `rotations`: appended to the
     // document rather than inserted among the keys already there.
     ...targeting(),
   })
@@ -1372,7 +1421,7 @@ export function recordSession(
     if (gen < applied) return
     applied = gen
     for (const [id, ts] of fresh) turns.set(id, ts)
-    recorder.update({ messages: relay.log.length, participants: seats(), ...rotations(), ...targeting() })
+    recorder.update({ messages: relay.log.length, participants: seats(), ...rotations(), ...forces(), ...targeting() })
   }
 
   /**
@@ -1395,6 +1444,7 @@ export function recordSession(
       pause: extra?.pause,
       outcome: lastOutcome,
       ...rotations(),
+      ...forces(),
       ...targeting(),
     })
     // Detached: `set` is called from the run loop and a lifecycle change must not wait on a
@@ -1448,7 +1498,7 @@ export function recordSession(
       // Every event refreshes the participant block, so a permission prompt appears in the
       // status file at the moment it appears in the stream rather than at the next
       // lifecycle change -- which for a seat stopped at a prompt would be never.
-      recorder.update({ messages: relay.log.length, participants: seats(), ...rotations(), ...targeting() })
+      recorder.update({ messages: relay.log.length, participants: seats(), ...rotations(), ...forces(), ...targeting() })
     }
   })()
 

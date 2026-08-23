@@ -42,7 +42,7 @@ import type { AgentRegistry } from '../registry/registry.ts'
 import type { ParticipantSpec } from '../registry/types.ts'
 import { boundOf, implementerSpecsFor, Relay, reviewerSpecFor, type SeatRequest } from '../relay/relay.ts'
 import type { RelayMessage } from '../relay/message.ts'
-import type { RunHandle, RunPause } from '../relay/run.ts'
+import type { ForceRecord, RunHandle, RunPause } from '../relay/run.ts'
 import { ensureCodexHooksTrusted } from '../deployment/ensureTrust.ts'
 import { AGENT_KINDS, installConfig, type AgentKind } from '../config/install.ts'
 import { CONFIG_RELATIVE, launchArgsFor, permissionModeFor, readProjectConfig } from '../config/project.ts'
@@ -545,7 +545,7 @@ function renderPause(p: RunPause, width: number): string {
  *
  * This used to read `pause.verdictOf.participant` instead, and that field is narrower than it
  * looks: it is set at exactly two halt sites, both `turn_incomplete`
- * (`src/relay/relay.ts:6555` and `src/relay/relay.ts:7071`). So FOUR of the five seat-scoped
+  * (`src/relay/relay.ts:6571` and `src/relay/relay.ts:7087`). So FOUR of the five seat-scoped
  * reasons -- `rotation_candidate`, `implementer_unanswered`, `merge_blocked`, `review_blocked`
  * -- named a seat in their scope and were sampled by rank anyway, because the field the guard
  * read was empty. The scope is the field that is always populated, which is the other half of
@@ -559,16 +559,16 @@ function renderPause(p: RunPause, width: number): string {
  * pause never mentioned. The rank fallback's own comment argued it was right "only because
  * there is one of them", which is an argument for deriving the seat from the pause instead of
  * from a rank. Worse than useless on one of them: resuming an `advisor_escalated` pause sends
- * to the ADVISOR (`src/relay/relay.ts:6672`), so the fallback measured children that were not
+  * to the ADVISOR (`src/relay/relay.ts:6692`), so the fallback measured children that were not
  * about to be sent to at all.
  *
  * What that gives up, stated rather than discovered: the `advisor_escalated` halt raised when a
- * seat's turn completed and its report could not be read (`src/relay/relay.ts:6983-6985`) is
+  * seat's turn completed and its report could not be read (`src/relay/relay.ts:7005`) is
  * conclave-scoped by design -- "the reason names who is being asked to take it, and the scope
  * follows the reason" -- yet the thing an operator wants to know there is whether THAT seat's
  * child is still writing. Under the rank fallback that seat was sampled at N=1 by coincidence
  * of being the only implementer. It is not sampled now. The pause still carries its own
- * liveness EVIDENCE from the halt site (`src/relay/relay.ts:6994-6996`), which is what the operator
+  * liveness EVIDENCE from the halt site (`src/relay/relay.ts:7016`), which is what the operator
  * reads;
  * what is gone is a refusal derived from a rank scan. Narrowing that halt's scope, if the
  * refusal is wanted back, is a change to the halt site rather than to this guard.
@@ -1301,8 +1301,38 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     // written down and where the removed rank fallback is accounted for.
     const children = seatsToSampleAtPause(run.pause, relay.participants)
     const supersededCompleted = run.pause?.superseded?.verdict?.outcome === 'completed'
-    if (!runOpts.force && !supersededCompleted) {
-      const sample = opts.liveness ?? sampleLiveness
+    const sample = opts.liveness ?? sampleLiveness
+
+    if (runOpts.force && run.pause) {
+      // Record what the guard would have read, so a force that overrode a refusal and a force
+      // applied to an idle child stay distinguishable in the record after the pause is cleared.
+      const overrode: ForceRecord['overrode'] = []
+      for (const child of children) {
+        const turn = activeTurn(child.events)
+        const pid = child.session.childPid
+        let colour: ChildLiveness | undefined
+        if (pid !== undefined) {
+          try {
+            colour = await sample(pid)
+          } catch {
+            // A sampling failure costs the operator a sentence, not the refusal.
+          }
+        }
+        overrode.push({
+          seat: child.id,
+          turn: turn ? describeActiveTurn(turn) : null,
+          ...(colour ? { liveness: colour } : {}),
+        })
+      }
+      run.recordForce({
+        at: Date.now(),
+        pause: { reason: run.pause.reason, atSeq: run.pause.atSeq },
+        overrode,
+        refusedFirst: run.pause.refusal !== undefined,
+        turnsTakenAtForce: relay.turnsTaken,
+        followedBy: null,
+      })
+    } else if (!runOpts.force && !supersededCompleted) {
       for (const child of children) {
         const turn = activeTurn(child.events)
         // No turn open is no refusal, whatever the child's CPU is doing. A high or mixed
@@ -2140,7 +2170,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
       // FALSIFIER, stated because it is the strongest argument against this shape: the
       // console has no general "trailing text is a message" rule and does not gain one here.
       // `/rotate <text>` and `/abort <text>` consume their text as a REASON
-      // (`src/repl/session.ts:2193`, `src/repl/session.ts:2226`) and `/pause`, `/queue`, `/audit` ignore
+      // (`src/repl/session.ts:2223`, `src/repl/session.ts:2256`) and `/pause`, `/queue`, `/audit` ignore
       // whatever follows them. So an operator who learns this from `/continue` and carries
       // it to `/pause I'll be back` still loses the sentence. That inconsistency is not
       // repaired by making `/continue` a third behaviour; it is narrowed by it, and the

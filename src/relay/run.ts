@@ -196,6 +196,69 @@ export interface PauseContinueRefusal {
 }
 
 /**
+ * A forced resume, recorded so the two cases #125 names stay separable in the record:
+ * a force that overrode a WRONG refusal (child idle, guard noisy, the run proceeded) and a
+ * force that overrode a RIGHT one (child mid-turn, the send went into a live turn, the run
+ * died). Today both are the same absence -- a force is recorded nowhere, and the refusal it
+ * answered evaporates with the pause on resume.
+ *
+ * WHAT IS RECORDED IS FACTS, never a verdict. The two halves:
+ *
+ *   - WHAT IT OVERRODE, known at the moment of the force: the evidence the guard read (per
+ *     sampled seat, the open turn's description or the explicit fact that there was none),
+ *     and whether the operator had already been shown a refusal. This half is complete at
+ *     `at` and never changes afterwards.
+ *   - WHAT FOLLOWED, filled when the run ends: the run's terminal outcome and its DISTANCE
+ *     from the force, in completed turns and milliseconds. The distance is the honesty of
+ *     the whole record. A run that ends before completing one more turn after a force died
+ *     in the only window where the force is attributable -- post-#117 that ending is
+ *     `peer_busy`, the send precondition expiring against the live turn the force released
+ *     into. A run that ends three turns later died of its own affairs, and this record says
+ *     only that it ended, and how far away -- proximity, not causation. A ledger that
+ *     overclaims is worse than one that records less: the analyst separates "justified"
+ *     from "killed a run" by reading the distance, so the ledger itself never has to.
+ *
+ * Lives on the `RunHandle`, the one object both the console (which applies the force) and
+ * the relay (which learns the outcome) can see -- the same arrangement as the suspension
+ * ledger, and for the same reason: a record kept beside either one alone would have to be
+ * closed in every place the other can end the run.
+ */
+export interface ForceRecord {
+  /** When the force was applied. */
+  at: number
+  /** The pause the force resumed from, so the entry lines up against the pause's own record. */
+  pause: Pick<RunPause, 'reason' | 'atSeq'>
+  /**
+   * What the guard read at the moment of the force, per seat the pause scoped it to sample.
+   * `turn` is `describeActiveTurn` of the seat's open turn, or `null` when no turn was open
+   * -- the explicit fact of an idle child, not an omitted one. `liveness` is the CPU colour
+   * sampled beside the reading, present when the adapter names a child process; it decided
+   * nothing and says so by its optionality, exactly as on `PauseContinueRefusal`.
+   */
+  overrode: Array<{ seat: string; turn: string | null; liveness?: ChildLiveness | undefined }>
+  /**
+   * Whether a refusal was already on the pause when the force landed: the difference between
+   * an operator who was refused and forced past it and one who forced blind. Both are legal;
+   * they are different populations when the guard's refusal rate is scored, and recording them
+   * as one is the contamination #75 named for rotations.
+   */
+  refusedFirst: boolean
+  /**
+   * Turns the relay had completed when the force was applied -- the baseline the outcome
+   * distance in `followedBy` is read against.
+   */
+  turnsTakenAtForce: number
+  /**
+   * What followed the force, or `null` while the run is still going. Spelled out rather than
+   * omitted (#103): an absent key is a reader guessing whether the run is alive or the field
+   * is new. When set: the run's terminal outcome, and its distance from the force in
+   * completed turns and milliseconds. `turnsCompleted: 0` is the attributable window; larger
+   * is the run's own story. No causal label is ever written here.
+   */
+  followedBy: { outcome: RunReason; detail?: string | undefined; turnsCompleted: number; ms: number } | null
+}
+
+/**
  * The liveness measurement behind this pause's evidence, as a fact rather than as prose.
  *
  * `evidence` is a `string[]` an operator reads. An AGENT operator — which the run this was
@@ -378,6 +441,15 @@ export class RunHandle {
    * re-ask the same judgement, which is what issue #49 is about.
    */
   #waitMemory = new Map<string, PauseWait>()
+  /**
+   * Forced resumes, recorded at the moment they are applied so the record can tell a force
+   * that overrode a refusal from one that did not. See `ForceRecord`.
+   *
+   * Kept here for the same reason the suspension ledger is: the handle is the one object that
+   * sees both the console-side decision to force and the relay-side outcome, so a ledger kept
+   * beside either one alone would have to be closed in every place the other can end the run.
+   */
+  #forces: ForceRecord[] = []
 
   constructor(control: RunControl, opts: RunHandleOptions = {}) {
     this.#control = control
@@ -418,6 +490,16 @@ export class RunHandle {
     if (this.#suspendedSince === undefined) return
     this.#suspendedMs += this.#now() - this.#suspendedSince
     this.#suspendedSince = undefined
+  }
+
+  /** Every force applied to this run, copied so the caller cannot mutate the handle's ledger. */
+  forceRecords(): ForceRecord[] {
+    return this.#forces.map((f) => ({ ...f, overrode: f.overrode.map((o) => ({ ...o })) }))
+  }
+
+  /** Record a force. The caller builds the record; the handle only holds it. */
+  recordForce(entry: ForceRecord): void {
+    this.#forces.push(entry)
   }
 
   /**
