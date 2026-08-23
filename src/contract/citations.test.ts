@@ -44,26 +44,37 @@
  */
 
 import { strict as assert } from 'node:assert'
+import { spawnSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import test from 'node:test'
 import {
   CITED,
+  DOCS_ROOTS,
   NOT_CITATIONS,
+  REGISTRY_FILE,
   REPO,
   allCitations,
+  applyRepairs,
   citationFault,
+  citationSites,
   citationsInLine,
   docsLiveClaimCitations,
   exemptKey,
+  faultsAfterRepair,
+  planPairedRepairs,
   planRepairs,
+  repairDocsText,
+  staleSpellings,
   relocate,
   weakPins,
   repairLine,
+  SOURCE_ROOTS,
   sourceFiles,
   type Found,
 } from './citations.ts'
+import { runFixer, type FixerOutput } from '../../scripts/fix-citations.ts'
 
 test('every path:line citation in the sources is declared with an expected token', () => {
   const undeclared = allCitations().filter((c) => !(c.cite in CITED) && !(exemptKey(c) in NOT_CITATIONS))
@@ -489,4 +500,424 @@ test('the fixer is wired into package.json under the name the guard tells you to
   }
   assert.ok(pkg.scripts?.['citations:fix'], 'the guard points at this script by name')
   assert.match(pkg.scripts['citations:fix']!, /fix-citations/)
+})
+
+/**
+ * A tree written for the purpose, with the four kinds of place a citation lives: the table that
+ * declares it, the prose that cites it, a `## LIVE:` docs section that claims it, and a frozen
+ * docs section that merely records it. Everything below is proven against one of these rather
+ * than against the repository, because the repository is green and the failures being proven are
+ * what happens when it is not.
+ */
+const withTree = (files: Record<string, string>, fn: (root: string) => void): void => {
+  const root = mkdtempSync(join(tmpdir(), 'conclave-citations-pair-'))
+  try {
+    // Every configured root, whether or not this fixture puts a file in it. The scanner refuses
+    // to read a missing one as an empty one -- see `walkRoot` -- so a fixture without `bin/` is
+    // not a smaller tree, it is a tree the scanner would not run on, and creating them here is
+    // what keeps these fixtures the same shape as the repository they stand in for.
+    for (const dir of [...SOURCE_ROOTS, ...DOCS_ROOTS]) mkdirSync(join(root, dir), { recursive: true })
+    for (const [file, text] of Object.entries(files)) {
+      const path = join(root, file)
+      mkdirSync(dirname(path), { recursive: true })
+      writeFileSync(path, text)
+    }
+    fn(root)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+}
+
+/** The cited file, with its token three lines below where the table still says it is. */
+const SHIFTED_THING = [
+  '// A helper whose declaration used to be on line 2.',
+  '//',
+  '//',
+  '//',
+  'export function thing(): void {}',
+  '',
+].join('\n')
+
+test('a repair moves the declaration, the prose and the live docs claim together', () => {
+  // #170. Before this, `citations:fix` repaired CITED and the sources and never looked at
+  // `docs/**` at all, so a pair whose docs half was brought into scope by #164 came out half
+  // done -- and the tree went from a failure the tool could finish to one only a human could,
+  // while the tool printed success.
+  const registry = [
+    'export const CITED: Record<string, string> = {',
+    "  'src/thing.ts:2': 'export function thing(',",
+    '}',
+    '',
+  ].join('\n')
+  const notes = [
+    '# Notes',
+    '',
+    '## Frozen: what was true when this was recorded',
+    'The helper was at `src/thing.ts:2` when this was written, and that is the point of it.',
+    '',
+    '## LIVE: what is true now',
+    '`thing` is declared at `src/thing.ts:2`, and once more as `:2` in the continued form.',
+    '',
+  ].join('\n')
+  withTree(
+    {
+      [REGISTRY_FILE]: registry,
+      'src/thing.ts': SHIFTED_THING,
+      'src/other.ts': '// The claim rests on `src/thing.ts:2` and on nothing else.\n',
+      'docs/NOTES.md': notes,
+    },
+    (root) => {
+      const cited = { 'src/thing.ts:2': 'export function thing(' }
+      const plan = planPairedRepairs(cited, root)
+      assert.deepEqual(
+        plan.repairs.map((r) => `${r.from} -> ${r.to}`),
+        ['src/thing.ts:2 -> src/thing.ts:5'],
+      )
+      assert.deepEqual(plan.refused, [])
+
+      // Planning writes nothing. `--check` is this call and no more, which is what makes the
+      // flag safe to trust rather than a second code path that has to be kept honest.
+      assert.equal(readFileSync(join(root, 'docs/NOTES.md'), 'utf8'), notes)
+      assert.equal(readFileSync(join(root, REGISTRY_FILE), 'utf8'), registry)
+
+      assert.deepEqual(applyRepairs(plan.writes, root), [
+        'docs/NOTES.md',
+        REGISTRY_FILE,
+        'src/other.ts',
+      ])
+      const read = (f: string): string => readFileSync(join(root, f), 'utf8')
+      assert.ok(read(REGISTRY_FILE).includes("'src/thing.ts:5'"), 'the declaration moved')
+      assert.ok(read('src/other.ts').includes('src/thing.ts:5'), 'the prose moved')
+
+      const docs = read('docs/NOTES.md').split('\n')
+      assert.equal(
+        docs[6],
+        '`thing` is declared at `src/thing.ts:5`, and once more as `:5` in the continued form.',
+        'the live claim moved, and the continued form stayed continued',
+      )
+      // The frozen half, byte for byte. It is a record of what was true when it was written, the
+      // guard does not check it, and renumbering it would be editing the evidence rather than
+      // the claim.
+      assert.equal(
+        docs[3],
+        'The helper was at `src/thing.ts:2` when this was written, and that is the point of it.',
+        'the frozen section is untouched',
+      )
+
+      const by = new Map(plan.repairs.map((r) => [r.from, r.to]))
+      assert.deepEqual(staleSpellings(by, root), [], 'no half of the pair is left behind')
+      assert.deepEqual(
+        Object.entries({ 'src/thing.ts:5': 'export function thing(' })
+          .map(([c, e]) => citationFault(c, e, root))
+          .filter((f) => f !== undefined),
+        [],
+        'and the repaired citation verifies against the tree it was written into',
+      )
+    },
+  )
+})
+
+/**
+ * A registry that writes one citation twice: once as the declaration, once inside an exemption
+ * granted for text that merely looks like it. Both are real shapes -- `NOT_CITATIONS` keys carry
+ * a citation spelling today -- and a rewriter cannot tell which is the claim.
+ */
+const AMBIGUOUS_REGISTRY = [
+  'export const CITED: Record<string, string> = {',
+  "  'src/thing.ts:2': 'export function thing(',",
+  "  'src/other.ts:2': 'export function other(',",
+  "  'src/thing.ts:1': 'a token that was deleted',",
+  '}',
+  '',
+  'export const NOT_CITATIONS: Record<string, string> = {',
+  "  'src/demo.ts|src/thing.ts:2': 'sample prose in a fixture, not a claim about this tree',",
+  '}',
+  '',
+].join('\n')
+
+const PAIR_TREE = {
+  [REGISTRY_FILE]: AMBIGUOUS_REGISTRY,
+  'src/thing.ts': SHIFTED_THING,
+  'src/other.ts': SHIFTED_THING.replace('thing', 'other').replace('thing', 'other'),
+  'docs/THING.md': ['# Thing', '', '## LIVE: now', 'It is at `src/thing.ts:2`.', ''].join('\n'),
+  'docs/OTHER.md': ['# Other', '', '## LIVE: now', 'It is at `src/other.ts:2`.', ''].join('\n'),
+}
+
+const PAIR_TABLE = {
+  'src/thing.ts:2': 'export function thing(',
+  'src/other.ts:2': 'export function other(',
+  'src/thing.ts:1': 'a token that was deleted',
+}
+
+test('a pair that cannot be rewritten whole is declined by name, and neither side of it moves', () => {
+  withTree(PAIR_TREE, (root) => {
+    const plan = planPairedRepairs(PAIR_TABLE, root)
+
+    assert.deepEqual(
+      plan.repairs.map((r) => `${r.from} -> ${r.to}`),
+      ['src/other.ts:2 -> src/other.ts:5'],
+      'the clean pair is still repaired -- one undecidable citation does not stop the rest',
+    )
+
+    const declined = plan.refused.find((r) => r.cite === 'src/thing.ts:2')
+    assert.ok(declined, 'the pair it declined is named')
+    assert.match(
+      declined.why,
+      /writes it on 2 lines \(2, 8\)/,
+      'and the reason says which side it could not rewrite, and where',
+    )
+    // The refusals `planRepairs` already made -- a token that is GONE -- come through unchanged.
+    // This narrows what is repaired; it does not widen it, and range behaviour is untouched.
+    assert.ok(
+      plan.refused.some((r) => r.cite === 'src/thing.ts:1' && r.why.includes('appears nowhere')),
+      'the pre-existing refusals still arrive',
+    )
+
+    // `src/other.ts` is absent because nothing in it cites anything: a pair is the declaration
+    // and whatever prose and live claims exist, which here is one docs section and no comment.
+    assert.deepEqual([...plan.writes.keys()].sort(), ['docs/OTHER.md', REGISTRY_FILE])
+    applyRepairs(plan.writes, root)
+
+    assert.equal(
+      readFileSync(join(root, 'docs/THING.md'), 'utf8'),
+      PAIR_TREE['docs/THING.md'],
+      'the declined pair leaves its live docs claim byte for byte unchanged',
+    )
+    const registry = readFileSync(join(root, REGISTRY_FILE), 'utf8').split('\n')
+    assert.equal(registry[1], "  'src/thing.ts:2': 'export function thing(',", 'and its declaration')
+    assert.equal(registry[7], "  'src/demo.ts|src/thing.ts:2': 'sample prose in a fixture, not a claim about this tree',")
+    assert.equal(registry[2], "  'src/other.ts:5': 'export function other(',", 'while the clean pair moved')
+
+    // And what the run REPORTS afterwards. A refused citation is still faulted once the run is
+    // over -- that is what refusing it means -- so counting it as a repair that failed to verify
+    // says "the tree has been changed, review it" over repairs that were all correct, and buries
+    // the line naming the pair a human has to look at.
+    const by = new Map(plan.repairs.map((r) => [r.from, r.to]))
+    const after = faultsAfterRepair(by, plan.faulted, PAIR_TABLE, root)
+    assert.deepEqual(after.broken, [], 'nothing the repair wrote is broken')
+    assert.deepEqual(after.halfRepaired, [], 'and no half of a pair was left behind')
+    assert.deepEqual(
+      after.untouched.map((f) => f.slice(0, f.indexOf(':', f.indexOf(':') + 1))).sort(),
+      ['src/thing.ts:1', 'src/thing.ts:2'],
+      'what remains is exactly what was declined, reported as needing a human',
+    )
+  })
+})
+
+test('a live docs claim is never repaired while its declaration stays stale', () => {
+  // The reverse of #170, asked structurally rather than hoped for. The docs half of the declined
+  // pair is perfectly rewritable ON ITS OWN -- proven here by rewriting it -- and the fixer still
+  // does not write it, because the plan is per PAIR and its registry half was refused. There is
+  // no path from a rewritable docs claim to a written one that does not carry the declaration
+  // with it: every file's new text comes from the same surviving map, computed once, after the
+  // declaration check has already removed what it removed.
+  withTree(PAIR_TREE, (root) => {
+    const alone = repairDocsText(
+      PAIR_TREE['docs/THING.md'],
+      new Map([['src/thing.ts:2', 'src/thing.ts:5']]),
+    )
+    assert.notEqual(alone, PAIR_TREE['docs/THING.md'], 'the docs half could have been rewritten')
+
+    const plan = planPairedRepairs(PAIR_TABLE, root)
+    assert.ok(!plan.writes.has('docs/THING.md'), 'and the fixer declines to write it anyway')
+
+    // Nothing accepted is written to docs without its declaration being written too.
+    const sites = citationSites(root)
+    for (const r of plan.repairs) {
+      const where = sites.get(r.from) ?? []
+      assert.equal(
+        where.filter((s) => s.scope === 'registry').length,
+        1,
+        `${r.from} is accepted, so exactly one declaration carries it`,
+      )
+      for (const s of where) {
+        assert.ok(plan.writes.has(s.file), `${r.from} is repaired at every side it is written, ${s.file} included`)
+      }
+    }
+  })
+})
+
+test('the fixer reaches docs `## LIVE:` claims, and every declaration is written once', () => {
+  // Two tripwires on the real tree, both of which the fixture tests above would keep passing if
+  // they broke. `docs/**` was brought into the guard by #164 and into the fixer by #170; if the
+  // live sections stop being reached, every test above still passes against its own fixture and
+  // the repository quietly returns to half repairs.
+  const sites = citationSites()
+  const paired = Object.keys(CITED).filter((c) =>
+    (sites.get(c) ?? []).some((s) => s.scope === 'docs-live'),
+  )
+  assert.ok(paired.length > 0, 'declared citations are claimed in docs `## LIVE:` sections')
+
+  // And the condition every one of those pairs is repairable UNDER: a declaration the rewriter
+  // can find exactly once. A second mention of the same spelling in the registry is legal and
+  // will simply be declined by name -- this says nothing has drifted into that state unnoticed.
+  assert.deepEqual(
+    Object.keys(CITED).filter(
+      (c) => (sites.get(c) ?? []).filter((s) => s.scope === 'registry').length !== 1,
+    ),
+    [],
+    `${REGISTRY_FILE} writes some declaration in no place or in more than one. The fixer cannot ` +
+      'tell a declaration from data about one, so it will decline those pairs rather than ' +
+      'half repair them -- which is safe, and still means they need a human.',
+  )
+})
+
+/** A run's two streams, collected instead of printed. */
+const collect = (): { log: string[]; error: string[]; out: FixerOutput } => {
+  const log: string[] = []
+  const error: string[] = []
+  return { log, error, out: { log: (l) => log.push(l), error: (l) => error.push(l) } }
+}
+
+/** Every file of a fixture, still exactly as it was written. */
+const assertUnchanged = (root: string, files: Record<string, string>, why: string): void => {
+  for (const [file, text] of Object.entries(files)) {
+    assert.equal(readFileSync(join(root, file), 'utf8'), text, `${file} ${why}`)
+  }
+}
+
+/**
+ * A tree where the only faulted pair is one the fixer must decline.
+ *
+ * Separate from the mixed fixture on purpose. There, the registry is rewritten on behalf of the
+ * OTHER pair, so "nothing was written" can only be asserted line by line -- true, and weaker than
+ * it sounds. Here there is nothing else to repair, so the claim is the whole tree, byte for byte,
+ * which is what "or it repairs neither" is supposed to mean.
+ */
+const DECLINE_ONLY_TREE = {
+  [REGISTRY_FILE]: [
+    'export const CITED: Record<string, string> = {',
+    "  'src/thing.ts:2': 'export function thing(',",
+    '}',
+    '',
+    'export const NOT_CITATIONS: Record<string, string> = {',
+    "  'src/demo.ts|src/thing.ts:2': 'sample prose in a fixture, not a claim about this tree',",
+    '}',
+    '',
+  ].join('\n'),
+  'src/thing.ts': SHIFTED_THING,
+  'src/prose.ts': '// The claim rests on `src/thing.ts:2` and on nothing else.\n',
+  'docs/THING.md': ['# Thing', '', '## LIVE: now', 'It is at `src/thing.ts:2`.', ''].join('\n'),
+}
+
+const DECLINE_ONLY_TABLE = { 'src/thing.ts:2': 'export function thing(' }
+
+test('a declined pair leaves the whole tree byte for byte, and says which pair it declined', () => {
+  withTree(DECLINE_ONLY_TREE, (root) => {
+    // Planning first, then the command, because they are different claims: the plan proposes no
+    // writes, and the command -- which is what an operator actually runs -- makes none.
+    const plan = planPairedRepairs(DECLINE_ONLY_TABLE, root)
+    assert.deepEqual(plan.repairs, [], 'nothing is accepted')
+    assert.deepEqual([...plan.writes.keys()], [], 'so there is nothing to write')
+    assert.deepEqual(
+      plan.refused.map((r) => r.cite),
+      ['src/thing.ts:2'],
+      'and the pair it declined is named',
+    )
+
+    const run = collect()
+    assert.equal(runFixer([], run.out, DECLINE_ONLY_TABLE, root), 1, 'the run needs a human')
+    assertUnchanged(root, DECLINE_ONLY_TREE, 'was written by a run that repaired nothing')
+
+    assert.ok(
+      run.log.some((l) => l.startsWith('  REFUSED src/thing.ts:2:') && l.includes('2 lines (2, 6)')),
+      `the refusal names the pair and where it could not rewrite it: ${JSON.stringify(run.log)}`,
+    )
+    assert.ok(
+      run.error.some((l) => l.includes('1 refused above and still need a human')),
+      'and the run ends saying so, rather than claiming a repair failed to verify',
+    )
+    assert.ok(
+      !run.log.some((l) => l.startsWith('citations: repaired')),
+      'nothing is reported as repaired',
+    )
+  })
+})
+
+test('--check writes nothing and exits on what it WOULD have done', () => {
+  // The flag's whole contract, asserted through the command rather than around it. Testing the
+  // planner and calling that `--check` proves that nothing wrote because nothing was asked to,
+  // which is the reasoning rather than the behaviour.
+  const clean = {
+    [REGISTRY_FILE]: [
+      'export const CITED: Record<string, string> = {',
+      "  'src/thing.ts:2': 'export function thing(',",
+      '}',
+      '',
+    ].join('\n'),
+    'src/thing.ts': SHIFTED_THING,
+    'docs/THING.md': ['# Thing', '', '## LIVE: now', 'It is at `src/thing.ts:2`.', ''].join('\n'),
+  }
+  withTree(clean, (root) => {
+    const run = collect()
+    assert.equal(runFixer(['--check'], run.out, DECLINE_ONLY_TABLE, root), 0, 'nothing refused, so 0')
+    assertUnchanged(root, clean, 'was written by --check')
+    assert.deepEqual(
+      run.log.filter((l) => l.startsWith('  would write')).sort(),
+      ['  would write docs/THING.md', `  would write ${REGISTRY_FILE}`],
+      'and it says which files it would have written, docs included',
+    )
+    assert.ok(run.log.some((l) => l.includes('1 would be repaired across 2 files, 0 refused (nothing written)')))
+
+    // The same tree, actually repaired, so the exit code above is a statement about a run that
+    // would have done something rather than about an empty plan.
+    assert.equal(runFixer([], collect().out, DECLINE_ONLY_TABLE, root), 0)
+    assert.ok(readFileSync(join(root, 'docs/THING.md'), 'utf8').includes('src/thing.ts:5'))
+  })
+
+  withTree(DECLINE_ONLY_TREE, (root) => {
+    const run = collect()
+    assert.equal(runFixer(['--check'], run.out, DECLINE_ONLY_TABLE, root), 1, 'a refusal exits 1')
+    assertUnchanged(root, DECLINE_ONLY_TREE, 'was written by --check over a refusal')
+    assert.ok(run.log.some((l) => l.includes('0 would be repaired across 0 files, 1 refused (nothing written)')))
+  })
+})
+
+test('the command line runs the same function this file tests', () => {
+  // The two lines `runFixer` does not cover: argv reaching it, and its return value becoming the
+  // process's exit code. Run against this repository, which is green, so it asserts the quiet
+  // path -- the one every other invocation of `npm run citations:fix` takes.
+  const ran = spawnSync(process.execPath, ['scripts/fix-citations.ts', '--check'], {
+    cwd: REPO,
+    encoding: 'utf8',
+  })
+  assert.equal(ran.status, 0, `citations:fix --check failed: ${ran.stdout}${ran.stderr}`)
+  assert.match(ran.stdout, /^citations: /m, 'and it reported through the same lines')
+})
+
+test('a configured scan root that is not there is raised, not read as an empty one', () => {
+  // The failure this shape invites, and the reason it is worth a test of its own: an unreadable
+  // root makes every guard over it pass. `docs/**` came into scope with #164 and is the newest
+  // and least load-bearing-looking of them, so a `docs` that had been renamed or not checked out
+  // would report zero live claims, take the two-way pin over them with it, and look like a clean
+  // run. Nothing downstream can tell that apart from a tree with no live claims in it.
+  const root = mkdtempSync(join(tmpdir(), 'conclave-citations-roots-'))
+  try {
+    for (const dir of [...SOURCE_ROOTS, ...DOCS_ROOTS]) mkdirSync(join(root, dir), { recursive: true })
+    writeFileSync(
+      join(root, 'docs/LIVE.md'),
+      ['# Doc', '', '## LIVE: now', 'It is at `src/thing.ts:2`.', ''].join('\n'),
+    )
+    assert.equal(docsLiveClaimCitations(root).length, 1, 'the tree it is about does have a live claim')
+
+    for (const dir of DOCS_ROOTS) rmSync(join(root, dir), { recursive: true, force: true })
+    assert.throws(
+      () => docsLiveClaimCitations(root),
+      /'docs' is a configured scan root and could not be read/,
+      'a missing docs root is raised rather than reported as no live claims',
+    )
+    // And through the fixer, because that is what would act on the emptiness.
+    assert.throws(() => planPairedRepairs({}, root), /configured scan root/)
+
+    // The same for the source roots, whose absence takes the found-must-be-declared half with it.
+    mkdirSync(join(root, 'docs'))
+    rmSync(join(root, SOURCE_ROOTS[1]!), { recursive: true, force: true })
+    assert.throws(
+      () => allCitations(root),
+      new RegExp(`'${SOURCE_ROOTS[1]}' is a configured scan root`),
+      'and a missing source root is not zero citations either',
+    )
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
 })

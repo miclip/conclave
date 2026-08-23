@@ -30,9 +30,25 @@
  * are the two cases where the guard is doing its actual job: the cited thing is GONE, or the pin
  * was never specific enough to be a pin. Both need a human to decide whether the claim survives,
  * and a tool that guessed would launder real rot into a green build.
+ *
+ * ## Why a repair is planned as a PAIR
+ *
+ * A citation is not one thing in one place. It is the DECLARATION in `CITED`, the mentions in the
+ * prose, and -- since #164 -- the claims in `docs/**` sections marked `## LIVE:`, which the guard
+ * checks in both directions. Repairing some of those and not the rest is worse than repairing
+ * none: it turns a failure this tool can finish into one only a human can, while reporting
+ * success. That is #170, and it was not hypothetical -- `sourceFiles()` has never included
+ * `docs/**`, so every pair with a live docs half came out half done.
+ *
+ * So `planPairedRepairs` simulates the whole set against every file that writes it before any of
+ * it is written, and declines BY NAME any repair that would leave a side stale -- taking its
+ * writes with it, so neither of its files is touched on its account. Frozen docs sections are
+ * never rewritten at all: the guard does not check them, and they record what was true when they
+ * were written. `liveSectionMask` is the one place that line is drawn, for the same reason the
+ * scanner is not copied -- see `439cf05`.
  */
 
-import { readFileSync, readdirSync } from 'node:fs'
+import { readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { join, relative } from 'node:path'
 
 export const REPO = join(import.meta.dirname, '..', '..')
@@ -50,7 +66,9 @@ export const DOCS_ROOTS = ['docs']
  * Either one scanned as a source would satisfy the found-and-declared pin with itself -- every
  * key found in its own table, proving nothing about the tree.
  */
-export const SELF = new Set(['src/contract/citations.ts', 'src/contract/citations.test.ts'])
+export const REGISTRY_FILE = 'src/contract/citations.ts'
+
+export const SELF = new Set([REGISTRY_FILE, 'src/contract/citations.test.ts'])
 
 /**
  * What each cited line must still say.
@@ -319,52 +337,89 @@ export function citationsInLine(line: string): { path: string; start: number; en
   return citationSpansInLine(line).map(({ path, start, end, text }) => ({ path, start, end, text }))
 }
 
-export function sourceFiles(): string[] {
-  const out: string[] = []
-  const walk = (dir: string): void => {
-    for (const e of readdirSync(dir, { withFileTypes: true })) {
-      const p = join(dir, e.name)
-      if (e.isDirectory()) walk(p)
-      else if (e.name.endsWith('.ts')) out.push(p)
-    }
+function walkFiles(dir: string, ext: string, out: string[]): void {
+  for (const e of readdirSync(dir, { withFileTypes: true })) {
+    const p = join(dir, e.name)
+    if (e.isDirectory()) walkFiles(p, ext, out)
+    else if (e.name.endsWith(ext)) out.push(p)
   }
-  for (const root of SOURCE_ROOTS) walk(join(REPO, root))
-  return out.map((p) => relative(REPO, p)).filter((p) => !SELF.has(p))
+}
+
+/**
+ * Walk a CONFIGURED root, and fail loudly when it cannot be read.
+ *
+ * The tempting shape here is to treat an unreadable root as an empty one, because it makes
+ * fixtures easier to write. It also makes every guard over that root pass by finding nothing:
+ * `docs/**` came into scope with #164, and a `docs` that has been renamed, moved, or simply not
+ * checked out would report zero live claims and take the two-way pin over them quietly with it.
+ * A root named in `SOURCE_ROOTS` or `DOCS_ROOTS` is a root this repository HAS, so not finding
+ * one is a fact about the scanner rather than about the tree, and it is raised as one. A fixture
+ * that wants to be scanned creates the roots, which is the honest version of the same
+ * convenience.
+ */
+function walkRoot(root: string, dir: string, ext: string, out: string[]): void {
+  try {
+    walkFiles(join(root, dir), ext, out)
+  } catch (cause) {
+    throw new Error(
+      `citations: '${dir}' is a configured scan root and could not be read (${(cause as Error).message}). ` +
+        'Nothing under it was scanned, so every guard over it would have passed by finding nothing.',
+      { cause },
+    )
+  }
+}
+
+export function sourceFiles(root: string = REPO): string[] {
+  const out: string[] = []
+  for (const dir of SOURCE_ROOTS) walkRoot(root, dir, '.ts', out)
+  return out.map((p) => relative(root, p)).filter((p) => !SELF.has(p))
+}
+
+/** Every `.md` under `DOCS_ROOTS`, repo-root-relative. Live and frozen alike; see `liveSectionMask`. */
+export function docsFiles(root: string = REPO): string[] {
+  const out: string[] = []
+  for (const dir of DOCS_ROOTS) walkRoot(root, dir, '.md', out)
+  return out.map((p) => relative(root, p))
+}
+
+/**
+ * Which lines of a document are inside a `## LIVE:` section.
+ *
+ * The ONE place that decides live from frozen. The scanner reads it to know what to enforce and
+ * the repair writer reads it to know what it may rewrite, and that is deliberate: two copies of
+ * this rule drifting apart would let the fixer renumber a frozen design record -- text the guard
+ * never looks at, written to be true of the tree it was written against -- which is the single
+ * thing `docs/**` is protected from. A section runs from its `## LIVE:` heading to the next
+ * sibling `## `, and the heading itself counts as inside it.
+ */
+export function liveSectionMask(text: string): boolean[] {
+  let inLive = false
+  return text.split('\n').map((line) => {
+    if (/^##\s+/.test(line)) inLive = /^##\s+LIVE:\s+/.test(line)
+    return inLive
+  })
 }
 
 /** Walk `docs/**` for `.md` files and return citations inside `## LIVE:` sections. */
 export function docsLiveClaimCitations(root: string = REPO): Found[] {
   const out: Found[] = []
-  const walk = (dir: string): void => {
-    for (const e of readdirSync(dir, { withFileTypes: true })) {
-      const p = join(dir, e.name)
-      if (e.isDirectory()) walk(p)
-      else if (e.name.endsWith('.md')) {
-        const file = relative(root, p)
-        let inLive = false
-        readFileSync(p, 'utf8')
-          .split('\n')
-          .forEach((line, i) => {
-            if (/^##\s+/.test(line)) {
-              inLive = /^##\s+LIVE:\s+/.test(line)
-            }
-            if (inLive) {
-              for (const c of citationsInLine(line)) {
-                out.push({ cite: c.text, path: c.path, start: c.start, end: c.end, at: `${file}:${i + 1}` })
-              }
-            }
-          })
+  for (const file of docsFiles(root)) {
+    const text = readFileSync(join(root, file), 'utf8')
+    const live = liveSectionMask(text)
+    text.split('\n').forEach((line, i) => {
+      if (!live[i]) return
+      for (const c of citationsInLine(line)) {
+        out.push({ cite: c.text, path: c.path, start: c.start, end: c.end, at: `${file}:${i + 1}` })
       }
-    }
+    })
   }
-  for (const docsRoot of DOCS_ROOTS) walk(join(root, docsRoot))
   return out
 }
 
-export function allCitations(): Found[] {
+export function allCitations(root: string = REPO): Found[] {
   const out: Found[] = []
-  for (const file of sourceFiles()) {
-    readFileSync(join(REPO, file), 'utf8')
+  for (const file of sourceFiles(root)) {
+    readFileSync(join(root, file), 'utf8')
       .split('\n')
       .forEach((line, i) => {
         for (const c of citationsInLine(line)) {
@@ -372,7 +427,7 @@ export function allCitations(): Found[] {
         }
       })
   }
-  out.push(...docsLiveClaimCitations())
+  out.push(...docsLiveClaimCitations(root))
   return out
 }
 
@@ -664,4 +719,302 @@ export function repairText(text: string, by: Map<string, string>): string {
     .split('\n')
     .map((l) => repairLine(l, by))
     .join('\n')
+}
+
+/**
+ * A document's text with repaired citations rewritten INSIDE `## LIVE:` sections only.
+ *
+ * Frozen sections pass through byte for byte. They are a record of what was true when they were
+ * written, the guard does not check them, and a repair tool that quietly renumbered them would be
+ * editing the evidence rather than the claim. The live sections are the opposite case -- they
+ * assert current fact and are checked -- so leaving THEM stale is the half-repair #170 is about.
+ */
+export function repairDocsText(text: string, by: Map<string, string>): string {
+  const live = liveSectionMask(text)
+  return text
+    .split('\n')
+    .map((l, i) => (live[i] ? repairLine(l, by) : l))
+    .join('\n')
+}
+
+/** Where a citation is written: the table that declares it, the prose, or a live docs claim. */
+export type SiteScope = 'registry' | 'source' | 'docs-live'
+
+export interface CitationSite {
+  readonly file: string
+  /** 1-based. */
+  readonly line: number
+  readonly scope: SiteScope
+}
+
+interface ScannedFile {
+  readonly file: string
+  readonly scope: SiteScope
+  readonly text: string
+  /** Present for docs only: which lines may be read and rewritten. See `liveSectionMask`. */
+  readonly mask: boolean[] | undefined
+}
+
+/**
+ * Every file a repair may have to touch, with its text and -- for docs -- its live mask.
+ *
+ * Read once and passed around, because the plan has to look at the same bytes twice: to find the
+ * sites, and to check what a rewrite of them would leave behind. Re-reading between those two
+ * would compare a proposal against a file that had moved under it.
+ */
+function scanScopes(root: string): ScannedFile[] {
+  const out: ScannedFile[] = []
+  const push = (file: string, scope: SiteScope): void => {
+    let text: string
+    try {
+      text = readFileSync(join(root, file), 'utf8')
+    } catch {
+      return
+    }
+    out.push({ file, scope, text, mask: scope === 'docs-live' ? liveSectionMask(text) : undefined })
+  }
+  // The registry is not in `sourceFiles()` -- it is excluded from scanning precisely because it
+  // carries citations as data -- so it is named here. A pass over the sources alone repairs the
+  // prose and leaves every declaration pointing at the old line, which is half of #170.
+  push(REGISTRY_FILE, 'registry')
+  for (const f of sourceFiles(root)) push(f, 'source')
+  for (const f of docsFiles(root)) push(f, 'docs-live')
+  return out
+}
+
+/** Every citation written in `s`, skipping the lines a mask excludes. */
+function sitesIn(s: ScannedFile, text: string): { cite: string; line: number }[] {
+  const out: { cite: string; line: number }[] = []
+  text.split('\n').forEach((line, i) => {
+    if (s.mask && !s.mask[i]) return
+    for (const span of citationSpansInLine(line)) out.push({ cite: span.text, line: i + 1 })
+  })
+  return out
+}
+
+/**
+ * Every place each citation is written, across the three scopes a repair must keep in step.
+ *
+ * Frozen docs sections are absent by construction: they are neither checked by the guard nor
+ * rewritten by the fixer, so a citation living only there has no site here and cannot make a
+ * repair look half-done.
+ */
+export function citationSites(root: string = REPO): Map<string, CitationSite[]> {
+  const out = new Map<string, CitationSite[]>()
+  for (const s of scanScopes(root)) {
+    for (const { cite, line } of sitesIn(s, s.text)) {
+      const list = out.get(cite) ?? []
+      list.push({ file: s.file, line, scope: s.scope })
+      out.set(cite, list)
+    }
+  }
+  return out
+}
+
+/**
+ * The old spellings a set of repairs was meant to remove, minus any that a repair also PRODUCES.
+ *
+ * Two citations can trade line numbers -- `A:10 -> A:12` alongside `A:12 -> A:10` -- and then the
+ * old spelling of one is the correct new spelling of the other. Reporting it as left-behind would
+ * turn a completed repair into a false alarm.
+ */
+function spellingsToRetire(by: Map<string, string>): Set<string> {
+  const produced = new Set(by.values())
+  return new Set([...by.keys()].filter((from) => by.get(from) !== from && !produced.has(from)))
+}
+
+function staleIn(scopes: ScannedFile[], texts: Map<string, string>, retire: Set<string>): Map<string, CitationSite[]> {
+  const out = new Map<string, CitationSite[]>()
+  for (const s of scopes) {
+    for (const { cite, line } of sitesIn(s, texts.get(s.file) ?? s.text)) {
+      if (!retire.has(cite)) continue
+      const list = out.get(cite) ?? []
+      list.push({ file: s.file, line, scope: s.scope })
+      out.set(cite, list)
+    }
+  }
+  return out
+}
+
+/**
+ * Citations still written in their pre-repair spelling anywhere the guard looks.
+ *
+ * Read from disk, so this is what the fixer asks AFTER writing: a plan proves what it intends,
+ * and this proves what landed. A non-empty answer is the #170 failure itself -- one half of a
+ * pair moved and the other did not.
+ */
+export function staleSpellings(by: Map<string, string>, root: string = REPO): string[] {
+  const scopes = scanScopes(root)
+  const stale = staleIn(scopes, new Map(), spellingsToRetire(by))
+  return [...stale.entries()].flatMap(([cite, at]) => at.map((s) => `${s.file}:${s.line} still cites ${cite}`))
+}
+
+export interface PairedRepairPlan extends RepairPlan {
+  /** Repo-relative file -> its whole new text, for every file the accepted repairs change. */
+  writes: Map<string, string>
+  /** Every citation that was faulted when this was planned, repaired or not. */
+  faulted: string[]
+}
+
+/**
+ * `planRepairs`, narrowed to the repairs whose every side can be rewritten in one go.
+ *
+ * A citation is not one thing in one place. It is a DECLARATION in the registry, zero or more
+ * mentions in the prose, and -- since #164 -- zero or more claims in a `## LIVE:` docs section
+ * that the guard now checks both ways. Repairing some of those and not the rest is worse than
+ * repairing none: it converts a failure the tool can finish into one only a human can, while
+ * printing success. That is #170, and the fixer's own comment already named the shape without
+ * covering the docs half, because `sourceFiles()` has never included `docs/**`.
+ *
+ * So every accepted repair is simulated against every file that writes it, in memory, before
+ * anything is written, and a repair that would leave any side stale is declined BY NAME and
+ * removed -- taking its writes with it, so neither of its files is touched on its account. The
+ * refusal is the same currency `planRepairs` already deals in for ranges and gone tokens, and it
+ * is deliberately per-pair: one undeclinable citation does not stop the twenty that are clean.
+ */
+export function planPairedRepairs(
+  cited: Record<string, string> = CITED,
+  root: string = REPO,
+): PairedRepairPlan {
+  const planned = planRepairs(cited, root)
+  const faulted = Object.entries(cited)
+    .filter(([c, e]) => citationFault(c, e, root) !== undefined)
+    .map(([c]) => c)
+  const refused = [...planned.refused]
+  const scopes = scanScopes(root)
+  const sites = new Map<string, CitationSite[]>()
+  for (const s of scopes) {
+    for (const { cite, line } of sitesIn(s, s.text)) {
+      const list = sites.get(cite) ?? []
+      list.push({ file: s.file, line, scope: s.scope })
+      sites.set(cite, list)
+    }
+  }
+
+  // The declaration first, because it is the half that cannot be inferred back. A citation the
+  // registry writes in no form the rewriter can see would have its prose moved onto a line the
+  // table still denies; one the registry writes TWICE is worse, because the second is data about
+  // the citation -- an exemption key, a quoted token -- and rewriting both would edit evidence to
+  // match the thing it was evidence about.
+  let candidates = planned.repairs.filter((r) => {
+    const declared = (sites.get(r.from) ?? []).filter((s) => s.scope === 'registry')
+    if (declared.length === 1) return true
+    refused.push({
+      cite: r.from,
+      why:
+        declared.length === 0
+          ? `it moved to ${r.to}, but ${REGISTRY_FILE} does not write it in a form this can rewrite, so the declaration would stay stale while the prose moved`
+          : `it moved to ${r.to}, but ${REGISTRY_FILE} writes it on ${declared.length} lines (${declared
+              .map((s) => s.line)
+              .join(', ')}) and a repair cannot tell the declaration from data about it`,
+    })
+    return false
+  })
+
+  // Then the whole plan, simulated. Declining one repair changes only the lines that repair
+  // would have touched, so a second pass cannot un-stale a third citation -- but it is cheap and
+  // the alternative is arguing that in a comment, so it loops until it stops changing its mind.
+  let texts = new Map<string, string>()
+  for (let pass = 0; ; pass++) {
+    const by = new Map(candidates.map((r) => [r.from, r.to]))
+    texts = new Map(
+      scopes.map((s) => [s.file, s.mask ? repairDocsText(s.text, by) : repairText(s.text, by)]),
+    )
+    const stale = staleIn(scopes, texts, spellingsToRetire(by))
+    if (stale.size === 0 || pass >= 4) {
+      for (const [cite, at] of stale) {
+        refused.push({
+          cite,
+          why: `it would move to ${by.get(cite)}, but ${at
+            .map((s) => `${s.file}:${s.line}`)
+            .join(', ')} still writes the old spelling after the rewrite, so the pair would be half repaired`,
+        })
+      }
+      if (stale.size > 0) candidates = candidates.filter((r) => !stale.has(r.from))
+      break
+    }
+    candidates = candidates.filter((r) => {
+      const at = stale.get(r.from)
+      if (!at) return true
+      refused.push({
+        cite: r.from,
+        why: `it would move to ${r.to}, but ${at
+          .map((s) => `${s.file}:${s.line}`)
+          .join(', ')} still writes the old spelling after the rewrite, so the pair would be half repaired`,
+      })
+      return false
+    })
+  }
+
+  // Recomputed against the surviving set, so a declined repair leaves no trace in what is
+  // written. This is what "or it repairs neither" means concretely: the bytes of its files are
+  // whatever the OTHER repairs made of them, and unchanged where there were none.
+  const finalBy = new Map(candidates.map((r) => [r.from, r.to]))
+  const writes = new Map<string, string>()
+  for (const s of scopes) {
+    const after = s.mask ? repairDocsText(s.text, finalBy) : repairText(s.text, finalBy)
+    if (after === s.text) continue
+    // `repairLine` splices within a line and never adds or removes one, so every citation's line
+    // number survives its own file being rewritten. If that ever stops holding, every relocation
+    // in the plan was measured against a file that no longer exists, and stopping is the only
+    // safe answer.
+    if (after.split('\n').length !== s.text.split('\n').length) {
+      throw new Error(`citations: rewriting ${s.file} changed its line count; nothing was written`)
+    }
+    writes.set(s.file, after)
+  }
+
+  return { repairs: candidates, refused, writes, faulted }
+}
+
+export interface PostRepairFaults {
+  /** Faulted now and not before, or faulted now having been repaired: the writes broke it. */
+  broken: string[]
+  /** An old spelling still written where the guard looks: a pair that moved by halves. */
+  halfRepaired: string[]
+  /** Faulted before, not repaired, faulted still: the refusals, doing what refusals do. */
+  untouched: string[]
+}
+
+/**
+ * What is wrong with the tree after a repair landed, split by whose fault it is.
+ *
+ * Worth separating, and it was not: walking `CITED` after writing reports every REFUSED citation
+ * as a repair that failed to verify, because a refusal is by definition a citation still faulted
+ * afterwards. So declining a pair -- the thing #170 asks for -- came out as "repairs did not
+ * verify, the tree has been changed, review it" over a set of repairs that were all correct, and
+ * buried the one line that says which pair needs a human.
+ */
+export function faultsAfterRepair(
+  by: Map<string, string>,
+  faultedBefore: Iterable<string>,
+  cited: Record<string, string> = CITED,
+  root: string = REPO,
+): PostRepairFaults {
+  const before = new Set(faultedBefore)
+  const broken: string[] = []
+  const untouched: string[] = []
+  for (const [cite, expected] of Object.entries(cited)) {
+    const fault = citationFault(by.get(cite) ?? cite, expected, root)
+    if (fault === undefined) continue
+    if (by.has(cite) || !before.has(cite)) broken.push(fault)
+    else untouched.push(fault)
+  }
+  return { broken, halfRepaired: staleSpellings(by, root), untouched }
+}
+
+/**
+ * Write a plan out, in sorted order, one file at a time.
+ *
+ * The guarantee is about the PLAN, not the filesystem: nothing is written until the whole set has
+ * been simulated and every pair that would come out half done has been declined, so no write here
+ * is one this could have known better than to make. It is NOT atomic -- these are ordinary
+ * sequential `writeFileSync` calls, and a failure partway leaves the files before it written and
+ * the files after it not. Closing that would take a write-and-rename pass; what closes the failure
+ * #170 is about is the simulation upstream, which is where the half-repairs came from.
+ */
+export function applyRepairs(writes: Map<string, string>, root: string = REPO): string[] {
+  const files = [...writes.keys()].sort()
+  for (const file of files) writeFileSync(join(root, file), writes.get(file)!)
+  return files
 }
