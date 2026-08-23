@@ -310,6 +310,11 @@ export interface SessionOptions {
   transcriptSettleMs?: number | undefined
   transcriptSalvageMs?: number | undefined
   /**
+   * How long a peer send waits for a target seat's turn to finish before giving up as
+   * `peer_busy`. Test-only plumbing; no console flag or default is changed here.
+   */
+  sendPreconditionMs?: number | undefined
+  /**
    * A routing log to replay into both seats, continuing a run rather than restarting it.
    *
    * The console had neither half of this: it replayed nothing, and it RECORDED nothing, so a
@@ -1035,6 +1040,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     ...(opts.operator ? { operator: opts.operator } : {}),
     ...(opts.transcriptSettleMs ? { transcriptSettleMs: opts.transcriptSettleMs } : {}),
     ...(opts.transcriptSalvageMs ? { transcriptSalvageMs: opts.transcriptSalvageMs } : {}),
+    ...(opts.sendPreconditionMs ? { sendPreconditionMs: opts.sendPreconditionMs } : {}),
     ...(opts.turnWatchdogMs ? { turnWatchdogMs: opts.turnWatchdogMs } : {}),
     ...(opts.silenceWatchdogMs ? { silenceWatchdogMs: opts.silenceWatchdogMs } : {}),
     // Unchanged, deliberately. See `SessionOptions.ceilings`.
@@ -1404,7 +1410,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
         return
       }
     }
-    await run.continue()
+    await run.continue(runOpts.force)
     wake()
   }
 

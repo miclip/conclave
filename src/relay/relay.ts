@@ -6243,6 +6243,10 @@ export class Relay {
         // exit is added next -- passes the one recording site. See `#finaliseTargeting`: the
         // denominator contract is kept by that placement and by nothing else.
         let attempt: AdvisorAttempt | undefined
+        // Set when a forced continue on an incomplete turn should replay the existing instruction
+        // instead of asking the advisor for a new one. The ledger measures distance from the force,
+        // not from a new advisor turn that may never reach the implementer.
+        let forceReplay = false
         try {
         // Every ceiling at the dispatch boundary, before anything is admitted or assigned, and
         // never mid-turn. A run cannot be interrupted mid-turn without discarding that turn's
@@ -6606,6 +6610,12 @@ export class Relay {
             closing ??= { kind: 'outcome', outcome: halted }
             continue advisor
           }
+          // A forced continue means the operator chose to send the instruction we already have,
+          // despite the guard's refusal. Re-asking the advisor would record a new turn before the
+          // forced send even happens, and the distance the ledger records must measure the force,
+          // not the re-ask.
+          const decision = handle?.lastDecision()
+          if (decision?.kind === 'continue' && decision.force) continue
           // Unattended, `#halt` ends the run. Reaching here means an operator resumed, so the
           // advisor is asked again rather than the empty instruction being sent anyway.
           next = await this.#exchange(
@@ -7114,6 +7124,14 @@ export class Relay {
             closing ??= { kind: 'outcome', outcome: halted }
             continue advisor
           }
+          // A forced continue on an incomplete turn means the operator chose to send the
+          // instruction we already have rather than get a new one. Remember that and keep the
+          // report processing so the seat is released; the lead exchange will be skipped and the
+          // loop will re-dispatch the same instruction.
+          const decision = handle?.lastDecision()
+          if (decision?.kind === 'continue' && decision.force) {
+            forceReplay = true
+          }
         }
 
         // §7a. Assessed before the advisor sees the report, so a degraded implementer is
@@ -7155,16 +7173,22 @@ export class Relay {
           continue advisor
         }
 
-        const leadAside = this.#drain(lead.id)
-        next = await this.#exchange(
-          lead,
-          [leadAside, this.#drainLeadNotices(), envelope({ from: seat.id, fromRank: 'implementer', fromRole: seat.role, kind: 'report', text: report.prose })]
-            .filter(Boolean)
-            .join('\n\n'),
-        )
-        // The report has reached the advisor. Independent of integration above, and recorded
-        // separately: at N>1 a task reaches the two in either order.
-        this.#routed(task)
+        if (forceReplay) {
+          // The operator forced a continue on an incomplete turn: replay the same instruction
+          // rather than asking the advisor for a new one. The report was not routed to the advisor.
+          forceReplay = false
+        } else {
+          const leadAside = this.#drain(lead.id)
+          next = await this.#exchange(
+            lead,
+            [leadAside, this.#drainLeadNotices(), envelope({ from: seat.id, fromRank: 'implementer', fromRole: seat.role, kind: 'report', text: report.prose })]
+              .filter(Boolean)
+              .join('\n\n'),
+          )
+          // The report has reached the advisor. Independent of integration above, and recorded
+          // separately: at N>1 a task reaches the two in either order.
+          this.#routed(task)
+        }
       }
       return this.#end('budget')
     } finally {
