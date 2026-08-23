@@ -2705,6 +2705,95 @@ test('a force that overrode a right refusal records refusedFirst: true and the l
   await running
 })
 
+test('a force into a held turn ends peer_busy, and the send is recorded as expired', async () => {
+  // The death-side population of #125: the same `/continue force` command, the same record
+  // shape, but the run dies in the only attributable window. The mirror test ended normally with
+  // a `sent` record and further turns completed; here the entry reads `send.outcome === 'expired'`
+  // and the run ends `peer_busy`. No causal label separates a justified force from a fatal one —
+  // the send's own fate and the outcome distance do.
+  const dir = repo()
+  const out = collect()
+  const input = new PassThrough()
+  const impl = slow('impl', 'claude', ['ack', 'Did it.'])
+  // The first work turn times out but is withdrawn, leaving the child genuinely mid-turn; the
+  // observed turn is the one the forced resume tries to send into and which never ends.
+  impl.endTurn = { index: 1, verdict: TIMED_OUT, withdraw: 'no_replacement' }
+  impl.holdTurn = 2
+  impl.childPid = 1
+  const running = runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'claude',
+    rounds: 6,
+    checks: [],
+    operator: 'agent',
+    sendPreconditionMs: 300,
+    liveness: async () => IDLE_LIVENESS,
+    registry: registryOf({
+      codex: [slow('advisor', 'codex', ['Do it.', 'More.', 'DONE'], 300)],
+      claude: [impl],
+    }),
+    input,
+    output: out.stream,
+  })
+  const until = async (pred: (f: ReturnType<typeof resolveSession>) => boolean, ms = 25_000) => {
+    const t = Date.now()
+    while (Date.now() - t < ms) {
+      const f = resolveSession(dir)
+      if (pred(f)) return f
+      await new Promise((r) => setTimeout(r, 50))
+    }
+    throw new Error(`timed out; console said:\n${out.text().slice(-700)}`)
+  }
+
+  await until((f) => 'session' in f && f.session.status.state === 'paused')
+  await until(
+    (f) =>
+      'session' in f &&
+      f.session.status.pause?.superseded !== undefined &&
+      f.session.status.pause?.superseded?.verdict === undefined,
+  )
+  // The bare withdrawal is a resumption now (#66), so the guard must be given a real observation:
+  // the child is seen beginning a turn after the withdrawal.
+  await observedTurn(impl, dir)
+
+  input.write('/continue\n')
+  const refused = await until((f) => 'session' in f && f.session.status.pause?.refusal !== undefined)
+  assert.ok('session' in refused)
+  const refusedReason = refused.session.status.pause?.reason
+
+  input.write('/continue force\n')
+  await until((f) => 'session' in f && f.session.status.state === 'running')
+
+  // The forced send waits briefly, then the run ends because the target is still mid-turn.
+  await running
+  const ended = resolveSession(dir)
+  assert.ok('session' in ended, 'session is still readable after the run ends')
+  assert.equal(ended.session.status.state, 'ended', 'status is ended after the run ends')
+  assert.equal(ended.session.status.outcome?.reason, 'peer_busy', 'the run ended peer_busy')
+
+  const forces = ended.session.status.forces
+  assert.ok(forces, 'forces is present on the final record')
+  assert.equal(forces.length, 1, 'one force recorded')
+  const entry = forces[0]!
+  assert.equal(entry.refusedFirst, true, 'this was the refused-first population')
+  assert.equal(entry.pause.reason, refusedReason, 'the entry names the turn_incomplete pause the force answered')
+  assert.notEqual(entry.send, null, 'the send is stamped because the force produced a send attempt')
+  assert.equal(entry.send!.outcome, 'expired', 'the overridden seat was still mid-turn, so the send expired in the precondition')
+  assert.equal(entry.send!.seat, 'implementer', 'the send was to the overridden seat')
+  assert.ok(entry.send!.waitMs < 5_000, 'the wait is bounded by the short send precondition')
+  assert.notEqual(entry.followedBy, null, 'followedBy is stamped when the run ends')
+  assert.equal(entry.followedBy!.outcome, 'peer_busy', 'followedBy names the peer_busy outcome')
+  // The unchanged loop re-asks the advisor before the failed send, so turnsCompleted is not the
+  // separator between the two populations; the send's own fate is.
+  assert.ok(entry.followedBy!.turnsCompleted >= 0, 'turnsCompleted is a bare distance fact, not a causal claim')
+  assert.ok(
+    entry.followedBy!.ms < 5_000,
+    'distance in milliseconds is bounded by the short send precondition, not the 5-minute default',
+  )
+})
+
 test('a blind force records refusedFirst: false and null turns when no sampled seat is mid-turn', async () => {
   // The second population: no refusal happened, the operator forced anyway, and the guard found
   // no open turn. The ledger must record the explicit absence of a turn, not omit the field.
@@ -2766,14 +2855,19 @@ test('a blind force records refusedFirst: false and null turns when no sampled s
   await running
 })
 
-test('a force that ends the run gets a distance-qualified followedBy record', async () => {
-  // The other half of the ledger: the force was recorded while the run was alive, and after the
-  // run ends its terminal outcome is stamped on every open entry, together with how far from the
-  // force that ending was. Distance, not causation: the record says the run ended for its own
-  // reason and how many turns after the force it did so.
+test('a blind force on an idle seat ends normally, and the send is recorded as sent', async () => {
+  // The mirror population of #125: the guard finds no open turn at all, so the force is recorded
+  // against an explicit idle seat and the first post-force send goes immediately. The same
+  // command, the same record shape, but the entry's `send` reads `sent` and the run ends normally.
   const dir = repo()
   const out = collect()
   const input = new PassThrough()
+  const impl = slow('impl', 'claude', ['ack', 'Did it.'])
+  // A closed `timed_out` verdict raises a `turn_incomplete` pause without leaving a live turn:
+  // the guard samples the implementer, sees an explicit null, and `/continue force` is a blind
+  // force on an idle seat rather than a force on a mid-turn child.
+  impl.endTurn = { index: 1, verdict: TIMED_OUT }
+  impl.childPid = 1
   const running = runSession({
     cwd: dir,
     goal: 'Keep the work moving.',
@@ -2782,14 +2876,16 @@ test('a force that ends the run gets a distance-qualified followedBy record', as
     rounds: 6,
     checks: [],
     operator: 'agent',
+    sendPreconditionMs: 300,
+    liveness: async () => IDLE_LIVENESS,
     registry: registryOf({
       codex: [slow('advisor', 'codex', ['Do it.', 'More.', 'DONE'], 300)],
-      claude: [slow('impl', 'claude', ['ack', 'Did it.', 'Again.'], 300)],
+      claude: [impl],
     }),
     input,
     output: out.stream,
   })
-  const until = async (pred: (f: ReturnType<typeof resolveSession>) => boolean, ms = 10_000) => {
+  const until = async (pred: (f: ReturnType<typeof resolveSession>) => boolean, ms = 25_000) => {
     const t = Date.now()
     while (Date.now() - t < ms) {
       const f = resolveSession(dir)
@@ -2799,9 +2895,14 @@ test('a force that ends the run gets a distance-qualified followedBy record', as
     throw new Error(`timed out; console said:\n${out.text().slice(-700)}`)
   }
 
-  await new Promise((r) => setTimeout(r, 500))
-  input.write('/pause\n')
   await until((f) => 'session' in f && f.session.status.state === 'paused')
+  await until((f) => 'session' in f && f.session.status.pause?.reason === 'turn_incomplete')
+  const beforeForce = resolveSession(dir)
+  assert.equal(
+    'session' in beforeForce ? beforeForce.session.status.pause?.refusal : undefined,
+    undefined,
+    'no refusal precedes a blind force on an idle seat',
+  )
 
   input.write('/continue force\n')
   await until((f) => 'session' in f && f.session.status.state === 'running')
@@ -2815,6 +2916,14 @@ test('a force that ends the run gets a distance-qualified followedBy record', as
   assert.ok(forces, 'forces is present on the final record')
   assert.equal(forces.length, 1, 'one force recorded')
   const entry = forces[0]!
+  assert.equal(entry.refusedFirst, false, 'this was the blind-force population')
+  assert.equal(entry.overrode.length, 1, 'one sampled seat was overridden')
+  assert.equal(entry.overrode[0]!.seat, 'implementer')
+  assert.equal(entry.overrode[0]!.turn, null, 'the seat was explicitly idle when the force was applied')
+  assert.notEqual(entry.send, null, 'the send is stamped because the force produced a send to the overridden seat')
+  assert.equal(entry.send!.outcome, 'sent', 'the overridden seat was idle, so the send happened immediately')
+  assert.equal(entry.send!.seat, 'implementer', 'the send was to the overridden seat')
+  assert.equal(entry.send!.waitMs, 0, 'an idle seat sends without waiting')
   assert.notEqual(entry.followedBy, null, 'followedBy is stamped when the run ends')
   assert.equal(
     entry.followedBy!.outcome,
@@ -2826,7 +2935,6 @@ test('a force that ends the run gets a distance-qualified followedBy record', as
     'the run demonstrably completed further turns after the force',
   )
   assert.ok(entry.followedBy!.ms >= 0, 'distance in milliseconds is non-negative')
-  assert.equal(entry.refusedFirst, false, 'this was the blind-force population')
 })
 
 test('the trailing-text rule stops at /continue: /pause still drops a suffix, /abort still keeps one', async () => {
@@ -3834,7 +3942,7 @@ test('a participant-scoped pause samples that seat and no other, at every reason
   assert.deepEqual(sampled(pauseFor({ reason: 'rotation_candidate', participant: 'implementer-2' })), ['implementer-2'])
   assert.deepEqual(sampled(pauseFor({ reason: 'implementer_unanswered', participant: 'implementer-2' })), ['implementer-2'])
   // The ADVISOR is a participant like any other, and its own bad turn pauses the run
-  // (src/relay/relay.ts:6581). A rank scan for implementers sampled the wrong child here too.
+  // (src/relay/relay.ts:6586). A rank scan for implementers sampled the wrong child here too.
   assert.deepEqual(
     sampled(pauseFor({ reason: 'turn_incomplete', participant: 'advisor' }, { participant: 'advisor', endSeq: 2 })),
     ['advisor'],
@@ -3843,13 +3951,13 @@ test('a participant-scoped pause samples that seat and no other, at every reason
 
 test('a conclave- or workstream-scoped pause samples nobody, with no fall back to rank', () => {
   // Both conclave-scoped reasons. Resuming an `advisor_escalated` pause sends to the ADVISOR
-  // (src/relay/relay.ts:6702), so measuring implementer children was never the question; and
+  // (src/relay/relay.ts:6707), so measuring implementer children was never the question; and
   // `operator_requested` is consumed at an advisor-turn boundary that states no turn is in
   // flight. Neither has anything for this guard to sample.
   assert.deepEqual(sampled(pauseFor({ reason: 'advisor_escalated' })), [])
   assert.deepEqual(sampled(pauseFor({ reason: 'operator_requested' })), [])
   // Workstream scope, and the id deliberately COLLIDES with a seat id -- at N=1 the workstream
-  // is named after the seat carrying the instruction (src/relay/relay.ts:6865), which is exactly
+  // is named after the seat carrying the instruction (src/relay/relay.ts:6870), which is exactly
   // the coincidence a guard could read as "so sample that seat". A workstream is not a seat.
   assert.deepEqual(sampled(pauseFor({ reason: 'authority_conflict', workstream: 'implementer' })), [])
 })
@@ -3865,7 +3973,7 @@ test('a scope naming a seat that is gone samples nobody rather than falling back
 test('a rotation_candidate pause on one seat resumes while the OTHER seat is genuinely mid-turn', async (t) => {
   // The production shape of the N>1 case the rank scan got wrong, and the reason it has to be
   // this shape: `rotation_candidate` carries NO `verdictOf` -- that field is set at two halt
-  // sites, both turn_incomplete (src/relay/relay.ts:6585, src/relay/relay.ts:7101) -- so under
+  // sites, both turn_incomplete (src/relay/relay.ts:6590, src/relay/relay.ts:7106) -- so under
   // the old expression this pause fell through to the rank scan and sampled EVERY implementer.
   // A simpler `turn_incomplete` fixture cannot show that: it populates the field, takes the
   // named-seat branch, and passes against the code being replaced.
@@ -3917,7 +4025,7 @@ test('a rotation_candidate pause on one seat resumes while the OTHER seat is gen
     ],
     rounds: 6,
     // ARMS ROTATION, which is what makes degradation a pause instead of an ended run
-    // (src/relay/relay.ts:4572). A command that exits 0 immediately: what the checks DO is
+    // (src/relay/relay.ts:4577). A command that exits 0 immediately: what the checks DO is
     // not what this test is about, only that a replacement would have something to reproduce.
     checks: ['true'],
     registry: registryOf({

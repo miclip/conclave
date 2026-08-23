@@ -256,6 +256,15 @@ export interface ForceRecord {
    * is the run's own story. No causal label is ever written here.
    */
   followedBy: { outcome: RunReason; detail?: string | undefined; turnsCompleted: number; ms: number } | null
+  /**
+   * The fate of the FIRST send attempted after the force to a seat the force overrode — the
+   * immediate next turn's fate, the only consequence honestly attributable to the force.
+   * `null` means no send to an overridden seat happened before the run ended (teardown
+   * mid-wait is a real case — a `TurnAbandonedError` exit stamps nothing).
+   * `sent` = no open turn at send time; `sent_after_wait` = the target was still mid-turn but
+   * its turn ended inside the bound; `expired` = the bound lapsed against the live turn.
+   */
+  send: { seat: string; outcome: 'sent' | 'sent_after_wait' | 'expired'; waitMs: number } | null
 }
 
 /**
@@ -500,6 +509,20 @@ export class RunHandle {
   /** Record a force. The caller builds the record; the handle only holds it. */
   recordForce(entry: ForceRecord): void {
     this.#forces.push(entry)
+  }
+
+  /**
+   * Stamp the first post-force send to an overridden seat on every open force ledger entry.
+   *
+   * The send is the only mechanical consequence attributable to the force. Two forces before one
+   * send both get stamped: the send followed both.
+   */
+  noteForceSend(seat: string, outcome: 'sent' | 'sent_after_wait' | 'expired', waitMs: number): void {
+    for (const entry of this.#forces) {
+      if (entry.send !== null) continue
+      if (!entry.overrode.some((o) => o.seat === seat)) continue
+      entry.send = { seat, outcome, waitMs }
+    }
   }
 
   /**

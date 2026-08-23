@@ -575,7 +575,7 @@ export interface RelayOptions {
    * this seam the whole of #101 -- the measurement, its timestamp, and the re-measurement that
    * makes the timestamp move -- is unreachable from any test that does not spawn a real CLI.
    * The console already carries the identical seam for its `/continue` guard
-   * (`src/repl/session.ts:349`), and the two are deliberately the same shape.
+   * (`src/repl/session.ts:354`), and the two are deliberately the same shape.
    */
   liveness?: ((pid: number) => Promise<ChildLiveness>) | undefined
   /**
@@ -3360,7 +3360,10 @@ export class Relay {
     if (closed.done) {
       throw new TurnAbandonedError(p.id, `${p.id}'s session was closed before this turn could be sent`)
     }
-    if (!activeTurn(p.events)) return
+    if (!activeTurn(p.events)) {
+      this.#handle?.noteForceSend(p.id, 'sent', 0)
+      return
+    }
 
     const bound = this.#opts.sendPreconditionMs ?? DEFAULT_SEND_PRECONDITION_MS
     const startedAt = Date.now()
@@ -3393,6 +3396,7 @@ export class Relay {
           `${p.id} was mid-turn, so the relay waited ${waited} for the turn to end before ` +
           `sending; sending into a live turn is what ends a run with no hook after the send`,
       })
+      this.#handle?.noteForceSend(p.id, 'sent_after_wait', elapsed)
       return
     }
 
@@ -3440,6 +3444,7 @@ export class Relay {
       `${p.id} was still mid-turn after ${waited}, so nothing was sent to it: ` +
       `${evidence.join('; ')}. ${dealt.join(', ')}.`
     this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text: detail })
+    this.#handle?.noteForceSend(p.id, 'expired', elapsed)
     throw new PeerBusyError(p.id, detail)
   }
 
@@ -4186,7 +4191,7 @@ export class Relay {
    * writing down because it points at a different mechanism: the loop is suspended at `await
    * deciding` above for the whole pause, so `#halt` cannot run again, and a watchdog `revision`
    * or replacement `turn_end` arriving meanwhile goes to `#trackSupersession`, which amends THE
-   * SAME `RunPause` in place (`src/relay/run.ts:849`). There was one pause, read twice. The
+   * SAME `RunPause` in place (`src/relay/run.ts:872`). There was one pause, read twice. The
    * evidence was not re-derived because nothing had re-derived it since it was captured -- which
    * is the same defect, reached by a shorter path than the report proposed.
    *
@@ -4305,7 +4310,7 @@ export class Relay {
       else if (!shouldWait && offered !== -1) pause.options.splice(offered, 1)
       // The status file is written from the LIVE pause object on any event, so an in-place
       // change reaches disk on the next one -- and a pause is precisely when nothing else is
-      // flowing. Same reasoning as `/wait` in the console (`src/repl/session.ts:2201`), and the
+      // flowing. Same reasoning as `/wait` in the console (`src/repl/session.ts:2208`), and the
       // reader who needs it most is the one polling from outside.
       this.#stream.emit({ type: 'liveness', pause })
       if (last) return stop()
