@@ -503,6 +503,26 @@ export class RunHandle {
   }
 
   /**
+   * Stamp the run's terminal outcome and its distance on every open force ledger entry.
+   *
+   * Called exactly once, immediately before `settle()`, so every path that ends the run
+   * records the distance without a separate closing phase. The distance is a fact, not a causal
+   * claim: `turnsCompleted` and `ms` measure how far from the force the ending was, and the
+   * reader decides what that proximity means.
+   */
+  completeForces(outcome: RunOutcome, turnsTaken: number, at: number): void {
+    for (const entry of this.#forces) {
+      if (entry.followedBy !== null) continue
+      entry.followedBy = {
+        outcome: outcome.reason,
+        ...(outcome.detail !== undefined ? { detail: outcome.detail } : {}),
+        turnsCompleted: turnsTaken - entry.turnsTakenAtForce,
+        ms: at - entry.at,
+      }
+    }
+  }
+
+  /**
    * Wait for the next pause.
    *
    * Resolves immediately if the run is already paused — an operator that attaches a moment

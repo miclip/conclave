@@ -2481,6 +2481,16 @@ export class Relay {
   }
 
   /**
+   * Settle the handle and, immediately before that, stamp every open force record with the
+   * run's outcome and distance. Kept in one place so no future end path can settle the handle
+   * without also closing the ledger.
+   */
+  #settleHandle(outcome: RunOutcome): void {
+    this.#handle?.completeForces(outcome, this.#turnsTaken, this.#now())
+    this.#handle?.settle(outcome)
+  }
+
+  /**
    * An outcome `#halt` already emitted, amended if the drain that followed it left a red tree.
    *
    * The ordering here is the honest limitation recorded on `Closing`: a halt calls `#end`
@@ -4176,7 +4186,7 @@ export class Relay {
    * writing down because it points at a different mechanism: the loop is suspended at `await
    * deciding` above for the whole pause, so `#halt` cannot run again, and a watchdog `revision`
    * or replacement `turn_end` arriving meanwhile goes to `#trackSupersession`, which amends THE
-   * SAME `RunPause` in place (`src/relay/run.ts:829`). There was one pause, read twice. The
+   * SAME `RunPause` in place (`src/relay/run.ts:849`). There was one pause, read twice. The
    * evidence was not re-derived because nothing had re-derived it since it was captured -- which
    * is the same defect, reached by a shorter path than the report proposed.
    *
@@ -4361,10 +4371,10 @@ export class Relay {
     // The settle is part of what `stop()` waits for, not just the loop body: a caller that has
     // awaited `stop()` and then reads `run.state` must not be reading it a tick early.
     this.#looped = this.#loop(goal, handle).then(
-      (outcome) => handle.settle(outcome),
+      (outcome) => this.#settleHandle(outcome),
       // Retained as a backstop only. #loop now converts a throw into a `transport_failed`
       // outcome, so this fires only for something #loop itself could not handle.
-      (err: Error) => handle.settle(this.#end('transport_failed', `the run threw: ${err.message}`)),
+      (err: Error) => this.#settleHandle(this.#end('transport_failed', `the run threw: ${err.message}`)),
     )
     void this.#looped
     return handle
@@ -7738,7 +7748,7 @@ export class Relay {
     // Settling also RELEASES a parked pause -- with no decision, because there was none -- so the
     // `#halt` frame unwinds instead of holding this relay for the life of the process. See
     // `RunHandle.pauseAt` for why that is not spelled as an abort.
-    if (this.#firstEnd) this.#handle?.settle(this.#firstEnd)
+    if (this.#firstEnd) this.#settleHandle(this.#firstEnd)
     for (const p of this.participants) {
       // The signal fires whatever the close did, including throwing (#143). A `close()` that fails
       // has still taken the session away, and leaving the signal unfired would park a polling turn
