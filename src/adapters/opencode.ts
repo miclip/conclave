@@ -181,6 +181,23 @@ interface TurnState {
   snapshot?: string | undefined
   /** What the child said went wrong, if it said anything. See `OpenCodeRecord.error`. */
   announcedError?: string | undefined
+  /**
+   * Whether the child has said, and not yet made good on, that a further step follows.
+   *
+   * `step_finish reason=tool-calls` is an explicit claim about what comes next, and it is the
+   * only intermediate record that makes one. Held until the promised `step_start` arrives.
+   *
+   * What it establishes is narrow and worth stating exactly: that the process exited BEFORE a
+   * continuation it had announced. Not why it exited -- the record is silent on that, and a
+   * verdict that read it as a cause would be inventing one. The value is that the ending is
+   * placed rather than explained: an exit at a point the child had said was not the end.
+   *
+   * Cleared by that `step_start`, so the detail carried into the verdict stays literally true.
+   * Once the promised step began, the promise was kept and nothing further was outstanding; an
+   * exit during that step is unplaced again, and claiming otherwise would put a false
+   * `before the announced next step` in an operator's record.
+   */
+  stepOwed: boolean
   startedAt: number
   endedAt?: number | undefined
 }
@@ -279,6 +296,7 @@ export class OpenCodeRunAdapter implements AgentSession {
       toolCalls: [],
       steps: 0,
       heard: 0,
+      stepOwed: false,
       startedAt: Date.now(),
     }
     this.#turns.push(turn)
@@ -441,6 +459,9 @@ export class OpenCodeRunAdapter implements AgentSession {
 
       case 'step_start':
         turn.steps += 1
+        // The step the previous `step_finish reason=tool-calls` promised has arrived, so the
+        // child is no longer owing one. See `TurnState.stepOwed`.
+        turn.stepOwed = false
         if (part.snapshot) turn.snapshot = part.snapshot
         break
 
@@ -503,6 +524,11 @@ export class OpenCodeRunAdapter implements AgentSession {
         // inferred from the process having exited.
         if (part.reason === 'stop') {
           turn.provenance.unshift({ source: 'hook', detail: 'step_finish reason=stop' })
+        } else if (part.reason === 'tool-calls') {
+          // Not a terminal signal, and deliberately not recorded as provenance here: it is a
+          // claim about what happens NEXT, and it is only evidence about the ending if the
+          // next step never comes. `#settle` reads it there. See `TurnState.stepOwed`.
+          turn.stepOwed = true
         }
         break
       }
@@ -519,6 +545,13 @@ export class OpenCodeRunAdapter implements AgentSession {
    * Announced completion outranks exit status, and deliberately so: a run can exit 0 with a
    * silently failed auxiliary model call, so exit 0 alone is NOT evidence that the turn
    * finished. `step_finish reason=stop` is.
+   *
+   * An exit with nothing announced is not always the same finding, either. A child that had
+   * just said another step was coming (`reason=tool-calls`) and then exited left its ending
+   * PLACED: we can say where in its own stated sequence the process stopped. We still cannot
+   * say why it stopped, and neither verdict claims to. Both are synthesized -- neither
+   * announced the turn's end -- but only the second leaves the ending unplaced as well as
+   * unexplained.
    */
   #settle(
     turn: TurnState,
@@ -581,24 +614,47 @@ export class OpenCodeRunAdapter implements AgentSession {
       // happened and can say so, so it does not get graded `assumed` alongside the genuinely
       // unknown cases.
       const transport = turn.provenance.find((p) => p.source === 'transport')
-      verdict = transport
-        ? {
-            outcome: 'transport_lost',
-            confidence: 'proven',
-            provenance: [transport],
-          }
-        : {
-        outcome: 'unknown_abnormal_end',
-        confidence: 'assumed',
-        provenance: [
-          { source: 'process', detail: `exit code ${code}, no step_finish reason=stop` },
-          // First, when the child said why. The exit code says a turn failed; only this says
-          // what failed, and an operator reading `exit code 1` has nowhere to go.
-          ...(turn.announcedError ? [{ source: 'transport' as const, detail: turn.announcedError }] : []),
-          ...(stderr.trim()
-            ? [{ source: 'process' as const, detail: stderr.trim().slice(0, 400), caveat: true }]
-            : []),
-        ],
+      // First, when the child said why. The exit code says a turn failed; only this says
+      // what failed, and an operator reading `exit code 1` has nowhere to go. Carried on both
+      // exited-without-finishing verdicts: which one we reach is a statement about how much we
+      // can prove, and it must not decide whether the child's own answer survives.
+      const childSaid: Provenance[] = [
+        ...(turn.announcedError ? [{ source: 'transport' as const, detail: turn.announcedError }] : []),
+        ...(stderr.trim()
+          ? [{ source: 'process' as const, detail: stderr.trim().slice(0, 400), caveat: true }]
+          : []),
+      ]
+      if (transport) {
+        verdict = { outcome: 'transport_lost', confidence: 'proven', provenance: [transport] }
+      } else if (turn.stepOwed) {
+        // The child announced a further step and the process exited before it began. Nothing
+        // announced the TURN's end, so this is still ours to synthesize. `proven` is a claim
+        // about WHERE the run stopped and nothing more: the exit is fixed against a
+        // continuation the child had already committed to, which is a fact off the stream
+        // rather than an inference from the exit code. The cause remains unknown, and the
+        // provenance below is careful not to imply one -- but grading this `assumed` alongside
+        // the endings we cannot place at all would discard the record that places it.
+        verdict = {
+          outcome: 'process_exited',
+          confidence: 'proven',
+          provenance: [
+            { source: 'hook', detail: 'step_finish reason=tool-calls' },
+            {
+              source: 'process',
+              detail: `exit code ${code} before the announced next step`,
+            },
+            ...childSaid,
+          ],
+        }
+      } else {
+        verdict = {
+          outcome: 'unknown_abnormal_end',
+          confidence: 'assumed',
+          provenance: [
+            { source: 'process', detail: `exit code ${code}, no step_finish reason=stop` },
+            ...childSaid,
+          ],
+        }
       }
     }
 

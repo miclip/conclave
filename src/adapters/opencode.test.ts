@@ -189,7 +189,7 @@ test('exit 0 without a stop record is NOT a completion', async () => {
   await session.close()
 })
 
-test('a stream that ends on a tool call leaves no report, and says so rather than inventing one', async () => {
+test('a stream that ends on a tool call leaves no report, and says so rather than inventing one', async (t) => {
   // The shape observed live in session 20260822-075223-56541, the first run with an OpenCode
   // ADVISOR (#163). Three of its turns ended this way: the model's last act was a tool call,
   // `opencode` exited 0, and no `step-finish reason=stop` ever arrived. Turns whose last act
@@ -201,35 +201,149 @@ test('a stream that ends on a tool call leaves no report, and says so rather tha
   // that spoke and lost its terminator. This one never spoke: no closing message exists, which
   // is why there is nothing to rebuild a report from -- the half that costs a run, and the half
   // a verdict-only assertion cannot see.
+  //
+  // Three subcases, one record apart each, because the differences between them are the whole
+  // finding. Cutting after the tool leaves an ending nothing places. Cutting one line later --
+  // after the `step_finish reason=tool-calls` the child itself emitted -- leaves an ending that
+  // CAN be placed: the process stopped before a continuation the child had committed to. That
+  // is not a cause. Nothing here says why the run stopped, and the verdict must not pretend
+  // otherwise; what it buys is a record that says where. Cutting one line later again -- after
+  // the promised `step_start` actually arrives -- takes it back, because the promise was kept
+  // and there is no longer an announced next step for the exit to be before. All three are
+  // synthesized. If the adapter grades the first two alike it loses the line that places one of
+  // them; if it grades the third like the second it prints a claim that is simply false.
   const lines = readFileSync(FIXTURE, 'utf8').split('\n').filter((l) => l.trim())
   const lastTool = lines.reduce((at, l, i) => (parseRecord(l)?.part?.type === 'tool' ? i : at), -1)
   assert.ok(lastTool >= 0, 'the fixture must contain a tool record for this test to truncate at')
-  const { command } = stub(lines.slice(0, lastTool + 1).join('\n'), 0)
-
-  const session = await OpenCodeRunAdapter.start({ cwd: REPO, role: 'advisor', command })
-  await session.send('go', { kind: 'orchestrator' })
-  const events = await nextTurn(session)
-
-  const end = events.find((e) => e.type === 'turn_end') as TurnEndEvent
-  assert.equal(end.verdict.outcome, 'unknown_abnormal_end')
-  assert.equal(end.verdict.confidence, 'assumed', 'exit 0 is not evidence the turn finished')
-  assert.equal(end.synthesized, true, 'nothing announced this, so it is ours')
-
-  // The operator-facing half. A tool call was recorded, so the child was heard and #82 must
-  // not name the model -- but no assistant message exists, so a caller has no report and must
-  // be told that rather than handed silence dressed as a completed turn.
-  const before = events.filter((e) => e.type !== 'turn_end')
-  assert.ok(
-    before.some((e) => e.type === 'tool_use'),
-    'the child spoke -- a tool call is output, and the turn must not read as having produced nothing',
-  )
+  const afterTool = parseRecord(lines[lastTool + 1] ?? '')?.part
   assert.equal(
-    before.filter((e) => e.type === 'message').length,
-    0,
-    'no closing message: this is why there is nothing to rebuild a report from',
+    afterTool?.type,
+    'step-finish',
+    'the fixture must follow its last tool with a step-finish for the second subcase to exist',
   )
-  assert.equal(before.at(-1)?.type, 'tool_use', 'the last thing the child did was call a tool')
-  await session.close()
+  assert.equal(afterTool?.reason, 'tool-calls', 'and that step-finish must promise a further step')
+  assert.equal(
+    parseRecord(lines[lastTool + 2] ?? '')?.part?.type,
+    'step-start',
+    'and the promised step must actually arrive, for the third subcase to exist',
+  )
+
+  /** Replay the fixture truncated after line `cut`, and return everything up to `turn_end`. */
+  const truncatedAt = async (cut: number): Promise<AgentEvent[]> => {
+    const { command } = stub(lines.slice(0, cut + 1).join('\n'), 0)
+    const session = await OpenCodeRunAdapter.start({ cwd: REPO, role: 'advisor', command })
+    await session.send('go', { kind: 'orchestrator' })
+    const events = await nextTurn(session)
+    await session.close()
+    return events
+  }
+
+  /**
+   * The operator-facing half, identical in both subcases: a tool call was recorded, so the
+   * child was heard and #82 must not name the model -- but no assistant message exists, so a
+   * caller has no report and must be told that rather than handed silence dressed as a
+   * completed turn.
+   */
+  const assertHeardButSilent = (events: AgentEvent[], end: TurnEndEvent): void => {
+    const before = events.filter((e) => e.type !== 'turn_end')
+    assert.ok(
+      before.some((e) => e.type === 'tool_use'),
+      'the child spoke -- a tool call is output, and the turn must not read as having produced nothing',
+    )
+    assert.equal(
+      before.filter((e) => e.type === 'message').length,
+      0,
+      'no closing message: this is why there is nothing to rebuild a report from',
+    )
+    assert.equal(before.at(-1)?.type, 'tool_use', 'the last thing the child did was call a tool')
+    // #82 blames the launch only when the child produced nothing at all. It produced a tool
+    // call here, so a verdict that reaches for the model is talking over evidence it has.
+    assert.equal(
+      end.verdict.provenance.find((p) => /model/i.test(p.detail)),
+      undefined,
+      'the child was heard, so nothing in the record may point at the model it was launched with',
+    )
+  }
+
+  await t.test('cut after the tool: nothing accounts for the ending', async () => {
+    const events = await truncatedAt(lastTool)
+    const end = events.find((e) => e.type === 'turn_end') as TurnEndEvent
+
+    assert.equal(end.verdict.outcome, 'unknown_abnormal_end')
+    assert.equal(end.verdict.confidence, 'assumed', 'exit 0 is not evidence the turn finished')
+    assert.equal(end.synthesized, true, 'nothing announced this, so it is ours')
+
+    // Read off the record rather than the outcome name: `assumed` has to be justified BY the
+    // provenance, and a verdict that graded itself unknown while citing a claim from the child
+    // would be citing evidence it is simultaneously saying it does not have.
+    assert.equal(
+      end.verdict.provenance.find((p) => p.source === 'hook'),
+      undefined,
+      'the child claimed nothing about this ending -- no hook may appear in the record',
+    )
+    assert.match(end.verdict.provenance[0]!.detail, /exit code 0, no step_finish reason=stop/)
+
+    assertHeardButSilent(events, end)
+  })
+
+  await t.test('cut one record later: the child said a step was coming, then exited', async () => {
+    const events = await truncatedAt(lastTool + 1)
+    const end = events.find((e) => e.type === 'turn_end') as TurnEndEvent
+
+    assert.equal(end.verdict.outcome, 'process_exited')
+    assert.equal(end.verdict.confidence, 'proven', 'the child stated what came next; it never came')
+    // Still ours. `reason=tool-calls` is a claim about the NEXT step, not about the turn, so
+    // nothing here announced an ending -- promoting this to an announced completion because
+    // the evidence got better would be the exact error the stop signal exists to prevent.
+    assert.equal(end.synthesized, true, 'no turn end was announced -- only a further step was')
+
+    assert.deepEqual(
+      end.verdict.provenance.find((p) => p.source === 'hook'),
+      { source: 'hook', detail: 'step_finish reason=tool-calls' },
+      'the intermediate record the child emitted, kept verbatim as the reason this is proven',
+    )
+    assert.ok(
+      end.verdict.provenance.some(
+        (p) => p.source === 'process' && /exit code 0 before the announced next step/.test(p.detail),
+      ),
+      'and the exit, stated against the step it was owed rather than on its own',
+    )
+    assert.equal(
+      end.verdict.provenance.find((p) => /reason=stop/.test(p.detail)),
+      undefined,
+      'the stop path is untouched: nothing here may read as a completion',
+    )
+
+    assertHeardButSilent(events, end)
+  })
+
+  await t.test('cut after the promised step arrives: the ending is unplaced again', async () => {
+    // The guard on the clear. `stepOwed` latched for the rest of the turn would still pass the
+    // subcase above while making this verdict say `exit code 0 before the announced next step`
+    // about a run whose announced next step is right there in the stream. An operator reading
+    // that would be reading a false statement, which is worse than the honest `assumed` -- so
+    // the evidence going BACKWARDS one record later is the correct behaviour, not a gap.
+    const events = await truncatedAt(lastTool + 2)
+    const end = events.find((e) => e.type === 'turn_end') as TurnEndEvent
+
+    assert.equal(end.verdict.outcome, 'unknown_abnormal_end')
+    assert.equal(end.verdict.confidence, 'assumed', 'the promise was kept; nothing places this exit')
+    assert.equal(end.synthesized, true, 'nothing announced this, so it is ours')
+
+    assert.equal(
+      end.verdict.provenance.find((p) => p.source === 'hook'),
+      undefined,
+      'the tool-calls claim was made good on, so it is no longer evidence about the ending',
+    )
+    assert.equal(
+      end.verdict.provenance.find((p) => /announced next step/.test(p.detail)),
+      undefined,
+      'and the record must not say the exit preceded a step the stream shows arriving',
+    )
+    assert.match(end.verdict.provenance[0]!.detail, /exit code 0, no step_finish reason=stop/)
+
+    assertHeardButSilent(events, end)
+  })
 })
 
 test('per-step token accounting survives to the caller', async () => {

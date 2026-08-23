@@ -223,7 +223,7 @@ export const CITED: Record<string, string> = {
     'const p: RelayParticipant = { id: spec.id, agent: spec.agent, rank, role: spec.role, launch, session, events: [], baselineGeneration: 0, degradationCursor: 0 }',
   'src/relay/report.ts:274-284': 'const snap = await p.session.snapshot()',
   'src/adapters/kimi.ts:727': 'compactionGeneration: 0,',
-  'src/adapters/opencode.ts:709': 'compactionGeneration: 0,',
+  'src/adapters/opencode.ts:765': 'compactionGeneration: 0,',
   'src/rotation/rotate.ts:412': 'export async function rotate(',
   'src/adapters/claude.ts:1429': "#state: SessionState = 'running'",
   'src/adapters/codex.ts:1013': "#state: SessionState = 'running'",
