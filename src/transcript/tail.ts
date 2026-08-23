@@ -31,10 +31,23 @@
  * at this layer can prevent that. The claim is that a poll can no longer CERTIFY one state of
  * the file and CONSUME another -- not that the bytes it holds are a state the file ever wholly
  * had.
+ *
+ * One rule spans both answers a poll can give, and it took #168 to state it as one: a record the
+ * writer has not finished is not a record. The append path always trimmed to the last complete
+ * line; the rewrite path did not, and consumed the half-written tail while correctly declining
+ * to parse it. Dropping a fragment from the OUTPUT is right. Dropping it from the OUTPUT while
+ * taking it from the INPUT is what turns a record that is merely EARLY into a record that is
+ * GONE -- the writer completes it, the bytes already banked are still a valid prefix, so no
+ * rewrite is seen and only the unparseable remainder is read. So `#offset` and `#prefixDigest`
+ * cover complete lines and nothing else, on both paths, and a partial record is always simply
+ * waited for.
  */
 
 import { createHash } from 'node:crypto'
 import { open, type FileHandle } from 'node:fs/promises'
+
+/** `\n`. The record separator, as a byte, because that is how the buffer is searched. */
+const NEWLINE = 0x0a
 
 export interface TailPoll<T> {
   /** Records appended since the last poll. Empty after a rewrite -- see `rebuilt`. */
@@ -44,7 +57,14 @@ export interface TailPoll<T> {
    * previously derived is void; `all` carries the full re-read.
    */
   rewritten: boolean
-  /** Present only when `rewritten`. The entire file, freshly parsed. */
+  /**
+   * Present only when `rewritten`. The rewritten file re-read from the start -- as far as its
+   * last COMPLETE line, which is as far as it can honestly be read (#168). A record the writer
+   * was still in the middle of is not here, and has not been consumed either; the poll that
+   * finds it finished delivers it as an ordinary append. Empty when the rewritten file has no
+   * complete line at all, which is a real answer and not a missing one: the file contains no
+   * whole record, so neither does this.
+   */
   all?: T[]
   /** True on the first successful poll, when there is nothing to rewrite yet. */
   first: boolean
@@ -124,13 +144,23 @@ export class RewriteAwareTail<T> {
       //
       // Nor is a short read a shorter FILE. Whatever produced it -- a signal, a filesystem that
       // declines to fill the request, a rewrite shrinking the file between the fstat and the
-      // read -- what came back is a FRAGMENT, and a fragment is the single most damaging thing
-      // this class can be handed. Believing it does not merely risk a spurious rewrite, which
-      // would be cheap: a fragment whose prefix no longer matches is routed to the rewrite
-      // branch, and that branch does not trim to the last complete line (#168). It would set
-      // `#offset` past half a record and bank a digest over it, and that record is then never
-      // delivered by any poll -- silent loss, manufactured out of a file that was never
-      // malformed.
+      // read -- what came back is a FRAGMENT, and a fragment is a state of the file that never
+      // existed.
+      //
+      // What believing one COSTS changed with #168, and the honest version is the smaller
+      // claim. It used to be record loss: a fragment whose prefix no longer matches is routed
+      // to the rewrite branch, that branch did not trim to the last complete line, and it would
+      // set `#offset` past half a record and bank a digest over it -- after which no poll ever
+      // delivered that record. Now that both branches trim, the fragment's complete lines are
+      // consumed and its partial tail is left for the next poll, so the records survive.
+      //
+      // The guard stays, because what is left is not nothing. A fragment that fails the prefix
+      // check is reported as a REWRITE, and a rewrite is not a cheap false alarm: it tells
+      // every consumer downstream that history changed and that everything derived from it is
+      // void. Manufacturing that out of a file nobody touched is a lie about the transcript,
+      // paid for by a full rebuild. It is also the wrong thing to rest on -- "believing a
+      // fragment is survivable" holds only as long as every branch that handles one gets the
+      // trimming right, which is precisely the assumption #168 found broken.
       //
       // So a read that did not deliver what it was asked for is a failed read. Fail it, commit
       // nothing, and let the next poll ask again from an offset that never moved.
@@ -226,9 +256,33 @@ export class RewriteAwareTail<T> {
 
     if (!this.#prefixIntact(whole)) {
       if (lease?.abandoned) return this.#nonAnswer()
-      this.#offset = size
-      this.#prefixDigest = createHash('sha256').update(whole).digest('hex')
-      return { appended: [], rewritten: true, all: this.#parseAll(whole.toString('utf8')), first }
+      // The same rule as the append path below, for the same reason, on the path that is MORE
+      // likely to meet it: a rewrite is a writer writing, which is exactly when a poll catches a
+      // record half done. Trimming here is not a refinement of the old behaviour, it is the
+      // difference between a delay and a loss -- see this file's header (#168).
+      //
+      // A byte index, taken from the buffer rather than from a decode of it. The append path
+      // reaches the same answer through `lastIndexOf` on a string and `Buffer.byteLength` back
+      // again; here there is nothing to gain by the round trip, and one fewer place for a
+      // multi-byte character to make a string index and a byte offset disagree.
+      const lastNewline = whole.lastIndexOf(NEWLINE)
+      // -1 means the rewritten file has no complete line at all, and 0 is then the honest
+      // offset: there is no coherent prefix to bank, so bank none. The rewrite is still
+      // REPORTED -- what the consumer held is void either way, and staying silent about that to
+      // avoid an awkward `all: []` would leave it holding records the file no longer contains.
+      // The record now being written is not skipped; with the offset at zero the next poll
+      // reads it as a plain append, whole.
+      const consumed = lastNewline + 1
+      this.#offset = consumed
+      this.#prefixDigest = createHash('sha256')
+        .update(whole.subarray(0, consumed))
+        .digest('hex')
+      return {
+        appended: [],
+        rewritten: true,
+        all: this.#parseAll(whole.subarray(0, consumed).toString('utf8')),
+        first,
+      }
     }
 
     if (size === this.#offset) return { appended: [], rewritten: false, first }

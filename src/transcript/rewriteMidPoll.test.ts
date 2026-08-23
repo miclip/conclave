@@ -279,20 +279,31 @@ test('a lease that expires between the two checks is caught by the one before th
  * A read that came back short is a failed read, and the poll must reject rather than believe it.
  *
  * The tempting reading is that a short read means a shorter file, and that believing it is the
- * conservative direction: worst case a spurious rewrite, which costs a re-read. That is wrong,
- * and wrong in the expensive direction. A fragment whose prefix no longer matches goes to the
- * REWRITE branch, and that branch does not trim to the last complete line (#168) -- so it would
- * set `#offset` past half a record and bank a digest over it, and the record is then never
- * delivered by any poll. A short read would MANUFACTURE silent record loss out of a file that
- * was never malformed. Rejecting costs one retry; believing costs a record, permanently.
+ * conservative direction. It is not, and the size of the cost has changed once already -- which
+ * is the better argument for the guard than any single number.
  *
- * Measured, not argued. Against a variant that believes the short read, this exact case gives:
+ * BEFORE #168 believing a fragment lost a record outright. A fragment whose prefix no longer
+ * matches goes to the REWRITE branch; that branch did not trim to the last complete line, so it
+ * set `#offset` past half a record and banked a digest over it, and the record was then never
+ * delivered by any poll. This exact case gave:
  *
  *   poll 2   rewritten=true, all=["a"], consumedBytes=18   -- `b` dropped, offset past its half
  *   poll 3   rewritten=false, appended=["c"]               -- prefix still matches, so no alarm
  *
- * `b` is on disk, whole and well-formed, from the first byte to the last. No poll ever hands it
- * to anyone.
+ * `b` was on disk, whole and well-formed, and no poll ever handed it to anyone.
+ *
+ * SINCE #168 both branches trim, and the same case measures (`partialRewrite.test.ts` pins the
+ * behaviour this rests on):
+ *
+ *   poll 2   rewritten=true, all=["a"], consumedBytes=10   -- only the complete line consumed
+ *   poll 3   rewritten=false, appended=["b","c"]           -- the rest arrives as a plain append
+ *
+ * No record is lost now. The guard is still right, for the reason that did not depend on the
+ * loss: poll 2 reports a REWRITE of a file nobody rewrote. That is not a cheap false alarm --
+ * `rewritten` tells every consumer downstream that history changed and that everything derived
+ * from it is void, so a fragment manufactures a full rebuild and a lie about the transcript out
+ * of thirty bytes that were never malformed. And resting on "the trimming will catch it" is
+ * resting on exactly the assumption #168 found broken on one of the two branches.
  *
  * Nothing about the file here is wrong -- thirty well-formed bytes, three complete records. Only
  * the read is short, which is why the wedge has to falsify the COUNT rather than the file: a real
@@ -309,8 +320,9 @@ test('a short read is rejected, commits nothing, and the next poll recovers the 
   await writeFile(path, rec('a') + rec('b') + rec('c'))
 
   wedge.arm()
-  // 18 of 30: below the consumed offset, so the fragment would fail the prefix check and take
-  // the untrimmed rewrite path -- and 18 lands mid-record, which is what makes that path lose one.
+  // 18 of 30: below the consumed offset, so the fragment fails the prefix check and takes the
+  // rewrite path, and 18 lands mid-record. Kept mid-record deliberately -- it is the shape that
+  // used to lose `b`, so the case the guard was built against is still the case it is tested on.
   wedge.short(1, 18)
 
   await assert.rejects(
