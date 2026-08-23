@@ -190,6 +190,16 @@ so the history is explained rather than merely wrong.
 explicitly, or hold commits until participants are quiesced. The orchestrator has to obey
 the workspace discipline it enforces on its participants.
 
+Addendum [2026-08-23]: `327c56c` ("WIP #125: a forced /continue is recorded with what it
+overrode") lists the two force-population tests as "not done" while containing them — the
+implementer landed them between the advisor's verification of the diff and its staging.
+Explicit staging by filename did not save it, because the participant was editing those very
+files at the time. So the rule's stronger form is the real one: explicit staging is
+necessary and NOT sufficient; re-read the diff between staging and committing, or hold the
+commit until the participant is quiescent. Not rewritten: the branch is unpushed WIP, the
+problem is the message's done/not-done list rather than the content, and the correction
+rides the commits that followed.
+
 ## Rotation: what is left to verify
 
 Two claims, deliberately separated (DESIGN-BRIEF §7a). A successful rotation settles the
@@ -507,3 +517,64 @@ it appears again, keep the assertion text and the file it came from before anyth
 3. The falsifier answer, recorded for whoever lands fix-36: there, `containedFallback` is documented as "this snapshot is the last projection the view was in a position to build rather than one read just now" — a STALE-read marker, set when a bounded transcript read fails and a prior verified projection is served. "No view yet" is a NEVER-read: no projection exists and none ever did. Flagging the pre-view returns with it folds a second, distinct condition into the flag — a widening, not a restatement. If fix-36 does that, its contract doc must say the flag now covers both, and the guard comments (which reason about a fallback of a prior read) must be re-checked against a case with no prior read.
 
 4. No behaviour change was made; #156 stays open.
+
+---
+
+## A forced resume records what it overrode, and what its send met (#125) — done, awaiting the operator
+
+**Done [2026-08-23] on `fix-125`. The issue is deliberately not closed; the call to close is the operator's.**
+
+WHAT FORCE OVERRIDES TODAY, because the issue quotes a guard that no longer exists. #117 moved
+the send precondition onto turn state, so the CPU-sampling refusal the issue describes is gone.
+The console guard in `resumeRun` refuses `/continue` when a seat the pause scopes it to sample
+has an open `activeTurn` over the child's own `turn_start`/`turn_end` events — bypassed when the
+pause's verdict was superseded by a completed replacement, and when the open turn is a withdrawn
+record rather than an observation (#66) — with the CPU reading printed as colour beside the
+refusal and deciding nothing. `/continue force` overrides exactly that refusal, and nothing
+else. In particular it does NOT bypass the relay's own precondition: `session.send` has exactly
+one call site in the relay, inside `#exchangeTurn`, immediately after `#awaitSendable`, so every
+send a forced continue releases — including queued human text — first waits out a live turn,
+bounded by `sendPreconditionMs`, and ends the run `peer_busy` (cancel-first) if the turn never
+ends. A fatal force therefore reads `peer_busy` today, not the `transport_failed` the issue
+names; the console refusal's "sends anyway, into a child that may still be working" wording is
+a pre-#117 leftover, left in place because console wording was out of scope here.
+
+THE RECORD. One `ForceRecord` per `/continue force`, ledgered on the `RunHandle` (the one object
+both the console that applies the force and the relay that learns the outcome can see), exposed
+through `Relay.forceRecords`, and surfaced in both documents a reader actually has — the status
+file and the run report — spelled out as an empty array when nothing was forced (#103), so "no
+forces" and "this build does not report forces" are different facts. Each entry carries:
+
+- `overrode` — per sampled seat, `describeActiveTurn` of its open turn or an explicit `null`,
+  with the liveness colour when one was sampled: the evidence the guard read at the moment of
+  the force, gathered by the guard's own reads.
+- `refusedFirst` — whether a refusal was already on the pause. Forcing past a seen refusal and
+  forcing blind are both legal and are different populations when the guard's refusal rate is
+  scored; recording them as one is the contamination #75 named for rotations.
+- `send` — the fate of the FIRST post-force send to an overridden seat, stamped at
+  `#awaitSendable`'s three ordinary exits: `sent` (no open turn), `sent_after_wait` (still
+  mid-turn, turn ended inside the bound — the near-miss population, recorded rather than argued
+  about), `expired` (the bound lapsed against the live turn). `null` means no send to an
+  overridden seat happened before the run ended; teardown mid-wait is a real case and stamps
+  nothing.
+- `followedBy` — the run's terminal outcome and its distance from the force in completed turns
+  and milliseconds, stamped when the handle settles.
+
+THE FALSIFIER, ANSWERED. Only the immediate send fate is the force's own consequence; the
+terminal outcome is the run's. So the entry records both as facts and never a causal label:
+`send.outcome === 'expired'` marks a force whose send met a still-live turn; `followedBy` says
+what the run later did and how far away, and a run that ends three turns on died of its own
+affairs. "Forces that were justified" and "forces that killed a run" are separated by reading
+the record, not by a claim the ledger makes — a ledger that overclaims is worse than one that
+records less. An earlier cut (preserved at `881d9d5`, reverted at `9da62e5`) tried to make
+`turnsCompleted === 0` the separator by skipping the advisor re-ask after a forced continue;
+that changed what a force DOES — policy, not recording, which the task forbids — and bypassed
+`#routed`, which carries #79's targeting denominator. The send's fate is the honest linkage and
+the run loop is untouched.
+
+VERIFICATION. Both populations were driven through the console and read off the record, never
+off rendered output (#109): refused-then-forced into a held turn ends `peer_busy` with
+`send: expired`; a blind force on an idle seat ends normally with `send: sent`; and the two
+entries differ in the load-bearing fields. Every new assertion was mutation-checked — the
+recording disabled, the assertion observed to fail, the tree restored byte-for-byte — and the
+full `npm test` gate (typecheck first) ran 1349 pass, 0 fail.
