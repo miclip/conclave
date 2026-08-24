@@ -1850,9 +1850,11 @@ test('input that ends inside an unterminated block says so, and delivers nothing
  * Every assertion here describes input that works today and has to keep working identically.
  * A permissive opener -- any line ending in `<<word` -- would swallow the next several lines
  * of a `/rotate` reason or a message about C++ into a block the operator never opened, and
- * the console would show nothing routed while they kept typing. So the opener is enumerated,
- * the terminator is an exact match, and an unframed line keeps the whitespace normalisation
- * it has always had rather than inheriting the verbatim treatment a block needs.
+ * the console would show nothing routed while they kept typing. So an opener has a shape
+ * nobody reaches by accident -- nothing, or `>` and at least one more character, then the tag
+ * and nothing else -- the terminator is an exact match, and an unframed line keeps the
+ * whitespace normalisation it has always had rather than inheriting the verbatim treatment a
+ * block needs.
  */
 test('framing changes nothing about the lines that were already legal', async () => {
   const dir = repo()
@@ -1895,15 +1897,34 @@ test('framing changes nothing about the lines that were already legal', async ()
   input.write('>implementer two  spaces   collapse\n')
   await untilText('the spaced line', out.text, /two spaces collapse/)
 
+  // A BARE CHEVRON against the tag, with and without a space. Neither opens a block: `>` alone
+  // names no seat, so there is nothing for it to be the prefix OF, and both were ordinary
+  // lines before framing existed. The head pattern matched the empty rest for a while and
+  // turned both into openers -- silently, since an opener draws no speaker block, so the only
+  // symptom was everything typed afterwards disappearing into a block nobody asked for.
+  //
+  // They differ in what an ordinary line means for each. `><<EOF` is address-SHAPED -- `>` and
+  // something -- so it is held to naming a seat and refused by name. `> <<EOF` is not, so it
+  // is routed like any other text. The claim they share is the one asserted below: neither
+  // swallowed the lines that came after it.
+  input.write('><<EOF\n')
+  await untilText('the bare chevron to be refused rather than buffered', out.text, /no seat named <<EOF/)
+  input.write('> <<EOF\n')
+  // Waited on the QUEUE confirmation, not on the text: the renderer draws a leading `> ` as a
+  // blockquote glyph, so an assertion against the drawn line would be an assertion about
+  // presentation. What it was routed as is checked against the record at the end.
+  await untilText('the spaced bare chevron to be routed as text', out.text, /queued for everyone/)
+
   const text = out.text()
   // The load-bearing one, and the reason the last line is sent at all: had any line above
   // opened a block, everything after it would have been buffered into that block instead of
   // routed, and nothing since would have appeared at all.
   assert.equal(
     text.match(/● you → /g)?.length,
-    4,
-    'the goal and three routed messages — /rotate is a command and draws no speaker block, ' +
-      'and a line swallowed into an accidental block would be a missing one',
+    5,
+    'the goal and four routed messages — /rotate is a command and `><<EOF` is a refusal, so ' +
+      'neither draws a speaker block, and a line swallowed into an accidental block would be ' +
+      'a missing one',
   )
 
   input.end()
@@ -1922,6 +1943,18 @@ test('framing changes nothing about the lines that were already legal', async ()
     routed(dir, 'shifting twice')?.text,
     'prefer a<<b over shifting twice',
     'and a message merely ending in <<word is routed as itself',
+  )
+  // The bare chevron, on the record rather than on the screen. Routed as ITSELF -- the whole
+  // line, tag and all, as one ordinary message to everyone -- which is only true if it never
+  // became an opener: an opener contributes no message of its own and its tag never appears in
+  // any text.
+  const chevron = routed(dir, '<<EOF')
+  assert.equal(chevron?.text, '> <<EOF', 'a bare > before the tag is a line, not an opener')
+  assert.deepEqual([...(chevron?.to ?? [])], ['advisor', 'implementer'])
+  // And the address-shaped one reached nobody at all, by the same reading.
+  assert.ok(
+    routedAll(dir).every((r) => r.text !== '><<EOF'),
+    '`><<EOF` names no seat, so it is refused rather than routed',
   )
 })
 

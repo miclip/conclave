@@ -407,30 +407,36 @@ const ADDRESS = /^>./
 /**
  * A line that opens a multi-line message: NOTHING, or one address prefix, then `<<TAG`.
  *
- * Deliberately not "any line ending in `<<TAG`". The head is enumerated -- empty, `>both`, or
- * `>` and the id of a seat that is live right now -- because the alternative silently
- * reinterprets input that is already correct today. `/rotate the seat is stuck <<HERE` is a
- * rotate reason and `>advisor compare a<<b` is a message about C++; under a permissive rule
- * both open a block instead, and the operator's next several lines vanish into it with the
- * console showing nothing routed. Every form that is framing has to be a form nobody writes
- * by accident, which is what makes the framing explicit rather than a guess.
+ * Deliberately not "any line ending in `<<TAG`". A head is a form nobody writes by accident --
+ * nothing at all, or a first word of `>` and at least one more character -- because the
+ * alternative silently reinterprets input that is already correct today. `/rotate the seat is
+ * stuck <<HERE` is a rotate reason and `>advisor compare a<<b` is a message about C++; under a
+ * permissive rule both open a block instead, and the operator's next several lines vanish into
+ * it with the console showing nothing routed.
  *
- * The head is address-SHAPED rather than checked against the live seats here, and the block is
- * opened for an unknown one on purpose (#93). A head this refused to recognise did not stay
- * unrecognised -- it fell through to `dispatch` as an ordinary line, which refused the OPENER
- * and then let the next several lines through one at a time, to everyone. So a mistyped
- * `>implemnter-2 <<EOF` refused the address and broadcast the paste, which is the worst of
- * both answers. Recognising it means the body is collected, nothing is routed, and the
- * refusal happens ONCE, when the terminator arrives, in the one place that owns it.
+ * SHAPE, not membership, and that is the correction #93 made here. The head is NOT checked
+ * against the live seats -- a block opens for an unknown one on purpose, and `handle` decides
+ * whether it named anything, exactly as it does for the single-line form. Validation in one
+ * place; recognition in this one. A head this refused to recognise did not stay unrecognised:
+ * it fell through to `dispatch` as an ordinary line, which refused the OPENER and then let the
+ * body past one line at a time, unaddressed, to everyone. So a mistyped `>implemnter-2 <<EOF`
+ * refused the address and broadcast the paste, which is the worst of both answers. Recognising
+ * it means the body is collected, nothing is routed, and the refusal happens ONCE.
  *
- * `[^\s<]` rather than `[^\s]` so the head cannot swallow its own `<<`: `>implementer<<EOF`
- * has no space and opened a block before this existed, and must keep doing so.
+ * Two characters of the pattern carry the edges, and both are load-bearing:
+ *
+ *   - `+` rather than `*`, so a bare `>` is NOT a head. `><<EOF` and `> <<EOF` stay ordinary
+ *     lines, which is what they were before framing existed and what `ADDRESS` above promises:
+ *     `>` alone names no seat, so there is nothing for it to be the prefix OF. A `*` here
+ *     matched the empty rest and quietly turned both into openers.
+ *   - `[^\s<]` rather than `[^\s]`, so the head cannot swallow its own `<<`. `>implementer<<EOF`
+ *     has no space and opened a block before this existed, and must keep doing so.
  *
  * Module scope so it cannot land in the temporal dead zone of the console's own startup;
  * see `block` in `runSession`.
  */
 function heredocOpen(line: string): { head: string; tag: string } | undefined {
-  const head = /^>[^\s<]*/.exec(line)?.[0]
+  const head = /^>[^\s<]+/.exec(line)?.[0]
   if (head !== undefined) {
     const tag = HEREDOC_TAG.exec(line.slice(head.length))
     return tag ? { head, tag: tag[1]! } : undefined
@@ -2241,7 +2247,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
       // FALSIFIER, stated because it is the strongest argument against this shape: the
       // console has no general "trailing text is a message" rule and does not gain one here.
       // `/rotate <text>` and `/abort <text>` consume their text as a REASON
-      // (`src/repl/session.ts:2294`, `src/repl/session.ts:2327`) and `/pause`, `/queue`, `/audit` ignore
+      // (`src/repl/session.ts:2300`, `src/repl/session.ts:2333`) and `/pause`, `/queue`, `/audit` ignore
       // whatever follows them. So an operator who learns this from `/continue` and carries
       // it to `/pause I'll be back` still loses the sentence. That inconsistency is not
       // repaired by making `/continue` a third behaviour; it is narrowed by it, and the
