@@ -48,6 +48,16 @@ export function suggest(
   cursor: number,
   cwd: string,
   commands: string[] = [],
+  /**
+   * The seats that are live, in join order, from `relay.participants` (#93).
+   *
+   * A fixed pair offered `>implementer` to a run whose second seat was called
+   * `implementer-2` and could not offer that one at all -- so the menu taught an operator
+   * that the addressable set was two, when the transport had always accepted any seat id.
+   * The default is the shape of a run that has not named a seat list, which is what a caller
+   * with no relay in hand -- every test of the path completion below -- should see.
+   */
+  seats: string[] = ['advisor', 'implementer'],
 ): Suggestion | undefined {
   const upto = line.slice(0, cursor)
 
@@ -63,7 +73,9 @@ export function suggest(
   const to = /^>([^\s]*)$/.exec(upto)
   if (to) {
     const partial = to[1] ?? ''
-    const items = PARTICIPANTS.filter((p) => p.startsWith(partial)).map((p) => `>${p}`)
+    // `both` last, and after the seats, because it is the option you take by NOT choosing:
+    // the menu reads as the narrowing choices first and the default beside them.
+    const items = [...seats, BOTH].filter((p) => p.startsWith(partial)).map((p) => `>${p}`)
     if (items.length > 0) {
       return { items, start: 0, end: cursor, suffix: ' ', note: 'plain text reaches both' }
     }
@@ -86,10 +98,11 @@ export function suggest(
  * `both` is an alias for typing nothing at all, and exists only so the menu can say so.
  *
  * The default — plain text reaches both participants — is the one piece of the addressing
- * model that is invisible: you learn it by not doing something. Listing it beside the two
- * narrowing options makes the whole choice legible at the moment it is being made.
+ * model that is invisible: you learn it by not doing something. Listing it beside the
+ * narrowing options, however many seats there are, makes the whole choice legible at the
+ * moment it is being made.
  */
-const PARTICIPANTS = ['advisor', 'implementer', 'both']
+const BOTH = 'both'
 
 /** Directory entries matching a partial path, with `/` appended to directories. */
 function pathCandidates(cwd: string, partial: string): string[] {

@@ -41,6 +41,27 @@ test('> narrows as it is typed', () => {
   assert.equal(suggest('>zz', 3, dir, CMDS), undefined)
 })
 
+test('> offers the seats that are actually running, not a fixed pair', () => {
+  // #93. The menu listed `advisor` and `implementer` whatever the run was, so a session with
+  // two implementer seats was taught that the second one -- visible in the box, named by
+  // `/state`, routable by the transport all along -- could not be addressed. The list comes
+  // from `relay.participants` now, which is the same list the relay resolves an address
+  // against, so what the menu offers and what routing accepts cannot drift apart.
+  const dir = tree()
+  const seats = ['advisor', 'implementer', 'implementer-2', 'reviewer']
+  assert.deepEqual(suggest('>', 1, dir, CMDS, seats)?.items, [
+    '>advisor',
+    '>implementer',
+    '>implementer-2',
+    '>reviewer',
+    '>both',
+  ])
+  // Narrowing keeps the seat whose id is a PREFIX of another's. `>implementer` is itself a
+  // seat, so typing it whole must still offer it rather than only the longer one.
+  assert.deepEqual(suggest('>implementer', 12, dir, CMDS, seats)?.items, ['>implementer', '>implementer-2'])
+  assert.deepEqual(suggest('>implementer-', 13, dir, CMDS, seats)?.items, ['>implementer-2'])
+})
+
 test('a slash offers commands, but only as the first token', () => {
   const dir = tree()
   assert.deepEqual(suggest('/c', 2, dir, CMDS)?.items, ['/continue'])

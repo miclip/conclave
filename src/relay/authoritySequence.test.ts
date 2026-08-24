@@ -108,7 +108,7 @@ const REVERSE_SECOND = 'Remove three.txt, it is clutter.'
  *
  * Through `run.injectConstraint(text, 'all')`, which IS the console's paused path: a reply
  * typed at a pause reaches `answerPause`, which calls `inject(text, 'all')` and then resumes
- * (src/repl/session.ts:1438). Nothing here is a shortcut around the front end.
+ * (src/repl/session.ts:1482). Nothing here is a shortcut around the front end.
  */
 const BROADCAST =
   `Both of you, for the record — this is what I sent the implementer earlier, in full: ` +
@@ -343,7 +343,7 @@ test('handing the aside to the advisor alone settles it, and arms nothing new (#
   assert.equal(first.pause.conflict!.origin.seq, asideMsg.seq)
 
   // To the advisor alone. This is `>advisor <text>` at the prompt, which is `inject(rest,
-  // { only: who })` (src/repl/session.ts:2308).
+  // { only: who })` (src/repl/session.ts:2390).
   const delivery = run.injectConstraint(BROADCAST, { only: 'advisor' })
   assert.equal(delivery.visibility, 'restricted', 'a human message to one seat is restricted')
   assert.deepEqual(delivery.excluded, ['implementer'], 'and the implementer is the one left out of it')

@@ -4558,3 +4558,255 @@ test('/rotate WITH a reason at a candidate says the reason was not recorded (#75
   input.end()
   await running
 })
+
+test('any live seat is addressable by its own id, and a name no seat has is refused', async (t) => {
+  // #93. `--implementers "claude, claude"` names seats `implementer` and `implementer-2`, and
+  // the console's address parser accepted exactly two literal words -- so the second seat could
+  // be watched working, listed by `/state` and narrated under its own id, and could not be
+  // replied to. The transport was never the constraint: `Audience` is `'all' | {only}`, and
+  // `Relay.#resolve` validates `only` against the participant map and returns that id alone.
+  // What was missing was the parser, and this is the end-to-end proof that it is not any more.
+  //
+  // Asserted on the ROUTED RECORD rather than on the drawn line, because the claim is about
+  // where the message went. `to` is the whole answer: it is exactly one seat, so every other
+  // live seat is excluded by construction, and `/audit` is asserted beside it because that is
+  // the surface an operator asks the same question through.
+  const dir = repo()
+  // Two seats mean linked worktrees cut from a COMMIT, so the console refuses to start with
+  // anything uncommitted. The hook files it installs land untracked here, so they are ignored
+  // and committed before the run rather than tripping a guard this test is not about.
+  writeFileSync(join(dir, '.gitignore'), '.conclave/\n.claude/\n.codex/\n')
+  execFileSync('git', ['add', '.'], { cwd: dir })
+  execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'ignore agent hook files'], { cwd: dir })
+
+  const advisor = slow('advisor', 'codex', ['@seat implementer-2: Sweep the docs.', 'DONE', 'DONE', 'DONE'], 200)
+  // A pause the operator can type into, which is the state this is all about: the run is in
+  // flight, both seats are up, and the console is where a reply has to be possible.
+  advisor.endTurn = { index: 0, verdict: TIMED_OUT }
+  const alpha = slow('alpha', 'alpha', ['ack', 'Did it.', 'Did it.', 'NONE'], 50)
+  const beta = slow('beta', 'beta', ['ack', 'Did it.', 'Did it.', 'NONE'], 50)
+  const out = collect()
+  const input = new PassThrough()
+  const running = runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'alpha',
+    // `alpha` fills seat `implementer`, `beta` fills seat `implementer-2` -- the ids the console
+    // constructs for a named seat list, and the ones typed below.
+    implementers: [
+      { agent: 'alpha', args: [] },
+      { agent: 'beta', args: [] },
+    ],
+    rounds: 6,
+    checks: [],
+    registry: registryOf({
+      codex: [advisor],
+      alpha: [alpha],
+      beta: [beta],
+    }),
+    input,
+    output: out.stream,
+  })
+  // A guard, not the exit path: the body below closes input and awaits `running` itself. This
+  // is what unblocks the console when an assertion throws before it gets there, and both calls
+  // are safe to make twice.
+  t.after(async () => {
+    input.end()
+    await running
+  })
+
+  await untilText('the pause on the advisor turn', out.text, /paused/)
+
+  input.write('>implementer-2 only you: touch nothing under src/adapters\n')
+  await untilText('the second seat to be addressable at all', out.text, /queued for implementer-2/)
+
+  // The same seat through the multi-line form, because the block opener enumerates its heads
+  // and that list was two fixed words too. A seat you can address on one line and not in a
+  // block is addressable in a way that fails exactly where the longest answers are written.
+  input.write('>implementer-2 <<EOF\nfirst line\n\nsecond line\nEOF\n')
+  await untilText('the block to be routed', out.text, /queued for implementer-2/)
+
+  // A NAME NO SEAT HAS. Refused and told what exists -- not broadcast to everyone as plain
+  // text, which is what a `>` word that is not an address falls through to, and not queued
+  // into nothing.
+  input.write('>implementor-2 this must go nowhere\n')
+  await untilText('the refusal', out.text, /no seat named implementor-2/)
+
+  // PUNCTUATION, one keystroke from a real address. The refusal used to be gated on a seat-id
+  // character class, so this was not address-SHAPED, fell past the branch entirely, and went to
+  // everyone as plain text -- the silent widening a narrowing prefix exists to prevent. The
+  // comma is part of what was typed, so it is part of what is quoted back.
+  input.write('>implementer-2, punctuation must go nowhere\n')
+  await untilText('the punctuation refusal', out.text, /no seat named implementer-2,/)
+
+  // A TYPOED BLOCK. The head was refused and then the body fell through line by line, each one
+  // an unaddressed message to everyone -- so a mistyped address on a paste leaked exactly the
+  // text it was narrowing. The block is recognised now, collected, and refused once.
+  input.write('>implemnter-2 <<NOPE\nblock body must go nowhere\nnor must this second line\nNOPE\n')
+  await untilText('the block refusal', out.text, /no seat named implemnter-2/)
+  // The count notice is asserted at the END rather than waited on HERE, and deliberately: a
+  // console that refuses the head and then leaks the body line by line still prints this
+  // refusal, so a gate on it would pass under exactly the regression the record assertions
+  // below exist to catch, and would stop the test before they ran.
+
+  input.write('/audit\n')
+  await untilText('the audit', out.text, /informed implementer-2/)
+
+  input.write('/continue\n')
+  // The delivery is waited for BEFORE stdin is closed, and the order is load-bearing. A piped
+  // console ends on `Promise.race([firstRunEnded, rl close])`, so closing input is one of the
+  // two ways this run can finish -- and it is the fast one: it tears the relay down while the
+  // queued message is still waiting for the next turn boundary, so the seat never receives it
+  // and the assertion below fails every time rather than flaking. Waited for, not slept on.
+  await untilValue(
+    'implementer-2 to actually be handed the message',
+    () => beta.received.find((r) => r.includes('src/adapters')),
+    out.text,
+  )
+  // Closed HERE rather than left to `t.after`, so nothing about finishing this test depends on
+  // a hook running: the body closes stdin and waits for the exit code it asserts on.
+  input.end()
+  assert.equal(await running, 0)
+
+  const text = out.text()
+  // The refusal NAMES the seats that exist, which is the whole difference between a refusal
+  // and a rejection: a typo is one letter from something real, and the console holds the list.
+  assert.match(text, /no seat named implementor-2 — live seats: advisor, implementer, implementer-2/, text.slice(-3000))
+
+  // THE RECORD. One recipient, and it is the seat that was named.
+  const m = routed(dir, 'touch nothing under src/adapters')
+  assert.ok(m, `the message must be routed: ${text.slice(-3000)}`)
+  assert.deepEqual([...m.to], ['implementer-2'])
+  // Every other LIVE seat, read off the run rather than assumed: the advisor and the first
+  // implementer are both up, and neither is a recipient.
+  for (const other of ['advisor', 'implementer']) {
+    assert.ok(!m.to.includes(other), `${other} is live and must not be a recipient`)
+  }
+  // And the exclusion as an operator asks for it. `/audit` lists it because the message is
+  // `restricted`, which it is only because it reached one of three participants.
+  assert.match(text, /informed implementer-2 · excluded advisor, implementer/, text.slice(-3000))
+
+  // The block, verbatim, to the same one seat.
+  const block = routed(dir, 'second line')
+  assert.ok(block, 'the block must be routed')
+  assert.equal(block.text, 'first line\n\nsecond line')
+  assert.deepEqual([...block.to], ['implementer-2'])
+
+  // DELIVERED, and to nobody else. The record says where it was addressed; this says what the
+  // child was actually handed.
+  assert.ok(beta.received.some((r) => r.includes('src/adapters')), 'implementer-2 receives it')
+  assert.ok(!alpha.received.some((r) => r.includes('src/adapters')), 'implementer does not')
+  assert.ok(!advisor.received.some((r) => r.includes('src/adapters')), 'nor does the advisor')
+
+  // EVERY refused form reached NOTHING. Not a record, not a seat -- neither the opener nor,
+  // for the block, the body it framed. The failure mode all three replace is one narrowing
+  // prefix silently widening to everyone.
+  const refused = [
+    'this must go nowhere', // the plain typo
+    'punctuation must go nowhere', // one character off a real seat
+    'block body must go nowhere', // the block's first body line
+    'nor must this second line', // and its second, which fell through separately
+  ]
+  for (const text of refused) {
+    assert.ok(
+      routedAll(dir).every((r) => !r.text.includes(text)),
+      `a refused address must not be recorded as sent to anyone: ${text}`,
+    )
+    for (const seat of [advisor, alpha, beta]) {
+      assert.ok(!seat.received.some((r) => r.includes(text)), `nor delivered: ${text}`)
+    }
+  }
+  // The block's body was named as undelivered, rather than dropped without a word: the lines
+  // were taken off stdin and there is no queue row for them, so the console saying how many is
+  // the only account the operator gets.
+  assert.match(text, /2 line\(s\) it framed were NOT delivered/, text.slice(-4000))
+  // And the refusal quotes back what was typed, punctuation included, so a one-character
+  // mistake is visible as one character rather than as an unrecognised word.
+  assert.match(text, /no seat named implementer-2, — live seats: advisor, implementer, implementer-2/, text.slice(-4000))
+})
+
+test('with no run in flight, a named seat is asked DIRECTLY, and only that seat is asked', async (t) => {
+  // The other half of #93, and the half that has no queue to inspect. `>seat <text>` takes two
+  // paths: with a run it is INJECTED and drained at the next turn boundary, and with none it
+  // goes through `askDirectly` -> `Relay.ask`, which sends a turn and waits for the reply. The
+  // second path is the reason the console stays up after a run ends -- start the server so I
+  // can try it, explain that change -- and it took the same two hardcoded words, so between
+  // runs the second seat was not merely unqueueable, it was unaskable.
+  //
+  // NO GOAL, so no run ever starts. That is the state being tested, not a shortcut to it: the
+  // seats are launched by `Relay.start` and are alive; only the loop is absent.
+  const dir = repo()
+  writeFileSync(join(dir, '.gitignore'), '.conclave/\n.claude/\n.codex/\n')
+  execFileSync('git', ['add', '.'], { cwd: dir })
+  execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'ignore agent hook files'], { cwd: dir })
+
+  const advisor = slow('advisor', 'codex', ['DONE'], 50)
+  const alpha = slow('alpha', 'alpha', ['ack'], 50)
+  const beta = slow('beta', 'beta', ['the server is up on :4000'], 50)
+  const out = collect()
+  const input = new PassThrough()
+  const running = runSession({
+    cwd: dir,
+    lead: 'codex',
+    implementer: 'alpha',
+    implementers: [
+      { agent: 'alpha', args: [] },
+      { agent: 'beta', args: [] },
+    ],
+    rounds: 6,
+    checks: [],
+    registry: registryOf({
+      codex: [advisor],
+      alpha: [alpha],
+      beta: [beta],
+    }),
+    input,
+    output: out.stream,
+  })
+  // A guard, not the exit path: the body closes input and awaits `running` itself.
+  t.after(async () => {
+    input.end()
+    await running
+  })
+
+  await untilText('the console to be waiting for a goal', out.text, /no goal given/)
+
+  input.write('>implementer-2 start the server so I can try it\n')
+
+  // OBSERVED, not slept on, and in both directions: the seat was handed the question, and the
+  // answer came back to the operator. A test that only waited for the question would pass on a
+  // console that asks and never renders the reply, which is the whole value of this path.
+  await untilValue(
+    'implementer-2 to be handed the question',
+    () => beta.received.find((r) => r.includes('start the server so I can try it')),
+    out.text,
+  )
+  await untilText('the answer to reach the operator', out.text, /the server is up on :4000/)
+
+  input.end()
+  assert.equal(await running, 0)
+
+  const text = out.text()
+  // THE RECORD. `ask` records the human's question and the seat's reply as two messages, so
+  // `/log` and `/audit` see this exactly as they see anything said to one seat and not another.
+  const q = routed(dir, 'start the server so I can try it')
+  assert.ok(q, `the question must be recorded: ${text.slice(-3000)}`)
+  assert.equal(q.from, 'human')
+  assert.deepEqual([...q.to], ['implementer-2'])
+  const a = routed(dir, 'the server is up on :4000')
+  assert.ok(a, 'and so must the answer')
+  assert.equal(a.from, 'implementer-2', 'the reply is attributed to the seat that gave it')
+
+  // ONLY that seat. Both others are live -- `Relay.start` launched them -- and neither was
+  // sent the question nor saw the answer.
+  assert.ok(!alpha.received.some((r) => r.includes('start the server')), 'implementer is not asked')
+  assert.ok(!advisor.received.some((r) => r.includes('start the server')), 'nor is the advisor')
+
+  // And no run was started by any of it. A direct question is not a goal, which is the
+  // distinction that makes this path worth having at all.
+  assert.ok(
+    routedAll(dir).every((r) => r.kind !== 'goal'),
+    'asking a seat something must not start a run',
+  )
+})

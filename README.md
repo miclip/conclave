@@ -211,6 +211,9 @@ The goal is optional. Start with none and the first thing you type becomes it.
 <text>                 to both, at human rank
 >advisor <text>        to the advisor only
 >implementer <text>    to the implementer only
+>implementer-2 <text>  any seat, by the id it answers to — `/state` names them, and tab
+                       completes them. An id no seat has is refused, naming the ones that
+                       exist, rather than going to everyone as plain text.
 @src/relay/relay.ts    a path. Tab completes both sigils.
 
 /pause  /continue [message | force]  /wait [minutes]  /rotate [reason]  /abort
@@ -449,7 +452,7 @@ not a decision — `/continue` samples the child itself at the moment you ask, a
 on anything that is not clearly idle.
 
 One line is one message, so an answer of several paragraphs needs framing. `<<TAG` opens a
-block — on its own, or after `>advisor`, `>implementer` or `>both`, and only there, so a
+block — on its own, or after `>both` or a seat id, and only there, so a
 message or a `/command` that happens to end in `<<word` still means what it always did. A
 line **equal to** `TAG` closes it; everything between is a single message, verbatim, with
 its blank lines intact:
