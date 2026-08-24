@@ -1215,6 +1215,86 @@ how to build remain yours; use FLAG: for every concern that only qualifies the r
 than invalidating it.`
 
 /**
+ * What a seat is told, on every dispatch, about the work the OTHER seats are holding (#152).
+ *
+ * Multi-seat only, and per dispatch rather than once at the briefing, because the fact it
+ * carries changes between one instruction and the next: what the seat beside you is building
+ * now is not what it was building when you were briefed. Derived immediately before the send
+ * from the seat table itself, so it cannot describe a schedule that has already moved on.
+ *
+ * Two seats built the same bypass, with incompatible signatures, and the first thing that
+ * noticed was the integration merge -- which reports a textual conflict in two files, the
+ * weakest possible signal for "one of these is a design your colleague rejected an hour ago".
+ * The losing work was coherent, typechecked and green; nothing in the run marked it as the
+ * second implementation of a solved problem.
+ *
+ * Visibility alone would NOT have prevented that, which is why the rule is here and not just
+ * the list. The repair genuinely had to touch the other seat's guard, so a seat that could see
+ * the other task would still have had to decide what to do about it -- and both seats, given
+ * the same overlap, chose to build. What changes the outcome is the instruction to STOP at the
+ * point where the design gets chosen and hand the choice back to the advisor, which is the one
+ * participant that can see both instructions.
+ *
+ * The exact instruction verbatim, never a summary: an overlap is a judgement about what
+ * another seat is going to BUILD, and a paraphrase is precisely where the detail that makes two
+ * tasks collide gets lost.
+ */
+const SEAT_COORDINATION_RULE = `Do not independently implement anything that overlaps what another seat holds, even when your
+own instruction seems to need it. Two seats that build the same thing find out at the merge,
+which reports a textual conflict and says nothing about which design was right — and the half
+that is discarded may be the correct one.
+
+If your instruction cannot be carried out without building something another seat's instruction
+covers, STOP BEFORE YOU CHOOSE A DESIGN and report the overlap to the advisor: say what you
+would have had to build and which seat's instruction it collides with. The advisor holds both
+instructions and decides who builds it; you do not resolve it yourself. Carry on with whatever
+part of your instruction does NOT overlap, and say in your report what you left.`
+
+/**
+ * The per-dispatch notice, or nothing at all when this run has one writing seat.
+ *
+ * `undefined` rather than an empty string on the single-seat path, so the caller cannot
+ * accidentally join a blank into the message: a default run's prompt and its routing log stay
+ * byte-identical to what they have always been, which is the same bar `MULTI_SEAT_BRIEFING`
+ * and `#addressBlocked` are held to.
+ *
+ * The reviewer is excluded from both the gate and the list. It is a dispatchable seat (#72) and
+ * it is in `#seatState` for that reason, but it writes nothing, has no worktree, and cannot
+ * collide with anyone -- so a run with one implementer and a reviewer is a single-seat run for
+ * this purpose and must not start paying for a notice about an overlap that cannot happen.
+ *
+ * A seat with nothing in flight is LISTED as having nothing, rather than omitted. The seat
+ * reading this cannot otherwise tell "that seat is idle" from "the notice did not mention it",
+ * and the two mean opposite things about whether work may be about to arrive there.
+ */
+function seatCoordinationNotice(seatId: string, seats: readonly SeatExecution[], queue: readonly Task[]): string | undefined {
+  // Every seat that WRITES, which is every seat that can collide with another one's tree.
+  const writing = seats.filter((s) => s.role !== 'reviewer')
+  if (writing.length < 2) return undefined
+  // The reviewer is excluded as a RECIPIENT as well as from the list. It is dispatched through
+  // this same path -- a review is a task like any other (#72) -- so a gate that only counted
+  // the writing seats would hand a reviewer in a two-implementer run a rule about not building
+  // overlapping work, which is advice for a seat that builds nothing.
+  if (!writing.some((s) => s.seat === seatId)) return undefined
+  const others = writing.filter((s) => s.seat !== seatId)
+  const held = others.map((s) => {
+    // Role named only when it says something the id does not, the same rule the join note
+    // follows: at a run of plain implementer seats it would be the same word every time.
+    const who = s.role === 'implementer' ? s.seat : `${s.seat} (${s.role})`
+    const task = s.current === undefined ? undefined : queue.find((t) => t.id === s.current)
+    return `=== ${who} ===\n${task ? task.instruction : '(nothing in flight)'}`
+  })
+  return (
+    `THIS RUN HAS ${writing.length} IMPLEMENTER SEATS WORKING AT THE SAME TIME. Each of them, including you, ` +
+    `works in its own git worktree: you cannot see their changes and they cannot see yours, and ` +
+    `nothing brings the work together until it is merged.\n\n` +
+    `The instruction each of the others is holding at this moment, verbatim:\n\n` +
+    `${held.join('\n\n')}\n\n` +
+    SEAT_COORDINATION_RULE
+  )
+}
+
+/**
  * What a REVIEWER seat is told instead of `IMPLEMENTER_BRIEFING` (#72, D9b).
  *
  * Sent only to a seat whose role is `reviewer` -- a reviewer is rank `implementer` (D5), so
@@ -5974,13 +6054,33 @@ export class Relay {
      */
     const launch = (task: Task, exec: SeatExecution): void => {
       const seat = this.#participants.get(exec.seat)!
+      // Derived HERE, from the live seat table, and not a line earlier (#152). Every seat this
+      // reply put to work has already been assigned by the time any of them is launched, so
+      // what this reads is the whole of the schedule the advisor just wrote -- a notice built
+      // during the assignment loop would tell the first seat of a two-seat reply that it was
+      // working alone, which is the exact falsehood the notice exists to remove.
+      const notice = seatCoordinationNotice(seat.id, [...this.#seatState.values()], this.#queue)
+      // Recorded as its own message, before the instruction, because it is the ORCHESTRATOR
+      // speaking and not the advisor: folding it into the instruction record would attribute
+      // prose to a participant that did not write it, and the log is the only complete account
+      // of the session there is. `to` names the seat it was delivered to, so the record answers
+      // "what was this seat told" and not merely "what was said somewhere".
+      if (notice !== undefined) {
+        this.#record({ from: 'orchestrator', fromRank: 'human', to: [seat.id], kind: 'note', text: notice })
+      }
       this.#record({ from: lead.id, fromRank: 'advisor', to: [seat.id], kind: 'instruction', text: task.instruction })
       const aside = this.#drain(seat.id)
       this.#sending(task)
       const work = (async (): Promise<Completion> => {
         const report = await this.#exchange(
           seat,
-          [aside, envelope({ from: lead.id, fromRank: 'advisor', fromRole: lead.role, kind: 'instruction', text: task.instruction })]
+          [
+            aside,
+            // Before the instruction, so the instruction is still the last thing read, and
+            // marked mechanical the way every other orchestrator-authored line is (`#tellLead`).
+            notice === undefined ? '' : `[ORCHESTRATOR — mechanical, not a participant speaking]\n\n${notice}`,
+            envelope({ from: lead.id, fromRank: 'advisor', fromRole: lead.role, kind: 'instruction', text: task.instruction }),
+          ]
             .filter(Boolean)
             .join('\n\n'),
         )
@@ -6025,6 +6125,27 @@ export class Relay {
      * something nobody asked it to.
      */
     const dispatchReady = (): CeilingBreach | undefined => {
+      /**
+       * Assigned and not yet launched, so every seat this pass puts to work is on the table
+       * before any of them is sent anything (#152).
+       *
+       * The two steps used to be one, and the seam is invisible from outside: the same tasks go
+       * to the same seats in the same order either way, because everything between here and the
+       * launches is synchronous. What changes is only what the seat table SAYS when the first
+       * seat's message is composed. A reply that names two seats assigns both here, so the
+       * coordination notice each of them receives describes the other -- where launching inside
+       * the loop had the first seat's notice built one statement before its sibling existed.
+       */
+      const ready: { task: Task; seat: SeatExecution }[] = []
+      /**
+       * The ceiling that stopped the loop, returned only if NOTHING is running or about to.
+       *
+       * `ready` counts toward that, and it has to: these tasks are assigned, their seats are
+       * `running`, and they are sent before this function returns. Asking `inflight` alone would
+       * see zero, read a simultaneity limit as "no seat may work", and end a run that is about
+       * to dispatch.
+       */
+      let breach: CeilingBreach | undefined
       for (;;) {
         // Before choosing anything, take out the work that can never run. A dependent of a
         // failed or cancelled task is not waiting -- `dependenciesMet` reads a persistent fact,
@@ -6038,14 +6159,19 @@ export class Relay {
         // of a queue that holds nothing unrunnable.
         this.#cancelUnrunnable()
         const d = nextDispatch(this.#queue, this.#taskRuntime, [...this.#seatState.values()])
-        if (!d) return undefined
+        if (!d) break
         const wouldRun = this.#breachedNow({
           concurrentSeats: concurrentSeats([...this.#seatState.values()]) + 1,
         })
-        if (wouldRun) return inflight.size > 0 ? undefined : wouldRun
+        if (wouldRun) {
+          breach = inflight.size + ready.length > 0 ? undefined : wouldRun
+          break
+        }
         this.#assign(d.task, d.seat)
-        launch(d.task, d.seat)
+        ready.push(d)
       }
+      for (const d of ready) launch(d.task, d.seat)
+      return breach
     }
 
     // The dispatcher. One iteration is one ADVISOR TURN: the advisor's standing reply is read

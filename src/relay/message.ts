@@ -29,7 +29,7 @@ export type MessageKind =
   | 'instruction' // advisor → implementer
   | 'report' // implementer → advisor: its prose for the turn
   | 'aside' // human → one participant, invisible to the others
-  | 'note' // orchestrator → log only, delivered to nobody
+  | 'note' // orchestrator; `to` names who it was delivered to, empty when it went to the log alone
 
 /**
  * Visibility is a property of PROVENANCE, not of topology.

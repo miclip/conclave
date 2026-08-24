@@ -177,6 +177,67 @@ A **clean-base rule** refuses to start a concurrent run against a dirty tree, un
 included: naming a file and then omitting it produces exactly the divergence the rule exists
 to prevent.
 
+### D6a. Isolation is not free: each seat is told at dispatch what the others hold (#152)
+
+The trees are the point of D6 and they are also a blindfold. Two seats were given interacting
+work — one holding #66, one holding "repair the integration-only failure, which exists in
+neither merged half alone" — and the repair genuinely had to touch #66's guard. Both seats
+built a bypass. Same names, incompatible signatures, three collisions in two files, and the
+first thing that noticed was the integration merge, which reports a textual conflict and says
+nothing about which design was right. The half that was discarded had already been tried and
+rejected with evidence by the other seat, in a comment the second seat never saw.
+
+**Each implementer seat is given, on every dispatch, the exact current instruction of every
+other writing seat.** Not a summary: an overlap is a judgement about what another seat is going
+to BUILD, and a paraphrase is where the detail that makes two tasks collide gets lost. A seat
+with nothing in flight is listed as having nothing, because "that seat is idle" and "the notice
+did not mention it" mean opposite things about what may be about to arrive there.
+
+**Per dispatch, not once at the briefing**, and derived from the seat table immediately before
+the send. The fact it carries changes between one instruction and the next, and a notice frozen
+at briefing time would describe a schedule that has already moved on.
+
+**Visibility alone would not have prevented this, so the notice carries a rule.** The repair
+genuinely needed to touch the other seat's work; a seat that could merely SEE the collision
+still had to decide what to do about it, and both seats, given that choice, chose to build. So
+the seat is told to STOP BEFORE CHOOSING A DESIGN and report the overlap to the advisor — the
+one participant holding both instructions — and to carry on with whatever part of its
+instruction does not overlap.
+
+**Multi-seat only, and the reviewer is not one of the seats.** A reviewer is dispatchable (D9b)
+and is in `#seatState` for that reason, but it writes nothing and has no worktree, so a run with
+one implementer and a reviewer is a single-seat run for this purpose. D1 holds: a default run's
+prompt and its routing log are byte-identical to what they have always been.
+
+**Recorded as its own message, from the orchestrator, addressed to the seat.** Folding it into
+the instruction record would attribute prose to a participant that did not write it, and the
+routing log is the only complete account of a session there is — so "what was this seat told"
+has to be answerable from it.
+
+**The complaint experiment is not contaminated by this, and the check is not a formality.**
+`spikes/experiments/04-complaint-as-signal.md` freezes two things for the duration of its second
+attempt: the ADVISOR's briefing — "the briefing must NOT be changed mid-experiment, that
+confounds this attempt against the first", because the advisor investigating rather than
+delegating is itself the threat to validity being tracked — and the rotation policy, which stays
+at `'candidate'` so that an unbacked complaint is recorded and continued rather than acted on.
+This touches neither. It adds no word to `LEAD_BRIEFING`, `MULTI_SEAT_BRIEFING` or any advisor
+prompt; it changes nothing in `assess()`, `ComplaintLedger` or the rotation arms; and it is
+conditional on a run having two or more writing seats, which the study's runs do not. The path
+under measurement — one advisor, one implementer, the unmodified briefing — is byte-identical:
+same prompt text, same routing log, same records, asserted rather than asserted about
+(`seatCoordination.test.ts`, and the standing guard in `defaultUnchanged.test.ts`). The
+experiment scores an implementer's degradation on a single-seat run; what a SECOND seat is told
+at dispatch cannot reach it, because on those runs no second seat exists and no notice is
+composed, delivered or recorded.
+
+One consequence, declared: the dispatch loop now assigns every task it can before launching any
+of them. The same tasks reach the same seats in the same order — everything in between is
+synchronous — but a reply that names two seats assigns both before either is sent, so neither
+is told it is working alone. Launching inside the assignment loop had the first seat's notice
+built one statement before its sibling existed, which is the exact falsehood this exists to
+remove. The ceiling check counts the assigned-but-unlaunched tasks, because they are running
+seats that are sent before the function returns.
+
 ## D7. Checks are per-seat and serialised across seats
 
 Per-seat checks in the seat's own tree are correct — a rotation candidate is verified against
