@@ -40,7 +40,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PassThrough, Writable } from 'node:stream'
 import test from 'node:test'
-import { VALUED_FLAGS, main } from '../../bin/conclave.ts'
+import { FLAG_SURFACE, main } from '../../bin/conclave.ts'
 import { PASS_THROUGH_FLAGS } from '../config/cliFlags.ts'
 import { effectiveLaunchArgs } from '../registry/launch.ts'
 import { AgentRegistry } from '../registry/registry.ts'
@@ -63,6 +63,21 @@ function flagsIn(block: string): Set<string> {
     ...[...block.matchAll(/flag\('([a-z-]+)'/g)].map((m) => m[1]!),
     ...[...block.matchAll(/includes\('--([a-z-]+)'\)/g)].map((m) => m[1]!),
   ])
+}
+
+/**
+ * Every flag the block reads as a SWITCH -- with `includes`, taking no value.
+ *
+ * The same scrape `flagsIn` does, kept separate because it is compared against a different
+ * half of the declaration. `--bypass` is read through `bypassRequest`/`applyBypassFlag` rather
+ * than by scanning for the token in the block, deliberately and for a reason the session block
+ * states -- so those calls are what counts as reading it, and a block that stopped calling
+ * them would fail the same way a block that stopped writing `includes('--force')` would.
+ */
+function switchesIn(block: string): Set<string> {
+  const read = new Set([...block.matchAll(/includes\('--([a-z-]+)'\)/g)].map((m) => m[1]!))
+  if (/(applyBypassFlag|bypassRequest)\(/.test(block)) read.add('bypass')
+  return read
 }
 
 /**
@@ -183,6 +198,8 @@ async function verdictOf(front: 'relay' | 'session', probe: readonly string[]): 
   assert.equal(code, 1, `${front} ${probe.join(' ')} must stop at the seat contradiction, not start a run`)
   // Refused by the flag reader: the value never reached anything downstream.
   if (text.includes('was given without a value')) return 'refused: no value'
+  // Refused by the surface: the flag is not one this command has (#172).
+  if (text.includes('is not a flag this command takes')) return 'refused: unknown flag'
   // Accepted: the seat builder is the next thing that refuses, and it can only have been
   // reached by an invocation whose flags all parsed.
   if (text.includes('--implementers')) return 'accepted'
@@ -210,7 +227,7 @@ const PROBE_VALUES: readonly { value: string; label: string; accepted: 'always' 
 ]
 
 test('both front-ends accept the same VALUES for the same flag, not merely the same flags', async () => {
-  const shared = VALUED_FLAGS.session.filter((f) => VALUED_FLAGS.relay.includes(f))
+  const shared = FLAG_SURFACE.session.valued.filter((f) => FLAG_SURFACE.relay.valued.includes(f))
   assert.ok(shared.length >= 20, 'the shared valued-flag surface must be the whole of it, not a sample')
 
   const disagreements: string[] = []
@@ -247,6 +264,73 @@ test('both front-ends accept the same VALUES for the same flag, not merely the s
       'fragment for a child CLI; every other flag treats a leading `--` as a value that went ' +
       'missing. See PASS_THROUGH_FLAGS.',
   )
+})
+
+test('neither front-end accepts a flag nobody declared, and both refuse it the same way', async () => {
+  // #172, driven through `main` on both commands. `--goal-file` is not a flag either command
+  // has: it was skipped, `/tmp/goal.txt` was skipped with it as the token after a flag, and
+  // the console opened asking for the goal it had just been handed. Nothing was printed.
+  //
+  // The near miss is asserted too, because it is drawn from the same declaration the refusal
+  // is made against -- a suggestion computed from a second list would eventually name a flag
+  // the parser refuses, and a wrong first suggestion costs more than none.
+  for (const front of ['relay', 'session'] as const) {
+    assert.equal(await verdictOf(front, ['--goal-file', '/tmp/goal.txt']), 'refused: unknown flag')
+    assert.equal(await verdictOf(front, ['-x']), 'refused: unknown flag')
+    assert.equal(await verdictOf(front, ['--round', '4']), 'refused: unknown flag')
+  }
+  // And what it says, once, on the front-end whose runs nobody is watching.
+  const [log, error] = [console.log, console.error]
+  const said: string[] = []
+  console.log = () => {}
+  console.error = (...args: unknown[]) => void said.push(args.map(String).join(' '))
+  try {
+    assert.equal(await main(['relay', 'a goal', '--round', '4']), 1)
+  } finally {
+    console.log = log
+    console.error = error
+  }
+  const text = said.join('\n')
+  assert.match(text, /--round is not a flag this command takes/, 'the bad flag is named')
+  assert.match(text, /did you mean --rounds\?/, 'and the near miss is offered')
+  assert.match(text, /--implementer-args/, 'and the flags it does take are listed')
+})
+
+test('a value that went missing is named before a flag that does not exist, on both', async () => {
+  // `--rounds --json` is both, on `session`: a value that went missing AND -- since `--json`
+  // is relay-only -- a flag this command does not have. The two front-ends must not answer
+  // differently about one argv, which they would if either refused on the surface first: the
+  // same tokens are a missing value on relay, where `--json` exists, and unknown on session.
+  for (const front of ['relay', 'session'] as const) {
+    assert.equal(await verdictOf(front, ['--rounds', '--json']), 'refused: no value')
+  }
+})
+
+test('a goal quoted after `--` is a goal on both front-ends, including exactly `--help`', async () => {
+  // The marker is the only way to say "this token is my goal, dashes and all". Exactly
+  // `--help` is the case worth pinning: the guard above the dispatch answers it for every
+  // command, and it must not answer for a token the operator marked as a positional.
+  //
+  // The seat contradiction proves the goal was TAKEN rather than merely tolerated: the seat
+  // builder is the next thing that refuses, and relay does not reach it without a goal.
+  for (const front of ['relay', 'session'] as const) {
+    const argv = [front, '--implementers', 'zzz,zzz', '--implementer', 'yyy', '--', '--help']
+    const [log, error] = [console.log, console.error]
+    const said: string[] = []
+    console.log = (...args: unknown[]) => void said.push(args.map(String).join(' '))
+    console.error = (...args: unknown[]) => void said.push(args.map(String).join(' '))
+    let code: number
+    try {
+      code = await main(argv)
+    } finally {
+      console.log = log
+      console.error = error
+    }
+    const text = said.join('\n')
+    assert.ok(!text.includes('conclave <command>'), `${front} must not read a marked goal as --help`)
+    assert.equal(code, 1, `${front} must reach the seat contradiction with "--help" as its goal`)
+    assert.match(text, /--implementers/, `${front} must have taken the marked token as its goal`)
+  }
 })
 
 /**
@@ -557,13 +641,32 @@ test('both front-ends read their argv with the one shared reader, over a declare
   const relay = commandBlock('relay', "if (command === 'session')")
   const session = commandBlock('session', "if (command === 'demo')")
 
-  for (const [name, block, list] of [
-    ['relay', relay, 'RELAY_VALUED_FLAGS'],
-    ['session', session, 'SESSION_VALUED_FLAGS'],
+  for (const [name, block, list, surface] of [
+    ['relay', relay, 'RELAY_VALUED_FLAGS', 'RELAY_SURFACE'],
+    ['session', session, 'SESSION_VALUED_FLAGS', 'SESSION_SURFACE'],
   ] as const) {
     assert.ok(
       block.includes(`const flag = flagReader(`) && block.includes(`, ${list})`),
       `${name} must build its flag reader with the shared flagReader over ${list}`,
+    )
+    // And the whole argv through the shared parser, over the whole declared surface. The
+    // reader answers what a flag was GIVEN; this answers whether the argv is one this command
+    // takes at all, which is the question #172 was not asking.
+    assert.ok(
+      block.includes(`parseArgv(tail, ${surface})`),
+      `${name} must split its argv with the shared parseArgv over ${surface}`,
+    )
+    assert.match(
+      block,
+      new RegExp(
+        `if \\(parsed\\.unknown\\.length > 0\\) \\{\\n\\s*console\\.error\\(unknownFlagMessage\\(parsed\\.unknown, '${name}', ${surface}\\)\\)`,
+      ),
+      `${name} must refuse a flag its surface does not declare, naming it`,
+    )
+    assert.match(
+      block,
+      /if \(spare\.length > 0\) \{\n\s*console\.error\(extraPositionalMessage\(spare\[0\]!, '/,
+      `${name} must refuse a bare token nothing is going to use, rather than dropping it`,
     )
     assert.doesNotMatch(
       block,
@@ -585,8 +688,8 @@ test('both front-ends read their argv with the one shared reader, over a declare
   // value for and the other does not, which is the same claim the flag-set test makes about the
   // source text -- made here against the list the parser actually uses.
   const only = [
-    ...VALUED_FLAGS.relay.filter((f) => !VALUED_FLAGS.session.includes(f)),
-    ...VALUED_FLAGS.session.filter((f) => !VALUED_FLAGS.relay.includes(f)),
+    ...FLAG_SURFACE.relay.valued.filter((f) => !FLAG_SURFACE.session.valued.includes(f)),
+    ...FLAG_SURFACE.session.valued.filter((f) => !FLAG_SURFACE.relay.valued.includes(f)),
   ]
   assert.deepEqual(
     only.filter((f) => !(f in DECLARED)),
@@ -595,22 +698,61 @@ test('both front-ends read their argv with the one shared reader, over a declare
       'same reason a flag one command has and the other lacks must be.',
   )
 
-  // And the declared surface must be the surface: a flag read but not declared is one the
-  // missing-value scan cannot see, and a flag declared but never read is a claim about nothing.
-  for (const [name, block, declaredFlags] of [
-    ['relay', relay, VALUED_FLAGS.relay],
-    ['session', session, VALUED_FLAGS.session],
+  // The switches, compared the same way. Both halves of the surface are declared since #172:
+  // a parser that knew only the valued flags could not tell `--force`, which relay takes, from
+  // `--goal-file`, which nobody wrote, so it ignored both -- and ignoring an invented flag is
+  // how `session --goal-file /tmp/goal.txt` came to open a console asking for the goal it had
+  // been handed.
+  const onlySwitch = [
+    ...FLAG_SURFACE.relay.boolean.filter((f) => !FLAG_SURFACE.session.boolean.includes(f)),
+    ...FLAG_SURFACE.session.boolean.filter((f) => !FLAG_SURFACE.relay.boolean.includes(f)),
+  ]
+  assert.deepEqual(
+    onlySwitch.filter((f) => !(f in DECLARED)),
+    [],
+    'a switch one command takes and the other does not must be declared, for the same reason ' +
+      'a valued flag must be.',
+  )
+
+  // And the declared surface must be the surface, in BOTH directions and for BOTH halves: a
+  // flag read but not declared is a flag the parser would refuse before the code reading it
+  // ever runs, and a flag declared but never read is a claim about nothing.
+  //
+  // This is the drift guard. A new `flag('x', ...)` or a new `includes('--x')` in either block
+  // fails here until `x` is on that command's declared surface -- which is the same object the
+  // parser accepts against, so the declaration cannot be a comment that fell behind the code.
+  for (const [name, block, surface] of [
+    ['relay', relay, FLAG_SURFACE.relay],
+    ['session', session, FLAG_SURFACE.session],
   ] as const) {
     const read = new Set([...block.matchAll(/flag\('([a-z-]+)'/g)].map((m) => m[1]!))
     assert.deepEqual(
-      [...read].filter((f) => !declaredFlags.includes(f)).sort(),
+      [...read].filter((f) => !surface.valued.includes(f)).sort(),
       [],
       `${name} reads a flag that is not in its declared valued-flag list`,
     )
     assert.deepEqual(
-      declaredFlags.filter((f) => !read.has(f)),
+      surface.valued.filter((f) => !read.has(f)),
       [],
       `${name} declares a valued flag it never reads`,
+    )
+
+    // A switch may be a flag the command reads a VALUE for elsewhere -- relay asks whether
+    // `--implementer` was NAMED as well as what it was given -- so the accepted set here is
+    // the whole surface, not the boolean half of it.
+    const accepted = new Set<string>([...surface.valued, ...surface.boolean])
+    const switches = switchesIn(block)
+    assert.deepEqual(
+      [...switches].filter((f) => !accepted.has(f)).sort(),
+      [],
+      `${name} reads a flag with includes() that its declared surface does not accept. The ` +
+        `surface is what the parser refuses against, so this flag is refused before the line ` +
+        `reading it can run: add it to ${name === 'relay' ? 'RELAY' : 'SESSION'}_BOOLEAN_FLAGS.`,
+    )
+    assert.deepEqual(
+      surface.boolean.filter((f) => !switches.has(f)),
+      [],
+      `${name} declares a switch it never reads, which is a flag it accepts and ignores`,
     )
   }
 })

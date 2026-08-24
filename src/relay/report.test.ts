@@ -640,7 +640,7 @@ test('under --json nothing but the report may reach stdout', () => {
   // The exception above is only safe while both halves hold: the id goes to stdout ALONE,
   // and --json takes the JSON path instead. Asserted here so the exemption cannot outlive
   // the reasoning for it.
-  const detach = block.slice(block.indexOf("if (rest.includes('--detach')) {"))
+  const detach = block.slice(block.indexOf("if (flagArgv.includes('--detach')) {"))
   const detachEnd = detach.indexOf('\n    }\n')
   const detachBlock = detach.slice(0, detachEnd)
   assert.ok(detachBlock.includes('console.log(id)'), 'the detach block must be locatable')
@@ -651,6 +651,15 @@ test('under --json nothing but the report may reach stdout', () => {
   assert.ok(
     detachBlock.includes('console.error(`  detached as pid'),
     'everything a human reads about a detached run must go to stderr',
+  )
+  // The child re-parses this argv as an ordinary `conclave relay`, which is the whole point of
+  // re-executing the binary rather than forking a worker -- so the goal has to reach it the way
+  // an operator would have to type one that begins with a dash. Without the marker, a goal the
+  // parent accepted after a `--` of its own would arrive at the child as a flag it refuses.
+  assert.match(
+    detachBlock,
+    /'--',\n\s*goal,/,
+    'the detached child must be given the goal as a positional after the end-of-options marker',
   )
 })
 

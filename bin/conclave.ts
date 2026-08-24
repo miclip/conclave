@@ -26,7 +26,15 @@ import {
   setPermissionMode,
 } from '../src/config/project.ts'
 import { formatConfigShow, formatConfigShowJson, showConfig } from '../src/config/show.ts'
-import { flagReader, missingValueMessage } from '../src/config/cliFlags.ts'
+import {
+  beforeEndOfOptions,
+  extraPositionalMessage,
+  flagReader,
+  missingValueMessage,
+  parseArgv,
+  unknownFlagMessage,
+} from '../src/config/cliFlags.ts'
+import type { FlagSurface } from '../src/config/cliFlags.ts'
 import type { CheckSpec } from '../src/rotation/record.ts'
 import type { ProjectConfig } from '../src/config/project.ts'
 import { runReport } from '../src/relay/report.ts'
@@ -302,6 +310,9 @@ Commands:
                                    a crash before the relay starts appears nowhere else.
                                    Every run is recorded either way -- detaching changes
                                    who waits for it, not what is written down.
+                                   A flag this does not recognise is refused rather than
+                                   ignored, and so is a second bare token: the goal is ONE
+                                   argument. Put -- before a goal that begins with a dash.
                                    Spawns real sessions and uses real quota.
   sessions       [--json]          List every session recorded in this project, newest
                                    first: id, state, how long since it last updated, and
@@ -357,6 +368,13 @@ Commands:
                                    line of text addressed to a seat by id, e.g. >advisor,
                                    >implementer, >implementer-2.
                                    Shows participant activity while a turn is running.
+                                   A flag this does not recognise is refused rather than
+                                   ignored, as in relay -- an invented flag used to be skipped
+                                   along with the value after it, which is how
+                                   "session --goal-file goal.txt" came to open a console
+                                   asking for the goal it had just been handed. A second bare
+                                   token is refused too: the goal is ONE argument, and -- says
+                                   the token after it is a goal however it begins.
                                    --advisor-args / --implementer-args pass extra launch
                                    arguments, e.g. "-m opencode/kimi-k2.6". Required for
                                    any agent that picks its model per invocation.
@@ -459,9 +477,12 @@ function extraArgs(raw: string): string[] {
  * a detached child adopts the id its parent printed and has nothing to say to a console), and
  * `frontEndParity.test.ts` fails on any other difference that is not declared there.
  *
- * Boolean flags are absent by design. `--json`, `--force`, `--detach`, `--dry-run` and
- * `--strict-goal` are read with `includes`, take no value, and are legitimately followed by
- * another flag -- putting one here would turn `--force --json` into a missing value.
+ * Boolean flags are absent from THESE lists by design. `--json`, `--force`, `--detach`,
+ * `--dry-run` and `--strict-goal` are read with `includes`, take no value, and are
+ * legitimately followed by another flag -- putting one here would turn `--force --json` into
+ * a missing value. They are declared beside these lists instead, in `RELAY_BOOLEAN_FLAGS` and
+ * `SESSION_BOOLEAN_FLAGS`: a switch this file did not know about was indistinguishable from
+ * an invented flag, which is why an invented one used to be ignored (#172).
  *
  * Declared rather than derived from the call sites, because the missing-value check runs over
  * the whole argv BEFORE the first read (see `flagReader`), and a check that only knew about
@@ -497,8 +518,62 @@ const RELAY_VALUED_FLAGS: readonly string[] = [
 
 const SESSION_VALUED_FLAGS: readonly string[] = RELAY_VALUED_FLAGS.filter((f) => f !== 'detached-id')
 
-/** Read by `frontEndParity.test.ts`, which compares the two surfaces as data. */
-export const VALUED_FLAGS = { relay: RELAY_VALUED_FLAGS, session: SESSION_VALUED_FLAGS } as const
+/**
+ * Every SWITCH each command takes -- the flags that are complete on their own.
+ *
+ * Declared for the reason the valued ones are, and #172 is what the gap cost. A parser that
+ * knew only which flags take values could not tell a switch it accepts from a flag nobody
+ * wrote, so it had to ignore both: `session --goal-file /tmp/goal.txt` was parsed, dropped,
+ * and started a console asking for the goal that was sitting in the file it had been handed.
+ * With both halves declared, an unrecognised flag is a refusal that names the flag.
+ *
+ * `--help` and `-h` are absent on purpose: they are answered above the dispatch, for every
+ * command, and never reach a command's own surface.
+ *
+ * The difference between the two lists is divergence, exactly as it is for the valued ones,
+ * and `frontEndParity.test.ts` fails on any difference that is not declared there.
+ */
+const RELAY_BOOLEAN_FLAGS: readonly string[] = [
+  'bypass',
+  'detach',
+  'dry-run',
+  'force',
+  'json',
+  'strict-goal',
+]
+
+const SESSION_BOOLEAN_FLAGS: readonly string[] = ['bypass', 'dry-run', 'force']
+
+/**
+ * What each command accepts, as one value.
+ *
+ * This is the runtime source of truth: the same object is what values are consumed against,
+ * what an invented flag is refused against, and what a near-miss suggestion is drawn from. A
+ * flag read by code but missing from here is refused before that code runs, which is what
+ * makes the declaration true rather than merely written down.
+ */
+const RELAY_SURFACE: FlagSurface = {
+  valued: RELAY_VALUED_FLAGS,
+  boolean: RELAY_BOOLEAN_FLAGS,
+  // `--bypass [agent]`, and only the agents that can be scoped. See `FlagSurface`.
+  optionalValues: { bypass: CONFIGURABLE_AGENTS },
+}
+
+const SESSION_SURFACE: FlagSurface = {
+  valued: SESSION_VALUED_FLAGS,
+  boolean: SESSION_BOOLEAN_FLAGS,
+  optionalValues: { bypass: CONFIGURABLE_AGENTS },
+}
+
+/**
+ * Read by `frontEndParity.test.ts`, which compares the two surfaces as data.
+ *
+ * The ONE export, rather than a valued list beside a boolean one. Every question either block
+ * asks about its argv is answered from here, so a flag read by code and missing from this
+ * object is refused before that code runs -- which is what makes the declaration true rather
+ * than merely written down, and what the parity guard checks in both directions.
+ */
+export const FLAG_SURFACE = { relay: RELAY_SURFACE, session: SESSION_SURFACE } as const
 
 /**
  * Verification commands with their declared relevance.
@@ -820,7 +895,10 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
   //
   // Exact matches only: a goal is one argv entry, so a goal MENTIONING `--help` never
   // equals it.
-  if (argv.includes('--help') || argv.includes('-h')) {
+  // Scanned up to `--`, which is where the options end and the positionals begin: a goal is
+  // one argv entry, and `conclave session -- "--help"` is an operator saying that entry is
+  // their goal. Before the marker the guard is what it was.
+  if (beforeEndOfOptions(argv).some((a) => a === '--help' || a === '-h')) {
     console.log(USAGE)
     return 0
   }
@@ -980,22 +1058,23 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
   }
 
   if (command === 'relay') {
-    const goal = sub
-    // A flag in the goal position is FLAGS, not a goal. `--help` and `-h` are already
-    // answered before dispatch; what is left here is every OTHER flag typed where the goal
-    // belongs, which is a mistake worth naming rather than starting a run over.
-    if (!goal || goal.startsWith('-')) {
-      console.error(
-        goal
-          ? `relay: "${goal}" looks like a flag, not a goal. The goal comes first:\n\n` +
-              `  conclave relay "<goal>" [--lead codex] [--implementer claude]\n`
-          : 'relay needs a goal: conclave relay "<goal>"\n',
-      )
-      return 1
-    }
+    // The whole argv is understood BEFORE any of it is used, against the surface this command
+    // declares. Three refusals come out of that one pass -- a flag whose value went missing, a
+    // flag that does not exist, and the goal -- and each names the token that has to change
+    // rather than the consequence of it.
+    const tail = argv.slice(1)
+    // Over the options only. `\u2014bypass` matches no flag and would be dropped, which is the
+    // dangerous direction; after `--` the operator has said the token is a positional and
+    // means it, so a goal may legitimately open with any dash there is.
+    if (!rejectUnicodeDashes(beforeEndOfOptions(tail))) return 1
+    const parsed = parseArgv(tail, RELAY_SURFACE)
+    // The flag tokens and their values, positionals removed. Every `includes` below reads
+    // THIS rather than the raw argv, so a goal that spells a flag -- legal only after `--`,
+    // where it was quoted deliberately -- can never be read as one.
+    const flagArgv = parsed.flags
     // The same reader the console builds, over the same rules. Both commands used to carry a
     // helper of their own and the two disagreed about what a value is (#81); see `flagReader`.
-    const flag = flagReader(rest, RELAY_VALUED_FLAGS)
+    const flag = flagReader(flagArgv, RELAY_VALUED_FLAGS)
     // Before anything is read, resolved or written, and in the same place on both front-ends.
     // A flag whose value went missing is an invocation that does not mean what was typed, and
     // relay is the command whose runs nobody is watching: reading `--json` as the round count
@@ -1004,11 +1083,39 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
       console.error(missingValueMessage(flag.missing, 'relay'))
       return 1
     }
+    // A flag nobody declared used to be skipped, taking its value with it (#172). An argv
+    // that does not mean what was typed must not start a run -- least of all this one, whose
+    // runs nobody is watching.
+    //
+    // BELOW the missing-value refusal, and both commands do it in this order. `--rounds
+    // --json` leaves `--json` unconsumed, so on `session` -- which has no `--json` -- the
+    // same argv is both a value that went missing and a flag that does not exist. Naming the
+    // missing value first is the reading that holds on BOTH front-ends, and the two saying
+    // different things about one argv is the divergence this pair of blocks exists to prevent.
+    if (parsed.unknown.length > 0) {
+      console.error(unknownFlagMessage(parsed.unknown, 'relay', RELAY_SURFACE))
+      return 1
+    }
+    // The goal is the bare token, wherever it sits. It was `argv[1]` and nothing else, which
+    // read `relay --json "<goal>"` as a run with no goal at all; now that every flag's value
+    // is consumed by the scan, a token nothing consumed is the goal and nothing else can be.
+    const [goal, ...spare] = parsed.positionals
+    if (goal === undefined) {
+      console.error('relay needs a goal: conclave relay "<goal>"\n')
+      return 1
+    }
+    // Refused rather than dropped. A second bare token is a goal that lost its quotes or a
+    // value whose flag went missing, and starting a run on the half of it that parsed is how
+    // an operator finds out an hour later that they briefed the wrong thing.
+    if (spare.length > 0) {
+      console.error(extraPositionalMessage(spare[0]!, 'relay'))
+      return 1
+    }
     const registry = overrides.registry ?? defaultRegistry()
     // Everything a human would read goes to STDERR under --json, so stdout carries the
     // report and nothing else. A consumer that had to strip log lines out of a JSON stream
     // is a consumer that will eventually strip the wrong one.
-    const asJson = rest.includes('--json')
+    const asJson = flagArgv.includes('--json')
     const say = (line: string) => (asJson ? console.error(line) : console.log(line))
     // `--advisor`, because that is the word every other surface uses: the seat id, the
     // routing log, the console's `>advisor`, and the briefing itself. `--lead` was the
@@ -1022,7 +1129,7 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
     const seatPlan = implementerSeatPlan({
       implementer: flag('implementer', 'claude'),
       implementers: flag('implementers', ''),
-      implementerNamed: rest.includes('--implementer'),
+      implementerNamed: flagArgv.includes('--implementer'),
     })
     if (seatPlan.kind === 'refused') {
       console.error(`conclave: ${seatPlan.reason}`)
@@ -1066,21 +1173,19 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
     })
     // Read once, because two things consult it: the launch preamble, which is suppressed when
     // the plan is about to say the same lines, and the short-circuit that prints the plan.
-    // Spelled as an `includes` over `rest` because that is the form `frontEndParity.test.ts`
+    // Spelled as an `includes` over `flagArgv` because that is the form `frontEndParity.test.ts`
     // scans for -- a flag read in a shape the guard cannot see is a flag that quietly leaves
     // the compared surface.
-    const isDryRun = rest.includes('--dry-run')
+    const isDryRun = flagArgv.includes('--dry-run')
     const runCeilings = effectiveCeilings({
       advisorTurns: boundOf({ maxAdvisorTurns: Number(flag('rounds', '4')) }),
       ...(ceilings ? { ceilings } : {}),
     })
 
-    if (!rejectUnicodeDashes(rest)) return 1
-
     // Before anything is spawned, registered or written. The failure being guarded is an
     // operator who did not intend to start a run at all, and every line of setup below is
     // work done on their behalf in a directory they did not mean to be in.
-    const refusals = preflightRefusals(process.cwd(), { force: rest.includes('--force') })
+    const refusals = preflightRefusals(process.cwd(), { force: flagArgv.includes('--force') })
     for (const r of refusals) console.error(`conclave: ${r.reason}\n  ${r.remedy}`)
     if (refusals.length > 0) return 1
 
@@ -1089,7 +1194,7 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
     const goalFindings = lintGoal(goal)
     if (goalFindings.length > 0) {
       for (const line of formatGoalFindings(goalFindings)) console.error(line)
-      if (rest.includes('--strict-goal')) {
+      if (flagArgv.includes('--strict-goal')) {
         console.error('conclave: refusing to start (--strict-goal)')
         return 1
       }
@@ -1109,7 +1214,7 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
      * stack trace, an adapter writing to stderr -- all of that lands here and nowhere else.
      * A detached run whose failure left no trace would reproduce the problem this is for.
      */
-    if (rest.includes('--detach') && rest.includes('--dry-run')) {
+    if (flagArgv.includes('--detach') && flagArgv.includes('--dry-run')) {
       console.error(
         'conclave: --detach and --dry-run contradict each other. A dry run resolves ' +
           'everything and starts nothing, so there is no run to hand to a background ' +
@@ -1117,14 +1222,24 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
       )
       return 1
     }
-    if (rest.includes('--detach')) {
+    if (flagArgv.includes('--detach')) {
       const id = newSessionId(runStartedAt, process.pid)
       const root = projectRootFor(process.cwd())
       const dir = sessionDir(root, id)
       mkdirSync(dir, { recursive: true })
       const logFile = join(dir, 'stdio.log')
       const fd = openSync(logFile, 'a')
-      const argvOut = ['relay', goal, ...rest.filter((a) => a !== '--detach'), '--detached-id', id]
+      // `--` before the goal, always: the child parses this argv exactly as an operator's
+      // would be parsed, and a goal beginning with a dash -- legal here because the parent
+      // accepted it after a marker of its own -- would otherwise reach the child as a flag.
+      const argvOut = [
+        'relay',
+        ...flagArgv.filter((a) => a !== '--detach'),
+        '--detached-id',
+        id,
+        '--',
+        goal,
+      ]
       const child = spawn(process.execPath, [process.argv[1]!, ...argvOut], {
         cwd: process.cwd(),
         detached: true,
@@ -1248,7 +1363,7 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
     }
 
     // Parsed early so this run sees its own flag; written later, once it is going to start.
-    const bypass = bypassRequest(rest)
+    const bypass = bypassRequest(flagArgv)
     const projectConfig = withBypass(readProjectConfig(process.cwd()), bypass)
     // Config-derived args first, then per-invocation ones, so an explicit flag wins.
     const leadArgs = [...launchArgsFor(projectConfig, lead), ...extraArgs(flag('advisor-args', '') || flag('lead-args', ''))]
@@ -1454,9 +1569,9 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
     // on a run that then refused to start -- a consequential change from an invocation that
     // reported doing nothing, which is #136's own complaint one line further down.
     //
-    // No longer conditional: the dry run returns above, so `!rest.includes('--dry-run')` would
+    // No longer conditional: the dry run returns above, so `!flagArgv.includes('--dry-run')` would
     // guard a state that cannot be reached, and a redundant guard is one nobody maintains.
-    if (!applyBypassFlag(rest, say)) return 1
+    if (!applyBypassFlag(flagArgv, say)) return 1
 
     // Recorded continuously into a gitignored directory, because a record written on exit
     // is exactly the record a crash destroys -- and a crash is one of the endings a resume
@@ -1630,37 +1745,47 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
   }
 
   if (command === 'session') {
-    // The goal is optional: without one the console comes up and waits, and the first
-    // thing typed starts the run. So a flag in the first position is not a goal named
-    // `--lead` — it is a session with no goal and some flags, which is legitimate.
-    const args = [sub, ...rest].filter((a): a is string => a !== undefined)
-    if (!rejectUnicodeDashes(args)) return 1
-    const goal = args[0] && !args[0].startsWith('--') ? args[0] : undefined
-    // A goal written AFTER a flag is not picked up -- the goal is args[0] by design, because
-    // `session` legitimately starts with no goal at all. Saying so is the fix: silently
-    // waiting at an empty prompt while the operator's sentence sits unused in argv reads as
-    // the console having ignored them.
-    if (!goal) {
-      const stray = args.find(
-        (a, i) => i > 0 && !a.startsWith('--') && (args[i - 1] ?? '').startsWith('--') === false,
-      )
-      if (stray) {
-        console.error(
-          `conclave: "${stray}" is not being used. A goal must come first: ` +
-            `conclave session "<goal>" [flags]. Starting without one; type it at the prompt.`,
-        )
-      }
-    }
+    // The same three refusals as `relay`, in the same order, out of the same one pass over
+    // the argv -- see the relay block above. What differs is the goal, and only the goal:
+    // here it is optional, because without one the console comes up and waits and the first
+    // thing typed starts the run.
+    const tail = argv.slice(1)
+    if (!rejectUnicodeDashes(beforeEndOfOptions(tail))) return 1
+    const parsed = parseArgv(tail, SESSION_SURFACE)
+    // The flag tokens and their values. Read by every `includes` below, so a goal quoted
+    // after `--` is never mistaken for the flag it spells.
+    const flagArgv = parsed.flags
     // The same reader `relay` builds, over the same rules. The console's own helper refused
     // every value beginning with `--`, including the ones that are argv for a child CLI, so
     // `--implementer-args "--model x"` was refused here and launched there (#81).
-    const flag = flagReader(args, SESSION_VALUED_FLAGS)
+    const flag = flagReader(flagArgv, SESSION_VALUED_FLAGS)
     // Refused BEFORE the bypass is applied, as the seat-plan contradiction below is and for the
     // same reason: an invocation that is not going to start a session must not leave a
     // permission mode written into the operator's project on its way out. It used to be checked
     // after, which it could not help being -- `bad` was only known once every read had happened.
     if (flag.missing !== undefined) {
       console.error(missingValueMessage(flag.missing, 'session'))
+      return 1
+    }
+    // `session --goal-file /tmp/goal.txt` is the invocation this refuses, and #172 is what it
+    // used to do: the flag matched nothing, so it was skipped, the path after it was skipped
+    // with it, and the console opened asking for the goal it had just been handed. Nothing was
+    // printed either, because the stray-token warning this replaces exempted a token that
+    // followed a flag -- and the flag it followed was one nobody had ever declared.
+    //
+    // Below the missing-value refusal, in the same order as `relay`; see the note there.
+    if (parsed.unknown.length > 0) {
+      console.error(unknownFlagMessage(parsed.unknown, 'session', SESSION_SURFACE))
+      return 1
+    }
+    // Wherever it sits, and there is at most one. A goal written after a flag used to be
+    // dropped with a warning that the console was starting anyway -- which reads, to the
+    // operator watching an empty prompt, as the console having ignored their sentence. Every
+    // flag's value is consumed by the scan, so a bare token is a goal and a SECOND bare token
+    // is something nothing is going to use: refused, rather than started around.
+    const [goal, ...spare] = parsed.positionals
+    if (spare.length > 0) {
+      console.error(extraPositionalMessage(spare[0]!, 'session'))
       return 1
     }
     const checks = parseChecks(
@@ -1675,7 +1800,7 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
     const seatPlan = implementerSeatPlan({
       implementer: flag('implementer', 'claude'),
       implementers: flag('implementers', ''),
-      implementerNamed: args.includes('--implementer'),
+      implementerNamed: flagArgv.includes('--implementer'),
     })
     const seatRequests: SeatRequest[] =
       seatPlan.kind === 'listed' ? seatPlan.seats : [{ agent: flag('implementer', 'claude'), args: [] }]
@@ -1685,7 +1810,7 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
     // The same flag `relay` has. Its absence here is what made an agent pick the front-end
     // that cannot hold a pause -- see SessionOptions.operator.
     const operator = flag('operator', '') === 'agent' ? ('agent' as const) : undefined
-    const force = args.includes('--force')
+    const force = flagArgv.includes('--force')
     // All three existed on `relay` and were unreachable here. `--record` is the starkest:
     // `SessionOptions.record` is documented as the way to inspect a rendering fault in the
     // bytes rather than from a screenshot, and no invocation could switch it on.
@@ -1741,8 +1866,8 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
      * parity guard compares the flags each block MENTIONS, and the bypass token appearing in
      * this block and not in relay's would read as a capability the console has and relay lacks.
      */
-    const dryRun = args.includes('--dry-run')
-    if (dryRun && bypassRequest(args).requested) {
+    const dryRun = flagArgv.includes('--dry-run')
+    if (dryRun && bypassRequest(flagArgv).requested) {
       console.error(
         'conclave: --dry-run and --bypass contradict each other. --bypass WRITES a permission ' +
           'mode into .conclave/config.json for this run and future ones, and a dry run must ' +
@@ -1754,7 +1879,7 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
     // The console applies and persists together: there is no in-memory overlay as in `relay`,
     // so the point of no return is here. A dry run never reaches it -- it is refused above with
     // `--bypass`, and without one there is nothing to apply.
-    if (!applyBypassFlag(args, (l) => console.log(l))) return 1
+    if (!applyBypassFlag(flagArgv, (l) => console.log(l))) return 1
     return runSession({
       cwd: process.cwd(),
       ...(operator ? { operator } : {}),

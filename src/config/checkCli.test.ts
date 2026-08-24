@@ -357,11 +357,22 @@ test('relay refuses a flag in the goal position instead of billing for it', () =
     assert.ok(!/joined as (advisor|implementer)/.test(help.stdout), 'no participant may start')
   }
 
-  // Anything else flag-shaped is a mistake, and is refused rather than interpreted.
-  for (const bad of ['--rounds', '--lead', '-x']) {
+  // Anything else flag-shaped is a mistake, and is refused rather than interpreted -- each
+  // now for its OWN reason. All three used to answer "looks like a flag, not a goal", because
+  // the goal was argv[1] and anything else standing there was a mistake by definition. Since
+  // #172 the goal is the token no flag claimed, so the refusal can name what is actually
+  // wrong: a value that went missing, a flag this command does not have, or a flag that is
+  // fine with no goal beside it. What has not changed is the property this test is for --
+  // status 1, and nothing spawned.
+  for (const [bad, expected] of [
+    ['--rounds', /--rounds was given without a value/],
+    ['--lead', /--lead was given without a value/],
+    ['-x', /-x is not a flag this command takes/],
+    ['--json', /relay needs a goal/],
+  ] as const) {
     const r = run(bad)
     assert.equal(r.status, 1, `${bad} must be refused`)
-    assert.match(r.stderr, /looks like a flag, not a goal/)
+    assert.match(r.stderr, expected)
     assert.ok(!/joined as/.test(r.stdout), `${bad} must not start a session`)
   }
 
