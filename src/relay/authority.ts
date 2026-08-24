@@ -739,6 +739,15 @@ export function describeConflict(c: AuthorityConflict): string {
     ``,
     `Continue to let the instruction through, or send a constraint first. The advisor may`,
     `be correcting a genuine mistake; it may also be undoing something it cannot see.`,
+    ``,
+    // The third option, and the only one that changes the record rather than answering one
+    // question about it. Named because #171 is a report of an operator taking it and the
+    // tool not noticing: they broadcast the message at the first pause and were asked twice
+    // more. It states the mechanism and its condition; it does not say which to choose.
+    `Sending #${c.origin.seq}'s text in full to ${c.origin.excluded.join(', ') || 'nobody'} ends the`,
+    `asymmetry itself: a seat that has been given the message is no longer reversing something`,
+    `it never saw, and #${c.origin.seq} stops raising this. The COMPLETE text, in one message —`,
+    `a partial quote or a summary reconciles nothing.`,
   )
   return lines.join('\n')
 }

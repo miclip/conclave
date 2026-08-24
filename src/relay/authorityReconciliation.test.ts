@@ -34,7 +34,13 @@
 
 import { strict as assert } from 'node:assert'
 import test from 'node:test'
-import { deliversInFull, detectConflict, originOf, reconcileDelivery } from './authority.ts'
+import {
+  deliversInFull,
+  describeConflict,
+  detectConflict,
+  originOf,
+  reconcileDelivery,
+} from './authority.ts'
 import type { RelayMessage } from './message.ts'
 
 /**
@@ -282,4 +288,19 @@ test('with no advisor named, detection behaves exactly as it did before reconcil
     undefined,
     'and an origin nobody is excluded from can support no claim, named advisor or not',
   )
+})
+
+test('the pause names the repair, in the terms that actually work (#171)', () => {
+  // The issue is a report of an operator taking the escape hatch and the tool not noticing.
+  // Now that it works, the pause has to say it exists -- and has to say the condition, or the
+  // next operator hands over the paragraph they were looking at and is asked again.
+  const origin = originOf(aside(NOTE))
+  const text = describeConflict(detectConflict(PAUSE_1, [origin], 'advisor')!)
+
+  assert.ok(text.includes(`Sending #${origin.seq}'s text in full to advisor`), 'the repair is named')
+  assert.ok(/COMPLETE text, in one message/.test(text), 'and so is what makes it count')
+  assert.ok(/partial quote or a summary reconciles nothing/.test(text), 'and what does not')
+
+  // §9 still holds: it states a mechanism and never says which option to take.
+  assert.ok(!/should (continue|abort|refuse|send|broadcast)/i.test(text))
 })
