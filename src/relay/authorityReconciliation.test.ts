@@ -169,17 +169,39 @@ test('and once reconciled, every later matching instruction goes through silentl
     undefined,
     'pause 2 must not fire',
   )
-  assert.equal(
-    detectConflict(GENUINE_REVERSAL, [origin], 'advisor'),
-    undefined,
-    'a seat that has been given the message is not reversing something it never saw',
-  )
 
   // Not because the tokens stopped matching. The origin is unchanged as evidence; it is the
   // premise about who was kept in the dark that has expired.
   assert.ok(origin.tokens.includes('DESIGN.md'), 'the token set is untouched')
   const stillHidden = originOf(aside(NOTE, 99))
   assert.ok(detectConflict(PAUSE_3, [stillHidden], 'advisor'), 'and an unreconciled twin still fires')
+})
+
+test('THE FALSIFIER: after a full delivery even a genuine reversal is silent (#171)', () => {
+  // Stated as its own test because it is a real loss of detection and must not be discovered
+  // later as a surprise. `GENUINE_REVERSAL` deletes the files the note said were preserved and
+  // drops the branch it named -- nobody would call that propagation, and before the broadcast
+  // it pauses. After the broadcast it does not.
+  //
+  // Accepted deliberately. The mechanism guards HIDDEN AUTHORITY -- an advisor undoing what it
+  // was never allowed to see -- not the judgment of an advisor that has now been shown the
+  // message. An informed advisor proposing to undo human-originated work is ordinary
+  // disagreement, and §5c says the orchestrator does not adjudicate that: the aside's author is
+  // in the room, has just quoted it to both seats, and is reading the instruction. The false
+  // negative that would matter is suppressing on an UNINFORMED advisor's overlap, which the
+  // test above this one proves still pauses.
+  const origin = originOf(aside(NOTE))
+  const before = detectConflict(GENUINE_REVERSAL, [origin], 'advisor')
+  assert.ok(before, 'it really is a reversal the detector catches')
+  assert.equal(before.verb.toLowerCase(), 'delete')
+  assert.ok(before.matched.length >= 3, 'and it really does name what the note preserved')
+
+  reconcileDelivery(origin, { seq: 15, text: BROADCAST, to: ['advisor', 'implementer'] })
+  assert.equal(
+    detectConflict(GENUINE_REVERSAL, [origin], 'advisor'),
+    undefined,
+    'and it is given up, knowingly, once the advisor holds the message',
+  )
 })
 
 test('a partial quote is not a delivery: the seat holds half the message (#171)', () => {
@@ -197,6 +219,57 @@ test('a partial quote is not a delivery: the seat holds half the message (#171)'
   assert.deepEqual(origin.excluded, ['advisor'], 'still withheld')
   assert.deepEqual(origin.reconciled, [])
   assert.ok(detectConflict(PAUSE_3, [origin], 'advisor'), 'so the pause is still correct to fire')
+})
+
+test('an OPENING quote is not a delivery: the message is contained or it is not (#171)', () => {
+  // The other half of the partial case, and the one a prefix rule would let through. The
+  // operator quotes the message from the top and stops where the interesting part was --
+  // which is what re-reading a message out loud actually looks like. Containment is of the
+  // WHOLE text, so where the excerpt was cut from makes no difference.
+  const origin = originOf(aside(NOTE))
+  const opening = NOTE.replace(/\n/g, ' ').slice(0, 60)
+  assert.ok(NOTE.replace(/\n/g, ' ').startsWith(opening), 'it really is the start of the message')
+
+  const partial = `Both of you, what I sent earlier began: ${opening}... and so on.`
+  assert.deepEqual(reconcileDelivery(origin, { seq: 15, text: partial, to: ['advisor'] }), [])
+  assert.deepEqual(origin.excluded, ['advisor'])
+  assert.ok(detectConflict(PAUSE_1, [origin], 'advisor'), 'so the pause is still correct to fire')
+})
+
+test('a recipient that was never excluded is not added to informed (#171)', () => {
+  // `informed` and `excluded` partition the participants as they stood when the message was
+  // sent, and this repairs the partition rather than growing it. A delivery reaching somebody
+  // who was not part of that audience -- a seat that joined later, an id from another run --
+  // says nothing about the asymmetry the origin records, and writing it into `informed` would
+  // make the record claim an audience the message never had.
+  const origin = originOf(aside(NOTE))
+  const moved = reconcileDelivery(origin, {
+    seq: 15,
+    text: BROADCAST,
+    to: ['advisor', 'implementer', 'seat-joined-later'],
+  })
+  assert.deepEqual(moved, ['advisor'], 'only the excluded seat moves')
+  assert.deepEqual(origin.informed, ['implementer', 'advisor'], 'and nobody else is written in')
+  assert.deepEqual(origin.reconciled, [{ participant: 'advisor', seq: 15 }])
+})
+
+test('handing the message to the ADVISOR alone settles it, though a seat is still excluded (#171)', () => {
+  // The complement of the per-seat test above, and the case that says why the check reads the
+  // advisor's id rather than counting `excluded`. The operator gives the withheld text to the
+  // advisor only -- the implementer already has it, so there is nobody else to tell -- and a
+  // third seat is left out. `excluded` is not empty, and the advisor is not in it.
+  const origin = originOf({ ...aside(NOTE), excluded: ['advisor', 'impl-b'] })
+  assert.deepEqual(reconcileDelivery(origin, { seq: 15, text: BROADCAST, to: ['advisor'] }), ['advisor'])
+  assert.deepEqual(origin.excluded, ['impl-b'], 'somebody is still in the dark')
+
+  assert.equal(
+    detectConflict(PAUSE_1, [origin], 'advisor'),
+    undefined,
+    'but not the advisor, and the advisor is whose instruction this is',
+  )
+  // Counting `excluded` instead would pause here, on an asymmetry that has nothing to do with
+  // the seat proposing the reversal.
+  assert.ok(origin.excluded.length > 0, 'which is exactly what a count would read as still withheld')
 })
 
 test('a paraphrase is not a delivery either, however faithful (#171)', () => {

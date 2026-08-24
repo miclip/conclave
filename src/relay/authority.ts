@@ -55,6 +55,48 @@
  * aside, inside a later human message that reached the excluded seat. Partial quotes and
  * paraphrases do not qualify, because a false reconciliation is a silent false negative --
  * and only `/continue` is offered otherwise, which answers one pause and changes no record.
+ *
+ * THE FALSIFIER RECONCILIATION ACCEPTS, stated rather than discovered. After a full delivery
+ * the origin goes silent for every later instruction, INCLUDING one that genuinely reverses
+ * the work. That is real detection given up, and it is the right trade: this mechanism guards
+ * HIDDEN AUTHORITY -- an advisor undoing what it was never allowed to see -- not the judgment
+ * of an advisor that has now been shown the message. An informed advisor proposing to undo
+ * human-originated work is ordinary disagreement, and §5c is explicit that the orchestrator
+ * does not adjudicate that: the aside's author is in the room, has just quoted it to both
+ * seats, and is reading the instruction it is about to allow. The false negative that would
+ * matter is suppressing on an UNINFORMED advisor's overlap, and nothing here does that.
+ * Pinned as its own test, not left as a remark, in `authorityReconciliation.test.ts`.
+ *
+ * TWO REPAIRS #171 SUGGESTED AND THIS DOES NOT MAKE.
+ *
+ *   path demotion. The issue's third pause matched `DESIGN.md` alone, a file that project's
+ *     commit policy requires touching whenever an invariant changes, and proposes demoting a
+ *     path that appears in nearly every instruction. It is refused because the signal it
+ *     would read -- frequency -- is not evidence about the aside. A path can be common AND be
+ *     the thing the human asked for; `DESIGN.md` is common in that repository precisely
+ *     because it is load-bearing, and a rule that trusts a token less the more the project
+ *     depends on it is backwards. It also fails silently and cumulatively: nothing tells the
+ *     operator a token was demoted, so a genuine reversal of a frequently-touched file
+ *     becomes a pause that never happens and never explains itself. The delivery rule solves
+ *     the reported case at the level the operator can see and act on -- and the third pause
+ *     had already been repaired by hand before it fired.
+ *
+ *   broader verb polarity. The issue's second pause matched `restore` on the restore half of
+ *     a plan approved at the first, and proposes suppressing on verb direction more widely.
+ *     `actionDirection` already exists and is used, narrowly and only as one half of #157's
+ *     propagation rule, and widening it means deciding direction from the ADVISOR's text
+ *     alone. That is exactly what #157's `mixed` case shows cannot be done: "keep these three
+ *     fields, and do not emit `raw_token`" pushes both ways, and an advisor deleting the kept
+ *     fields reads as aligned. Alignment is only safe when the HUMAN's own text is
+ *     unambiguous, which is where it is read from today.
+ *
+ * #157 IS UNTOUCHED BY ALL OF THIS. `isPropagation` is not called differently, not passed
+ * anything new, and not reordered relative to the match: containment floors, the requirement
+ * that the human's own message be unambiguously removal-shaped, and the artifact veto all run
+ * exactly as they did. The delivery rule is a separate `continue` earlier in the same loop,
+ * asking a question about the ADVISOR rather than about the texts, and the two cannot mask
+ * each other -- an origin still withheld reaches `isPropagation` unchanged, and a reconciled
+ * one never gets there because there is no longer a claim for either rule to weigh.
  */
 
 import { execFileSync } from 'node:child_process'
