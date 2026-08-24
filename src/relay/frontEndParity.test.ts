@@ -348,6 +348,45 @@ test('an unknown flag beats --dry-run on both front-ends: no plan, and the flag 
   }
 })
 
+test('a second bare token stops both front-ends, rather than being dropped', async () => {
+  // The mutation audit is why this exists as a BEHAVIOUR rather than as a shape in the source:
+  // deleting either front-end's guard left every behavioural test green, and only the
+  // source-text assertion above noticed. A guard nothing exercises is a guard that will be
+  // deleted by someone tidying, which is how the console came to have a warning that let the
+  // run start anyway.
+  //
+  // `--rounds 4 "a goal" "and its lost quotes"` is the shape that bites: two bare tokens, the
+  // second of them the half of a sentence the shell split off. Starting on the first half is
+  // how an operator finds out an hour later that they briefed the wrong thing.
+  //
+  // Every probe carries the seat-plan contradiction the tests above use, and here it earns its
+  // place twice over. It is the backstop that makes a MUTANT fail rather than hang: with the
+  // guard deleted, `session` accepts the first token as its goal and opens a console that waits
+  // on stdin forever, which is a test that never finishes instead of a test that fails. With
+  // the contradiction behind it the mutant refuses at the seat builder in milliseconds, on the
+  // wrong message, which is exactly the failure this is supposed to produce. The guard fires
+  // first, so an unmutated run never reaches it.
+  const contradiction = ['--implementers', 'zzz,zzz', '--implementer', 'yyy']
+  for (const front of ['relay', 'session'] as const) {
+    const argv = [front, '--rounds', '4', 'a goal', 'and its lost quotes', ...contradiction]
+    const { code, text } = await saidBy(argv)
+    assert.equal(code, 1, `${front} must refuse rather than start on the half that parsed`)
+    assert.match(text, /"and its lost quotes" is not being used/, `${front} names the stray token`)
+    assert.match(text, /The goal is one argument/, `${front} says what to do about it`)
+    assert.ok(!/dry run/.test(text), `${front} must not describe a run it is refusing`)
+    assert.ok(!/joined as/.test(text), `${front} must not start anything`)
+    assert.ok(
+      !/name different agents/.test(text),
+      `${front} must refuse the stray token BEFORE the seat plan, or this proves nothing`,
+    )
+  }
+  // And a stray token after the end-of-options marker is the same refusal, not a second goal:
+  // everything past `--` is a positional, and only the first of them is the goal.
+  const { code, text } = await saidBy(['relay', ...contradiction, '--', 'a goal', '--json'])
+  assert.equal(code, 1)
+  assert.match(text, /"--json" is not being used/, 'after the marker a flag is a bare token too')
+})
+
 test('a value that went missing is named before a flag that does not exist, on both', async () => {
   // `--rounds --json` is both, on `session`: a value that went missing AND -- since `--json`
   // is relay-only -- a flag this command does not have. The two front-ends must not answer
@@ -381,7 +420,19 @@ test('a goal quoted after `--` is a goal on both front-ends, including exactly `
     const text = said.join('\n')
     assert.ok(!text.includes('conclave <command>'), `${front} must not read a marked goal as --help`)
     assert.equal(code, 1, `${front} must reach the seat contradiction with "--help" as its goal`)
-    assert.match(text, /--implementers/, `${front} must have taken the marked token as its goal`)
+    // The seat refusal, in its own words, and NOT merely a mention of `--implementers`: an
+    // unknown-flag refusal lists every flag the command takes, `--implementers` among them, so
+    // a marker that stopped working would have satisfied a looser match while `--` and `--help`
+    // were both being refused as flags nobody declared. It did, and this is what caught it.
+    assert.match(
+      text,
+      /name different agents for the same seat/,
+      `${front} must have taken the marked token as its goal and reached the seat builder`,
+    )
+    assert.ok(
+      !/is not a flag this command takes/.test(text),
+      `${front} must not read anything after the marker as a flag`,
+    )
   }
 })
 
