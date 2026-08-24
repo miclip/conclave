@@ -1865,12 +1865,19 @@ test('framing changes nothing about the lines that were already legal', async ()
     goal: 'Keep the work moving.',
     lead: 'codex',
     implementer: 'claude',
-    rounds: 6,
+    // ROUNDS AND REPLIES SIZED TO OUTLIVE THE TYPING, which is not decoration. The run's pace
+    // is wall-clock -- `slow()` delays a fake turn by a timer -- while the input sequence below
+    // is gated on console output, which is CPU-bound. Under `--test-concurrency=4` the console
+    // slows and the timers do not, so a three-turn run reached `DONE` before the last lines were
+    // submitted; the session tore down, they were never processed, and the wait for their output
+    // timed out. Reproduced 1 in 3 concurrent runs of this file. The seats now hold far more
+    // replies than the run can use, so the run ends where this test says it does: at `input.end()`.
+    rounds: 25,
     checks: [],
     operator: 'agent',
     registry: registryOf({
-      codex: [slow('advisor', 'codex', ['Do it.', 'More.', 'DONE'], 250)],
-      claude: [slow('impl', 'claude', ['ack', 'Did it.', 'Again.'], 250)],
+      codex: [slow('advisor', 'codex', [...Array(24).fill('Keep going.'), 'DONE'], 250)],
+      claude: [slow('impl', 'claude', [...Array(24).fill('Did it.'), 'Done here.'], 250)],
     }),
     input,
     output: out.stream,
@@ -4705,7 +4712,11 @@ test('any live seat is addressable by its own id, and a name no seat has is refu
   const text = out.text()
   // The refusal NAMES the seats that exist, which is the whole difference between a refusal
   // and a rejection: a typo is one letter from something real, and the console holds the list.
-  assert.match(text, /no seat named implementor-2 — live seats: advisor, implementer, implementer-2/, text.slice(-3000))
+  // ANCHORED to end-of-line, and that is the point of it rather than tidiness. An unanchored
+  // match is satisfied by a refusal that goes on to name seats which do not exist, so it holds
+  // the console to naming AT LEAST the live seats -- while the refusal's whole job is to name
+  // exactly them. Caught by the operator's mutation: a hardcoded superset passed unanchored.
+  assert.match(text, /no seat named implementor-2 — live seats: advisor, implementer, implementer-2$/m, text.slice(-3000))
 
   // THE RECORD. One recipient, and it is the seat that was named.
   const m = routed(dir, 'touch nothing under src/adapters')
@@ -4756,7 +4767,7 @@ test('any live seat is addressable by its own id, and a name no seat has is refu
   assert.match(text, /2 line\(s\) it framed were NOT delivered/, text.slice(-4000))
   // And the refusal quotes back what was typed, punctuation included, so a one-character
   // mistake is visible as one character rather than as an unrecognised word.
-  assert.match(text, /no seat named implementer-2, — live seats: advisor, implementer, implementer-2/, text.slice(-4000))
+  assert.match(text, /no seat named implementer-2, — live seats: advisor, implementer, implementer-2$/m, text.slice(-4000))
 })
 
 test('with no run in flight, a named seat is asked DIRECTLY, and only that seat is asked', async (t) => {
@@ -4842,4 +4853,60 @@ test('with no run in flight, a named seat is asked DIRECTLY, and only that seat 
     routedAll(dir).every((r) => r.kind !== 'goal'),
     'asking a seat something must not start a run',
   )
+})
+
+test('a well-formed id naming no seat in THIS run is refused, and the refusal names exactly the live ones', async () => {
+  // The case a drifted seat list gets wrong, and the one an operator hits first: a DEFAULT
+  // run, one implementer, and `>implementer-2` typed at it. The id is well-formed -- it is
+  // what a second seat would be called, and the operator has seen it in the help -- but no
+  // such seat is running, so it must be refused naming the two that are.
+  //
+  // Every other refusal test uses a two-implementer run where the refused ids are typos, and a
+  // typo is absent from any list, live or stale. So none of them can tell `relay.participants`
+  // apart from a hardcoded list that has drifted -- which is exactly the second-list failure
+  // the design was picked to prevent, and it survived until this test. Found by the operator's
+  // independent mutation: replacing `addressable()` with a fixed superset left the suite green.
+  const dir = repo()
+  const impl = slow('impl', 'claude', ['ack', 'Did it.', 'And again.'])
+  const advisor = slow('advisor', 'codex', ['Do it.', 'More.', 'DONE'])
+  const out = collect()
+  const code = await runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    // ONE implementer. No `implementers` key, so this is the run the console has always been.
+    implementer: 'claude',
+    rounds: 4,
+    checks: [],
+    registry: registryOf({ codex: [advisor], claude: [impl] }),
+    input: script(['>implementer-2 this seat is not in this run', '/audit'], 300),
+    output: out.stream,
+  })
+  assert.equal(code, 0)
+  const text = out.text()
+
+  // EXACTLY the live seats, anchored to end-of-line. A refusal that named a seat which is not
+  // running would be a worse answer than the silence it replaced: it tells the operator to
+  // retype an address that cannot work. The anchor is what holds it to that -- unanchored,
+  // `advisor, implementer` matches a line that continues `, implementer-2, implementer-3`.
+  assert.match(
+    text,
+    /no seat named implementer-2 — live seats: advisor, implementer$/m,
+    `the refusal must enumerate exactly the running seats: ${text.slice(-3000)}`,
+  )
+
+  // NOT RECORDED. `#resolve` would have thrown on an id that names no participant, and the
+  // throw would surface as a console error from inside the run loop -- so the difference
+  // between refusing and not is also the difference between an answer and a stack trace.
+  assert.ok(
+    routedAll(dir).every((r) => !r.text.includes('this seat is not in this run')),
+    'a refused address must not be recorded as sent to anyone',
+  )
+  // NOT DELIVERED, to either seat that is actually up.
+  for (const seat of [advisor, impl]) {
+    assert.ok(!seat.received.some((r) => r.includes('this seat is not in this run')), 'nor delivered')
+  }
+  // And nothing was withheld from anyone, because nothing was sent: `/audit` is the surface
+  // that would show a restricted message, and there is none to show.
+  assert.match(text, /no restricted messages/)
 })
