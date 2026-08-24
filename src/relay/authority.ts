@@ -43,6 +43,18 @@
  *     attributed, even if that participant did cause it.
  *   - compaction rewrites the transcript the evidence is read from. Attribution is
  *     cumulative and runs immediately after each turn, so the exposure is one turn wide.
+ *
+ * WHEN AN ORIGIN STOPS COUNTING (#171). The asymmetry is a state, not an event. An operator
+ * who answers a pause by broadcasting the withheld message's own text to the seat it was
+ * withheld from has ended it, and from that moment the pause's own sentence -- "a message it
+ * never saw" -- is false. Until `reconcileDelivery` existed the record could not say so, and
+ * one aside went on citing an exclusion that had ended: three pauses, one origin, the last of
+ * them matching on a single filename the project's own commit policy touches every time.
+ *
+ * Reconciliation is deliberately narrow. It needs the origin's COMPLETE text, whitespace
+ * aside, inside a later human message that reached the excluded seat. Partial quotes and
+ * paraphrases do not qualify, because a false reconciliation is a silent false negative --
+ * and only `/continue` is offered otherwise, which answers one pause and changes no record.
  */
 
 import { execFileSync } from 'node:child_process'
@@ -182,6 +194,24 @@ export interface RestrictedOrigin {
    * supported. That was invisible before this field existed.
    */
   artifactSupport: Record<string, AttributionSupport>
+  /**
+   * Participants the message was withheld from and has since been GIVEN, in full (#171).
+   *
+   * A withheld message is not withheld forever. The operator who resolves a conflict by
+   * broadcasting the aside's own text to the seat that never saw it has repaired the
+   * asymmetry the pause exists to report -- and until this field existed the detector could
+   * not tell, so the same origin went on citing an exclusion that had already ended. Three
+   * pauses in one live run, all naming the same message, the third matching on a single
+   * common filename (#171).
+   *
+   * A LEDGER rather than a boolean, and it does not replace `informed`/`excluded`: those
+   * two say who holds the message NOW, which is the question the detector asks, and this
+   * says which later message put them there, which is the question a human reading the
+   * record afterwards asks. Present and empty rather than absent, for the reason the report
+   * gives about `flags`: a field that disappears when it has nothing to say makes a reader
+   * distinguish "nothing was reconciled" from "this build does not reconcile".
+   */
+  reconciled: { participant: string; seq: number }[]
 }
 
 export interface AuthorityConflict {
@@ -406,6 +436,95 @@ function isPropagation(
 }
 
 /**
+ * Whitespace-insensitive, and nothing else (#171).
+ *
+ * The operator who repairs an asymmetry pastes the message back, and a paste is reflowed:
+ * wrapped at a different width, indented into a quote, joined onto a sentence. Comparing
+ * raw text would refuse every one of those for a reason that has nothing to do with whether
+ * the seat now holds the message.
+ *
+ * It stops there. Markdown quote markers are NOT stripped, punctuation is NOT folded, case
+ * is NOT folded. Every relaxation here is a way to mistake a paraphrase for the message, and
+ * a false reconciliation silently disarms the detector -- the direction this module says it
+ * must not fail in. Refusing to notice a delivery only leaves the pause firing, which is the
+ * status quo and is visible.
+ */
+function normaliseDelivery(text: string): string {
+  return text.replace(/\s+/g, ' ').trim()
+}
+
+/**
+ * Does this later text contain the origin's message WHOLE? (#171)
+ *
+ * Containment, not equality, because a delivery is rarely bare: "for the record, here is
+ * what I sent the implementer at #5: <the whole thing>. You both have it now" is the shape an
+ * operator actually types, and demanding an exact match would refuse it.
+ *
+ * Containment of the COMPLETE text, because anything less is not the message. A partial
+ * quote hands over the half the operator happened to re-read; a paraphrase hands over the
+ * operator's summary of it. Neither puts the excluded seat where an informed one stands, and
+ * the whole point of reconciliation is that the seat can now be held to what the human
+ * actually said.
+ */
+export function deliversInFull(origin: RestrictedOrigin, text: string): boolean {
+  const message = normaliseDelivery(origin.text)
+  // An empty origin is contained in everything. Nothing was withheld, so nothing is delivered.
+  if (message.length === 0) return false
+  return normaliseDelivery(text).includes(message)
+}
+
+/**
+ * Move the seats this delivery reached out of `excluded` and into `informed` (#171).
+ *
+ * The origin RECORD is what the detector reads, so the record is what has to change. The
+ * routing log is deliberately left alone: it says what happened at that seq, and seq 5 was
+ * withheld from the advisor whatever seq 20 did about it. `audit()` and `asymmetryAt()` are
+ * defined over the log and go on answering the historical question.
+ *
+ * Returns the participants whose membership actually moved, so a caller can say who -- an
+ * empty return means this message delivered nothing and nothing was touched.
+ */
+export function reconcileDelivery(
+  origin: RestrictedOrigin,
+  delivery: { seq: number; text: string; to: readonly string[] },
+): string[] {
+  // A message cannot deliver something sent after it, and an origin cannot deliver itself.
+  if (delivery.seq <= origin.seq) return []
+  if (!deliversInFull(origin, delivery.text)) return []
+  const moved: string[] = []
+  for (const id of delivery.to) {
+    const at = origin.excluded.indexOf(id)
+    if (at === -1) continue
+    origin.excluded.splice(at, 1)
+    if (!origin.informed.includes(id)) origin.informed.push(id)
+    origin.reconciled.push({ participant: id, seq: delivery.seq })
+    moved.push(id)
+  }
+  return moved
+}
+
+/**
+ * Can this origin still support the claim the pause makes? (#171)
+ *
+ * The pause's own sentence is "an advisor instruction would reverse work that came from a
+ * message it never saw". Once the advisor has been handed that message in full, the sentence
+ * is false, and a pause that asserts it is asking the human to adjudicate a premise the human
+ * personally repaired. That is what #171 reports: three pauses, one origin, the second and
+ * third raised after the operator had broadcast the message to both seats.
+ *
+ * Read off the ADVISOR specifically rather than off `excluded` being empty. At N>1 an origin
+ * can be reconciled for one implementer seat and still withheld from the advisor, and the
+ * detector's question is only ever about the advisor -- it is the advisor's instruction.
+ *
+ * With no advisor named the rule falls back to "somebody is still excluded", which is what
+ * every origin built by `originOf` from a restricted message satisfies. Callers that cannot
+ * name the advisor therefore behave exactly as they did before this existed.
+ */
+function stillWithheld(origin: RestrictedOrigin, advisor: string | undefined): boolean {
+  return advisor === undefined ? origin.excluded.length > 0 : origin.excluded.includes(advisor)
+}
+
+/**
  * Would this advisor instruction reverse something a restricted message caused?
  *
  * Requires BOTH a reversal verb and a reference to something traceable to the aside.
@@ -415,12 +534,24 @@ function isPropagation(
 export function detectConflict(
   instruction: string,
   origins: RestrictedOrigin[],
+  /**
+   * The seat whose instruction this is, when the caller knows it. See `stillWithheld`.
+   *
+   * Optional because the record-level callers -- and every test that builds an origin by hand
+   * -- have no participant table to read it from, and because a detector that silently stops
+   * firing when a caller forgets an argument is worse than one that keeps its old behaviour.
+   */
+  advisor?: string,
 ): AuthorityConflict | undefined {
   const verbMatch = REVERSAL.exec(instruction)
   if (!verbMatch) return undefined
   const haystack = instruction.toLowerCase()
 
   for (const origin of origins) {
+    // Delivered in full since, so the asymmetry this origin stands for has ended. `continue`
+    // rather than `return`, for the same reason propagation uses one: a DIFFERENT origin,
+    // still withheld, may be genuinely opposed by this same instruction.
+    if (!stillWithheld(origin, advisor)) continue
     const candidates = [...origin.tokens, ...origin.artifacts]
     const matched = candidates.filter((c) => {
       const b = base(c).toLowerCase()
@@ -529,6 +660,7 @@ export function originOf(m: RelayMessage): RestrictedOrigin {
     artifacts: [],
     attributions: [],
     artifactSupport: {},
+    reconciled: [],
   }
 }
 
@@ -574,6 +706,18 @@ export function describeConflict(c: AuthorityConflict): string {
     `    ${c.origin.text.trim().split('\n')[0]}`,
     `  withheld from: ${c.origin.excluded.join(', ') || 'nobody'}`,
   ]
+  if (c.origin.reconciled.length > 0) {
+    // Only reachable at N>1: the pause cannot fire once the ADVISOR has been given the
+    // message, so anything listed here is another seat. It is printed because the human is
+    // being asked to adjudicate an asymmetry and has already closed part of it -- a line
+    // saying which part is the difference between "you were never told" and "you were told,
+    // and one of the three seats now knows".
+    lines.push(
+      `  since delivered in full to: ${c.origin.reconciled
+        .map((r) => `${r.participant} (#${r.seq})`)
+        .join(', ')}`,
+    )
+  }
   if (c.origin.artifacts.length > 0) {
     // The support level travels with the path. A reader deciding whether to trust an
     // attribution needs to know whether a tool named the file or a substring matched.

@@ -258,6 +258,18 @@ export interface RunReport {
      * claim this made before the fields existed. Nothing is upgraded by them.
      */
     artifacts: { path: string; support: string; seat: string | null; confidence: string }[]
+    /**
+     * Seats the message was withheld from and has since been GIVEN in full (#171).
+     *
+     * `informed` and `excluded` above are current membership: who holds the message at the
+     * end of the run. This says which later message moved someone between them, which is the
+     * only way a reader can tell an aside that was never withheld from the advisor from one
+     * that was withheld and then handed over -- and the second is what stops an
+     * `authority_conflict` re-firing for the rest of the session.
+     *
+     * Present and empty on every run that reconciled nothing, per this file's second rule.
+     */
+    reconciled: { participant: string; seq: number }[]
   }[]
 }
 
@@ -398,6 +410,9 @@ export async function runReport(relay: Relay, input: ReportInput): Promise<RunRe
         seat: a.seat,
         confidence: a.confidence,
       })),
+      // Copied, not aliased: the relay goes on mutating this list for the rest of the run,
+      // and a report is a snapshot of what was true when it was taken.
+      reconciled: o.reconciled.map((r) => ({ participant: r.participant, seq: r.seq })),
     })),
     // The force ledger. Added last so it does not shift the line numbers cited for the fields
     // above. The handle already returns a copy.

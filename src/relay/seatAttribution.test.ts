@@ -354,6 +354,7 @@ test('the same relative path in two trees is two attributions, not one', () => {
     artifacts: [],
     attributions: [],
     artifactSupport: {},
+    reconciled: [],
   }
   recordAttribution(origin, { path: 'notes.md', support: 'named_path', seat: 'seat-alpha' })
   recordAttribution(origin, { path: 'notes.md', support: 'text_match', seat: 'seat-beta' })

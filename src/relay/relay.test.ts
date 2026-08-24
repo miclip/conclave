@@ -719,6 +719,55 @@ test('a restricted aside reaches only its recipient, once, and is auditable', as
   assert.ok(entry.text.includes('Postgres'), 'the audit records what was withheld, not just that something was')
 })
 
+test('broadcasting an aside in full reconciles its origin record, and says so (#171)', async () => {
+  // The wiring, not the rule -- `authorityReconciliation.test.ts` is where the containment
+  // and detection rules are pinned. What this proves is that the operator's actual route,
+  // typing at a pause, reaches the record: `handle.constrain` is `say`, `say` records, and
+  // `#record` is where a human message is checked against the origins already standing.
+  const { relay } = await twoParty(['DONE'], [])
+  const withheld = 'Keep `src/legacy/shim.ts` exactly as it is — I put that back on purpose.'
+  const origin = relay.say(withheld, { only: 'implementer' }, 'aside')
+  assert.equal(origin.visibility, 'restricted')
+  assert.deepEqual(relay.restrictedOrigins[0]!.excluded, ['advisor'])
+
+  // The operator repairs the asymmetry the way #171 describes: the whole message, to both.
+  const delivery = relay.say(`For the record, both of you: ${withheld} That is all of it.`, 'all')
+
+  const record = relay.restrictedOrigins[0]!
+  assert.deepEqual(record.excluded, [], 'the advisor is no longer in the dark')
+  assert.deepEqual(record.informed, ['implementer', 'advisor'])
+  assert.deepEqual(record.reconciled, [{ participant: 'advisor', seq: delivery.seq }])
+
+  // And the run says it happened. A pause that silently stops firing is indistinguishable
+  // from a detector that broke, which is the reading this note exists to prevent.
+  const note = relay.log.find((m) => m.kind === 'note' && m.text.includes(`#${origin.seq}`))
+  assert.ok(note, 'the reconciliation is recorded')
+  assert.equal(note.visibility, 'internal')
+  assert.ok(note.text.includes('advisor'), 'and names the seat that was given it')
+
+  // The LOG is untouched: what happened at that seq is that it was withheld, and no later
+  // message changes that. `audit()` and `asymmetryAt()` still answer the historical question.
+  assert.deepEqual(relay.audit()[0]!.excluded, ['advisor'])
+  assert.deepEqual(relay.asymmetryAt(delivery.seq).excluded, ['advisor'])
+  await relay.stop()
+})
+
+test('a partial re-quote leaves the origin record exactly as it was (#171)', async () => {
+  const { relay } = await twoParty(['DONE'], [])
+  relay.say('Keep `src/legacy/shim.ts` exactly as it is — I put that back on purpose.', { only: 'implementer' }, 'aside')
+  relay.say('Both of you: I did say something about `src/legacy/shim.ts` earlier.', 'all')
+
+  const record = relay.restrictedOrigins[0]!
+  assert.deepEqual(record.excluded, ['advisor'], 'a mention is not a delivery')
+  assert.deepEqual(record.reconciled, [])
+  assert.equal(
+    relay.log.filter((m) => m.kind === 'note' && m.text.includes('reproduced restricted message')).length,
+    0,
+    'and nothing was announced',
+  )
+  await relay.stop()
+})
+
 test('with nothing withheld, a disagreement cannot be blamed on us', async () => {
   // The other half of the same property: the audit must not manufacture an explanation
   // for a disagreement that was genuinely about the work.
