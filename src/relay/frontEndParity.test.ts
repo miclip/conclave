@@ -296,6 +296,58 @@ test('neither front-end accepts a flag nobody declared, and both refuse it the s
   assert.match(text, /--implementer-args/, 'and the flags it does take are listed')
 })
 
+/**
+ * Everything one invocation of `main` said, with the streams captured.
+ *
+ * Both streams into one transcript on purpose: what is being asserted about a refused
+ * invocation is that a PLAN never appeared, and a plan that had drifted to the other stream
+ * would still be a plan the operator read.
+ */
+async function saidBy(argv: string[]): Promise<{ code: number; text: string }> {
+  const [log, error] = [console.log, console.error]
+  const said: string[] = []
+  console.log = (...args: unknown[]) => void said.push(args.map(String).join(' '))
+  console.error = (...args: unknown[]) => void said.push(args.map(String).join(' '))
+  try {
+    return { code: await main(argv), text: said.join('\n') }
+  } finally {
+    console.log = log
+    console.error = error
+  }
+}
+
+test('an unknown flag beats --dry-run on both front-ends: no plan, and the flag is named', async () => {
+  // --dry-run is the mode an operator reaches for to CHECK an invocation, so it is the one
+  // where an ignored flag does the most damage: the plan comes back healthy, every line of it
+  // true of a run that is not the run they typed, and they take it as confirmation. The flag
+  // has to win over the mode. Nothing here starts anything either way -- both commands refuse
+  // above every side effect -- so what is asserted is the absence of the PLAN, not of a run.
+  //
+  // `--max-minute` is the case worth naming: it is one letter off a ceiling flag, and a ceiling
+  // silently dropped is exactly #119, a run whose operator was told nothing about a bound they
+  // believed they had raised.
+  for (const front of ['relay', 'session'] as const) {
+    const { code, text } = await saidBy([front, 'a goal', '--max-minute', '5', '--dry-run'])
+    assert.equal(code, 1, `${front} must exit non-zero rather than plan around the flag`)
+    assert.match(text, /--max-minute is not a flag this command takes/, `${front} names the flag`)
+    assert.match(text, /did you mean --max-minutes\?/, `${front} offers the near miss`)
+    assert.match(text, /--max-queue-depth/, `${front} lists the flags it does take`)
+    // The plan, in either rendering. `dryRunPlanLines` opens with this line and the JSON one
+    // carries the same key, so neither can appear without the other being caught.
+    assert.ok(!/dry run — nothing was started/.test(text), `${front} must not print a plan`)
+    assert.ok(!/"dryRun"/.test(text), `${front} must not print a plan as JSON either`)
+    assert.ok(!/goal: would be asked for/.test(text), `${front} must not describe a run at all`)
+  }
+  // The same with the flag AFTER --dry-run, since a scan that stopped at the first thing it
+  // recognised would pass the case above and none of the arguments for it would hold.
+  for (const front of ['relay', 'session'] as const) {
+    const { code, text } = await saidBy([front, 'a goal', '--dry-run', '--goal-file', '/tmp/goal.txt'])
+    assert.equal(code, 1, `${front} must refuse whatever order the flags came in`)
+    assert.match(text, /--goal-file is not a flag this command takes/)
+    assert.ok(!/dry run — nothing was started/.test(text), `${front} must not print a plan`)
+  }
+})
+
 test('a value that went missing is named before a flag that does not exist, on both', async () => {
   // `--rounds --json` is both, on `session`: a value that went missing AND -- since `--json`
   // is relay-only -- a flag this command does not have. The two front-ends must not answer
