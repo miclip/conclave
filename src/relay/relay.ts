@@ -91,6 +91,7 @@ import {
   detectConflict,
   dirtyPaths,
   originOf,
+  reconcileDelivery,
   type AuthorityConflict,
   type RestrictedOrigin,
 } from './authority.ts'
@@ -2482,9 +2483,87 @@ export class Relay {
 
     const full: RelayMessage = { ...m, visibility, excluded, seq: ++this.#seq, at: Date.now() }
     this.log.push(full)
+    // BEFORE the observers, and the notes it produces AFTER them. Two rules that look like
+    // one and are not, so they are split across the two calls below (#171).
+    //
+    // Here rather than in `say`, because this is the one place that knows a human message
+    // reached a participant. `say` is the operator's route and `ask` is another, and an
+    // asymmetry repaired by either is repaired. Notes are skipped: they are orchestrator
+    // state, they are what the reconciliation itself records, and letting one through would
+    // recurse.
+    //
+    // The MUTATION runs first because `onLog` and the event stream are where a front end,
+    // the session record and `relay --json` all read the world from, and every one of them
+    // can reach `restrictedOrigins` synchronously while handling the delivery. Reconciling
+    // afterwards published one frame in which the delivery had happened and the record still
+    // said the seat had never seen it -- a reader that snapshots on the message, which the
+    // session record does, could persist that frame and it would be the last word.
+    const reconciliations =
+      full.fromRank === 'human' && full.kind !== 'note' && full.to.length > 0
+        ? this.#reconcileOrigins(full)
+        : []
     this.#opts.onLog?.(full)
     this.#stream.emit({ type: 'message', message: full })
+    // And the NOTES after, because a note explaining a delivery cannot precede the delivery
+    // in the log a human reads back. Recording them here rather than inside
+    // `#reconcileOrigins` is what keeps the two orders independent: the record moves before
+    // the observers see the message, the notes arrive after it, and neither rule is expressed
+    // as a side effect of the other.
+    for (const text of reconciliations) {
+      this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text })
+    }
     return full
+  }
+
+  /**
+   * A human message that reproduces an earlier restricted one in full DELIVERS it (#171).
+   *
+   * The operator's escape hatch, made real. Answering an `authority_conflict` by broadcasting
+   * the withheld message to the seat that never saw it is the repair the pause is asking for,
+   * and until this ran the record did not notice: the same origin cited the same exclusion for
+   * the rest of the session, narrowing onto whichever common filename it still shared with the
+   * advisor's instructions.
+   *
+   * Only the RECORD moves. The routing log keeps saying what it said -- seq 5 was withheld
+   * from the advisor, and no later message changes what happened at seq 5 -- so `audit()` and
+   * `asymmetryAt()` still answer the historical question they were written for.
+   *
+   * Returns the notes to record and records none itself. The caller emits them after the
+   * delivery has reached the observers, which is the only order a human reading the log can
+   * make sense of -- and keeping that decision at the caller is what lets the MUTATION happen
+   * before those same observers without the note moving with it.
+   */
+  #reconcileOrigins(m: RelayMessage): string[] {
+    // The origin attribution is still reading. `#attributeArtifacts` works on the LAST
+    // restricted message and on the two maps below, so a seat newly informed of an older one
+    // has nothing to keep in step and must not overwrite the current one's marks.
+    const latest = this.restrictedOrigins.at(-1)
+    const notes: string[] = []
+    for (const origin of this.restrictedOrigins) {
+      const moved = reconcileDelivery(origin, { seq: m.seq, text: m.text, to: m.to })
+      if (moved.length === 0) continue
+      if (origin === latest) {
+        for (const id of moved) {
+          // A seat given the message a moment ago cannot have caused anything before it
+          // arrived. Marked HERE, at delivery, exactly as `say` marks the original recipients
+          // -- without it the seat's entire run so far would corroborate paths attributed to
+          // a message it has only just been handed.
+          this.#evidenceAtOrigin.set(id, (this.#evidence.get(id) ?? []).length)
+          const root = this.#rootOf(id)
+          if (this.#treeAtOrigin && !this.#treeAtOrigin.has(root)) {
+            this.#treeAtOrigin.set(root, dirtyPaths(root))
+          }
+        }
+      }
+      notes.push(
+        `#${m.seq} reproduced restricted message #${origin.seq} in full and reached ` +
+          `${moved.join(', ')}, so the record no longer treats ` +
+          `${moved.length === 1 ? 'that seat as never having' : 'those seats as never having'} ` +
+          `seen it. An authority_conflict cites #${origin.seq} only against a seat it is still ` +
+          `withheld from, which is now ${origin.excluded.join(', ') || 'nobody'}.`,
+      )
+    }
+    return notes
   }
 
   /**
@@ -6977,7 +7056,11 @@ export class Relay {
             // Keyed by the TASK's instruction rather than by the whole reply: at N=1 those are
             // the same string, and at N>1 a reply carrying two instructions has two adjudications
             // to make and one key would collapse them into whichever came first.
-            const conflict = detectConflict(task.instruction, this.restrictedOrigins)
+            // The advisor's own id, so an origin it has since been GIVEN in full stops counting
+            // against it (#171). `lead` is this run's advisor -- the participant whose reply
+            // produced this task -- and naming it is what lets the check ask whether THE ADVISOR
+            // is still in the dark, rather than whether anybody at all is.
+            const conflict = detectConflict(task.instruction, this.restrictedOrigins, lead.id)
             if (conflict && !this.#adjudicated.has(`${conflict.origin.seq}:${task.instruction}`)) {
               this.#adjudicated.add(`${conflict.origin.seq}:${task.instruction}`)
               // Who this task can actually land on, read off its own target rather than off a rank

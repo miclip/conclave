@@ -338,7 +338,7 @@ const DECLARED: Record<string, string> = {
     'Authority routing (#56, D2) sends implementer_unanswered to the advisor before the operator, ' +
     'so a default run interrupts the human less than today. Real change at N=1, an improvement, ' +
     'declared rather than discovered. The pause reason exists at src/relay/run.ts:52 and the halt ' +
-    'that raises it is at src/relay/relay.ts:7095.',
+    'that raises it is at src/relay/relay.ts:7178.',
   'status.pause.resolution':
     'Classifying unresolved conditions on both axes (#56, D2) added `resolution` to every RunPause ' +
     '(src/relay/run.ts:329), so `conclave status --json` on a paused default run now carries ' +
@@ -620,7 +620,7 @@ const DECLARED: Record<string, string> = {
     'participant and nobody else, and a conclave or workstream scope samples NOBODY. It used to ' +
     'read pause.verdictOf.participant and fall back to scanning participants by rank for ' +
     'implementers — and verdictOf is set at exactly two halt sites, both turn_incomplete ' +
-    '(src/relay/relay.ts:6716, src/relay/relay.ts:7232), so every other pause reached that rank ' +
+    '(src/relay/relay.ts:6795, src/relay/relay.ts:7315), so every other pause reached that rank ' +
     'scan. WHAT CHANGES AT N=1: on the three pauses whose scope names no participant — ' +
     'operator_requested (/pause), advisor_escalated, authority_conflict — the lone implementer ' +
     'child used to be sampled, so a child that measured busy REFUSED the resume and wrote ' +
@@ -629,15 +629,15 @@ const DECLARED: Record<string, string> = {
     'safety guard rather than presented as a pure N>1 fix. The reason it is the right narrowing: ' +
     'the guard exists because continuing SENDS into a child that cannot accept input mid-turn, ' +
     'and on those three pauses the child it measured is not the child being sent to — resuming ' +
-    'advisor_escalated sends to the ADVISOR (src/relay/relay.ts:6833), resuming ' +
+    'advisor_escalated sends to the ADVISOR (src/relay/relay.ts:6912), resuming ' +
     'authority_conflict queues a constraint that is delivered by the dispatcher on the next ' +
     'dispatch to a free seat, and operator_requested is consumed at an advisor-turn boundary ' +
     'whose own evidence line says no turn is in flight. WHAT IS GIVEN UP, named rather than ' +
     'discovered: the advisor_escalated halt raised when a seat’s turn completed and its report ' +
-    'could not be read (src/relay/relay.ts:7146) is conclave-scoped by design, yet the useful ' +
+    'could not be read (src/relay/relay.ts:7229) is conclave-scoped by design, yet the useful ' +
     'question there is whether THAT seat is still writing; at N=1 the rank scan sampled it by ' +
     'coincidence of it being the only implementer, and now nothing does. The pause still carries ' +
-    'that seat’s liveness evidence from the halt site (src/relay/relay.ts:7157), which is what ' +
+    'that seat’s liveness evidence from the halt site (src/relay/relay.ts:7240), which is what ' +
     'the operator actually reads; restoring a refusal there is a change to that halt’s scope, ' +
     'not to the guard. AT N>1 the old behaviour was unsafe in the other direction: a pause about ' +
     'one seat could be refused because a DIFFERENT seat was mid-turn, and the operator was told ' +
@@ -1690,9 +1690,26 @@ const DECLARED: Record<string, string> = {
     + 'write order rather than over stdout, with a real launch as the control -- a fix that '
     + 'moved one copy to stderr, or that deleted the plan lines instead of the preamble ones, '
     + 'passes a stdout-only count and fails both.',
+  'a restricted origin records the seats it has since been given to in full (#171)':
+    'An origin whose withheld text a later human message reproduced IN FULL to the seat it was ' +
+    'withheld from stops counting against that seat: the pause says "a message it never saw", ' +
+    'and once the operator has handed it over that sentence is false. #171 reports three ' +
+    'authority_conflict pauses from one aside, the second and third raised after the operator ' +
+    'had broadcast it to both seats, the last matching on a single filename the project touches ' +
+    'in every commit. `RestrictedOrigin` gains one key, `reconciled` — a list of ' +
+    '{participant, seq} — so a status document paused on authority_conflict carries it, the run ' +
+    'report’s `restricted` entries carry it, and the pinned shapes here were updated rather than ' +
+    'relaxed. THE DEFAULT RUN IS UNCHANGED IN VALUE: `reconciled` is present and EMPTY unless a ' +
+    'human message reproduces an earlier restricted one whole, which no run does by accident — ' +
+    'partial quotes and paraphrases reconcile nothing, deliberately, because a false ' +
+    'reconciliation is a silent false negative and the detector is tuned away from those. ' +
+    '`informed` and `excluded` are mutated on the RECORD only; the routing log is untouched, so ' +
+    '`audit()` and `asymmetryAt()` still answer what was withheld at that seq. Declared because ' +
+    'the pause document and report keys are a change an existing consumer can see, and because ' +
+    'an origin that stops raising pauses is a behaviour change even when it is the right one.'
 }
 
-test('DECLARED contains exactly the routing, pause-resolution, attribution, ceiling-flag, seat-flag, seat-status, launch-record, flag-reader, integration-check, per-seat-rotation, reviewer, resume-guard, mixed-liveness, timestamped-liveness, model-validation, executable-preflight, compaction-survival, rotation-reporting, send-precondition, process-tree-liveness, ceiling-reporting, record-heartbeat, rotation-intent, console-dry-run, flag-reconciliation, paused-time, advisor-targeting, silence-timeout and launch-bounds entries', () => {
+test('DECLARED contains exactly the routing, pause-resolution, attribution, ceiling-flag, seat-flag, seat-status, launch-record, flag-reader, integration-check, per-seat-rotation, reviewer, resume-guard, mixed-liveness, timestamped-liveness, model-validation, executable-preflight, compaction-survival, rotation-reporting, send-precondition, process-tree-liveness, ceiling-reporting, record-heartbeat, rotation-intent, console-dry-run, flag-reconciliation, paused-time, advisor-targeting, silence-timeout, launch-bounds and origin-reconciliation entries', () => {
   assert.deepEqual(Object.keys(DECLARED), [
     'implementer_unanswered -> advisor',
     'status.pause.resolution',
@@ -1724,6 +1741,7 @@ test('DECLARED contains exactly the routing, pause-resolution, attribution, ceil
     'whether the advisor used the assignment syntax, in the run report and in status --json (#79)',
     '--silence-timeout on both front-ends',
     'the launch surfaces name the absolute cap, and the dry-run plan carries what bounds the run (#162)',
+    'a restricted origin records the seats it has since been given to in full (#171)',
   ])
 })
 
@@ -2169,7 +2187,7 @@ async function provokeReviewBlocked(repo: string): Promise<{ relay: Relay; run: 
  * Drive a real relay into one condition and return the pause it raised.
  *
  * The provocations are the ones `resolution.test.ts`'s own `provoke` already uses, deliberately:
- * the same triggers reaching the same single halt site (src/relay/relay.ts:4052), where the
+ * the same triggers reaching the same single halt site (src/relay/relay.ts:4131), where the
  * classification is computed by production `resolutionFor` from the subject the caller passed.
  * Nothing here writes a `RunPause`.
  *
@@ -2462,7 +2480,7 @@ test('default run works in the run cwd and creates no worktree', async () => {
   }
 
   // The relay CLI passes process.cwd() as the run cwd: bin/conclave.ts:1472-1474.
-  // The relay hands that same cwd to each participant adapter: src/relay/relay.ts:2236-2242.
+  // The relay hands that same cwd to each participant adapter: src/relay/relay.ts:2237-2243.
   // The cwd getter simply returns the option: src/relay/relay.ts:1956-1958.
   assert.match(relay, /cwd:\s*process\.cwd\(\)/, 'relay block must start in process.cwd')
   // Both creation sites now pass a NAMED context object rather than an inline literal, because
@@ -2513,7 +2531,7 @@ test('default run works in the run cwd and creates no worktree', async () => {
 
   // A default run with no subagents must not create any git worktree. The relay only samples
   // the worktree list for its subagent-use report: src/relay/subagents.ts:68 defines
-  // worktreePaths, and src/relay/relay.ts:2970-2971, :3568 and :5932 read it.
+  // worktreePaths, and src/relay/relay.ts:3049-3050, :3647 and :6011 read it.
   // Prove it by exercising the run in a real temporary repository.
   const repo = mkdtempSync(join(tmpdir(), 'conclave-default-'))
   try {
@@ -2913,10 +2931,16 @@ const PAUSED_SUBTREE: Record<PauseReason, Record<string, string>> = {
   authority_conflict: {
     pause: 'at, atSeq, conflict, detail, evidence, options, reason, resolution',
     'pause.conflict': 'instruction, matched, origin, verb',
-    // `attributions` is the declared addition; see DECLARED['per-seat artifact attribution'].
+    // `attributions` is one declared addition; see DECLARED['per-seat artifact attribution'].
     // It is present and EMPTY here, which is why it contributes no element path: this
     // provocation attributes nothing, exactly as `artifactSupport: {}` beside it records.
-    'pause.conflict.origin': 'artifactSupport, artifacts, at, attributions, excluded, informed, seq, text, tokens',
+    //
+    // `reconciled` is the other; see DECLARED['a restricted origin records the seats it has
+    // since been given to in full (#171)']. Empty here for the same reason and a stronger one:
+    // this provocation withholds a message and never hands it over, which is what makes the
+    // pause fire at all.
+    'pause.conflict.origin':
+      'artifactSupport, artifacts, at, attributions, excluded, informed, reconciled, seq, text, tokens',
     // An object with no keys at all, and pinned as one: `artifactSupport` is a map keyed by
     // artifact, and this origin supports none. A build that started emitting an entry here
     // would change what a reader of the conflict sees.
