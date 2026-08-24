@@ -383,21 +383,67 @@ export const COMMANDS = [
   '/exit',
 ]
 
+/** `<<TAG` alone, once an address head has been taken off the front of the line. */
+const HEREDOC_TAG = /^[ \t]*<<([A-Za-z_][A-Za-z0-9_]*)[ \t]*$/
+
+/**
+ * An address: `>` and ANYTHING, as the first word of a line.
+ *
+ * Deliberately not `>` plus a seat-id character class. A class decides what is address-SHAPED
+ * by the characters in it, so `>implementer-2,` -- one keystroke from an address, and nothing
+ * else in the world -- was not shaped like one, fell past the branch below, and went to
+ * EVERYONE as plain text. That is the exact failure a narrowing prefix is typed to avoid, and
+ * a rule that only catches well-formed typos is not a validation rule.
+ *
+ * So the shape is `>` and one more character, and WHETHER IT NAMES A SEAT is decided in one
+ * place, against `relay.participants`. Anything that looks addressed is held to being
+ * addressed; nothing that looks addressed is quietly widened.
+ *
+ * A bare `>` and `> quoted text` stay outside it, and must: the word is `>` alone, it carries
+ * no name, there is no seat it could have meant, and it has always been ordinary text.
+ */
+const ADDRESS = /^>./
+
 /**
  * A line that opens a multi-line message: NOTHING, or one address prefix, then `<<TAG`.
  *
- * Deliberately not "any line ending in `<<TAG`". The head is enumerated -- empty, `>advisor`,
- * `>implementer`, `>both` -- because the alternative silently reinterprets input that is
- * already correct today. `/rotate the seat is stuck <<HERE` is a rotate reason and
- * `>advisor compare a<<b` is a message about C++; under a permissive rule both open a block
- * instead, and the operator's next several lines vanish into it with the console showing
- * nothing routed. Every form that is framing has to be a form nobody writes by accident,
- * which is what makes the framing explicit rather than a guess.
+ * Deliberately not "any line ending in `<<TAG`". A head is a form nobody writes by accident --
+ * nothing at all, or a first word of `>` and at least one more character -- because the
+ * alternative silently reinterprets input that is already correct today. `/rotate the seat is
+ * stuck <<HERE` is a rotate reason and `>advisor compare a<<b` is a message about C++; under a
+ * permissive rule both open a block instead, and the operator's next several lines vanish into
+ * it with the console showing nothing routed.
+ *
+ * SHAPE, not membership, and that is the correction #93 made here. The head is NOT checked
+ * against the live seats -- a block opens for an unknown one on purpose, and `handle` decides
+ * whether it named anything, exactly as it does for the single-line form. Validation in one
+ * place; recognition in this one. A head this refused to recognise did not stay unrecognised:
+ * it fell through to `dispatch` as an ordinary line, which refused the OPENER and then let the
+ * body past one line at a time, unaddressed, to everyone. So a mistyped `>implemnter-2 <<EOF`
+ * refused the address and broadcast the paste, which is the worst of both answers. Recognising
+ * it means the body is collected, nothing is routed, and the refusal happens ONCE.
+ *
+ * Two characters of the pattern carry the edges, and both are load-bearing:
+ *
+ *   - `+` rather than `*`, so a bare `>` is NOT a head. `><<EOF` and `> <<EOF` stay ordinary
+ *     lines, which is what they were before framing existed and what `ADDRESS` above promises:
+ *     `>` alone names no seat, so there is nothing for it to be the prefix OF. A `*` here
+ *     matched the empty rest and quietly turned both into openers.
+ *   - `[^\s<]` rather than `[^\s]`, so the head cannot swallow its own `<<`. `>implementer<<EOF`
+ *     has no space and opened a block before this existed, and must keep doing so.
  *
  * Module scope so it cannot land in the temporal dead zone of the console's own startup;
  * see `block` in `runSession`.
  */
-const HEREDOC_OPEN = /^(|>advisor|>implementer|>both)[ \t]*<<([A-Za-z_][A-Za-z0-9_]*)[ \t]*$/
+function heredocOpen(line: string): { head: string; tag: string } | undefined {
+  const head = /^>[^\s<]+/.exec(line)?.[0]
+  if (head !== undefined) {
+    const tag = HEREDOC_TAG.exec(line.slice(head.length))
+    return tag ? { head, tag: tag[1]! } : undefined
+  }
+  const bare = HEREDOC_TAG.exec(line)
+  return bare ? { head: '', tag: bare[1]! } : undefined
+}
 
 /**
  * What `/help` writes, verbatim.
@@ -412,6 +458,10 @@ export const HELP = `
   <text>                 to BOTH, at human rank — the default, no prefix needed
   >advisor <text>        to the advisor only — the implementer will not see it
   >implementer <text>    to the implementer only — the advisor will not see it
+  >implementer-2 <text>  ANY seat, by the id it answers to. A run with more than one
+                         implementer names them implementer, implementer-2, ...;
+                         /state lists them and tab completes them. A name no seat
+                         has is refused, not sent to everyone.
   >both <text>           the same as no prefix; spelled out so the menu can offer it
   @src/relay/relay.ts    a path, anywhere in the line. Tab completes both sigils.
 
@@ -427,9 +477,9 @@ export const HELP = `
                            Existing drivers write bare lines today.
                            EOF
 
-                         Only <<TAG on its own or after >advisor, >implementer or
-                         >both opens one — so a message or a command that happens to
-                         end in <<something still means what it always did. Without
+                         Only <<TAG on its own, or after >both or a seat id, opens
+                         one — so a message or a command that happens to end in
+                         <<something still means what it always did. Without
                          it a line is a message, which is what an answer of several
                          paragraphs written to stdin needs to know.
 
@@ -1681,6 +1731,26 @@ export async function runSession(opts: SessionOptions): Promise<number> {
   const multiSeat = (): boolean => relay.seats().length > 1
 
   /**
+   * Every seat that can be addressed, by the id it actually answers to.
+   *
+   * `relay.participants` and nothing else. It is the list the relay routes against --
+   * `#resolve` validates `{ only }` against exactly these keys, and `ask` looks the id up in
+   * exactly this map -- so reading it here is what makes "what the console offers" and "what
+   * the transport accepts" the same set by construction rather than by two lists agreeing.
+   *
+   * This is the whole of #93. Addressing was two hardcoded words while the transport had
+   * always been general, so a run with `--implementers "claude, claude"` printed a seat named
+   * `implementer-2`, listed it in `/state`, narrated it under its own id -- and had no way to
+   * say anything to it. `>advisor` and `>implementer` keep working unchanged for the reason
+   * they always worked: those ARE participant ids, and the first implementer seat is called
+   * `implementer` (`seatIdFor`), so a one-seat run resolves the same word to the same seat.
+   *
+   * Live, not captured. A rotation replaces a seat's session and keeps its id, but a list
+   * snapshotted at startup would still be a second copy of something that has one home.
+   */
+  const addressable = (): string[] => relay.participants.map((p) => p.id)
+
+  /**
    * One row per implementer seat with a task in flight.
    *
    * EMPTY AT N=1, which is what keeps the default console byte-identical: with one seat the
@@ -1861,7 +1931,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
       status,
       hint,
       onLine: (raw) => submit(raw),
-      suggest: (line, cursor) => suggest(line, cursor, opts.cwd, COMMANDS),
+      suggest: (line, cursor) => suggest(line, cursor, opts.cwd, COMMANDS, addressable()),
       pending: pendingRows,
       seats: seatRows,
       onInterrupt: () => onInterrupt(),
@@ -2006,9 +2076,9 @@ export async function runSession(opts: SessionOptions): Promise<number> {
       screen?.draw()
       return
     }
-    const opened = HEREDOC_OPEN.exec(body)
+    const opened = heredocOpen(body)
     if (opened) {
-      block = { head: opened[1] ?? '', tag: opened[2]!, lines: [] }
+      block = { head: opened.head, tag: opened.tag, lines: [] }
       screen?.draw()
       return
     }
@@ -2069,9 +2139,9 @@ export async function runSession(opts: SessionOptions): Promise<number> {
    * serve input that did not.
    */
   async function handle(line: string, framed?: string): Promise<void> {
-    // `framed` is a head from `HEREDOC_OPEN`, which is one of four exact strings — so it is
-    // the whole word by construction, and an empty head is the no-prefix form whose message
-    // goes to both.
+    // `framed` is a head from `heredocOpen`, which is an exact string off an enumerated list
+    // — so it is the whole word by construction, and an empty head is the no-prefix form
+    // whose message goes to both.
     const [word, ...restWords] = framed === undefined ? line.split(/\s+/) : [line]
     const rest = framed ?? restWords.join(' ')
     // What a message-shaped line SAYS, as opposed to the line that carried it. Identical for
@@ -2177,7 +2247,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
       // FALSIFIER, stated because it is the strongest argument against this shape: the
       // console has no general "trailing text is a message" rule and does not gain one here.
       // `/rotate <text>` and `/abort <text>` consume their text as a REASON
-      // (`src/repl/session.ts:2230`, `src/repl/session.ts:2263`) and `/pause`, `/queue`, `/audit` ignore
+      // (`src/repl/session.ts:2300`, `src/repl/session.ts:2333`) and `/pause`, `/queue`, `/audit` ignore
       // whatever follows them. So an operator who learns this from `/continue` and carries
       // it to `/pause I'll be back` still loses the sentence. That inconsistency is not
       // repaired by making `/continue` a third behaviour; it is narrowed by it, and the
@@ -2297,8 +2367,26 @@ export async function runSession(opts: SessionOptions): Promise<number> {
       return
     }
 
-    if (word === '>advisor' || word === '>implementer') {
+    if (word !== undefined && ADDRESS.test(word)) {
       const who = word.slice(1)
+      const seats = addressable()
+      if (!seats.includes(who)) {
+        // REFUSED, and told which names exist. The two alternatives were both silent: a typo
+        // that is not an address falls through to plain text and goes to EVERYONE, which is
+        // the opposite of what a narrowing prefix was typed for; and an id that names nothing
+        // reaches `#resolve`, which throws from inside the run loop where the operator does
+        // not see it. Neither is a thing to learn from at the prompt.
+        // "live seats", not "this run has": this path is reached with no run in flight too,
+        // where the seats are up and the loop is not, and a refusal that names a run the
+        // operator has not started is a worse answer than the one it is correcting.
+        write(`  no seat named ${who} — live seats: ${seats.join(', ')}`)
+        // Said explicitly for a BLOCK, because a block is the case where the operator cannot
+        // see what happened to their input: the lines were taken off stdin and there is no
+        // queue row for them. Refusing the head silently and dropping ten pasted lines is the
+        // same as swallowing them.
+        if (framed) write(dim(`  the ${framed.split('\n').length} line(s) it framed were NOT delivered`))
+        return void write(dim('  >both, or no prefix at all, reaches everyone'))
+      }
       if (!rest) return void write(`  ${word} needs something to say`)
       // With no run there is no loop to drain a queue, so this is a direct exchange rather
       // than a queued message. The participants are still alive — only the loop stopped —

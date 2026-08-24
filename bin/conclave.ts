@@ -90,14 +90,16 @@ Driving conclave from an agent
                                     the decision, sends nothing, leaves the run paused
     /allow /deny                    answer a permission prompt
     /pause /state /log /exit        drive and inspect
-    >advisor ... / >implementer ... send a message to one seat
+    >advisor ... / >implementer ... send a message to one seat. ANY seat, by the id it
+    >implementer-2 ...              answers to -- /state names them; an id no seat has is
+                                    refused, naming the ones that exist, not sent to all
     anything else                   the goal, if none has been given yet
 
   One line is one message. An answer that spans lines needs framing, or each line
   becomes a message of its own -- addressed to everyone, since only the first line
   carries the prefix, and resuming the run on whichever line got there first:
-    <<EOF                           open a block, alone or after >advisor,
-    ...                             >implementer or >both -- and only those, so a
+    <<EOF                           open a block, alone or after >both or a seat
+    ...                             id -- and only those, so a
     EOF                             message or a slash command ending in <<word
                                     is unchanged. Everything up to a line equal to
                                     EOF is ONE message, blank lines kept. Closing
@@ -352,7 +354,8 @@ Commands:
                                    without one the console waits and the first thing you
                                    type starts the run. Pauses become decision
                                    points you resolve: /continue, /rotate, /abort, or a
-                                   line of text addressed with >advisor / >implementer.
+                                   line of text addressed to a seat by id, e.g. >advisor,
+                                   >implementer, >implementer-2.
                                    Shows participant activity while a turn is running.
                                    --advisor-args / --implementer-args pass extra launch
                                    arguments, e.g. "-m opencode/kimi-k2.6". Required for
