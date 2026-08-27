@@ -315,6 +315,40 @@ test('a wedged read is never joined by a second one, however long it lasts', asy
     // The shape Codex's post-cancel wait uses: reconcile repeatedly inside a budget. Before any
     // of this existed, iteration one never returned and the budget was never consulted again.
     // Now every iteration comes back -- and none of them reads.
+    // FAILING REPRODUCTION -- the `rounds >= 3` race. The loop below asserts that a budget of
+    // three lease intervals fits three iterations, and each iteration costs one whole lease,
+    // so it is asserting that the overhead between iterations is nil. Measured on an idle
+    // machine it very nearly is, and that is the entire margin:
+    //
+    //   [rounds] budget=180ms rounds=3 per-round=[62,61,61]
+    //   [rounds] budget=180ms rounds=3 per-round=[61,60,61]
+    //   [rounds] budget=180ms rounds=3 per-round=[61,61,61]
+    //
+    // Round three STARTS at t≈122 against a deadline of 180. 58ms of slack, spread across two
+    // iterations -- about 29ms each -- and the third round never begins. The operator saw
+    // exactly that once, `rounds === 2`, in six isolated runs.
+    //
+    // `ROUND_LAG_MS` is that busy machine, made portable: 45ms of scheduling lag between
+    // completed attempts, which is what a loaded runner inserts by accident. It is well inside
+    // the window -- anything from ~29ms (round three no longer starts) to ~119ms (round two
+    // stops starting either, which would be a different failure) reproduces it:
+    //
+    //   $ node --test --test-name-pattern "a wedged read is never joined" \
+    //       src/transcript/readLease.test.ts
+    //   ✖ a wedged read is never joined by a second one, however long it lasts
+    //     AssertionError [ERR_ASSERTION]: a budget loop over snapshot() must keep going round: 2
+    //       actual: false, expected: true, operator: '=='
+    //
+    // The lag is between COMPLETED attempts, not inside one: no snapshot is interrupted, no
+    // lease is shortened, and nothing about what the view does changes. The only thing being
+    // varied is how promptly the caller gets to ask again, which is the one variable this
+    // assertion silently depends on and does not control.
+    //
+    // NOT FIXED HERE, deliberately. What the loop is really for is that every iteration COMES
+    // BACK -- before this existed, iteration one never returned and the budget was never
+    // consulted again. `rounds >= 3` is a wall-clock proxy for that, and the repair is a
+    // question about what the loop should count, not a number to enlarge.
+    const ROUND_LAG_MS = 45
     const deadline = Date.now() + LEASE_MS * 3
     let rounds = 0
     while (Date.now() < deadline) {
@@ -323,6 +357,7 @@ test('a wedged read is never joined by a second one, however long it lasts', asy
         () => undefined,
         () => undefined,
       )
+      await sleep(ROUND_LAG_MS)
     }
     assert.ok(rounds >= 3, `a budget loop over snapshot() must keep going round: ${rounds}`)
     assert.equal(
