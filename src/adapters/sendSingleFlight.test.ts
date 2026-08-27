@@ -26,8 +26,8 @@
  * this process concluding a turn is hung, was read as the CHILD having stopped. It is not
  * evidence of that at all: a `timed_out` turn may still be running, and it is the likeliest turn
  * in the session to be. The adapters now track transport openness separately -- opened by
- * `UserPromptSubmit`, closed only by an observed stop (`Stop`, `SessionEnd`, child exit, a
- * completed `cancel()`) -- and both guards ask that instead.
+ * `UserPromptSubmit`, closed by a `Stop`, a `SessionEnd`, the child exiting, or a completed
+ * `cancel()` -- and both guards ask that instead.
  *
  * Real adapters over a fake child: see `fakeCli.ts`.
  */

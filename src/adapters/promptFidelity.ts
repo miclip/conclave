@@ -125,3 +125,121 @@ export function describePromptMismatch(sent: string, received: string): PromptMi
     message,
   }
 }
+
+// ------------------------------------------------------------------------------------------
+// Recovery. What a sender does about a mismatch, once it has one.
+// ------------------------------------------------------------------------------------------
+
+/**
+ * Why a corrupted send is RETRIED rather than only reported.
+ *
+ * Refusing is honest and it is not a recovery: the operator is told the message was mangled
+ * and the seat is left holding a malformed turn that somebody has to cancel by hand. The
+ * corruption is in the transport, not in the message -- the same bytes typed a second time
+ * usually land -- so the run can repair itself, once, before it asks for help.
+ *
+ * Once, and the bound is the whole design:
+ *
+ *   - A retry is only safe if the malformed turn is OVER, and only the CHILD can say that.
+ *     Neither CLI accepts input mid-turn; a re-send into an open turn is spliced into it rather
+ *     than queued (#117), which turns one corrupted message into two. So the retry is gated on
+ *     the child's own account of the ending -- its `Stop`, a `SessionEnd`, the process exiting,
+ *     or Codex's transcript record of the abort -- and never on conclave having typed ESC.
+ *     Typing ESC is something this process did; Claude Code records an interruption nowhere,
+ *     and Codex's `turn_aborted` may never arrive, so a `cancelled` verdict at `assumed`
+ *     confidence is compatible with a child still running the fragment. See
+ *     `TurnState.childClosure` and `#recoverForRetry` in either adapter.
+ *   - The single-flight claim is HELD across the whole thing. The window between the mismatch
+ *     and the re-send is exactly when a second caller could type into the gap; `send()` is
+ *     already the one holding the slot, so it keeps it rather than releasing and re-taking it.
+ *   - A second mismatch is not transport noise, it is a broken transport. Retrying again would
+ *     produce a third malformed turn and a third cancellation, and the operator would learn
+ *     the same thing three failures later.
+ */
+export const PROMPT_SEND_ATTEMPTS = 2
+
+/**
+ * How long the cancellation and the child's confirmation may take before the retry is abandoned.
+ *
+ * The clock is on RECOVERY: what it bounds is the time between "the child took the wrong text"
+ * and "the child has said that turn ended", after which the answer is a refusal rather than a
+ * re-send. Codex adds its own cancellation evidence budget to this, because there the
+ * confirmation is a transcript record the child writes after the fact -- see
+ * `CANCEL_EVIDENCE_BUDGET_MS`.
+ *
+ * Ten seconds is long enough for a `Stop` that follows an interrupt and short enough that a
+ * refused send is not mistaken for a hung one. On a CLI that reports nothing when interrupted
+ * it is simply the wait before the refusal, which is the honest outcome there.
+ */
+export const PROMPT_RECOVERY_MS = 10_000
+
+/**
+ * The token every refusal after a spent retry carries.
+ *
+ * One token for both of them -- the retry that was tried and failed, and the retry that was
+ * never safe to try -- because to a caller they are the same fact: this message did not get
+ * through and conclave has stopped trying. What differs is the reason, which follows it.
+ */
+export const RETRY_EXHAUSTED = 'RETRY EXHAUSTED'
+
+/**
+ * A mismatch that has not yet been ruled final.
+ *
+ * Thrown by the hook path and caught by `send()`, which owns the retry budget. It is a
+ * distinct type rather than a flag on the message because `send()` must not mistake any OTHER
+ * failure -- a hook timeout, a dead child, a swallowed submit -- for a corruption worth
+ * re-sending: those have their own repairs and re-sending on top of them is how a duplicate
+ * prompt gets delivered.
+ */
+export class CorruptedPromptError extends Error {
+  readonly mismatch: PromptMismatch
+  /** The malformed turn the child opened. It exists, it is recorded, and it must be cancelled. */
+  readonly turnKey: string
+
+  constructor(mismatch: PromptMismatch, turnKey: string) {
+    super(mismatch.message)
+    this.name = 'CorruptedPromptError'
+    this.mismatch = mismatch
+    this.turnKey = turnKey
+  }
+}
+
+export function isCorruptedPrompt(e: unknown): e is CorruptedPromptError {
+  return e instanceof CorruptedPromptError
+}
+
+function summarise(m: PromptMismatch): string {
+  return `${m.shape.toUpperCase()}, sent ${m.sentBytes} B and the child took ${m.receivedBytes} B`
+}
+
+/** The child mangled the message, then mangled the re-send. Both attempts, then the detail. */
+export function promptRetryExhausted(first: PromptMismatch, again: PromptMismatch): string {
+  return (
+    `${RETRY_EXHAUSTED}: the child accepted a corrupted prompt, the malformed turn was cancelled, ` +
+    `the message was sent again, and the child corrupted it a second time. A third attempt would ` +
+    `produce a third malformed turn and tell you nothing this one has not. The transport to this ` +
+    `seat is not delivering; the seat needs attention rather than another send.\n` +
+    `  attempt 1  ${summarise(first)} -- cancelled\n` +
+    `  attempt 2  ${summarise(again)} -- refused\n` +
+    `${again.message}`
+  )
+}
+
+/**
+ * The child mangled the message and the re-send was never made, because the first turn could
+ * not be shown to be over.
+ *
+ * Deliberately the same refusal as a spent retry rather than a softer one. The caller's message
+ * did not arrive either way, and the difference -- that conclave declined to try -- belongs in
+ * the reason, not in a second class of outcome for a caller to handle.
+ */
+export function promptRetryNotAttempted(mismatch: PromptMismatch, why: string): string {
+  return (
+    `${RETRY_EXHAUSTED}: the child accepted a corrupted prompt and it was NOT sent again, because ` +
+    `${why}. Neither CLI accepts input mid-turn, so a re-send into a turn the CHILD has not said ` +
+    `it finished is spliced into the malformed one rather than replacing it -- two corrupted ` +
+    `messages instead of one. The malformed turn was cancelled; send again once the seat is ` +
+    `idle.\n` +
+    `${mismatch.message}`
+  )
+}
