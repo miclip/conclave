@@ -234,6 +234,58 @@ function repo(gitignore = '.conclave/\n'): string {
  * width from the ambient terminal would assert something different on every machine, and
  * `wrap()` would quietly move the answer with it.
  */
+/**
+ * Test-only control over WHEN and HOW OFTEN `until` looks at the stream, for reproducing
+ * torn-frame flakes.
+ *
+ * A pty hands over whatever bytes have arrived. A console frame -- finish one draw, start the
+ * next, clear a row, write a rule across it -- is many writes, and nothing makes them cross the
+ * pipe together. `until` polls every 50ms and returns at whatever prefix it happens to look at,
+ * so a predicate that stops at the first row it recognises is right or wrong depending on where
+ * that look landed. That is not something the test controls, and it is not something it should
+ * depend on.
+ *
+ * `the box is pinned below the transcript` depends on it. It stops as soon as the INPUT ROW
+ * exists and then asserts about the row below, and the console redraws continuously: measured
+ * over the real stream, the predicate accepts ~5950 distinct prefixes, ~500 of which have the
+ * lower rule half-written or cleared. About one look in twelve is torn, which is the shape of a
+ * flake that fails once in ten platform-attempts and never locally.
+ *
+ * Neither knob invents a state. Every string handed to the predicate is a PREFIX of bytes the
+ * pty really delivered, in order, and a prefix is exactly what a reader gets when it looks
+ * mid-delivery. What they control is which prefix -- the one variable CI was varying for free:
+ *
+ *   `inPiecesOf`   how finely the view advances, so the predicate is offered every boundary
+ *                  rather than the handful a 50ms tick catches
+ *   `lookLateBy`   how far the first ACTING look falls behind the moment the predicate became
+ *                  satisfiable, which is what a starved 50ms poll does: the state arrives, and
+ *                  the tick that actually looks lands later
+ *
+ * So this is a sharper instrument, not a rigged one, and a green test under it is a stronger
+ * result than a green test without it. Opt-in because it is also much slower -- one event-loop
+ * turn per piece -- and because every other test in this file asserts over `c.text()` after the
+ * fact, where tearing cannot arise.
+ */
+interface Observation {
+  /**
+   * Show the predicate every prefix, advancing exactly this many bytes per check.
+   *
+   * Absent means the old behaviour exactly: the whole buffer, every 50ms. Present, the view
+   * advances only when a whole piece is available, so the boundaries are the multiples of this
+   * number and do not move with when the bytes happened to arrive.
+   */
+  readonly inPiecesOf?: number
+  /**
+   * Bytes to keep advancing after the predicate FIRST holds, before answering on it.
+   *
+   * Zero is "look the instant it becomes true", which is the luckiest possible observer and the
+   * one every local run gets. Anything else is a late look. Needs `inPiecesOf` to have anything
+   * to count. The predicate is re-asked at every byte in between, so a predicate with a side
+   * effect -- these capture the grid they matched -- keeps the LAST one, which is the point.
+   */
+  readonly lookLateBy?: number
+}
+
 async function spawnConsole(
   dir: string,
   t?: { after: (fn: () => void) => void },
@@ -241,6 +293,10 @@ async function spawnConsole(
   quiet: boolean = false,
   /** Which driver to run. The one-seat console, unless a test needs a differently-shaped run. */
   script: (dir: string) => string = (d) => driver(d, goal, quiet),
+  /**
+   * How `until` is allowed to LOOK at the stream. Off unless a test asks for it; see `Observation`.
+   */
+  observe: Observation = {},
 ) {
   const { default: pty } = await import('node-pty')
   const p = pty.spawn(process.execPath, [script(dir)], {
@@ -275,6 +331,17 @@ async function spawnConsole(
       /* already gone */
     }
   })
+  /**
+   * How much of `buf` `until` is currently allowed to see. Only moves under `inPiecesOf`.
+   *
+   * `buf` itself is always the whole stream: `text()` returns it, and the `\x1b[6n` answering
+   * above reads it, because both want the truth about what the terminal received. This is a
+   * separate, deliberately lagging view for the ONE thing that is allowed to be pessimistic.
+   */
+  let shown = 0
+  const piece = observe.inPiecesOf
+  const view = (): string => (piece === undefined ? buf : buf.slice(0, shown))
+
   return {
     proc: p,
     text: () => buf,
@@ -290,12 +357,28 @@ async function spawnConsole(
      * ptys and real node processes, and letting the runner start as many workers as it likes
      * is what starves them. The budget stays generous because a starved-but-progressing
      * console should still be allowed to finish rather than be called broken.
+     *
+     * Under `inPiecesOf` the 50ms tick is replaced by a tick per PIECE: the view advances by at
+     * most that many bytes, the predicate is asked again, and the loop yields. See `Observation`
+     * for why that is a sharper instrument rather than a rigged one.
      */
     async until(pred: (s: string) => boolean, ms = 60_000): Promise<boolean> {
       const deadline = Date.now() + ms
+      /** Where the view stood the first time the predicate held. See `lookLateBy`. */
+      let heldAt: number | undefined
       while (Date.now() < deadline) {
-        if (pred(buf)) return true
-        await new Promise((r) => setTimeout(r, 50))
+        if (pred(view())) {
+          if (heldAt === undefined) heldAt = shown
+          if (piece === undefined || shown - heldAt >= (observe.lookLateBy ?? 0)) return true
+        }
+        if (piece !== undefined && buf.length - shown >= piece) {
+          shown += piece
+          // A turn of the loop, not 50ms: the point is to ask at every boundary, and there are
+          // a great many of them.
+          await new Promise((r) => setImmediate(r))
+        } else {
+          await new Promise((r) => setTimeout(r, 50))
+        }
       }
       return false
     },
@@ -527,7 +610,36 @@ test('the box is pinned below the transcript, and progress lives only in it', as
   // in the stream whether it landed in the box, above it, or was overwritten a frame later.
   // Replaying the escapes into a grid answers where it actually IS.
   const dir = repo()
-  const c = await spawnConsole(dir, t, undefined, true)
+  // FAILING REPRODUCTION. `until` below stops at the first prefix in which the input row
+  // exists, and then everything after it reads a grid that the console had not finished
+  // writing. Measured over the real byte stream, the predicate accepts ~5950 prefixes and
+  // ~500 of them have the lower rule cleared or half-drawn, so about one look in twelve is
+  // torn -- invisible locally, one failure in ten platform-attempts on a loaded runner.
+  //
+  // `lookLateBy` puts the look where CI's happened to land. Byte by byte after the input row
+  // first appears, the shape is fixed by the ORDER the renderer emits in, not by the clock,
+  // and it came out identical on five separate runs:
+  //
+  //   +0 .. +10   clean   the frame that drew the input row is finished
+  //   +11 .. +30  TORN    the next frame clears that row and redraws the rule across it
+  //   +31 ..      clean   until the frame after that
+  //
+  // +16 is six bytes into the tear, where the rule has five of its hundred characters. That is
+  // the value CI reported, so this reproduces the recorded failure and not merely one like it:
+  //
+  //   $ node --test --test-name-pattern "the box is pinned below the transcript" \
+  //       src/repl/session.tty.test.ts
+  //   ✖ the box is pinned below the transcript, and progress lives only in it
+  //     AssertionError [ERR_ASSERTION]: rule below the input
+  //       actual: '─────',
+  //       expected: /─{20,}/,
+  //       operator: 'match',
+  //
+  // Eight isolated runs and four under eight spinning CPU hogs: twelve failures, same actual
+  // every time. TO RERUN AFTER THE FIX, put `{ inPiecesOf: 1, lookLateBy: 16 }` back on the
+  // `spawnConsole` below; the predicate must survive it, because a 50ms poll on a slow enough
+  // machine IS that observer.
+  const c = await spawnConsole(dir, t, undefined, true, undefined, { inPiecesOf: 1, lookLateBy: 16 })
   assert.ok(await c.until((s) => /─{20,}/.test(s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '')), 20_000))
   c.type('typing here')
 
