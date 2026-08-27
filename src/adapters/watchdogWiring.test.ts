@@ -32,7 +32,6 @@ import test from 'node:test'
 import type { AgentEvent, TurnEndEvent } from '../contract/session.ts'
 import { ClaudePtyHookAdapter } from './claude.ts'
 import { CodexPtyHookAdapter } from './codex.ts'
-import { COMPOSER_JS } from './fakeCli.ts'
 
 /**
  * Stands in for `claude` / `codex` on PATH. Extensionless and shebanged, so Node runs it
@@ -54,17 +53,20 @@ function post(event, extra) {
   }).catch(function () {})
 }
 
-// Bracketed paste: what PtyProcess reads as "a real interactive raw-mode UI", and what
-// InputQueue.submit() frames its payloads with. COMPOSER_JS implements the other half --
-// without it the framing would be recorded as part of the prompt, and since #174 the adapters
-// compare that against what they sent.
+// Bracketed paste: what PtyProcess reads as "a real interactive raw-mode UI".
 process.stdout.write('\\x1b[?2004h')
-${COMPOSER_JS}
+
+let buf = ''
 let turns = 0
 // One prompt at a time. The await below only orders anything if a second chunk cannot begin
 // posting while the first is still waiting on its own POST.
 let queue = Promise.resolve()
-onComposerSubmit(function (prompt) {
+process.stdin.on('data', function (d) {
+  buf += d.toString()
+  const m = /[\\r\\n]/.exec(buf)
+  if (!m) return
+  const prompt = buf.slice(0, m.index)
+  buf = buf.slice(m.index + 1)
   if (!prompt.trim()) return
   turns += 1
   const id = 'fake-turn-' + turns

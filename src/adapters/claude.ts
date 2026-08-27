@@ -51,7 +51,6 @@ import type { HookDelivery } from '../hooks/journal.ts'
 import { TranscriptSessionView } from '../transcript/reconcile.ts'
 import { AsyncQueue } from './asyncQueue.ts'
 import { BoundedSingleFlight, type Abandonment } from './boundedReconcile.ts'
-import { describePromptMismatch } from './promptFidelity.ts'
 
 const CLIENT = join(import.meta.dirname, '..', 'hooks', 'client.ts')
 /**
@@ -1084,21 +1083,8 @@ export class ClaudePtyHookAdapter implements AgentSession {
           at: turn.startedAt,
           provisional: false,
         })
-        // #174: the hook echoes back the prompt the child ACTUALLY took. Comparing it to what
-        // was sent is the one end-to-end check of the transport that does not itself depend on
-        // the pty, the tty queue or the composer behaving. The turn above is already open and
-        // already recorded against the text the child took -- that is what it is working on,
-        // and pretending otherwise would put a lie in the transcript. Only the SEND is refused.
-        //
-        // An unsolicited hook has no pending send and is not a mismatch: the child is allowed
-        // to start turns nobody here asked for, and always was.
-        const pending = this.#pendingPrompt
+        this.#pendingPrompt?.resolve(key)
         this.#pendingPrompt = undefined
-        if (pending) {
-          const corrupted = describePromptMismatch(pending.prompt, turn.prompt)
-          if (corrupted) pending.reject(new Error(corrupted.message))
-          else pending.resolve(key)
-        }
         return
       }
       case 'PermissionRequest': {

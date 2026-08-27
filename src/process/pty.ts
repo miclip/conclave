@@ -133,18 +133,6 @@ export class PtyProcess extends EventEmitter<PtyProcessEvents> {
     return DECISIVE_TUI_MARKERS.some((m) => this.#markers.has(m))
   }
 
-  /**
-   * True once the child has advertised BRACKETED PASTE specifically.
-   *
-   * Deliberately not `isInteractive`, which any of three decisive markers satisfies. A child
-   * that negotiated focus events or the kitty keyboard protocol has said nothing about how it
-   * treats ESC[200~, and wrapping a payload in a framing the receiver does not parse would put
-   * the literal escape sequences into its composer. Only this marker licenses that.
-   */
-  get bracketedPaste(): boolean {
-    return this.#markers.has('bracketedPaste')
-  }
-
   write(data: string): void {
     if (!this.#alive) throw new Error('write to a dead pty')
     this.#pty.write(data)
