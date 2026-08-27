@@ -198,8 +198,8 @@ export const CITED: Record<string, string> = {
   // Live-claim section in docs/NOTES.md: #156's premise and the unverified-generation guards.
   // These citations assert current fact in a section marked `## LIVE:`, so they are checked even
   // though the rest of docs/** is frozen design record.
-  'src/adapters/claude.ts:1644-1657': 'containedFallback: true,',
-  'src/adapters/codex.ts:1205-1218': 'containedFallback: true,',
+  'src/adapters/claude.ts:1658-1671': 'containedFallback: true,',
+  'src/adapters/codex.ts:1219-1232': 'containedFallback: true,',
   'src/rotation/rotate.ts:484':
     'const generation = snap.containedFallback ? UNKNOWN_GENERATION : snap.compactionGeneration',
   'src/relay/relay.ts:4555': 'async #considerRotation(',
@@ -235,8 +235,8 @@ export const CITED: Record<string, string> = {
     "    return halted ?? this.#acknowledge(impl, (await impl.session.snapshot()).compactionGeneration)",
   'src/relay/relay.ts:7335':
     'const rotated = await this.#considerRotation(seat, report.prose, handle)',
-  'src/adapters/codex.ts:556-562': 'this.#view = new TranscriptSessionView({',
-  'src/adapters/claude.ts:1025-1029': 'this.#view = new TranscriptSessionView({',
+  'src/adapters/codex.ts:557-563': 'this.#view = new TranscriptSessionView({',
+  'src/adapters/claude.ts:1026-1030': 'this.#view = new TranscriptSessionView({',
   'src/relay/relay.ts:2246':
     'const p: RelayParticipant = { id: spec.id, agent: spec.agent, rank, role: spec.role, launch, session, events: [], baselineGeneration: 0, degradationCursor: 0 }',
   'src/relay/report.ts:286-296': 'const snap = await p.session.snapshot()',
@@ -248,8 +248,8 @@ export const CITED: Record<string, string> = {
   'src/adapters/kimi.ts:727': 'compactionGeneration: 0,',
   'src/adapters/opencode.ts:765': 'compactionGeneration: 0,',
   'src/rotation/rotate.ts:412': 'export async function rotate(',
-  'src/adapters/claude.ts:1429': "#state: SessionState = 'running'",
-  'src/adapters/codex.ts:1013': "#state: SessionState = 'running'",
+  'src/adapters/claude.ts:1443': "#state: SessionState = 'running'",
+  'src/adapters/codex.ts:1027': "#state: SessionState = 'running'",
   'src/rotation/handoff.ts:74': 'compactionGeneration: CompactionGeneration',
   'src/workspace/sessionRecord.ts:1408': 'snap.turns.map(',
   'src/relay/relay.ts:3720':
