@@ -50,7 +50,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 import { TranscriptReadAbandoned, TranscriptSessionView } from './reconcile.ts'
 import { RewriteAwareTail, parseJsonLine, type ReadLease } from './tail.ts'
-import { wedgeOneTailPoll } from './tailWedge.ts'
+import { wedgeOneTailPoll, type TailWedge } from './tailWedge.ts'
 import { guaranteesFor } from '../contract/session.ts'
 import type { AgentEvent } from '../contract/session.ts'
 
@@ -152,6 +152,59 @@ const settled = async (v: TranscriptSessionView, within: number = SETTLE_BUDGET_
 const promptsOf = (events: AgentEvent[]): string[] =>
   events.filter((e) => e.type === 'turn_start').map((e) => String(e.prompt))
 
+/**
+ * Run one of the test below's ordinary reads under a name, so a lost lease says WHICH one.
+ *
+ * Diagnostic only. It changes no timing, no lease, and nothing the view does; it catches
+ * `TranscriptReadAbandoned`, restates it with the stage name and the view's counters, and
+ * rethrows with the original as `cause` so the frames survive.
+ *
+ * WHY IT EXISTS. `a wedged read is never joined by a second one` failed once, in a full-suite
+ * run on this machine, at `--test-concurrency=4` alongside the suites that spawn real ptys:
+ *
+ *   ✖ a wedged read is never joined by a second one, however long it lasts (80.502292ms)
+ *     TranscriptReadAbandoned: transcript read abandoned after 60ms without answering; this
+ *     caller stopped waiting
+ *         at Timeout.expire (src/transcript/reconcile.ts)
+ *         at listOnTimeout (node:internal/timers)
+ *
+ * `Timeout.expire` is the lease timer in `#attach`, so an ordinary read did not answer inside
+ * `LEASE_MS`. Which one, the trace does not say: the rejection reaches the test through a timer,
+ * so no frame of this file appears in it, and this test makes several reads. That is the gap
+ * this closes, and it is all it closes.
+ *
+ * WHAT IS NOT KNOWN. It has not been reproduced: 12 runs of this file under 40 spinning CPU
+ * hogs stayed green, as did a second full-suite run (1469 tests, 1443 pass) and the run that
+ * followed it. So CPU contention alone is not the trigger, and the suspicion sits on the real
+ * ptys and filesystem load the rest of the suite brings. Treated as UNREPRODUCED, not fixed.
+ *
+ * WHAT WAS DELIBERATELY NOT DONE. `LEASE_MS` is not raised. A lease that fails once under load
+ * is either a real bound being exceeded -- which raising it hides -- or a test asking for an
+ * answer inside a window the machine cannot promise, which is a question about the test's
+ * shape, not its constant. Neither is answerable from one observation, and the next occurrence
+ * will now arrive with the stage named. Same family as #176.
+ */
+async function readStage<T>(
+  name: string,
+  v: TranscriptSessionView,
+  wedge: TailWedge | undefined,
+  run: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await run()
+  } catch (err) {
+    if (!(err instanceof TranscriptReadAbandoned)) throw err
+    throw new Error(
+      `the "${name}" read lost its ${LEASE_MS}ms lease. readsStalled=${v.readsStalled}, ` +
+        `abandonedReads=${v.abandonedReads}, ` +
+        `wedge.calls=${wedge ? wedge.calls : 'n/a -- no wedge installed at this stage'}. ` +
+        `This is the unreproduced failure described on \`readStage\`; record the stage name and ` +
+        `the counters above, since one observation is what it is short of.`,
+      { cause: err },
+    )
+  }
+}
+
 test('a wedged read is never joined by a second one, however long it lasts', async () => {
   // The invariant, counted rather than inferred. Everything that used to be let past the head
   // -- a retry, an unbounded reader, a budget loop going round and round -- is answered here,
@@ -161,7 +214,7 @@ test('a wedged read is never joined by a second one, however long it lasts', asy
   const v = view(path)
 
   const seen: AgentEvent[] = []
-  seen.push(...(await v.poll()))
+  seen.push(...(await readStage('precondition poll', v, undefined, () => v.poll())))
   assert.deepEqual(promptsOf(seen), ['one'], 'precondition: an ordinary read works')
 
   const wedge = wedgeOneTailPoll()
@@ -228,7 +281,7 @@ test('a wedged read is never joined by a second one, however long it lasts', asy
     await settled(v)
     assert.equal(wedge.calls - before, 1, 'and it landed without any other read ever having been started')
 
-    const after = await v.poll()
+    const after = await readStage('post-release bank drain', v, wedge, () => v.poll())
     seen.push(...after)
     assert.deepEqual(
       promptsOf(after),
@@ -244,7 +297,7 @@ test('a wedged read is never joined by a second one, however long it lasts', asy
     const seqs = seen.map((e) => e.seq)
     assert.equal(new Set(seqs).size, seqs.length, 'no sequence number is issued twice')
 
-    const snap = await v.snapshot()
+    const snap = await readStage('final authoritative snapshot', v, wedge, () => v.snapshot())
     assert.deepEqual(
       snap.turns.map((t) => t.prompt),
       ['one', 'two', 'three'],
