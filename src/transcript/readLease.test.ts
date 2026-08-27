@@ -99,31 +99,55 @@ const PATIENT_MS = 5_000
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
 
 /**
- * Give a released read the turn of the loop it needs to actually settle.
+ * Wait until the view will take a caller again, and say so out loud if it never will.
  *
  * Releasing the wedge lets the held poll RESUME; the view is still holding it until that poll
- * returns and its job runs its `finally`. A view with an overdue read outstanding refuses new
- * callers immediately -- correctly, since it can neither cancel it nor duplicate it -- so a test
- * that reads on the next line is measuring that sub-millisecond window rather than the recovery
- * it meant to check. A real caller retries; a test waits.
- */
-const settled = (): Promise<void> => sleep(25)
-
-/**
- * The same settle with the guess taken out of it: one turn of the microtask queue, and no more.
+ * returns and `#read`'s `finally` runs. Until then a view somebody has called `abandonReads()`
+ * on refuses arrivals with `TranscriptReadAbandoned` -- correctly, since it can neither cancel
+ * the operation nor duplicate it -- and a test that reads on the next line is measuring that
+ * window rather than the recovery it meant to check. A real caller retries; a test waits.
  *
- * `settled()` above waits 25ms because 25ms is usually enough. Nothing makes it enough. The read
- * it waits for resumes from the wedge, does real filesystem work, and only then runs the
- * `finally` that clears the view's `#inflight` and `#stalled`; a caller arriving before that is
- * refused with `TranscriptReadAbandoned`, which is correct behaviour meeting a test that assumed
- * the window had closed. Shrinking the wait to its floor does not create the race. It removes the
- * margin that was hiding it, so the failure is the same one every time instead of once in ten
- * runs on the slowest machine in the matrix.
+ * This waited 25ms. 25ms is a guess about how long a filesystem takes, and #176 is what a guess
+ * costs: one failure in ten platform-attempts on the slowest runner in the matrix, at
+ * `abandonReads() answers everyone at once`, where the sleep ended before the flag cleared and
+ * the snapshot behind it was refused. `readsStalled` is that flag, and it is public because
+ * `cancel()` reads it for exactly this question -- "is there any point asking yet". So the test
+ * asks the same thing the production caller asks, and stops when it has an answer rather than
+ * when a number of milliseconds chosen in 2025 has gone by.
  *
- * Used at exactly one call site, the one being reproduced. The other `settled()` waits are left
- * as they are: this commit is about the failure being visible, not about hunting for its cousins.
+ * TO REPRODUCE #176 DETERMINISTICALLY: put `await Promise.resolve()` in place of a call to this
+ * helper. One microtask is not enough for a released read to finish real filesystem work, so the
+ * flag is still set, and the failure is the same one every run instead of one run in ten. See
+ * the call site in `abandonReads() answers everyone at once` for the recorded output.
+ *
+ * ON THE THREE SITES WHERE NOBODY ABANDONED ANYTHING this returns on the first check, and that
+ * is the correct answer rather than a hole: `#stalled` is set only by `abandonReads()`, and a
+ * view that has not been told to give up does not refuse arrivals at all -- the next caller
+ * ATTACHES to the outstanding read and is answered by it. There is nothing to wait for, so it
+ * does not wait. What the helper guarantees everywhere is the precondition each of those call
+ * sites actually needs: the view is not going to turn the next line away.
+ *
+ * It THROWS on expiry rather than returning. A wait that gives up quietly and lets the next line
+ * run turns "the flag never cleared" into whatever that line happens to assert -- which for #176
+ * was a `TranscriptReadAbandoned` naming a 5000ms lease the caller had not waited any of, three
+ * frames from anything that would tell a reader what went wrong.
  */
-const barelySettled = (): Promise<void> => Promise.resolve()
+const SETTLE_BUDGET_MS = 2_000
+const settled = async (v: TranscriptSessionView, within: number = SETTLE_BUDGET_MS): Promise<void> => {
+  const deadline = Date.now() + within
+  while (v.readsStalled) {
+    if (Date.now() >= deadline) {
+      throw new Error(
+        `the view was still refusing callers ${within}ms after the read was released: ` +
+          `readsStalled is true, so \`#read\`'s \`finally\` has not run and the operation has not ` +
+          `come back. ${v.abandonedReads} read(s) abandoned so far. Either the wedge was not ` +
+          `released, or the release stopped clearing the flag. A machine merely being slow does not ` +
+          `reach here: the default budget is ${SETTLE_BUDGET_MS}ms for work that takes single digits.`,
+      )
+    }
+    await sleep(1)
+  }
+}
 
 const promptsOf = (events: AgentEvent[]): string[] =>
   events.filter((e) => e.type === 'turn_start').map((e) => String(e.prompt))
@@ -201,7 +225,7 @@ test('a wedged read is never joined by a second one, however long it lasts', asy
     // what it found is banked for whoever asks next.
     assert.notEqual(late.abandoned, true, 'a read with no rival has nothing to protect anyone from')
     assert.equal(late.appended.length, 4, 'and it hands back the two turns it was holding all along')
-    await settled()
+    await settled(v)
     assert.equal(wedge.calls - before, 1, 'and it landed without any other read ever having been started')
 
     const after = await v.poll()
@@ -398,10 +422,11 @@ test('abandonReads() answers everyone at once, and starts nothing in their place
     // And the moment it settles, the view reads again -- the same file from the same offset,
     // because the abandoned read committed nothing.
     //
-    // FAILING REPRODUCTION -- #176. `release()` does not settle the read; it lets it RESUME, and
-    // the view stays stalled until the operation's `finally` runs. What stood here was a 25ms
-    // sleep waiting for that, which is a bet on how long a filesystem takes. The snapshot below
-    // is the loser of that bet:
+    // #176 LIVED HERE, and this is how to bring it back. `release()` does not settle the read;
+    // it lets it RESUME, and the view goes on refusing arrivals until `#read`'s `finally` runs.
+    // What stood on the next line was `sleep(25)` -- a bet on how long a filesystem takes -- and
+    // the `snapshot()` below is what loses that bet on a slow enough runner. Substitute
+    // `await Promise.resolve()` for the `settled(v)` below and it loses it every time:
     //
     //   $ node --test src/transcript/readLease.test.ts
     //   ✖ abandonReads() answers everyone at once, and starts nothing in their place (0.951417ms)
@@ -413,17 +438,19 @@ test('abandonReads() answers everyone at once, and starts nothing in their place
     //   ℹ pass 12
     //   ℹ fail 1
     //
-    // Verbatim but for the `line:column` on those three frames, which `citations.test.ts` reads
-    // as citations it is then asked to pin; the frames name the functions, which is the part
-    // that identifies the failure. The full trace is in this commit's message.
+    // Five runs of that, five identical failures, where the 25ms version passed 13/13 five times
+    // over on the same machine. The `line:column` are dropped from those three frames because
+    // `citations.test.ts` reads a `path:line` as a citation it must then pin, and a stack trace
+    // is not a claim about the tree; the frames name the functions, which is the identifying
+    // part. `ca7393d` carries the trace whole.
     //
-    // Five consecutive runs, five identical failures -- where the 25ms version passed 13/13
-    // five times over. The message is the tell: `after 5000ms` is `PATIENT_MS`, this view's whole lease, reported
-    // by a caller that waited none of it. It was refused on arrival by the `#stalled` flag that
-    // had not been cleared yet, which is the same refusal a caller gets from a read that really
-    // has not come back. The test cannot tell those apart, and cannot fix it by waiting longer.
+    // The message is the tell, and the reason a longer sleep was never the answer: `after 5000ms`
+    // is `PATIENT_MS`, this view's entire lease, reported by a caller that waited none of it. It
+    // was refused on arrival by a `#stalled` flag not yet cleared -- the same refusal a caller
+    // gets from a read that genuinely has not come back. No wait can tell those two apart. Only
+    // asking the flag can, which is what `settled()` now does.
     wedge.release()
-    await barelySettled()
+    await settled(v)
     const snap = await v.snapshot()
     assert.deepEqual(snap.turns.map((t) => t.prompt), ['one'], 'a real read of a real file')
     assert.equal(wedge.calls, before + 1, 'exactly one further read, and only after the first settled')
@@ -467,7 +494,7 @@ test('readsStalled says when there is no point waiting, and only then', async ()
     assert.ok((await wedged) instanceof TranscriptReadAbandoned)
 
     wedge.release()
-    await settled()
+    await settled(v)
     assert.equal(v.readsStalled, false, 'and it clears when the operation returns, not before')
     assert.deepEqual(promptsOf(await v.poll()), [], 'the view reads again, and the file is unchanged')
   } finally {
@@ -585,7 +612,7 @@ test('snapshotOrLastBuilt() answers with the last projection built rather than r
   }
 
   // Not a cache that has replaced the file: the next read that lands is authoritative again.
-  await settled()
+  await settled(v)
   assert.deepEqual(promptsOf(await v.poll()), ['two'], 'containment did not consume or lose the append')
   assert.deepEqual(
     (await v.snapshot()).turns.map((t) => t.prompt),
@@ -638,7 +665,7 @@ test('a fallback says so, and a snapshot that was actually read does not', async
   }
 
   // And the mark does not stick to the view: the next read that lands answers unflagged.
-  await settled()
+  await settled(v)
   assert.equal((await v.snapshot()).containedFallback, undefined, 'not latched -- a good read is a good read')
 })
 
