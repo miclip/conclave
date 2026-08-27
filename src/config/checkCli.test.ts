@@ -417,3 +417,32 @@ test('a flag typed with a unicode dash is refused, not ignored', () => {
   assert.match(r.stderr, /Did you mean "--bypass"/, 'and says what was probably meant')
   assert.ok(!/joined as/.test(r.stdout), 'no participant may start')
 })
+
+test('a GOAL beginning with a unicode dash is refused, and `--` is how it is said anyway', () => {
+  // The guard above moved to cover the token no flag claimed, which tightened relay: a goal
+  // that BEGINS with an em or en dash was accepted before and is refused now. The run that
+  // made the change flagged this as pinned by no test of its own, which is what this is.
+  //
+  // The direction is right. `—rounds 4` off a smart-dash substitution matches no flag, and
+  // the goal token is exactly where such a token lands once no flag has claimed it -- so
+  // exempting the goal would reopen the silent drop this issue is about, one position over.
+  //
+  // But it is still a sentence somebody may have meant, so the escape has to be real and has
+  // to be asserted beside the refusal. Both halves here: refused when bare, taken after `--`.
+  const EM = String.fromCharCode(0x2014)
+  const GOAL = `${EM}rewrite the onboarding copy`
+  const run = (argv: string[]) =>
+    spawnSync(process.execPath, [CLI, 'relay', ...argv], { cwd: REPO, encoding: 'utf8', timeout: 20_000 })
+
+  const bare = run([GOAL, '--dry-run'])
+  assert.equal(bare.status, 1, 'refused rather than run')
+  assert.match(bare.stderr, /starts with an em dash/)
+  // The dry-run half of #172, at the goal token: a plan for an argv that was not read is the
+  // failure this issue is about, so the ABSENCE of the plan is what is asserted.
+  assert.ok(!/dry run/.test(bare.stdout), 'and no plan comes back')
+
+  const marked = run(['--dry-run', '--', GOAL])
+  assert.equal(marked.status, 0, '`--` is a real escape, not advice the parser then ignores')
+  assert.match(marked.stdout, /dry run/, 'the plan comes back')
+  assert.ok(!/starts with an em dash/.test(marked.stderr), 'and the goal is not re-read as a flag')
+})
