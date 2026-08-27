@@ -47,15 +47,19 @@ const PASTE_END = '\x1b[201~'
 /**
  * A pty child that records the bytes it receives and interprets none of them.
  *
- * argv: outfile, advertisePaste ('1' | '0'), readAfterMs. Whether it advertises bracketed
- * paste is a parameter because that marker is what `submit()` gates the paste framing on, and
- * a gate needs both of its sides exercised.
+ * argv: outfile, advertise ('paste' | 'focus' | 'none'), readAfterMs. WHICH markers it
+ * announces is a parameter because that is what `submit()` gates the paste framing on, and a
+ * gate needs every side of it exercised -- including a child that is fully interactive by way
+ * of the other two decisive markers and has still said nothing about ESC[200~.
  */
 const RECORDER = `
 import { appendFileSync, writeFileSync } from 'node:fs'
-const [outfile, advertisePaste = '1', readAfterMs = '0'] = process.argv.slice(2)
+const [outfile, advertise = 'paste', readAfterMs = '0'] = process.argv.slice(2)
 writeFileSync(outfile, '')
-if (advertisePaste === '1') process.stdout.write('\\x1b[?2004h')
+if (advertise === 'paste') process.stdout.write('\\x1b[?2004h')
+// focus events AND the kitty keyboard protocol: the other two DECISIVE markers. A child like
+// this is interactive and has said nothing whatsoever about ESC[200~.
+if (advertise === 'focus') process.stdout.write('\\x1b[?1004h\\x1b[>7u')
 process.stdout.write('READY\\n')
 function start() {
   if (process.stdin.isTTY) process.stdin.setRawMode(true)
@@ -83,9 +87,9 @@ setTimeout(() => process.exit(0), 60000)
  */
 const COMPOSER = `
 import { appendFileSync, writeFileSync } from 'node:fs'
-const [outfile, advertisePaste = '1', readAfterMs = '0'] = process.argv.slice(2)
+const [outfile, advertise = 'paste', readAfterMs = '0'] = process.argv.slice(2)
 writeFileSync(outfile, '')
-if (advertisePaste === '1') process.stdout.write('\\x1b[?2004h')
+if (advertise === 'paste') process.stdout.write('\\x1b[?2004h')
 process.stdout.write('READY\\n')
 let composer = ''   // what the user would see in the input box
 let pending = ''    // bytes not yet interpreted
@@ -173,18 +177,24 @@ interface Child {
 }
 
 interface ChildOptions {
-  /** Advertise the bracketed-paste marker. Off exercises the other side of the gate. */
-  advertisePaste?: boolean
+  /**
+   * Which TUI markers the child announces.
+   *
+   * `focus` is the side of the gate that needs stating: focus events and the kitty keyboard
+   * protocol are the other two DECISIVE markers, so such a child IS `isInteractive` and has
+   * still said nothing about bracketed paste. Framing it would be a guess.
+   */
+  advertise?: 'paste' | 'focus' | 'none'
   /** Delay the child's first read, to hold the tty input queue full on purpose. */
   readAfterMs?: number
 }
 
 async function spawnChild(script: string, opts: ChildOptions = {}): Promise<Child> {
-  const { advertisePaste = true, readAfterMs = 0 } = opts
+  const { advertise = 'paste', readAfterMs = 0 } = opts
   const out = join(dir, `recording-${seq++}.bin`)
   const pty = await PtyProcess.spawn({
     file: process.execPath,
-    args: [script, out, advertisePaste ? '1' : '0', String(readAfterMs)],
+    args: [script, out, advertise, String(readAfterMs)],
     cwd: dir,
     env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? dir, TERM: 'xterm-256color' },
   })
@@ -423,10 +433,70 @@ test('#174 the paste framing is gated on the bracketedPaste marker, not on isInt
   assert.ok(framed.startsWith(PASTE_START), 'a child that advertised bracketed paste gets the framing')
   assert.ok(framed.replace(/[\r\n]+$/, '').endsWith(PASTE_END), 'and gets it closed')
 
-  const bare = await submitAndRecord(text, { advertisePaste: false })
+  const bare = await submitAndRecord(text, { advertise: 'none' })
   assert.ok(!bare.includes(PASTE_START), 'a child that never advertised it must not be sent ESC[200~')
   // Chunking is unconditional, so the payload still arrives whole either way.
   assertWholeMessageArrived(text, payloadOf(bare), '300 B to a child with no paste support')
+})
+
+test('#174 an interactive child that never advertised PASTE is not framed anyway', async () => {
+  // The gate is `bracketedPaste`, not `isInteractive`, and this is the case that tells them
+  // apart. Focus events and the kitty keyboard protocol are the other two DECISIVE markers, so
+  // this child is fully interactive -- and it has said nothing whatsoever about ESC[200~.
+  // Framing it would be conclave guessing that a receiver parses a framing it never claimed.
+  const text = payload(300)
+  const { pty, read } = await spawnChild(recorderPath, { advertise: 'focus' })
+  try {
+    assert.equal(pty.isInteractive, true, 'focus events and kitty are decisive markers')
+    assert.equal(pty.bracketedPaste, false, 'but neither of them is bracketed paste')
+
+    await new InputQueue(pty).submit(text)
+    await settle(600)
+    const got = read()
+    assert.ok(!got.includes(PASTE_START), 'an interactive child that never claimed paste must not be sent ESC[200~')
+    // Chunking is unconditional, so the payload still arrives whole.
+    assertWholeMessageArrived(text, payloadOf(got), '300 B to an interactive child with no paste support')
+  } finally {
+    await stop(pty)
+  }
+})
+
+test('#174 the paste markers are written whole, never split across a chunk boundary', async () => {
+  // Observed at the WRITE level, because at the byte level a split marker is indistinguishable
+  // from a whole one -- the tty concatenates either way, and a child that buffers its escape
+  // parser would not notice. That is exactly why it needs pinning here: nothing downstream can
+  // tell, so nothing downstream can catch it if the framing starts being chunked with the body.
+  //
+  // The payload length is chosen so that a naive `chunkForPty(START + text + END)` would put a
+  // boundary INSIDE the closing marker: 6 + 1018 = 1024 is a multiple of the 256 B budget, so
+  // the last chunk would begin three bytes into ESC[201~.
+  const text = payload(1018)
+  const { pty } = await spawnChild(recorderPath)
+  const writes: string[] = []
+  const real = pty.write.bind(pty)
+  ;(pty as unknown as { write: (d: string) => void }).write = (d: string) => {
+    writes.push(d)
+    real(d)
+  }
+  try {
+    await new InputQueue(pty).submit(text)
+    assert.ok(
+      writes.includes(PASTE_START),
+      `ESC[200~ must be one write of its own; writes were ${JSON.stringify(writes.map((w) => w.length))}`,
+    )
+    assert.ok(
+      writes.includes(PASTE_END),
+      `ESC[201~ must be one write of its own; writes were ${JSON.stringify(writes.map((w) => w.length))}`,
+    )
+    // And no other write may carry a marker, whole or in part: a chunk that ends mid-escape is
+    // the failure this is about, and it shows up as a fragment rather than as a full marker.
+    for (const w of writes) {
+      if (w === PASTE_START || w === PASTE_END || w === '\r') continue
+      assert.ok(!w.includes('\x1b'), `a body chunk must carry no escape bytes: ${JSON.stringify(w.slice(0, 24))}`)
+    }
+  } finally {
+    await stop(pty)
+  }
 })
 
 test('#174 a message with embedded newlines reaches the composer as ONE message', async () => {
@@ -455,7 +525,7 @@ test('#174 a composer with no paste support still splits, and that is the gate w
   // The honest limit of gating on the marker: a child that never advertised bracketed paste is
   // typed at, so its newlines are still Enters. Pinned so nobody reads the fix as universal.
   const text = [payload(100), payload(100), payload(100)].join('\n')
-  const messages = await submitToComposer(text, { advertisePaste: false })
+  const messages = await submitToComposer(text, { advertise: 'none' })
   assert.equal(messages.length, 3, 'without the marker the payload is typed, and newlines submit')
 })
 

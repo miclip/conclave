@@ -29,7 +29,7 @@
 
 import { strict as assert } from 'node:assert'
 import test from 'node:test'
-import type { AgentEvent, TurnStartEvent } from '../contract/session.ts'
+import type { AgentEvent, TurnRecord, TurnStartEvent } from '../contract/session.ts'
 import { ClaudePtyHookAdapter } from './claude.ts'
 import { CodexPtyHookAdapter } from './codex.ts'
 import { installFakeClis } from './fakeCli.ts'
@@ -76,6 +76,16 @@ interface Attempt {
   error: Error | undefined
   /** The turn the adapter opened anyway, if it opened one. */
   started: TurnStartEvent | undefined
+  /**
+   * The same turn as the SESSION sees it.
+   *
+   * Separate from `started` on purpose. An event is a thing that was said once; the snapshot is
+   * what the session will keep answering with. "The malformed turn is still recorded" is a
+   * claim about the second, and a refusal that emitted `turn_start` and then quietly dropped
+   * the turn would satisfy the first while leaving the session denying a turn its child is
+   * actually running.
+   */
+  recorded: TurnRecord | undefined
   /** What `InputQueue` recorded writing. The write-side half of the evidence. */
   written: string | undefined
 }
@@ -101,9 +111,12 @@ async function attempt(Adapter: Adapter, message: string, lose: string): Promise
     } catch (e) {
       error = e as Error
     }
+    const started = startOf(await events)
+    const snap = await session.snapshot()
     return {
       error,
-      started: startOf(await events),
+      started,
+      recorded: snap.turns.find((t) => String(t.key) === String(started?.turnKey)),
       written: session.inputLog.find((a) => a.kind === 'submit')?.bytes,
     }
   } finally {
@@ -161,7 +174,7 @@ test('describePromptMismatch names the shape and counts UTF-8 bytes', () => {
 for (const [name, Adapter] of ADAPTERS) {
   test(`${name}: a TRUNCATED prompt is refused, and the malformed turn is still recorded`, async () => {
     const sent = 'please summarise the release notes and then stop'
-    const { error, started, written } = await attempt(Adapter, sent, 'tail:12')
+    const { error, started, recorded, written } = await attempt(Adapter, sent, 'tail:12')
 
     assert.ok(error, 'a send whose text the child mangled must not resolve as delivered')
     assert.match(error.message, /corrupted in transport/)
@@ -173,6 +186,11 @@ for (const [name, Adapter] of ADAPTERS) {
     // transport state honest: the child IS working on that text.
     assert.ok(started, 'the malformed turn must still be opened')
     assert.equal(started.prompt, sent.slice(0, -12))
+    // And it must still be there afterwards. A turn announced and then withdrawn leaves the
+    // session denying work its child is doing, which is a worse lie than the one being fixed.
+    assert.ok(recorded, 'snapshot() must still carry the malformed turn')
+    assert.equal(recorded.prompt, sent.slice(0, -12))
+    assert.equal(recorded.state, 'in_progress', 'the child is still working on it')
 
     // The write side. `submit()` framed and wrote the whole message, so the corruption
     // happened after conclave let go of it -- which is what the diagnostic claims.
@@ -183,7 +201,7 @@ for (const [name, Adapter] of ADAPTERS) {
     // The field symptom. A tail fragment that still parses is the failure this exists for:
     // it is not recoverable by noticing that nothing arrived, because something did.
     const sent = 'do not delete the fixtures; the measurement was wrong'
-    const { error, started, written } = await attempt(Adapter, sent, 'front:38')
+    const { error, started, recorded, written } = await attempt(Adapter, sent, 'front:38')
 
     assert.ok(error, 'a fragment that reads like a sentence is exactly what must not be accepted')
     assert.match(error.message, /SUFFIX of what was sent: the first 38 bytes are missing/)
@@ -191,18 +209,20 @@ for (const [name, Adapter] of ADAPTERS) {
     // What is left starts mid-word and still parses, which is the argument for refusing it
     // rather than trusting a seat to be suspicious of the opening.
     assert.equal(started?.prompt, 'ement was wrong')
+    assert.equal(recorded?.prompt, 'ement was wrong', 'and the session keeps saying so')
     assert.equal(written, `\x1b[200~${sent}\x1b[201~\\r`)
   })
 
   test(`${name}: INTERIOR corruption is refused too, and not mistaken for truncation`, async () => {
     const sent = 'run the suite, then tag the release and push it'
-    const { error, started } = await attempt(Adapter, sent, 'middle:9')
+    const { error, started, recorded } = await attempt(Adapter, sent, 'middle:9')
 
     assert.ok(error)
     assert.match(error.message, /INTERIOR corruption/)
     assert.doesNotMatch(error.message, /PREFIX|SUFFIX/, 'a hole in the middle is neither')
     assert.ok(started, 'still opened')
     assert.notEqual(started.prompt, sent)
+    assert.equal(recorded?.prompt, started.prompt, 'and still recorded, against what the child took')
   })
 
   test(`${name}: an exact MULTILINE prompt is accepted, framing and all`, async () => {
