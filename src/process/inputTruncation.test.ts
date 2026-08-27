@@ -290,13 +290,19 @@ async function submitToComposer(text: string, opts: ChildOptions = {}): Promise<
  * Defect A is a property of one tty implementation, not of ttys, and CI measured that in run
  * 33085187259: on `ubuntu-latest` a 1025 B unchunked write arrived as 1025 -- no ceiling at
  * all -- and on `macos-15-intel` a 4096 B one arrived as 4096 while 1025 was still cut to
- * 1024. Only `darwin-arm64` cut every oversized write to exactly 1024. So the assertion is
- * made where the hazard was measured; everywhere else the same three writes still run and
- * the test SKIPS carrying the numbers this platform actually produced.
+ * 1024. Only `darwin-arm64` cut every oversized write to exactly 1024. So the three tests
+ * below that pin a ceiling SIZE assert it where the hazard was measured; everywhere else
+ * they still perform every write, through a real pty to a real child, and SKIP carrying the
+ * numbers this platform actually produced.
  *
  * The skip is not a pass. It reports; it never asserts a shape it did not measure. On
- * darwin-arm64 the assertion is live, so if the ceiling ever lifts there, this goes red --
- * which is the point of pinning a hazard the fix is designed against.
+ * darwin-arm64 every one of those assertions is live, so if a hazard ever lifts there, the
+ * test that pins it goes red -- which is the point of pinning hazards the fix is designed
+ * against.
+ *
+ * `pacing under the ceiling is what clears it` is NOT gated: it asserts that the whole
+ * message arrives, which is a claim about the fix rather than about the queue's size, and
+ * it holds on every platform CI runs.
  */
 const CEILING_MEASURED_HERE = process.platform === 'darwin' && process.arch === 'arm64'
 const THIS_PLATFORM = `${process.platform}-${process.arch}`
@@ -325,22 +331,32 @@ test('#174 hazard: an unchunked newline-free write is cut to exactly 1024 bytes'
   }
 })
 
-test('#174 hazard: a newline inside the first 1024 bytes lifts it; one past it does not', async () => {
+test('#174 hazard: a newline inside the first 1024 bytes lifts it; one past it does not', async (t) => {
   // The rule, precisely. It is why defect A never fired on real traffic: envelope() puts a
   // newline at byte 249 of every message conclave sends.
+  //
+  // Asserted where the ceiling exists -- see CEILING_MEASURED_HERE. A platform with no
+  // ceiling has no rule to state: on ubuntu-latest the byte-1030 case arrived as all 5031 B,
+  // which is not the rule failing, it is there being nothing to lift.
   const cases: Array<[string, string, number]> = [
     ['newline at byte 500', `${payload(500)}\n${payload(4500)}`, 5001],
     ['newline at byte 1030', `${payload(1030)}\n${payload(4000)}`, 1024],
   ]
+  const measured: string[] = []
   for (const [label, text, expected] of cases) {
     const { pty, read } = await spawnChild(recorderPath)
     try {
       pty.write(text)
       await settle(700)
-      assert.equal(payloadOf(read()).length, expected, label)
+      const arrived = payloadOf(read()).length
+      measured.push(`${label}: ${text.length} B -> ${arrived} B (darwin-arm64: ${expected} B)`)
+      if (CEILING_MEASURED_HERE) assert.equal(arrived, expected, label)
     } finally {
       await stop(pty)
     }
+  }
+  if (!CEILING_MEASURED_HERE) {
+    return t.skip(`the lift rule is asserted on darwin-arm64, where the ceiling it lifts was measured; ${THIS_PLATFORM} received: ${measured.join('; ')}`)
   }
 })
 
@@ -365,7 +381,7 @@ test('#174 hazard: pacing under the ceiling is what clears it', async () => {
   }
 })
 
-test('#174 hazard: chunking cannot rescue a child that has stopped reading', async () => {
+test('#174 hazard: chunking cannot rescue a child that has stopped reading', async (t) => {
   // The residual, stated rather than papered over. There is no drain signal to wait on, so a
   // stalled child still loses the overflow. Noticing that is the mismatch detection #174 asks
   // for, and it is deliberately not in this change.
@@ -373,12 +389,23 @@ test('#174 hazard: chunking cannot rescue a child that has stopped reading', asy
   // 1024 bytes of the RECORDING, framing included: the queue counts what it was handed, and
   // what it was handed opens with ESC[200~. Even the closing marker and the Enter, written
   // 400 ms later, do not fit.
+  //
+  // The SIZE of the residual is the queue's, so it is asserted where that queue was measured:
+  // ubuntu-latest kept 4096 B of the same submit. That a stalled child loses bytes is true on
+  // both; only "and exactly 1024 of them survive" is darwin-arm64's.
   const text = payload(8192)
   const { pty, read } = await spawnChild(recorderPath, { readAfterMs: 1500 })
   try {
     await new InputQueue(pty).submit(text)
     await settle(1800)
-    assert.equal(read().length, 1024, 'a child that reads nothing for 1.5 s keeps 1024 B and no more')
+    const kept = read().length
+    if (!CEILING_MEASURED_HERE) {
+      return t.skip(
+        `the 1024 B residual is asserted on darwin-arm64, where it was measured; ` +
+          `${THIS_PLATFORM} kept ${kept} B of an 8192 B submit after 1.5 s of a child not reading`,
+      )
+    }
+    assert.equal(kept, 1024, 'a child that reads nothing for 1.5 s keeps 1024 B and no more')
   } finally {
     await stop(pty)
   }
