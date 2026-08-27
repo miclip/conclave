@@ -213,8 +213,55 @@ test('a wedged read is never joined by a second one, however long it lasts', asy
   writeFileSync(path, turn('one', 'first'))
   const v = view(path)
 
+  // FAILING REPRODUCTION -- the `precondition poll` stage, made deterministic.
+  //
+  // This read has nothing to do with the invariant below it. No wedge exists yet, `#stalled`
+  // was never set, and the file is two lines that `writeFileSync` has just finished writing.
+  // It is an ORDINARY read, and it is racing exactly one thing: whether the filesystem answers
+  // inside `LEASE_MS`. On a machine where it does not, `#attach`'s lease timer rejects the
+  // caller and this line throws.
+  //
+  // The gate below is that machine, made portable. It holds one tail poll -- this one -- past
+  // the lease and then lets it go, which is what a loaded runner does by accident:
+  //
+  //   $ node --test --test-name-pattern "a wedged read is never joined" \
+  //       src/transcript/readLease.test.ts
+  //   ✖ a wedged read is never joined by a second one, however long it lasts
+  //     Error: the "precondition poll" read lost its 60ms lease. readsStalled=false,
+  //     abandonedReads=1, wedge.calls=n/a -- no wedge installed at this stage.
+  //
+  // Same three counters as the observed failure, and the same stage. `readsStalled=false` is
+  // the load-bearing part of that line: nobody called `abandonReads()`, so this is not the
+  // path #176 was about and not the path `settled()` waits on. `abandonedReads=1` is this
+  // caller counting its own rejection, and nothing else's.
+  //
+  // IT IS A SEPARATE GATE FROM THE WEDGE BELOW, deliberately. That one is armed to count
+  // operations across a wedge that never lifts; this one exists for the length of a single
+  // read and is torn down before the test's real subject begins. Sharing one would make the
+  // call counts the invariant is measured with unreadable.
+  //
+  // OBSERVED, NOT YET EXPLAINED. In the operator's six isolated runs this failure came up
+  // once, and independently `rounds >= 3` failed once with `rounds === 2` -- a second
+  // wall-clock assumption in the same test, that a budget loop gets at least three iterations
+  // inside three lease intervals. Neither is fixed here. This commit makes the first one
+  // reproducible on demand; the second is recorded so the next reader knows it is there.
+  const slow = wedgeOneTailPoll()
+  slow.arm()
+  // Comfortably past the lease rather than a whisker past it: the point is that the read is
+  // late, and a margin that is itself a race would be the same mistake one layer down.
+  const lift = setTimeout(() => slow.release(), LEASE_MS + 40)
+  lift.unref?.()
+
   const seen: AgentEvent[] = []
-  seen.push(...(await readStage('precondition poll', v, undefined, () => v.poll())))
+  try {
+    seen.push(...(await readStage('precondition poll', v, undefined, () => v.poll())))
+  } finally {
+    // The held read is let go and the prototype put back whatever happened, so a failure here
+    // cannot leave a patch installed for the tests behind it.
+    clearTimeout(lift)
+    slow.release()
+    slow.restore()
+  }
   assert.deepEqual(promptsOf(seen), ['one'], 'precondition: an ordinary read works')
 
   const wedge = wedgeOneTailPoll()
