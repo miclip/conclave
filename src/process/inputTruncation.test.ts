@@ -13,6 +13,8 @@
  * There were two defects, with different signatures, and the issue conflated them:
  *
  *   A. A newline-free run over 1024 B was truncated to 1024 in transport. The TAIL was lost.
+ *      That ceiling belongs to one tty implementation, not to ttys: CI measured it on
+ *      darwin-arm64 and NOT on ubuntu-latest, so a test that asserts it says where.
  *   B. A newline in the payload was typed as ENTER, so the child submitted there and the rest
  *      became a separate message. The FRONT was lost, at any size.
  *
@@ -282,18 +284,44 @@ async function submitToComposer(text: string, opts: ChildOptions = {}): Promise<
 // loss: they are the measurement the fix is designed against, not a wish for how it behaves.
 // ---------------------------------------------------------------------------------------
 
-test('#174 hazard: an unchunked newline-free write is cut to exactly 1024 bytes', async () => {
+/**
+ * Where the 1024 B ceiling is a FACT rather than a hope.
+ *
+ * Defect A is a property of one tty implementation, not of ttys, and CI measured that in run
+ * 33085187259: on `ubuntu-latest` a 1025 B unchunked write arrived as 1025 -- no ceiling at
+ * all -- and on `macos-15-intel` a 4096 B one arrived as 4096 while 1025 was still cut to
+ * 1024. Only `darwin-arm64` cut every oversized write to exactly 1024. So the assertion is
+ * made where the hazard was measured; everywhere else the same three writes still run and
+ * the test SKIPS carrying the numbers this platform actually produced.
+ *
+ * The skip is not a pass. It reports; it never asserts a shape it did not measure. On
+ * darwin-arm64 the assertion is live, so if the ceiling ever lifts there, this goes red --
+ * which is the point of pinning a hazard the fix is designed against.
+ */
+const CEILING_MEASURED_HERE = process.platform === 'darwin' && process.arch === 'arm64'
+const THIS_PLATFORM = `${process.platform}-${process.arch}`
+
+test('#174 hazard: an unchunked newline-free write is cut to exactly 1024 bytes', async (t) => {
+  const measured: string[] = []
   for (const n of [1024, 1025, 4096]) {
     const text = payload(n)
     const { pty, read } = await spawnChild(recorderPath)
     try {
       pty.write(text)
       await settle(700)
+      const arrived = payloadOf(read()).length
+      measured.push(`${n} B -> ${arrived} B`)
       // 1024 is the ceiling itself, so it survives; everything above it lands as 1024.
-      assert.equal(payloadOf(read()).length, Math.min(n, 1024), `${n} B written in one call`)
+      if (CEILING_MEASURED_HERE) assert.equal(arrived, Math.min(n, 1024), `${n} B written in one call`)
     } finally {
       await stop(pty)
     }
+  }
+  if (!CEILING_MEASURED_HERE) {
+    return t.skip(
+      `the 1024 B tty ceiling is asserted on darwin-arm64, where it was measured; ` +
+        `${THIS_PLATFORM} wrote unchunked and received: ${measured.join(', ')}`,
+    )
   }
 })
 
