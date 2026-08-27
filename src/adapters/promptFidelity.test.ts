@@ -158,6 +158,21 @@ interface Child {
   /** The child opens a turn of its own when it is told to stop. */
   escOpensTurn?: boolean
   /**
+   * The child ends each turn with its own `Stop`, after this many ms.
+   *
+   * Required by every test that expects a RETRY to happen. The #174 recovery re-sends only
+   * after the CHILD has said the malformed turn ended, and a stand-in that reports nothing --
+   * which is the default here, and is also what Claude Code does when it is interrupted --
+   * gives it nothing to act on. Without this the honest outcome is a refusal, and that case
+   * has its own test.
+   */
+  stopAfterMs?: number
+  /**
+   * The child is deaf to the cancellation: the ESC changes nothing, no turn ends, nothing is
+   * reported. The case the closure gate exists for.
+   */
+  deaf?: boolean
+  /**
    * Put the stand-in in raw mode, as both real CLIs are.
    *
    * Needed by any test that sends more than MAX_CANON (1024 B on darwin): in canonical mode the
@@ -184,13 +199,29 @@ async function attempt(
   else delete process.env['ORCH_FAKE_ESC_TURN']
   if (child.raw) process.env['ORCH_FAKE_RAW'] = '1'
   else delete process.env['ORCH_FAKE_RAW']
+  if (child.stopAfterMs) process.env['ORCH_FAKE_STOP_MS'] = String(child.stopAfterMs)
+  else delete process.env['ORCH_FAKE_STOP_MS']
+  if (child.deaf) process.env['ORCH_FAKE_DEAF'] = '1'
+  else delete process.env['ORCH_FAKE_DEAF']
 
   // `cancelEvidenceBudgetMs` is Codex's only: its cancel() polls the transcript for the child's
   // own `turn_aborted` before it is finished, and this stand-in never writes a transcript, so
   // the default 15 s budget would be spent in full on every recovery here. Claude's options do
   // not have the field and ignore it. Passed as a variable rather than a literal so it is not
   // an excess property on the adapter that does not take it.
-  const opts = { cwd: RUN, role: 'implementer' as const, readyTimeoutMs: 20_000, cancelEvidenceBudgetMs: 1_000 }
+  const opts = {
+    cwd: RUN,
+    role: 'implementer' as const,
+    readyTimeoutMs: 20_000,
+    cancelEvidenceBudgetMs: 1_000,
+    // The whole recovery budget: the cancellation AND the wait for the child's confirmation that
+    // the malformed turn ended. Shortened from ten seconds because one case here is a child that
+    // will never send that confirmation, and the honest refusal is the same refusal whether it
+    // is reached in four seconds or ten. Not shorter: Claude's `cancel()` alone sleeps 1.5 s
+    // before it returns, and a budget that expired inside it would report a cancellation that
+    // did not come back rather than the missing confirmation this suite is about.
+    promptRecoveryMs: 4_000,
+  }
   const session = await Adapter.start(opts)
   try {
     let error: Error | undefined
@@ -220,6 +251,8 @@ async function attempt(
     delete process.env['ORCH_FAKE_LOSE_TURNS']
     delete process.env['ORCH_FAKE_ESC_TURN']
     delete process.env['ORCH_FAKE_RAW']
+    delete process.env['ORCH_FAKE_STOP_MS']
+    delete process.env['ORCH_FAKE_DEAF']
     await session.close()
   }
 }
@@ -357,7 +390,7 @@ for (const [name, Adapter] of ADAPTERS) {
     // stand-in corrupts the first prompt only, so the same bytes typed again arrive whole --
     // and the run repairs itself instead of handing the operator a mangled seat.
     const sent = 'read the issue first; the byte counts in it are the point'
-    const { error, key, starts, turns, notices, actions } = await attempt(Adapter, sent, 'front:9', { loseTurns: 1 })
+    const { error, key, starts, turns, notices, actions } = await attempt(Adapter, sent, 'front:9', { loseTurns: 1, stopAfterMs: 300 })
 
     assert.equal(error, undefined, `a corruption that clears on a re-send must recover: ${error?.message ?? ''}`)
     assert.equal(starts.length, 2, 'the malformed turn, then the re-sent one -- and nothing else')
@@ -388,9 +421,16 @@ for (const [name, Adapter] of ADAPTERS) {
       'typed, cancelled, typed again -- in that order',
     )
 
+    // Closed, not abandoned open -- and closed by the CHILD, which is what made the re-send
+    // legal in the first place. `completed` here rather than `cancelled` because this stand-in
+    // finishes the fragment turn and says so; a child that instead ended on the ESC would read
+    // `cancelled`. Either is a turn the child is no longer running, and that is the claim.
     const malformed = turns.find((t) => String(t.key) === String(starts[0]?.turnKey))
-    assert.equal(malformed?.state, 'cancelled', 'the malformed turn is closed, not abandoned open')
-    assert.equal(malformed?.prompt, sent.slice(9), 'and still recorded against what the child took')
+    assert.ok(
+      malformed && malformed.state !== 'in_progress',
+      `the malformed turn must be closed before anything is re-typed, and it is ${malformed?.state}`,
+    )
+    assert.equal(malformed.prompt, sent.slice(9), 'and still recorded against what the child took')
 
     // Said out loud. A silent retry is a run in which a corrupted prompt happened and nothing
     // anywhere records it, which is how a transport that is quietly failing stays quiet.
@@ -405,7 +445,7 @@ for (const [name, Adapter] of ADAPTERS) {
     // transport, and a third attempt would produce a third malformed turn and teach nobody
     // anything. `attempt` leaves ORCH_FAKE_LOSE_TURNS unset, so every prompt is mangled.
     const sent = 'run the suite and then tag the release'
-    const { error, key, starts, actions } = await attempt(Adapter, sent, 'tail:11')
+    const { error, key, starts, actions } = await attempt(Adapter, sent, 'tail:11', { stopAfterMs: 300 })
 
     assert.equal(key, undefined, 'a send that never got through must not resolve')
     assert.ok(error, 'and must reject')
@@ -429,20 +469,21 @@ for (const [name, Adapter] of ADAPTERS) {
     )
   })
 
-  test(`${name}: a child that will not stop is refused rather than re-sent to`, async () => {
-    // The gate, exercised. This stand-in opens a turn of its own when it is told to stop, so
-    // when the cancellation comes back the transport is open -- and an open turn is precisely
-    // the state in which a re-send is spliced into a running turn rather than replacing the
-    // malformed one (#117). The retry is available, the corruption would have cleared on a
-    // second attempt, and the message is still not typed again. That is the intended trade:
-    // an unrepaired send is recoverable, and two corrupted messages are not.
+  test(`${name}: a child that starts another turn is refused rather than re-sent to`, async () => {
+    // The second gate, exercised. This stand-in DOES confirm that the malformed turn ended --
+    // it sends Stop for it -- and then opens a turn of its own when it is told to stop, which
+    // is what a queued prompt or a human at the same terminal looks like from outside. An open
+    // turn is precisely the state in which a re-send is spliced into a running turn rather than
+    // replacing the malformed one (#117). The retry is available, the corruption would have
+    // cleared on a second attempt, and the message is still not typed again. That is the
+    // intended trade: an unrepaired send is recoverable, and two corrupted messages are not.
     const sent = 'a message this seat will never be told twice'
-    const { error, key, starts, actions } = await attempt(Adapter, sent, 'front:9', { loseTurns: 1, escOpensTurn: true })
+    const { error, key, starts, actions } = await attempt(Adapter, sent, 'front:9', { loseTurns: 1, escOpensTurn: true, stopAfterMs: 300 })
 
     assert.equal(key, undefined, 'the send must not resolve')
     assert.ok(error)
     assert.match(error.message, new RegExp(RETRY_EXHAUSTED), 'and is refused in the same terms as a spent retry')
-    assert.match(error.message, /transport is still open/, 'naming the reason the retry was not attempted')
+    assert.match(error.message, /transport is open again/, 'naming the reason the retry was not attempted')
     assert.match(error.message, /SUFFIX of what was sent: the first 9 bytes are missing/, 'with the original diagnosis intact')
 
     assert.equal(
@@ -461,6 +502,44 @@ for (const [name, Adapter] of ADAPTERS) {
     )
   })
 
+  test(`${name}: a child deaf to the cancellation is never re-sent to`, async () => {
+    // THE GATE. This stand-in takes the fragment and then ignores everything: the ESC changes
+    // nothing, no turn ends, and it reports nothing at all. From out here that is
+    // indistinguishable from a child still running the fragment -- which is the point, because
+    // it is also exactly what Claude Code looks like when it is interrupted. It records an
+    // interruption nowhere.
+    //
+    // The earlier version of this gate would have re-sent here. It accepted `cancel()` coming
+    // back, a shut transport and a settled verdict as "observed closure", and all three are
+    // things conclave does to itself: `cancel()` closes the transport in its own body and mints
+    // a `cancelled` verdict from our note of having typed ESC, at `assumed` confidence. So the
+    // message would have gone into a turn that may well still be running, which is the failure
+    // the gate exists to prevent.
+    const sent = 'a message that must not be typed at a child twice'
+    const { error, key, starts, actions } = await attempt(Adapter, sent, 'front:9', {
+      loseTurns: 1,
+      deaf: true,
+      stopAfterMs: 300,
+    })
+
+    assert.equal(key, undefined, 'the send must not resolve')
+    assert.ok(error)
+    assert.match(error.message, new RegExp(RETRY_EXHAUSTED))
+    assert.match(error.message, /never confirmed that turn/, 'naming what was missing: the child never said so')
+
+    // The whole claim, in one number.
+    assert.equal(
+      actions.filter((a) => a.kind === 'submit').length,
+      1,
+      'the message was typed once, and the retry was withheld for want of the child saying it stopped',
+    )
+    // Cancelled anyway. Withholding the re-send is not the same as leaving the malformed turn
+    // to run: the ESC is still typed, it is just no longer mistaken for an answer.
+    assert.ok(actions.some((a) => a.kind === 'cancel'), 'the malformed turn was still cancelled')
+    assert.equal(starts.length, 1, 'and no second turn was ever opened')
+    assert.equal(starts.filter((st) => st.prompt === sent).length, 0, 'nothing received the message intact')
+  })
+
   test(`${name}: the single-flight claim is HELD across the retry`, async () => {
     // The window this closes: between the corrupted hook and the re-send, the transport is shut
     // and no turn is open, so the guard that refuses a send during a running turn would let a
@@ -469,7 +548,15 @@ for (const [name, Adapter] of ADAPTERS) {
     // being asked to do its job at the one moment it matters.
     process.env['ORCH_FAKE_LOSE'] = 'front:9'
     process.env['ORCH_FAKE_LOSE_TURNS'] = '1'
-    const opts = { cwd: RUN, role: 'implementer' as const, readyTimeoutMs: 20_000, cancelEvidenceBudgetMs: 1_000 }
+    // A child that reports the end of its turns, because a retry only happens after one does.
+    process.env['ORCH_FAKE_STOP_MS'] = '300'
+    const opts = {
+      cwd: RUN,
+      role: 'implementer' as const,
+      readyTimeoutMs: 20_000,
+      cancelEvidenceBudgetMs: 1_000,
+      promptRecoveryMs: 4_000,
+    }
     const session = await Adapter.start(opts)
     try {
       const sent = 'the first message, which the child will mangle once'
@@ -502,6 +589,7 @@ for (const [name, Adapter] of ADAPTERS) {
     } finally {
       delete process.env['ORCH_FAKE_LOSE']
       delete process.env['ORCH_FAKE_LOSE_TURNS']
+      delete process.env['ORCH_FAKE_STOP_MS']
       await session.close()
     }
   })

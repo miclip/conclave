@@ -140,10 +140,15 @@ export function describePromptMismatch(sent: string, received: string): PromptMi
  *
  * Once, and the bound is the whole design:
  *
- *   - A retry is only safe if the malformed turn is OVER. Neither CLI accepts input mid-turn;
- *     a re-send into an open turn is spliced into it rather than queued (#117), which turns
- *     one corrupted message into two. So the retry is gated on an OBSERVED closure -- the same
- *     `#openTurnKey` rule the send guard uses -- and never on a hope that the ESC worked.
+ *   - A retry is only safe if the malformed turn is OVER, and only the CHILD can say that.
+ *     Neither CLI accepts input mid-turn; a re-send into an open turn is spliced into it rather
+ *     than queued (#117), which turns one corrupted message into two. So the retry is gated on
+ *     the child's own account of the ending -- its `Stop`, a `SessionEnd`, the process exiting,
+ *     or Codex's transcript record of the abort -- and never on conclave having typed ESC.
+ *     Typing ESC is something this process did; Claude Code records an interruption nowhere,
+ *     and Codex's `turn_aborted` may never arrive, so a `cancelled` verdict at `assumed`
+ *     confidence is compatible with a child still running the fragment. See
+ *     `TurnState.childClosure` and `#recoverForRetry` in either adapter.
  *   - The single-flight claim is HELD across the whole thing. The window between the mismatch
  *     and the re-send is exactly when a second caller could type into the gap; `send()` is
  *     already the one holding the slot, so it keeps it rather than releasing and re-taking it.
@@ -154,13 +159,17 @@ export function describePromptMismatch(sent: string, received: string): PromptMi
 export const PROMPT_SEND_ATTEMPTS = 2
 
 /**
- * How long the cancellation and its closure may take before the retry is abandoned.
+ * How long the cancellation and the child's confirmation may take before the retry is abandoned.
  *
- * The clock is on RECOVERY, not on the child: what it bounds is the time between "the child
- * took the wrong text" and "the transport is observed shut", after which the answer is a
- * refusal rather than a re-send. Codex adds its own cancellation evidence budget to this,
- * because there the cancellation is not complete until the transcript has been given a chance
- * to say `turn_aborted` -- see `CANCEL_EVIDENCE_BUDGET_MS`.
+ * The clock is on RECOVERY: what it bounds is the time between "the child took the wrong text"
+ * and "the child has said that turn ended", after which the answer is a refusal rather than a
+ * re-send. Codex adds its own cancellation evidence budget to this, because there the
+ * confirmation is a transcript record the child writes after the fact -- see
+ * `CANCEL_EVIDENCE_BUDGET_MS`.
+ *
+ * Ten seconds is long enough for a `Stop` that follows an interrupt and short enough that a
+ * refused send is not mistaken for a hung one. On a CLI that reports nothing when interrupted
+ * it is simply the wait before the refusal, which is the honest outcome there.
  */
 export const PROMPT_RECOVERY_MS = 10_000
 
@@ -227,9 +236,10 @@ export function promptRetryExhausted(first: PromptMismatch, again: PromptMismatc
 export function promptRetryNotAttempted(mismatch: PromptMismatch, why: string): string {
   return (
     `${RETRY_EXHAUSTED}: the child accepted a corrupted prompt and it was NOT sent again, because ` +
-    `${why}. Neither CLI accepts input mid-turn, so a re-send into a turn that has not been ` +
-    `observed to stop is spliced into the malformed one rather than replacing it -- two corrupted ` +
-    `messages instead of one. Cancel the seat and send again once it is idle.\n` +
+    `${why}. Neither CLI accepts input mid-turn, so a re-send into a turn the CHILD has not said ` +
+    `it finished is spliced into the malformed one rather than replacing it -- two corrupted ` +
+    `messages instead of one. The malformed turn was cancelled; send again once the seat is ` +
+    `idle.\n` +
     `${mismatch.message}`
   )
 }

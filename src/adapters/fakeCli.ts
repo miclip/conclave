@@ -71,8 +71,13 @@ function onComposerSubmit(handler) {
         // with Escape. Buffering it as a character instead would make the NEXT prompt start
         // with a stray control byte, which the #174 comparison then reports as corruption the
         // transport never caused.
+        //
+        // ORCH_FAKE_DEAF drops the byte and changes nothing: a child that is deaf to the
+        // cancellation. It does not clear, it does not stop, and it says nothing -- so from
+        // outside, an interrupted turn and a turn still running the fragment are the same
+        // picture. That is the case the #174 retry must refuse rather than type into.
         pending = pending.slice(esc + 1)
-        composer = ''
+        if (!process.env.ORCH_FAKE_DEAF) composer = ''
         continue
       }
       if (open === at) {
@@ -103,8 +108,10 @@ function onComposerSubmit(handler) {
  * ORCH_FAKE_LOSE_TURNS bounds the corruption to the first N prompts, so a stand-in can be a
  * transport that glitched once rather than one that is broken for good. ORCH_FAKE_ESC_TURN
  * makes it a child that opens a turn when it is told to stop, which is the one condition under
- * which a corrupted prompt must NOT be re-sent. ORCH_FAKE_RAW puts it in raw mode, as both real
- * CLIs are, which is what a test needs before it can send it more than MAX_CANON bytes.
+ * which a corrupted prompt must NOT be re-sent. ORCH_FAKE_DEAF is the quieter version of the
+ * same hazard: it ignores the ESC completely and reports nothing, so nothing the child produces
+ * ever says the turn ended. ORCH_FAKE_RAW puts it in raw mode, as both real CLIs are, which is
+ * what a test needs before it can send it more than MAX_CANON bytes.
  */
 export const FAKE_CLI = `#!/usr/bin/env node
 const url = process.env.ORCH_HOOK_URL
@@ -163,7 +170,7 @@ onComposerSubmit(function (prompt) {
   // ORCH_FAKE_SPEAK: say ONE thing and then go quiet, which is a turn that stopped rather than
   // a child that never started. A PermissionRequest is used because it is the only child-sourced
   // event this stand-in can produce without writing a transcript.
-  if (stopAfter > 0) {
+  if (stopAfter > 0 && !process.env.ORCH_FAKE_DEAF) {
     setTimeout(function () {
       post('Stop', { prompt_id: id, turn_id: id, last_assistant_message: 'done' })
     }, stopAfter)

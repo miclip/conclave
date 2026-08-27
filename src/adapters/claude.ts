@@ -112,6 +112,20 @@ interface TurnState {
    * that came from the child, which is what separates "went quiet" from "never spoke".
    */
   produced: boolean
+  /**
+   * How the CHILD said this turn ended, if it has said so at all.
+   *
+   * Undefined until something the child produced closes the turn: its own `Stop`, a
+   * `SessionEnd`, the process exiting, or -- on Codex -- the transcript recording how the turn
+   * finished. Conclave typing ESC does NOT set it, and that distinction is the whole reason
+   * the field exists: `cancel()` closes the transport and mints a `cancelled` verdict from our
+   * own record of the keystroke at `assumed` confidence, so a turn that was cancelled looks
+   * closed from in here whether or not the child ever stopped running it.
+   *
+   * Read by the #174 retry, which may only re-type a message once the child itself has been
+   * heard from. See `#recoverForRetry`.
+   */
+  childClosure: string | undefined
 }
 
 /**
@@ -175,6 +189,14 @@ export function mergeKnownTurns(
 export interface ClaudeAdapterOptions {
   cwd: string
   role: Role
+  /**
+   * How long the #174 recovery may wait for the CHILD to confirm the malformed turn ended,
+   * before the send is refused instead of re-sent. Defaults to `PROMPT_RECOVERY_MS`.
+   *
+   * Not for production use. Shortening it makes a session give up on a confirmation that was
+   * merely slow, which turns a recoverable corruption into a refusal.
+   */
+  promptRecoveryMs?: number | undefined
   inputOwnership?: InputOwnership | undefined
   /** Extra CLI args, e.g. ['--permission-mode', 'default']. */
   args?: string[] | undefined
@@ -364,6 +386,15 @@ const DEADLINE_OUTCOMES = new Set(['timed_out', 'unknown_abnormal_end'])
 
 
 /** How long to wait for a submitted prompt to appear in the transcript before repairing. */
+/**
+ * How often the #174 recovery asks whether the child has confirmed the malformed turn ended.
+ *
+ * A poll, because the confirmation arrives on the hook thread or from a transcript read, and
+ * neither of them has anything to notify. Short enough that the common case -- a `Stop` landing
+ * a moment after the ESC -- costs the recovery nothing measurable.
+ */
+const RECOVERY_POLL_MS = 50
+
 const SUBMIT_LANDED_MS = 6_000
 
 /** How long to wait after the repair keystroke before concluding the text never landed. */
@@ -983,7 +1014,7 @@ export class ClaudePtyHookAdapter implements AgentSession {
    * that is not accepting input: not queued behind the turn, spliced into it, which is the
    * failure #117 is about.
    *
-   * Opened by `UserPromptSubmit` and closed only by something that OBSERVED the child stop:
+   * Opened by `UserPromptSubmit` and closed only by one of these:
    *
    *   Stop            the child's own hook, for this turn and not an earlier one
    *   SessionEnd      the session is over, so no turn in it is running
@@ -991,6 +1022,14 @@ export class ClaudePtyHookAdapter implements AgentSession {
    *   cancel()        ESC typed and the input queue drained -- a completed cancellation
    *
    * A deadline expiring closes none of them, which is the whole point.
+   *
+   * Three of those four are the CHILD's account and the fourth is ours. A completed
+   * cancellation is the right rule for THIS question -- may a new send start? -- because a
+   * cancelled seat is one an operator has taken back, and refusing forever after an unanswered
+   * ESC would leave the seat unusable. It is not evidence that the child stopped: Claude Code
+   * records an interruption nowhere and Codex may not write `turn_aborted` for a while. Any
+   * decision that turns on the child actually having stopped -- the #174 retry is the one that
+   * does -- reads `TurnState.childClosure` instead, which only the child's own signals set.
    *
    * The consequence is deliberate and worth stating: a turn whose `Stop` is LOST stays open here
    * until something cancels it, and sends to that seat are refused meanwhile. That is the same
@@ -1081,6 +1120,7 @@ export class ClaudePtyHookAdapter implements AgentSession {
           endSeq: undefined,
           assistantText: undefined,
           produced: false,
+          childClosure: undefined,
         }
         if (this.#producedBeforeTurn) {
           this.#producedBeforeTurn = false
@@ -1157,12 +1197,16 @@ export class ClaudePtyHookAdapter implements AgentSession {
         // The child's own statement that it is done, which is the only routine way this
         // closes. Keyed, so a late Stop for an earlier turn does not free a running one.
         this.#closeTransport(String(turn.key))
+        // And it is the child's, which is what a #174 retry needs before it re-types anything.
+        turn.childClosure ??= 'the child sent Stop for it'
         this.#apply(turn, turn.tracker.observeHook('Stop', d.payload), false)
         return
       }
       case 'SessionEnd': {
         // The session is over, so nothing in it is still running.
         this.#closeTransport(undefined)
+        // The child's own account of the ending, so a #174 retry may act on it.
+        for (const t of this.#liveTurns()) t.childClosure ??= 'the child ended the session'
         // Session-level, not turn-level. Recorded as evidence on turns still open.
         for (const t of this.#liveTurns()) {
           this.#apply(t, t.tracker.observeHook('SessionEnd', d.payload), true)
@@ -1436,6 +1480,7 @@ export class ClaudePtyHookAdapter implements AgentSession {
     this.#pendingPrompt = undefined
     // A dead child is executing nothing. The strongest form of an observed stop.
     this.#closeTransport(undefined)
+    for (const t of this.#liveTurns()) t.childClosure ??= `the child exited (${reason})`
 
     // The child is gone: whatever the turns are, they are not still running. The deadline
     // has nothing left to say and must not fire against a dead session.
@@ -1545,7 +1590,7 @@ export class ClaudePtyHookAdapter implements AgentSession {
   }
 
   /**
-   * Cancel a malformed turn and establish that the child has stopped working on it.
+   * Cancel a malformed turn and wait for the CHILD to say it ended.
    *
    * Returns only when a re-send is SAFE. Every other path throws, and the throw is the refusal
    * -- `send()` does not type anything after catching one. That asymmetry is deliberate: the
@@ -1553,9 +1598,28 @@ export class ClaudePtyHookAdapter implements AgentSession {
    * that was still running", which splices two messages together (#117) and produces a second
    * corrupted prompt out of a mechanism meant to repair the first.
    *
-   * What counts as observed closure is not a new rule. It is the two this adapter already
-   * keeps: the transport is shut (`#openTurnKey`, closed by `cancel()`'s completed ESC) and the
-   * malformed turn has a verdict (`tracker.settled`, which the cancellation gives it).
+   * ## Why our own cancellation is not evidence
+   *
+   * The first version of this gate accepted `cancel()` returning, plus a shut transport and a
+   * settled verdict. Every one of those is something THIS process did. `cancel()` types ESC,
+   * calls `#closeTransport(undefined)` itself, and mints a `cancelled` verdict from our own
+   * record of the keystroke at `assumed` confidence -- which is exactly what `assumed` means
+   * and why the adapter grades it that way. Claude records a cancellation nowhere at all, and
+   * Codex's `turn_aborted` may never arrive within the evidence budget. So a child that took
+   * the fragment, ignored the ESC and carried on running it satisfied the whole gate, and the
+   * re-send went into a live turn: the precise failure the gate exists to prevent, reached
+   * through the mechanism meant to prevent it.
+   *
+   * What is required now is CHILD-DERIVED closure for the malformed turn specifically -- its
+   * own `Stop`, a `SessionEnd`, the process exiting, or, on Codex, the transcript recording how
+   * it ended. See `TurnState.childClosure`. The ESC is still typed, because cancelling is the
+   * right thing to do with a turn running text nobody sent and because it clears the composer
+   * before anything is re-typed; it just no longer counts as the child having answered.
+   *
+   * The cost is stated rather than hidden: on Claude, which emits nothing when interrupted, a
+   * corrupted prompt whose turn does not end on its own will be cancelled and REFUSED rather
+   * than retried. That is the intended trade. An unrepaired send is recoverable by an operator;
+   * two messages spliced into one turn are not.
    */
   async #recoverForRetry(bad: CorruptedPromptError): Promise<void> {
     const malformed = this.#turnFor(bad.turnKey)
@@ -1573,6 +1637,7 @@ export class ClaudePtyHookAdapter implements AgentSession {
     })
 
     const refuse = (why: string): Error => new Error(promptRetryNotAttempted(bad.mismatch, why))
+    const until = Date.now() + this.#recoveryMs
 
     let timer: NodeJS.Timeout | undefined
     const outcome = await Promise.race([
@@ -1581,27 +1646,45 @@ export class ClaudePtyHookAdapter implements AgentSession {
         (e: unknown) => (e instanceof Error ? e : new Error(String(e))),
       ),
       new Promise<'timeout'>((r) => {
-        timer = setTimeout(() => r('timeout'), PROMPT_RECOVERY_MS)
+        timer = setTimeout(() => r('timeout'), this.#recoveryMs)
       }),
     ]).finally(() => clearTimeout(timer))
 
-    // A cancellation still in flight is not an observed closure, however likely it is to
+    // A cancellation that has not come back is not a completed one, however likely it is to
     // finish a moment later. It keeps running -- nothing here can stop it -- and the seat is
     // left cancelled and idle, which is the state an operator can send into by hand.
     if (outcome === 'timeout') {
-      throw refuse(`the cancellation of turn ${bad.turnKey} had not come back after ${PROMPT_RECOVERY_MS} ms`)
+      throw refuse(`the cancellation of turn ${bad.turnKey} had not come back after ${this.#recoveryMs} ms`)
     }
     if (outcome !== 'cancelled') {
       throw refuse(`the cancellation of turn ${bad.turnKey} failed: ${outcome.message}`)
     }
-    const open = this.#openTurn()
-    if (open) throw refuse(`the transport is still open on turn ${String(open.key)}`)
-    if (malformed && !malformed.tracker.settled) {
-      throw refuse(`turn ${bad.turnKey} has no verdict after the cancellation, so it may still be running`)
+    // Now the only question that matters: has the CHILD said this turn ended? The ESC above is
+    // ours and proves nothing about what the child did with it.
+    if (!malformed) {
+      throw refuse(`turn ${bad.turnKey} is not on record, so nothing can be said about whether it ended`)
     }
+    while (!malformed.childClosure && Date.now() < until) {
+      await new Promise((r) => setTimeout(r, RECOVERY_POLL_MS))
+    }
+    if (!malformed.childClosure) {
+      throw refuse(
+        `the child never confirmed that turn ${bad.turnKey} ended: ESC was typed and ${this.#recoveryMs} ms ` +
+          `passed with no Stop, no SessionEnd and no exit. Claude Code records an interruption nowhere, so ` +
+          `conclave's own note of having sent ESC is not evidence the child stopped -- and it may still be ` +
+          `running the fragment`,
+      )
+    }
+    const open = this.#openTurn()
+    if (open) throw refuse(`the transport is open again, on turn ${String(open.key)}`)
     if (this.#state !== 'running' || !this.acceptsInput) {
       throw refuse(`the session is ${this.#state} and no longer accepting input`)
     }
+  }
+
+  /** The shipped recovery bound unless this session was given another. */
+  get #recoveryMs(): number {
+    return this.#opts.promptRecoveryMs ?? PROMPT_RECOVERY_MS
   }
 
   /** The body of `send()`, after the guards and the pending-prompt slot are settled. */
