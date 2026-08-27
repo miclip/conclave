@@ -20,7 +20,7 @@ import { join } from 'node:path'
 import { PassThrough, Writable } from 'node:stream'
 import test from 'node:test'
 import { AsyncQueue } from '../adapters/asyncQueue.ts'
-import { VALUED_FLAGS, main } from '../../bin/conclave.ts'
+import { FLAG_SURFACE, main } from '../../bin/conclave.ts'
 import { flagReader } from '../config/cliFlags.ts'
 import { newSessionId, recordSession } from '../workspace/sessionRecord.ts'
 import type { Verdict } from '../contract/outcome.ts'
@@ -1934,7 +1934,7 @@ async function seatsFromSessionCli(): Promise<{ creates: CreateRecord[]; cwd: st
  * The two machine-readable documents a default run actually emits.
  *
  * Both come out of one `relay --json` run in a temporary repository, through the production
- * call sites: the report is what `bin/conclave.ts:1567` prints, and the status record is what
+ * call sites: the report is what `bin/conclave.ts:1682` prints, and the status record is what
  * `recordSession` wrote during that same run, read back by `main(['status', '--json'])` --
  * which resolves the most recent session in `process.cwd()`, so the record has to have been
  * written where an operator would look for it.
@@ -2479,7 +2479,7 @@ test('default run works in the run cwd and creates no worktree', async () => {
     assert.equal(c.cwd, fromCli.cwd, `the session CLI must create ${c.id} in the run cwd`)
   }
 
-  // The relay CLI passes process.cwd() as the run cwd: bin/conclave.ts:1475-1477.
+  // The relay CLI passes process.cwd() as the run cwd: bin/conclave.ts:1590-1592.
   // The relay hands that same cwd to each participant adapter: src/relay/relay.ts:2237-2243.
   // The cwd getter simply returns the option: src/relay/relay.ts:1956-1958.
   assert.match(relay, /cwd:\s*process\.cwd\(\)/, 'relay block must start in process.cwd')
@@ -2587,8 +2587,8 @@ test('both flag helpers fall back when the flag is absent, and each block reads 
   // A default invocation must be able to run with just a goal. Both front-ends now read their
   // flags with the one shared `flagReader`, and every flag read in either block goes through it,
   // so none become required. See DECLARED['one flag reader for both front-ends'].
-  assertFlagHelperOptional(relay, 'relay', VALUED_FLAGS.relay)
-  assertFlagHelperOptional(session, 'session', VALUED_FLAGS.session)
+  assertFlagHelperOptional(relay, 'relay', FLAG_SURFACE.relay.valued)
+  assertFlagHelperOptional(session, 'session', FLAG_SURFACE.session.valued)
 
   // Pin the current optional flag set for each front-end. This includes both the valued flags
   // read with flag('--name') and the boolean flags checked with includes('--name').
