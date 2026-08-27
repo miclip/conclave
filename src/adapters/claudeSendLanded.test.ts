@@ -35,6 +35,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { ClaudePtyHookAdapter } from './claude.ts'
+import { COMPOSER_JS } from './fakeCli.ts'
 
 /**
  * Stands in for `claude` on PATH: a child mid-turn, swallowing input, transcript still moving.
@@ -74,36 +75,31 @@ append({
   message: { role: 'assistant', stop_reason: 'tool_use', content: [{ type: 'tool_use', name: 'Bash', input: { command: 'sleep 600' } }] },
 })
 
-// Bracketed paste: what PtyProcess reads as "a real interactive raw-mode UI".
+// Bracketed paste: what PtyProcess reads as "a real interactive raw-mode UI", and what
+// InputQueue.submit() frames its payloads with. COMPOSER_JS implements the other half --
+// without it this stand-in would record the framing as part of the prompt and the exact-match
+// check below would fail for a reason that has nothing to do with a swallowed send.
 process.stdout.write('\\x1b[?2004h')
-
-let buf = ''
+${COMPOSER_JS}
 let submits = 0
-process.stdin.on('data', function (d) {
-  buf += d.toString()
-  for (;;) {
-    const m = /[\\r\\n]/.exec(buf)
-    if (!m) return
-    const prompt = buf.slice(0, m.index)
-    buf = buf.slice(m.index + 1)
-    // A bare Enter at an empty composer does nothing at all, which is exactly what the first
-    // repair is betting on when the composer might have held the text.
-    if (!prompt.trim()) continue
-    submits += 1
-    fs.appendFileSync(submitLog, JSON.stringify(prompt) + '\\n')
-    if (landAt > 0 && submits >= landAt) {
-      const id = 'fake-turn-' + submits
-      append({ type: 'user', sessionId: 'fake-session', message: { role: 'user', content: prompt } })
-      post('UserPromptSubmit', { prompt_id: id, turn_id: id, prompt: prompt })
-    } else {
-      // Swallowed. The keystrokes never became a prompt -- and the transcript grows anyway,
-      // because the turn already running is what is writing to it.
-      append({
-        type: 'user',
-        sessionId: 'fake-session',
-        message: { role: 'user', content: '<task-notification>\\n<task-id>bg-' + submits + '</task-id>\\n</task-notification>' },
-      })
-    }
+onComposerSubmit(function (prompt) {
+  // A bare Enter at an empty composer does nothing at all, which is exactly what the first
+  // repair is betting on when the composer might have held the text.
+  if (!prompt.trim()) return
+  submits += 1
+  fs.appendFileSync(submitLog, JSON.stringify(prompt) + '\\n')
+  if (landAt > 0 && submits >= landAt) {
+    const id = 'fake-turn-' + submits
+    append({ type: 'user', sessionId: 'fake-session', message: { role: 'user', content: prompt } })
+    post('UserPromptSubmit', { prompt_id: id, turn_id: id, prompt: prompt })
+  } else {
+    // Swallowed. The keystrokes never became a prompt -- and the transcript grows anyway,
+    // because the turn already running is what is writing to it.
+    append({
+      type: 'user',
+      sessionId: 'fake-session',
+      message: { role: 'user', content: '<task-notification>\\n<task-id>bg-' + submits + '</task-id>\\n</task-notification>' },
+    })
   }
 })
 
