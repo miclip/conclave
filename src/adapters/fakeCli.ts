@@ -100,6 +100,10 @@ function onComposerSubmit(handler) {
  *
  * ORCH_FAKE_LOSE makes it a CORRUPTING child: it reports having taken a mangled version of
  * what it was typed, which is the #174 condition every downstream witness agrees with.
+ * ORCH_FAKE_LOSE_TURNS bounds the corruption to the first N prompts, so a stand-in can be a
+ * transport that glitched once rather than one that is broken for good. ORCH_FAKE_ESC_TURN
+ * makes it a child that opens a turn when it is told to stop, which is the one condition under
+ * which a corrupted prompt must NOT be re-sent.
  */
 export const FAKE_CLI = `#!/usr/bin/env node
 const url = process.env.ORCH_HOOK_URL
@@ -109,9 +113,16 @@ const stopAfter = Number(process.env.ORCH_FAKE_STOP_MS || 0)
 // ORCH_FAKE_LOSE=front:N | tail:N | middle:N -- a child that accepted text which is not the
 // text that was sent (#174). It reports what it TOOK, which is the whole point: every witness
 // downstream then agrees on the wrong message, and only the sender can tell.
+//
+// ORCH_FAKE_LOSE_TURNS=N bounds that to the first N prompts, which is the difference between a
+// transport that dropped bytes once and one that is broken. The adapters treat those two
+// differently -- the first is retried, the second is refused -- so a stand-in that can only be
+// permanently broken cannot exercise the recovery at all.
 const lose = String(process.env.ORCH_FAKE_LOSE || '')
-function asReceived(prompt) {
+const loseTurns = Number(process.env.ORCH_FAKE_LOSE_TURNS || 0)
+function asReceived(prompt, nth) {
   if (!lose) return prompt
+  if (loseTurns > 0 && nth > loseTurns) return prompt
   const how = lose.split(':')[0]
   const n = Number(lose.split(':')[1] || 0)
   if (how === 'front') return prompt.slice(n)
@@ -147,7 +158,7 @@ onComposerSubmit(function (prompt) {
   if (process.env.ORCH_FAKE_SPEAK) {
     post('PermissionRequest', { prompt_id: id, turn_id: id, tool_name: 'Bash', tool_input: { command: 'ls' } })
   }
-  post('UserPromptSubmit', { prompt_id: id, turn_id: id, prompt: asReceived(prompt) })
+  post('UserPromptSubmit', { prompt_id: id, turn_id: id, prompt: asReceived(prompt, turns) })
   // ORCH_FAKE_SPEAK: say ONE thing and then go quiet, which is a turn that stopped rather than
   // a child that never started. A PermissionRequest is used because it is the only child-sourced
   // event this stand-in can produce without writing a transcript.
@@ -158,6 +169,32 @@ onComposerSubmit(function (prompt) {
   }
   // Otherwise: nothing, ever. This is the hang the watchdog exists for.
 })
+
+// ORCH_FAKE_ESC_TURN: a child that does NOT stop when it is told to. On a bare ESC it opens a
+// turn of its own instead -- which is what a resumed session, a queued prompt, or a human at
+// the same terminal looks like from outside. The #174 recovery has to refuse to type into
+// that: a re-send here is spliced into a running turn rather than replacing the malformed one.
+if (process.env.ORCH_FAKE_ESC_TURN) {
+  // Raw mode, and it is load-bearing rather than tidy. Without it the tty line discipline is
+  // CANONICAL: a lone ESC is buffered until a newline arrives, so the child does not see the
+  // cancellation until the NEXT prompt is typed -- and a child that reacts to the ESC only
+  // after the re-send cannot stand in for one that ignored it. Both real CLIs set raw mode;
+  // the other stand-ins do not, because nothing else here depends on when a bare byte lands.
+  if (process.stdin.isTTY) process.stdin.setRawMode(true)
+  var escTurns = 0
+  process.stdin.on('data', function (d) {
+    var s = d.toString()
+    for (var i = 0; i < s.length; i++) {
+      // A bare ESC, not the ESC that opens a paste marker or any other CSI sequence.
+      if (s.charAt(i) === '\\x1b' && s.charAt(i + 1) !== '[') {
+        escTurns += 1
+        var escId = 'fake-esc-turn-' + escTurns
+        post('UserPromptSubmit', { prompt_id: escId, turn_id: escId, prompt: 'a turn nobody asked for' })
+        return
+      }
+    }
+  })
+}
 
 post('SessionStart', { transcript_path: process.env.ORCH_FAKE_TRANSCRIPT })
 setInterval(function () {}, 1 << 30)

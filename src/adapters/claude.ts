@@ -51,7 +51,16 @@ import type { HookDelivery } from '../hooks/journal.ts'
 import { TranscriptSessionView } from '../transcript/reconcile.ts'
 import { AsyncQueue } from './asyncQueue.ts'
 import { BoundedSingleFlight, type Abandonment } from './boundedReconcile.ts'
-import { describePromptMismatch } from './promptFidelity.ts'
+import {
+  CorruptedPromptError,
+  describePromptMismatch,
+  isCorruptedPrompt,
+  PROMPT_RECOVERY_MS,
+  PROMPT_SEND_ATTEMPTS,
+  promptRetryExhausted,
+  promptRetryNotAttempted,
+  type PromptMismatch,
+} from './promptFidelity.ts'
 
 const CLIENT = join(import.meta.dirname, '..', 'hooks', 'client.ts')
 /**
@@ -68,6 +77,16 @@ const HOOK_EVENTS = [
   'Stop',
   'SessionEnd',
 ]
+
+/**
+ * The one send this session is waiting on a hook for. See `#pendingPrompt`, and
+ * `PROMPT_SEND_ATTEMPTS` for why a corrupted send keeps it rather than releasing it.
+ */
+interface PendingPrompt {
+  resolve: (k: TurnKey) => void
+  reject: (e: Error) => void
+  prompt: string
+}
 
 interface TurnState {
   key: TurnKey
@@ -629,7 +648,7 @@ export class ClaudePtyHookAdapter implements AgentSession {
   #ready = false
   #closed = false
   #closeMode: 'graceful' | 'abandoned' | undefined
-  #pendingPrompt: { resolve: (k: TurnKey) => void; reject: (e: Error) => void; prompt: string } | undefined
+  #pendingPrompt: PendingPrompt | undefined
   #opts: ClaudeAdapterOptions
   #folderTrust: FolderTrustAcceptance | undefined
   #notices: string[] = []
@@ -1093,11 +1112,18 @@ export class ClaudePtyHookAdapter implements AgentSession {
         // An unsolicited hook has no pending send and is not a mismatch: the child is allowed
         // to start turns nobody here asked for, and always was.
         const pending = this.#pendingPrompt
-        this.#pendingPrompt = undefined
         if (pending) {
           const corrupted = describePromptMismatch(pending.prompt, turn.prompt)
-          if (corrupted) pending.reject(new Error(corrupted.message))
-          else pending.resolve(key)
+          if (!corrupted) {
+            this.#pendingPrompt = undefined
+            pending.resolve(key)
+          } else {
+            // The claim is NOT released here, and that is the point of releasing it in exactly
+            // one place instead: `send()` may cancel this turn and type the message once more,
+            // and the slot is what stops a second caller from sending into the gap while that
+            // is happening. `send()` gives it back on every path out, including this one.
+            pending.reject(new CorruptedPromptError(corrupted, String(key)))
+          }
         }
         return
       }
@@ -1478,19 +1504,103 @@ export class ClaudePtyHookAdapter implements AgentSession {
     }
     if (!this.acceptsInput) throw new Error('session is not accepting input')
     this.#refuseOverlappingSend()
-    const keyed = new Promise<TurnKey>((resolve, reject) => {
-      this.#pendingPrompt = { resolve, reject, prompt: message }
-    })
+
+    // ONE claim, held across both attempts. See `PROMPT_SEND_ATTEMPTS`: the window between a
+    // corrupted prompt and its re-send is exactly when a second caller could type into the
+    // gap, so the retry does not release the slot and take it again -- it never lets go.
+    let claim: PendingPrompt | undefined
+    let first: PromptMismatch | undefined
     try {
-      return await this.#submit(message, keyed)
-    } catch (e) {
-      // Release the slot on the way out. A send that failed still claimed it, and leaving it
-      // claimed would make the guard above refuse every later send on this session -- turning
-      // one failed prompt into a seat that can never be spoken to again. The turn, if the hook
-      // does arrive late, is created by `#onHook` from the hook's own payload and does not need
-      // this promise; nothing but this method ever awaited it.
-      this.#pendingPrompt = undefined
-      throw e
+      for (let attempt = 1; ; attempt++) {
+        const keyed = new Promise<TurnKey>((resolve, reject) => {
+          claim = { resolve, reject, prompt: message }
+          this.#pendingPrompt = claim
+        })
+        try {
+          return await this.#submit(message, keyed)
+        } catch (e) {
+          // Only a corrupted prompt is retried. A hook timeout, a swallowed submit or a dead
+          // child are different failures with their own repairs, and typing the message again
+          // on top of one of those is how the same prompt gets delivered twice.
+          if (!isCorruptedPrompt(e)) throw e
+          if (attempt >= PROMPT_SEND_ATTEMPTS) throw new Error(promptRetryExhausted(first ?? e.mismatch, e.mismatch))
+          first = e.mismatch
+          // Throws if the malformed turn cannot be shown to be over, and that throw is the
+          // refusal: nothing below it re-types anything.
+          await this.#recoverForRetry(e)
+        }
+      }
+    } finally {
+      // Released here and nowhere else on the send path. A send that failed still claimed the
+      // slot, and leaving it claimed would make the guard above refuse every later send on this
+      // session -- turning one failed prompt into a seat that can never be spoken to again. The
+      // turn, if the hook does arrive late, is created by `#onHook` from the hook's own payload
+      // and does not need this promise; nothing but this method ever awaited it.
+      //
+      // By identity, because a resolved send has already had its slot cleared by the hook, and
+      // clearing unconditionally here would throw away a claim the NEXT send had made in the
+      // meantime -- letting two sends run at once through the guard that exists to stop that.
+      if (this.#pendingPrompt === claim) this.#pendingPrompt = undefined
+    }
+  }
+
+  /**
+   * Cancel a malformed turn and establish that the child has stopped working on it.
+   *
+   * Returns only when a re-send is SAFE. Every other path throws, and the throw is the refusal
+   * -- `send()` does not type anything after catching one. That asymmetry is deliberate: the
+   * dangerous outcome here is not "gave up too early", it is "typed the message into a turn
+   * that was still running", which splices two messages together (#117) and produces a second
+   * corrupted prompt out of a mechanism meant to repair the first.
+   *
+   * What counts as observed closure is not a new rule. It is the two this adapter already
+   * keeps: the transport is shut (`#openTurnKey`, closed by `cancel()`'s completed ESC) and the
+   * malformed turn has a verdict (`tracker.settled`, which the cancellation gives it).
+   */
+  async #recoverForRetry(bad: CorruptedPromptError): Promise<void> {
+    const malformed = this.#turnFor(bad.turnKey)
+    // Said out loud, because a silent retry is a run where a corrupted prompt happened and
+    // nothing anywhere records it. Non-fatal: this is a repair in progress, not a failure.
+    this.#emit({
+      type: 'error',
+      message:
+        `#174: the child accepted a corrupted prompt (${bad.mismatch.shape}, ${bad.mismatch.lostBytes} of ` +
+        `${bad.mismatch.sentBytes} bytes lost). Cancelling turn ${bad.turnKey} and sending the message once more.`,
+      fatal: false,
+      seq: this.#next(),
+      at: Date.now(),
+      provisional: false,
+    })
+
+    const refuse = (why: string): Error => new Error(promptRetryNotAttempted(bad.mismatch, why))
+
+    let timer: NodeJS.Timeout | undefined
+    const outcome = await Promise.race([
+      this.cancel().then(
+        () => 'cancelled' as const,
+        (e: unknown) => (e instanceof Error ? e : new Error(String(e))),
+      ),
+      new Promise<'timeout'>((r) => {
+        timer = setTimeout(() => r('timeout'), PROMPT_RECOVERY_MS)
+      }),
+    ]).finally(() => clearTimeout(timer))
+
+    // A cancellation still in flight is not an observed closure, however likely it is to
+    // finish a moment later. It keeps running -- nothing here can stop it -- and the seat is
+    // left cancelled and idle, which is the state an operator can send into by hand.
+    if (outcome === 'timeout') {
+      throw refuse(`the cancellation of turn ${bad.turnKey} had not come back after ${PROMPT_RECOVERY_MS} ms`)
+    }
+    if (outcome !== 'cancelled') {
+      throw refuse(`the cancellation of turn ${bad.turnKey} failed: ${outcome.message}`)
+    }
+    const open = this.#openTurn()
+    if (open) throw refuse(`the transport is still open on turn ${String(open.key)}`)
+    if (malformed && !malformed.tracker.settled) {
+      throw refuse(`turn ${bad.turnKey} has no verdict after the cancellation, so it may still be running`)
+    }
+    if (this.#state !== 'running' || !this.acceptsInput) {
+      throw refuse(`the session is ${this.#state} and no longer accepting input`)
     }
   }
 
