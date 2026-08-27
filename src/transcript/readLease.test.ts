@@ -153,36 +153,42 @@ const promptsOf = (events: AgentEvent[]): string[] =>
   events.filter((e) => e.type === 'turn_start').map((e) => String(e.prompt))
 
 /**
- * Run one of the test below's ordinary reads under a name, so a lost lease says WHICH one.
+ * Run one of the test below's ordinary reads to an ANSWER, and name the stage if it never gets
+ * one.
  *
- * Diagnostic only. It changes no timing, no lease, and nothing the view does; it catches
- * `TranscriptReadAbandoned`, restates it with the stage name and the view's counters, and
- * rethrows with the original as `cause` so the frames survive.
+ * These three reads are not the subject of anything. They set the file up, they drain what a
+ * released read banked, and they check the final projection; every assertion about the
+ * invariant is somewhere else. What they were nonetheless asserting, silently, is that a cold
+ * filesystem read answers inside `LEASE_MS` -- 60ms -- on whatever machine happens to be
+ * running them. That is not a property of this code. It is a property of the disk, and it is
+ * the one this test kept losing:
  *
- * WHY IT EXISTS. `a wedged read is never joined by a second one` failed once, in a full-suite
- * run on this machine, at `--test-concurrency=4` alongside the suites that spawn real ptys:
- *
- *   ✖ a wedged read is never joined by a second one, however long it lasts (80.502292ms)
- *     TranscriptReadAbandoned: transcript read abandoned after 60ms without answering; this
- *     caller stopped waiting
+ *   ✖ a wedged read is never joined by a second one, however long it lasts
+ *     Error: the "precondition poll" read lost its 60ms lease. readsStalled=false,
+ *     abandonedReads=1, wedge.calls=n/a -- no wedge installed at this stage.
+ *     [cause]: TranscriptReadAbandoned: transcript read abandoned after 60ms ...
  *         at Timeout.expire (src/transcript/reconcile.ts)
- *         at listOnTimeout (node:internal/timers)
  *
- * `Timeout.expire` is the lease timer in `#attach`, so an ordinary read did not answer inside
- * `LEASE_MS`. Which one, the trace does not say: the rejection reaches the test through a timer,
- * so no frame of this file appears in it, and this test makes several reads. That is the gap
- * this closes, and it is all it closes.
+ * `readsStalled=false` and no wedge: nothing had been abandoned and nothing was being held.
+ * An ordinary read was simply late, and a caller with a 60ms lease was told so -- which is the
+ * lease doing its job, correctly, at a test that had no business asking for that guarantee.
  *
- * WHAT IS NOT KNOWN. It has not been reproduced: 12 runs of this file under 40 spinning CPU
- * hogs stayed green, as did a second full-suite run (1469 tests, 1443 pass) and the run that
- * followed it. So CPU contention alone is not the trigger, and the suspicion sits on the real
- * ptys and filesystem load the rest of the suite brings. Treated as UNREPRODUCED, not fixed.
+ * SO IT RETRIES, because that is what the lease is FOR. `TranscriptReadAbandoned` is not a
+ * failure; it is "no answer yet, ask again if you still care" -- the contract `BoundedSingleFlight`
+ * is built on, and the same answer a real deadline re-check gets. A caller that still cares
+ * asks again, attaches to the same operation, and is answered when it lands. Nothing here
+ * duplicates a read: `#inflight` guarantees one operation and this loop just keeps a waiter on
+ * it.
  *
- * WHAT WAS DELIBERATELY NOT DONE. `LEASE_MS` is not raised. A lease that fails once under load
- * is either a real bound being exceeded -- which raising it hides -- or a test asking for an
- * answer inside a window the machine cannot promise, which is a question about the test's
- * shape, not its constant. Neither is answerable from one observation, and the next occurrence
- * will now arrive with the stage named. Same family as #176.
+ * WHAT IT DELIBERATELY IS NOT. Not a longer lease -- `LEASE_MS` is unchanged, and raising it
+ * would only move the machine at which this breaks. Not a sleep -- there is no interval here to
+ * guess, and guessing one is the mistake this whole issue exists to remove. The bound is
+ * `PATIENT_MS`, and what it buys is a diagnostic rather than a hang: a read that never answers
+ * in five seconds is a real defect and says so, with the stage, the counters and the attempt
+ * count.
+ *
+ * Only `TranscriptReadAbandoned` is retried. Anything else -- an unreadable file, a parse that
+ * threw -- is a real failure of a real read and goes straight up.
  */
 async function readStage<T>(
   name: string,
@@ -190,18 +196,33 @@ async function readStage<T>(
   wedge: TailWedge | undefined,
   run: () => Promise<T>,
 ): Promise<T> {
-  try {
-    return await run()
-  } catch (err) {
-    if (!(err instanceof TranscriptReadAbandoned)) throw err
-    throw new Error(
-      `the "${name}" read lost its ${LEASE_MS}ms lease. readsStalled=${v.readsStalled}, ` +
-        `abandonedReads=${v.abandonedReads}, ` +
-        `wedge.calls=${wedge ? wedge.calls : 'n/a -- no wedge installed at this stage'}. ` +
-        `This is the unreproduced failure described on \`readStage\`; record the stage name and ` +
-        `the counters above, since one observation is what it is short of.`,
-      { cause: err },
-    )
+  const deadline = Date.now() + PATIENT_MS
+  let attempts = 0
+  let abandoned = 0
+  for (;;) {
+    attempts++
+    try {
+      return await run()
+    } catch (err) {
+      if (!(err instanceof TranscriptReadAbandoned)) throw err
+      abandoned++
+      if (Date.now() >= deadline) {
+        throw new Error(
+          `the "${name}" read never answered inside ${PATIENT_MS}ms: ${attempts} attempt(s), ` +
+            `${abandoned} of them told the read had not come back. readsStalled=${v.readsStalled}, ` +
+            `abandonedReads=${v.abandonedReads}, ` +
+            `wedge.calls=${wedge ? wedge.calls : 'n/a -- no wedge installed at this stage'}. ` +
+            `A single lost ${LEASE_MS}ms lease is ordinary and is retried; ${PATIENT_MS}ms of them ` +
+            `is a read that is not coming back, which is a defect rather than a slow disk.`,
+          { cause: err },
+        )
+      }
+      // A turn of the macrotask queue before asking again. Not a delay -- there is nothing to
+      // wait out, and no number is being guessed. A rejection that arrives without ever
+      // reaching the filesystem settles on the microtask queue, and a loop that never leaves it
+      // would starve the very timers that let the read finish.
+      await new Promise((r) => setImmediate(r))
+    }
   }
 }
 
@@ -213,38 +234,31 @@ test('a wedged read is never joined by a second one, however long it lasts', asy
   writeFileSync(path, turn('one', 'first'))
   const v = view(path)
 
-  // FAILING REPRODUCTION -- the `precondition poll` stage, made deterministic.
+  // THE GATE STAYS ON. It was the reproduction; it is now the guard, and it runs every time.
   //
   // This read has nothing to do with the invariant below it. No wedge exists yet, `#stalled`
   // was never set, and the file is two lines that `writeFileSync` has just finished writing.
-  // It is an ORDINARY read, and it is racing exactly one thing: whether the filesystem answers
-  // inside `LEASE_MS`. On a machine where it does not, `#attach`'s lease timer rejects the
-  // caller and this line throws.
+  // It is an ORDINARY read, and the only thing it was ever racing is whether the filesystem
+  // answers inside `LEASE_MS`. On a loaded machine it does not, and the test used to fail:
   //
-  // The gate below is that machine, made portable. It holds one tail poll -- this one -- past
-  // the lease and then lets it go, which is what a loaded runner does by accident:
-  //
-  //   $ node --test --test-name-pattern "a wedged read is never joined" \
-  //       src/transcript/readLease.test.ts
   //   ✖ a wedged read is never joined by a second one, however long it lasts
   //     Error: the "precondition poll" read lost its 60ms lease. readsStalled=false,
   //     abandonedReads=1, wedge.calls=n/a -- no wedge installed at this stage.
   //
-  // Same three counters as the observed failure, and the same stage. `readsStalled=false` is
-  // the load-bearing part of that line: nobody called `abandonReads()`, so this is not the
-  // path #176 was about and not the path `settled()` waits on. `abandonedReads=1` is this
-  // caller counting its own rejection, and nothing else's.
+  // The gate below is that machine, made portable: it holds this one tail poll past the lease
+  // and then lets it go, which is what a loaded runner does by accident. The read is guaranteed
+  // to lose its first lease, every run, on every machine. It is not guaranteed to lose the
+  // second, because by then the gate has lifted -- which is the whole point. `readStage` asks
+  // again, attaches to the same operation, and is answered when it lands.
   //
-  // IT IS A SEPARATE GATE FROM THE WEDGE BELOW, deliberately. That one is armed to count
-  // operations across a wedge that never lifts; this one exists for the length of a single
-  // read and is torn down before the test's real subject begins. Sharing one would make the
-  // call counts the invariant is measured with unreadable.
+  // IT IS A SEPARATE GATE FROM THE WEDGE BELOW, deliberately, and torn down before the test's
+  // real subject begins. That one is armed to count operations across a wedge that never lifts;
+  // sharing it would make the call counts the invariant is measured with unreadable.
   //
-  // OBSERVED, NOT YET EXPLAINED. In the operator's six isolated runs this failure came up
-  // once, and independently `rounds >= 3` failed once with `rounds === 2` -- a second
-  // wall-clock assumption in the same test, that a budget loop gets at least three iterations
-  // inside three lease intervals. Neither is fixed here. This commit makes the first one
-  // reproducible on demand; the second is recorded so the next reader knows it is there.
+  // STILL OPEN, NOT TOUCHED HERE. `rounds >= 3` further down is a second wall-clock assumption
+  // in this same test -- that a budget loop gets three iterations inside three lease intervals
+  // -- and the operator saw it fail once with `rounds === 2`. It is a different question from
+  // this one and is left alone.
   const slow = wedgeOneTailPoll()
   slow.arm()
   // Comfortably past the lease rather than a whisker past it: the point is that the read is
@@ -252,6 +266,7 @@ test('a wedged read is never joined by a second one, however long it lasts', asy
   const lift = setTimeout(() => slow.release(), LEASE_MS + 40)
   lift.unref?.()
 
+  const lostLeasesBefore = v.abandonedReads
   const seen: AgentEvent[] = []
   try {
     seen.push(...(await readStage('precondition poll', v, undefined, () => v.poll())))
@@ -262,6 +277,14 @@ test('a wedged read is never joined by a second one, however long it lasts', asy
     slow.release()
     slow.restore()
   }
+  // The guard proving the guard. Without this the gate could stop holding anything -- an
+  // `arm()` that no longer catches, a lease that quietly grew -- and the retry would go on
+  // passing while testing nothing at all.
+  assert.ok(
+    v.abandonedReads > lostLeasesBefore,
+    `the gate must actually cost this read a lease, or the retry below it is proving nothing: ` +
+      `abandonedReads went ${lostLeasesBefore} -> ${v.abandonedReads}`,
+  )
   assert.deepEqual(promptsOf(seen), ['one'], 'precondition: an ordinary read works')
 
   const wedge = wedgeOneTailPoll()
