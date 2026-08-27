@@ -18,6 +18,64 @@ import { join } from 'node:path'
  */
 
 /**
+ * A composer that honours BRACKETED PASTE, for pasting into a stand-in that advertises it.
+ *
+ * Every one of these fakes writes `ESC[?2004h`, which is the marker `PtyProcess` reads as "a
+ * real interactive raw-mode UI" -- and, since #174, the marker `InputQueue.submit()` gates its
+ * paste framing on. A stand-in that advertises the capability has to implement it, or it is
+ * not standing in for anything: text between `ESC[200~` and `ESC[201~` is inserted into the
+ * composer LITERALLY, newlines inside it are characters rather than Enter, and the Enter that
+ * arrives after the paste is the one submission.
+ *
+ * Typed text keeps the old behaviour, because that is also still real: without the framing a
+ * newline IS Enter, which is the defect #174 is about.
+ *
+ * JavaScript source, spliced into the CJS stand-ins below. `onComposerSubmit(fn)` calls `fn`
+ * once per submission with exactly what the composer held.
+ */
+export const COMPOSER_JS = `
+function onComposerSubmit(handler) {
+  let composer = ''
+  let pending = ''
+  let pasting = false
+  // A terminator can straddle two reads, so never commit the last few bytes of a partial one.
+  function holdBack() {
+    const keep = Math.max(0, pending.length - 5)
+    composer += pending.slice(0, keep)
+    pending = pending.slice(keep)
+  }
+  process.stdin.on('data', function (d) {
+    pending += d.toString()
+    for (;;) {
+      if (pasting) {
+        const close = pending.indexOf('\\x1b[201~')
+        if (close === -1) return holdBack()
+        composer += pending.slice(0, close)
+        pending = pending.slice(close + 6)
+        pasting = false
+        continue
+      }
+      const open = pending.indexOf('\\x1b[200~')
+      const m = /[\\r\\n]/.exec(pending)
+      const enter = m ? m.index : -1
+      if (open !== -1 && (enter === -1 || open < enter)) {
+        composer += pending.slice(0, open)
+        pending = pending.slice(open + 6)
+        pasting = true
+        continue
+      }
+      if (enter === -1) return holdBack()
+      composer += pending.slice(0, enter)
+      pending = pending.slice(enter + 1)
+      const prompt = composer
+      composer = ''
+      handler(prompt)
+    }
+  })
+}
+`
+
+/**
  * Stands in for `claude` / `codex` on PATH. Extensionless and shebanged, so Node runs it
  * as CJS -- it therefore uses no import or require at all.
  *
@@ -37,17 +95,12 @@ function post(event, extra) {
   }).catch(function () {})
 }
 
-// Bracketed paste: what PtyProcess reads as "a real interactive raw-mode UI".
+// Bracketed paste: what PtyProcess reads as "a real interactive raw-mode UI", and what
+// InputQueue.submit() frames its payloads with. COMPOSER_JS implements the other half.
 process.stdout.write('\\x1b[?2004h')
-
-let buf = ''
+${COMPOSER_JS}
 let turns = 0
-process.stdin.on('data', function (d) {
-  buf += d.toString()
-  const m = /[\\r\\n]/.exec(buf)
-  if (!m) return
-  const prompt = buf.slice(0, m.index)
-  buf = buf.slice(m.index + 1)
+onComposerSubmit(function (prompt) {
   if (!prompt.trim()) return
   turns += 1
   const id = 'fake-turn-' + turns

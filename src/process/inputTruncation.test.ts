@@ -1,44 +1,35 @@
 /**
- * #174: bytes written to a seat's pty in one burst go missing, silently.
+ * #174: bytes written to a seat's pty in one burst went missing, silently. This is the fix,
+ * and the measurements it stands on.
  *
  *   node --test src/process/inputTruncation.test.ts
  *
- * This file is a REPRODUCTION, not a fix. Some of it fails on purpose against
- * `InputQueue.submit()` as it stands; those failures are the evidence, and a fix is what turns
- * them green. Nothing is mocked -- a real pty, a real child, real bytes, and the child records
- * exactly what it was handed.
+ * Nothing here is mocked: a real pty, a real child, real bytes, and the child records exactly
+ * what it was handed. Two children, and which one a test uses is the test's whole argument.
+ * The RECORDER appends bytes to a file and interprets nothing -- no line editor, no paste
+ * parser, no redraw -- so whatever it fails to receive was lost below the application. The
+ * COMPOSER models a TUI: raw mode, a buffer, bracketed paste inserted literally, Enter submits.
  *
- * There are TWO defects here, they have different signatures, and the issue conflates them.
+ * There were two defects, with different signatures, and the issue conflated them:
  *
- *   A. A newline-free run longer than 1024 bytes is truncated to 1024 in transport. The TAIL
- *      is lost. Measured on darwin 25.5.0, deterministic (10 of 11 observations; one 5000-byte
- *      run passed and did not repeat).
- *   B. A newline in the payload is typed as ENTER. The child submits at that point and the rest
- *      of the message becomes a separate message. The FRONT is lost, at any size.
+ *   A. A newline-free run over 1024 B was truncated to 1024 in transport. The TAIL was lost.
+ *   B. A newline in the payload was typed as ENTER, so the child submitted there and the rest
+ *      became a separate message. The FRONT was lost, at any size.
  *
- * The issue reports the FRONT going missing, so B is the one that produced the field incidents
- * and A is not -- and the tests below say so rather than asserting it. Every message conclave
- * sends a seat goes through `envelope()`, which puts a header and a blank line in front of the
- * body, so the wire always carries a newline at byte 249. That newline lifts A's ceiling
- * entirely: `the wire shape conclave actually sends` below carries 64 KB through the same pty
- * without losing a byte. A cannot be what truncated a 934-byte field message.
+ * B is what produced the field reports, and A did not. Every send goes through `envelope()`,
+ * which puts a blank line after the header, so byte 249 is always a newline -- and a newline
+ * inside the first 1024 B lifts A's ceiling entirely. A could not have truncated a 934 B field
+ * message. It is fixed here anyway: it is one newline-free payload away from mattering.
  *
- * Four candidate causes, one controlled case each:
- *
- *   1. tty input queue                 RULED IN for A. The same bytes to the same child, paced
- *                                      instead of burst, arrive whole. Only pacing differs.
- *   2. child line-editor behaviour     RULED OUT for A. The recorder child has no line editor,
- *                                      no paste heuristic and no redraw, and loses bytes anyway.
- *                                      It is the whole of B.
- *   3. settle-delay race               RULED OUT. Identical loss at 0 ms, at the production
- *                                      400 ms, and at 2000 ms.
- *   4. embedded-newline early submit   RULED IN, and it is defect B. 302 bytes -- three times
- *                                      under any transport ceiling -- arrive as three messages.
+ * Part 1 pins the hazard at the raw pty layer, writing through `pty.write` and asserting the
+ * loss. Those tests describe the environment `submit()` has to work in, and they still lose
+ * bytes on purpose. Part 2 puts the same shapes through `InputQueue.submit()` and asserts they
+ * arrive whole.
  *
  * Harness caveat, so the recordings are not over-read: the recorder is a Node child in
  * `setRawMode(true)`, which leaves ICRNL on, so a CR it receives is recorded as LF. A real
- * agent TUI sets its own termios and need not match. That is why the conclusions above are
- * drawn from `\n` payloads and byte counts, never from which of CR/LF landed.
+ * agent TUI sets its own termios and need not match. Conclusions here are drawn from byte
+ * counts and from `\n` payloads, never from which of CR/LF landed.
  */
 
 import { strict as assert } from 'node:assert'
@@ -47,66 +38,106 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { envelope } from '../relay/message.ts'
-import { InputQueue } from './input.ts'
+import { chunkForPty, InputQueue } from './input.ts'
 import { PtyProcess } from './pty.ts'
+
+const PASTE_START = '\x1b[200~'
+const PASTE_END = '\x1b[201~'
 
 /**
  * A pty child that records the bytes it receives and interprets none of them.
  *
- * It advertises bracketed paste so `PtyProcess.isInteractive` is true, which is what a real
- * seat looks like -- the detection the issue points at is present, and unused, either way.
+ * argv: outfile, advertisePaste ('1' | '0'), readAfterMs. Whether it advertises bracketed
+ * paste is a parameter because that marker is what `submit()` gates the paste framing on, and
+ * a gate needs both of its sides exercised.
  */
 const RECORDER = `
 import { appendFileSync, writeFileSync } from 'node:fs'
-const [outfile, delayMs = '0'] = process.argv.slice(2)
+const [outfile, advertisePaste = '1', readAfterMs = '0'] = process.argv.slice(2)
 writeFileSync(outfile, '')
-process.stdout.write('\\x1b[?2004h')
+if (advertisePaste === '1') process.stdout.write('\\x1b[?2004h')
 process.stdout.write('READY\\n')
 function start() {
   if (process.stdin.isTTY) process.stdin.setRawMode(true)
   process.stdin.on('data', (b) => appendFileSync(outfile, b))
   process.stdin.resume()
 }
-if (Number(delayMs) > 0) setTimeout(start, Number(delayMs))
+if (Number(readAfterMs) > 0) setTimeout(start, Number(readAfterMs))
 else start()
 setTimeout(() => process.exit(0), 60000)
 `
 
 /**
- * A pty child that models a TUI composer: raw mode, a buffer, and CR or LF submits.
+ * A pty child that models a TUI composer.
  *
- * It honours bracketed paste, because the children conclave drives do -- that is what the
- * `[?2004h` marker means. One JSON record per submission, so an early submission shows up as
- * an extra record rather than as a difference in length.
+ * Raw mode, one buffer, and the two ways text can enter it:
+ *
+ *   - typed  -- CR or LF is ENTER. Everything buffered so far is submitted and the buffer
+ *               starts again. This is the behaviour defect B rides on.
+ *   - pasted -- text between ESC[200~ and ESC[201~ is inserted into the buffer LITERALLY.
+ *               Newlines inside it are characters, not Enter, so a paste never submits. The
+ *               Enter that arrives after the paste is what submits, once.
+ *
+ * That is what bracketed paste means, and modelling it any other way would let this file
+ * agree with a fix that does not work.
  */
 const COMPOSER = `
 import { appendFileSync, writeFileSync } from 'node:fs'
-const [outfile] = process.argv.slice(2)
+const [outfile, advertisePaste = '1', readAfterMs = '0'] = process.argv.slice(2)
 writeFileSync(outfile, '')
-process.stdout.write('\\x1b[?2004h')
+if (advertisePaste === '1') process.stdout.write('\\x1b[?2004h')
 process.stdout.write('READY\\n')
-if (process.stdin.isTTY) process.stdin.setRawMode(true)
-let buf = ''
+let composer = ''   // what the user would see in the input box
+let pending = ''    // bytes not yet interpreted
 let pasting = false
-process.stdin.on('data', (b) => {
-  buf += b.toString('binary')
+function submit() {
+  appendFileSync(outfile, JSON.stringify({ text: composer }) + '\\n')
+  composer = ''
+}
+function onData(b) {
+  pending += b.toString('utf8')
   for (;;) {
-    if (!pasting && buf.startsWith('\\x1b[200~')) { pasting = true; buf = buf.slice(6); continue }
     if (pasting) {
-      const close = buf.indexOf('\\x1b[201~')
-      if (close === -1) break
-      appendFileSync(outfile, JSON.stringify({ kind: 'paste', text: buf.slice(0, close) }) + '\\n')
-      buf = buf.slice(close + 6)
+      const close = pending.indexOf('\\x1b[201~')
+      if (close === -1) {
+        // Hold back a possible partial terminator straddling a read boundary.
+        const keep = Math.max(0, pending.length - 5)
+        composer += pending.slice(0, keep)
+        pending = pending.slice(keep)
+        break
+      }
+      composer += pending.slice(0, close)
+      pending = pending.slice(close + 6)
       pasting = false
       continue
     }
-    const m = buf.search(/[\\r\\n]/)
-    if (m === -1) break
-    appendFileSync(outfile, JSON.stringify({ kind: 'submit', text: buf.slice(0, m) }) + '\\n')
-    buf = buf.slice(m + 1)
+    const open = pending.indexOf('\\x1b[200~')
+    const enter = pending.search(/[\\r\\n]/)
+    if (open !== -1 && (enter === -1 || open < enter)) {
+      composer += pending.slice(0, open)
+      pending = pending.slice(open + 6)
+      pasting = true
+      continue
+    }
+    if (enter !== -1) {
+      composer += pending.slice(0, enter)
+      pending = pending.slice(enter + 1)
+      submit()
+      continue
+    }
+    const keep = Math.max(0, pending.length - 5)
+    composer += pending.slice(0, keep)
+    pending = pending.slice(keep)
+    break
   }
-})
-process.stdin.resume()
+}
+function start() {
+  process.stdin.on('data', onData)
+  if (process.stdin.isTTY) process.stdin.setRawMode(true)
+  process.stdin.resume()
+}
+if (Number(readAfterMs) > 0) setTimeout(start, Number(readAfterMs))
+else start()
 setTimeout(() => process.exit(0), 60000)
 `
 
@@ -119,12 +150,12 @@ writeFileSync(composerPath, COMPOSER)
 let seq = 0
 
 /**
- * A payload that carries its own offsets and contains no newline.
+ * A payload that carries its own offsets and contains NO newline.
  *
  * `[000000][000010]...` means a fragment says where in the message it came from, so a failure
- * reports "lost the first N bytes" or "lost from N on" instead of "lengths differ". Newline-free
- * is load-bearing: a newline anywhere in the first 1024 bytes changes the answer, which is what
- * `a newline inside the first 1024 bytes lifts the ceiling` exists to pin.
+ * reports "lost the first N" or "lost the last N" instead of "lengths differ". Newline-free is
+ * load-bearing: a newline in the first 1024 bytes changes the transport answer, which is what
+ * `a newline inside the first 1024 bytes lifts it` exists to pin.
  */
 function payload(n: number): string {
   let s = ''
@@ -141,18 +172,25 @@ interface Child {
   read: () => string
 }
 
-/** `readAfterMs` delays the child's first read, to hold the tty input queue full on purpose. */
-async function spawnChild(script: string, readAfterMs = 0): Promise<Child> {
+interface ChildOptions {
+  /** Advertise the bracketed-paste marker. Off exercises the other side of the gate. */
+  advertisePaste?: boolean
+  /** Delay the child's first read, to hold the tty input queue full on purpose. */
+  readAfterMs?: number
+}
+
+async function spawnChild(script: string, opts: ChildOptions = {}): Promise<Child> {
+  const { advertisePaste = true, readAfterMs = 0 } = opts
   const out = join(dir, `recording-${seq++}.bin`)
   const pty = await PtyProcess.spawn({
     file: process.execPath,
-    args: [script, out, String(readAfterMs)],
+    args: [script, out, advertisePaste ? '1' : '0', String(readAfterMs)],
     cwd: dir,
     env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? dir, TERM: 'xterm-256color' },
   })
   assert.ok(await pty.waitForOutput((s) => s.includes('READY'), 10_000), 'child never announced READY')
-  // utf8, not latin1: the real envelope carries an em dash, and a decoding difference must not
-  // be reported as a lost byte.
+  // utf8, not latin1: the payloads here carry an em dash and non-BMP characters, and a
+  // decoding difference must not be reported as a lost byte.
   return { pty, read: () => readFileSync(out, 'utf8') }
 }
 
@@ -169,15 +207,21 @@ async function stop(pty: PtyProcess): Promise<void> {
   }
 }
 
+/** What the recorder holds, with the trailing Enter and any paste framing taken back off. */
+function payloadOf(received: string): string {
+  let s = received.replace(/[\r\n]+$/, '')
+  if (s.startsWith(PASTE_START)) s = s.slice(PASTE_START.length)
+  if (s.endsWith(PASTE_END)) s = s.slice(0, -PASTE_END.length)
+  return s
+}
+
 /**
  * Fail if any part of `sent` did not arrive, and say WHICH part.
  *
- * A trailing CR/LF is transport, not payload, so it is stripped before comparing; nothing else
- * is forgiven. `lost the first N` and `lost the last N` are different defects and the message
- * has to distinguish them, because that is the whole question this file answers.
+ * `lost the first N` and `lost the last N` are different defects and the message has to
+ * distinguish them, because that is the question this file answers.
  */
-function assertWholeMessageArrived(sent: string, received: string, label: string): void {
-  const got = received.replace(/[\r\n]+$/, '')
+function assertWholeMessageArrived(sent: string, got: string, label: string): void {
   if (got === sent) return
 
   let detail: string
@@ -195,9 +239,9 @@ function assertWholeMessageArrived(sent: string, received: string, label: string
   )
 }
 
-/** One production `submit()` into a fresh recorder. Returns what arrived. */
-async function submitAndRecord(text: string): Promise<string> {
-  const { pty, read } = await spawnChild(recorderPath)
+/** One production `submit()` into a fresh recorder. Returns the recording, framing and all. */
+async function submitAndRecord(text: string, opts: ChildOptions = {}): Promise<string> {
+  const { pty, read } = await spawnChild(recorderPath, opts)
   try {
     await new InputQueue(pty).submit(text)
     await settle(600)
@@ -207,40 +251,159 @@ async function submitAndRecord(text: string): Promise<string> {
   }
 }
 
-/**
- * The sweep, straddling the ceiling measured on this machine.
- *
- * The sizes are not the issue's, which are message-body sizes and do not include the 249-byte
- * envelope; `the two field byte counts` below carries those.
- */
-const SWEEP = [256, 768, 1000, 1024, 1025, 1200, 2048, 4096]
+/** Every message a composer submitted, in order. */
+async function submitToComposer(text: string, opts: ChildOptions = {}): Promise<string[]> {
+  const { pty, read } = await spawnChild(composerPath, opts)
+  try {
+    await new InputQueue(pty).submit(text)
+    await settle(600)
+    return read()
+      .trim()
+      .split('\n')
+      .filter(Boolean)
+      .map((l) => (JSON.parse(l) as { text: string }).text)
+  } finally {
+    await stop(pty)
+  }
+}
+
+// ---------------------------------------------------------------------------------------
+// Part 1. The hazard, at the raw pty layer. These write through `pty.write` and assert the
+// loss: they are the measurement the fix is designed against, not a wish for how it behaves.
+// ---------------------------------------------------------------------------------------
+
+test('#174 hazard: an unchunked newline-free write is cut to exactly 1024 bytes', async () => {
+  for (const n of [1024, 1025, 4096]) {
+    const text = payload(n)
+    const { pty, read } = await spawnChild(recorderPath)
+    try {
+      pty.write(text)
+      await settle(700)
+      // 1024 is the ceiling itself, so it survives; everything above it lands as 1024.
+      assert.equal(payloadOf(read()).length, Math.min(n, 1024), `${n} B written in one call`)
+    } finally {
+      await stop(pty)
+    }
+  }
+})
+
+test('#174 hazard: a newline inside the first 1024 bytes lifts it; one past it does not', async () => {
+  // The rule, precisely. It is why defect A never fired on real traffic: envelope() puts a
+  // newline at byte 249 of every message conclave sends.
+  const cases: Array<[string, string, number]> = [
+    ['newline at byte 500', `${payload(500)}\n${payload(4500)}`, 5001],
+    ['newline at byte 1030', `${payload(1030)}\n${payload(4000)}`, 1024],
+  ]
+  for (const [label, text, expected] of cases) {
+    const { pty, read } = await spawnChild(recorderPath)
+    try {
+      pty.write(text)
+      await settle(700)
+      assert.equal(payloadOf(read()).length, expected, label)
+    } finally {
+      await stop(pty)
+    }
+  }
+})
+
+test('#174 hazard: pacing under the ceiling is what clears it', async () => {
+  // The same bytes, the same child, the same pty -- only the pacing differs, and the loss
+  // goes away. That is what rules the tty queue in as the cause of defect A.
+  //
+  // Only the timer half is asserted. `setImmediate` between chunks was measured losing bytes
+  // (8 KB arriving as 7168, 64 KB as 58880) but it does sometimes get away with it, so
+  // pinning its failure here would pin a coin toss. The reasoning lives in `yieldToChild`.
+  const text = payload(8192)
+  const { pty, read } = await spawnChild(recorderPath)
+  try {
+    for (const chunk of chunkForPty(text)) {
+      pty.write(chunk)
+      await settle(0)
+    }
+    await settle(700)
+    assertWholeMessageArrived(text, payloadOf(read()), '8192 B in chunks, timer yield between them')
+  } finally {
+    await stop(pty)
+  }
+})
+
+test('#174 hazard: chunking cannot rescue a child that has stopped reading', async () => {
+  // The residual, stated rather than papered over. There is no drain signal to wait on, so a
+  // stalled child still loses the overflow. Noticing that is the mismatch detection #174 asks
+  // for, and it is deliberately not in this change.
+  //
+  // 1024 bytes of the RECORDING, framing included: the queue counts what it was handed, and
+  // what it was handed opens with ESC[200~. Even the closing marker and the Enter, written
+  // 400 ms later, do not fit.
+  const text = payload(8192)
+  const { pty, read } = await spawnChild(recorderPath, { readAfterMs: 1500 })
+  try {
+    await new InputQueue(pty).submit(text)
+    await settle(1800)
+    assert.equal(read().length, 1024, 'a child that reads nothing for 1.5 s keeps 1024 B and no more')
+  } finally {
+    await stop(pty)
+  }
+})
+
+test('#174 when it does truncate, the paste framing turns silence into non-delivery', async () => {
+  // Worth having on purpose. #174's argument is that a dropped message is recoverable and a
+  // truncated one that still parses is not. Under the framing, a truncation that eats the
+  // closing ESC[201~ leaves the child still in paste mode, so the Enter is absorbed as text
+  // and NOTHING is submitted. The seat gets no message rather than a plausible fragment.
+  const text = payload(8192)
+  const messages = await submitToComposer(text, { readAfterMs: 1500 })
+  assert.deepEqual(messages, [], `expected no message at all, got ${JSON.stringify(messages.map((m) => m.length))}`)
+})
+
+// ---------------------------------------------------------------------------------------
+// Part 2. The fix, through `InputQueue.submit()`.
+// ---------------------------------------------------------------------------------------
+
+test('chunkForPty splits on code points, under the byte budget', () => {
+  const emoji = '😀' // U+1F600: 4 UTF-8 bytes, 2 UTF-16 code units
+  for (const text of [payload(4096), `${'x'.repeat(3)}${emoji.repeat(400)}`, '', 'short']) {
+    const chunks = chunkForPty(text)
+    assert.equal(chunks.join(''), text, 'chunks must rejoin into exactly what went in')
+    for (const chunk of chunks) {
+      assert.ok(Buffer.byteLength(chunk, 'utf8') <= 256, `chunk of ${Buffer.byteLength(chunk)} B exceeds the budget`)
+      // A split surrogate pair survives as U+FFFD, which would corrupt rather than truncate.
+      assert.ok(!/[\uD800-\uDFFF]/.test(chunk.replace(/[\uD800-\uDBFF][\uDC00-\uDFFF]/g, '')), 'lone surrogate')
+    }
+  }
+  assert.deepEqual(chunkForPty(''), [], 'nothing to write for an empty message')
+  assert.deepEqual(chunkForPty('abc', 1), ['a', 'b', 'c'])
+  // A single code point wider than the budget still has to go somewhere whole.
+  assert.deepEqual(chunkForPty('😀', 1), ['😀'])
+})
+
+const SWEEP = [256, 1024, 1025, 2048, 4096, 16_384]
 
 for (const n of SWEEP) {
   test(`#174 a ${n} B newline-free message survives submit() into a real pty`, async () => {
     const text = payload(n)
-    assertWholeMessageArrived(text, await submitAndRecord(text), `${n} B via InputQueue.submit`)
+    assertWholeMessageArrived(text, payloadOf(await submitAndRecord(text)), `${n} B via submit`)
   })
 }
 
-test('#174 a newline inside the first 1024 bytes lifts the ceiling; one past it does not', async () => {
-  // The precise rule, and the reason defect A does not explain the field reports. Only \n does
-  // this: TAB and ESC at the same offset were measured NOT to lift it.
-  const early = `${payload(500)}\n${payload(4500)}`
-  assertWholeMessageArrived(early, await submitAndRecord(early), 'newline at byte 500, 5001 B total')
-
-  const late = `${payload(1030)}\n${payload(4000)}`
-  const got = await submitAndRecord(late)
-  assert.equal(
-    got.replace(/[\r\n]+$/, '').length,
-    1024,
-    'a newline at byte 1030 is one byte past the ceiling and must not rescue the write',
-  )
+test('#174 64 KB survives submit(), which the unchunked write cut to 1024', async () => {
+  const text = payload(65_536)
+  assertWholeMessageArrived(text, payloadOf(await submitAndRecord(text)), '65536 B via submit')
 })
 
-test('#174 the wire shape conclave actually sends is NOT truncated, at any size', async () => {
-  // envelope() puts a header and a blank line in front of every message, so byte 249 is a
-  // newline on every send. This is the measurement that moves the diagnosis off the tty queue:
-  // 64 KB through the same pty, same child, not a byte lost.
+test('#174 non-BMP characters straddling every chunk boundary arrive intact', async () => {
+  // 256 bytes is 64 four-byte emoji exactly, so an unpadded payload would only ever split on
+  // a clean boundary and prove nothing. The pad walks the boundary into the middle of a
+  // surrogate pair, which is where a byte-wise slice would produce U+FFFD.
+  for (const pad of [0, 1, 2, 3]) {
+    const text = `${'x'.repeat(pad)}${'😀'.repeat(400)}`
+    const got = payloadOf(await submitAndRecord(text))
+    assert.ok(!got.includes('�'), `pad=${pad}: a replacement character means a code point was split`)
+    assertWholeMessageArrived(text, got, `pad=${pad}, ${Buffer.byteLength(text)} B of emoji`)
+  }
+})
+
+test('#174 the wire shape conclave actually sends arrives whole, at any size', async () => {
   for (const bodyBytes of [245, 934, 64_000]) {
     const wire = envelope({
       from: 'advisor',
@@ -248,172 +411,68 @@ test('#174 the wire shape conclave actually sends is NOT truncated, at any size'
       kind: 'instruction',
       text: payload(bodyBytes),
     })
-    const got = await submitAndRecord(wire)
+    const got = payloadOf(await submitAndRecord(wire))
     assertWholeMessageArrived(wire, got, `${bodyBytes} B body = ${Buffer.byteLength(wire)} B on the wire`)
   }
 })
 
-test('#174 the two field byte counts, carried in the real envelope', async () => {
-  // The issue's bracket -- 245 B arrived intact, 934 B was truncated -- read as byte counts.
-  // Both arrive whole here. What separates them in the field is not size: a 245 B message is
-  // one paragraph and a 934 B message is several, and every paragraph break is an Enter. That
-  // is defect B, and `an embedded newline submits the front early` is where it fails.
-  for (const bodyBytes of [245, 934]) {
-    const body = payload(bodyBytes)
-    const wire = envelope({ from: 'advisor', fromRank: 'advisor', kind: 'instruction', text: body })
-    assertWholeMessageArrived(wire, await submitAndRecord(wire), `${bodyBytes} B field body`)
-  }
+test('#174 the paste framing is gated on the bracketedPaste marker, not on isInteractive', async () => {
+  const text = payload(300)
+
+  const framed = await submitAndRecord(text)
+  assert.ok(framed.startsWith(PASTE_START), 'a child that advertised bracketed paste gets the framing')
+  assert.ok(framed.replace(/[\r\n]+$/, '').endsWith(PASTE_END), 'and gets it closed')
+
+  const bare = await submitAndRecord(text, { advertisePaste: false })
+  assert.ok(!bare.includes(PASTE_START), 'a child that never advertised it must not be sent ESC[200~')
+  // Chunking is unconditional, so the payload still arrives whole either way.
+  assertWholeMessageArrived(text, payloadOf(bare), '300 B to a child with no paste support')
 })
 
-test('#174 control: tty input queue -- the same bytes, paced, arrive whole', async () => {
-  // Expected to PASS. It is the control that rules the queue in for defect A: same child, same
-  // bytes, same pty, only the write pacing differs, and the loss disappears.
-  const text = payload(4096)
-  const { pty, read } = await spawnChild(recorderPath)
-  try {
-    for (let i = 0; i < text.length; i += 256) {
-      pty.write(text.slice(i, i + 256))
-      await settle(5)
-    }
-    await settle(600)
-    assertWholeMessageArrived(text, read(), '4096 B written in 256 B chunks')
-  } finally {
-    await stop(pty)
-  }
+test('#174 a message with embedded newlines reaches the composer as ONE message', async () => {
+  // Defect B, fixed. Previously three messages, the first two of which the seat never saw as
+  // part of this message at all.
+  const text = [payload(100), payload(100), payload(100)].join('\n')
+  const messages = await submitToComposer(text)
+  assert.equal(messages.length, 1, `arrived as ${messages.length} messages: ${JSON.stringify(messages.map((m) => m.length))}`)
+  assertWholeMessageArrived(text, messages[0]!, 'a 302 B message with embedded newlines')
 })
 
-test('#174 control: child line editor -- a recorder with none loses bytes anyway', async () => {
-  // The recorder appends to a file and interprets nothing: no editor, no paste heuristic, no
-  // redraw. Bytes go missing here, so the child's input handling cannot be the cause of A.
-  const text = payload(2048)
-  const { pty, read } = await spawnChild(recorderPath)
-  try {
-    pty.write(text)
-    await settle(600)
-    assertWholeMessageArrived(text, read(), '2048 B to a child with no line editor')
-  } finally {
-    await stop(pty)
-  }
-})
-
-test('#174 control: settle delay -- the loss does not move with it', async () => {
-  const text = payload(2048)
-  const measured: Array<{ settleMs: number; received: number }> = []
-  for (const settleMs of [0, 400, 2000]) {
-    const { pty, read } = await spawnChild(recorderPath)
-    try {
-      pty.write(text)
-      await settle(settleMs)
-      pty.write('\r')
-      await settle(600)
-      measured.push({ settleMs, received: read().replace(/[\r\n]+$/, '').length })
-    } finally {
-      await stop(pty)
-    }
-  }
-  // This assertion is the ruling-out, and it PASSES: the same amount arrives at every delay,
-  // including the production 400 ms, so SUBMIT_SETTLE_MS is not what drops the bytes.
+test('#174 the real envelope no longer splits at its own blank line', async () => {
+  // The field failure, on production bytes: the header and the blank line after it used to be
+  // enough on their own to break a message into three, leaving the seat holding the tail.
+  const wire = envelope({ from: 'advisor', fromRank: 'advisor', kind: 'instruction', text: payload(2000) })
+  const messages = await submitToComposer(wire)
   assert.equal(
-    new Set(measured.map((m) => m.received)).size,
+    messages.length,
     1,
-    `the settle delay changed how much arrived, so it is part of the cause: ${JSON.stringify(measured)}`,
+    `arrived as ${messages.length} messages: ${JSON.stringify(messages.map((m) => ({ bytes: m.length, head: m.slice(0, 24) })))}`,
   )
-  // And the amount that arrives is still short, which is the defect.
-  assert.equal(
-    measured[0]!.received,
-    text.length,
-    `2048 B was truncated to ${measured[0]!.received} at every settle delay: ${JSON.stringify(measured)}`,
-  )
+  assertWholeMessageArrived(wire, messages[0]!, 'a 2000 B body in the real envelope')
 })
 
-test('#174 control: a child that is slow to read loses the same 1024, not more', async () => {
-  // Holding the queue full for 2 s changes nothing, which is what makes this a fixed ceiling
-  // rather than a race against the child's read loop.
-  const text = payload(4096)
-  const { pty, read } = await spawnChild(recorderPath, 2000)
-  try {
-    pty.write(text)
-    await settle(2600)
-    assertWholeMessageArrived(text, read(), '4096 B to a child that waits 2 s before reading')
-  } finally {
-    await stop(pty)
-  }
-})
-
-test('#174 an embedded newline submits the front early, far below any ceiling', async () => {
-  // Defect B, isolated. 302 bytes: no transport ceiling is anywhere near this, so anything that
-  // goes wrong is the application layer and nothing else. This is the FRONT-loss the issue
-  // actually reports, and it does not need a large message to happen.
+test('#174 a composer with no paste support still splits, and that is the gate working', async () => {
+  // The honest limit of gating on the marker: a child that never advertised bracketed paste is
+  // typed at, so its newlines are still Enters. Pinned so nobody reads the fix as universal.
   const text = [payload(100), payload(100), payload(100)].join('\n')
-  const { pty, read } = await spawnChild(composerPath)
-  try {
-    await new InputQueue(pty).submit(text)
-    await settle(600)
-    const records = read()
-      .trim()
-      .split('\n')
-      .filter(Boolean)
-      .map((l) => JSON.parse(l) as { kind: string; text: string })
-    assert.equal(
-      records.length,
-      1,
-      `a ${text.length} B message with 2 embedded newlines arrived as ${records.length} messages, not 1: ` +
-        `${JSON.stringify(records.map((r) => ({ kind: r.kind, bytes: r.text.length })))}. ` +
-        `The front went out as earlier messages and what the seat is left holding is the TAIL ` +
-        `(${JSON.stringify(records.at(-1)?.text.slice(0, 24))}...).`,
-    )
-    assertWholeMessageArrived(text, records[0]!.text, 'a 302 B message with embedded newlines')
-  } finally {
-    await stop(pty)
-  }
+  const messages = await submitToComposer(text, { advertisePaste: false })
+  assert.equal(messages.length, 3, 'without the marker the payload is typed, and newlines submit')
 })
 
-test('#174 the real envelope splits at its own blank line, before the body is even reached', async () => {
-  // Defect B on production bytes. The header and the blank line after it are enough on their
-  // own: a body with no newline in it at all still arrives as two messages, the first of which
-  // is the header. This is the mechanism by which a seat receives a message whose front is gone.
-  const wire = envelope({ from: 'advisor', fromRank: 'advisor', kind: 'instruction', text: payload(300) })
-  const { pty, read } = await spawnChild(composerPath)
-  try {
-    await new InputQueue(pty).submit(wire)
-    await settle(600)
-    const records = read()
-      .trim()
-      .split('\n')
-      .filter(Boolean)
-      .map((l) => JSON.parse(l) as { kind: string; text: string })
-    assert.equal(
-      records.length,
-      1,
-      `an envelope-wrapped message arrived as ${records.length} messages: ` +
-        `${JSON.stringify(records.map((r) => ({ kind: r.kind, bytes: r.text.length, head: r.text.slice(0, 24) })))}`,
-    )
-  } finally {
-    await stop(pty)
-  }
+test('#174 a bare Enter is still a bare Enter', async () => {
+  // claude.ts sends submit('') to nudge a composer that swallowed a prompt. It must not
+  // acquire paste framing, and it must not write a body.
+  const got = await submitAndRecord('')
+  assert.ok(!got.includes(PASTE_START), 'an empty submit must not open a paste')
+  assert.match(got, /^[\r\n]$/, `expected one Enter and nothing else, got ${JSON.stringify(got)}`)
 })
 
-test('#174 control: bracketed paste keeps embedded newlines literal', async () => {
-  // The counterfactual, and the reason the issue calls the fix cheap: the same bytes wrapped in
-  // ESC[200~ / ESC[201~ arrive as ONE paste. conclave already knows the child negotiated
-  // bracketed paste -- `isInteractive` is defined by that marker -- and submit() does not use
-  // it. This PASSES today, and pins the behaviour a fix would rely on.
-  const text = [payload(100), payload(100), payload(100)].join('\n')
-  const { pty, read } = await spawnChild(composerPath)
+test('#174 the recorded action reports the bytes that were actually written', async () => {
+  const { pty } = await spawnChild(recorderPath)
   try {
-    assert.ok(pty.isInteractive, 'the composer child advertises bracketed paste')
-    pty.write(`\x1b[200~${text}\x1b[201~`)
-    await settle(400)
-    pty.write('\r')
-    await settle(600)
-    const records = read()
-      .trim()
-      .split('\n')
-      .filter(Boolean)
-      .map((l) => JSON.parse(l) as { kind: string; text: string })
-    const pastes = records.filter((r) => r.kind === 'paste')
-    assert.equal(pastes.length, 1, `expected one paste, got ${JSON.stringify(records.map((r) => r.kind))}`)
-    assertWholeMessageArrived(text, pastes[0]!.text, 'the same 302 B wrapped as a paste')
+    const action = await new InputQueue(pty).submit('hello')
+    assert.equal(action.bytes, `${PASTE_START}hello${PASTE_END}\\r`)
+    assert.equal(action.detail, 'hello')
   } finally {
     await stop(pty)
   }
