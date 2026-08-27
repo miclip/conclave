@@ -109,6 +109,22 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
  */
 const settled = (): Promise<void> => sleep(25)
 
+/**
+ * The same settle with the guess taken out of it: one turn of the microtask queue, and no more.
+ *
+ * `settled()` above waits 25ms because 25ms is usually enough. Nothing makes it enough. The read
+ * it waits for resumes from the wedge, does real filesystem work, and only then runs the
+ * `finally` that clears the view's `#inflight` and `#stalled`; a caller arriving before that is
+ * refused with `TranscriptReadAbandoned`, which is correct behaviour meeting a test that assumed
+ * the window had closed. Shrinking the wait to its floor does not create the race. It removes the
+ * margin that was hiding it, so the failure is the same one every time instead of once in ten
+ * runs on the slowest machine in the matrix.
+ *
+ * Used at exactly one call site, the one being reproduced. The other `settled()` waits are left
+ * as they are: this commit is about the failure being visible, not about hunting for its cousins.
+ */
+const barelySettled = (): Promise<void> => Promise.resolve()
+
 const promptsOf = (events: AgentEvent[]): string[] =>
   events.filter((e) => e.type === 'turn_start').map((e) => String(e.prompt))
 
@@ -381,8 +397,33 @@ test('abandonReads() answers everyone at once, and starts nothing in their place
 
     // And the moment it settles, the view reads again -- the same file from the same offset,
     // because the abandoned read committed nothing.
+    //
+    // FAILING REPRODUCTION -- #176. `release()` does not settle the read; it lets it RESUME, and
+    // the view stays stalled until the operation's `finally` runs. What stood here was a 25ms
+    // sleep waiting for that, which is a bet on how long a filesystem takes. The snapshot below
+    // is the loser of that bet:
+    //
+    //   $ node --test src/transcript/readLease.test.ts
+    //   ✖ abandonReads() answers everyone at once, and starts nothing in their place (0.951417ms)
+    //     TranscriptReadAbandoned: transcript read abandoned after 5000ms without answering; this
+    //     caller stopped waiting
+    //         at #attach (src/transcript/reconcile.ts)
+    //         at TranscriptSessionView.snapshot (src/transcript/reconcile.ts)
+    //         at TestContext.<anonymous> (src/transcript/readLease.test.ts)   <- the snapshot below
+    //   ℹ pass 12
+    //   ℹ fail 1
+    //
+    // Verbatim but for the `line:column` on those three frames, which `citations.test.ts` reads
+    // as citations it is then asked to pin; the frames name the functions, which is the part
+    // that identifies the failure. The full trace is in this commit's message.
+    //
+    // Five consecutive runs, five identical failures -- where the 25ms version passed 13/13
+    // five times over. The message is the tell: `after 5000ms` is `PATIENT_MS`, this view's whole lease, reported
+    // by a caller that waited none of it. It was refused on arrival by the `#stalled` flag that
+    // had not been cleared yet, which is the same refusal a caller gets from a read that really
+    // has not come back. The test cannot tell those apart, and cannot fix it by waiting longer.
     wedge.release()
-    await settled()
+    await barelySettled()
     const snap = await v.snapshot()
     assert.deepEqual(snap.turns.map((t) => t.prompt), ['one'], 'a real read of a real file')
     assert.equal(wedge.calls, before + 1, 'exactly one further read, and only after the first settled')
