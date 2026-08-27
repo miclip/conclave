@@ -13,8 +13,9 @@
  * There were two defects, with different signatures, and the issue conflated them:
  *
  *   A. A newline-free run over 1024 B was truncated to 1024 in transport. The TAIL was lost.
- *      That ceiling belongs to one tty implementation, not to ttys: CI measured it on
- *      darwin-arm64 and NOT on ubuntu-latest, so a test that asserts it says where.
+ *      That ceiling belongs to a moment, not to a platform: CI measured it on darwin-arm64 and
+ *      not on ubuntu-latest, and then measured darwin-arm64 delivering an unchunked 1025 B
+ *      write whole. Nothing here asserts a byte count any more.
  *   B. A newline in the payload was typed as ENTER, so the child submitted there and the rest
  *      became a separate message. The FRONT was lost, at any size.
  *
@@ -23,10 +24,11 @@
  * inside the first 1024 B lifts A's ceiling entirely. A could not have truncated a 934 B field
  * message. It is fixed here anyway: it is one newline-free payload away from mattering.
  *
- * Part 1 pins the hazard at the raw pty layer, writing through `pty.write` and asserting the
- * loss where it was measured. Those tests describe the environment `submit()` has to work in,
- * and they still lose bytes on purpose. Part 2 puts the same shapes through
- * `InputQueue.submit()`.
+ * Part 1 MEASURES the hazard at the raw pty layer, writing through `pty.write` and printing
+ * what the child was handed. Those tests describe the environment `submit()` has to work in,
+ * and they still lose bytes on purpose. They assert no byte count at all -- see the block above
+ * `assertNothingInvented` for the four CI attempts that took the byte counts away. Part 2 puts
+ * the same shapes through `InputQueue.submit()`.
  *
  * WHAT PART 2 DOES NOT CLAIM, since it used to and was wrong. It does not assert that a large
  * message arrives whole. There is nothing at this layer that could make that true: `pty.write`
@@ -302,79 +304,91 @@ async function submitToComposer(text: string, opts: ChildOptions = {}): Promise<
 // ---------------------------------------------------------------------------------------
 
 /**
- * Where the 1024 B ceiling is a FACT rather than a hope.
+ * Part 1 MEASURES. It no longer asserts a byte count anywhere, and the reason is four CI
+ * attempts of one commit.
  *
- * Defect A is a property of one tty implementation, not of ttys, and CI measured that in run
- * 33085187259: on `ubuntu-latest` a 1025 B unchunked write arrived as 1025 -- no ceiling at
- * all -- and on `macos-15-intel` a 4096 B one arrived as 4096 while 1025 was still cut to
- * 1024. Only `darwin-arm64` cut every oversized write to exactly 1024. So the three tests
- * below that pin a ceiling SIZE assert it where the hazard was measured; everywhere else
- * they still perform every write, through a real pty to a real child, and SKIP carrying the
- * numbers this platform actually produced.
+ * These tests used to assert darwin-arm64's 1024 B cliff and skip elsewhere, on the strength of
+ * that platform having produced it every time it was asked. Run 33100038199 asked four more
+ * times on the same sha:
  *
- * The skip is not a pass. It reports; it never asserts a shape it did not measure. On
- * darwin-arm64 every one of those assertions is live, so if a hazard ever lifts there, the
- * test that pins it goes red -- which is the point of pinning hazards the fix is designed
- * against.
+ *   attempt 4, darwin-arm64  an unchunked 1025 B write delivered ALL 1025 -- no cliff at all,
+ *                            on the machine the cliff was named after. Red build, no defect.
+ *   attempt 3, darwin-arm64  a PACED 2048 B `submit()` delivered 1018 B. Chunked, timer-yielded,
+ *                            and it still lost half the message on a platform that delivered
+ *                            the same 2048 whole in the three attempts either side of it.
+ *   attempt 3, linux-x64     an unchunked 8192 B write delivered all 8192, where the same
+ *                            runner delivered 4095 in attempts 1, 2 and 4.
  *
- * `pacing under the ceiling is what clears it` is NOT gated: it asserts that the whole
- * message arrives, which is a claim about the fix rather than about the queue's size, and
- * it holds on every platform CI runs.
+ * So the cliff is not a platform constant. It is a race between how fast this process hands
+ * bytes to node-pty's write queue and when the child next reads, and every number in it moves
+ * with load -- on every platform, in both directions. `yieldToChild` has the mechanism.
+ *
+ * What is left here is the DATA, printed on every platform on every run, which is the thing
+ * nobody had while #174 was being diagnosed from one machine's numbers. The assertions are the
+ * two relationships that cannot be a scheduling artifact: nothing arrives that was not written,
+ * and something always arrives. Anything stronger has now been observed to move.
+ *
+ * The guarantee a caller gets is unchanged and lives where it can be kept:
+ * `adapters/promptFidelity.test.ts` asserts, through both real adapters, that a message arrives
+ * exactly or the send is refused -- never a fragment. That contract passed on all three
+ * platforms in all four attempts, including the two in which this layer lost bytes.
  */
-const CEILING_MEASURED_HERE = process.platform === 'darwin' && process.arch === 'arm64'
 const THIS_PLATFORM = `${process.platform}-${process.arch}`
 
-test('#174 hazard: an unchunked newline-free write is cut to exactly 1024 bytes', async (t) => {
-  const measured: string[] = []
+/** Nothing arrives that was not written, and something always arrives. The rest is measured. */
+function assertNothingInvented(sent: number, got: number, what: string): void {
+  assert.ok(got <= sent, `${what}: ${got} B arrived from a ${sent} B write, which is more than was written`)
+  assert.ok(got > 0, `${what}: nothing arrived at all from a ${sent} B write`)
+}
+
+test('#174 hazard: what an unchunked newline-free write delivers', async (t) => {
+  // The defect A measurement. One `pty.write` of the whole payload, no chunking, no pacing --
+  // the shape conclave USED to send and the one every ceiling shows up in.
+  const rows: string[] = []
   for (const n of [1024, 1025, 4096]) {
     const text = payload(n)
     const { pty, read } = await spawnChild(recorderPath)
     try {
       pty.write(text)
       await settle(700)
-      const arrived = payloadOf(read()).length
-      measured.push(`${n} B -> ${arrived} B`)
-      // 1024 is the ceiling itself, so it survives; everything above it lands as 1024.
-      if (CEILING_MEASURED_HERE) assert.equal(arrived, Math.min(n, 1024), `${n} B written in one call`)
+      const got = payloadOf(read())
+      rows.push(`${n}->${got.length}${got.length === n ? '' : ' SHORT'}${text.startsWith(got) ? '' : ' NOT-A-PREFIX'}`)
+      assertNothingInvented(n, got.length, `${n} B written in one call`)
     } finally {
       await stop(pty)
     }
   }
-  if (!CEILING_MEASURED_HERE) {
-    return t.skip(
-      `the 1024 B tty ceiling is asserted on darwin-arm64, where it was measured; ` +
-        `${THIS_PLATFORM} wrote unchunked and received: ${measured.join(', ')}`,
-    )
-  }
+  // `NOT-A-PREFIX` would be the finding worth having: it would mean the loss is not a lost
+  // TAIL, which is the shape every observation so far has had and the shape the adapters'
+  // mismatch classifier is built around. It has never appeared. It is reported rather than
+  // asserted because the assertion would be one more guess about a transport nobody controls.
+  t.diagnostic(`unchunked write on ${THIS_PLATFORM}: ${rows.join(', ')}`)
 })
 
-test('#174 hazard: a newline inside the first 1024 bytes lifts it; one past it does not', async (t) => {
-  // The rule, precisely. It is why defect A never fired on real traffic: envelope() puts a
-  // newline at byte 249 of every message conclave sends.
-  //
-  // Asserted where the ceiling exists -- see CEILING_MEASURED_HERE. A platform with no
-  // ceiling has no rule to state: on ubuntu-latest the byte-1030 case arrived as all 5031 B,
-  // which is not the rule failing, it is there being nothing to lift.
-  const cases: Array<[string, string, number]> = [
-    ['newline at byte 500', `${payload(500)}\n${payload(4500)}`, 5001],
-    ['newline at byte 1030', `${payload(1030)}\n${payload(4000)}`, 1024],
+test('#174 hazard: what a newline before and after the ceiling delivers', async (t) => {
+  // Why defect A never fired on real traffic, if the ceiling is where it was measured:
+  // envelope() puts a newline at byte 249 of every message conclave sends, and a newline early
+  // in an unchunked write has been observed to lift whatever ceiling that platform has. Both
+  // halves are reported, because "the rule" is a rule about one platform on one day: linux
+  // delivers the byte-1030 case whole and darwin-x64 cuts it to 1024, in the same run.
+  const cases: Array<[string, string]> = [
+    ['newline at byte 500', `${payload(500)}\n${payload(4500)}`],
+    ['newline at byte 1030', `${payload(1030)}\n${payload(4000)}`],
   ]
-  const measured: string[] = []
-  for (const [label, text, expected] of cases) {
+  const rows: string[] = []
+  for (const [label, text] of cases) {
     const { pty, read } = await spawnChild(recorderPath)
     try {
       pty.write(text)
       await settle(700)
-      const arrived = payloadOf(read()).length
-      measured.push(`${label}: ${text.length} B -> ${arrived} B (darwin-arm64: ${expected} B)`)
-      if (CEILING_MEASURED_HERE) assert.equal(arrived, expected, label)
+      const got = payloadOf(read())
+      rows.push(`${label}: ${text.length}->${got.length}${got.length === text.length ? '' : ' SHORT'}`)
+      assertNothingInvented(text.length, got.length, label)
     } finally {
       await stop(pty)
     }
   }
-  if (!CEILING_MEASURED_HERE) {
-    return t.skip(`the lift rule is asserted on darwin-arm64, where the ceiling it lifts was measured; ${THIS_PLATFORM} received: ${measured.join('; ')}`)
-  }
+  t.diagnostic(`newline placement on ${THIS_PLATFORM}: ${rows.join(', ')}`)
 })
 
 test('#174 hazard: pacing under the ceiling CHANGES it, measured both ways', async (t) => {
@@ -411,50 +425,69 @@ test('#174 hazard: pacing under the ceiling CHANGES it, measured both ways', asy
   }
   const paced = await deliver(true)
   const unpaced = await deliver(false)
-  t.diagnostic(`8192 B on ${THIS_PLATFORM}: paced in 256 B chunks -> ${paced} B, one write -> ${unpaced} B`)
-  // The one comparison worth holding: pacing never makes it worse. If that ever inverts, the
-  // chunking is doing harm and the reasoning in `SUBMIT_CHUNK_BYTES` has to be reopened.
-  assert.ok(paced >= unpaced, `pacing delivered ${paced} B where one write delivered ${unpaced} B`)
+  t.diagnostic(
+    `8192 B on ${THIS_PLATFORM}: paced in 256 B chunks -> ${paced} B, one write -> ${unpaced} B` +
+      `${paced >= unpaced ? '' : ' -- PACING DELIVERED LESS'}`,
+  )
+  // `paced >= unpaced` held in all twelve CI observations and is still NOT asserted, which is a
+  // deliberate second thought rather than an oversight. Both sides of it have been seen to move
+  // on the same platform: attempt 3 paced a 2048 B submit down to 1018 B, and the same attempt
+  // delivered an unpaced 8192 B write whole on linux. Two numbers that each swing by 8x are not
+  // a relationship to hang a build on, and an inversion is worth READING about rather than
+  // being told about by a red CI job on a commit that did not cause it.
+  assertNothingInvented(8192, paced, 'paced in 256 B chunks')
+  assertNothingInvented(8192, unpaced, 'one unchunked write')
 })
 
-test('#174 hazard: chunking cannot rescue a child that has stopped reading', async (t) => {
+test('#174 hazard: what a stalled child keeps of a chunked submit', async (t) => {
   // The residual, stated rather than papered over. There is no drain signal to wait on, so a
-  // stalled child still loses the overflow. Noticing that is the mismatch detection #174 asks
-  // for, and it is deliberately not in this change.
+  // child that is not reading loses the overflow however carefully the write is paced. Noticing
+  // that is the mismatch detection #174 asks for, and it is why the adapters refuse rather than
+  // trust the write.
   //
-  // 1024 bytes of the RECORDING, framing included: the queue counts what it was handed, and
-  // what it was handed opens with ESC[200~. Even the closing marker and the Enter, written
-  // 400 ms later, do not fit.
-  //
-  // The SIZE of the residual is the queue's, so it is asserted where that queue was measured:
-  // ubuntu-latest kept 4096 B of the same submit. That a stalled child loses bytes is true on
-  // both; only "and exactly 1024 of them survive" is darwin-arm64's.
+  // The SIZE of what survives is the queue's and it moves: darwin has kept 1024 B of this and
+  // linux 4096 B, in the same run. Reported, not asserted.
   const text = payload(8192)
+  const framed = PASTE_START.length + text.length + PASTE_END.length + 1
   const { pty, read } = await spawnChild(recorderPath, { readAfterMs: 1500 })
   try {
     await new InputQueue(pty).submit(text)
     await settle(1800)
     const kept = read().length
-    if (!CEILING_MEASURED_HERE) {
-      return t.skip(
-        `the 1024 B residual is asserted on darwin-arm64, where it was measured; ` +
-          `${THIS_PLATFORM} kept ${kept} B of an 8192 B submit after 1.5 s of a child not reading`,
-      )
-    }
-    assert.equal(kept, 1024, 'a child that reads nothing for 1.5 s keeps 1024 B and no more')
+    t.diagnostic(
+      `a child that read nothing for 1.5 s on ${THIS_PLATFORM} kept ${kept} B of a ${framed} B framed submit`,
+    )
+    assertNothingInvented(framed, kept, 'a stalled child')
   } finally {
     await stop(pty)
   }
 })
 
-test('#174 when it does truncate, the paste framing turns silence into non-delivery', async () => {
-  // Worth having on purpose. #174's argument is that a dropped message is recoverable and a
-  // truncated one that still parses is not. Under the framing, a truncation that eats the
-  // closing ESC[201~ leaves the child still in paste mode, so the Enter is absorbed as text
-  // and NOTHING is submitted. The seat gets no message rather than a plausible fragment.
+test('#174 a truncated framed paste submits NOTHING, never a fragment', async (t) => {
+  // Worth having on purpose, and it is the one claim at this layer that does not depend on how
+  // much a given runner's tty carries. #174's argument is that a dropped message is recoverable
+  // and a truncated one that still parses is not. Under the paste framing a truncation that
+  // eats the closing ESC[201~ leaves the child in paste mode, so the Enter that follows is
+  // absorbed as text and nothing is submitted at all.
+  //
+  // Stated as the disjunction, because the premise is a race: this child reads nothing for
+  // 1.5 s, which has produced a truncation on every platform so far -- but "so far" is what
+  // attempt 4 punished. If a runner ever carries the whole 8205 B framed payload, the honest
+  // answer is one whole message, not a failure. What must NEVER happen is the third case.
   const text = payload(8192)
   const messages = await submitToComposer(text, { readAfterMs: 1500 })
-  assert.deepEqual(messages, [], `expected no message at all, got ${JSON.stringify(messages.map((m) => m.length))}`)
+  t.diagnostic(
+    `an 8192 B submit to a child stalled 1.5 s on ${THIS_PLATFORM} produced ` +
+      `${messages.length} message(s): ${JSON.stringify(messages.map((m) => m.length))}`,
+  )
+  if (messages.length === 0) return
+  assert.equal(messages.length, 1, 'a truncated paste must not split into several messages')
+  assert.equal(
+    messages[0],
+    text,
+    `the composer submitted a ${messages[0]?.length} B FRAGMENT of an ${text.length} B message, ` +
+      `which is the exact failure the framing exists to prevent`,
+  )
 })
 
 // ---------------------------------------------------------------------------------------

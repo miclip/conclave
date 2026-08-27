@@ -50,11 +50,17 @@ const SUBMIT_SETTLE_MS = 400
  * forwards to node-pty, whose write returns no drain signal, so there is no backpressure to
  * read either. Recorded as a named constant because SUBMIT_CHUNK_BYTES is derived from it.
  *
- * ONE PLATFORM'S NUMBER, and CI measured that the hard way: `ubuntu-latest` took a 1025 B
- * unchunked write and gave the child all 1025, and `macos-15-intel` passed a 4096 B one
- * straight through while still cutting 1025 to 1024. So this is the tightest ceiling in
- * evidence rather than the rule everywhere, which makes it the right number to derive a chunk
- * size from and the wrong number to promise anything with.
+ * ONE PLATFORM ON ONE DAY, and CI measured that the hard way. Across four attempts of a single
+ * commit (run 33100038199): `ubuntu-latest` gave the child all 1025 B of an unchunked write
+ * every time and 4096 B whole in one attempt out of four; `macos-15-intel` cut 1025 to 1024 in
+ * three attempts and passed all 1025 in the fourth; and darwin-arm64 -- the machine this number
+ * is named after -- delivered an unchunked 1025 B write WHOLE in attempt 4 after cutting it to
+ * 1024 in the three before.
+ *
+ * So the cliff is not a constant anywhere. It is a race with the child's next read, and it
+ * moves with load in both directions on every platform. This stays as the tightest ceiling in
+ * evidence, which makes it the right number to derive a chunk size from and the wrong number to
+ * promise anything with.
  */
 const TTY_INPUT_QUEUE_BYTES = 1024
 
@@ -75,8 +81,10 @@ const TTY_INPUT_QUEUE_BYTES = 1024
  *
  * WHAT THOSE NUMBERS ARE. They are a failure RATE falling to zero on one machine's sample, and
  * a rate of zero over 60 attempts is not a guarantee -- it is the absence of a counterexample
- * in 60 tries. CI then produced the counterexample: a 4096 B `submit()`, chunked exactly like
- * this, arrived short on a `macos-latest` runner. Nothing here has changed as a result, because
+ * in 60 tries. CI has now produced two: a 4096 B `submit()`, chunked exactly like this, arrived
+ * short on a `macos-latest` runner; and in attempt 3 of run 33100038199 a PACED 2048 B
+ * `submit()` delivered 1018 B on darwin-arm64, losing half the message on a platform that
+ * carried the same 2048 whole in the three attempts either side of it. Nothing here has changed as a result, because
  * 256 B is still the best-measured value and a smaller one would only move the rate, not the
  * kind of claim. What changed is what is claimed for it: chunking is RISK REDUCTION on a
  * transport that offers no delivery signal at all. The guarantee a caller gets lives one layer
