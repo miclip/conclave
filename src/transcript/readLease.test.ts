@@ -315,55 +315,53 @@ test('a wedged read is never joined by a second one, however long it lasts', asy
     // The shape Codex's post-cancel wait uses: reconcile repeatedly inside a budget. Before any
     // of this existed, iteration one never returned and the budget was never consulted again.
     // Now every iteration comes back -- and none of them reads.
-    // FAILING REPRODUCTION -- the `rounds >= 3` race. The loop below asserts that a budget of
-    // three lease intervals fits three iterations, and each iteration costs one whole lease,
-    // so it is asserting that the overhead between iterations is nil. Measured on an idle
-    // machine it very nearly is, and that is the entire margin:
+    // The shape Codex's post-cancel wait uses, counted rather than clocked.
+    //
+    // WHAT THIS IS FOR. Before any of this existed, iteration one never returned and the budget
+    // was never consulted again -- one call into a wedged filesystem took the whole loop with
+    // it. What has to be true is that every iteration COMES BACK, and comes back with the truth:
+    // no answer yet. Three callers, three non-answers, one read underneath them.
+    //
+    // IT USED TO BE CLOCKED, and that was the bug. The loop ran against a budget of three lease
+    // intervals and asserted `rounds >= 3` -- but every iteration costs one whole lease, so it
+    // was really asserting that the overhead BETWEEN iterations was nil:
     //
     //   [rounds] budget=180ms rounds=3 per-round=[62,61,61]
     //   [rounds] budget=180ms rounds=3 per-round=[61,60,61]
-    //   [rounds] budget=180ms rounds=3 per-round=[61,61,61]
     //
-    // Round three STARTS at t≈122 against a deadline of 180. 58ms of slack, spread across two
-    // iterations -- about 29ms each -- and the third round never begins. The operator saw
-    // exactly that once, `rounds === 2`, in six isolated runs.
+    // Round three started at t≈122 against a deadline of 180. 58ms of slack across two
+    // iterations, and on a machine that inserted ~29ms of scheduling lag apiece it never began:
     //
-    // `ROUND_LAG_MS` is that busy machine, made portable: 45ms of scheduling lag between
-    // completed attempts, which is what a loaded runner inserts by accident. It is well inside
-    // the window -- anything from ~29ms (round three no longer starts) to ~119ms (round two
-    // stops starting either, which would be a different failure) reproduces it:
+    //   ✖ AssertionError: a budget loop over snapshot() must keep going round: 2
     //
-    //   $ node --test --test-name-pattern "a wedged read is never joined" \
-    //       src/transcript/readLease.test.ts
-    //   ✖ a wedged read is never joined by a second one, however long it lasts
-    //     AssertionError [ERR_ASSERTION]: a budget loop over snapshot() must keep going round: 2
-    //       actual: false, expected: true, operator: '=='
+    // The operator saw that once in six isolated runs. The number was never the problem --
+    // enlarging the budget would have left the same assertion one machine further from the
+    // edge. The problem was counting elapsed time to prove a thing that is not about time.
     //
-    // The lag is between COMPLETED attempts, not inside one: no snapshot is interrupted, no
-    // lease is shortened, and nothing about what the view does changes. The only thing being
-    // varied is how promptly the caller gets to ask again, which is the one variable this
-    // assertion silently depends on and does not control.
+    // SO IT COUNTS CALLERS INSTEAD. Three attempts, written out, each one REQUIRED to come back
+    // rejecting with `TranscriptReadAbandoned`. That is stronger than what the clock version
+    // checked, which swallowed both outcomes with a bare `.then(undefined, undefined)` and so
+    // could not tell a non-answer from an answer, or from an unrelated throw.
     //
-    // NOT FIXED HERE, deliberately. What the loop is really for is that every iteration COMES
-    // BACK -- before this existed, iteration one never returned and the budget was never
-    // consulted again. `rounds >= 3` is a wall-clock proxy for that, and the repair is a
-    // question about what the loop should count, not a number to enlarge.
+    // THE 45ms LAG STAYS ON, and it now proves the opposite of what it used to. It was the
+    // reproduction -- enough scheduling lag to cost the old loop its third round. Nothing here
+    // reads a clock any more, so it costs this version nothing, and a future edit that
+    // reintroduces a wall-clock bound fails on the machine that runs this file rather than on
+    // the slowest runner in the matrix, weeks later.
+    const ROUNDS = 3
     const ROUND_LAG_MS = 45
-    const deadline = Date.now() + LEASE_MS * 3
-    let rounds = 0
-    while (Date.now() < deadline) {
-      rounds++
-      await v.snapshot().then(
-        () => undefined,
-        () => undefined,
+    for (let round = 1; round <= ROUNDS; round++) {
+      await assert.rejects(
+        () => v.snapshot(),
+        TranscriptReadAbandoned,
+        `round ${round} of ${ROUNDS} must come back, and must come back saying it got no answer`,
       )
       await sleep(ROUND_LAG_MS)
     }
-    assert.ok(rounds >= 3, `a budget loop over snapshot() must keep going round: ${rounds}`)
     assert.equal(
       wedge.calls - before,
       1,
-      `exactly one underlying read, across ${rounds} callers and three lease intervals: ${wedge.calls - before}`,
+      `exactly one underlying read, across ${ROUNDS} callers and three lease intervals: ${wedge.calls - before}`,
     )
 
     assert.ok(
