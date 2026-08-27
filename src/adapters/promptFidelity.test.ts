@@ -77,6 +77,23 @@ async function collect(
   return seen
 }
 
+/**
+ * A newline-free payload of `n` characters that carries its own offsets.
+ *
+ * `[000000][000010]...` means a fragment says where it came from, so a failure reports which
+ * part survived rather than "the lengths differ". Newline-free because a newline inside the
+ * first kilobyte changes the transport answer entirely -- see `process/inputTruncation.test.ts`.
+ */
+function payload(n: number): string {
+  let out = ''
+  let i = 0
+  while (out.length < n) {
+    out += `[${String(i).padStart(6, '0')}]`
+    i += 10
+  }
+  return out.slice(0, n)
+}
+
 const startOf = (e: AgentEvent[]): TurnStartEvent | undefined =>
   e.find((x) => x.type === 'turn_start') as TurnStartEvent | undefined
 
@@ -135,21 +152,38 @@ interface Attempt {
  * cancellation and a second turn, which a collector that stopped at the first `turn_start`
  * would have thrown away.
  */
+interface Child {
+  /** Corrupt only the first N prompts. Zero, the default, means every prompt. */
+  loseTurns?: number
+  /** The child opens a turn of its own when it is told to stop. */
+  escOpensTurn?: boolean
+  /**
+   * Put the stand-in in raw mode, as both real CLIs are.
+   *
+   * Needed by any test that sends more than MAX_CANON (1024 B on darwin): in canonical mode the
+   * line discipline holds a bracketed paste -- which contains no newline -- until it overflows,
+   * so the closing marker is discarded and nothing is ever submitted. That is a property of the
+   * fixture, not of conclave, and a test that ran into it would be measuring the fixture.
+   */
+  raw?: boolean
+}
+
 async function attempt(
   Adapter: Adapter,
   message: string,
   lose: string,
-  loseTurns = 0,
-  escOpensTurn = false,
+  child: Child = {},
 ): Promise<Attempt> {
   // Read by the child at spawn. `sanitizedCopy` passes ORCH_-prefixed variables through, which
   // is the same channel the other stand-in knobs use.
   if (lose) process.env['ORCH_FAKE_LOSE'] = lose
   else delete process.env['ORCH_FAKE_LOSE']
-  if (loseTurns) process.env['ORCH_FAKE_LOSE_TURNS'] = String(loseTurns)
+  if (child.loseTurns) process.env['ORCH_FAKE_LOSE_TURNS'] = String(child.loseTurns)
   else delete process.env['ORCH_FAKE_LOSE_TURNS']
-  if (escOpensTurn) process.env['ORCH_FAKE_ESC_TURN'] = '1'
+  if (child.escOpensTurn) process.env['ORCH_FAKE_ESC_TURN'] = '1'
   else delete process.env['ORCH_FAKE_ESC_TURN']
+  if (child.raw) process.env['ORCH_FAKE_RAW'] = '1'
+  else delete process.env['ORCH_FAKE_RAW']
 
   // `cancelEvidenceBudgetMs` is Codex's only: its cancel() polls the transcript for the child's
   // own `turn_aborted` before it is finished, and this stand-in never writes a transcript, so
@@ -185,6 +219,7 @@ async function attempt(
     delete process.env['ORCH_FAKE_LOSE']
     delete process.env['ORCH_FAKE_LOSE_TURNS']
     delete process.env['ORCH_FAKE_ESC_TURN']
+    delete process.env['ORCH_FAKE_RAW']
     await session.close()
   }
 }
@@ -322,7 +357,7 @@ for (const [name, Adapter] of ADAPTERS) {
     // stand-in corrupts the first prompt only, so the same bytes typed again arrive whole --
     // and the run repairs itself instead of handing the operator a mangled seat.
     const sent = 'read the issue first; the byte counts in it are the point'
-    const { error, key, starts, turns, notices, actions } = await attempt(Adapter, sent, 'front:9', 1)
+    const { error, key, starts, turns, notices, actions } = await attempt(Adapter, sent, 'front:9', { loseTurns: 1 })
 
     assert.equal(error, undefined, `a corruption that clears on a re-send must recover: ${error?.message ?? ''}`)
     assert.equal(starts.length, 2, 'the malformed turn, then the re-sent one -- and nothing else')
@@ -402,7 +437,7 @@ for (const [name, Adapter] of ADAPTERS) {
     // second attempt, and the message is still not typed again. That is the intended trade:
     // an unrepaired send is recoverable, and two corrupted messages are not.
     const sent = 'a message this seat will never be told twice'
-    const { error, key, starts, actions } = await attempt(Adapter, sent, 'front:9', 1, true)
+    const { error, key, starts, actions } = await attempt(Adapter, sent, 'front:9', { loseTurns: 1, escOpensTurn: true })
 
     assert.equal(key, undefined, 'the send must not resolve')
     assert.ok(error)
@@ -468,6 +503,67 @@ for (const [name, Adapter] of ADAPTERS) {
       delete process.env['ORCH_FAKE_LOSE']
       delete process.env['ORCH_FAKE_LOSE_TURNS']
       await session.close()
+    }
+  })
+
+  test(`${name}: 4096 B arrives whole after at most one retry, or is refused -- never a fragment`, async () => {
+    // THE CONTRACT, and the reason it lives here rather than at the pty.
+    //
+    // `process/inputTruncation.test.ts` used to assert that a 4096 B `submit()` arrived whole.
+    // It cannot: `pty.write` queues into node-pty's own write queue and the timer between
+    // chunks acknowledges neither that write nor a child read, so 256 B chunking lowers the
+    // odds of loss and promises nothing. CI produced the counterexample on a `macos-latest`
+    // runner, and the honest response is not a smaller chunk -- it is to stop making the
+    // promise at a layer that cannot keep it and to make a weaker, true one here, where the
+    // child says what it took.
+    //
+    // What a caller is owed, at any size: the message arrives EXACTLY, or the send is refused.
+    // A fragment is never handed over as though it were the message, and the retry may run at
+    // most once. That holds whatever the transport does on the day, which is what makes it
+    // assertable on every platform -- including one whose tty drops the tail.
+    const sent = payload(4096)
+    const cases: Array<[string, string, Child]> = [
+      ['a clean transport', '', { raw: true }],
+      ['a transport that mangles the first attempt', 'front:64', { raw: true, loseTurns: 1 }],
+      ['a transport that mangles every attempt', 'tail:64', { raw: true }],
+    ]
+
+    for (const [what, lose, child] of cases) {
+      const { error, key, starts, turns, actions } = await attempt(Adapter, sent, lose, child)
+      const submits = actions.filter((a) => a.kind === 'submit').length
+
+      if (key !== undefined) {
+        // Delivered. Then it is delivered WHOLE, and the turn the caller was handed is the one
+        // holding all 4096 bytes -- not a turn that merely exists.
+        assert.equal(error, undefined, `${what}: resolved and rejected at once`)
+        const landed = turns.find((t) => String(t.key) === String(key))
+        assert.equal(landed?.prompt, sent, `${what}: the turn handed back must carry the whole message`)
+        assert.ok(submits <= 2, `${what}: at most one retry, and this took ${submits} submits`)
+      } else {
+        // Refused. Any refusal is contractual -- corrupted twice, a retry that was not safe to
+        // make, a prompt that never became one -- as long as it IS one, and as long as nothing
+        // downstream was handed a fragment to work from.
+        assert.ok(error, `${what}: neither resolved nor rejected`)
+        assert.match(
+          error.message,
+          /RETRY EXHAUSTED|corrupted in transport|never became a prompt|acknowledged by a hook/,
+          `${what}: a refusal has to say which failure it was`,
+        )
+      }
+
+      // The half that matters most, and it is checked on BOTH branches: every turn whose prompt
+      // is not the message is a turn the caller was not given. A fragment may exist -- the child
+      // really is working on it, and denying that would be the worse lie -- but it is never the
+      // answer to this send.
+      for (const start of starts) {
+        if (start.prompt === sent) continue
+        assert.notEqual(
+          String(start.turnKey),
+          String(key ?? ''),
+          `${what}: a fragment of ${start.prompt.length}/${sent.length} B was handed back as the message`,
+        )
+      }
+      assert.ok(submits <= 2, `${what}: the message was typed ${submits} times; the budget is two`)
     }
   })
 

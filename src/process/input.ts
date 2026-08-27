@@ -40,8 +40,8 @@ export interface InputAction {
 const SUBMIT_SETTLE_MS = 400
 
 /**
- * The tty input queue ceiling, MEASURED (#174) on darwin 25.5.0 through a real pty into a
- * child that records what it is handed:
+ * The tty input queue ceiling, MEASURED (#174) on darwin-arm64 25.5.0 through a real pty into
+ * a child that records what it is handed:
  *
  *   1024 B sent -> 1024 B received.  1025 B sent -> 1024 B received.  64 KB sent -> 1024 B.
  *
@@ -49,6 +49,12 @@ const SUBMIT_SETTLE_MS = 400
  * write succeeds, the child never sees the bytes, nobody is told. `src/process/pty.ts`
  * forwards to node-pty, whose write returns no drain signal, so there is no backpressure to
  * read either. Recorded as a named constant because SUBMIT_CHUNK_BYTES is derived from it.
+ *
+ * ONE PLATFORM'S NUMBER, and CI measured that the hard way: `ubuntu-latest` took a 1025 B
+ * unchunked write and gave the child all 1025, and `macos-15-intel` passed a 4096 B one
+ * straight through while still cutting 1025 to 1024. So this is the tightest ceiling in
+ * evidence rather than the rule everywhere, which makes it the right number to derive a chunk
+ * size from and the wrong number to promise anything with.
  */
 const TTY_INPUT_QUEUE_BYTES = 1024
 
@@ -66,6 +72,18 @@ const TTY_INPUT_QUEUE_BYTES = 1024
  * At 256 B there were no failures in 60 attempts across 4 KB and 16 KB, and none in 8 at 64 KB.
  * The cost is one write per 256 bytes: ~18 ms for 4 KB, ~74 ms for 16 KB, ~293 ms for 64 KB.
  * Messages are sent once per turn, so that is not a budget worth defending.
+ *
+ * WHAT THOSE NUMBERS ARE. They are a failure RATE falling to zero on one machine's sample, and
+ * a rate of zero over 60 attempts is not a guarantee -- it is the absence of a counterexample
+ * in 60 tries. CI then produced the counterexample: a 4096 B `submit()`, chunked exactly like
+ * this, arrived short on a `macos-latest` runner. Nothing here has changed as a result, because
+ * 256 B is still the best-measured value and a smaller one would only move the rate, not the
+ * kind of claim. What changed is what is claimed for it: chunking is RISK REDUCTION on a
+ * transport that offers no delivery signal at all. The guarantee a caller gets lives one layer
+ * up, in the adapters -- the child echoes back what it took, a mismatch is cancelled and re-sent
+ * once, and a message that still does not arrive intact is REFUSED rather than delivered short
+ * (`adapters/promptFidelity.ts`). That is the only place a promise about arrival can be kept,
+ * because it is the only place anything downstream of the write is observed.
  */
 const SUBMIT_CHUNK_BYTES = TTY_INPUT_QUEUE_BYTES / 4
 
@@ -112,7 +130,7 @@ export function chunkForPty(text: string, maxBytes: number = SUBMIT_CHUNK_BYTES)
 }
 
 /**
- * Hand the event loop back so the CHILD can drain the queue between chunks.
+ * Hand the event loop back, so the child has a CHANCE to drain the queue between chunks.
  *
  * A timer, not `setImmediate`, and that was measured rather than assumed: with setImmediate
  * between chunks an 8 KB payload arrived as 7168 B and a 64 KB payload as 58880 B. A
@@ -120,6 +138,20 @@ export function chunkForPty(text: string, maxBytes: number = SUBMIT_CHUNK_BYTES)
  * queue -- the child's next read is. Only parking the loop on a timer gives that a chance to
  * happen. setImmediate does sometimes get away with it, which is worse than never working:
  * a timer is the version that does not depend on how busy the child was.
+ *
+ * What this yield does NOT do is acknowledge anything, and the mechanism is worth stating
+ * because the name invites the opposite reading. `PtyProcess.write` forwards to node-pty's
+ * `write`, which does not write: it pushes the buffer onto node-pty's own `_writeQueue` and
+ * returns (`node_modules/node-pty/lib/unixTerminal.js`, `CustomWriteStream`). The queue is
+ * drained by `fs.write` callbacks that RECURSE straight into the next write with no yield of
+ * their own -- deliberately, so that large pastes stay fast -- and only an EAGAIN from a full
+ * kernel buffer parks the drain on a `setImmediate`. So when this timer fires, the previous
+ * chunk may not have reached the fd, and if it has, nothing says the child has read it out of
+ * the tty buffer. Several 256 B chunks can be handed to the driver back to back with no gap at
+ * all, which is what an unchunked write looks like from the line discipline's side.
+ *
+ * The yield therefore buys a better distribution, not a delivery. See SUBMIT_CHUNK_BYTES for
+ * what that is worth and where the actual guarantee is kept.
  */
 function yieldToChild(): Promise<void> {
   return new Promise((r) => setTimeout(r, 0))

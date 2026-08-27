@@ -103,7 +103,8 @@ function onComposerSubmit(handler) {
  * ORCH_FAKE_LOSE_TURNS bounds the corruption to the first N prompts, so a stand-in can be a
  * transport that glitched once rather than one that is broken for good. ORCH_FAKE_ESC_TURN
  * makes it a child that opens a turn when it is told to stop, which is the one condition under
- * which a corrupted prompt must NOT be re-sent.
+ * which a corrupted prompt must NOT be re-sent. ORCH_FAKE_RAW puts it in raw mode, as both real
+ * CLIs are, which is what a test needs before it can send it more than MAX_CANON bytes.
  */
 export const FAKE_CLI = `#!/usr/bin/env node
 const url = process.env.ORCH_HOOK_URL
@@ -174,13 +175,25 @@ onComposerSubmit(function (prompt) {
 // turn of its own instead -- which is what a resumed session, a queued prompt, or a human at
 // the same terminal looks like from outside. The #174 recovery has to refuse to type into
 // that: a re-send here is spliced into a running turn rather than replacing the malformed one.
-if (process.env.ORCH_FAKE_ESC_TURN) {
-  // Raw mode, and it is load-bearing rather than tidy. Without it the tty line discipline is
-  // CANONICAL: a lone ESC is buffered until a newline arrives, so the child does not see the
-  // cancellation until the NEXT prompt is typed -- and a child that reacts to the ESC only
-  // after the re-send cannot stand in for one that ignored it. Both real CLIs set raw mode;
-  // the other stand-ins do not, because nothing else here depends on when a bare byte lands.
+// ORCH_FAKE_RAW: put the stand-in in RAW MODE, which is what both real CLIs do and what this
+// one otherwise does not. It matters for exactly two things, and both are transport questions:
+//
+//   - WHEN a byte lands. In canonical mode the line discipline holds input until a newline, so
+//     a bare ESC is not seen until the next prompt is typed -- a child that reacts to a
+//     cancellation only after the re-send cannot stand in for one that ignored it.
+//   - HOW MUCH lands. The canonical buffer is MAX_CANON (1024 B on darwin) and a bracketed
+//     paste contains no newline at all, so anything past it is discarded before the child gets
+//     a look: a 4096 B message loses its closing ESC[201~, nothing is ever submitted, and the
+//     stand-in has a truncation behaviour no real CLI has. Measuring conclave against that
+//     measures the fixture.
+//
+// Off by default: the suites that send small payloads are unaffected either way, and flipping
+// a shared fixture for all of them is a larger change than the two tests that need it.
+if (process.env.ORCH_FAKE_RAW || process.env.ORCH_FAKE_ESC_TURN) {
   if (process.stdin.isTTY) process.stdin.setRawMode(true)
+}
+
+if (process.env.ORCH_FAKE_ESC_TURN) {
   var escTurns = 0
   process.stdin.on('data', function (d) {
     var s = d.toString()
