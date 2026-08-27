@@ -81,10 +81,17 @@ const TTY_INPUT_QUEUE_BYTES = 1024
  *
  * WHAT THOSE NUMBERS ARE. They are a failure RATE falling to zero on one machine's sample, and
  * a rate of zero over 60 attempts is not a guarantee -- it is the absence of a counterexample
- * in 60 tries. CI has now produced two: a 4096 B `submit()`, chunked exactly like this, arrived
- * short on a `macos-latest` runner; and in attempt 3 of run 33100038199 a PACED 2048 B
- * `submit()` delivered 1018 B on darwin-arm64, losing half the message on a platform that
- * carried the same 2048 whole in the three attempts either side of it. Nothing here has changed as a result, because
+ * in 60 tries. CI has now produced nine of them. A 4096 B `submit()`, chunked exactly like
+ * this, arrived short on a `macos-latest` runner; run 33100038199 paced a 2048 B `submit()`
+ * down to 1018 B on darwin-arm64; and run 33104083028 lost bytes in 7 of 90 paced measurements
+ * on darwin-x64, including 65536 -> 47610 and 1024 -> 1018.
+ *
+ * WHY 256 STAYS ANYWAY. The same two runs measured 8192 B paced against 8192 B unpaced on the
+ * same runner seconds apart, 21 times: paced was never worse, and on darwin it was 8x better
+ * every single time. Chunking is a large, repeatedly measured reduction in the FREQUENCY of
+ * loss, with no bound on the residual and no delivery signal to check it against.
+ * `process/inputTruncation.test.ts` carries the full tally under WHAT THE PACING EVIDENCE
+ * SUPPORTS, including what it does not license anyone to claim. Nothing here has changed as a result, because
  * 256 B is still the best-measured value and a smaller one would only move the rate, not the
  * kind of claim. What changed is what is claimed for it: chunking is RISK REDUCTION on a
  * transport that offers no delivery signal at all. The guarantee a caller gets lives one layer

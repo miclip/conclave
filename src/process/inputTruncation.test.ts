@@ -391,6 +391,57 @@ test('#174 hazard: what a newline before and after the ceiling delivers', async 
   t.diagnostic(`newline placement on ${THIS_PLATFORM}: ${rows.join(', ')}`)
 })
 
+/**
+ * WHAT THE PACING EVIDENCE SUPPORTS, AND WHAT IT DOES NOT
+ *
+ * Written down because nobody reading this later will re-derive it, and because the honest
+ * sentence is stronger than the guarantee the old tests asserted.
+ *
+ * Twenty-one paced-vs-unpaced observations exist: CI runs 33100038199 (sha 21aa7be, four
+ * attempts) and 33104083028 (sha 4da49a3, three attempts), three platforms each, 8192 B both
+ * ways into the same recorder on the same runner seconds apart.
+ *
+ *   PACED (256 B chunks, timer yield)   UNPACED (one write)
+ *   darwin-arm64   8192 x 7             1024 x 7
+ *   darwin-x64     8192 x 6, 7424 x 1   1024 x 7
+ *   linux-x64      8192 x 7             4095 x 5, 8192 x 2
+ *
+ * WHAT IT SUPPORTS. Paced was never worse than unpaced: 21 of 21, strictly better in 19 and
+ * equal in 2 -- both of those on linux-x64, where an unpaced 8192 B write also happened to
+ * arrive whole. On darwin the gap is not marginal, it is 8x, and it held on every attempt on
+ * both architectures. Even the worst paced result beat its own unpaced control in the same
+ * job: darwin-x64 in attempt 1 of run 33104083028 paced 7424 B through while one write
+ * delivered 1024. That is a real, repeatedly measured effect, and it is the whole reason
+ * `SUBMIT_CHUNK_BYTES` stays at 256.
+ *
+ * WHAT IT DOES NOT SUPPORT, and each of these was specifically checked for:
+ *
+ *   - No RATE BOUND. In the same run that produced the table above, the paced size sweep lost
+ *     bytes in 7 of its 90 measurements, all on darwin-x64: 1024->1018, 1025->1019, 2048->1530,
+ *     16384->16378 and 65536->47610 in one attempt, 1025->1018 and 2048->1018 in another. The
+ *     worst delivered 72% of the message. Run 33100038199 lost a paced 2048 B submit down to
+ *     1018 B on darwin-arm64. Pacing lowers the frequency of loss by an amount nobody here has
+ *     bounded, and 60 clean attempts on one machine did not bound it either.
+ *   - No BACKPRESSURE. There is no drain signal anywhere in this path. `pty.write` queues into
+ *     node-pty's `_writeQueue` and returns; the queue drains through `fs.write` callbacks that
+ *     recurse without yielding. The timer between chunks acknowledges neither the write nor the
+ *     child's read. See `yieldToChild`.
+ *   - No GUARANTEED DELIVERY, at any size. 256 B is the only size never observed short, across
+ *     both runs and all three platforms -- which is an absence of counterexamples in 21 tries,
+ *     not a guarantee, and is exactly the reasoning that produced the assertions CI deleted.
+ *   - No CORRUPTION SHAPE. Every loss observed so far has been a shortfall, and the unchunked
+ *     measurement reports whether what arrived is a prefix -- but `1024->1018` is six bytes
+ *     missing from a payload at the ceiling, and nothing here establishes whether they came off
+ *     the tail or out of the middle. The sweep does not report prefix-ness at all. So "the loss
+ *     is always a lost tail" is a hypothesis with no test behind it.
+ *
+ * The guarantee a caller actually gets is none of these. It is in the adapters: the child
+ * echoes back what it took, a mismatch is cancelled and re-sent once if the child confirms the
+ * turn ended, and anything short of an exact match is REFUSED. That contract passed on all
+ * three platforms in all seven attempts across both runs, including every attempt in which this
+ * layer lost bytes. `adapters/promptFidelity.test.ts` is where it is asserted.
+ */
+
 test('#174 hazard: pacing under the ceiling CHANGES it, measured both ways', async (t) => {
   // The same bytes, the same child, the same pty -- only the pacing differs. That comparison is
   // what rules the tty queue in as the cause of defect A, and it is all this reports.
@@ -429,12 +480,8 @@ test('#174 hazard: pacing under the ceiling CHANGES it, measured both ways', asy
     `8192 B on ${THIS_PLATFORM}: paced in 256 B chunks -> ${paced} B, one write -> ${unpaced} B` +
       `${paced >= unpaced ? '' : ' -- PACING DELIVERED LESS'}`,
   )
-  // `paced >= unpaced` held in all twelve CI observations and is still NOT asserted, which is a
-  // deliberate second thought rather than an oversight. Both sides of it have been seen to move
-  // on the same platform: attempt 3 paced a 2048 B submit down to 1018 B, and the same attempt
-  // delivered an unpaced 8192 B write whole on linux. Two numbers that each swing by 8x are not
-  // a relationship to hang a build on, and an inversion is worth READING about rather than
-  // being told about by a red CI job on a commit that did not cause it.
+  // Not asserted. See WHAT THE PACING EVIDENCE SUPPORTS below for the 21 observations behind
+  // that decision.
   assertNothingInvented(8192, paced, 'paced in 256 B chunks')
   assertNothingInvented(8192, unpaced, 'one unchunked write')
 })
@@ -528,7 +575,10 @@ const SWEEP = [256, 1024, 1025, 2048, 4096, 16_384, 65_536]
  *
  * So the sweep stays as EVIDENCE and stops being a promise. It prints what each size actually
  * delivered on this platform and this run, which is the thing that would have made the CI
- * failure a data point instead of a mystery. The promise a caller gets is made where it can be
+ * failure a data point instead of a mystery -- and it has since earned that: run 33104083028
+ * caught darwin-x64 losing bytes at five sizes in one attempt, down to 47610 of 65536. See
+ * WHAT THE PACING EVIDENCE SUPPORTS above for the full tally and for what it does and does not
+ * license anyone to claim. The promise a caller gets is made where it can be
  * kept -- in the adapters, where the child says what it took and a short message is re-sent
  * once and then refused. `adapters/promptFidelity.test.ts` holds that contract at 4096 B,
  * through real adapters, and it is the test that fails if the guarantee stops being true.
