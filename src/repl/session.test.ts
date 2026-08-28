@@ -1676,6 +1676,86 @@ test('a pause is held open for a piped driver, and resolvable from stdin', async
 })
 
 /**
+ * The invariant twelve of this file's wall-clock sleeps lean on, asserted for the first time (#179).
+ *
+ * Twelve sites here write a console command AFTER a `setTimeout`, on the theory that the command
+ * would otherwise race the run into existence and be answered with `nothing is running`. It cannot,
+ * and the reason is SOURCE ORDER rather than timing: `runSession` builds readline, attaches its
+ * `line` handler, and calls `begin(opts.goal)` with no `await` anywhere between the three
+ * (`src/repl/session.ts`); `begin` assigns `run = relay.start(goal)` synchronously, and
+ * `Relay#start` is not async — it drives its first exchange before it returns. readline cannot emit
+ * a line until the next tick, so with a goal supplied the run is ALWAYS live by the time stdin is
+ * dispatched, on any machine, under any load.
+ *
+ * Nothing asserted that. It was a property of the order of three statements, which is the kind of
+ * thing a future reordering breaks in silence: one `await` inserted into that stretch of startup,
+ * or a `begin` deferred by a timer, turns all twelve into genuine races that fail only on a loaded
+ * runner and pass on the machine of whoever made the change. Both mutations were applied while
+ * writing this and both kill it — see the run notes on #179.
+ *
+ * WHAT THIS DOES NOT COVER, said here because the count is the kind of thing that gets rounded up
+ * on a re-read: the thirteenth sleep in this file, in `a turn that ends lets /continue resume on
+ * retry`, does not lean on this at all. It sleeps AFTER dispatching `/continue` into an already
+ * paused run, waiting for a fire-and-forget command to finish before asserting on what it did. That
+ * one IS load-bearing — deleting it fails every time — and it is a completion race, not a startup
+ * race. Nothing here would catch it, and this test must not be cited as if it did.
+ *
+ * The claim is made on the RECORD, not on the console, and that is the point rather than a style
+ * preference: a refused `/pause` writes a console-only sentence and NO pause, so a pause whose
+ * reason is `operator_requested` is unsatisfiable unless the command reached a live run. The
+ * negative console form — grepping for the absence of the refusal — is the weaker claim this file
+ * warns about above `collect()`, because a wrap falling inside the phrase satisfies it either way.
+ *
+ * There is deliberately NO sleep here. A sleep would be the assumption under test.
+ */
+test('a command buffered before startup reaches a live run, and is not told nothing is running', async () => {
+  const dir = repo()
+  const out = collect()
+  const input = new PassThrough()
+  // The earliest observable moment there is: already on the stream before `runSession` exists to
+  // read it. Every other stdin test in this file arrives strictly later than this one.
+  input.write('/pause\n')
+  const running = runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'claude',
+    rounds: 6,
+    checks: [],
+    operator: 'agent',
+    registry: registryOf({
+      codex: [slow('advisor', 'codex', ['Do it.', 'More.', 'DONE'], 300)],
+      claude: [slow('impl', 'claude', ['ack', 'Did it.', 'Again.'], 300)],
+    }),
+    input,
+    output: out.stream,
+  })
+
+  const until = async (pred: (f: ReturnType<typeof resolveSession>) => boolean, ms = 10_000) => {
+    const t = Date.now()
+    while (Date.now() - t < ms) {
+      const f = resolveSession(dir)
+      if (pred(f)) return f
+      await new Promise((r) => setTimeout(r, 50))
+    }
+    throw new Error(`timed out; console said:\n${out.text().slice(-700)}`)
+  }
+
+  const paused = await until((f) => 'session' in f && f.session.status.state === 'paused')
+  assert.ok('session' in paused)
+  assert.equal(
+    paused.session.status.pause?.reason,
+    'operator_requested',
+    'the first line off stdin was accepted by a run that already existed',
+  )
+
+  input.write('/continue\n')
+  await until((f) => 'session' in f && f.session.status.state === 'running')
+  input.end()
+  await running
+})
+
+/**
  * One answer is one message, however many lines it took to write (#102).
  *
  * The reported case, and the worst one: an agent operator answering an
