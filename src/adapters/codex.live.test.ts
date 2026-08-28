@@ -44,6 +44,16 @@ async function participant(args: string[] = []): Promise<CodexPtyHookAdapter> {
  *
  * Recording once and querying the buffer is also closer to what a real consumer does.
  */
+/**
+ * How long a transcript-backed revision may take before the claim is considered unproven.
+ *
+ * Generous on purpose, and the generosity is free: `waitFor` returns the moment the condition
+ * holds, so a prompt revision costs nothing and only a genuinely absent one waits this out.
+ * The number is therefore an upper bound on patience, not an estimate of anything -- which is
+ * exactly what the 4000 ms it replaces was not.
+ */
+const REVISION_TIMEOUT_MS = 30_000
+
 class Recorder {
   readonly events: AgentEvent[] = []
 
@@ -62,10 +72,37 @@ class Recorder {
     return pred(this.events)
   }
 
-  /** Wait for a terminal verdict, then keep watching briefly in case it is revised. */
-  async waitForSettled(timeoutMs: number, settleMs = 4000): Promise<boolean> {
+  /**
+   * Wait for a terminal verdict, then for the revision that may refine it.
+   *
+   * `until` is the fix for #175 and the reason this is not simply a sleep. A verdict here is
+   * reported as soon as the adapter can state one, and the transcript read that UPGRADES it --
+   * `assumed` to `proven`, on the evidence of `turn_aborted` -- lands afterwards. How long
+   * afterwards is not a property of the code: the failing runs took ~33 s end to end where the
+   * passing ones took ~14 s, so a fixed 4000 ms was a bet on machine speed that a loaded
+   * machine loses. The evidence always arrived; the harness had stopped looking.
+   *
+   * Given `until`, this waits for the CONDITION -- with a timeout far past any observed read,
+   * so it costs nothing when the evidence is prompt and cannot be outrun when it is not.
+   *
+   * Timing out is deliberately NOT a failure here. The caller's assertion is what states the
+   * claim, and it must be the thing that fails: a harness that threw on the timeout would
+   * report "waited too long" for what is really "the transcript never proved it", which is the
+   * regression this test exists to catch and the one message that must survive.
+   *
+   * Without `until` the old fixed settle stands, for the flows that only need the stream to go
+   * quiet and have never been observed to flake. Changing those blind, in a suite that needs a
+   * real Codex to run, would be trading a known-good bet for an unmeasured one.
+   */
+  async waitForSettled(
+    timeoutMs: number,
+    opts: { settleMs?: number; until?: (events: AgentEvent[]) => boolean } = {},
+  ): Promise<boolean> {
+    const { settleMs = 4000, until } = opts
     const got = await this.waitFor((e) => e.some((x) => x.type === 'turn_end'), timeoutMs)
-    if (got) await new Promise((r) => setTimeout(r, settleMs))
+    if (!got) return got
+    if (until) await this.waitFor(until, REVISION_TIMEOUT_MS)
+    else await new Promise((r) => setTimeout(r, settleMs))
     return got
   }
 
@@ -170,7 +207,13 @@ test('send -> cancel -> cancelled, proven from the transcript', { skip }, async 
   const cancelled = await session.cancel()
   assert.equal(cancelled, key)
 
-  await rec.waitForSettled(60_000)
+  // Wait for the PROVEN verdict, not for four seconds and a hope. The transcript read that
+  // carries `turn_aborted` lands after the first verdict is reported, and this is the claim the
+  // test is about -- so it is the thing to wait for. If it never arrives the assertion below
+  // still fails, and says so in the words of the claim rather than of the wait.
+  await rec.waitForSettled(60_000, {
+    until: (e) => e.some((x) => x.type === 'turn_end' && x.verdict.confidence === 'proven'),
+  })
   const events = rec.events
   const end = rec.lastTurnEnd()
   assert.ok(end, 'expected a turn_end for the cancelled turn')
