@@ -43,10 +43,11 @@ import {
   type SeatExecution,
   type Task,
   type TaskEvent,
+  type TaskGrade,
   type TaskRuntime,
   type TaskTarget,
 } from './dispatch.ts'
-import { Relay, type RelayOptions } from './relay.ts'
+import { InvariantViolatedError, Relay, type RelayOptions } from './relay.ts'
 
 function repo(): string {
   const dir = mkdtempSync(join(tmpdir(), 'conclave-dispatch-'))
@@ -134,6 +135,89 @@ async function relayOf(
 function at(runtime: TaskRuntime, event: TaskEvent): number {
   return runtime.marks.find((m) => m.event === event)?.ordinal ?? -1
 }
+
+test('#74 an invariant the orchestrator broke is not reported as a transport failure', async (t) => {
+  // The reason the invariant above is worth having, and what #74 asks for: `#loop` catches
+  // everything a run can throw and reported all of it as `transport_failed`. That tells the
+  // operator the connection to a child failed. Nothing did -- they go and check the CLI, the
+  // network and the provider, and every one of them is fine.
+  //
+  // Injected rather than provoked, and that is deliberate. The throw it stands for is
+  // `#assign` refusing a seat `nextDispatch` chose, which the test above asserts CANNOT happen
+  // and which the code is written to keep unreachable. Provoking it would mean breaking the
+  // invariant on purpose to watch the guard fire, and the guard is not what would be tested
+  // then. What is tested here is the mapping: this error class, out of the loop, must not land
+  // in the transport bucket.
+  const dir = repo()
+  const advisor = new FakeRotationSession('advisor-1', 'codex', ['Do the thing.', 'DONE'])
+  const impl = new FakeRotationSession('impl-1', 'claude', ['ack', 'Did it.', 'NONE'])
+  impl.onSend = () => {
+    throw new InvariantViolatedError(
+      'a seat chosen by nextDispatch is accepted by refuseDispatch',
+      'dispatcher refused t-1: implementer still holds t-0, whose verdict is not graded',
+    )
+  }
+  const relay = await relayOf(dir, advisor, impl)
+  t.after(() => relay.stop())
+
+  const outcome = await relay.run('build the thing')
+
+  assert.equal(outcome.reason, 'invariant_violated', `the ending must name it: ${JSON.stringify(outcome)}`)
+  assert.notEqual(outcome.reason, 'transport_failed', 'no transport was asked to carry anything')
+  // The invariant, not only the message. A reader should not have to parse prose to learn
+  // which rule broke, and the detail is where an operator meets it.
+  assert.match(outcome.detail ?? '', /a seat chosen by nextDispatch is accepted by refuseDispatch/)
+  assert.match(outcome.detail ?? '', /dispatcher refused t-1/, 'and what it was doing at the time')
+})
+
+test('#74 every seat nextDispatch picks is one refuseDispatch accepts', () => {
+  // THE invariant, asserted directly. `#assign` calls `refuseDispatch` on the seat
+  // `nextDispatch` already chose through `seatFor`, so a refusal there is the dispatcher
+  // contradicting itself -- "a dispatcher deadlocking on itself", as `refuseDispatch` puts it.
+  //
+  // Worth stating as a property rather than as one example, because the throw it guards is
+  // unreachable at N=1 by construction and is meant to stay unreachable at N>1. A test that
+  // only checked the error type would pass while the invariant itself rotted.
+  const states: SeatExecution['state'][] = ['idle', 'running', 'integrating', 'merge_blocked']
+  const targets: Task['target'][] = [
+    { kind: 'role', role: 'implementer' },
+    { kind: 'seat', seat: 'implementer' },
+    { kind: 'seat', seat: 'implementer-2' },
+  ]
+  // Ungraded is the case `refuseDispatch` exists for, so both sides of it are covered.
+  const grades: (TaskGrade | undefined)[] = [
+    undefined,
+    { outcome: 'completed', superseded: false },
+    { outcome: 'timed_out', superseded: true },
+  ]
+
+  let picked = 0
+  for (const state of states) {
+    for (const target of targets) {
+      for (const grade of grades) {
+        for (const current of [undefined, 't-held']) {
+          const t = task({ id: 't-1', seq: 1, target })
+          const seats = [seat({ state, ...(current === undefined ? {} : { current }) })]
+          const runtime = new Map<string, TaskRuntime>([
+            ['t-1', { state: 'ready', marks: [] }],
+            ['t-held', { state: 'assigned', seat: 'implementer', marks: [], ...(grade ? { grade } : {}) }],
+          ])
+          const d = nextDispatch([t], runtime, seats)
+          if (!d) continue
+          picked += 1
+          assert.equal(
+            refuseDispatch(d.seat, runtime, d.task),
+            undefined,
+            `nextDispatch chose ${d.seat.seat} for ${d.task.id} (state=${state}, held=${current}, ` +
+              `grade=${grade?.outcome ?? 'ungraded'}) and refuseDispatch then refused it`,
+          )
+        }
+      }
+    }
+  }
+  // The loop must actually have exercised dispatches, or it asserts nothing at all.
+  assert.ok(picked > 0, `no combination produced a dispatch to check (${picked})`)
+})
 
 function seat(over: Partial<SeatExecution> = {}): SeatExecution {
   return { seat: 'implementer', role: 'implementer', state: 'idle', idleSince: 0, dispatched: 0, ...over }
