@@ -50,7 +50,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 import { TranscriptReadAbandoned, TranscriptSessionView } from './reconcile.ts'
 import { RewriteAwareTail, parseJsonLine, type ReadLease } from './tail.ts'
-import { wedgeOneTailPoll } from './tailWedge.ts'
+import { wedgeOneTailPoll, type TailWedge } from './tailWedge.ts'
 import { guaranteesFor } from '../contract/session.ts'
 import type { AgentEvent } from '../contract/session.ts'
 
@@ -99,18 +99,132 @@ const PATIENT_MS = 5_000
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
 
 /**
- * Give a released read the turn of the loop it needs to actually settle.
+ * Wait until the view will take a caller again, and say so out loud if it never will.
  *
  * Releasing the wedge lets the held poll RESUME; the view is still holding it until that poll
- * returns and its job runs its `finally`. A view with an overdue read outstanding refuses new
- * callers immediately -- correctly, since it can neither cancel it nor duplicate it -- so a test
- * that reads on the next line is measuring that sub-millisecond window rather than the recovery
- * it meant to check. A real caller retries; a test waits.
+ * returns and `#read`'s `finally` runs. Until then a view somebody has called `abandonReads()`
+ * on refuses arrivals with `TranscriptReadAbandoned` -- correctly, since it can neither cancel
+ * the operation nor duplicate it -- and a test that reads on the next line is measuring that
+ * window rather than the recovery it meant to check. A real caller retries; a test waits.
+ *
+ * This waited 25ms. 25ms is a guess about how long a filesystem takes, and #176 is what a guess
+ * costs: one failure in ten platform-attempts on the slowest runner in the matrix, at
+ * `abandonReads() answers everyone at once`, where the sleep ended before the flag cleared and
+ * the snapshot behind it was refused. `readsStalled` is that flag, and it is public because
+ * `cancel()` reads it for exactly this question -- "is there any point asking yet". So the test
+ * asks the same thing the production caller asks, and stops when it has an answer rather than
+ * when a number of milliseconds chosen in 2025 has gone by.
+ *
+ * TO REPRODUCE #176 DETERMINISTICALLY: put `await Promise.resolve()` in place of a call to this
+ * helper. One microtask is not enough for a released read to finish real filesystem work, so the
+ * flag is still set, and the failure is the same one every run instead of one run in ten. See
+ * the call site in `abandonReads() answers everyone at once` for the recorded output.
+ *
+ * ON THE THREE SITES WHERE NOBODY ABANDONED ANYTHING this returns on the first check, and that
+ * is the correct answer rather than a hole: `#stalled` is set only by `abandonReads()`, and a
+ * view that has not been told to give up does not refuse arrivals at all -- the next caller
+ * ATTACHES to the outstanding read and is answered by it. There is nothing to wait for, so it
+ * does not wait. What the helper guarantees everywhere is the precondition each of those call
+ * sites actually needs: the view is not going to turn the next line away.
+ *
+ * It THROWS on expiry rather than returning. A wait that gives up quietly and lets the next line
+ * run turns "the flag never cleared" into whatever that line happens to assert -- which for #176
+ * was a `TranscriptReadAbandoned` naming a 5000ms lease the caller had not waited any of, three
+ * frames from anything that would tell a reader what went wrong.
  */
-const settled = (): Promise<void> => sleep(25)
+const SETTLE_BUDGET_MS = 2_000
+const settled = async (v: TranscriptSessionView, within: number = SETTLE_BUDGET_MS): Promise<void> => {
+  const deadline = Date.now() + within
+  while (v.readsStalled) {
+    if (Date.now() >= deadline) {
+      throw new Error(
+        `the view was still refusing callers ${within}ms after the read was released: ` +
+          `readsStalled is true, so \`#read\`'s \`finally\` has not run and the operation has not ` +
+          `come back. ${v.abandonedReads} read(s) abandoned so far. Either the wedge was not ` +
+          `released, or the release stopped clearing the flag. A machine merely being slow does not ` +
+          `reach here: the default budget is ${SETTLE_BUDGET_MS}ms for work that takes single digits.`,
+      )
+    }
+    await sleep(1)
+  }
+}
 
 const promptsOf = (events: AgentEvent[]): string[] =>
   events.filter((e) => e.type === 'turn_start').map((e) => String(e.prompt))
+
+/**
+ * Run one of the test below's ordinary reads to an ANSWER, and name the stage if it never gets
+ * one.
+ *
+ * These three reads are not the subject of anything. They set the file up, they drain what a
+ * released read banked, and they check the final projection; every assertion about the
+ * invariant is somewhere else. What they were nonetheless asserting, silently, is that a cold
+ * filesystem read answers inside `LEASE_MS` -- 60ms -- on whatever machine happens to be
+ * running them. That is not a property of this code. It is a property of the disk, and it is
+ * the one this test kept losing:
+ *
+ *   ✖ a wedged read is never joined by a second one, however long it lasts
+ *     Error: the "precondition poll" read lost its 60ms lease. readsStalled=false,
+ *     abandonedReads=1, wedge.calls=n/a -- no wedge installed at this stage.
+ *     [cause]: TranscriptReadAbandoned: transcript read abandoned after 60ms ...
+ *         at Timeout.expire (src/transcript/reconcile.ts)
+ *
+ * `readsStalled=false` and no wedge: nothing had been abandoned and nothing was being held.
+ * An ordinary read was simply late, and a caller with a 60ms lease was told so -- which is the
+ * lease doing its job, correctly, at a test that had no business asking for that guarantee.
+ *
+ * SO IT RETRIES, because that is what the lease is FOR. `TranscriptReadAbandoned` is not a
+ * failure; it is "no answer yet, ask again if you still care" -- the contract `BoundedSingleFlight`
+ * is built on, and the same answer a real deadline re-check gets. A caller that still cares
+ * asks again, attaches to the same operation, and is answered when it lands. Nothing here
+ * duplicates a read: `#inflight` guarantees one operation and this loop just keeps a waiter on
+ * it.
+ *
+ * WHAT IT DELIBERATELY IS NOT. Not a longer lease -- `LEASE_MS` is unchanged, and raising it
+ * would only move the machine at which this breaks. Not a sleep -- there is no interval here to
+ * guess, and guessing one is the mistake this whole issue exists to remove. The bound is
+ * `PATIENT_MS`, and what it buys is a diagnostic rather than a hang: a read that never answers
+ * in five seconds is a real defect and says so, with the stage, the counters and the attempt
+ * count.
+ *
+ * Only `TranscriptReadAbandoned` is retried. Anything else -- an unreadable file, a parse that
+ * threw -- is a real failure of a real read and goes straight up.
+ */
+async function readStage<T>(
+  name: string,
+  v: TranscriptSessionView,
+  wedge: TailWedge | undefined,
+  run: () => Promise<T>,
+): Promise<T> {
+  const deadline = Date.now() + PATIENT_MS
+  let attempts = 0
+  let abandoned = 0
+  for (;;) {
+    attempts++
+    try {
+      return await run()
+    } catch (err) {
+      if (!(err instanceof TranscriptReadAbandoned)) throw err
+      abandoned++
+      if (Date.now() >= deadline) {
+        throw new Error(
+          `the "${name}" read never answered inside ${PATIENT_MS}ms: ${attempts} attempt(s), ` +
+            `${abandoned} of them told the read had not come back. readsStalled=${v.readsStalled}, ` +
+            `abandonedReads=${v.abandonedReads}, ` +
+            `wedge.calls=${wedge ? wedge.calls : 'n/a -- no wedge installed at this stage'}. ` +
+            `A single lost ${LEASE_MS}ms lease is ordinary and is retried; ${PATIENT_MS}ms of them ` +
+            `is a read that is not coming back, which is a defect rather than a slow disk.`,
+          { cause: err },
+        )
+      }
+      // A turn of the macrotask queue before asking again. Not a delay -- there is nothing to
+      // wait out, and no number is being guessed. A rejection that arrives without ever
+      // reaching the filesystem settles on the microtask queue, and a loop that never leaves it
+      // would starve the very timers that let the read finish.
+      await new Promise((r) => setImmediate(r))
+    }
+  }
+}
 
 test('a wedged read is never joined by a second one, however long it lasts', async () => {
   // The invariant, counted rather than inferred. Everything that used to be let past the head
@@ -120,8 +234,57 @@ test('a wedged read is never joined by a second one, however long it lasts', asy
   writeFileSync(path, turn('one', 'first'))
   const v = view(path)
 
+  // THE GATE STAYS ON. It was the reproduction; it is now the guard, and it runs every time.
+  //
+  // This read has nothing to do with the invariant below it. No wedge exists yet, `#stalled`
+  // was never set, and the file is two lines that `writeFileSync` has just finished writing.
+  // It is an ORDINARY read, and the only thing it was ever racing is whether the filesystem
+  // answers inside `LEASE_MS`. On a loaded machine it does not, and the test used to fail:
+  //
+  //   ✖ a wedged read is never joined by a second one, however long it lasts
+  //     Error: the "precondition poll" read lost its 60ms lease. readsStalled=false,
+  //     abandonedReads=1, wedge.calls=n/a -- no wedge installed at this stage.
+  //
+  // The gate below is that machine, made portable: it holds this one tail poll past the lease
+  // and then lets it go, which is what a loaded runner does by accident. The read is guaranteed
+  // to lose its first lease, every run, on every machine. It is not guaranteed to lose the
+  // second, because by then the gate has lifted -- which is the whole point. `readStage` asks
+  // again, attaches to the same operation, and is answered when it lands.
+  //
+  // IT IS A SEPARATE GATE FROM THE WEDGE BELOW, deliberately, and torn down before the test's
+  // real subject begins. That one is armed to count operations across a wedge that never lifts;
+  // sharing it would make the call counts the invariant is measured with unreadable.
+  //
+  // STILL OPEN, NOT TOUCHED HERE. `rounds >= 3` further down is a second wall-clock assumption
+  // in this same test -- that a budget loop gets three iterations inside three lease intervals
+  // -- and the operator saw it fail once with `rounds === 2`. It is a different question from
+  // this one and is left alone.
+  const slow = wedgeOneTailPoll()
+  slow.arm()
+  // Comfortably past the lease rather than a whisker past it: the point is that the read is
+  // late, and a margin that is itself a race would be the same mistake one layer down.
+  const lift = setTimeout(() => slow.release(), LEASE_MS + 40)
+  lift.unref?.()
+
+  const lostLeasesBefore = v.abandonedReads
   const seen: AgentEvent[] = []
-  seen.push(...(await v.poll()))
+  try {
+    seen.push(...(await readStage('precondition poll', v, undefined, () => v.poll())))
+  } finally {
+    // The held read is let go and the prototype put back whatever happened, so a failure here
+    // cannot leave a patch installed for the tests behind it.
+    clearTimeout(lift)
+    slow.release()
+    slow.restore()
+  }
+  // The guard proving the guard. Without this the gate could stop holding anything -- an
+  // `arm()` that no longer catches, a lease that quietly grew -- and the retry would go on
+  // passing while testing nothing at all.
+  assert.ok(
+    v.abandonedReads > lostLeasesBefore,
+    `the gate must actually cost this read a lease, or the retry below it is proving nothing: ` +
+      `abandonedReads went ${lostLeasesBefore} -> ${v.abandonedReads}`,
+  )
   assert.deepEqual(promptsOf(seen), ['one'], 'precondition: an ordinary read works')
 
   const wedge = wedgeOneTailPoll()
@@ -152,20 +315,53 @@ test('a wedged read is never joined by a second one, however long it lasts', asy
     // The shape Codex's post-cancel wait uses: reconcile repeatedly inside a budget. Before any
     // of this existed, iteration one never returned and the budget was never consulted again.
     // Now every iteration comes back -- and none of them reads.
-    const deadline = Date.now() + LEASE_MS * 3
-    let rounds = 0
-    while (Date.now() < deadline) {
-      rounds++
-      await v.snapshot().then(
-        () => undefined,
-        () => undefined,
+    // The shape Codex's post-cancel wait uses, counted rather than clocked.
+    //
+    // WHAT THIS IS FOR. Before any of this existed, iteration one never returned and the budget
+    // was never consulted again -- one call into a wedged filesystem took the whole loop with
+    // it. What has to be true is that every iteration COMES BACK, and comes back with the truth:
+    // no answer yet. Three callers, three non-answers, one read underneath them.
+    //
+    // IT USED TO BE CLOCKED, and that was the bug. The loop ran against a budget of three lease
+    // intervals and asserted `rounds >= 3` -- but every iteration costs one whole lease, so it
+    // was really asserting that the overhead BETWEEN iterations was nil:
+    //
+    //   [rounds] budget=180ms rounds=3 per-round=[62,61,61]
+    //   [rounds] budget=180ms rounds=3 per-round=[61,60,61]
+    //
+    // Round three started at t≈122 against a deadline of 180. 58ms of slack across two
+    // iterations, and on a machine that inserted ~29ms of scheduling lag apiece it never began:
+    //
+    //   ✖ AssertionError: a budget loop over snapshot() must keep going round: 2
+    //
+    // The operator saw that once in six isolated runs. The number was never the problem --
+    // enlarging the budget would have left the same assertion one machine further from the
+    // edge. The problem was counting elapsed time to prove a thing that is not about time.
+    //
+    // SO IT COUNTS CALLERS INSTEAD. Three attempts, written out, each one REQUIRED to come back
+    // rejecting with `TranscriptReadAbandoned`. That is stronger than what the clock version
+    // checked, which swallowed both outcomes with a bare `.then(undefined, undefined)` and so
+    // could not tell a non-answer from an answer, or from an unrelated throw.
+    //
+    // THE 45ms LAG STAYS ON, and it now proves the opposite of what it used to. It was the
+    // reproduction -- enough scheduling lag to cost the old loop its third round. Nothing here
+    // reads a clock any more, so it costs this version nothing, and a future edit that
+    // reintroduces a wall-clock bound fails on the machine that runs this file rather than on
+    // the slowest runner in the matrix, weeks later.
+    const ROUNDS = 3
+    const ROUND_LAG_MS = 45
+    for (let round = 1; round <= ROUNDS; round++) {
+      await assert.rejects(
+        () => v.snapshot(),
+        TranscriptReadAbandoned,
+        `round ${round} of ${ROUNDS} must come back, and must come back saying it got no answer`,
       )
+      await sleep(ROUND_LAG_MS)
     }
-    assert.ok(rounds >= 3, `a budget loop over snapshot() must keep going round: ${rounds}`)
     assert.equal(
       wedge.calls - before,
       1,
-      `exactly one underlying read, across ${rounds} callers and three lease intervals: ${wedge.calls - before}`,
+      `exactly one underlying read, across ${ROUNDS} callers and three lease intervals: ${wedge.calls - before}`,
     )
 
     assert.ok(
@@ -185,10 +381,10 @@ test('a wedged read is never joined by a second one, however long it lasts', asy
     // what it found is banked for whoever asks next.
     assert.notEqual(late.abandoned, true, 'a read with no rival has nothing to protect anyone from')
     assert.equal(late.appended.length, 4, 'and it hands back the two turns it was holding all along')
-    await settled()
+    await settled(v)
     assert.equal(wedge.calls - before, 1, 'and it landed without any other read ever having been started')
 
-    const after = await v.poll()
+    const after = await readStage('post-release bank drain', v, wedge, () => v.poll())
     seen.push(...after)
     assert.deepEqual(
       promptsOf(after),
@@ -204,7 +400,7 @@ test('a wedged read is never joined by a second one, however long it lasts', asy
     const seqs = seen.map((e) => e.seq)
     assert.equal(new Set(seqs).size, seqs.length, 'no sequence number is issued twice')
 
-    const snap = await v.snapshot()
+    const snap = await readStage('final authoritative snapshot', v, wedge, () => v.snapshot())
     assert.deepEqual(
       snap.turns.map((t) => t.prompt),
       ['one', 'two', 'three'],
@@ -381,8 +577,36 @@ test('abandonReads() answers everyone at once, and starts nothing in their place
 
     // And the moment it settles, the view reads again -- the same file from the same offset,
     // because the abandoned read committed nothing.
+    //
+    // #176 LIVED HERE, and this is how to bring it back. `release()` does not settle the read;
+    // it lets it RESUME, and the view goes on refusing arrivals until `#read`'s `finally` runs.
+    // What stood on the next line was `sleep(25)` -- a bet on how long a filesystem takes -- and
+    // the `snapshot()` below is what loses that bet on a slow enough runner. Substitute
+    // `await Promise.resolve()` for the `settled(v)` below and it loses it every time:
+    //
+    //   $ node --test src/transcript/readLease.test.ts
+    //   ✖ abandonReads() answers everyone at once, and starts nothing in their place (0.951417ms)
+    //     TranscriptReadAbandoned: transcript read abandoned after 5000ms without answering; this
+    //     caller stopped waiting
+    //         at #attach (src/transcript/reconcile.ts)
+    //         at TranscriptSessionView.snapshot (src/transcript/reconcile.ts)
+    //         at TestContext.<anonymous> (src/transcript/readLease.test.ts)   <- the snapshot below
+    //   ℹ pass 12
+    //   ℹ fail 1
+    //
+    // Five runs of that, five identical failures, where the 25ms version passed 13/13 five times
+    // over on the same machine. The `line:column` are dropped from those three frames because
+    // `citations.test.ts` reads a `path:line` as a citation it must then pin, and a stack trace
+    // is not a claim about the tree; the frames name the functions, which is the identifying
+    // part. `ca7393d` carries the trace whole.
+    //
+    // The message is the tell, and the reason a longer sleep was never the answer: `after 5000ms`
+    // is `PATIENT_MS`, this view's entire lease, reported by a caller that waited none of it. It
+    // was refused on arrival by a `#stalled` flag not yet cleared -- the same refusal a caller
+    // gets from a read that genuinely has not come back. No wait can tell those two apart. Only
+    // asking the flag can, which is what `settled()` now does.
     wedge.release()
-    await settled()
+    await settled(v)
     const snap = await v.snapshot()
     assert.deepEqual(snap.turns.map((t) => t.prompt), ['one'], 'a real read of a real file')
     assert.equal(wedge.calls, before + 1, 'exactly one further read, and only after the first settled')
@@ -426,7 +650,7 @@ test('readsStalled says when there is no point waiting, and only then', async ()
     assert.ok((await wedged) instanceof TranscriptReadAbandoned)
 
     wedge.release()
-    await settled()
+    await settled(v)
     assert.equal(v.readsStalled, false, 'and it clears when the operation returns, not before')
     assert.deepEqual(promptsOf(await v.poll()), [], 'the view reads again, and the file is unchanged')
   } finally {
@@ -544,7 +768,7 @@ test('snapshotOrLastBuilt() answers with the last projection built rather than r
   }
 
   // Not a cache that has replaced the file: the next read that lands is authoritative again.
-  await settled()
+  await settled(v)
   assert.deepEqual(promptsOf(await v.poll()), ['two'], 'containment did not consume or lose the append')
   assert.deepEqual(
     (await v.snapshot()).turns.map((t) => t.prompt),
@@ -597,7 +821,7 @@ test('a fallback says so, and a snapshot that was actually read does not', async
   }
 
   // And the mark does not stick to the view: the next read that lands answers unflagged.
-  await settled()
+  await settled(v)
   assert.equal((await v.snapshot()).containedFallback, undefined, 'not latched -- a good read is a good read')
 })
 

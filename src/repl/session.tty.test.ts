@@ -234,6 +234,58 @@ function repo(gitignore = '.conclave/\n'): string {
  * width from the ambient terminal would assert something different on every machine, and
  * `wrap()` would quietly move the answer with it.
  */
+/**
+ * Test-only control over WHEN and HOW OFTEN `until` looks at the stream, for reproducing
+ * torn-frame flakes.
+ *
+ * A pty hands over whatever bytes have arrived. A console frame -- finish one draw, start the
+ * next, clear a row, write a rule across it -- is many writes, and nothing makes them cross the
+ * pipe together. `until` polls every 50ms and returns at whatever prefix it happens to look at,
+ * so a predicate that stops at the first row it recognises is right or wrong depending on where
+ * that look landed. That is not something the test controls, and it is not something it should
+ * depend on.
+ *
+ * `the box is pinned below the transcript` depends on it. It stops as soon as the INPUT ROW
+ * exists and then asserts about the row below, and the console redraws continuously: measured
+ * over the real stream, the predicate accepts ~5950 distinct prefixes, ~500 of which have the
+ * lower rule half-written or cleared. About one look in twelve is torn, which is the shape of a
+ * flake that fails once in ten platform-attempts and never locally.
+ *
+ * Neither knob invents a state. Every string handed to the predicate is a PREFIX of bytes the
+ * pty really delivered, in order, and a prefix is exactly what a reader gets when it looks
+ * mid-delivery. What they control is which prefix -- the one variable CI was varying for free:
+ *
+ *   `inPiecesOf`   how finely the view advances, so the predicate is offered every boundary
+ *                  rather than the handful a 50ms tick catches
+ *   `lookLateBy`   how far the first ACTING look falls behind the moment the predicate became
+ *                  satisfiable, which is what a starved 50ms poll does: the state arrives, and
+ *                  the tick that actually looks lands later
+ *
+ * So this is a sharper instrument, not a rigged one, and a green test under it is a stronger
+ * result than a green test without it. Opt-in because it is also much slower -- one event-loop
+ * turn per piece -- and because every other test in this file asserts over `c.text()` after the
+ * fact, where tearing cannot arise.
+ */
+interface Observation {
+  /**
+   * Show the predicate every prefix, advancing exactly this many bytes per check.
+   *
+   * Absent means the old behaviour exactly: the whole buffer, every 50ms. Present, the view
+   * advances only when a whole piece is available, so the boundaries are the multiples of this
+   * number and do not move with when the bytes happened to arrive.
+   */
+  readonly inPiecesOf?: number
+  /**
+   * Bytes to keep advancing after the predicate FIRST holds, before answering on it.
+   *
+   * Zero is "look the instant it becomes true", which is the luckiest possible observer and the
+   * one every local run gets. Anything else is a late look. Needs `inPiecesOf` to have anything
+   * to count. The predicate is re-asked at every byte in between, so a predicate with a side
+   * effect -- these capture the grid they matched -- keeps the LAST one, which is the point.
+   */
+  readonly lookLateBy?: number
+}
+
 async function spawnConsole(
   dir: string,
   t?: { after: (fn: () => void) => void },
@@ -241,6 +293,10 @@ async function spawnConsole(
   quiet: boolean = false,
   /** Which driver to run. The one-seat console, unless a test needs a differently-shaped run. */
   script: (dir: string) => string = (d) => driver(d, goal, quiet),
+  /**
+   * How `until` is allowed to LOOK at the stream. Off unless a test asks for it; see `Observation`.
+   */
+  observe: Observation = {},
 ) {
   const { default: pty } = await import('node-pty')
   const p = pty.spawn(process.execPath, [script(dir)], {
@@ -275,6 +331,17 @@ async function spawnConsole(
       /* already gone */
     }
   })
+  /**
+   * How much of `buf` `until` is currently allowed to see. Only moves under `inPiecesOf`.
+   *
+   * `buf` itself is always the whole stream: `text()` returns it, and the `\x1b[6n` answering
+   * above reads it, because both want the truth about what the terminal received. This is a
+   * separate, deliberately lagging view for the ONE thing that is allowed to be pessimistic.
+   */
+  let shown = 0
+  const piece = observe.inPiecesOf
+  const view = (): string => (piece === undefined ? buf : buf.slice(0, shown))
+
   return {
     proc: p,
     text: () => buf,
@@ -290,12 +357,28 @@ async function spawnConsole(
      * ptys and real node processes, and letting the runner start as many workers as it likes
      * is what starves them. The budget stays generous because a starved-but-progressing
      * console should still be allowed to finish rather than be called broken.
+     *
+     * Under `inPiecesOf` the 50ms tick is replaced by a tick per PIECE: the view advances by at
+     * most that many bytes, the predicate is asked again, and the loop yields. See `Observation`
+     * for why that is a sharper instrument rather than a rigged one.
      */
     async until(pred: (s: string) => boolean, ms = 60_000): Promise<boolean> {
       const deadline = Date.now() + ms
+      /** Where the view stood the first time the predicate held. See `lookLateBy`. */
+      let heldAt: number | undefined
       while (Date.now() < deadline) {
-        if (pred(buf)) return true
-        await new Promise((r) => setTimeout(r, 50))
+        if (pred(view())) {
+          if (heldAt === undefined) heldAt = shown
+          if (piece === undefined || shown - heldAt >= (observe.lookLateBy ?? 0)) return true
+        }
+        if (piece !== undefined && buf.length - shown >= piece) {
+          shown += piece
+          // A turn of the loop, not 50ms: the point is to ask at every boundary, and there are
+          // a great many of them.
+          await new Promise((r) => setImmediate(r))
+        } else {
+          await new Promise((r) => setTimeout(r, 50))
+        }
       }
       return false
     },
@@ -527,7 +610,44 @@ test('the box is pinned below the transcript, and progress lives only in it', as
   // in the stream whether it landed in the box, above it, or was overwritten a frame later.
   // Replaying the escapes into a grid answers where it actually IS.
   const dir = repo()
-  const c = await spawnConsole(dir, t, undefined, true)
+  // The observer stays on, and it is the regression guard rather than scaffolding left behind.
+  //
+  // WHAT IT REPRODUCED. The wait below used to stop at the first prefix in which the input row
+  // existed, and everything after it then read a grid the console had not finished writing.
+  // Measured over the real stream, that predicate accepted ~5950 prefixes and ~500 of them had
+  // the lower rule cleared or half-drawn -- about one look in twelve -- which is invisible
+  // locally and is one failure in ten platform-attempts on a loaded runner. CI caught one:
+  //
+  //   ✖ the box is pinned below the transcript, and progress lives only in it
+  //     AssertionError [ERR_ASSERTION]: rule below the input
+  //       actual: '─────',
+  //       expected: /─{20,}/,
+  //       operator: 'match',
+  //
+  // WHAT THE KNOBS DO. `inPiecesOf: 1` offers the predicate every byte prefix instead of the
+  // handful a 50ms tick catches. `lookLateBy: 16` makes the first ACTING look land 16 bytes
+  // after the predicate first becomes satisfiable -- a starved poll, which is what CI had.
+  // Neither invents a state: every string the predicate sees is a prefix the pty really
+  // delivered, in order.
+  //
+  // WHY 16. Byte by byte after the input row first appears, the shape is fixed by the order the
+  // renderer emits in rather than by the clock, and was identical on five separate runs:
+  //
+  //   +0 .. +10   clean   the frame that drew the input row is finished
+  //   +11 .. +30  TORN    the next frame clears that row and redraws the rule across it
+  //   +31 ..      clean
+  //
+  // Any value in 11..30 lands in the tear. 16 is six bytes in, where five of the rule's hundred
+  // characters exist, which is the `'─────'` CI reported. Absolute offsets move between runs
+  // (first acceptance at 4612, 7397 and 7782 across five); the relative shape did not.
+  //
+  // WHAT KEEPING IT BUYS. The wait now walks every one of those 20 torn prefixes, `'─────'`
+  // among them, refuses all of them, and returns at the first coherent frame after the tear.
+  // Measured at the fix: 32 prefixes the old predicate would have taken, 20 of them torn, all
+  // rejected, returning at +31. Take these knobs off and the test passes again -- but it passes
+  // the way it did before, by never being asked the hard question. A 50ms poll on a slow enough
+  // machine IS this observer; here it runs on every machine, every time.
+  const c = await spawnConsole(dir, t, undefined, true, undefined, { inPiecesOf: 1, lookLateBy: 16 })
   assert.ok(await c.until((s) => /─{20,}/.test(s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '')), 20_000))
   c.type('typing here')
 
@@ -542,31 +662,50 @@ test('the box is pinned below the transcript, and progress lives only in it', as
   // Waiting for the row rather than sleeping a fixed 1.5s: the console draws the echo when it
   // draws it, and a fixed sleep either fails on a slow machine or wastes time on a fast one.
   // The pty is fixed at 30x100 and the scan below covers every row of it, so a miss means the
-  // row is not drawn YET — which is exactly what polling answers. The grid that first holds
-  // the typed line is kept, so every assertion below reads one coherent frame rather than
-  // re-replaying a stream that has moved on since the row was found.
+  // row is not drawn YET — which is exactly what polling answers.
+  //
+  // What it waits FOR is the whole box, not the input row alone. A prefix of the stream can
+  // hold a finished input row with the rule beneath it cleared or five characters long,
+  // because that is a frame the console is still in the middle of writing, and stopping there
+  // captured a grid whose lower rows had not happened yet. The rest of this test then read
+  // it. So the wait asks for the three rows TOGETHER, in one rendered grid: a partial frame
+  // fails the wait, the loop looks again, and the grid that is kept is one the console had
+  // finished. The same three patterns are asserted below, which is what keeps a future
+  // change to either from moving one without the other.
+  const UPPER_RULE = /─{10,}/
+  const INPUT_TEXT = /›\s*typing here/
+  const LOWER_RULE = /─{20,}/
   let screen: string[][] | undefined
   let found: number | undefined
   const drawn = await c.until((s) => {
     const g = renderGrid(s, rows, cols)
-    const at = Array.from({ length: rows }, (_, i) => i + 1).find((n) =>
-      /›\s*typing here/.test(g[n - 1]!.join('').replace(/\s+$/, '')),
+    const row = (n: number): string => (g[n - 1] ?? []).join('').replace(/\s+$/, '')
+    const at = Array.from({ length: rows }, (_, i) => i + 1).find(
+      (n) =>
+        n > 1 &&
+        n < rows &&
+        INPUT_TEXT.test(row(n)) &&
+        UPPER_RULE.test(row(n - 1)) &&
+        LOWER_RULE.test(row(n + 1)),
     )
     if (at === undefined) return false
     screen = g
     found = at
     return true
   }, 20_000)
-  assert.ok(drawn && screen && found, `the input row should be on screen, holding what was typed`)
+  assert.ok(drawn && screen && found, `a complete box should be on screen, holding what was typed`)
   const grid = screen
   const inputRow = found
   const line = (n: number) => grid[n - 1]!.join('').replace(/\s+$/, '')
 
-  // The status is inlaid into the top rule rather than given a row of its own: a permanent
-  // row for one short phrase is a row spent on nothing.
-  assert.match(line(inputRow - 1), /─{10,}/, 'rule above the input')
-  assert.match(line(inputRow), /›\s*typing here/, 'the input row holds what was typed')
-  assert.match(line(inputRow + 1), /─{20,}/, 'rule below the input')
+  // Restated rather than assumed. The wait above requires all three, so these cannot fail
+  // while it succeeds -- and that is the point of keeping them: they are what the test SAYS
+  // the box is, and a later edit that loosens the wait fails here instead of silently
+  // asserting less. The status is inlaid into the top rule rather than given a row of its
+  // own: a permanent row for one short phrase is a row spent on nothing.
+  assert.match(line(inputRow - 1), UPPER_RULE, 'rule above the input')
+  assert.match(line(inputRow), INPUT_TEXT, 'the input row holds what was typed')
+  assert.match(line(inputRow + 1), LOWER_RULE, 'rule below the input')
   // The row below answers what is being typed. With an ordinary line typed and no
   // completion pending it is empty, which is the point — it is not a status line.
   assert.ok(!/⋯/.test(line(inputRow + 2)), 'the row below is not a second status line')
