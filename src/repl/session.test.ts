@@ -4337,19 +4337,31 @@ test('a turn that ends lets /continue resume on retry, however busy the child re
   )
   await observedTurn(impl, dir)
   input.write('/continue\n')
-  // FAILING REPRODUCTION (#179) — red on purpose, and not yet fixed.
+  // WAIT FOR THE EFFECT, NOT FOR A DURATION (#179).
   //
-  // A 300ms sleep stood here. It is NOT the startup race #179 alleges: the run is already paused
-  // above, so `/continue` always reaches a live run. What it waited for is the COMMAND. Dispatch is
-  // fire-and-forget — `dispatch` in `src/repl/session.ts` runs `handle` inside a floating
-  // `void (async () => …)()` — so nothing connects writing the line to its effects, and the
-  // assertions below read the console before `resumeRun` has drawn anything. `calls` has usually
-  // already incremented, which is exactly why the sleep looked adequate: the state it guards lands
-  // in pieces, so a duration that covers half of it passes.
+  // A 300ms sleep stood here, and of the thirteen wall-clock sleeps this file had it was the only
+  // one that was load-bearing: deleting it failed every time. It was never the startup race #179
+  // alleged — the run is already paused above, so `/continue` always reaches a live run. What it
+  // waited for is the COMMAND. Dispatch is fire-and-forget: `dispatch` runs `handle` inside a
+  // floating `void (async () => …)()` (`src/repl/session.ts`), so writing a line to stdin is
+  // connected to its effects by nothing at all, and the assertions below were reading the console
+  // on a bet about how long a refusal takes to appear.
   //
-  // The fix is to wait for the EFFECT rather than for a number of milliseconds. The refusal is
-  // recorded — `resumeRun` sets `pause.refusal` and republishes the pause — so it is a condition
-  // the session record can be polled for, the way every other wait in this file already works.
+  // The bet was worse than it looked, because the transaction does NOT land atomically. `calls`
+  // had already incremented while the console was still empty — so a duration covering half of it
+  // passed, and the test read as settled while it was still in motion.
+  //
+  // `pause.refusal` is the LAST thing the refusal path does: `resumeRun` writes every console line
+  // first, then sets `pause.refusal` and republishes the pause. So a record carrying a refusal is
+  // proof that the console lines are already drawn and the liveness reading already taken. That
+  // makes this wait strictly STRONGER than the sleep it replaces rather than merely more patient
+  // — it is an ordering guarantee, and no amount of load can shorten it.
+  const refused = await until((f) => 'session' in f && f.session.status.pause?.refusal !== undefined)
+  assert.ok('session' in refused)
+  // The run is still stopped. A refusal that resumed anyway would be the #117 failure this guard
+  // exists to prevent, and `state` is the field that would show it.
+  assert.equal(refused.session.status.state, 'paused', 'the refusal leaves the run paused')
+  assert.ok(refused.session.status.pause?.refusal, 'and the refusal is recorded, not merely printed')
   assert.equal(calls, 1, 'the reading is taken once, as colour on the refusal')
   assert.match(out.text(), /not continuing/)
 
