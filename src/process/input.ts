@@ -111,8 +111,26 @@ const SUBMIT_CHUNK_BYTES = TTY_INPUT_QUEUE_BYTES / 4
  * missing. Every message conclave sends goes through `envelope()`, which puts a blank line
  * after the header, so this fired on every send with a multi-line body.
  *
- * Known gap, not addressed here: a payload containing a literal ESC[201~ would end the paste
- * early. Real terminals have the same hole and prose does not carry raw escape bytes.
+ * Known gap, not addressed here: a payload containing a literal ESC[201~ ends the paste early.
+ * Real terminals have the same hole.
+ *
+ * Two corrections to what this note used to say, both measured in `inputTruncation.test.ts`:
+ *
+ * "Ends the paste early" understates it. Against a composer that clears on Escape -- which is
+ * what a real one does -- the payload's marker closes the paste, the rest of the payload
+ * becomes keystrokes, and then the REAL closing marker arrives outside any paste and CLEARS.
+ * The whole message is destroyed and replaced by `[201~`, rather than being cut short.
+ *
+ * "Prose does not carry raw escape bytes" is the assumption to be careful with, and #174 is
+ * where it was questioned: seats quote ANSI-coloured terminal output at each other, and that
+ * output carries ESC literally. An ordinary interior ESC is harmless here BECAUSE of the
+ * framing -- inside a paste it is content -- which is the same reasoning that makes ESC[201~
+ * the one sequence the framing cannot protect.
+ *
+ * Left unaddressed deliberately: `adapters/promptFidelity.ts` compares what the child took
+ * against what was sent and refuses on any difference, so this is loud rather than silent, and
+ * a send path that started rewriting payloads to escape a marker would be altering a message
+ * to make it transmissible -- which is the failure this whole area exists to prevent.
  */
 const PASTE_START = '\x1b[200~'
 const PASTE_END = '\x1b[201~'
