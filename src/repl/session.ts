@@ -26,7 +26,14 @@
 
 import { describeTool } from '../relay/subagents.ts'
 import { formatGoalFindings, lintGoal } from '../relay/goalLint.ts'
-import { type Ceilings, effectiveCeilings, preflightRefusals } from '../relay/guardrails.ts'
+import {
+  type Ceilings,
+  effectiveCeilings,
+  freeBytes,
+  outOfSpace,
+  preflightRefusals,
+  preflightWarnings,
+} from '../relay/guardrails.ts'
 import { createWriteStream, existsSync, realpathSync } from 'node:fs'
 import { basename, join, relative } from 'node:path'
 import { Writable } from 'node:stream'
@@ -779,6 +786,14 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     write(`  ${r.remedy}`)
   }
   if (refusals.length > 0) return 1
+
+  // Said, not refused. Between the floor and the warning band there is no way to know whether
+  // this run will fit, and a guard that stopped every run it was unsure about would be routed
+  // around within a week. The operator gets the number and makes the call.
+  for (const w of preflightWarnings(opts.cwd)) {
+    write(`starting anyway: ${w.reason}`)
+    write(`  ${w.remedy}`)
+  }
 
   // The seat list, resolved once and read by everything below that used to read
   // `opts.implementer` and mean "the implementers". At N=1 it is one seat filled by
@@ -2247,7 +2262,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
       // FALSIFIER, stated because it is the strongest argument against this shape: the
       // console has no general "trailing text is a message" rule and does not gain one here.
       // `/rotate <text>` and `/abort <text>` consume their text as a REASON
-      // (`src/repl/session.ts:2300`, `src/repl/session.ts:2333`) and `/pause`, `/queue`, `/audit` ignore
+      // (`src/repl/session.ts:2315`, `src/repl/session.ts:2348`) and `/pause`, `/queue`, `/audit` ignore
       // whatever follows them. So an operator who learns this from `/continue` and carries
       // it to `/pause I'll be back` still loses the sentence. That inconsistency is not
       // repaired by making `/continue` a third behaviour; it is narrowed by it, and the
@@ -2449,6 +2464,26 @@ export async function runSession(opts: SessionOptions): Promise<number> {
         new Promise<void>((resolve) => rl!.once('close', () => resolve())),
       ])
     }
+  } catch (err) {
+    // A run that cannot write stops DELIBERATELY, saying so, instead of leaving through an
+    // uncaught throw. The #180 run exited on a full volume through a Node crash dump whose
+    // last line was the runtime version; the only clue to the cause was two `could not write
+    // session status` warnings naming the file rather than the volume.
+    //
+    // Rethrown if it is anything else. This catch exists to translate ONE condition into a
+    // diagnosis, and swallowing unrelated bugs here would hide exactly the failures the stack
+    // trace is the right answer for.
+    if (!outOfSpace(err)) throw err
+    const free = freeBytes(opts.cwd)
+    write('stopping: the volume ran out of space mid-run')
+    write(`  ${free === undefined ? 'free space unknown' : `${(free / 1024 / 1024 / 1024).toFixed(1)} GiB free`} on the volume holding ${opts.cwd}`)
+    // Named explicitly, because the two survive differently and an operator deciding what to
+    // salvage needs to know which is which. Commits are durable; a working tree that was being
+    // written when the volume filled may hold a partial change.
+    write('  commits already made are safe; the working tree may hold an incomplete change')
+    // The teardown below still runs: participants are stopped and the record is closed, so
+    // this does not leak the seats or leave a lock behind for the next run to trip over.
+    return 1
   } finally {
     // Every exit path tears down. A console that leaks participants on an unexpected throw
     // is worse than no console, because the leak is invisible until the next run refuses

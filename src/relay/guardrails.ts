@@ -23,6 +23,7 @@
  */
 
 import { execFileSync } from 'node:child_process'
+import { statfsSync } from 'node:fs'
 
 export interface PreflightRefusal {
   reason: string
@@ -48,6 +49,133 @@ export function insideGitRepo(dir: string): boolean {
 }
 
 /**
+ * Free bytes on the volume holding `dir`, or `undefined` if the reading cannot be taken.
+ *
+ * Exported so the thresholds below are testable without filling a volume, which is the same
+ * reason `insideGitRepo` is exported.
+ *
+ * `undefined` rather than 0 for an unavailable reading, and the distinction is the whole
+ * contract: `statfs` is not available on every platform Node runs on, and a guard that cannot
+ * read the disk must not refuse the run. Returning 0 would make an unsupported platform look
+ * exactly like a full one and would block every run on it.
+ */
+export function freeBytes(dir: string): number | undefined {
+  try {
+    const s = statfsSync(dir)
+    // `bavail`, not `bfree`: the blocks available to THIS user, not the ones that exist. On a
+    // volume with reserved blocks the two differ by gigabytes, and a run cannot spend the
+    // reserve.
+    return s.bavail * s.bsize
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Below this, a run is refused. Above it but below `DISK_WARN_BYTES`, it is warned about.
+ *
+ * A run is not one write. It creates a worktree per seat, a transcript that grows for as long
+ * as the run lasts, and a session record written on every status change -- so the question at
+ * startup is not "can the next write land" but "is there room for a run's worth of writes",
+ * and those are different numbers by orders of magnitude.
+ *
+ * The figures are deliberately unfussy. There is no way to know what a given run will need,
+ * so precision here would be false: the floor is set where a run is CERTAIN not to finish, and
+ * the warning where finishing is a gamble the operator should get to make knowingly.
+ */
+export const DISK_FLOOR_BYTES = 512 * 1024 * 1024
+/** @see DISK_FLOOR_BYTES */
+export const DISK_WARN_BYTES = 2 * 1024 * 1024 * 1024
+
+/** A condition worth saying out loud that is not, on its own, a reason to refuse. */
+export interface PreflightWarning {
+  reason: string
+  remedy: string
+}
+
+/**
+ * Conditions the operator should know about before a run starts, none of which refuse it.
+ *
+ * Separate from `preflightRefusals` rather than a flag on it, because the caller does
+ * different things with them: a refusal ends the process and a warning does not. Folding both
+ * into one list would put that distinction in the CALLER, where forgetting it turns every
+ * warning into a fatal error or every refusal into a printed line.
+ */
+export function preflightWarnings(
+  cwd: string,
+  opts: { readFree?: (dir: string) => number | undefined } = {},
+): PreflightWarning[] {
+  const w = spaceWarning(cwd, (opts.readFree ?? freeBytes)(cwd))
+  return w ? [w] : []
+}
+
+/**
+ * The warning band, as a decision about a reading rather than about a volume.
+ *
+ * Split from the reading so the thresholds are testable without filling a disk -- the same
+ * reason `insideGitRepo` is exported. Every branch below is reachable from a plain number.
+ */
+export function spaceWarning(cwd: string, free: number | undefined): PreflightWarning | undefined {
+  // An unavailable reading warns about nothing. See `freeBytes` for why `undefined` is not 0.
+  if (free === undefined || free < DISK_FLOOR_BYTES || free >= DISK_WARN_BYTES) return undefined
+  return {
+    reason: `${gib(free)} free on the volume holding ${cwd}`,
+    remedy:
+      'A run writes a worktree per seat plus a growing transcript. This may not be enough ' +
+      'to finish on. Freeing space now is cheaper than losing the run partway.',
+  }
+}
+
+/**
+ * The refusal floor, as a decision about a reading. @see spaceWarning
+ *
+ * Below the floor and above it are the only two cases; the band between floor and warning is
+ * `spaceWarning`'s, and the two are deliberately exclusive so a single reading cannot produce
+ * both a refusal and a warning saying softer versions of the same thing.
+ */
+export function spaceRefusal(cwd: string, free: number | undefined): PreflightRefusal | undefined {
+  if (free === undefined || free >= DISK_FLOOR_BYTES) return undefined
+  return {
+    reason: `only ${gib(free)} free on the volume holding ${cwd}`,
+    remedy:
+      'A run writes a worktree per seat, a transcript, and a session record on every status ' +
+      'change; there is not room for that here. Free some space, or pass --force to start ' +
+      'anyway. See #180: a run that fills the volume dies mid-flight, and what it was doing ' +
+      'when it died is the part that is lost.',
+  }
+}
+
+/**
+ * Whether `err` is, anywhere in its cause chain, a volume that has run out of room.
+ *
+ * The chain walk is the point. By the time a full disk reaches a caller it has usually been
+ * wrapped at least once -- a write failure surfacing as a transcript error, a spawn failure,
+ * a JSON dump that could not be flushed -- and the `code` that names the real condition is on
+ * the innermost error, not the one that was thrown. Matching only the outermost is why this
+ * arrived as a stack dump rather than a diagnosis (#180).
+ *
+ * `EDQUOT` counts: a quota that is exhausted is a full volume from the run's point of view,
+ * and the operator's remedy is the same one.
+ *
+ * The depth cap is not a guess about how deep wrapping goes -- it is there because `cause` is
+ * an ordinary property that can point back at an error already seen, and a cycle here would
+ * hang the one path whose whole job is to fail cleanly.
+ */
+export function outOfSpace(err: unknown): boolean {
+  for (let e: unknown = err, depth = 0; e !== undefined && e !== null && depth < 16; depth += 1) {
+    const code = (e as { code?: unknown }).code
+    if (code === 'ENOSPC' || code === 'EDQUOT') return true
+    e = (e as { cause?: unknown }).cause
+  }
+  return false
+}
+
+/** Bytes as GiB to one decimal, for a message a person reads rather than parses. */
+function gib(bytes: number): string {
+  return `${(bytes / 1024 / 1024 / 1024).toFixed(1)} GiB`
+}
+
+/**
  * Reasons not to start, checked before anything is spawned.
  *
  * A directory with no repository is the strongest signal available that a run was started in
@@ -61,7 +189,13 @@ export function insideGitRepo(dir: string): boolean {
  * fresh checkout needs nothing. Refusing on those would break the supported case to guard an
  * unsupported one.
  */
-export function preflightRefusals(cwd: string, opts: { force?: boolean } = {}): PreflightRefusal[] {
+export function preflightRefusals(
+  cwd: string,
+  // `readFree` is a seam, and it injects the READING rather than a number on purpose: a number
+  // would make "no override given" and "the volume could not be read" the same `undefined`,
+  // and those two must not collapse -- the second is the case that must never refuse.
+  opts: { force?: boolean; readFree?: (dir: string) => number | undefined } = {},
+): PreflightRefusal[] {
   const out: PreflightRefusal[] = []
   if (!opts.force && !insideGitRepo(cwd)) {
     out.push({
@@ -71,6 +205,15 @@ export function preflightRefusals(cwd: string, opts: { force?: boolean } = {}): 
         'it, so both are meaningless here. Run from a repository, or pass --force to start anyway.',
     })
   }
+  // AFTER the repository check, so an operator who is in the wrong directory entirely is told
+  // that first. Being out of disk in a directory you did not mean to run in is the less useful
+  // half of the answer.
+  //
+  // Forceable for the same reason the repository check is: the reading is evidence, not proof.
+  // A volume that reports little free space can still be the right place to run -- and the
+  // operator who passes --force has been told the number and has decided.
+  const space = opts.force ? undefined : spaceRefusal(cwd, (opts.readFree ?? freeBytes)(cwd))
+  if (space) out.push(space)
   return out
 }
 
