@@ -95,13 +95,13 @@ export const CITED: Record<string, string> = {
   //
   // The three below moved twice over, once for #81 and once for #80's integration work in the
   // same file, and are pinned against the merged tree rather than against either side of it.
-  'bin/conclave.ts:1590-1592': "    const relay = await Relay.start({\n      registry,\n      cwd: process.cwd(),",
-  'bin/conclave.ts:1682': 'runReport(relay, { goal, outcome, startedAt: runStartedAt, build })',
+  'bin/conclave.ts:1601-1603': "    const relay = await Relay.start({\n      registry,\n      cwd: process.cwd(),",
+  'bin/conclave.ts:1693': 'runReport(relay, { goal, outcome, startedAt: runStartedAt, build })',
   // One flag for every implementer seat, which is the RUN-WIDE half of the launch args. The
   // per-seat half is no longer missing (#77): it rides inside each `--implementers` entry and
   // is appended after this, so a seat's own spelling wins. This citation still pins what it
   // always pinned -- the flag that applies to all of them.
-  'bin/conclave.ts:1376-1379': "...extraArgs(flag('implementer-args', ''))",
+  'bin/conclave.ts:1387-1390': "...extraArgs(flag('implementer-args', ''))",
   'src/config/project.ts:160-163': 'export function launchArgsFor',
   'src/registry/roles.ts:15': 'export type RoleId = string',
   // The relay.ts citations below moved together when `launch` was added to RelayParticipant
@@ -120,7 +120,7 @@ export const CITED: Record<string, string> = {
   // footer's notion of "working" is `turn_start` until `turn_end`, and `tool_use` only relabels
   // a turn that is already running. If that ever stops being true, the predicate the relay and
   // `/continue` both send on is no longer the thing the operator is watching.
-  'src/repl/session.ts:1206': 'progress.note(e.participant, label)',
+  'src/repl/session.ts:1221': 'progress.note(e.participant, label)',
   'src/relay/relay.ts:6011': 'this.#worktreesAtStart = worktreePaths(this.#opts.cwd)',
   'src/relay/relay.ts:6791': "subject: { reason: 'turn_incomplete', participant: lead.id }",
   // The five below are what the console's `/continue` liveness guard cites for reading a
@@ -169,31 +169,31 @@ export const CITED: Record<string, string> = {
   // one, because there is only ever the one object.
   'src/relay/run.ts:872': 'this.#pause.superseded = info',
   'src/relay/subagents.ts:68': 'export function worktreePaths',
-  'src/repl/session.ts:258-270': 'turnWatchdogMs?: number | undefined',
+  'src/repl/session.ts:265-277': 'turnWatchdogMs?: number | undefined',
   // The console's liveness seam, cited by the relay's own copy of it (#101). Two front-ends
   // needing the same injection is not duplication to be noticed later -- it is the shape the
   // relay deliberately copied, and the citation is what keeps the two spellings together.
-  'src/repl/session.ts:354': 'liveness?: (pid: number) => Promise<ChildLiveness>',
+  'src/repl/session.ts:361': 'liveness?: (pid: number) => Promise<ChildLiveness>',
   // The three below moved by the same edit that added `seatsToSampleAtPause` above
   // `runSession`: it inserts a documented function into the middle of the file, so every
   // citation past it shifts. Repaired against this tree rather than deleted -- each still
   // points at the line it was written about.
-  'src/repl/session.ts:989': 'escalates to you rather than being replaced',
-  'src/repl/session.ts:1140': 'logPath: runLogPath,',
+  'src/repl/session.ts:1004': 'escalates to you rather than being replaced',
+  'src/repl/session.ts:1155': 'logPath: runLogPath,',
   // Moved by #83's edit to the `/continue` refusal, nine lines above it in the same block.
   // Repaired rather than deleted: the call it pins is the one the console still makes.
-  'src/repl/session.ts:1458': 'run.pause.refusal = { at: Date.now(), reason, ...(colour ? { liveness: colour } : {}) }',
+  'src/repl/session.ts:1473': 'run.pause.refusal = { at: Date.now(), reason, ...(colour ? { liveness: colour } : {}) }',
   // Why an in-place amendment to a pause needs an event behind it. Cited by both halves of
   // #101's refresh -- the module that explains the mechanism and the loop that uses it --
   // because the argument was already written here, for `/wait`, and restating it in two more
   // places is how three copies of a reason drift apart.
-  'src/repl/session.ts:2278': 'so an in-place change like `superseded` reaches the file on the next one',
+  'src/repl/session.ts:2293': 'so an in-place change like `superseded` reaches the file on the next one',
   // The falsifier `/continue <message>` is argued against: two commands that already give
   // their trailing text a meaning, so the new rule is narrow by intent rather than by
   // accident. Pinned to the dispatch lines, which is what makes "these are unchanged"
   // checkable rather than a claim about code nobody re-reads.
-  "src/repl/session.ts:2300": "if (word === '/rotate') {",
-  "src/repl/session.ts:2333": "if (word === '/abort') {",
+  "src/repl/session.ts:2315": "if (word === '/rotate') {",
+  "src/repl/session.ts:2348": "if (word === '/abort') {",
 
   // Live-claim section in docs/NOTES.md: #156's premise and the unverified-generation guards.
   // These citations assert current fact in a section marked `## LIVE:`, so they are checked even
@@ -243,8 +243,8 @@ export const CITED: Record<string, string> = {
   // The two console lines the #171 sequence test says it is not going around: the operator's
   // reply at a pause, and `>advisor <text>`. The claim they support is that the test drives the
   // same call the front end makes, so a pin on the call itself is the whole point.
-  'src/repl/session.ts:1488': "inject(text, 'all')",
-  'src/repl/session.ts:2396': 'inject(rest, { only: who })',
+  'src/repl/session.ts:1503': "inject(text, 'all')",
+  'src/repl/session.ts:2411': 'inject(rest, { only: who })',
   'src/adapters/kimi.ts:727': 'compactionGeneration: 0,',
   'src/adapters/opencode.ts:765': 'compactionGeneration: 0,',
   'src/rotation/rotate.ts:412': 'export async function rotate(',

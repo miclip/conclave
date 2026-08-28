@@ -14,9 +14,16 @@ import {
   breached,
   ceilingSummary,
   ceilingsFrom,
+  DISK_FLOOR_BYTES,
+  DISK_WARN_BYTES,
   effectiveCeilings,
+  freeBytes,
   insideGitRepo,
+  outOfSpace,
   preflightRefusals,
+  preflightWarnings,
+  spaceRefusal,
+  spaceWarning,
   type CeilingState,
 } from './guardrails.ts'
 
@@ -63,6 +70,119 @@ test('nothing else is refused: Conclave must work in a project it has never seen
   const dir = mkdtempSync(join(tmpdir(), 'conclave-empty-'))
   execFileSync('git', ['init', '-q', '.'], { cwd: dir })
   assert.deepEqual(preflightRefusals(dir), [], 'an empty repository is a legitimate start')
+})
+
+test('a volume with no room to finish on is refused, with a remedy', () => {
+  // #180: a run died on a full volume having never asked whether there was room. The floor is
+  // where a run is CERTAIN not to finish, not where the next write would fail -- a run is a
+  // worktree per seat plus a transcript that grows for as long as it lasts.
+  const r = spaceRefusal('/w', DISK_FLOOR_BYTES - 1)
+  assert.ok(r, 'below the floor refuses')
+  assert.match(r.reason, /free on the volume holding \/w/)
+  // A diagnostic naming an internal condition with no action attached is half a message.
+  assert.match(r.remedy, /--force/)
+})
+
+test('exactly at the floor is not refused: the boundary is spent, not reached', () => {
+  // A consumable ceiling breaches on `>=`; this is the opposite kind of number. The floor is
+  // the amount that must REMAIN, so having exactly it is having enough.
+  assert.equal(spaceRefusal('/w', DISK_FLOOR_BYTES), undefined)
+})
+
+test('an unreadable volume refuses nothing, because a guard that cannot see must not block', () => {
+  // `statfs` is not available on every platform Node runs on. Returning 0 for an unavailable
+  // reading would make an unsupported platform look exactly like a full one and would block
+  // every run on it -- which is why `freeBytes` distinguishes `undefined` from 0.
+  assert.equal(spaceRefusal('/w', undefined), undefined)
+  assert.equal(spaceWarning('/w', undefined), undefined)
+})
+
+test('--force overrides the disk floor, because the reading is evidence and not proof', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'conclave-disk-'))
+  execFileSync('git', ['init', '-q', '.'], { cwd: dir })
+  // Real volume, so this asserts the wiring rather than the threshold: the operator who forces
+  // has been told the number and has decided.
+  assert.deepEqual(preflightRefusals(dir, { force: true }), [])
+})
+
+test('the band above the floor warns and does not refuse', () => {
+  // The two are exclusive by construction, so one reading cannot produce both a refusal and a
+  // softer restatement of it.
+  const free = DISK_FLOOR_BYTES + 1
+  assert.equal(spaceRefusal('/w', free), undefined, 'above the floor is not refused')
+  const w = spaceWarning('/w', free)
+  assert.ok(w, 'but it is said out loud')
+  assert.match(w.remedy, /cheaper than losing the run partway/)
+})
+
+test('a volume with room produces neither a refusal nor a warning', () => {
+  assert.equal(spaceRefusal('/w', DISK_WARN_BYTES), undefined)
+  assert.equal(spaceWarning('/w', DISK_WARN_BYTES), undefined, 'the warning band ends at the threshold')
+})
+
+test('the real reading is a positive number here, and undefined for a path that is not there', () => {
+  const here = freeBytes(process.cwd())
+  assert.equal(typeof here, 'number')
+  assert.ok((here as number) > 0)
+  assert.equal(freeBytes('/nonexistent-conclave-180'), undefined, 'unreadable is undefined, not 0')
+  // What the live preflight says is checked for CONSISTENCY with the reading, not against a
+  // fixed expectation. `assert.deepEqual(preflightWarnings(cwd), [])` stood here, and it
+  // asserts that whichever machine runs this suite happens to have more than DISK_WARN_BYTES
+  // free -- an assertion about the environment wearing the clothes of one about the code,
+  // which is the #179 shape exactly. A tight CI runner would have failed it for being tight.
+  const banded = here !== undefined && here >= DISK_FLOOR_BYTES && here < DISK_WARN_BYTES
+  assert.equal(preflightWarnings(process.cwd()).length, banded ? 1 : 0)
+})
+
+test('a full volume is recognised through the wrapping that hides it', () => {
+  // The whole reason #180 surfaced as a stack dump: by the time a full disk reaches a caller it
+  // has been wrapped, and the `code` naming the condition is on the innermost error.
+  const inner = Object.assign(new Error('write failed'), { code: 'ENOSPC' })
+  assert.equal(outOfSpace(inner), true, 'the bare error')
+  assert.equal(outOfSpace(new Error('transcript', { cause: inner })), true, 'wrapped once')
+  assert.equal(
+    outOfSpace(new Error('run', { cause: new Error('transcript', { cause: inner }) })),
+    true,
+    'wrapped twice',
+  )
+  // An exhausted quota is a full volume from the run's point of view, with the same remedy.
+  assert.equal(outOfSpace(Object.assign(new Error('q'), { code: 'EDQUOT' })), true)
+})
+
+test('an unrelated failure is not mistaken for a full volume, and a cause cycle terminates', () => {
+  // The catch rethrows anything that is not this condition: swallowing unrelated bugs there
+  // would hide exactly the failures a stack trace is the right answer for.
+  assert.equal(outOfSpace(Object.assign(new Error('nope'), { code: 'ENOENT' })), false)
+  assert.equal(outOfSpace(new Error('plain')), false)
+  assert.equal(outOfSpace(undefined), false)
+  // `cause` is an ordinary property and can point back at an error already seen. A cycle here
+  // would hang the one path whose whole job is to fail cleanly.
+  const a = new Error('a')
+  const b = new Error('b', { cause: a })
+  ;(a as { cause?: unknown }).cause = b
+  assert.equal(outOfSpace(a), false, 'terminates rather than hanging')
+})
+
+test('the floor is wired into the preflight, not merely defined beside it', () => {
+  // Without this, every threshold test above would still pass with the check never called --
+  // a guard that looks configured and does nothing, which is the worst failure a guard has.
+  const dir = mkdtempSync(join(tmpdir(), 'conclave-disk-wired-'))
+  execFileSync('git', ['init', '-q', '.'], { cwd: dir })
+  const refusals = preflightRefusals(dir, { readFree: () => DISK_FLOOR_BYTES - 1 })
+  assert.equal(refusals.length, 1)
+  assert.match(refusals[0]!.reason, /free on the volume/)
+  // And --force still reaches past it, with the same reading underneath.
+  assert.deepEqual(preflightRefusals(dir, { force: true, readFree: () => 0 }), [])
+})
+
+test('the warning band is wired in too, and stays non-fatal', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'conclave-disk-warn-'))
+  execFileSync('git', ['init', '-q', '.'], { cwd: dir })
+  const free = DISK_FLOOR_BYTES + 1
+  assert.equal(preflightWarnings(dir, { readFree: () => free }).length, 1)
+  // The same reading that warns must not also refuse: a warning the caller treats as fatal is
+  // the failure this separation exists to prevent.
+  assert.deepEqual(preflightRefusals(dir, { readFree: () => free }), [])
 })
 
 test('a turn ceiling reports what was reached, not only what was allowed', () => {

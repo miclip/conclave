@@ -41,7 +41,13 @@ import { runReport } from '../src/relay/report.ts'
 import { reportedTargeting } from '../src/relay/targeting.ts'
 import { dryRunPlan, dryRunPlanLines, type DryRunPlanInput } from '../src/relay/dryRunPlan.ts'
 import { RunLogWriter, readRunLog, runLogExists } from '../src/relay/resume.ts'
-import { ceilingSummary, ceilingsFrom, effectiveCeilings, preflightRefusals } from '../src/relay/guardrails.ts'
+import {
+  ceilingSummary,
+  ceilingsFrom,
+  effectiveCeilings,
+  preflightRefusals,
+  preflightWarnings,
+} from '../src/relay/guardrails.ts'
 import { absoluteSummary, resolveDeadlines, silenceSummary } from '../src/relay/deadlines.ts'
 import { ensureCodexHooksTrusted } from '../src/deployment/ensureTrust.ts'
 import type { ReadSession } from '../src/workspace/sessionRecord.ts'
@@ -1188,6 +1194,11 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
     const refusals = preflightRefusals(process.cwd(), { force: flagArgv.includes('--force') })
     for (const r of refusals) console.error(`conclave: ${r.reason}\n  ${r.remedy}`)
     if (refusals.length > 0) return 1
+
+    // Said, not refused. Between the floor and the warning band there is no way to know
+    // whether this run will fit, and a guard that stopped every run it was unsure about would
+    // be routed around within a week -- the same reasoning as `lintGoal` below.
+    for (const w of preflightWarnings(process.cwd())) console.error(`conclave: ${w.reason}\n  ${w.remedy}`)
 
     // Warned about before anything starts, refused only if asked. A bad goal is sometimes a
     // deliberate probe, and a check that blocks work becomes a check people route around.
