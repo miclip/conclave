@@ -142,6 +142,20 @@ function onData(b) {
     }
     const open = pending.indexOf('\\x1b[200~')
     const enter = pending.search(/[\\r\\n]/)
+    // A real composer CLEARS on Escape, and so does this one. Any ESC that is not the paste
+    // opener discards what has been typed so far and keeps only what follows -- which is a
+    // DROPPED PREFIX cutting mid-word at whatever offset the ESC sits, the shape #174's
+    // unexplained incidents have. Modelling it any other way would let this file agree with a
+    // fix that does not work, which is what this composer exists to prevent.
+    const esc = pending.indexOf('\\x1b')
+    if (esc !== -1 && esc !== open && (enter === -1 || esc < enter)) {
+      // Not enough yet to know whether this ESC begins a paste opener. Wait rather than guess:
+      // deciding early would clear on the first byte of every framed send.
+      if (pending.length - esc < 6) break
+      composer = ''
+      pending = pending.slice(esc + 1)
+      continue
+    }
     if (open !== -1 && (enter === -1 || open < enter)) {
       composer += pending.slice(0, open)
       pending = pending.slice(open + 6)
@@ -610,6 +624,86 @@ test('#174 a truncated framed paste submits NOTHING, never a fragment', async (t
       `${messages.length} message(s): ${JSON.stringify(messages.map((m) => m.length))}`,
   )
   assertWholeOrNothing(messages, text)
+})
+
+test('#174 an ESC inside an UNFRAMED message drops everything before it, mid-word', async () => {
+  // The third mechanism, reproduced. #174 closed A (the tty queue truncating a newline-free
+  // write, losing the TAIL) and B (a newline typed as ENTER, losing the front at a LINE
+  // boundary). Two of the four field incidents fit neither: 942 B, no newline anywhere, under
+  // A's ceiling, cut mid-word at byte 928 leaving a 14 B tail.
+  //
+  // A composer clears on Escape. So an ESC anywhere in an unframed payload discards everything
+  // typed before it and keeps what follows -- a dropped prefix, cutting at whatever offset the
+  // ESC sits, which is neither a line boundary nor a byte ceiling. That is the shape.
+  //
+  // Why prose would carry one: these seats quote ANSI-coloured terminal output at each other,
+  // and that output carries `\x1b[` literally. `input.ts` says of the same hazard that "prose
+  // does not carry raw escape bytes" -- which is the assumption this test exists to question.
+  const head = payload(900)
+  const tail = 'and that proves this measurement wrong.'
+  const text = `${head}\x1b[0m ${tail}`
+
+  // `advertise: 'none'` is what makes it unframed: `submit()` frames only when the child has
+  // ADVERTISED bracketed paste, so this is the pre-#174 path, still reachable by any child that
+  // never sends ESC[?2004h.
+  const messages = await submitToComposer(text, { advertise: 'none' })
+
+  assert.equal(messages.length, 1, 'one message, not a split: there is no newline to split on')
+  assert.notEqual(messages[0], text, 'and it is NOT what was sent')
+  assert.ok(
+    text.endsWith(messages[0]!),
+    'what survives is a TAIL of the message -- a dropped prefix, which is #174 seq 7 exactly',
+  )
+  assert.ok(
+    messages[0]!.length < text.length / 2,
+    `the front is gone: ${messages[0]?.length} B survived of ${text.length} B`,
+  )
+  // The cut is mid-word, not at any boundary either earlier fix would produce.
+  assert.ok(messages[0]!.includes(tail), 'the text after the escape is what is left')
+})
+
+test('#174 the paste framing neutralises it: the same ESC arrives as literal text', async () => {
+  // And this is why the merged fix very likely already closed those two incidents. Inside a
+  // bracketed paste the child inserts bytes LITERALLY -- an interior ESC is content, not a
+  // keypress -- so the identical payload survives whole.
+  const head = payload(900)
+  const tail = 'and that proves this measurement wrong.'
+  const text = `${head}\x1b[0m ${tail}`
+
+  const messages = await submitToComposer(text)
+
+  assert.equal(messages.length, 1, 'one message')
+  assert.equal(messages[0], text, 'whole, escape byte and all')
+})
+
+test('#174 a payload carrying ESC[201~ still ends the paste early — the documented hole', async () => {
+  // `input.ts` records this as a known gap and does not address it: a literal ESC[201~ inside
+  // the payload closes the paste, and everything after it is keystrokes again. Written down as
+  // a test rather than only as a comment, because a hazard nobody can see is one nobody
+  // maintains -- and because the justification beside it ("prose does not carry raw escape
+  // bytes") is the assumption the test above questions.
+  //
+  // NOT a regression and not a new defect: real terminals have the same hole, and the fidelity
+  // guard in `adapters/promptFidelity.ts` catches the result rather than letting a fragment
+  // through. This pins the SHAPE so that a future fix has something to make fail.
+  const text = `before \x1b[201~ after`
+  const messages = await submitToComposer(text)
+
+  // The paste ends at the marker, so what follows is typed -- and carries no Enter of its own,
+  // so it lands in the same submit rather than splitting.
+  // Measured, and WORSE than the note in `input.ts` says. That note reads "would end the paste
+  // early", which sounds like a truncation. What actually happens against a composer that
+  // clears on Escape -- which is what a real one does:
+  //
+  //   1. ESC[200~ opens the paste
+  //   2. the payload's own ESC[201~ closes it early, leaving `before ` in the composer
+  //   3. ` after` is now KEYSTROKES, so the composer holds `before  after`
+  //   4. the REAL closing ESC[201~ arrives outside any paste -- so its ESC CLEARS
+  //   5. `[201~` is typed as literal text, and Enter submits that
+  //
+  // So the whole message is destroyed and replaced by the tail of a control sequence, rather
+  // than being cut short. Nothing arrives that resembles what was sent.
+  assert.deepEqual(messages, ['[201~'], 'the entire message is lost, not merely truncated')
 })
 
 test('#178 a stalled child is still observed, because the wait outlives the stall', async () => {
