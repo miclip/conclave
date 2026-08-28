@@ -26,6 +26,7 @@ import { NO_DEADLINE_CLOCKS, type DeadlineSupport } from '../registry/types.ts'
 import type { AgentSession } from '../contract/session.ts'
 import { AgentRegistry } from '../registry/registry.ts'
 import { FakeRotationSession } from '../rotation/fakeSession.ts'
+import { summaryLine } from './render.ts'
 import { commandOpeningBlock, HELP, runSession, seatsToSampleAtPause, withHeartbeat } from './session.ts'
 import type { ResolutionSubject } from '../relay/resolution.ts'
 import { resolutionFor } from '../relay/resolution.ts'
@@ -136,7 +137,12 @@ function slow(id: string, agent: string, replies: string[], ms = 250): FakeRotat
  *      `Blank lines survive.` to `Blank   lines   survive.` left every console assertion about
  *      it green. Use `routed()`.
  *   2. A NEGATIVE assertion against the console -- "this phrase was not printed" -- is satisfied
- *      whenever a wrap happens to fall inside the phrase. Assert the ABSENCE OF A RECORD instead.
+ *      whenever a wrap happens to fall inside the phrase. Assert the ABSENCE OF A RECORD
+ *      instead, where one exists. Where none does -- a run summary, a hint, a banner -- there is
+ *      nothing else to read, so put the render through `flowed()` first: measured, `/NONE of/`
+ *      is absent from a summary that CONTAINS it at widths 25-27 and 63-65, and moving the
+ *      phrase a few words along moves those widths to 78-80. Such an assertion made against the
+ *      raw render is safe only by coincidence of how long the current wording is.
  *   3. A claim about presentation is only meaningful at a known width, so `collect()` pins one
  *      rather than inheriting whatever the stream happens to report.
  *
@@ -144,6 +150,33 @@ function slow(id: string, agent: string, replies: string[], ms = 250): FakeRotat
  * banner -- because no record carries those. Say so where you write one, so the next reader can
  * tell a deliberate rendering claim from a content claim that went to the wrong place.
  */
+
+/**
+ * Rendered console text with every run of whitespace collapsed to one space (#109).
+ *
+ * For NEGATIVE assertions about wrapped output, which the rule above could not previously make
+ * safe. Its advice for those is "assert the absence of a RECORD instead", and that is right
+ * whenever a record exists -- but a run summary is console-only, so there is nothing else to
+ * read, and the assertion has to be made against the render or not at all.
+ *
+ * Made against the raw render it is unfalsifiable by accident. `summaryLine` wraps at the
+ * width, so a phrase is invisible to a grep whenever a wrap happens to fall inside it:
+ * measured, `/NONE of/` is absent from a summary that CONTAINS it at widths 25-27 and 63-65,
+ * and moving the phrase along by a few words moves those widths to 78-80. At the pinned width
+ * the negative assertions in this file survive that -- by coincidence of how long the current
+ * wording is, not by construction. Reword a summary and they can silently stop testing
+ * anything, which is the whole of #109.
+ *
+ * Collapsing first removes the coincidence: a wrap inserts a newline and an indent where a
+ * space was, and both come back as one space. `session.tty.test.ts` squashes its frames for
+ * the same reason.
+ *
+ * NOT for positive assertions. Those already fail when the text changes, and reading them
+ * against the raw render keeps them honest about what was actually drawn.
+ */
+function flowed(rendered: string): string {
+  return rendered.replace(/\s+/g, ' ')
+}
 
 /**
  * The width every test here renders at.
@@ -476,6 +509,48 @@ test('#173 a command handed only a heredoc opener is refused, and the body is no
   assert.equal(routedAll(dir).filter((r) => r.text.trim() === 'CLAUDEEOF').length, 0)
 })
 
+test('#109 a wrap can hide a phrase from a negative console assertion, and flowed() stops it', () => {
+  // The defect class, made falsifiable. #109 says every assertion reading rendered output is
+  // "unfalsifiable to an unknown degree" and that nothing systematically looks for it. This is
+  // the mechanism, pinned, so the claim is measured rather than argued.
+  const body =
+    'advisor targeting: INCONCLUSIVE — the briefing reached NONE of the seats that answered'
+  assert.ok(/NONE of/.test(body), 'the phrase IS in what was handed to the renderer')
+
+  // At some widths the wrap falls between the two words, and a grep of the render cannot see a
+  // phrase that is demonstrably there. A `doesNotMatch` against that render passes while the
+  // thing it forbids is on screen.
+  const hidden = []
+  for (let w = 20; w <= 140; w += 1) {
+    if (!/NONE of/.test(summaryLine('===', body, w))) hidden.push(w)
+  }
+  assert.ok(hidden.length > 0, 'a wrap can fall inside the phrase at some width')
+  // Named, so a change to `wrap()` that moved them shows up as a diff rather than as silence.
+  assert.deepEqual(hidden, [25, 26, 27, 63, 64, 65])
+
+  // Collapsing the wrap removes the coincidence at EVERY width, which is the property the
+  // negative assertions in this file now rely on.
+  for (let w = 20; w <= 140; w += 1) {
+    assert.ok(
+      /NONE of/.test(flowed(summaryLine('===', body, w))),
+      `flowed() must find the phrase at width ${w}`,
+    )
+  }
+})
+
+test('#109 flowed() does not invent a match that was never rendered', () => {
+  // The other half, and the one that keeps the helper honest: collapsing whitespace must not
+  // join words that were separate, or a negative assertion would start failing on text nobody
+  // wrote. Only the wrap's own newline-and-indent is removed.
+  const rendered = summaryLine('===', 'advisor targeting: CONCLUSIVE — every seat answered', 100)
+  assert.doesNotMatch(flowed(rendered), /NONE of/)
+  assert.doesNotMatch(flowed(rendered), /the briefing ELICITED/)
+  // And a phrase that really is absent stays absent however narrow the render gets.
+  for (let w = 20; w <= 140; w += 1) {
+    assert.doesNotMatch(flowed(summaryLine('===', 'nothing to report', w)), /NONE of/)
+  }
+})
+
 test('#173 only trailing text that is ENTIRELY an opener is refused', () => {
   // The exactness IS the rule. `heredocOpen` enumerates its heads precisely so a permissive
   // rule cannot silently reinterpret input that is already correct, and a refusal added beside
@@ -617,7 +692,7 @@ test('an addressed line is queued, restricted, and reported as such', async () =
   // No `withheld from advisor` line: `→ implementer` already says where it went, and on a
   // two-participant run the exclusion follows from that. The fact is not lost — `/audit`
   // is where it is asked for, and still answers.
-  assert.ok(!/withheld from/.test(text), 'the exclusion must not be narrated on every line')
+  assert.ok(!/withheld from/.test(flowed(text)), 'the exclusion must not be narrated on every line')
   assert.match(text, /excluded advisor/, '/audit shows the asymmetry')
   assert.ok(impl.received.some((m) => m.includes('src/adapters')), 'and it reaches the participant')
 })
@@ -1290,9 +1365,14 @@ test('the console prints the targeting reading, and on truncated-only evidence i
   // it, which is what makes the negative assertions below meaningful at this width.
   const text = out.text()
   assert.match(text, /advisor targeting: INCONCLUSIVE/, text.slice(-2000))
-  assert.doesNotMatch(text, /the briefing ELICITED/, 'text nobody read to the end does not certify a briefing')
-  assert.doesNotMatch(text, /NONE of/, 'and a fragment beginning @seat is not an advisor that never wrote it')
-  assert.doesNotMatch(text, /IS reaching the advisor/, 'which is the same certification in other clothes')
+  // Through `flowed`, because these are multi-word phrases in WRAPPED output. The note above
+  // this test justified them on the positive assertion's word being short enough that no wrap
+  // can fall inside it -- true of `INCONCLUSIVE`, and not of any of the three below. Collapsing
+  // the wrap is what makes them mean something at any width rather than at this one.
+  const flat = flowed(text)
+  assert.doesNotMatch(flat, /the briefing ELICITED/, 'text nobody read to the end does not certify a briefing')
+  assert.doesNotMatch(flat, /NONE of/, 'and a fragment beginning @seat is not an advisor that never wrote it')
+  assert.doesNotMatch(flat, /IS reaching the advisor/, 'which is the same certification in other clothes')
 })
 
 test('another timeout on the still-running turn is shown as the turn still running', async () => {
