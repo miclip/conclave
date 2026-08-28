@@ -115,12 +115,16 @@ process.stdout.write('READY\\n')
 let composer = ''   // what the user would see in the input box
 let pending = ''    // bytes not yet interpreted
 let pasting = false
+let readBytes = 0   // reported, so the harness can watch for input to STOP arriving
+let submits = 0
 function submit() {
   appendFileSync(outfile, JSON.stringify({ text: composer }) + '\\n')
   composer = ''
+  submits += 1
 }
 function onData(b) {
   pending += b.toString('utf8')
+  readBytes += b.length
   for (;;) {
     if (pasting) {
       const close = pending.indexOf('\\x1b[201~')
@@ -155,11 +159,15 @@ function onData(b) {
     pending = pending.slice(keep)
     break
   }
+  process.stdout.write('PROGRESS ' + readBytes + ' ' + submits + '\\n')
 }
 function start() {
   process.stdin.on('data', onData)
   if (process.stdin.isTTY) process.stdin.setRawMode(true)
   process.stdin.resume()
+  // Announced, so the harness can WAIT for reading to have begun instead of betting on a
+  // duration longer than readAfterMs. See submitToComposer (#178).
+  process.stdout.write('READING\\n')
 }
 if (Number(readAfterMs) > 0) setTimeout(start, Number(readAfterMs))
 else start()
@@ -270,6 +278,30 @@ function assertWholeMessageArrived(sent: string, got: string, label: string): vo
   )
 }
 
+/**
+ * The whole-or-nothing disjunction, as a function so it can be TESTED rather than only run.
+ *
+ * #174's claim is that a dropped message is recoverable and a truncated one that still parses
+ * is not. Under paste framing a truncation that eats the closing ESC[201~ leaves the child in
+ * paste mode, the following Enter is absorbed, and nothing is submitted -- so zero messages is
+ * a legitimate outcome and asserting a failure on it would be wrong. So is one whole message,
+ * if a runner's tty carried the lot.
+ *
+ * The third case is the defect, and it is the only one. Keeping the check here, rather than
+ * inline in the test that usually observes zero, is what lets a manufactured fragment prove the
+ * check fires -- see the #178 test below.
+ */
+function assertWholeOrNothing(messages: string[], text: string): void {
+  if (messages.length === 0) return
+  assert.equal(messages.length, 1, 'a truncated paste must not split into several messages')
+  assert.equal(
+    messages[0],
+    text,
+    `the composer submitted a ${messages[0]?.length} B FRAGMENT of an ${text.length} B message, ` +
+      `which is the exact failure the framing exists to prevent`,
+  )
+}
+
 /** One production `submit()` into a fresh recorder. Returns the recording, framing and all. */
 async function submitAndRecord(text: string, opts: ChildOptions = {}): Promise<string> {
   const { pty, read } = await spawnChild(recorderPath, opts)
@@ -282,12 +314,62 @@ async function submitAndRecord(text: string, opts: ChildOptions = {}): Promise<s
   }
 }
 
+/**
+ * Wait until the composer has begun reading and input has STOPPED arriving at it.
+ *
+ * Two different kinds of wait, and the difference is the whole of #178.
+ *
+ * The first is an ordering guarantee. `READING` is written by the child's `start()`, so
+ * observing it proves the child is now consuming the tty -- however long `readAfterMs` held it
+ * off, and however loaded the machine is. What stood here was `settle(600)` against a child
+ * told to wait 1500ms, so the harness always looked before the child had read a byte: the
+ * message count was zero by construction, the caller's early return fired every time, and the
+ * assertions past it never once executed on any platform.
+ *
+ * The second is an observation, and is deliberately not dressed up as a guarantee. There is no
+ * drain signal for a tty -- this file says so where it measures what a stalled child keeps --
+ * so "the child has everything it is going to get" cannot be proven, only watched for. The
+ * child reports cumulative bytes after every batch it processes, and this waits for that number
+ * to stop moving. A duration is still involved, but it now bounds a gap BETWEEN OBSERVED READS
+ * rather than standing in for the entire transfer, and a slower machine simply takes more
+ * rounds instead of being read too early.
+ *
+ * When that observation is wrong it is wrong safely. Looking early can only mean fewer bytes
+ * have been processed, which yields fewer submitted messages -- never a fragment that was not
+ * there. The disjunction at the call site already treats a low count as a legitimate outcome,
+ * so a premature read degrades into the benign branch and cannot manufacture a failure.
+ */
+async function composerQuiescent(pty: PtyProcess, waitMs = 10_000): Promise<void> {
+  assert.ok(
+    await pty.waitForOutput((s) => s.includes('READING'), waitMs),
+    'the composer never began reading, so nothing below could be observed',
+  )
+  const readSoFar = (all: string): number => {
+    const seen = [...all.matchAll(/PROGRESS (\d+) \d+/g)]
+    return seen.length === 0 ? -1 : Number(seen[seen.length - 1]![1])
+  }
+  // Bounded, because a child that never reads anything at all must fail the assertions rather
+  // than hang the suite.
+  const deadline = Date.now() + waitMs
+  let last = -2
+  while (Date.now() < deadline) {
+    const now = readSoFar(pty.output)
+    if (now === last && now >= 0) return
+    last = now
+    await settle(150)
+  }
+  // Loud, not a quiet return. A harness that gives up and lets the caller read an empty file
+  // reports "nothing was submitted" for what is really "nothing was observed" -- which is #178
+  // itself, arriving more slowly. The two must never be the same answer again.
+  assert.fail('the composer never stopped receiving input, so what it holds was never measured')
+}
+
 /** Every message a composer submitted, in order. */
 async function submitToComposer(text: string, opts: ChildOptions = {}): Promise<string[]> {
   const { pty, read } = await spawnChild(composerPath, opts)
   try {
     await new InputQueue(pty).submit(text)
-    await settle(600)
+    await composerQuiescent(pty)
     return read()
       .trim()
       .split('\n')
@@ -527,14 +609,95 @@ test('#174 a truncated framed paste submits NOTHING, never a fragment', async (t
     `an 8192 B submit to a child stalled 1.5 s on ${THIS_PLATFORM} produced ` +
       `${messages.length} message(s): ${JSON.stringify(messages.map((m) => m.length))}`,
   )
-  if (messages.length === 0) return
-  assert.equal(messages.length, 1, 'a truncated paste must not split into several messages')
-  assert.equal(
-    messages[0],
-    text,
-    `the composer submitted a ${messages[0]?.length} B FRAGMENT of an ${text.length} B message, ` +
-      `which is the exact failure the framing exists to prevent`,
-  )
+  assertWholeOrNothing(messages, text)
+})
+
+test('#178 a stalled child is still observed, because the wait outlives the stall', async () => {
+  // What the 600ms sleep could not do, and the reason the assertions above were unreachable.
+  //
+  // This child reads nothing for 1.5 s, and is sent a message small enough to sit in the tty
+  // buffer intact while it waits -- so the ONLY question is whether the harness is still
+  // looking when the child finally reads. `settle(600)` was not: it returned before the child
+  // had taken a byte, saw an empty file, and reported zero. Waiting for the child's own
+  // `READING` cannot be outrun by any amount of stalling.
+  //
+  // Deliberately small. The 8 KB case above is about what a tty drops under pressure and is
+  // reported rather than asserted; this one holds the transport constant so the observation
+  // itself is what is being tested.
+  const text = payload(128)
+  const messages = await submitToComposer(text, { readAfterMs: 1500 })
+  assert.equal(messages.length, 1, 'the stalled child did submit, and the harness saw it')
+  assert.equal(messages[0], text, 'whole, as the framing promises')
+})
+
+test('#178 the whole-or-nothing check FIRES on a fragment, which is what makes it a test', async () => {
+  // The reproduction #178 asks to keep. The test above can only report what a real tty happened
+  // to carry, and for the whole of its life on `main` it reported zero -- so the assertion it is
+  // named for had never once executed, on any platform, in any run.
+  //
+  // Waiting for the child rather than for 600ms fixes the observation but cannot prove the
+  // assertion works: a run that carries nothing and a run whose check is broken look identical
+  // from outside. So the fragment is manufactured here and fed through the SAME function the
+  // test above calls. A truncation that kept its closing ESC[201~ leaves a well-formed paste of
+  // half a message, which is exactly the failure #174 exists to prevent.
+  // Small on purpose. A first draft manufactured the fragment out of 2 KB and got ZERO
+  // messages: written raw, without the chunking `InputQueue` exists to do, the tail of the
+  // write -- closing marker and Enter included -- was eaten by the same tty limit this whole
+  // file is about, and the composer sat in paste mode forever. The shape is what matters here,
+  // not the size, so this stays comfortably inside one write.
+  const text = payload(256)
+  const half = text.slice(0, 128)
+  const { pty, read } = await spawnChild(composerPath)
+  try {
+    // Written raw, not through InputQueue: the point is to hand the composer the bytes a broken
+    // transport WOULD produce, which a working one by construction never will.
+    pty.write(`${PASTE_START}${half}${PASTE_END}\r`)
+    await composerQuiescent(pty)
+    const messages = read()
+      .trim()
+      .split('\n')
+      .filter(Boolean)
+      .map((l) => (JSON.parse(l) as { text: string }).text)
+
+    assert.equal(messages.length, 1, 'the manufactured fragment did arrive as one message')
+    assert.equal(messages[0], half, 'and it is the half that was sent')
+    // The check the real test relies on, run against that: it must refuse this.
+    assert.throws(
+      () => assertWholeOrNothing(messages, text),
+      /FRAGMENT/,
+      'a fragment must be refused, and named as one',
+    )
+    // And it must accept both legitimate outcomes, or the disjunction would be a trap of its
+    // own: zero messages is the truncated case, one whole message is the intact case.
+    assert.doesNotThrow(() => assertWholeOrNothing([], text))
+    assert.doesNotThrow(() => assertWholeOrNothing([text], text))
+    // Several messages is the other way a truncated paste can go wrong -- the framing failed
+    // open and the payload's own newlines became Enters. Manufactured the same way, because
+    // the branch is otherwise never taken by anything.
+    assert.throws(
+      () => assertWholeOrNothing([half, half], text),
+      /several messages/,
+      'a split submit must be refused too',
+    )
+  } finally {
+    await stop(pty)
+  }
+})
+
+test('#178 a harness that observes nothing SAYS so, rather than reporting an empty result', async () => {
+  // The failure mode #178 was, reduced to its essence: the harness looked, saw nothing, and the
+  // caller could not tell that from a child that genuinely submitted nothing. Now it fails, and
+  // names which of the two happened.
+  const { pty } = await spawnChild(composerPath, { readAfterMs: 5000 })
+  try {
+    await assert.rejects(
+      () => composerQuiescent(pty, 800),
+      /never began reading/,
+      'a child that has not read must be reported, not read as a legitimate zero',
+    )
+  } finally {
+    await stop(pty)
+  }
 })
 
 // ---------------------------------------------------------------------------------------
