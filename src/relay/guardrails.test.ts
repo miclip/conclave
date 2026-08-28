@@ -125,8 +125,13 @@ test('the real reading is a positive number here, and undefined for a path that 
   assert.equal(typeof here, 'number')
   assert.ok((here as number) > 0)
   assert.equal(freeBytes('/nonexistent-conclave-180'), undefined, 'unreadable is undefined, not 0')
-  // The volume this suite runs on has room, so the live preflight says nothing about it.
-  assert.deepEqual(preflightWarnings(process.cwd()), [])
+  // What the live preflight says is checked for CONSISTENCY with the reading, not against a
+  // fixed expectation. `assert.deepEqual(preflightWarnings(cwd), [])` stood here, and it
+  // asserts that whichever machine runs this suite happens to have more than DISK_WARN_BYTES
+  // free -- an assertion about the environment wearing the clothes of one about the code,
+  // which is the #179 shape exactly. A tight CI runner would have failed it for being tight.
+  const banded = here !== undefined && here >= DISK_FLOOR_BYTES && here < DISK_WARN_BYTES
+  assert.equal(preflightWarnings(process.cwd()).length, banded ? 1 : 0)
 })
 
 test('a full volume is recognised through the wrapping that hides it', () => {
