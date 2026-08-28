@@ -246,7 +246,12 @@ test('a turn that keeps producing events is not called hung', async () => {
   // a suite is legitimately long, and firing on it manufactures a pause out of ordinary work
   // -- which is exactly why the absolute deadline was raised from 10 minutes to 45.
   const { updates, onUpdate } = collector()
-  const w = new TurnWatchdog<Turn>(10_000, onUpdate, MS * 2)
+  // TEN touch intervals, not two, for the reason its twin below already records: two is not a
+  // margin. The loop touches every `sleep(MS)`, so a window of `MS * 2` asserts that no sleep
+  // ever overruns to double its length -- and on a loaded runner they do. This fired on
+  // macos-latest in CI (#176 audit, #179) with `activity keeps it alive`, which is a test
+  // reporting how busy the machine was rather than whether a touched turn stays armed.
+  const w = new TurnWatchdog<Turn>(10_000, onUpdate, MS * 10)
   const turn = turnAt(Date.now())
   turn.lastActivityAt = Date.now()
   w.arm(turn.key, turn)
