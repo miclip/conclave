@@ -46,6 +46,18 @@ export type RunReason =
    */
   | 'transport_failed'
   /**
+   * Conclave broke one of its own invariants, so the run could not continue (#74).
+   *
+   * Distinct from `transport_failed` for the reason `peer_busy` is: that reason tells the
+   * operator the connection to a child failed, and here nothing about any child, CLI, network
+   * or provider was wrong. Every place they would go to look is fine, and the run stopped
+   * because the orchestrator contradicted itself.
+   *
+   * No reason meant this before, which is why such a throw landed in the transport bucket by
+   * default rather than by decision. The outcome detail names the invariant that broke.
+   */
+  | 'invariant_violated'
+  /**
    * A participant was still mid-turn when the relay had something to send it, and stayed that
    * way for the whole precondition window (#117).
    *

@@ -418,6 +418,29 @@ export class TurnAbandonedError extends Error {
   }
 }
 
+/**
+ * The orchestrator broke one of its own invariants (#74).
+ *
+ * A named type for the same reason `PeerBusyError` is one, and for a sharper version of the
+ * same complaint. `#loop` reports every other throw as `transport_failed`, which tells the
+ * operator the connection to a child failed. Nothing did: they will check the CLI, the network
+ * and the provider, and every one of them will be fine. This project keeps naming that failure
+ * in its own diagnostics -- a verdict true in form that points away from what happened -- and
+ * an internal contradiction reported as a transport fault is the purest instance of it.
+ *
+ * It carries the invariant in its own field rather than only in the message, so a reader does
+ * not have to parse prose to learn which rule broke.
+ */
+export class InvariantViolatedError extends Error {
+  /** The rule that was broken, in the words of the code that holds it. */
+  readonly invariant: string
+  constructor(invariant: string, message: string) {
+    super(message)
+    this.name = 'InvariantViolatedError'
+    this.invariant = invariant
+  }
+}
+
 export interface RelayOptions {
   registry: AgentRegistry
   cwd: string
@@ -5241,6 +5264,12 @@ export class Relay {
       // saying `stopped` here rather than `transport_failed` is what keeps a relay stopped
       // BEFORE its run ever started from reporting a fault it did not have.
       if (err instanceof TurnAbandonedError) return this.#end('stopped', detail)
+      // Nor is an invariant the orchestrator broke itself (#74). Sending an operator to check a
+      // transport that was never asked to carry anything is the misdirection this whole set of
+      // arms exists to prevent, and this is the case where the fault is entirely ours.
+      if (err instanceof InvariantViolatedError) {
+        return this.#end('invariant_violated', `${err.invariant} — ${detail}`)
+      }
       return this.#end('transport_failed', detail)
     } finally {
       this.#looping = false
@@ -5419,7 +5448,15 @@ export class Relay {
     // The task's own target, so this asks exactly what `seatFor` asked. A resolution task
     // named at a `merge_blocked` seat is a legal dispatch and must not be refused here.
     const refusal = refuseDispatch(seat, this.#taskRuntime, task)
-    if (refusal) throw new Error(`dispatcher refused ${task.id}: ${refusal}`)
+    // `nextDispatch` already chose this seat through `seatFor`, so a refusal here is the
+    // dispatcher contradicting itself rather than anything about the run -- which is why it is
+    // raised as an invariant violation and not left to land in the transport bucket (#74).
+    if (refusal) {
+      throw new InvariantViolatedError(
+        'a seat chosen by nextDispatch is accepted by refuseDispatch',
+        `dispatcher refused ${task.id}: ${refusal}`,
+      )
+    }
     const runtime = this.#taskRuntime.get(task.id)!
     runtime.state = 'assigned'
     runtime.seat = seat.seat
