@@ -523,17 +523,45 @@ export const HELP = `
   /exit                  leave, stopping the run and the participants (or Ctrl-C)
 `
 
+/**
+ * What the request was FOR, when the tool's input says so plainly.
+ *
+ * The bare notice named the tool and nothing else, and #177 reports that as the one detail
+ * that would most have narrowed it: `Bash` is every command a seat runs, so a line naming only
+ * `Bash` cannot be matched to anything that happened. The shapes handled here are the ones the
+ * adapters actually send; anything else adds nothing and is left off rather than guessed at.
+ */
+function permissionDetail(input: unknown): string {
+  if (typeof input !== 'object' || input === null) return ''
+  const i = input as { command?: unknown; file_path?: unknown; path?: unknown }
+  const what = [i.command, i.file_path, i.path].find((v) => typeof v === 'string' && v.length > 0)
+  if (typeof what !== 'string') return ''
+  const one = what.replace(/\s+/g, ' ').trim()
+  return `: ${one.length > 60 ? `${one.slice(0, 59)}…` : one}`
+}
+
 /** One line per event. Verbose enough to see progress, quiet enough to read the prose. */
-function renderActivity(participant: string, e: AgentEvent): string | undefined {
+function renderActivity(participant: string, e: AgentEvent, bypassed: boolean): string | undefined {
   switch (e.type) {
     // No `tool_use` arm: it is handled before `renderActivity` is reached, in both the
     // pinned-footer and the fallback paths. An arm here would be dead code that looks like
     // the place tool rendering lives.
     case 'permission_requested':
+      // A seat whose agent is in bypass cannot be stopped at a prompt, so telling the operator
+      // to answer one is a contradiction of the banner printed above it -- and it costs a check
+      // every time, because it reads exactly like a blocked seat (#177). The request is still
+      // WORTH printing: something reached the permission path, and a line saying so is how that
+      // stays visible. What it must not do is ask for a decision that nothing is waiting on.
+      //
+      // Dim and without the `!`, because the marker is what makes it read as an alert. This is
+      // an account of a decision already taken, not a demand for one.
+      if (bypassed) {
+        return dim(`    · ${participant} permission auto-allowed (bypass) — ${e.tool}${permissionDetail(e.input)}`)
+      }
       // Naming the answer at the moment the question appears. It read as a status —
       // something being waited out — when it is the one event in a turn that cannot
       // proceed without the operator.
-      return `    ! ${participant} needs a permission decision for ${e.tool} — /allow or /deny`
+      return `    ! ${participant} needs a permission decision for ${e.tool}${permissionDetail(e.input)} — /allow or /deny`
     case 'revision':
       return `    ~ ${participant} transcript revised (${e.reason})`
     case 'error':
@@ -1086,6 +1114,15 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     write(yellow(`  permission prompts bypassed for ${bypassing.join(' and ')} — per ${CONFIG_RELATIVE}`))
   }
 
+  // By SEAT id, not by agent name, because that is what an event carries. The banner above
+  // names agents because a bypass is configured per agent; the activity line has a participant
+  // and has to answer "can this seat be waiting?" without re-deriving the mapping each time.
+  const bypassedSeats = new Set(
+    [leadSpec, ...implSpecs, ...(reviewerSpec ? [reviewerSpec] : [])]
+      .filter((spec) => permissionModeFor(projectConfig, spec.agent) === 'bypass')
+      .map((spec) => spec.id),
+  )
+
   // Refused above, with the other terminal argument errors. What is left here is the read.
   const prior = opts.resume ? readRunLog(opts.resume) : []
   if (prior.length > 0) {
@@ -1228,7 +1265,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
         if (held !== undefined) narrate(e.participant, e.rank, held)
         pendingNarration.set(e.participant, ev.text)
       } else {
-        const line = renderActivity(e.participant, ev)
+        const line = renderActivity(e.participant, ev, bypassedSeats.has(e.participant))
         if (line) write(line)
       }
     }
@@ -2262,7 +2299,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
       // FALSIFIER, stated because it is the strongest argument against this shape: the
       // console has no general "trailing text is a message" rule and does not gain one here.
       // `/rotate <text>` and `/abort <text>` consume their text as a REASON
-      // (`src/repl/session.ts:2315`, `src/repl/session.ts:2348`) and `/pause`, `/queue`, `/audit` ignore
+      // (`src/repl/session.ts:2352`, `src/repl/session.ts:2385`) and `/pause`, `/queue`, `/audit` ignore
       // whatever follows them. So an operator who learns this from `/continue` and carries
       // it to `/pause I'll be back` still loses the sentence. That inconsistency is not
       // repaired by making `/continue` a third behaviour; it is narrowed by it, and the
