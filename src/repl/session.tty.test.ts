@@ -475,6 +475,22 @@ function renderGrid(buf: string, rows: number, cols: number): string[][] {
   return parseTerminal(buf, rows, cols).grid
 }
 
+/**
+ * Rendered text with every run of whitespace collapsed to one space (#109).
+ *
+ * For NEGATIVE assertions about a multi-word phrase. A terminal lays text into a fixed grid, so
+ * a phrase that is on screen is invisible to a grep whenever a row boundary falls inside it --
+ * and `assert.ok(!text.includes('two words'))` then passes while the thing it forbids is drawn.
+ * Measured in `session.test.ts`, where the same phrase disappears from a summary at some widths
+ * and not others. Collapsing first makes the claim hold at every width instead of at the ones
+ * the current wording happens to produce.
+ *
+ * Positive assertions stay on the raw text: they already fail when it changes.
+ */
+function flowed(rendered: string): string {
+  return rendered.replace(/\s+/g, ' ')
+}
+
 test('typed-but-unsubmitted text survives asynchronous output', async (t) => {
   const dir = repo()
   const c = await spawnConsole(dir, t)
@@ -510,7 +526,7 @@ test('typed-but-unsubmitted text survives asynchronous output', async (t) => {
   )
   // No `withheld from advisor` line is expected: `→ implementer` already carries where it
   // went, and the exclusion is answered by `/audit` rather than narrated on every line.
-  assert.ok(!c.text().includes('withheld from'), 'the exclusion must not be narrated')
+  assert.ok(!flowed(c.text()).includes('withheld from'), 'the exclusion must not be narrated')
   c.proc.kill()
 })
 
@@ -989,7 +1005,7 @@ test('an open block is named in the hint row until its terminator closes it', as
   const screen = renderGrid(c.text(), 30, 100)
     .map((row) => row.join('').replace(/\s+$/, ''))
     .join('\n')
-  assert.doesNotMatch(screen, /collecting a message/, 'the hint row is taken back once it closes')
+  assert.doesNotMatch(flowed(screen), /collecting a message/, 'the hint row is taken back once it closes')
 
   // WHAT was collected is read from the record, not from the screen. A block exists to carry
   // text a plain line cannot — the blank line in the middle of this one is the whole reason
