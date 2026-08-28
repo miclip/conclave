@@ -26,7 +26,7 @@ import { NO_DEADLINE_CLOCKS, type DeadlineSupport } from '../registry/types.ts'
 import type { AgentSession } from '../contract/session.ts'
 import { AgentRegistry } from '../registry/registry.ts'
 import { FakeRotationSession } from '../rotation/fakeSession.ts'
-import { HELP, runSession, seatsToSampleAtPause, withHeartbeat } from './session.ts'
+import { commandOpeningBlock, HELP, runSession, seatsToSampleAtPause, withHeartbeat } from './session.ts'
 import type { ResolutionSubject } from '../relay/resolution.ts'
 import { resolutionFor } from '../relay/resolution.ts'
 import type { RunPause } from '../relay/run.ts'
@@ -425,6 +425,115 @@ test('#177 a seat that is NOT bypassed still asks, and now says what for', async
   assert.match(out.text(), /needs a permission decision for Bash/)
   assert.match(out.text(), /git push --force/, 'and names the command, in this branch too')
   assert.doesNotMatch(out.text(), /auto-allowed/)
+})
+
+test('#173 a command handed only a heredoc opener is refused, and the body is not leaked', async () => {
+  // Hit while operating a live run. `/continue <<TAG` made `<<TAG` the ANSWER, and the 19 body
+  // lines then arrived as 19 separate unaddressed messages at human rank -- every line looking
+  // accepted, because every line WAS accepted. `heredocOpen` deliberately does not fire for a
+  // command head, and that rule is right; the defect is the consequence of falling through.
+  const dir = repo()
+  const impl = slow('impl', 'claude', ['ack', 'Did it.'])
+  const out = collect()
+  const input = new PassThrough()
+  const running = runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'claude',
+    rounds: 2,
+    checks: [],
+    registry: registryOf({ codex: [slow('advisor', 'codex', ['Do it.', 'DONE'])], claude: [impl] }),
+    input,
+    output: out.stream,
+  })
+  await untilText('the console to be up', out.text, /Keep the work moving|conclave/)
+
+  input.write('/log <<CLAUDEEOF\n')
+  await untilText('the refusal', out.text, /does not open a block/)
+  input.write('529 Overloaded is transient and not a reason to stop.\n')
+  input.write('The second line of the paste.\n')
+  input.write('CLAUDEEOF\n')
+  await untilText('the discard count', out.text, /were discarded, not sent/)
+  input.end()
+  assert.equal(await running, 0)
+
+  const text = out.text()
+  assert.match(text, /\/log does not open a block/, 'the refusal names the command')
+  assert.match(text, /<<CLAUDEEOF/, 'and the form that does open one, using their own tag')
+
+  // The actual harm, off the RECORD rather than the console: not one body line became a
+  // message. `msgs` went 34 -> 47 in one step in the field, and that is what must not happen.
+  //
+  // Counted by CONTENT, not by total. The run routes its own traffic while the operator types,
+  // so a before/after total counts the advisor's turns as leaked paste -- which is how the
+  // first version of this test failed for a reason that had nothing to do with the defect.
+  const body = ['529 Overloaded is transient and not a reason to stop.', 'The second line of the paste.']
+  for (const needle of body) {
+    assert.equal(routed(dir, needle), undefined, `"${needle}" must not have been routed`)
+  }
+  // The tag itself must not arrive either -- it is the terminator, not a message.
+  assert.equal(routedAll(dir).filter((r) => r.text.trim() === 'CLAUDEEOF').length, 0)
+})
+
+test('#173 only trailing text that is ENTIRELY an opener is refused', () => {
+  // The exactness IS the rule. `heredocOpen` enumerates its heads precisely so a permissive
+  // rule cannot silently reinterpret input that is already correct, and a refusal added beside
+  // it has to hold the same line. A permissive version passes the end-to-end test below and
+  // quietly takes away a working input, which is why this is asserted here rather than only
+  // through a console.
+  assert.deepEqual(commandOpeningBlock('/log <<CLAUDEEOF'), { word: '/log', tag: 'CLAUDEEOF' })
+  assert.deepEqual(commandOpeningBlock('/continue <<TAG'), { word: '/continue', tag: 'TAG' })
+  // Whitespace around the opener is still just an opener.
+  assert.deepEqual(commandOpeningBlock('  /continue   <<TAG  '), { word: '/continue', tag: 'TAG' })
+
+  // The case the comment beside `heredocOpen` names, and it is a rotate REASON. Refusing it
+  // would take away input that works today.
+  assert.equal(commandOpeningBlock('/rotate the seat is stuck <<HERE'), undefined)
+  // A tag with anything after it is not a framing attempt either.
+  assert.equal(commandOpeningBlock('/log <<TAG and more'), undefined)
+  assert.equal(commandOpeningBlock('/rotate <<HERE is why'), undefined)
+  // Not a command at all: these are `heredocOpen`'s business, and it opens a real block.
+  assert.equal(commandOpeningBlock('>implementer <<TAG'), undefined)
+  assert.equal(commandOpeningBlock('<<TAG'), undefined)
+  assert.equal(commandOpeningBlock('just a message'), undefined)
+  // A command with no trailing text at all is an ordinary command.
+  assert.equal(commandOpeningBlock('/continue'), undefined)
+})
+
+test('#173 the refusal is exact: a real argument that merely mentions a tag still goes through', async () => {
+  // The rule this must not break. `heredocOpen` enumerates its heads precisely so a permissive
+  // rule cannot silently reinterpret input that is already correct, and a refusal added beside
+  // it has to hold the same line: only trailing text that is ENTIRELY an opener is refused.
+  //
+  // `/rotate the seat is stuck <<HERE` is the case the comment beside `heredocOpen` names, and
+  // it is a rotate reason. Refusing it would take a working input away.
+  const dir = repo()
+  const out = collect()
+  const input = new PassThrough()
+  const running = runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'claude',
+    rounds: 2,
+    checks: [],
+    registry: registryOf({
+      codex: [slow('advisor', 'codex', ['Do it.', 'DONE'])],
+      claude: [slow('impl', 'claude', ['ack', 'Did it.'])],
+    }),
+    input,
+    output: out.stream,
+  })
+  await untilText('the console to be up', out.text, /Keep the work moving|conclave/)
+
+  // Trailing text with a tag INSIDE it, not as the whole of it.
+  input.write('>implementer the seat is stuck <<HERE and I need help\n')
+  await untilText('it to be taken as a message', out.text, /→ implementer|queued|stuck/)
+  input.end()
+  assert.equal(await running, 0)
+
+  assert.doesNotMatch(out.text(), /does not open a block/, 'a real argument is not refused')
 })
 
 test('a pause is rendered with its evidence and the operator resumes it', async () => {
