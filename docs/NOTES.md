@@ -408,6 +408,17 @@ the right assertion. Every control was restored byte-for-byte, verified by sha25
 The stdout and stderr halves of `heard` are separately pinned in both adapters — neither
 control disturbed the other's test.
 
+`conclave mutations` makes that discipline crash-safe. `mutations begin <path>` copies the file
+and records its sha256 before you break it; `mutations end <path>` verifies the restore against
+that hash and KEEPS the marker if the file is not genuinely back. Bare, it lists what is
+outstanding and exits non-zero while the tree is holding a mutation, and a run started on such
+a tree is warned before it begins.
+
+The reason is #181. A run doing exactly this work died on a full volume mid-mutation, and left
+behind a working tree in which a fix had been REVERTED -- a diff that looks precisely like work
+in progress, which `git diff` cannot distinguish from the real thing. The marker is what tells
+them apart afterwards; it cannot prevent the crash, only make the wreckage legible.
+
 ### What the fixture barrier does not establish
 
 It covers the part that blows out under load: fork, exec, shell startup, a `cat`. It does not

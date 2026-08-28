@@ -80,6 +80,12 @@ import type { AgentRegistry } from '../src/registry/registry.ts'
 import { runSession } from '../src/repl/session.ts'
 import { boundOf, implementerSeatPlan, implementerSpecsFor, Relay, reviewerSpecFor, type SeatRequest } from '../src/relay/relay.ts'
 import { formatGuardReportJson, guard } from '../src/workspace/sessionLock.ts'
+import {
+  begin as beginMutation,
+  end as endMutation,
+  outstanding as outstandingMutations,
+  restore as restoreMutation,
+} from '../src/workspace/mutationMarker.ts'
 
 const USAGE = `conclave <command>
 
@@ -176,6 +182,15 @@ Commands:
                                    live, so it can gate a commit helper. --json prints the
                                    report as JSON on stdout instead of prose; the exit
                                    code is unchanged.
+  mutations      [begin|end|restore <path>] [--note "..."]
+                                   Track files that are deliberately broken for mutation
+                                   testing, so a crash between breaking one and restoring
+                                   it leaves a record instead of a diff that looks like
+                                   work in progress (#181). Bare, it lists what is
+                                   outstanding and exits non-zero if the tree is holding a
+                                   mutation right now. "end" verifies the restore against
+                                   the sha256 taken by "begin" and keeps the marker if it
+                                   does not match.
   relay "<goal>" [--advisor codex] [--implementer claude]
                  [--implementers "claude --model opus-5, claude --model sonnet-5"]
                  [--reviewer claude] [--reviewer-args "..."]
@@ -1015,6 +1030,58 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
     const now = Date.now()
     for (const s of all) console.log(formatSessionLine(s, now))
     return 0
+  }
+
+  if (command === 'mutations') {
+    // Deliberately read-mostly. Detecting an orphan is the whole value (#181); `restore` is
+    // here because a report saying "this file is broken" without saying what it was is a
+    // puzzle rather than a fix, and the copy that answers that is already on disk.
+    const root = process.cwd()
+    const action = sub && !sub.startsWith('--') ? sub : 'list'
+    if (action === 'begin' || action === 'end' || action === 'restore') {
+      const target = rest.find((a) => !a.startsWith('--'))
+      if (!target) {
+        console.error(`conclave: mutations ${action} needs a path`)
+        return 1
+      }
+      if (action === 'begin') {
+        const noteAt = rest.indexOf('--note')
+        const note = noteAt >= 0 ? rest[noteAt + 1] : undefined
+        const m = beginMutation(root, target, { ...(note === undefined ? {} : { note }) })
+        console.log(`conclave: recorded ${m.path} as mutated (sha256 ${m.sha256.slice(0, 12)})`)
+        return 0
+      }
+      if (action === 'restore') {
+        const ok = restoreMutation(root, target)
+        console.log(ok ? `conclave: restored ${target} from its stored original` : `conclave: no marker for ${target}`)
+        return ok ? 0 : 1
+      }
+      const r = endMutation(root, target)
+      if (r.restored) {
+        console.log(`conclave: ${target} is back to its original; marker cleared`)
+        return 0
+      }
+      // Non-zero and loud. A restore the caller believed in and got wrong is exactly the
+      // state this command exists to catch, and clearing the marker would hide it.
+      console.error(
+        `conclave: ${target} is NOT back to its original — marker kept\n` +
+          `  expected sha256 ${r.expected.slice(0, 12)}, found ${r.actual.slice(0, 12) || '(missing)'}\n` +
+          `  \`conclave mutations restore ${target}\` puts the stored original back`,
+      )
+      return 1
+    }
+    const all = outstandingMutations(root)
+    if (all.length === 0) {
+      console.log('no mutations are recorded')
+      return 0
+    }
+    for (const m of all) {
+      const state = m.dirty ? 'MUTATED — not restored' : 'restored, stale marker'
+      console.log(`${m.marker.path}  [${state}]  pid ${m.marker.pid}${m.marker.note ? `  — ${m.marker.note}` : ''}`)
+    }
+    // Non-zero only for a tree actually holding a defect. A stale marker is untidy, not a
+    // reason for a commit helper to stop.
+    return all.some((m) => m.dirty) ? 1 : 0
   }
 
   if (command === 'status') {

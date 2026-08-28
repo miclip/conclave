@@ -24,6 +24,7 @@
 
 import { execFileSync } from 'node:child_process'
 import { statfsSync } from 'node:fs'
+import { outstanding } from '../workspace/mutationMarker.ts'
 
 export interface PreflightRefusal {
   reason: string
@@ -105,8 +106,43 @@ export function preflightWarnings(
   cwd: string,
   opts: { readFree?: (dir: string) => number | undefined } = {},
 ): PreflightWarning[] {
+  const out: PreflightWarning[] = []
   const w = spaceWarning(cwd, (opts.readFree ?? freeBytes)(cwd))
-  return w ? [w] : []
+  if (w) out.push(w)
+  const m = mutationWarning(cwd)
+  if (m) out.push(m)
+  return out
+}
+
+/**
+ * A tree holding a file that is deliberately broken and was never put back (#181).
+ *
+ * Said, not refused, and that is deliberate: a marker that blocked work would be deleted by
+ * the first person it inconvenienced, and then it guards nothing. `sessionLock.read` reached
+ * the same conclusion about a stale lock for the same reason.
+ *
+ * Only the DIRTY markers. One whose file already matches its recorded original is a marker
+ * that outlived its restore -- untidy, harmless, and not worth a line in front of every run.
+ * The case worth interrupting someone for is a defect sitting in the tree right now.
+ */
+export function mutationWarning(cwd: string): PreflightWarning | undefined {
+  let dirty: ReturnType<typeof outstanding>
+  try {
+    dirty = outstanding(cwd).filter((m) => m.dirty)
+  } catch {
+    // A guard that cannot read its own bookkeeping must not stop a run. Same rule as an
+    // unreadable volume above.
+    return undefined
+  }
+  if (dirty.length === 0) return undefined
+  const named = dirty.map((m) => m.marker.path).join(', ')
+  return {
+    reason: `${dirty.length} file(s) are deliberately mutated and were never restored: ${named}`,
+    remedy:
+      'A mutation left by a crash looks exactly like work in progress, which is how #180 ' +
+      'nearly committed a reverted fix. `conclave mutations` says what each one was for, ' +
+      'and `conclave mutations restore <path>` puts the original back from the stored copy.',
+  }
 }
 
 /**
