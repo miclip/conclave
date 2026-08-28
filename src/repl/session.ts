@@ -453,6 +453,26 @@ function heredocOpen(line: string): { head: string; tag: string } | undefined {
 }
 
 /**
+ * A `/command` whose trailing text is nothing but a heredoc opener (#173).
+ *
+ * Separate from `heredocOpen` because it is the opposite answer to the same question. That
+ * function decides what DOES open a block and deliberately excludes command heads; this one
+ * recognises the case where excluding them silently cost the operator a paste, so it can be
+ * refused out loud instead of falling through.
+ *
+ * Exported for the same reason `seatsToSampleAtPause` is: the EXACTNESS is the whole rule, and
+ * driving every near-miss through a live console would be slower without testing more. A
+ * permissive version of this passes an end-to-end refusal test and takes away a working input.
+ */
+export function commandOpeningBlock(line: string): { word: string; tag: string } | undefined {
+  const trimmed = line.trim()
+  if (!trimmed.startsWith('/')) return undefined
+  const [word, ...rest] = trimmed.split(/\s+/)
+  const tag = HEREDOC_TAG.exec(rest.join(' '))
+  return tag && word ? { word, tag: tag[1]! } : undefined
+}
+
+/**
  * What `/help` writes, verbatim.
  *
  * Exported for the same reason `COMMANDS` above it is: a test asserts that the help describes
@@ -731,7 +751,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
    * initialization` out of the keypress handler and took the console down with it. Caught
    * by the pty suite, which types the instant the banner appears.
    */
-  let block: { head: string; tag: string; lines: string[] } | undefined
+  let block: { head: string; tag: string; lines: string[]; refusing?: boolean } | undefined
   /**
    * A `/rotate` waiting on the reason its operator did not type. Declared beside `block` for the
    * same temporal-dead-zone reason, and consumed in the same place.
@@ -2110,8 +2130,16 @@ export async function runSession(opts: SessionOptions): Promise<number> {
       // against. Nothing else is interpreted either: a blank line is part of the answer and
       // a line beginning `/` is text rather than a command.
       if (body === block.tag) {
-        const { head, lines } = block
+        const { head, lines, refusing, tag: closedTag } = block
         block = undefined
+        if (refusing) {
+          // Counted, so the operator knows the whole paste was accounted for. #93's rule: a
+          // framing that is not going to work must consume its own body, because the harm is
+          // not the refusal -- it is a paste arriving one line at a time as separate messages
+          // while every line looks accepted.
+          write(dim(`  ${lines.length} line(s) between <<${closedTag} and the tag were discarded, not sent`))
+          return void refreshPrompt()
+        }
         // Verbatim. Leading and trailing blank lines are the operator's, not noise to be
         // tidied: a block is a quotation of what they wrote, and a framing that edits its
         // own payload is one they have to think about instead of use.
@@ -2131,6 +2159,28 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     const opened = heredocOpen(body)
     if (opened) {
       block = { head: opened.head, tag: opened.tag, lines: [] }
+      screen?.draw()
+      return
+    }
+    // A COMMAND handed nothing but a heredoc opener (#173). `heredocOpen` deliberately does not
+    // fire for a `/command` head -- `/rotate the seat is stuck <<HERE` is a rotate reason, not a
+    // block -- and that rule is right. What was wrong is the consequence: the opener became the
+    // command's argument, and the body then arrived as one unaddressed message per line, at
+    // human rank, with every line looking accepted because every line WAS accepted.
+    //
+    // At a pause that is worse than untidy: the opener resolved the pause, so the run had
+    // already resumed on `<<TAG` as its answer before the body landed in a running session.
+    //
+    // The test is exact rather than permissive: trailing text that is ENTIRELY an opener, with
+    // nothing after the tag. Nobody's rotate reason is the empty string plus a heredoc tag, so
+    // this cannot swallow an argument someone meant.
+    const command = commandOpeningBlock(body)
+    if (command) {
+      write(`  ! ${command.word} does not open a block — a command's trailing text is its argument`)
+      write(dim(`  open the block on its own line instead: <<${command.tag}, or >implementer <<${command.tag}`))
+      write(dim('  at a pause the message IS the answer, so a bare block answers it'))
+      // The body is swallowed rather than left to fall through, which is the whole point.
+      block = { head: '', tag: command.tag, lines: [], refusing: true }
       screen?.draw()
       return
     }
@@ -2299,7 +2349,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
       // FALSIFIER, stated because it is the strongest argument against this shape: the
       // console has no general "trailing text is a message" rule and does not gain one here.
       // `/rotate <text>` and `/abort <text>` consume their text as a REASON
-      // (`src/repl/session.ts:2352`, `src/repl/session.ts:2385`) and `/pause`, `/queue`, `/audit` ignore
+      // (`src/repl/session.ts:2402`, `src/repl/session.ts:2435`) and `/pause`, `/queue`, `/audit` ignore
       // whatever follows them. So an operator who learns this from `/continue` and carries
       // it to `/pause I'll be back` still loses the sentence. That inconsistency is not
       // repaired by making `/continue` a third behaviour; it is narrowed by it, and the
