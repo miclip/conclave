@@ -34,7 +34,7 @@
  *
  * The signal Conclave already holds and already renders. `turn_start` opens a turn and
  * `turn_end` closes it; that pair is what draws `implementer 43s Edit` in the console footer
-  * (`src/repl/session.ts:1221`), where `tool_use` only relabels a turn that is already
+  * (`src/repl/session.ts:1258`), where `tool_use` only relabels a turn that is already
 
  * running. It is exact rather than inferred, because the adapters emit it from the hooks
  * themselves.

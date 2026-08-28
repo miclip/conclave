@@ -343,6 +343,90 @@ test('a bypass config reaches the launch, and the console says so', async () => 
   assert.match(out.text(), /permission prompts bypassed for advisor \(codex\) and implementer \(claude\)/)
 })
 
+test('#177 a bypassed seat reports the permission as taken, not as one to answer', async () => {
+  // The banner says prompts are bypassed and then the log asked for a decision anyway. Nothing
+  // was blocked -- the seat carried on within seconds -- so it was a contradiction rather than
+  // a stall, and it cost the operator a check every time it appeared.
+  const dir = repo()
+  mkdirSync(join(dir, '.conclave'), { recursive: true })
+  writeFileSync(join(dir, '.conclave', 'config.json'), '{"permissions":"bypass"}')
+
+  const impl = slow('impl', 'claude', ['ack'])
+  // Emitted as the turn begins, which is where a real PermissionRequest hook fires.
+  impl.onSend = () => {
+    impl.emit({
+      type: 'permission_requested',
+      tool: 'Bash',
+      input: { command: 'npm run verify' },
+      seq: 9001,
+      at: Date.now(),
+      provisional: false,
+    })
+  }
+
+  const out = collect()
+  const code = await runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'claude',
+    rounds: 2,
+    checks: [],
+    registry: registryOf({ codex: [slow('advisor', 'codex', ['DONE'])], claude: [impl] }),
+    input: script([]),
+    output: out.stream,
+  })
+  assert.equal(code, 0)
+
+  // Still printed: something reached the permission path and that stays visible. What it must
+  // not do is ask for a decision nothing is waiting on.
+  assert.match(out.text(), /permission auto-allowed \(bypass\)/)
+  assert.doesNotMatch(
+    out.text(),
+    /needs a permission decision/,
+    'a seat that cannot be stopped at a prompt must not be reported as stopped at one',
+  )
+  // The detail #177 says would most have narrowed it: `Bash` alone is every command a seat
+  // runs, so the line could not be matched to anything that happened.
+  assert.match(out.text(), /npm run verify/)
+})
+
+test('#177 a seat that is NOT bypassed still asks, and now says what for', async () => {
+  // The other half, and the one that must not be broken by the fix: with no bypass configured
+  // a permission request genuinely blocks, and the operator does need to answer it.
+  const dir = repo()
+
+  const impl = slow('impl', 'claude', ['ack'])
+  impl.onSend = () => {
+    impl.emit({
+      type: 'permission_requested',
+      tool: 'Bash',
+      input: { command: 'git push --force' },
+      seq: 9002,
+      at: Date.now(),
+      provisional: false,
+    })
+  }
+
+  const out = collect()
+  const code = await runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'claude',
+    rounds: 2,
+    checks: [],
+    registry: registryOf({ codex: [slow('advisor', 'codex', ['DONE'])], claude: [impl] }),
+    input: script([]),
+    output: out.stream,
+  })
+  assert.equal(code, 0)
+
+  assert.match(out.text(), /needs a permission decision for Bash/)
+  assert.match(out.text(), /git push --force/, 'and names the command, in this branch too')
+  assert.doesNotMatch(out.text(), /auto-allowed/)
+})
+
 test('a pause is rendered with its evidence and the operator resumes it', async () => {
   const dir = repo()
   // Compacts deterministically on its second turn rather than on a timer.
