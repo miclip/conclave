@@ -4337,7 +4337,19 @@ test('a turn that ends lets /continue resume on retry, however busy the child re
   )
   await observedTurn(impl, dir)
   input.write('/continue\n')
-  await new Promise((r) => setTimeout(r, 300))
+  // FAILING REPRODUCTION (#179) — red on purpose, and not yet fixed.
+  //
+  // A 300ms sleep stood here. It is NOT the startup race #179 alleges: the run is already paused
+  // above, so `/continue` always reaches a live run. What it waited for is the COMMAND. Dispatch is
+  // fire-and-forget — `dispatch` in `src/repl/session.ts` runs `handle` inside a floating
+  // `void (async () => …)()` — so nothing connects writing the line to its effects, and the
+  // assertions below read the console before `resumeRun` has drawn anything. `calls` has usually
+  // already incremented, which is exactly why the sleep looked adequate: the state it guards lands
+  // in pieces, so a duration that covers half of it passes.
+  //
+  // The fix is to wait for the EFFECT rather than for a number of milliseconds. The refusal is
+  // recorded — `resumeRun` sets `pause.refusal` and republishes the pause — so it is a condition
+  // the session record can be polled for, the way every other wait in this file already works.
   assert.equal(calls, 1, 'the reading is taken once, as colour on the refusal')
   assert.match(out.text(), /not continuing/)
 
