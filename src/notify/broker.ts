@@ -25,20 +25,14 @@ export function decisionsPath(repoRoot: string): string {
 /**
  * The keys an adapter may ever see.
  *
- * Enforced at the boundary rather than trusted: a field that is not on this list cannot reach a
- * transport even if a caller builds one, so no adapter leaks a diff by being helpful.
+ * Keeps the payload predictable: an adapter formats these and nothing else, so adding a field
+ * is a decision made here rather than a thing one transport starts doing. A caller that builds
+ * a richer object finds the extra keys simply do not travel.
  *
- * ## What this does NOT guarantee, stated because it would be easy to overclaim
- *
- * `headline` is free text and its author is the OPERATING AGENT, not conclave. So this stops
- * structured leakage -- there is no field for a diff, a file body or tool output -- and it does
- * not stop a caller that puts a secret into a sentence. The length cap makes bulk leakage
- * impractical rather than impossible: a 20-character HUD line cannot carry a file, and 200
- * characters cannot carry a diff worth having.
- *
- * "The vendor never sees code" is therefore a property of the SHAPE plus a discipline about the
- * headline, not a property of the type alone. A stronger version -- conclave composing every
- * headline from record fields -- is possible and is not what this is.
+ * NOT a privacy boundary, and worth saying so plainly because an earlier draft of this file
+ * claimed it was. `headline` is free text written by the operating agent: prose is the message,
+ * and any surface that displays it has read it. What the shape does is keep a notification from
+ * accidentally carrying a patch -- useful, incidental, and not a guarantee about anything.
  */
 const ALLOWED = new Set(['kind', 'headline', 'options', 'href', 'runId'])
 

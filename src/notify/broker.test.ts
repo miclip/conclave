@@ -26,9 +26,9 @@ const APPROVAL: Outbound = {
 }
 
 test('#184 nothing but the allowed fields can reach a transport', () => {
-  // The reason this exists at all: a decision taken on a surface the work is not visible on.
-  // That is worth nothing as a promise and everything as a boundary, so a caller who attaches
-  // a diff to the payload finds it does not travel.
+  // Keeps the payload predictable, so an adapter formats these fields and nothing else and
+  // adding one is a decision made in the module rather than a thing a transport starts doing.
+  // A caller that builds a richer object finds the extra keys do not travel.
   const smuggled = {
     ...APPROVAL,
     diff: '--- a/secret.ts\n+++ b/secret.ts\n-const KEY = "hunter2"',
@@ -46,14 +46,15 @@ test('#184 nothing but the allowed fields can reach a transport', () => {
   assert.doesNotMatch(json, /1521 passing/, 'no tool output leaves')
 })
 
-test('#184 the boundary stops FIELDS, and the headline is only capped — not sanitised', () => {
-  // Asserted so the limit is written down rather than discovered. `headline` is free text whose
-  // author is the operating agent, so a caller that puts a secret in a sentence gets it
-  // through. What the shape guarantees is that there is nowhere to put a diff, and what the cap
-  // guarantees is that bulk leakage is impractical: 20 characters cannot carry a file.
+test('#184 the allow-list is about shape, not sanitising: prose travels as written', () => {
+  // Written down so nobody later mistakes the allow-list for a privacy boundary -- an earlier
+  // draft of this module did. `headline` is free text authored by the operating agent, and any
+  // surface that shows a notification has read it. Notifications are prose; that is the whole
+  // point of them, and a third party carrying them sees what they carry.
   const leaky: Outbound = { kind: 'progress', headline: 'pushed b59eed4 — key is hunter2' }
-  assert.match(forTransport(leaky, { maxChars: 200 }).headline, /hunter2/, 'prose is not sanitised')
-  assert.equal(forTransport(leaky, { maxChars: 20 }).headline.length, 20, 'but it cannot carry much')
+  assert.match(forTransport(leaky, { maxChars: 200 }).headline, /hunter2/, 'prose travels as written')
+  // The cap is a rendering budget, not a redaction: it exists so a HUD gets a line it can show.
+  assert.equal(forTransport(leaky, { maxChars: 20 }).headline.length, 20)
 })
 
 test('#184 a headline is cut to what the surface can show, and href carries the rest', () => {

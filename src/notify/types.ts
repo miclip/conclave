@@ -3,14 +3,18 @@
  *
  * ## Why the payload is a struct and not a string
  *
- * The reason to have this at all is that a decision can be taken on a surface the work is not
- * visible on -- a HUD, a phone, a chat the code never enters. That property is worth nothing as
- * a promise and everything as a type: `Outbound` has no field a diff, a file body or tool
- * output could go in, so no adapter can leak one by being helpful. A test asserts the shape,
- * and the claim stops depending on nobody ever widening it.
+ * So that an adapter stays thin and a message renders to any surface. A HUD line and a chat
+ * message are the same decision at different budgets: given a struct plus `limits.maxChars`,
+ * each adapter formats what it can show, and none of them has to invent a layout. Handed a
+ * pre-formatted string, every adapter would re-parse it to fit, and they would disagree.
  *
- * `href` is the release valve. The evidence still exists and the human can still read it -- the
- * message says WHERE, and the reading happens wherever they already read things.
+ * `href` is what makes a small message enough. The evidence still exists and the human can
+ * still read it -- the message says WHERE, and the reading happens wherever they already read
+ * things.
+ *
+ * A side effect, not the point: there is no field a diff or tool output travels in, so a
+ * notification does not accidentally carry a patch. That is worth having and is not a privacy
+ * boundary -- the prose is the message, and any surface that shows it reads it.
  *
  * ## Why free text is never a command
  *
