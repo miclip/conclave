@@ -17,6 +17,7 @@
 
 import { strict as assert } from 'node:assert'
 import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+ import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -766,4 +767,119 @@ test('a run that produced records and then stalled is not blamed on its model', 
   assert.equal(launchCaveat(end), undefined)
   // Restored before `close()`, which has timers of its own and no reason to be tested here.
   await session.close()
+})
+
+/**
+ * A child that emits its records, then IGNORES SIGTERM.
+ *
+ * The only way to reach `close('graceful')`'s three-second cap on purpose. `hangingStub`'s
+ * `sleep` dies on SIGTERM and never gets there, so the cap and everything past it -- the
+ * escalation, and the event that says a verdict was lost -- had no test at all (#146).
+ */
+function deafStub(body: string): { command: string; wrote: string } {
+  const dir = mkdtempSync(join(tmpdir(), 'oc-deaf-'))
+  const payload = join(dir, 'payload.ndjson')
+  writeFileSync(payload, body)
+  const wrote = join(dir, 'wrote')
+  const command = join(dir, 'opencode-deaf')
+  writeFileSync(
+    command,
+    `#!/bin/sh\ntrap '' TERM\ncat ${JSON.stringify(payload)}\n: > ${JSON.stringify(wrote)}\n` +
+      `while :; do sleep 1; done\n`,
+  )
+  chmodSync(command, 0o755)
+  return { command, wrote }
+}
+
+test('#146 a graceful close that gives up says so, and escalates', async () => {
+  // Three defects in one path, and none of them had a test. On expiry the stream closed over a
+  // live turn with no `turn_end` and no `error`, so a consumer following events() could not tell
+  // a missing verdict from a pending one; and the child was left running after `close()`
+  // returned with the session reporting `terminated`.
+  const started = readFileSync(FIXTURE, 'utf8').split('\n').slice(0, 2).join('\n')
+  const { command, wrote } = deafStub(`${started}\n`)
+  const session = await OpenCodeRunAdapter.start({ cwd: REPO, role: 'implementer', command })
+
+  const seen: AgentEvent[] = []
+  const reading = (async () => {
+    for await (const e of session.events()) seen.push(e)
+  })()
+
+  await session.send('do the thing', { kind: 'orchestrator' })
+  // Wait for the child to have written, so the turn is genuinely in flight rather than racing
+  // the spawn -- the same marker `hangingStub` uses, and for the same reason.
+  for (let i = 0; i < 200 && !existsSync(wrote); i += 1) await new Promise((r) => setTimeout(r, 25))
+  assert.ok(existsSync(wrote), 'the child must have started before the close is meaningful')
+
+  await session.close('graceful')
+  await reading
+
+  const lost = seen.find((e) => e.type === 'error' && /no terminal verdict was observed/.test(e.message))
+  assert.ok(lost, `the lost verdict must be announced: ${JSON.stringify(seen.map((e) => e.type))}`)
+  assert.equal(lost.type === 'error' ? lost.fatal : true, false, 'the run may continue; only this turn is unknown')
+  // And nothing claimed the turn ended, because nothing saw it end.
+  assert.equal(seen.find((e) => e.type === 'turn_end'), undefined, 'no verdict may be invented')
+
+  // ESCALATED. `contract/session.ts` says "always SIGTERM and wait before escalating", and this
+  // path never did -- so a child that ignores SIGTERM outlived `close()` while the session
+  // reported `terminated`. Checked by looking for the process, because a leak is not visible
+  // from anything the adapter says about itself.
+  await new Promise((r) => setTimeout(r, 200))
+  const alive = spawnSync('pgrep', ['-f', command], { encoding: 'utf8' }).stdout.trim()
+  assert.equal(alive, '', `the child must not outlive close(); still running as ${alive}`)
+})
+
+/**
+ * A child that ignores SIGTERM, then finishes its turn shortly after.
+ *
+ * The only shape that reaches the leak. A turn already finished at close time returns before
+ * either timer is created -- so a "fast close" test exercises no timer at all, which is what the
+ * first version of the test below did and why removing `clearTimeout` did not fail it.
+ */
+function slowFinishStub(head: string, tail: string): { command: string; wrote: string } {
+  const dir = mkdtempSync(join(tmpdir(), 'oc-slow-'))
+  const headPath = join(dir, 'head.ndjson')
+  const tailPath = join(dir, 'tail.ndjson')
+  writeFileSync(headPath, head)
+  writeFileSync(tailPath, tail)
+  const wrote = join(dir, 'wrote')
+  const command = join(dir, 'opencode-slow')
+  writeFileSync(
+    command,
+    `#!/bin/sh\ntrap '' TERM\ncat ${JSON.stringify(headPath)}\n: > ${JSON.stringify(wrote)}\n` +
+      `sleep 0.4\ncat ${JSON.stringify(tailPath)}\nexit 0\n`,
+  )
+  chmodSync(command, 0o755)
+  return { command, wrote }
+}
+
+test('#146 a graceful close whose turn finishes does not hold the loop for the rest of the cap', async () => {
+  // The `clearTimeout(cap)` the poll branch never did. Both timers are deliberately ref'd, so a
+  // turn that completes 400ms into a three-second cap left 2.6 seconds of pending timer holding
+  // the event loop open -- after the close had already returned.
+  //
+  // Measured in a child process, because that is where the symptom is: in-process the leak
+  // delays nothing observable. What it delays is the process being ABLE TO EXIT.
+  const records = readFileSync(FIXTURE, 'utf8').split('\n').filter(Boolean)
+  const { command } = slowFinishStub(`${records.slice(0, 2).join('\n')}\n`, `${records.slice(2).join('\n')}\n`)
+  const script = `
+    import { OpenCodeRunAdapter } from ${JSON.stringify(join(REPO, 'src/adapters/opencode.ts'))}
+    const s = await OpenCodeRunAdapter.start({ cwd: ${JSON.stringify(REPO)}, role: 'implementer', command: ${JSON.stringify(command)} })
+    const seen = (async () => { for await (const e of s.events()) { /* drain */ } })()
+    await s.send('go', { kind: 'orchestrator' })
+    await new Promise((r) => setTimeout(r, 150))   // close while the turn is still open
+    await s.close('graceful')
+  `
+  const file = join(mkdtempSync(join(tmpdir(), 'oc-timer-')), 'probe.mjs')
+  writeFileSync(file, script)
+
+  const began = Date.now()
+  const { status } = spawnSync(process.execPath, [file], { encoding: 'utf8', timeout: 20_000 })
+  const took = Date.now() - began
+
+  assert.equal(status, 0, 'the probe must run cleanly')
+  // The turn finishes ~400ms in. With the cap left pending the process cannot exit until 3s;
+  // with it cleared it exits as soon as the work is done. Two seconds separates those
+  // unambiguously and is not a performance budget.
+  assert.ok(took < 2_000, `a completed turn must not hold the loop for the rest of the cap; exited after ${took}ms`)
 })

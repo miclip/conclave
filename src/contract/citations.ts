@@ -245,8 +245,8 @@ export const CITED: Record<string, string> = {
   // same call the front end makes, so a pin on the call itself is the whole point.
   'src/repl/session.ts:1560': "inject(text, 'all')",
   'src/repl/session.ts:2498': 'inject(rest, { only: who })',
-  'src/adapters/kimi.ts:727': 'compactionGeneration: 0,',
-  'src/adapters/opencode.ts:765': 'compactionGeneration: 0,',
+  'src/adapters/kimi.ts:752': 'compactionGeneration: 0,',
+  'src/adapters/opencode.ts:790': 'compactionGeneration: 0,',
   'src/rotation/rotate.ts:412': 'export async function rotate(',
   'src/adapters/claude.ts:1514': "#state: SessionState = 'running'",
   'src/adapters/codex.ts:1096': "#state: SessionState = 'running'",
