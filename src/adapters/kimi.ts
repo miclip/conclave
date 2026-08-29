@@ -311,7 +311,32 @@ export class KimiPrintAdapter implements AgentSession {
       provisional: false,
       prompt: message,
     })
-    void this.#runTurn(turn, message)
+    // GUARDED (#146). `void` on its own leaves a rejection unhandled, and worse: a throw
+    // before `#child` is assigned strands this turn `in_progress` with no child, which also
+    // skips the `this.#child &&` half of `close()`'s wait -- so nothing would ever emit a
+    // terminal verdict for it and the stream would close over a turn that never started.
+    //
+    // DEFENSIVE, and untested, stated so rather than implied by a test that proves nothing. No
+    // input reaches it today: `spawn` does not throw synchronously for a bad command or a bad
+    // cwd -- it emits an asynchronous `error`, which the handler below already covers -- so the
+    // synchronous throw this guards is not constructible from the public API. A first attempt to
+    // test it passed with the guard removed, which is worse than no test.
+    void this.#runTurn(turn, message).catch((err: unknown) => {
+      // `unknown_abnormal_end` rather than a guess at a cause: the turn ended and nothing
+      // observed how. Marking it terminal is what stops it being stranded `in_progress` for
+      // `snapshot()`; deliberately NOT a synthesised `turn_end`, because a verdict nobody
+      // observed is the thing #146 says must not be invented -- that belongs to the larger
+      // fix, where an adapter emits a terminal verdict it can actually stand behind.
+      turn.state = 'unknown_abnormal_end'
+      this.#emit({
+        type: 'error',
+        message: `turn ${turn.key} failed before it began: ${err instanceof Error ? err.message : String(err)}`,
+        fatal: false,
+        seq: this.#next(),
+        at: Date.now(),
+        provisional: false,
+      })
+    })
     return key
   }
 
@@ -754,9 +779,14 @@ export class KimiPrintAdapter implements AgentSession {
         const settled = new Promise<void>((resolve) => {
           const live = this.#turns.find((t) => t.state === 'in_progress')
           if (!live) return resolve()
+          let cap: ReturnType<typeof setTimeout>
           const poll = setInterval(() => {
             if (live.state !== 'in_progress') {
               clearInterval(poll)
+              // `cap` too (#146). Only the interval was cleared, and both timers are
+              // deliberately ref'd -- so every FAST graceful close held the event loop open for
+              // the balance of the three seconds it had just finished not needing.
+              clearTimeout(cap)
               resolve()
             }
           }, 50)
@@ -766,8 +796,32 @@ export class KimiPrintAdapter implements AgentSession {
           // cannot hold a process open for long.
           // Bounded. A child that will not die must not hold the console open, and this
           // divergence is a nicety next to a session that cannot be shut down.
-          const cap = setTimeout(() => {
+          cap = setTimeout(() => {
             clearInterval(poll)
+            // ESCALATE (#146). `contract/session.ts`'s `close()` says "always SIGTERM and wait
+            // before escalating", and this never did: a child that ignores SIGTERM was left
+            // running after `close()` returned with `#state = 'terminated'` -- a process leak
+            // the caller is told nothing about -- and it guaranteed this cap was reached rather
+            // than merely risked.
+            try {
+              this.#child?.kill('SIGKILL')
+            } catch {
+              // Already gone between the check and the signal. Nothing to escalate to.
+            }
+            // SAID, not dropped (#146). The turn is still `in_progress` and the stream is about
+            // to close over it, so a consumer following `events()` would otherwise never learn
+            // that the last turn's verdict is missing rather than pending. `snapshot()` keeps
+            // the divergence; this is what tells anyone to go and look.
+            this.#emit({
+              type: 'error',
+              message:
+                `close('graceful') gave up waiting for turn ${live.key} after 3s; ` +
+                `the child was killed and no terminal verdict was observed`,
+              fatal: false,
+              seq: this.#next(),
+              at: Date.now(),
+              provisional: false,
+            })
             resolve()
           }, 3_000)
         })
