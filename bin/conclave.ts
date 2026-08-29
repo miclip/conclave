@@ -71,7 +71,7 @@ import {
 } from '../src/workspace/sessionView.ts'
 import { formatGoalFindings, lintGoal } from '../src/relay/goalLint.ts'
 import { version } from '../src/version.ts'
-import { closeSync, existsSync, mkdirSync, openSync, readSync, realpathSync, statSync } from 'node:fs'
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { seedCodexTrust } from '../src/deployment/codexHookTrust.ts'
@@ -182,6 +182,11 @@ Commands:
                                    live, so it can gate a commit helper. --json prints the
                                    report as JSON on stdout instead of prose; the exit
                                    code is unchanged.
+  skill          [install] [--force]
+                                   The operator skill: how to start a run, read it without
+                                   scraping the console, answer a pause, and act on how it
+                                   ended. Bare, it says where the skill is; "install" copies
+                                   it into ~/.claude/skills. Never installed for you.
   mutations      [begin|end|restore <path>] [--note "..."]
                                    Track files that are deliberately broken for mutation
                                    testing, so a crash between breaking one and restoring
@@ -1029,6 +1034,44 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
     }
     const now = Date.now()
     for (const s of all) console.log(formatSessionLine(s, now))
+    return 0
+  }
+
+  if (command === 'skill') {
+    // Offered, never imposed. `install.sh` symlinks one binary and touches nothing else in
+    // $HOME; writing into a user's Claude configuration uninvited is a larger change to their
+    // environment than installing conclave is, so this is a command they run rather than a
+    // step that happens to them (#183).
+    const source = join(import.meta.dirname, '..', '.claude', 'skills', 'conclave', 'SKILL.md')
+    if (!existsSync(source)) {
+      console.error(`conclave: no skill bundled at ${source}`)
+      return 1
+    }
+    const dest = join(process.env.HOME ?? '', '.claude', 'skills', 'conclave')
+    if (sub !== 'install') {
+      console.log(`conclave: the operator skill is at ${source}`)
+      console.log(`  conclave skill install    copy it to ${dest}`)
+      console.log('  It teaches an agent operator to start a run, read it, answer a pause and act on how it ended.')
+      return 0
+    }
+    const target = join(dest, 'SKILL.md')
+    // An existing skill that differs is somebody's edit, and copying over it would discard
+    // work this command has no business deciding about. Identical content is a no-op rather
+    // than a refusal, so re-running is safe.
+    if (existsSync(target)) {
+      const same = readFileSync(target, 'utf8') === readFileSync(source, 'utf8')
+      if (same) {
+        console.log(`conclave: skill already installed at ${target}`)
+        return 0
+      }
+      if (!rest.includes('--force')) {
+        console.error(`conclave: ${target} exists and differs — pass --force to replace it`)
+        return 1
+      }
+    }
+    mkdirSync(dest, { recursive: true })
+    writeFileSync(target, readFileSync(source, 'utf8'))
+    console.log(`conclave: installed the operator skill at ${target}`)
     return 0
   }
 
