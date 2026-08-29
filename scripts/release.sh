@@ -116,13 +116,22 @@ update_install() {
   # Whether the release moved a dependency. A plain checkout is enough when it did not --
   # v0.5.11 changed only the version string -- and leaves node_modules disagreeing with the
   # source when it did.
+  #
+  # Asked by CONTENT, not by counting lines. A first version counted changed lines and treated
+  # more than two as a dependency move -- reasoning that two lines is the version string on both
+  # sides. `package-lock.json` carries the version TWICE, at the root and under `packages[""]`,
+  # so a pure version bump is four lines and every release reinstalled for nothing. Measured on
+  # v0.5.12, which reported "the release moved a dependency" for a diff that was four version
+  # lines and nothing else.
+  #
+  # So: strip the version lines, and if anything is left, something really moved.
   deps_changed=0
-  if [ "$DRY" = 0 ] && ! git -C "$dir" diff --quiet "$before" "$tag" -- package-lock.json 2>/dev/null; then
-    if git -C "$dir" diff "$before" "$tag" -- package-lock.json | grep -qE '^[-+]' ; then
-      changed=$(git -C "$dir" diff "$before" "$tag" -- package-lock.json | grep -cE '^[-+][^-+]' || true)
-      # Two lines is the version string alone, on both sides.
-      [ "$changed" -gt 2 ] && deps_changed=1
-    fi
+  if [ "$DRY" = 0 ]; then
+    other=$(git -C "$dir" diff "$before" "$tag" -- package-lock.json 2>/dev/null \
+      | grep -E '^[-+][^-+]' \
+      | grep -vE '^[-+][[:space:]]*"version":' \
+      | head -1)
+    [ -n "$other" ] && deps_changed=1
   fi
   run "git -C '$dir' checkout '$tag' --quiet"
   if [ "$deps_changed" = 1 ]; then

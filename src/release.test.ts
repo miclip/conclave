@@ -150,3 +150,25 @@ test('#182 a dry run executes nothing, and says what it would have done', () => 
   assert.equal(after.tree, before.tree, 'a dry run must not change what is modified')
   assert.ok(r.out.length > 0, 'and it must say something')
 })
+
+test('#182 a pure version bump is not a dependency move', () => {
+  // Measured on the v0.5.12 release, which reported "the release moved a dependency" and ran a
+  // needless `npm ci`. The first version counted changed lines and treated more than two as a
+  // move, reasoning that two lines is the version string on both sides -- but package-lock.json
+  // carries the version TWICE, at the root and under `packages[""]`, so a pure bump is four
+  // lines and every release reinstalled for nothing.
+  //
+  // Asserted against the real diff between the last two tags, because that is the case that was
+  // wrong and the one that recurs every release.
+  const diff = execFileSync('git', ['diff', 'v0.5.11', 'v0.5.12', '--', 'package-lock.json'], {
+    cwd: REPO,
+    encoding: 'utf8',
+  })
+  const changed = diff.split('\n').filter((l) => /^[-+][^-+]/.test(l))
+  assert.ok(changed.length > 2, `the bump must actually change lines, found ${changed.length}`)
+
+  // The rule the script now uses: strip the version lines, and if anything is left, something
+  // really moved. Nothing is left here, which is why this release needed no reinstall.
+  const other = changed.filter((l) => !/^[-+]\s*"version":/.test(l))
+  assert.deepEqual(other, [], 'a version bump alone must not read as a dependency move')
+})
