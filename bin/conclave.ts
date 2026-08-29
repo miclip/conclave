@@ -80,6 +80,9 @@ import type { AgentRegistry } from '../src/registry/registry.ts'
 import { runSession } from '../src/repl/session.ts'
 import { boundOf, implementerSeatPlan, implementerSpecsFor, Relay, reviewerSpecFor, type SeatRequest } from '../src/relay/relay.ts'
 import { formatGuardReportJson, guard } from '../src/workspace/sessionLock.ts'
+import { Broker } from '../src/notify/broker.ts'
+import { resolveTransport, transportNames } from '../src/notify/registry.ts'
+import type { Outbound } from '../src/notify/types.ts'
 import {
   begin as beginMutation,
   end as endMutation,
@@ -182,6 +185,14 @@ Commands:
                                    live, so it can gate a commit helper. --json prints the
                                    report as JSON on stdout instead of prose; the exit
                                    code is unchanged.
+  notify         tell|ask "<headline>" [--options id:Label,...] [--kind ...]
+                 [--href URL] [--run <id>] [--transport <name>]
+                 log [--json]
+                                   Reach a human when an agent is operating. "tell" is one way
+                                   and never waits; "ask" waits and prints the answer as JSON.
+                                   An action is an id that was offered; free text comes back as
+                                   text for the caller to interpret. "log" is what was asked and
+                                   who answered.
   skill          [install] [--force]
                                    The operator skill: how to start a run, read it without
                                    scraping the console, answer a pause, and act on how it
@@ -1034,6 +1045,98 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
     }
     const now = Date.now()
     for (const s of all) console.log(formatSessionLine(s, now))
+    return 0
+  }
+
+  if (command === 'notify') {
+    // The operating agent's entry point. It calls this when it judges the human is needed --
+    // conclave does not decide that, because the operating agent is what has the context (#184).
+    const root = process.cwd()
+    const verb = sub && !sub.startsWith('--') ? sub : ''
+    const flagOf = (name: string): string | undefined => {
+      const at = rest.indexOf(`--${name}`)
+      return at >= 0 ? rest[at + 1] : undefined
+    }
+
+    if (verb === 'log') {
+      const decisions = new Broker(root).decisions()
+      if (rest.includes('--json')) {
+        console.log(JSON.stringify(decisions, null, 2))
+        return 0
+      }
+      if (decisions.length === 0) {
+        console.log('no decisions recorded')
+        return 0
+      }
+      for (const d of decisions) {
+        const when = new Date(d.at).toISOString().slice(11, 19)
+        // "unanswered" is wrong for a `tell`: nothing asked it anything. The three states are
+        // answered, not delivered, and delivered-with-nothing-expected -- and conflating the
+        // last two would make a working notification look like a failed question.
+        const answered = d.answer
+          ? `${d.answer.option ?? JSON.stringify(d.answer.text)} (${d.answer.by.kind} ${d.answer.by.id})`
+          : d.undelivered !== undefined
+            ? d.undelivered
+            : d.offered !== undefined
+              ? 'unanswered'
+              : 'delivered'
+        console.log(`${when}  ${d.kind.padEnd(9)} ${d.headline}`)
+        console.log(`          via ${d.transport} — ${answered}`)
+      }
+      return 0
+    }
+
+    if (verb !== 'tell' && verb !== 'ask') {
+      console.error('usage: conclave notify tell|ask "<headline>" [--options id:Label,...] [--transport name]')
+      console.error(`       conclave notify log [--json]`)
+      console.error(`  transports: ${transportNames().join(', ')}`)
+      return 2
+    }
+
+    const headline = rest.find((a) => !a.startsWith('--') && rest[rest.indexOf(a) - 1]?.startsWith('--') !== true)
+    if (headline === undefined || headline === '') {
+      console.error(`conclave: notify ${verb} needs a headline`)
+      return 2
+    }
+    const transportName = flagOf('transport') ?? 'fake'
+    const transport = resolveTransport(transportName)
+    if (!transport) {
+      console.error(`conclave: no transport named ${transportName} — have: ${transportNames().join(', ')}`)
+      return 2
+    }
+    // `id:Label` pairs. An action is an id that was OFFERED; free text is a message and is
+    // interpreted by the operating agent, never parsed into a command here.
+    const options = (flagOf('options') ?? '')
+      .split(',')
+      .filter(Boolean)
+      .map((pair) => {
+        const [id, ...label] = pair.split(':')
+        return { id: id!.trim(), label: label.join(':').trim() || id!.trim() }
+      })
+    const kind = (flagOf('kind') ?? (verb === 'ask' ? 'approval' : 'progress')) as Outbound['kind']
+    const message: Outbound = {
+      kind,
+      headline,
+      ...(options.length > 0 ? { options } : {}),
+      ...(flagOf('href') ? { href: flagOf('href')! } : {}),
+      ...(flagOf('run') ? { runId: flagOf('run')! } : {}),
+    }
+
+    const broker = new Broker(root)
+    if (verb === 'tell') {
+      await broker.tell(message, transport)
+      // Silent on success by design: a `tell` that printed would make a notification into
+      // output the caller has to read, and the caller is an agent with a transcript to spend.
+      return 0
+    }
+    const answer = await broker.ask(message, transport)
+    if (!answer) {
+      // Non-zero, because the caller asked a question and did not get one answered. The pause
+      // or the decision it was asking about has not gone away.
+      console.error(`conclave: ${transportName} carried no answer — see conclave notify log`)
+      return 1
+    }
+    console.log(JSON.stringify(answer))
     return 0
   }
 
