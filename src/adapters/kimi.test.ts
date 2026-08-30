@@ -406,3 +406,45 @@ test('a first run that produced no messages at all points at the launch (#82)', 
   assert.equal(said!.caveat, true)
   await session.close()
 })
+
+test('#48 the declared absence of a silence clock is OBSERVED, not read off the source', async () => {
+  // The same claim as OpenCode's, and the same reason it matters: a seat with no silence clock
+  // goes quiet forever and produces no verdict, so a reader trusting `supported: false` wrongly
+  // waits for a timeout that arrives and is attributed to nothing.
+  //
+  // `DEFAULT_IDLE_MS` is twelve minutes, so this does not wait one out. It asserts the stronger
+  // and faster thing: with an absolute bound set, the only deadline that fires is that one, at
+  // that bound, in its own words. A silence clock would be a second timer, firing earlier, with
+  // a different detail.
+  const command = hangingStub()
+  const s = await KimiPrintAdapter.start({ cwd: REPO, role: 'implementer', command, watchdogMs: 700 })
+  try {
+    const seen: AgentEvent[] = []
+    const reading = (async () => {
+      for await (const e of s.events()) {
+        seen.push(e)
+        if (e.type === 'turn_end') break
+      }
+    })()
+    await s.send('go quiet', { kind: 'orchestrator' })
+
+    await new Promise((r) => setTimeout(r, 350))
+    assert.equal(
+      seen.filter((e) => e.type === 'turn_end').length,
+      0,
+      'nothing may end a quiet turn before the absolute bound',
+    )
+
+    await reading
+    const end = seen.find((e): e is TurnEndEvent => e.type === 'turn_end')
+    assert.ok(end, 'the absolute clock must still fire')
+    assert.equal(end.verdict.outcome, 'timed_out')
+    assert.match(
+      end.verdict.provenance.map((p) => p.detail).join(' '),
+      /no terminal message within 700ms/,
+      'the deadline that fired is the absolute one, named as such',
+    )
+  } finally {
+    await s.close('abandoned').catch(() => undefined)
+  }
+})
