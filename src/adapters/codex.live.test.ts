@@ -269,6 +269,58 @@ test('send -> permission deny -> permission_refused', { skip }, async (t) => {
   assertConverges(events, await session.snapshot(), 'permission_refused')
 })
 
+test('#6 a blocked session keeps emitting, which is what the staleness rule has to survive', { skip }, async (t) => {
+  // The premise `#trackPermission` is built on, observed against a real dialog rather than read
+  // off the adapter.
+  //
+  // The first cut of that rule cleared a pending permission on ANY later event, reasoning that a
+  // decision taken in the child's own terminal would otherwise leave a stale entry. It was wrong
+  // about what a WAITING session emits: the transcript poller reports the very tool call being
+  // blocked, so an event arrives immediately after `permission_requested` and cancelled the
+  // request microseconds after it appeared. The console printed "needs a permission decision"
+  // and `/allow` a moment later answered "nobody is waiting".
+  //
+  // That reasoning was taken from reading the adapter. This watches it happen: after the dialog
+  // is up and BEFORE any decision, further events arrive on the same session.
+  const probe = '/tmp/codex-accept-staleness.txt'
+  rmSync(probe, { force: true })
+  const session = await participant(CODEX_PROMPT_ON_APPROVAL_ARGS)
+  t.after(() => session.close('graceful'))
+
+  const rec = new Recorder(session)
+  await session.send(`Use your file-writing tool to create ${probe} containing the word probe. Do this immediately.`, {
+    kind: 'orchestrator',
+  })
+
+  const asked = await rec.waitFor((e) => e.some((x) => x.type === 'permission_requested'), 180_000)
+  assert.ok(asked, 'expected a permission_requested event')
+  const at = rec.events.findIndex((e) => e.type === 'permission_requested')
+
+  // Nothing is decided yet. Anything that arrives now is what a clear-on-any-later-event rule
+  // would have consumed the request on.
+  const after = await rec.waitFor((e) => e.length > at + 1, 30_000)
+
+  t.diagnostic(
+    `after permission_requested, ${rec.events.length - at - 1} further event(s) arrived before any ` +
+      `decision: ${JSON.stringify(rec.events.slice(at + 1).map((e) => e.type))}`,
+  )
+
+  // Reported rather than asserted as a count. What must hold is the DIRECTION: a blocked session
+  // is not silent, so a rule that cleared on silence-until-decision would be resting on nothing.
+  // If Codex ever went quiet here the rule would be safe for a reason nobody chose, and that is
+  // worth seeing in a diagnostic rather than discovering when it changes back.
+  assert.equal(after, true, 'a session stopped at a dialog must still be emitting')
+  assert.equal(
+    rec.events.slice(at + 1).some((e) => e.type === 'turn_end'),
+    false,
+    'and none of it is a turn_end -- which is the boundary the rule now uses, and the only one it may clear on',
+  )
+
+  await session.decidePermission('deny')
+  await rec.waitForSettled(60_000)
+  assert.equal(existsSync(probe), false, 'the write must not have happened')
+})
+
 test('send -> permission allow -> completed', { skip }, async (t) => {
   const probe = '/tmp/codex-accept-allow.txt'
   rmSync(probe, { force: true })
