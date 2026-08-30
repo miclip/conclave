@@ -19,6 +19,7 @@
  *                completed even though its hook never arrived.
  */
 
+import { hookTimeoutSeconds } from './hookTimeout.ts'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -258,8 +259,21 @@ export interface ClaudeAdapterOptions {
  * last line a 12-turn run ever printed (issue #32). A diagnostic that ends a run
  * should say what to do about it.
  */
-const SEND_HOOK_TIMEOUT =
-  "no UserPromptSubmit hook after send, and the prompt IS in the child's transcript -- so the text was accepted and the hook is what did not arrive. Most often the previous turn had not finished -- neither CLI accepts input mid-turn -- so try a longer --settle. If it recurs at the first turn, the hooks are probably not firing at all: run `conclave config check`."
+const SEND_HOOK_TIMEOUT = (journal: string): string =>
+  `no UserPromptSubmit hook after send, and the prompt IS in the child's transcript -- so the text was accepted and the hook is what did not arrive. Most often the previous turn had not finished -- neither CLI accepts input mid-turn -- so try a longer --settle. If it recurs at the first turn, the hooks are not firing.
+
+Three states produce this, and only one is transient:
+
+  - the hooks are not registered, or registered but untrusted. 'conclave config check'
+    distinguishes those two and says so plainly
+  - the handler was killed before it could run. Under load a cold 'node' start can exceed the
+    hook's own timeout and the CLI kills it. 'config check' reports registration and trust; it
+    cannot see this, and will report that everything is fine
+
+${journal} tells them apart. If that file EXISTS the handler ran and could not deliver, which is
+a delivery problem. If it is ABSENT the handler never executed, which under load is the timeout
+-- and the same command succeeds on a quiet machine, which is why this presents as flakiness
+rather than as a resource problem.`
 
 /**
  * The other half of the send failure, and the half that used to be reported as the one above.
@@ -741,6 +755,7 @@ export class ClaudePtyHookAdapter implements AgentSession {
     this.#settingsDir = runDir
 
     this.#receiver = new HookReceiver(join(runDir, 'hooks.ndjson'))
+    this.#attemptJournal = join(runDir, 'attempts.ndjson')
     const url = await this.#receiver.start()
     this.#receiver.on('delivery', (d) => this.#onHook(d))
     // Replays are visible rather than silent: a duplicate means recovery ran.
@@ -764,6 +779,7 @@ export class ClaudePtyHookAdapter implements AgentSession {
       extra: {
         ORCH_HOOK_URL: url,
         ORCH_HOOK_ATTEMPT_JOURNAL: join(runDir, 'attempts.ndjson'),
+        // Recorded on the instance so the diagnostic can name it (#41).
         ORCH_HOOK_TIMEOUT_MS: '5000',
       },
     })
@@ -876,7 +892,7 @@ export class ClaudePtyHookAdapter implements AgentSession {
 
   #hookSettings(): unknown {
     const command = `node ${CLIENT} claude`
-    const entry = { hooks: [{ type: 'command', command, timeout: 10 }] }
+    const entry = { hooks: [{ type: 'command', command, timeout: hookTimeoutSeconds() }] }
     return { hooks: Object.fromEntries(HOOK_EVENTS.map((e) => [e, [entry]])) }
   }
 
@@ -1751,7 +1767,7 @@ export class ClaudePtyHookAdapter implements AgentSession {
     // pending keeps the event loop alive long after the send resolved.
     let timer: NodeJS.Timeout | undefined
     const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new Error(SEND_HOOK_TIMEOUT)), 30_000)
+      timer = setTimeout(() => reject(new Error(SEND_HOOK_TIMEOUT(this.#attemptJournal))), 30_000)
     })
     try {
       return await Promise.race([keyed, timeout])
@@ -1901,6 +1917,16 @@ export class ClaudePtyHookAdapter implements AgentSession {
    * manufacture an outcome: turns are reconciled against the transcript first, so a
    * completed turn whose Stop was lost is recovered rather than reported as a death.
    */
+  /**
+   * Where the hook client records an attempt it could not deliver (#41).
+   *
+   * Held so the send-timeout diagnostic can name it by path. Its ABSENCE is the finding: the
+   * handler never ran, which under load is the hook's own timeout killing a cold `node` start.
+   * Its presence means the handler ran and could not POST, which is a different fault with a
+   * different remedy.
+   */
+  #attemptJournal = ''
+
   async close(mode: 'graceful' | 'abandoned' = 'graceful'): Promise<void> {
     if (this.#closed) return
     this.#closed = true

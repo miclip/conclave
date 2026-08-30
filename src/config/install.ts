@@ -587,6 +587,14 @@ export function formatInstallResult(r: InstallResult): string {
   lines.push('')
   if (r.codex.ready) {
     lines.push('Codex hooks are loaded, enabled and trusted — they will run.')
+    // The limit of what this command can see (#41). A run that dies with "no UserPromptSubmit
+    // hook after send" sends its operator here, and this line said everything was fine -- a
+    // remedy offered for the wrong cause is worse than "I do not know". Registration and trust
+    // are static facts about configuration; whether a handler COMPLETES is a fact about the
+    // machine at the moment it runs, and nothing here can observe that.
+    lines.push('  This reports registration and trust only. It cannot tell whether a handler')
+    lines.push('  will finish inside its timeout on a loaded machine — see the attempts journal')
+    lines.push('  named in a send-timeout error for that.')
   } else if (r.codex.retrustRequired) {
     lines.push('Codex hooks need re-trusting before they will run.')
     lines.push('  Codex hashes the normalised handler, which includes the absolute command')

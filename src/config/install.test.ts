@@ -623,3 +623,28 @@ test('a plain checkout gets no stray .codex directory', async () => {
   await installConfig({ projectRoot: plain, conclaveRoot: REPO, agents: ['claude'], diagnose: false })
   assert.equal(existsSync(join(plain, '.codex')), false, 'no codex agent, no codex directory')
 })
+
+test('#41 the ready line says what it cannot see', async () => {
+  // A run that dies with "no UserPromptSubmit hook after send" sends its operator here, and this
+  // reported that everything was fine. Three states produce that death and this distinguishes
+  // only two: registration and trust are static facts about configuration, and whether a handler
+  // finishes inside its timeout is a fact about the machine at the moment it runs. A remedy
+  // offered for the wrong cause is worse than "I do not know".
+  // Built from a real install rather than a hand-made object: `formatInstallResult` reads
+  // several fields, and a fixture that guesses which ones is a fixture that breaks when the
+  // shape moves for unrelated reasons.
+  const project = fixtureProject()
+  const result = await installConfig({
+    projectRoot: project,
+    conclaveRoot: REPO,
+    agents: ['codex'],
+    diagnose: false,
+    dryRun: true,
+  })
+  const text = formatInstallResult({ ...result, codex: { ready: true, retrustRequired: false, messages: [] } })
+
+  assert.match(text, /loaded, enabled and trusted/, 'it still says what it did establish')
+  assert.match(text, /registration and trust only/, 'and now says what it did not')
+  assert.match(text, /timeout on a loaded machine/, 'naming the state it cannot see')
+  assert.match(text, /attempts journal/, 'and where the answer actually is')
+})

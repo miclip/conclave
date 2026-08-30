@@ -195,8 +195,21 @@ export interface CodexAdapterOptions {
  * last line a 12-turn run ever printed (issue #32). A diagnostic that ends a run
  * should say what to do about it.
  */
-const SEND_HOOK_TIMEOUT =
-  "no UserPromptSubmit hook after send. The child accepted the text but no hook fired, so this turn could not be observed. Most often the previous turn had not finished -- neither CLI accepts input mid-turn -- so try a longer --settle. If it recurs at the first turn, the hooks are probably not firing at all: run `conclave config check`."
+const SEND_HOOK_TIMEOUT = (journal: string): string =>
+  `no UserPromptSubmit hook after send. The child accepted the text but no hook fired, so this turn could not be observed. Most often the previous turn had not finished -- neither CLI accepts input mid-turn -- so try a longer --settle. If it recurs at the first turn, the hooks are not firing.
+
+Three states produce this, and only one is transient:
+
+  - the hooks are not registered, or registered but untrusted. 'conclave config check'
+    distinguishes those two and says so plainly
+  - the handler was killed before it could run. Under load a cold 'node' start can exceed the
+    hook's own timeout and the CLI kills it. 'config check' reports registration and trust; it
+    cannot see this, and will report that everything is fine
+
+${journal} tells them apart. If that file EXISTS the handler ran and could not deliver, which is
+a delivery problem. If it is ABSENT the handler never executed, which under load is the timeout
+-- and the same command succeeds on a quiet machine, which is why this presents as flakiness
+rather than as a resource problem.`
 
 /**
  * A second `send()` while the first has not yet become a turn.
@@ -415,6 +428,7 @@ export class CodexPtyHookAdapter implements AgentSession {
     const runDir = mkdtempSync(join(tmpdir(), 'orch-codex-'))
 
     this.#receiver = new HookReceiver(join(runDir, 'hooks.ndjson'))
+    this.#attemptJournal = join(runDir, 'attempts.ndjson')
     const url = await this.#receiver.start()
     this.#receiver.on('delivery', (d) => this.#onHook(d))
     this.#receiver.on('duplicate', (d) =>
@@ -432,6 +446,7 @@ export class CodexPtyHookAdapter implements AgentSession {
       extra: {
         ORCH_HOOK_URL: url,
         ORCH_HOOK_ATTEMPT_JOURNAL: join(runDir, 'attempts.ndjson'),
+        // Recorded on the instance so the diagnostic can name it (#41).
         ORCH_HOOK_TIMEOUT_MS: '5000',
       },
     })
@@ -1177,7 +1192,7 @@ export class CodexPtyHookAdapter implements AgentSession {
     // pending keeps the event loop alive long after the send resolved.
     let timer: NodeJS.Timeout | undefined
     const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new Error(SEND_HOOK_TIMEOUT)), 60_000)
+      timer = setTimeout(() => reject(new Error(SEND_HOOK_TIMEOUT(this.#attemptJournal))), 60_000)
     })
     try {
       await this.#input.submit(message)
@@ -1489,6 +1504,16 @@ export class CodexPtyHookAdapter implements AgentSession {
   async fork(): Promise<AgentSession> {
     throw new Error('fork() not implemented for the PTY adapter yet')
   }
+
+  /**
+   * Where the hook client records an attempt it could not deliver (#41).
+   *
+   * Held so the send-timeout diagnostic can name it by path. Its ABSENCE is the finding: the
+   * handler never ran, which under load is the hook's own timeout killing a cold `node` start.
+   * Its presence means the handler ran and could not POST, which is a different fault with a
+   * different remedy.
+   */
+  #attemptJournal = ''
 
   async close(mode: 'graceful' | 'abandoned' = 'graceful'): Promise<void> {
     if (this.#closed) return
