@@ -9,6 +9,7 @@
  * "how do I add a transport" has one answer rather than a convention to discover.
  */
 
+import { EvenRealitiesTransport } from './evenRealities/transport.ts'
 import { FakeTransport } from './fake.ts'
 import type { Inbound, Transport } from './types.ts'
 
@@ -36,7 +37,18 @@ function fake(): Transport {
   return t
 }
 
-const BUILT_IN: Record<string, () => Transport> = { fake }
+/**
+ * `even-realities` serves the Terminal Mode protocol rather than calling it: the glasses connect
+ * to an address the operator types, so conclave being that address is what puts its questions in
+ * front of them. `EVEN_PORT` and `EVEN_TOKEN` are how the operator points the app at it.
+ */
+function evenRealities(): Transport {
+  const port = Number(process.env['CONCLAVE_EVEN_PORT'] ?? '3457')
+  const token = process.env['CONCLAVE_EVEN_TOKEN']
+  return new EvenRealitiesTransport({ port, ...(token ? { token } : {}) })
+}
+
+const BUILT_IN: Record<string, () => Transport> = { fake, 'even-realities': evenRealities }
 
 export function transportNames(): string[] {
   return Object.keys(BUILT_IN).sort()
