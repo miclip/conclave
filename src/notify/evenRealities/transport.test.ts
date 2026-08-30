@@ -99,3 +99,38 @@ test('#184 a tell is a notification and never opens a question', async (t2) => {
   assert.equal(msgs[0]?.type, 'notification', 'a tell announces')
   assert.equal(msgs[0]?.title, 'Decided', 'and the kind names it')
 })
+
+test('#184 a veto tapped after the decision reaches the broker through poll', async (t2) => {
+  // End to end on the real surface: a `decided` notification carrying an override, a tap that
+  // arrives with nothing waiting for it, and the broker attaching it to the decision it vetoes.
+  const t = await up()
+  t2.after(() => t.close())
+  const dir = repo()
+  const b = new Broker(dir)
+
+  await b.tell(
+    {
+      kind: 'decided',
+      headline: 'letting the advisor fix land rather than cutting short',
+      options: [{ id: 'cut', label: 'Cut it short' }],
+    },
+    t,
+  )
+
+  // The notification carries the override, so a glance shows what can be done about it.
+  const msgs = (await (await fetch(`${t.bridge.url}/api/messages?token=tok`)).json()) as { message: string }[]
+  assert.match(msgs[0]?.message ?? '', /Cut it short/, 'the veto is on screen')
+
+  // Tapped later, through the endpoint the app uses, with nothing awaiting a reply.
+  await fetch(`${t.bridge.url}/api/question-response?token=tok`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ sessionId: 's', answer: 'Cut it short' }),
+  })
+
+  const taken = await b.collectVetoes(t)
+  assert.deepEqual(taken, [{ headline: 'letting the advisor fix land rather than cutting short', option: 'cut' }])
+  const all = b.decisions()
+  assert.equal(all.length, 2, 'the decision, then the veto')
+  assert.equal(all[1]?.answer?.by.kind, 'human')
+})

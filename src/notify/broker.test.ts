@@ -213,3 +213,90 @@ test('#184 a decision already taken is told, not asked — and the veto offered 
   assert.deepEqual(rec?.offered, ['cut'], 'and the record says what they could have done')
   assert.equal(rec?.answer, undefined, 'nothing waited, so nothing was answered')
 })
+
+test('#184 a late veto attaches to the decision that offered it', async () => {
+  // A `decided` message announces a judgement already taken and offers an override. Nothing
+  // waits on it, so the tap lands after `tell` has returned -- and without somewhere for it to
+  // go, the override on screen is a lie.
+  const dir = repo()
+  const t = new FakeTransport()
+  const b = new Broker(dir)
+
+  await b.tell(
+    { kind: 'decided', headline: 'letting the advisor fix land', options: [{ id: 'cut', label: 'Cut it short' }] },
+    t,
+  )
+  assert.deepEqual(await b.collectVetoes(t), [], 'nothing has arrived yet')
+
+  // The human taps, minutes later.
+  t.unsolicited = [{ option: 'cut', from: { id: 'mic', kind: 'human' } }]
+  const taken = await b.collectVetoes(t)
+  assert.deepEqual(taken, [{ headline: 'letting the advisor fix land', option: 'cut' }])
+
+  // APPENDED, not rewritten. An append-only log that edited its own history could not be
+  // trusted about anything else in it, and "decided, then vetoed" is the sequence worth keeping.
+  const all = b.decisions()
+  assert.equal(all.length, 2)
+  assert.equal(all[0]?.answer, undefined, 'the decision as it was taken')
+  assert.equal(all[1]?.answer?.option, 'cut', 'and the veto that followed it')
+  assert.equal(all[1]?.answer?.by.kind, 'human')
+})
+
+test('#184 a late option that was never offered is refused', async () => {
+  const dir = repo()
+  const t = new FakeTransport()
+  const b = new Broker(dir)
+  await b.tell({ kind: 'decided', headline: 'letting it land', options: [{ id: 'cut', label: 'Cut' }] }, t)
+
+  t.unsolicited = [{ option: 'deploy', from: { id: 'mic', kind: 'human' } }]
+  assert.deepEqual(await b.collectVetoes(t), [], 'a surface may not widen the choice offered')
+  assert.equal(b.decisions().length, 1, 'and nothing is recorded as an answer')
+})
+
+test('#184 a transport that cannot poll is not an error, it just has nothing to say', async () => {
+  const dir = repo()
+  const writeOnly = new FakeTransport({ canReceive: false })
+  ;(writeOnly as { poll?: unknown }).poll = undefined
+  assert.deepEqual(await new Broker(dir).collectVetoes(writeOnly), [])
+})
+
+test('#184 an agent operator has no tell budget, because it IS the budget', async () => {
+  // The operating agent already decides what is worth a human's attention and has the context to
+  // decide well. A budget behind that is a filter behind a filter, and makes the outer one
+  // unpredictable: a message it judged worth sending would vanish for reasons it cannot see.
+  const dir = repo()
+  const t = new FakeTransport()
+  const b = new Broker(dir, { operator: 'agent' })
+
+  for (let i = 0; i < 5; i += 1) await b.tell({ kind: 'progress', headline: `line ${i}` }, t)
+  assert.equal(t.sent.length, 5, 'every one reaches the surface')
+  assert.equal(b.decisions().filter((d) => d.undelivered === 'budgeted').length, 0)
+})
+
+test('#184 a human operator gets a channel budget, and what it swallows is recorded', async () => {
+  // No filter in this mode, and this is where a HUD floods. A budget for the CHANNEL rather than
+  // the episode, so a run producing a hundred of something produces one line rather than a
+  // hundred -- and the ones it held are on the record, because a channel that quietly ate a
+  // message is indistinguishable from one that was not working.
+  const dir = repo()
+  const t = new FakeTransport()
+  const b = new Broker(dir, { operator: 'human' })
+
+  for (let i = 0; i < 5; i += 1) await b.tell({ kind: 'progress', headline: `line ${i}` }, t)
+  assert.equal(t.sent.length, 1, 'one got through')
+  const budgeted = b.decisions().filter((d) => d.undelivered === 'budgeted')
+  assert.equal(budgeted.length, 4, 'and the rest are recorded as held, not lost')
+})
+
+test('#184 the budget never applies to a question', async () => {
+  // `ask` is someone waiting on an answer. Dropping it would hang the caller rather than quieten
+  // the channel, which is the opposite of what a budget is for.
+  const dir = repo()
+  const t = new FakeTransport()
+  t.reply = { option: 'yes', from: { id: 'mic', kind: 'human' } }
+  const b = new Broker(dir, { operator: 'human' })
+
+  await b.tell({ kind: 'progress', headline: 'first' }, t)
+  const answer = await b.ask({ kind: 'approval', headline: 'Merge?', options: [{ id: 'yes', label: 'Yes' }] }, t)
+  assert.equal(answer?.option, 'yes', 'the question went through the budget that had just fired')
+})

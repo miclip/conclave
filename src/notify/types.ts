@@ -92,6 +92,18 @@ export interface Transport {
   send(m: Outbound): Promise<{ id: string }>
   /** Absent on a write-only surface. */
   receive?(sentId: string): Promise<Inbound>
+  /**
+   * Answers that arrived with nothing waiting for them, taken and cleared.
+   *
+   * A `decided` message carries a veto -- "letting the advisor's fix land rather than cutting
+   * it short", with a `Cut it short` option -- and nothing waits on it, because the decision
+   * was already taken. So the tap lands after `tell` has returned, and without this there is
+   * nowhere for it to go: `receive` is a promise for an answer someone is awaiting, and this is
+   * the opposite case.
+   *
+   * Non-blocking by contract. It reports what has arrived, never waits for something to.
+   */
+  poll?(): Promise<Inbound[]>
 }
 
 /** One line of the decision log. */
