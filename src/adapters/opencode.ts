@@ -548,7 +548,7 @@ export class OpenCodeRunAdapter implements AgentSession {
         // means the model is done. This is what makes `completed` observed rather than
         // inferred from the process having exited.
         if (part.reason === 'stop') {
-          turn.provenance.unshift({ source: 'hook', detail: 'step_finish reason=stop' })
+          turn.provenance.unshift({ source: 'announced', detail: 'step_finish reason=stop' })
         } else if (part.reason === 'tool-calls') {
           // Not a terminal signal, and deliberately not recorded as provenance here: it is a
           // claim about what happens NEXT, and it is only evidence about the ending if the
@@ -596,7 +596,7 @@ export class OpenCodeRunAdapter implements AgentSession {
         outcome: 'completed',
         confidence: 'proven',
         provenance: [
-          { source: 'hook', detail: 'step_finish reason=stop' },
+          { source: 'announced', detail: 'step_finish reason=stop' },
           { source: 'process', detail: `exit code ${code}` },
         ],
       }
@@ -663,7 +663,7 @@ export class OpenCodeRunAdapter implements AgentSession {
           outcome: 'process_exited',
           confidence: 'proven',
           provenance: [
-            { source: 'hook', detail: 'step_finish reason=tool-calls' },
+            { source: 'announced', detail: 'step_finish reason=tool-calls' },
             {
               source: 'process',
               detail: `exit code ${code} before the announced next step`,

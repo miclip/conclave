@@ -103,6 +103,24 @@ export type Confidence = (typeof CONFIDENCES)[number]
 
 export type ProvenanceSource =
   | 'hook'
+  /**
+   * The child said so itself, on a documented output stream.
+   *
+   * Distinct from `hook` because the two are believed for different reasons and fail in
+   * different ways. A hook is a handler WE registered: it can be registered but untrusted,
+   * killed by its own timeout, or lost in delivery, and a reader who sees `hook:` will go
+   * looking for it in `.claude/settings.json` or `~/.codex/config.toml`. A record the child
+   * printed on a mode it documents can be none of those things, and there is nowhere to go
+   * looking.
+   *
+   * Distinct from `transcript` too, which means a file we parsed after the fact. `announced`
+   * is neither registered nor recovered -- it is what the child chose to say while running.
+   *
+   * OpenCode is the adapter this exists for: it needs no hook registration, no sidecar and no
+   * trust decision, and recording its evidence as `hook:` erased exactly the difference the
+   * seam was built to preserve (#52).
+   */
+  | 'announced'
   | 'transcript'
   | 'process'
   | 'orchestrator'

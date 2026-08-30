@@ -278,7 +278,7 @@ test('a stream that ends on a tool call leaves no report, and says so rather tha
     // provenance, and a verdict that graded itself unknown while citing a claim from the child
     // would be citing evidence it is simultaneously saying it does not have.
     assert.equal(
-      end.verdict.provenance.find((p) => p.source === 'hook'),
+      end.verdict.provenance.find((p) => p.source === 'announced'),
       undefined,
       'the child claimed nothing about this ending -- no hook may appear in the record',
     )
@@ -299,8 +299,8 @@ test('a stream that ends on a tool call leaves no report, and says so rather tha
     assert.equal(end.synthesized, true, 'no turn end was announced -- only a further step was')
 
     assert.deepEqual(
-      end.verdict.provenance.find((p) => p.source === 'hook'),
-      { source: 'hook', detail: 'step_finish reason=tool-calls' },
+      end.verdict.provenance.find((p) => p.source === 'announced'),
+      { source: 'announced', detail: 'step_finish reason=tool-calls' },
       'the intermediate record the child emitted, kept verbatim as the reason this is proven',
     )
     assert.ok(
@@ -332,7 +332,7 @@ test('a stream that ends on a tool call leaves no report, and says so rather tha
     assert.equal(end.synthesized, true, 'nothing announced this, so it is ours')
 
     assert.equal(
-      end.verdict.provenance.find((p) => p.source === 'hook'),
+      end.verdict.provenance.find((p) => p.source === 'announced'),
       undefined,
       'the tool-calls claim was made good on, so it is no longer evidence about the ending',
     )
@@ -882,4 +882,30 @@ test('#146 a graceful close whose turn finishes does not hold the loop for the r
   // with it cleared it exits as soon as the work is done. Two seconds separates those
   // unambiguously and is not a performance budget.
   assert.ok(took < 2_000, `a completed turn must not hold the loop for the rest of the cap; exited after ${took}ms`)
+})
+
+test('#52 a hookless adapter never claims a hook, and the claim is checked against the real adapter', async () => {
+  // `provenance` says WHY a verdict is believed, and it is what an auditor reads when deciding
+  // how much a `completed (proven)` is worth. OpenCode's headline property is that its terminal
+  // signal is announced by the child on a documented output mode -- no hook registration, no
+  // sidecar, no trust decision. Recording it as `hook:` erased exactly that, and sent a reader
+  // looking in `.claude/settings.json` for a handler that will never be there.
+  //
+  // Driven through a real turn rather than asserted about the source text, so a future path that
+  // records provenance somewhere new is covered by construction.
+  const { command } = stub(readFileSync(FIXTURE, 'utf8'))
+  const session = await OpenCodeRunAdapter.start({ cwd: REPO, role: 'implementer', command })
+  await session.send('Edit calc.py so add() returns a + b.', { kind: 'orchestrator' })
+  const events = await nextTurn(session)
+
+  const sources = events
+    .filter((e): e is TurnEndEvent => e.type === 'turn_end')
+    .flatMap((e) => e.verdict.provenance.map((p) => p.source))
+  assert.ok(sources.length > 0, 'the turn must carry provenance, or this asserts nothing')
+  assert.equal(
+    sources.filter((s) => s === 'hook').length,
+    0,
+    `an adapter that registers no hooks must not cite one: ${sources.join(', ')}`,
+  )
+  assert.ok(sources.includes('announced'), 'and it says what it actually is')
 })
