@@ -151,24 +151,79 @@ test('#182 a dry run executes nothing, and says what it would have done', () => 
   assert.ok(r.out.length > 0, 'and it must say something')
 })
 
-test('#182 a pure version bump is not a dependency move', () => {
-  // Measured on the v0.5.12 release, which reported "the release moved a dependency" and ran a
-  // needless `npm ci`. The first version counted changed lines and treated more than two as a
-  // move, reasoning that two lines is the version string on both sides -- but package-lock.json
-  // carries the version TWICE, at the root and under `packages[""]`, so a pure bump is four
-  // lines and every release reinstalled for nothing.
-  //
-  // Asserted against the real diff between the last two tags, because that is the case that was
-  // wrong and the one that recurs every release.
-  const diff = execFileSync('git', ['diff', 'v0.5.11', 'v0.5.12', '--', 'package-lock.json'], {
-    cwd: REPO,
-    encoding: 'utf8',
-  })
-  const changed = diff.split('\n').filter((l) => /^[-+][^-+]/.test(l))
-  assert.ok(changed.length > 2, `the bump must actually change lines, found ${changed.length}`)
+/**
+ * An install checkout at one tag, with a newer tag to move to.
+ *
+ * `lockAt` writes the whole `package-lock.json`, so a caller decides exactly what differs
+ * between the two — which is the thing under test.
+ */
+function installFixture(lockA: string, lockB: string): { dir: string; env: NodeJS.ProcessEnv } {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'conclave-deps-')))
+  const origin = realpathSync(mkdtempSync(join(tmpdir(), 'conclave-deps-origin-')))
+  execFileSync('git', ['init', '-q', '--bare', origin])
+  const git = (...a: string[]) =>
+    execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', ...a], { cwd: dir })
+  git('init', '-q', '-b', 'main')
+  mkdirSync(join(dir, 'bin'), { recursive: true })
+  // Prints the version out of package.json, so the script's own post-checkout verification
+  // passes the way it does against a real install.
+  writeFileSync(
+    join(dir, 'bin', 'conclave.ts'),
+    `#!/usr/bin/env node\nimport { readFileSync } from 'node:fs'\nimport { join } from 'node:path'\n` +
+      `const p = JSON.parse(readFileSync(join(import.meta.dirname, '..', 'package.json'), 'utf8'))\n` +
+      `process.stdout.write(p.version + '\\n')\n`,
+  )
+  chmodSync(join(dir, 'bin', 'conclave.ts'), 0o755)
 
-  // The rule the script now uses: strip the version lines, and if anything is left, something
-  // really moved. Nothing is left here, which is why this release needed no reinstall.
-  const other = changed.filter((l) => !/^[-+]\s*"version":/.test(l))
-  assert.deepEqual(other, [], 'a version bump alone must not read as a dependency move')
+  writeFileSync(join(dir, 'package.json'), JSON.stringify({ version: '9.9.9' }, null, 2))
+  writeFileSync(join(dir, 'package-lock.json'), lockA)
+  git('add', '.')
+  git('commit', '-qm', 'v9.9.9')
+  git('tag', 'v9.9.9')
+
+  writeFileSync(join(dir, 'package.json'), JSON.stringify({ version: '9.9.10' }, null, 2))
+  writeFileSync(join(dir, 'package-lock.json'), lockB)
+  git('add', '.')
+  git('commit', '-qm', 'v9.9.10')
+  git('tag', 'v9.9.10')
+
+  git('remote', 'add', 'origin', origin)
+  git('push', '-q', 'origin', 'main', '--tags')
+  // The install sits on the OLD tag, so moving to the new one has a diff to inspect.
+  git('checkout', '-q', 'v9.9.9')
+
+  const binDir = realpathSync(mkdtempSync(join(tmpdir(), 'conclave-deps-bin-')))
+  symlinkSync(join(dir, 'bin', 'conclave.ts'), join(binDir, 'conclave'))
+  return { dir, env: { ...process.env, PATH: `${binDir}:${process.env.PATH ?? ''}` } }
+}
+
+const lock = (version: string, extra = '') =>
+  JSON.stringify({ name: 'x', version, packages: { '': { version, ...(extra ? { dependencies: { dep: extra } } : {}) } } }, null, 2)
+
+test('#182 a pure version bump is not a dependency move', () => {
+  // `scripts/release.sh` reported "the release moved a dependency" while cutting v0.5.12 and ran
+  // a needless `npm ci`. The rule counted changed lines and treated more than two as a move --
+  // but package-lock.json carries the version TWICE, at the root and under `packages[""]`, so a
+  // pure bump is four lines.
+  //
+  // A FIXTURE, not the repo's own tags. The first version of this test diffed `v0.5.11..v0.5.12`
+  // and failed on all three CI runners with `fatal: bad revision` -- the checkout has no tags,
+  // so it was asserting about the environment rather than the code.
+  const { dir, env } = installFixture(lock('9.9.9'), lock('9.9.10'))
+  const r = spawnSync('sh', [SCRIPT, '--install-only'], { cwd: dir, env, encoding: 'utf8' })
+  const out = `${r.stdout}${r.stderr}`
+  assert.equal(r.status, 0, out)
+  assert.match(out, /install is on v9\.9\.10/, 'it still moves the checkout')
+  assert.doesNotMatch(out, /moved a dependency/, 'a version bump alone must not trigger a reinstall')
+})
+
+test('#182 a dependency that really moved is still detected', () => {
+  // The other half, or the fix would be "never reinstall", which is worse than reinstalling
+  // always: node_modules would silently disagree with the source it was installed from.
+  const { dir, env } = installFixture(lock('9.9.9', '^1.0.0'), lock('9.9.10', '^2.0.0'))
+  const out = (() => {
+    const r = spawnSync('sh', [SCRIPT, '--install-only'], { cwd: dir, env, encoding: 'utf8' })
+    return `${r.stdout}${r.stderr}`
+  })()
+  assert.match(out, /moved a dependency/, 'a changed dependency must still be noticed')
 })
