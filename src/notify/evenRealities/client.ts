@@ -75,6 +75,13 @@ export class EvenRealitiesBridge {
   #nextId = 1
   /** At most one question is outstanding: `/question-response` carries no question id. */
   #pending: ((a: BridgeAnswer) => void) | undefined
+  /**
+   * Answers that arrived with nothing waiting for them.
+   *
+   * A veto on a `decided` notification lands here: the decision was already taken, so nothing
+   * was awaiting a reply, and dropping the tap would make the override on screen a lie.
+   */
+  readonly #unsolicited: BridgeAnswer[] = []
 
   constructor(opts: BridgeOptions = {}) {
     this.token = opts.token ?? randomBytes(16).toString('hex')
@@ -140,6 +147,11 @@ export class EvenRealitiesBridge {
     return new Promise<BridgeAnswer>((resolve) => {
       this.#pending = resolve
     })
+  }
+
+  /** Take the late answers, clearing them. Never waits. */
+  takeUnsolicited(): BridgeAnswer[] {
+    return this.#unsolicited.splice(0, this.#unsolicited.length)
   }
 
   #authorised(req: IncomingMessage, url: URL): boolean {
@@ -239,7 +251,8 @@ export class EvenRealitiesBridge {
       }
       const pending = this.#pending
       this.#pending = undefined
-      pending?.({ answer })
+      if (pending) pending({ answer })
+      else this.#unsolicited.push({ answer })
       res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ ok: true }))
     })
   }

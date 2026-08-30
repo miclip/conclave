@@ -20,6 +20,8 @@ export class FakeTransport implements Transport {
   failSend: string | undefined
   /** Set to make `receive` fail after a successful send. */
   failReceive: string | undefined
+  /** Answers that arrived with nothing waiting -- late vetoes. Drained by `poll`. */
+  unsolicited: Inbound[] = []
 
   constructor(over: Partial<TransportLimits> & { name?: string } = {}) {
     this.name = over.name ?? 'fake'
@@ -30,6 +32,12 @@ export class FakeTransport implements Transport {
     if (this.failSend !== undefined) return Promise.reject(new Error(this.failSend))
     this.sent.push(m)
     return Promise.resolve({ id: `fake-${this.sent.length}` })
+  }
+
+  poll(): Promise<Inbound[]> {
+    const taken = this.unsolicited
+    this.unsolicited = []
+    return Promise.resolve(taken)
   }
 
   receive(): Promise<Inbound> {

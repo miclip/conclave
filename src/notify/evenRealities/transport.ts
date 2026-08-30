@@ -43,6 +43,17 @@ export class EvenRealitiesTransport implements Transport {
       const id = this.bridge.send({ type: 'notification', title: titleFor(m), message: m.headline })
       return { id: String(id) }
     }
+    // A `tell` that carries options is a decision with a veto: announced, not asked, so the
+    // options travel with the notification and the tap comes back through `poll`.
+    if (m.kind === 'decided' || m.kind === 'progress') {
+      this.#lastOffered = m.options.map((o) => ({ id: o.id, label: o.label }))
+      const id = this.bridge.send({
+        type: 'notification',
+        title: titleFor(m),
+        message: `${m.headline} — ${m.options.map((o) => o.label).join(' / ')}`,
+      })
+      return { id: String(id) }
+    }
     // Deferred to `receive`, which is where the answer is awaited. The id is the correlation the
     // broker holds; the bridge allows one outstanding question, which is the same constraint.
     this.#pending = m
@@ -50,6 +61,24 @@ export class EvenRealitiesTransport implements Transport {
   }
 
   #pending: Outbound | undefined
+
+  /**
+   * Late answers, which on this surface is how a veto arrives.
+   *
+   * A tap on a `decided` notification reaches `/api/question-response` with nothing awaiting it.
+   * The bridge buffers those; this hands them over as inbound with no option resolution, because
+   * the broker matches them against the decision that offered them and knows the ids.
+   */
+  async poll(): Promise<Inbound[]> {
+    const from = { id: 'even-realities', kind: 'human' as const }
+    return this.bridge.takeUnsolicited().map((a) => {
+      const chosen = this.#lastOffered.find((o) => o.label === a.answer)
+      return chosen ? { option: chosen.id, from } : { text: a.answer, from }
+    })
+  }
+
+  /** The options most recently announced, so a late tap on a label resolves to its id. */
+  #lastOffered: { id: string; label: string }[] = []
 
   async receive(): Promise<Inbound> {
     const m = this.#pending

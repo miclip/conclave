@@ -186,8 +186,8 @@ Commands:
                                    report as JSON on stdout instead of prose; the exit
                                    code is unchanged.
   notify         tell|ask "<headline>" [--options id:Label,...] [--kind ...]
-                 [--href URL] [--run <id>] [--transport <name>]
-                 log [--json]
+                 [--href URL] [--run <id>] [--transport <name>] [--operator human]
+                 vetoes [--transport <name>] | log [--json]
                                    Reach a human when an agent is operating. "tell" is one way
                                    and never waits; "ask" waits and prints the answer as JSON.
                                    An action is an id that was offered; free text comes back as
@@ -1058,6 +1058,25 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
       return at >= 0 ? rest[at + 1] : undefined
     }
 
+    if (verb === 'vetoes') {
+      const transportName = flagOf('transport') ?? 'fake'
+      const transport = resolveTransport(transportName)
+      if (!transport) {
+        console.error(`conclave: no transport named ${transportName} — have: ${transportNames().join(', ')}`)
+        return 2
+      }
+      const taken = await new Broker(root).collectVetoes(transport)
+      if (taken.length === 0) {
+        console.log('no late answers')
+        return 0
+      }
+      for (const v of taken) console.log(`${v.option ?? JSON.stringify(v.text)}  ← ${v.headline}`)
+      // Non-zero: a veto is the operator asking for something to stop, and a caller that
+      // ignored it because the command succeeded would be the whole failure this exists to
+      // prevent.
+      return 1
+    }
+
     if (verb === 'log') {
       const decisions = new Broker(root).decisions()
       if (rest.includes('--json')) {
@@ -1088,6 +1107,7 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
 
     if (verb !== 'tell' && verb !== 'ask') {
       console.error('usage: conclave notify tell|ask "<headline>" [--options id:Label,...] [--transport name]')
+      console.error('       conclave notify vetoes [--transport name]   late answers to a decision')
       console.error(`       conclave notify log [--json]`)
       console.error(`  transports: ${transportNames().join(', ')}`)
       return 2
@@ -1122,7 +1142,8 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
       ...(flagOf('run') ? { runId: flagOf('run')! } : {}),
     }
 
-    const broker = new Broker(root)
+    const operator = flagOf('operator') === 'human' ? 'human' : 'agent'
+    const broker = new Broker(root, { operator })
     if (verb === 'tell') {
       await broker.tell(message, transport)
       // Silent on success by design: a `tell` that printed would make a notification into
