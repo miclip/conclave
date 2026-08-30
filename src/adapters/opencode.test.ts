@@ -909,3 +909,57 @@ test('#52 a hookless adapter never claims a hook, and the claim is checked again
   )
   assert.ok(sources.includes('announced'), 'and it says what it actually is')
 })
+
+test('#48 the declared absence of a silence clock is OBSERVED, not read off the source', async () => {
+  // `RUN_PER_TURN_DEADLINES` declares `silence: { supported: false }` for this adapter, and that
+  // claim was argued from the code rather than exercised — the one set of assertions in this
+  // project exempt from the grading `conformance/capabilities.ts` applies to everything else.
+  //
+  // It is load-bearing in a way that bites quietly: a seat with no silence clock goes quiet
+  // FOREVER and produces no verdict. A reader trusting `supported: false` correctly waits for
+  // nothing; a reader trusting it wrongly waits for a timeout that arrives and is attributed to
+  // nothing.
+  //
+  // Observed rather than waited out. `DEFAULT_IDLE_MS` is twelve minutes, so the test is not
+  // "no silence timeout in twelve minutes" but the stronger and faster claim: with an absolute
+  // bound set, the ONLY deadline that fires is that one, at that bound, in its own words. A
+  // silence clock would be a second timer with a different detail and an earlier deadline.
+  const { command } = hangingStub('')
+  const session = await OpenCodeRunAdapter.start({
+    cwd: REPO,
+    role: 'implementer',
+    command,
+    watchdogMs: 700,
+  })
+  try {
+    const seen: AgentEvent[] = []
+    const reading = (async () => {
+      for await (const e of session.events()) {
+        seen.push(e)
+        if (e.type === 'turn_end') break
+      }
+    })()
+    await session.send('go quiet', { kind: 'orchestrator' })
+
+    // Well past anything a short idle clock would use, and well inside the absolute bound.
+    await new Promise((r) => setTimeout(r, 350))
+    assert.equal(
+      seen.filter((e) => e.type === 'turn_end').length,
+      0,
+      'nothing may end a quiet turn before the absolute bound',
+    )
+
+    await reading
+    const end = seen.find((e): e is TurnEndEvent => e.type === 'turn_end')
+    assert.ok(end, 'the absolute clock must still fire')
+    assert.equal(end.verdict.outcome, 'timed_out')
+    // Its own words. A silence timeout would not say this, and this is the only timeout there is.
+    assert.match(
+      end.verdict.provenance.map((p) => p.detail).join(' '),
+      /no terminal record within 700ms/,
+      'the deadline that fired is the absolute one, named as such',
+    )
+  } finally {
+    await session.close('abandoned').catch(() => undefined)
+  }
+})
