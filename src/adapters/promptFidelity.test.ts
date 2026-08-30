@@ -692,3 +692,49 @@ for (const [name, Adapter] of ADAPTERS) {
     }
   })
 }
+
+test('a different message is `unrelated`, not INTERIOR corruption', () => {
+  // Reported from a live run: a `<task-notification>` block -- the harness delivering a
+  // background-task completion -- reached the child while an advisor send was in flight and was
+  // correlated against the open turn. The verbatim output was:
+  //
+  //   this is INTERIOR corruption: the first 0 bytes and the last 0 bytes match, and between
+  //   them 472 bytes were sent and 394 arrived
+  //
+  // "The first 0 bytes and the last 0 bytes match" is not a finding. Two strings that share no
+  // prefix AND no suffix are a different message, not a damaged one -- a truncation keeps a
+  // prefix, an overwrite keeps the ends, and sharing neither is the signature of neither.
+  const sent = '[FROM THE ADVISOR (advisor) — a peer AI model, not your user.] Do the thing.'
+  const received = '<task-notification>\n<task-id>bigxjzz62</task-id>\n</task-notification>'
+  const m = describePromptMismatch(sent, received)
+
+  assert.ok(m)
+  assert.equal(m.shape, 'unrelated', 'sharing nothing at either end is not interior corruption')
+  assert.match(m.message, /shares NOTHING with what was sent/)
+  assert.match(m.message, /DIFFERENT message rather than a damaged one/)
+  assert.match(m.message, /correlation fault/, 'and it names where to look')
+
+  // The advice that was wrong for this case is gone. It is not a transport fault, so ruling out
+  // the tooling sends the reader in the wrong direction with confidence.
+  assert.doesNotMatch(m.message, /corrupted in transport/)
+  assert.doesNotMatch(m.message, /not a hook failure/)
+  assert.doesNotMatch(m.message, /--settle/)
+  assert.doesNotMatch(m.message, /fragment/)
+
+  // `lostBytes` was a subtraction of two unrelated lengths -- 472 minus 394 reported as "78
+  // bytes lost", which is the number that starts the transport hunt.
+  assert.equal(m.lostBytes, 0, 'there is no quantity of loss to report')
+})
+
+test('genuine interior corruption is still INTERIOR, and still says so', () => {
+  // The other side, or the fix would be "call everything unrelated". A copy that keeps its ends
+  // and is wrong in the middle is exactly what the interior wording is for.
+  const sent = 'the quick brown fox jumps over the lazy dog'
+  const received = 'the quick XXXX fox jumps over the lazy dog'
+  const m = describePromptMismatch(sent, received)
+
+  assert.ok(m)
+  assert.equal(m.shape, 'interior')
+  assert.match(m.message, /INTERIOR/)
+  assert.match(m.message, /corrupted in transport/, 'this one really is a damaged copy')
+})
