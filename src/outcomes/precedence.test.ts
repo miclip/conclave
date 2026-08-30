@@ -5,9 +5,21 @@
  * seeing what Codex emits, the fixture stops answering the question and starts recording
  * whatever happened — and arrival order gets quietly blessed as semantics.
  *
- * These are SYNTHETIC. Whether Codex emits both records on cancellation is unknown; the
- * point is that the classifier is correct either way, and that neither order can produce
- * a different verdict.
+ * These are SYNTHETIC, and they are a GUARD rather than validated behaviour (#14).
+ *
+ * Whether Codex emits both records on cancellation is not unknown any more: it does not. The
+ * two are mutually exclusive -- measured on 0.146.0 when this rule was written, and observed
+ * again on 0.147.0 by `codex.live.test.ts`, which cancels a real turn and reports
+ * `turn_aborted=true Stop=false`. So the rule never fires in practice and no Codex fixture is
+ * evidence that it works.
+ *
+ * It stays because it is correct and costs nothing, and because a future version emitting both
+ * must not silently upgrade a cancellation into a completion. The live test asserts the mutual
+ * exclusion rather than merely reporting it, so the day that changes is a FAILURE naming this
+ * file rather than a line in a log nobody reads.
+ *
+ * What these cases establish: the classifier is correct either way, and neither arrival order
+ * can produce a different verdict.
  *
  *   node --test src/outcomes/precedence.test.ts
  */

@@ -74,7 +74,13 @@ export const CODEX_CAPABILITIES: AdapterCapabilities = {
     // independently records task_complete.
     completed: 'observed',
     // turn_aborted reason=interrupted. Stop does NOT fire; the two are mutually
-    // exclusive on 0.146.0.
+    // exclusive -- measured on 0.146.0 and observed again on 0.147.0.
+    //
+    // The version matters and is why the check is live rather than remembered: this is the
+    // fact `outcomes/precedence.test.ts` rests on, and a version-pinned fact with nothing
+    // watching it quietly stops being one. `codex.live.test.ts` cancels a real turn and fails
+    // if Stop ever arrives alongside turn_aborted, which is the day that rule stops being a
+    // guard and becomes load-bearing (#14).
     cancelled: 'observed',
     // Observed, with a qualification that matters: the transcript record for a refused
     // permission is `turn_aborted reason=interrupted` -- byte-identical to a user
