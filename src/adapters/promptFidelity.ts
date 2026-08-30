@@ -20,7 +20,21 @@
  */
 
 /** What the received text turned out to be, relative to what was sent. */
-export type MismatchShape = 'prefix' | 'suffix' | 'interior'
+/**
+ * `unrelated` is not a corruption at all, and that is the point of having it.
+ *
+ * Two strings that share no prefix AND no suffix are not a damaged copy of one another -- they
+ * are different messages. Folding that case into `interior` produced a sentence that reads as
+ * arithmetic and means nothing: "the first 0 bytes and the last 0 bytes match, and between them
+ * 472 bytes were sent and 394 arrived." It then told the operator this was neither a hook
+ * failure nor a slow child and that `--settle` would not help, which is confidently wrong for a
+ * message that simply is not the one we sent.
+ *
+ * Reported from a live run where the received text was a complete, well-formed
+ * `<task-notification>` block -- the harness delivering a background-task completion, which
+ * arrived while an advisor send was in flight and was correlated against the open turn.
+ */
+export type MismatchShape = 'prefix' | 'suffix' | 'interior' | 'unrelated'
 
 export interface PromptMismatch {
   /**
@@ -95,33 +109,64 @@ export function describePromptMismatch(sent: string, received: string): PromptMi
     const lost = sent.slice(0, sent.length - received.length)
     what = `the text it received is a SUFFIX of what was sent: the first ${bytes(lost)} bytes are missing`
   } else {
-    shape = 'interior'
     const head = commonPrefixLength(sent, received)
     const tail = commonSuffixLength(sent, received, Math.min(sent.length, received.length) - head)
-    what =
-      `the text it received is neither a prefix nor a suffix of what was sent, so this is INTERIOR ` +
-      `corruption: the first ${bytes(sent.slice(0, head))} bytes and the last ${bytes(sent.slice(sent.length - tail))} ` +
-      `bytes match, and between them ${bytes(sent.slice(head, sent.length - tail))} bytes were sent and ` +
-      `${bytes(received.slice(head, received.length - tail))} arrived`
+    if (head === 0 && tail === 0) {
+      // Nothing in common at either end. A damaged copy keeps SOMETHING -- a truncation keeps a
+      // prefix, an overwrite keeps the ends -- so sharing neither is the signature of a
+      // different message rather than a broken one, and saying "interior corruption" here sends
+      // the reader after a transport bug that is not there.
+      shape = 'unrelated'
+      what =
+        `the text it received shares NOTHING with what was sent -- no common prefix and no ` +
+        `common suffix -- so it is a DIFFERENT message rather than a damaged one. The byte ` +
+        `counts below are two unrelated lengths and their difference means nothing. This is a ` +
+        `correlation fault: something else reached the child while this send was in flight and ` +
+        `was matched against it. A harness-injected block (<task-notification>, ` +
+        `<system-reminder>) arriving mid-send is the known cause`
+    } else {
+      shape = 'interior'
+      what =
+        `the text it received is neither a prefix nor a suffix of what was sent, so this is INTERIOR ` +
+        `corruption: the first ${bytes(sent.slice(0, head))} bytes and the last ${bytes(sent.slice(sent.length - tail))} ` +
+        `bytes match, and between them ${bytes(sent.slice(head, sent.length - tail))} bytes were sent and ` +
+        `${bytes(received.slice(head, received.length - tail))} arrived`
+    }
   }
 
   // Named so an operator can tell this apart from the two send failures that came before it,
   // both of which are about text that never arrived at all rather than text that arrived wrong.
+  // The framing differs by shape, not just the detail. Everything below the colon used to be
+  // written for a damaged copy -- "corrupted in transport", "not a hook failure", "the
+  // fragment" -- and every one of those is wrong when the child simply took a different
+  // message. Telling an operator the transport is broken, and ruling out the tooling, is worse
+  // than saying nothing when the transport is fine.
   const message =
-    `the child accepted a prompt that is not the one that was sent, so the message was corrupted in ` +
-    `transport: ${what}. Sent ${sentBytes} UTF-8 bytes, the child took ${receivedBytes}. ` +
-    `This is not a hook failure and not a slow child -- \`conclave config check\` and \`--settle\` will ` +
-    `not help. The turn HAS been opened and recorded against the text the child actually took, because ` +
-    `that is what it is working on; the send is refused so nothing downstream treats the fragment as ` +
-    `the message.\n` +
-    `  sent     ${excerpt(sent)}\n` +
-    `  received ${excerpt(received)}`
+    shape === 'unrelated'
+      ? `the child accepted a prompt that is not the one that was sent, and not a damaged copy of ` +
+        `it either: ${what}. Sent ${sentBytes} UTF-8 bytes, the child took ${receivedBytes}. ` +
+        `The turn HAS been opened and recorded against the text the child actually took, because ` +
+        `that is what it is working on; the send is refused so nothing downstream treats the other ` +
+        `message as this one.\n` +
+        `  sent     ${excerpt(sent)}\n` +
+        `  received ${excerpt(received)}`
+      : `the child accepted a prompt that is not the one that was sent, so the message was corrupted in ` +
+        `transport: ${what}. Sent ${sentBytes} UTF-8 bytes, the child took ${receivedBytes}. ` +
+        `This is not a hook failure and not a slow child -- \`conclave config check\` and \`--settle\` will ` +
+        `not help. The turn HAS been opened and recorded against the text the child actually took, because ` +
+        `that is what it is working on; the send is refused so nothing downstream treats the fragment as ` +
+        `the message.\n` +
+        `  sent     ${excerpt(sent)}\n` +
+        `  received ${excerpt(received)}`
 
   return {
     shape,
     sentBytes,
     receivedBytes,
-    lostBytes: Math.max(0, sentBytes - receivedBytes),
+    // Zero for `unrelated`, because the subtraction has no referent: the two lengths belong to
+    // different messages, and a "78 bytes lost" that is really 472 minus 394 invites exactly the
+    // transport hunt this shape exists to prevent.
+    lostBytes: shape === 'unrelated' ? 0 : Math.max(0, sentBytes - receivedBytes),
     message,
   }
 }
