@@ -29,6 +29,7 @@
  * does briefly hold a second copy of it on disk.
  */
 
+import { hookTimeoutSeconds } from './hookTimeout.ts'
 import { execFileSync } from 'node:child_process'
 import { chmodSync, existsSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
@@ -121,7 +122,7 @@ export function withConclaveHooks(
   events: readonly string[] = KIMI_HOOK_EVENTS,
 ): Record<string, unknown> {
   const existing = Array.isArray(config.hooks) ? (config.hooks as HookDef[]) : []
-  const ours: HookDef[] = events.map((event) => ({ event, command, timeout: 10 }))
+  const ours: HookDef[] = events.map((event) => ({ event, command, timeout: hookTimeoutSeconds() }))
   return { ...config, hooks: [...existing, ...ours] }
 }
 
