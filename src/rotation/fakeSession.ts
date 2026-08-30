@@ -483,7 +483,18 @@ export class FakeRotationSession implements AgentSession {
     return undefined
   }
 
-  async decidePermission(): Promise<void> {}
+  /**
+   * Decisions this seat was told to take, in order.
+   *
+   * Recorded rather than discarded so a CONSOLE test can assert that `/allow` reached the
+   * participant. `decidePermission` was covered at the relay and not at the console (#6), and a
+   * no-op double is why: the console could route the command anywhere and nothing would notice.
+   */
+  readonly permissionDecisions: ('allow' | 'deny')[] = []
+
+  async decidePermission(decision: 'allow' | 'deny'): Promise<void> {
+    this.permissionDecisions.push(decision)
+  }
 
   events(): AsyncIterable<AgentEvent> {
     return this.#events

@@ -424,6 +424,49 @@ test('#177 a bypassed seat reports the permission as taken, not as one to answer
   assert.match(out.text(), /npm run verify/)
 })
 
+test('#6 /allow at the console reaches the participant', async () => {
+  // `decidePermission` was covered at the relay and not at the console -- and both it and
+  // `relay.ask` passed their tests and then failed in a real terminal. A console test is the
+  // only place the routing from a typed command to a seat is exercised at all.
+  const dir = repo()
+  const impl = slow('impl', 'claude', ['ack', 'Did it.'])
+  impl.onSend = () => {
+    impl.emit({
+      type: 'permission_requested',
+      tool: 'Bash',
+      input: { command: 'rm -rf build' },
+      seq: 6001,
+      at: Date.now(),
+      provisional: false,
+    })
+  }
+
+  const out = collect()
+  const input = new PassThrough()
+  const running = runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'claude',
+    rounds: 2,
+    checks: [],
+    registry: registryOf({ codex: [slow('advisor', 'codex', ['Do it.', 'DONE'])], claude: [impl] }),
+    input,
+    output: out.stream,
+  })
+
+  // Driven by the request ARRIVING, not by a guess at how long the turn takes: `/allow` typed
+  // before anything is waiting is answered "nobody is waiting", which would pass a weaker
+  // assertion while proving the opposite of what this test claims.
+  await untilText('the permission request', out.text, /needs a permission decision/)
+  input.write('/allow\n')
+  await untilText('the decision to be taken', () => JSON.stringify(impl.permissionDecisions), /allow/)
+  input.end()
+  assert.equal(await running, 0)
+
+  assert.deepEqual(impl.permissionDecisions, ['allow'], 'the seat was told, once')
+})
+
 test('#177 a seat that is NOT bypassed still asks, and now says what for', async () => {
   // The other half, and the one that must not be broken by the fix: with no bypass configured
   // a permission request genuinely blocks, and the operator does need to answer it.
