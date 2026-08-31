@@ -98,3 +98,44 @@ export function resolveRole(id: RoleId, roles: Record<RoleId, RoleDefinition> = 
   }
   return role
 }
+
+/**
+ * The shape an operator writes, structurally typed so this layer stays free of the config
+ * subsystem. `config/project.ts` produces it; nothing here reads a file.
+ */
+export interface DefinedRole {
+  description: string
+  agent?: string | undefined
+  model?: string | undefined
+}
+
+/**
+ * Operator-defined roles, merged over the built-ins.
+ *
+ * A defined role is implementer-SHAPED: it holds the codebase, writes code, and owns a
+ * worktree. What distinguishes `frontend` from `implementer` is the job, not the machinery,
+ * which is exactly the decision #89 settled -- a role is a job, and the invocation says who
+ * does it. So every field but the description is the implementer's, and nothing here invents
+ * a new kind of seat.
+ *
+ * Built-ins are not overridable. `implementer` and `advisor` are referred to by name across
+ * the relay, the briefing and the report, and letting a config file redefine what `advisor`
+ * means would change the behaviour of code that never reads this map. A collision is refused
+ * at config read, so reaching this function with one is already impossible.
+ */
+export function rolesWithDefined(defined: Record<string, DefinedRole> = {}): Record<RoleId, RoleDefinition> {
+  const merged: Record<RoleId, RoleDefinition> = { ...BUILTIN_ROLES }
+  for (const [id, role] of Object.entries(defined)) {
+    if (merged[id]) continue
+    merged[id] = {
+      id,
+      displayName: id,
+      description: role.description,
+      contextPolicy: 'full',
+      mutatesWorkspace: true,
+      defaultInputOwnership: 'mediated',
+      isModel: true,
+    }
+  }
+  return merged
+}

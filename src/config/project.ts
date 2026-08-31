@@ -4,8 +4,30 @@
  * The first thing in this codebase that reads a config file. `registry/types.ts` has
  * described the eventual shape for a while -- "global user config defining available
  * agents and personal defaults, project-local `.conclave/` config selecting agents and
- * assigning them to roles" -- and this is deliberately not that. It answers one question,
+ * assigning them to roles" -- and this WAS deliberately not that. It answered one question,
  * the one an operator actually hit: how do I stop being asked to approve every command.
+ *
+ * ## It is now half of that, and the reason is a dispatcher
+ *
+ * That decision was made when there were two seats and nothing that chose between them. With
+ * a dispatcher and a seat list, "which seat should this work go to" became a question an
+ * operator has to answer at every run by retyping the same thing, and #89 is the surface for
+ * answering it once. So `roles` lives here: a role names a JOB, and a seat list may reference
+ * one by name.
+ *
+ * Assigning AGENTS to roles is still not here, and the distinction is the point. A role's
+ * `agent` and `model` are optional DEFAULTS the invocation overrides -- running the same job
+ * against a cheaper model has to be a flag, not a config edit, because that comparison is
+ * the experiment conclave exists to make cheap.
+ *
+ * ## What this file being machine-local costs, stated rather than discovered
+ *
+ * `.conclave/` is gitignored, and everything above about permissions is the reason. Roles do
+ * not have that property -- "never touches migrations" is true for everyone who clones the
+ * repository, not for one checkout -- so putting them here means they do NOT travel, and each
+ * operator defines their own. That is a deliberate trade for keeping one config concept
+ * rather than two; a committed role file is a bigger change, and it would need its own answer
+ * about which layer wins.
  *
  * `.conclave/` is already gitignored and already holds machine-local state (the session
  * lock, scratch), which is where a decision this consequential belongs. It is a property
@@ -14,11 +36,15 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { BUILTIN_ROLES } from '../registry/roles.ts'
 import { dirname, join } from 'node:path'
 import type { AgentKind } from './install.ts'
 import { AGENT_KINDS } from './install.ts'
 
 export const CONFIG_RELATIVE = '.conclave/config.json'
+
+/** Roles the code refers to by name, and which a config file therefore may not redefine. */
+const BUILTIN_ROLE_IDS = Object.keys(BUILTIN_ROLES)
 
 /**
  * How much a participant is asked before it acts.
@@ -34,10 +60,40 @@ export interface AgentConfig {
   permissions?: PermissionMode
 }
 
+/**
+ * A role an operator defined: a JOB, not a seat template.
+ *
+ * Name, description, and `agent`/`model` as OPTIONAL defaults the invocation may override.
+ * That distinction is the whole design (#89). A role that hard-bound its agent and model
+ * would make its own most interesting use awkward -- running the same job against a cheaper
+ * model to see whether it holds up would mean editing config, when it should mean typing a
+ * different flag.
+ */
+export interface RoleConfig {
+  /** What the seat is for. Reaches the advisor's briefing and the seat's own instructions. */
+  description: string
+  /** Default agent for a seat in this role. Overridable per invocation. */
+  agent?: string
+  /** Default model, applied as `--model`. Overridable per invocation. */
+  model?: string
+}
+
+/** The longest a role description may be. See `ROLE_DESCRIPTION_MAX`. */
+export const ROLE_DESCRIPTION_MAX = 400
+
 export interface ProjectConfig {
   /** Applied to every agent, and overridden by a per-agent entry. */
   permissions?: PermissionMode
   agents?: Partial<Record<AgentKind, AgentConfig>>
+  /**
+   * Roles this project can seat by name, keyed by the name `--implementers` will use.
+   *
+   * Machine-local like the rest of this file, which is a deliberate choice and a real
+   * limitation: `.conclave/` is gitignored, so roles do NOT travel with the repository and
+   * each checkout defines its own. A shared, committed role file is a bigger change than
+   * #89 asked for and would need its own decision about precedence.
+   */
+  roles?: Record<string, RoleConfig>
 }
 
 /**
@@ -111,6 +167,60 @@ export function configPath(projectRoot: string): string {
  * typo silently reinstates permission prompts, and the operator discovers it as a session
  * that stops on every command with no explanation of why their configuration did nothing.
  */
+/**
+ * Roles are refused at READ, which is startup, rather than at first dispatch.
+ *
+ * Same class as #82: a run that starts with a role nobody defined is a run that will fail
+ * later, having already spent a boot and told the operator it was working. The three refusals
+ * are the ones an operator can actually hit.
+ *
+ * The COLLISION refusal is the one that earns its place. `--implementers "claude"` names an
+ * agent today and must keep doing so, so a role also called `claude` makes one invocation mean
+ * two things. Resolution order alone would silently pick a winner; naming the conflict is the
+ * only answer that leaves the operator's intent intact (#89).
+ */
+export function validateRoles(config: ProjectConfig, path: string): void {
+  for (const [name, role] of Object.entries(config.roles ?? {})) {
+    if (typeof role !== 'object' || role === null || Array.isArray(role)) {
+      throw new Error(`${path}: roles.${name} must be an object with a description`)
+    }
+    if ((CONFIGURABLE_AGENTS as readonly string[]).includes(name)) {
+      throw new Error(
+        `${path}: role '${name}' has the same name as an agent, so --implementers "${name}" ` +
+          `would mean two things. Rename the role. Agents: ${CONFIGURABLE_AGENTS.join(', ')}`,
+      )
+    }
+    if ((BUILTIN_ROLE_IDS as readonly string[]).includes(name)) {
+      throw new Error(
+        `${path}: role '${name}' is a built-in role and cannot be redefined. The relay, the ` +
+          `briefing and the run report all refer to it by name, so changing what it means here ` +
+          `would change code that never reads this file. Built-in: ${BUILTIN_ROLE_IDS.join(', ')}`,
+      )
+    }
+    if (typeof role.description !== 'string' || role.description.trim() === '') {
+      throw new Error(
+        `${path}: roles.${name}.description is required, and is what the advisor is told the ` +
+          `seat is for. Without it a named seat is indistinguishable from an unnamed one.`,
+      )
+    }
+    // Bounded because it lands in the advisor's prompt. Self-inflicted rather than hostile,
+    // but an unbounded description can still push the actual instructions out of the way,
+    // and failing here is cheaper than discovering it in a run's routing.
+    if (role.description.length > ROLE_DESCRIPTION_MAX) {
+      throw new Error(
+        `${path}: roles.${name}.description is ${role.description.length} characters; the limit ` +
+          `is ${ROLE_DESCRIPTION_MAX}. It is briefing prose the advisor reads before every ` +
+          `routing decision, not documentation.`,
+      )
+    }
+    if (role.agent !== undefined && !(CONFIGURABLE_AGENTS as readonly string[]).includes(role.agent)) {
+      throw new Error(
+        `${path}: roles.${name}.agent '${role.agent}' is not an agent. Known: ${CONFIGURABLE_AGENTS.join(', ')}`,
+      )
+    }
+  }
+}
+
 export function readProjectConfig(projectRoot: string): ProjectConfig {
   const path = configPath(projectRoot)
   if (!existsSync(path)) return {}
@@ -134,6 +244,7 @@ export function readProjectConfig(projectRoot: string): ProjectConfig {
     }
   }
   check(config.permissions, 'permissions')
+  validateRoles(config, path)
   for (const [agent, entry] of Object.entries(config.agents ?? {})) {
     if (!(CONFIGURABLE_AGENTS as readonly string[]).includes(agent)) {
       throw new Error(

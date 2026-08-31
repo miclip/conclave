@@ -76,6 +76,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { seedCodexTrust } from '../src/deployment/codexHookTrust.ts'
 import { defaultRegistry } from '../src/registry/builtin.ts'
+import { rolesWithDefined } from '../src/registry/roles.ts'
 import type { AgentRegistry } from '../src/registry/registry.ts'
 import { runSession } from '../src/repl/session.ts'
 import { boundOf, implementerSeatPlan, implementerSpecsFor, Relay, reviewerSpecFor, type SeatRequest } from '../src/relay/relay.ts'
@@ -1351,7 +1352,13 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
       console.error(extraPositionalMessage(spare[0]!, 'relay'))
       return 1
     }
-    const registry = overrides.registry ?? defaultRegistry()
+    // Parsed early so this run sees its own flag; written later, once it is going to start.
+    const bypass = bypassRequest(flagArgv)
+    // ONE reading, hoisted above both the registry and the seat plan because both now depend
+    // on it (#89). Read twice, a file edited in between would give the seat list one set of
+    // roles and the registry another, and the run would seat a role it could not resolve.
+    const projectConfig = withBypass(readProjectConfig(process.cwd()), bypass)
+    const registry = overrides.registry ?? defaultRegistry(rolesWithDefined(projectConfig.roles))
     // Everything a human would read goes to STDERR under --json, so stdout carries the
     // report and nothing else. A consumer that had to strip log lines out of a JSON stream
     // is a consumer that will eventually strip the wrong one.
@@ -1370,6 +1377,16 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
       implementer: flag('implementer', 'claude'),
       implementers: flag('implementers', ''),
       implementerNamed: flagArgv.includes('--implementer'),
+      // Both only when roles exist, so a run that defines none is refused exactly as it was
+      // before roles did: by the registry preflight, saying `unknown agent`. An operator with
+      // no roles who mistypes an agent should not be told about a feature they do not use.
+      //
+      // The registry ACTUALLY in use, not the builtin list: an injected registry seats agents
+      // `CONFIGURABLE_AGENTS` has never heard of, and refusing those would refuse a seat this
+      // invocation can genuinely fill.
+      ...(projectConfig.roles
+        ? { roles: projectConfig.roles, knownAgents: registry.list().map((a) => a.id) }
+        : {}),
     })
     if (seatPlan.kind === 'refused') {
       console.error(`conclave: ${seatPlan.reason}`)
@@ -1607,9 +1624,6 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
       return 0
     }
 
-    // Parsed early so this run sees its own flag; written later, once it is going to start.
-    const bypass = bypassRequest(flagArgv)
-    const projectConfig = withBypass(readProjectConfig(process.cwd()), bypass)
     // Config-derived args first, then per-invocation ones, so an explicit flag wins.
     const leadArgs = [...launchArgsFor(projectConfig, lead), ...extraArgs(flag('advisor-args', '') || flag('lead-args', ''))]
     // Per AGENT, not per seat: `.conclave/config.json` keys launch arguments by agent, and two
@@ -1844,6 +1858,9 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
       implementer: implSpecs[0]!,
       ...(seatPlan.kind === 'listed' ? { implementers: implSpecs } : {}),
       ...(reviewerSpec ? { reviewer: reviewerSpec } : {}),
+    // Descriptions only: prose is the whole of what the relay uses a role for (#89). Absent
+    // when no role is defined, which keeps the briefing byte-identical on a default run.
+    ...(projectConfig.roles ? { roleDescriptions: Object.fromEntries(Object.entries(projectConfig.roles).map(([n, r]) => [n, r.description])) } : {}),
       maxAdvisorTurns: runCeilings.advisorTurns,
       // Built by `ceilingsFrom` rather than inline, so this command and `session` cannot
       // disagree about what a ceiling flag means. Read where the launch line above is printed,
@@ -2047,10 +2064,19 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
     // Both front-ends, together, through the same builder. See the relay block above: this is
     // the ninth capability that would otherwise have been wired into one command and not the
     // other, and the seat count is not one an operator should have to discover empirically.
+    //
+    // The console reads the rest of the config layer inside `startSession`, so only the roles
+    // are read here -- the seat list has to resolve BEFORE the session is constructed, and a
+    // name that is neither a role nor an agent must be refused while an operator is still
+    // looking at the terminal (#89).
+    const sessionRoles = readProjectConfig(process.cwd()).roles
     const seatPlan = implementerSeatPlan({
       implementer: flag('implementer', 'claude'),
       implementers: flag('implementers', ''),
       implementerNamed: flagArgv.includes('--implementer'),
+      ...(sessionRoles
+        ? { roles: sessionRoles, knownAgents: (overrides.registry ?? defaultRegistry()).list().map((a) => a.id) }
+        : {}),
     })
     const seatRequests: SeatRequest[] =
       seatPlan.kind === 'listed' ? seatPlan.seats : [{ agent: flag('implementer', 'claude'), args: [] }]

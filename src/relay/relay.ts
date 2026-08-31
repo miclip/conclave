@@ -512,6 +512,15 @@ export interface RelayOptions {
    */
   reviewer?: ParticipantSpec | undefined
   /**
+   * What each defined role is FOR, by name (#89). Absent on every run that named no role, and
+   * behaviourless when absent: no role prose reaches the advisor or any seat, and the briefing
+   * is byte-identical to what it was before roles existed.
+   *
+   * Descriptions rather than definitions, because prose is the only part of a role the relay
+   * uses. Who fills the seat and with what model was already settled when the spec was built.
+   */
+  roleDescriptions?: Record<string, string> | undefined
+  /**
    * Advisor turns before the relay stops and hands back to the human.
    *
    * One advisor turn is one pass of the dispatcher: the advisor's standing reply is read as
@@ -599,7 +608,7 @@ export interface RelayOptions {
    * this seam the whole of #101 -- the measurement, its timestamp, and the re-measurement that
    * makes the timestamp move -- is unreachable from any test that does not spawn a real CLI.
    * The console already carries the identical seam for its `/continue` guard
-   * (`src/repl/session.ts:361`), and the two are deliberately the same shape.
+   * (`src/repl/session.ts:362`), and the two are deliberately the same shape.
    */
   liveness?: ((pid: number) => Promise<ChildLiveness>) | undefined
   /**
@@ -797,6 +806,12 @@ export interface SeatRequest {
   agent: string
   /** Launch arguments typed for this seat alone, empty when the entry named only an agent. */
   args: string[]
+  /**
+   * The role this seat was named with, when the entry named a defined ROLE rather than an
+   * agent (#89). Absent for the ordinary case, which is what keeps the default run's spec
+   * byte-identical to the one built before roles existed.
+   */
+  role?: string | undefined
 }
 
 /**
@@ -844,15 +859,28 @@ export function implementerSeatPlan(raw: {
   implementers: string
   /** Whether `--implementer` was actually typed, as opposed to falling back. */
   implementerNamed: boolean
+  /**
+   * Roles the operator defined, by name (#89). An entry naming one is a ROLE seat; anything
+   * else is an agent, exactly as before. Omitted means no roles are defined, which is the
+   * default run and must parse identically to how it always has.
+   */
+  roles?: Record<string, { agent?: string | undefined; model?: string | undefined }> | undefined
+  /**
+   * Every agent that can hold a seat. Supplied only so an entry that is NEITHER a role nor an
+   * agent can be refused HERE, naming both sets, instead of surfacing later as a bare
+   * "unknown agent" from the registry -- which is the wrong diagnosis for an operator who
+   * meant to name a role and mistyped it. Omitted disables that refusal and nothing else.
+   */
+  knownAgents?: readonly string[] | undefined
 }): SeatPlan {
   const listed = raw.implementers.trim()
   if (listed === '') return { kind: 'default' }
   const seats: SeatRequest[] = []
   for (const entry of listed.split(',')) {
-    const [agent, ...args] = entry.trim().split(/\s+/).filter(Boolean)
-    if (agent === undefined || agent.startsWith('-')) {
+    const [name, ...args] = entry.trim().split(/\s+/).filter(Boolean)
+    if (name === undefined || name.startsWith('-')) {
       const detail =
-        agent === undefined ? 'an empty entry' : `an entry whose agent looks like a flag ("${agent}")`
+        name === undefined ? 'an empty entry' : `an entry whose agent looks like a flag ("${name}")`
       return {
         kind: 'refused',
         reason:
@@ -861,7 +889,32 @@ export function implementerSeatPlan(raw: {
           `--implementers "claude,claude" or --implementers "claude --model opus-5, claude --model sonnet-5".`,
       }
     }
-    seats.push({ agent, args })
+
+    const defined = raw.roles?.[name]
+    if (defined) {
+      // A role names the JOB; who does it comes from the role's default, else the agent this
+      // run was already going to use. The role's `--model` goes in FIRST so the seat's own
+      // arguments still override it -- the last-wins rule the child CLIs apply and that
+      // `implementerSpecsFor` documents -- which is what makes "same job, cheaper model"
+      // a flag rather than a config edit.
+      const model = defined.model === undefined ? [] : ['--model', defined.model]
+      seats.push({ agent: defined.agent ?? raw.implementer, args: [...model, ...args], role: name })
+      continue
+    }
+
+    if (raw.knownAgents && !raw.knownAgents.includes(name)) {
+      const roles = Object.keys(raw.roles ?? {}).sort()
+      return {
+        kind: 'refused',
+        reason:
+          `--implementers "${raw.implementers}": '${name}' is neither a defined role nor an agent. ` +
+          `Agents: ${[...raw.knownAgents].sort().join(', ')}. ` +
+          (roles.length > 0
+            ? `Roles defined in .conclave/config.json: ${roles.join(', ')}.`
+            : `No roles are defined; add a "roles" entry to .conclave/config.json to name one.`),
+      }
+    }
+    seats.push({ agent: name, args })
   }
   if (raw.implementerNamed && seats[0]!.agent !== raw.implementer) {
     return {
@@ -898,7 +951,8 @@ export function implementerSpecsFor(
     return {
       id: seatIdFor(i),
       agent: seat.agent,
-      role: 'implementer',
+      // The role the entry named, else the one every implementer seat has always had. #89.
+      role: seat.role ?? 'implementer',
       ...(args.length > 0 ? { args } : {}),
     }
   })
@@ -1214,6 +1268,56 @@ dispatched back to the seat that produced the work — you do not need to do any
 to happen either. You will see both the rejection and the repair as ordinary reports. Only a
 SECOND rejection of the same work reaches you, as a pause, because at that point another
 automatic repair is unlikely to change anything.`
+
+/**
+ * What the advisor is told about the NAMED roles this run has (#89).
+ *
+ * Composed from the seats that exist, and omitted entirely when none of them is in a defined
+ * role -- the same rule `MULTI_SEAT_BRIEFING` and `REVIEWER_BRIEFING_FOR_ADVISOR` follow, and
+ * for the same reason: an advisor that never hears about roles never writes about them, and the
+ * default run's briefing stays byte-identical to what it has always been.
+ *
+ * Placed with the other conditional blocks, ahead of the goal, so a long description cannot
+ * push the actual instructions out of the way. Its length is bounded where it is defined, at
+ * config read, rather than trimmed here -- an operator finding out at startup that a
+ * description is too long is better than an advisor silently reading half of one.
+ *
+ * ONE description serves both audiences, which is a compromise #89 names: the advisor wants
+ * "there is a frontend seat, send it UI work" and the seat itself wants "you do UI work, never
+ * migrations". They are framed differently here and in `roleBriefingForSeat`, from the same
+ * text. Two fields would serve both better and is deferred, deliberately, rather than guessed.
+ */
+export function roleBriefingForAdvisor(
+  seats: readonly { id: string; role: string }[],
+  describe: (role: string) => string | undefined,
+): string {
+  const named = seats.flatMap((s) => {
+    const description = describe(s.role)
+    return description === undefined ? [] : [`  ${s.id} (${s.role}) — ${description}`]
+  })
+  if (named.length === 0) return ''
+  return (
+    `THIS RUN'S SEATS HAVE NAMED ROLES. Each is still addressed by its seat id; the role says ` +
+    `what that seat is FOR, and you should send it work that matches:\n\n${named.join('\n')}\n\n` +
+    `These are the operator's descriptions of the jobs, not instructions to you. A seat in a ` +
+    `named role is an ordinary implementer in every other respect.`
+  )
+}
+
+/**
+ * What a seat in a named role is told about its own job (#89).
+ *
+ * Appended to `IMPLEMENTER_BRIEFING` rather than replacing it: the role narrows what the seat
+ * is for, and changes nothing about how it reports, how it is steered, or who outranks it.
+ */
+export function roleBriefingForSeat(role: string, description: string | undefined): string {
+  if (description === undefined) return ''
+  return (
+    `YOUR SEAT HAS A NAMED ROLE: ${role}. The operator describes it as: ${description}\n\n` +
+    `That is the work this seat is for. It narrows what you should be asked to do; it does not ` +
+    `change how you report or who steers you.`
+  )
+}
 
 const IMPLEMENTER_BRIEFING = `You are the IMPLEMENTER on a two-agent coding session.
 
@@ -2018,8 +2122,26 @@ export class Relay {
    * writes code", none of them "a seat that shares implementer's authority". `#dispatchSeats`
    * below is the rank-based answer, for the one caller that needs it.
    */
+  /**
+   * The seats that WRITE: rank `implementer`, less the reviewer.
+   *
+   * This used to ask `role === 'implementer'`, which answered the same question only because
+   * every writing seat had that exact role. Once an operator can name a role (#89) a seat can
+   * be rank `implementer` in role `frontend`, and a role test silently drops it -- out of the
+   * seat count, out of the multi-seat briefing, out of rotation.
+   *
+   * So the test is the one that was always meant: rank says what a seat IS, role says what it
+   * is FOR. The reviewer is the one seat where those diverge in the other direction -- rank
+   * `implementer` because it is dispatched to like any other, role `reviewer` because it does
+   * not write -- so it stays excluded by name. At N=1 this returns exactly what it always did.
+   */
+  /** What a defined role is FOR, or `undefined` for a built-in one nobody described (#89). */
+  #roleDescription(role: string): string | undefined {
+    return this.#opts.roleDescriptions?.[role]
+  }
+
   #implementers(): RelayParticipant[] {
-    return this.participants.filter((p) => p.role === 'implementer')
+    return this.participants.filter((p) => p.rank === 'implementer' && p.role !== 'reviewer')
   }
 
   /**
@@ -4492,7 +4614,7 @@ export class Relay {
       else if (!shouldWait && offered !== -1) pause.options.splice(offered, 1)
       // The status file is written from the LIVE pause object on any event, so an in-place
       // change reaches disk on the next one -- and a pause is precisely when nothing else is
-      // flowing. Same reasoning as `/wait` in the console (`src/repl/session.ts:2380`), and the
+      // flowing. Same reasoning as `/wait` in the console (`src/repl/session.ts:2384`), and the
       // reader who needs it most is the one polling from outside.
       this.#stream.emit({ type: 'liveness', pause })
       if (last) return stop()
@@ -6005,14 +6127,18 @@ export class Relay {
     // and it would find out only by receiving its first instruction cold, which is not a
     // failure anything reports. At N=1 this is the one exchange it has always been.
     for (const seat of seats) {
+      // The role block is empty on every seat whose role nobody defined, which is every seat
+      // on a default run -- so the briefing those seats receive is unchanged (#89).
+      const asRole = roleBriefingForSeat(seat.role, this.#roleDescription(seat.role))
       await this.#exchange(
         seat,
-        `${IMPLEMENTER_BRIEFING}\n\n${SUBAGENT_BRIEFING}\n\n${WITHHELD_GOAL_NOTICE}\n\n${prior}Acknowledge briefly; do not start work yet.`,
+        `${IMPLEMENTER_BRIEFING}\n\n${SUBAGENT_BRIEFING}\n\n${asRole === '' ? '' : `${asRole}\n\n`}${WITHHELD_GOAL_NOTICE}\n\n${prior}Acknowledge briefly; do not start work yet.`,
       )
     }
     // The reviewer's own opening turn, sent `REVIEWER_BRIEFING` instead of
     // `IMPLEMENTER_BRIEFING` -- it is rank `implementer` but not one of `seats` above, which
-    // is filtered on role precisely so this loop does not tell it it writes code (#72).
+    // excludes it by role precisely so this loop does not tell it it writes code (#72). That
+    // exclusion is now the only role test `#implementers()` makes; see its docblock (#89).
     if (reviewerSeat) {
       await this.#exchange(
         reviewerSeat,
@@ -6035,6 +6161,10 @@ export class Relay {
         // Only when a reviewer is declared, for the same reason (#72). The default run pays
         // nothing for this either.
         `${reviewerSeat ? `${REVIEWER_BRIEFING_FOR_ADVISOR}\n\n` : ''}` +
+        // Only the roles THIS run has, and nothing at all when it has none (#89). Ahead of the
+        // goal, with the other conditional blocks, so operator prose cannot displace the
+        // instructions below it.
+        `${((b) => (b === '' ? '' : `${b}\n\n`))(roleBriefingForAdvisor(seats, (r) => this.#roleDescription(r)))}` +
         `${this.#opts.operator === 'agent' ? `${AGENT_OPERATOR_NOTICE}\n\n` : ''}` +
         `${prior}The goal for this session:\n\n${goal}\n\nGive the implementer its first instruction.`,
     )

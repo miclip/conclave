@@ -25,6 +25,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { AgentRegistry } from '../registry/registry.ts'
+import { rolesWithDefined, type RoleDefinition } from '../registry/roles.ts'
 import { NO_DEADLINE_CLOCKS } from '../registry/types.ts'
 import type { CreateParticipantContext, ResolvedParticipant } from '../registry/types.ts'
 import { FakeRotationSession } from '../rotation/fakeSession.ts'
@@ -34,8 +35,12 @@ import { runReport } from './report.ts'
 import type { RelayMessage } from './message.ts'
 
 /** One agent per fake session, so a seat's id and the child behind it stay distinguishable. */
-function registryOf(sessions: Record<string, FakeRotationSession>): AgentRegistry {
-  const r = new AgentRegistry()
+function registryOf(
+  sessions: Record<string, FakeRotationSession>,
+  /** Roles beyond the built-ins, as the CLI supplies them from config (#89). */
+  roles?: Record<string, RoleDefinition>,
+): AgentRegistry {
+  const r = new AgentRegistry(roles)
   for (const [agent, session] of Object.entries(sessions)) {
     r.register({
       id: agent,
@@ -550,6 +555,80 @@ test('a degraded seat in a multi-seat run is REPLACED, and its sibling is not di
       )
       // The detector still ran and still saw it. Acting is not a substitute for looking.
       assert.ok(relay.rotationWatch.degradationsSeen >= 1, 'the degradation was seen and counted')
+    } finally {
+      await relay.stop()
+    }
+  } finally {
+    rmSync(repo, { recursive: true, force: true })
+  }
+})
+
+test('#89 a seat in a defined role is an implementer by RANK, and is briefed as one', async () => {
+  // The riskiest line in #89. `#implementers()` used to ask `role === 'implementer'`, which
+  // answered correctly only while every writing seat had that exact role. A seat in role
+  // `frontend` is rank `implementer`, and a role test drops it silently -- out of the seat
+  // count, out of the multi-seat briefing, out of the opening loop, out of rotation.
+  //
+  // Two seats, one of them in a defined role. If the role test came back the count falls to
+  // one, `targetingWatch.applicable` goes false, and the multi-seat briefing disappears --
+  // which is what this asserts, because it is an effect an operator would actually feel.
+  const repo = tempRepo()
+  const lead = new FakeRotationSession('lead-1', 'lead', ['Do the thing.', 'DONE'])
+  const alpha = new FakeRotationSession('alpha-1', 'alpha', ['ack', 'Did it.', 'NONE'])
+  const beta = new FakeRotationSession('beta-1', 'beta', ['ack', 'NONE'])
+  try {
+    const relay = await Relay.start({
+      // The registry must KNOW the role, which is how the CLI wires it: `defaultRegistry` is
+      // given `rolesWithDefined(config.roles)`. Without that a named seat fails at join with
+      // `unknown role`, which is the correct refusal and not the thing under test here.
+      registry: registryOf({ lead, alpha, beta }, rolesWithDefined({ frontend: { description: 'ui' } })),
+      cwd: repo,
+      lead: { id: 'advisor', agent: 'lead', role: 'advisor' },
+      implementer: { id: 'seat-alpha', agent: 'alpha', role: 'implementer' },
+      implementers: [
+        { id: 'seat-alpha', agent: 'alpha', role: 'implementer' },
+        { id: 'seat-beta', agent: 'beta', role: 'frontend' },
+      ],
+      roleDescriptions: { frontend: 'front-end UI work; never migrations' },
+      maxAdvisorTurns: 3,
+    })
+    try {
+      // The briefings are composed when the relay RUNS, not when it starts.
+      await relay.run('Keep the work moving.')
+      // Rank is what it IS; role is what it is FOR. `#join` has always announced the two
+      // separately -- this is that distinction reaching a seat an operator named.
+      assert.deepEqual(relay.participants.map((p) => p.rank), ['advisor', 'implementer', 'implementer'])
+      assert.deepEqual(relay.participants.map((p) => p.role), ['advisor', 'implementer', 'frontend'])
+      assert.ok(
+        joinNotes(relay.log).includes('seat-beta joined as implementer in role frontend (beta)'),
+        `the role must be named where it differs from the rank: ${JSON.stringify(joinNotes(relay.log))}`,
+      )
+
+      // The briefings go to the SESSIONS; the routing log carries the goal and the notes.
+      // `received` is what each child was actually sent, which is the only place the composed
+      // prose exists.
+      const toAdvisor = lead.received.join('\n')
+      assert.match(
+        toAdvisor,
+        /THIS RUN'S SEATS HAVE NAMED ROLES/,
+        `the advisor must be told what the named seat is for: ${toAdvisor.slice(0, 300)}`,
+      )
+      assert.match(toAdvisor, /seat-beta \(frontend\) — front-end UI work/)
+      // The seat COUNT, which is what a role test would quietly get wrong: the multi-seat
+      // notice is composed from `#implementers()`, so if the role-named seat stopped counting
+      // this reads 1, or does not appear at all.
+      const notices = relay.log.filter((m) => m.kind === 'note' && m.text.includes('IMPLEMENTER SEATS'))
+      assert.ok(
+        notices.some((m) => m.text.includes('THIS RUN HAS 2 IMPLEMENTER SEATS')),
+        `a seat in a named role must still be counted as an implementer: ${JSON.stringify(notices.map((m) => m.text.slice(0, 60)))}`,
+      )
+
+      // And the seat itself was opened by the loop over `#implementers()`, and told its job.
+      const toBeta = beta.received.join('\n')
+      assert.match(toBeta, /YOUR SEAT HAS A NAMED ROLE: frontend/)
+      assert.match(toBeta, /never migrations/)
+      // An ordinary seat is told nothing extra, so the default run is unchanged.
+      assert.doesNotMatch(alpha.received.join('\n'), /YOUR SEAT HAS A NAMED ROLE/)
     } finally {
       await relay.stop()
     }
