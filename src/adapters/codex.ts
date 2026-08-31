@@ -1555,7 +1555,26 @@ export class CodexPtyHookAdapter implements AgentSession {
         // Reconcile before terminating: an established verdict must not be replaced by a
         // weaker causal guess because cleanup killed the process.
         await this.#reconcileFromTranscript()
-        await this.#pty.terminate()
+        const exit = await this.#pty.terminate()
+        // Anything still live at this point had no verdict from the transcript, and the child is
+        // now definitively gone -- `terminate()` escalates to SIGKILL and returns only once it
+        // has exited. So the turn ended, and the only honest account of HOW is the child's death.
+        //
+        // `#onExit` already draws exactly this conclusion, but it is wired fire-and-forget, so
+        // nothing orders it against the `#events.close()` below: the verdict it produced could
+        // land after the queue had closed and be buffered where no consumer would ever read it.
+        // That is #146's race, and `abandonReads` did not close it -- it made the handler FAST,
+        // which is not the same as making it ORDERED.
+        //
+        // Drawn here instead, where it is sequenced. Not duplicated work: the tracker returns
+        // `undefined` from an observation that does not change the verdict, so `#onExit` running
+        // afterwards emits nothing a second time. And nothing is synthesised, which is the rule
+        // #146 sets -- the evidence is the exit this call just awaited, and the classifier grades
+        // it. A turn whose outcome was already established by stronger evidence keeps it: process
+        // death is rule 4, and the hook and transcript rules are ahead of it.
+        for (const turn of this.#liveTurns()) {
+          this.#apply(turn, turn.tracker.observeProcess({ alive: false, howEnded: exit.reason }), true)
+        }
       } else if (mode === 'abandoned') {
         // Through the tracker, never around it. Emitting a verdict the tracker does not
         // hold is precisely what made events() and snapshot() disagree here.
