@@ -53,6 +53,7 @@ import type { ForceRecord, RunHandle, RunPause } from '../relay/run.ts'
 import { ensureCodexHooksTrusted } from '../deployment/ensureTrust.ts'
 import { AGENT_KINDS, installConfig, type AgentKind } from '../config/install.ts'
 import { CONFIG_RELATIVE, launchArgsFor, permissionModeFor, readProjectConfig } from '../config/project.ts'
+import { rolesWithDefined } from '../registry/roles.ts'
 
 /**
  * A role can be filled by an agent this installer knows nothing about — the registry is
@@ -655,7 +656,7 @@ function renderPause(p: RunPause, width: number): string {
  *
  * This used to read `pause.verdictOf.participant` instead, and that field is narrower than it
  * looks: it is set at exactly two halt sites, both `turn_incomplete`
-  * (`src/relay/relay.ts:6828` and `src/relay/relay.ts:7348`). So FOUR of the five seat-scoped
+  * (`src/relay/relay.ts:6958` and `src/relay/relay.ts:7478`). So FOUR of the five seat-scoped
  * reasons -- `rotation_candidate`, `implementer_unanswered`, `merge_blocked`, `review_blocked`
  * -- named a seat in their scope and were sampled by rank anyway, because the field the guard
  * read was empty. The scope is the field that is always populated, which is the other half of
@@ -669,16 +670,16 @@ function renderPause(p: RunPause, width: number): string {
  * pause never mentioned. The rank fallback's own comment argued it was right "only because
  * there is one of them", which is an argument for deriving the seat from the pause instead of
  * from a rank. Worse than useless on one of them: resuming an `advisor_escalated` pause sends
-  * to the ADVISOR (`src/relay/relay.ts:6949`), so the fallback measured children that were not
+  * to the ADVISOR (`src/relay/relay.ts:7079`), so the fallback measured children that were not
  * about to be sent to at all.
  *
  * What that gives up, stated rather than discovered: the `advisor_escalated` halt raised when a
-  * seat's turn completed and its report could not be read (`src/relay/relay.ts:7266`) is
+  * seat's turn completed and its report could not be read (`src/relay/relay.ts:7396`) is
  * conclave-scoped by design -- "the reason names who is being asked to take it, and the scope
  * follows the reason" -- yet the thing an operator wants to know there is whether THAT seat's
  * child is still writing. Under the rank fallback that seat was sampled at N=1 by coincidence
  * of being the only implementer. It is not sampled now. The pause still carries its own
-  * liveness EVIDENCE from the halt site (`src/relay/relay.ts:7277`), which is what the operator
+  * liveness EVIDENCE from the halt site (`src/relay/relay.ts:7407`), which is what the operator
  * reads;
  * what is gone is a refusal derived from a rank scan. Narrowing that halt's scope, if the
  * refusal is wanted back, is a change to the halt site rather than to this guard.
@@ -905,7 +906,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     ...(leadArgs.length > 0 ? { args: leadArgs } : {}),
   }
 
-  const registry = opts.registry ?? defaultRegistry()
+  const registry = opts.registry ?? defaultRegistry(rolesWithDefined(projectConfig.roles))
   // Every seat this invocation asked for, against the registry, before anything else happens.
   //
   // It THROWS rather than writing a refusal, and that is deliberate: `unknown agent 'nope'.
@@ -1176,6 +1177,9 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     implementer: implSpecs[0]!,
     ...(opts.implementers ? { implementers: implSpecs } : {}),
     ...(reviewerSpec ? { reviewer: reviewerSpec } : {}),
+    // Descriptions only: prose is the whole of what the relay uses a role for (#89). Absent
+    // when no role is defined, which keeps the briefing byte-identical on a default run.
+    ...(projectConfig.roles ? { roleDescriptions: Object.fromEntries(Object.entries(projectConfig.roles).map(([n, r]) => [n, r.description])) } : {}),
     maxAdvisorTurns: opts.rounds,
     ...(opts.checks.length > 0 ? { rotation: { checks: opts.checks } } : {}),
     onLog: (m) => {
@@ -2349,7 +2353,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
       // FALSIFIER, stated because it is the strongest argument against this shape: the
       // console has no general "trailing text is a message" rule and does not gain one here.
       // `/rotate <text>` and `/abort <text>` consume their text as a REASON
-      // (`src/repl/session.ts:2402`, `src/repl/session.ts:2435`) and `/pause`, `/queue`, `/audit` ignore
+      // (`src/repl/session.ts:2406`, `src/repl/session.ts:2439`) and `/pause`, `/queue`, `/audit` ignore
       // whatever follows them. So an operator who learns this from `/continue` and carries
       // it to `/pause I'll be back` still loses the sentence. That inconsistency is not
       // repaired by making `/continue` a third behaviour; it is narrowed by it, and the

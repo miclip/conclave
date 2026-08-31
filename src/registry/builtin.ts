@@ -8,6 +8,7 @@
  */
 
 import type { AgentSession } from '../contract/session.ts'
+import type { RoleDefinition, RoleId } from './roles.ts'
 import { ClaudePtyHookAdapter } from '../adapters/claude.ts'
 import { CodexPtyHookAdapter } from '../adapters/codex.ts'
 import { OpenCodeRunAdapter } from '../adapters/opencode.ts'
@@ -327,6 +328,6 @@ export const KIMI_AGENT: AgentDefinition = {
   },
 }
 
-export function defaultRegistry(): AgentRegistry {
-  return new AgentRegistry().register(CLAUDE_AGENT).register(CODEX_AGENT).register(OPENCODE_AGENT).register(KIMI_AGENT)
+export function defaultRegistry(roles?: Record<RoleId, RoleDefinition>): AgentRegistry {
+  return new AgentRegistry(roles).register(CLAUDE_AGENT).register(CODEX_AGENT).register(OPENCODE_AGENT).register(KIMI_AGENT)
 }
