@@ -61,18 +61,22 @@ conclave relay "<goal>" --advisor codex --implementer opencode \
   --implementer-args "-m opencode/kimi-k2.6"
 ```
 
-`--implementer-args` says implementer, so it applies to every implementer seat. A run with
-more than one seat gives each its own agent and its own launch arguments in a single flag,
-one entry per seat:
+`--implementer-args` says implementer, so it applies to every implementer seat.
+`--advisor-args` and `--reviewer-args` do the same for those seats, and each is per AGENT
+rather than per invocation — `.conclave/config.json` keys launch arguments the same way, and
+the flag is composed after it so what you typed wins.
+
+A run with more than one seat gives each its own agent and its own launch arguments in a
+single flag, one entry per seat:
 
 ```sh
 conclave relay "<goal>" --advisor codex \
   --implementers "claude --model opus-5, opencode -m opencode/kimi-k2.7-code"
 ```
 
-The comma is the seat boundary and the first word of each entry is the agent; everything
-after it belongs to that seat alone, and is applied after `--implementer-args` so the seat's
-own spelling wins. Seats are named `implementer`, `implementer-2`, … An argument containing a
+The comma is the seat boundary and the first word of each entry is the agent — or the name of
+a role you defined, see [Roles](#roles) — and everything after it belongs to that seat alone,
+applied after `--implementer-args` so the seat's own spelling wins. Seats are named `implementer`, `implementer-2`, … An argument containing a
 comma cannot be written here — put it in `.conclave/config.json`, which is keyed by agent.
 
 That is a different MODEL in the same harness, which is not the same thing as a different
@@ -284,6 +288,46 @@ It merges rather than replaces, so a narrower per-agent policy already in the fi
 And it persists — the run says so, because `.conclave/` is gitignored and the change is
 invisible to everyone else, including you tomorrow. Set `"permissions": "ask"` to undo.
 
+#### Roles
+
+A role is a JOB a seat does, defined once and referenced by name:
+
+```json
+{
+  "roles": {
+    "frontend": {
+      "description": "front-end UI work; React and Tailwind only, never touches migrations",
+      "agent": "claude",
+      "model": "sonnet"
+    },
+    "backend": { "description": "API handlers and migrations" }
+  }
+}
+```
+
+```sh
+conclave session "<goal>" --implementers "frontend, backend"
+```
+
+`agent` and `model` are DEFAULTS the invocation overrides, which is the whole point of a role
+being a job rather than a seat template: `--implementers "frontend --model opus-5"` runs the
+same job on a different model, and comparing those is the experiment this should make cheap.
+A role that fixed its model would make its own best use a config edit.
+
+The description is not decoration. The advisor is told which seat is for what, so it can route
+work that matches, and the seat is told what its own job is. It is bounded at 400 characters
+because it lands in the advisor's prompt ahead of the goal.
+
+An entry is looked up as a role first and as an agent otherwise, so `--implementers "claude"`
+means what it always did. The collisions are refused rather than resolved by precedence: a
+role named after an agent is refused, because one invocation must not mean two things, and a
+role named after a built-in (`advisor`, `implementer`, `reviewer`, `arbiter`) is refused
+because the relay refers to those by name. A name that is neither is refused at startup with
+both lists, rather than surfacing later as a missing binary.
+
+Roles live in this file, so they are gitignored like everything else in it — they do not
+travel with the repository, and each checkout defines its own.
+
 ## The idea
 
 Two models with different training and different harness prompts have different blind
@@ -301,8 +345,7 @@ report and writes an instruction. Those are not the same token bill.
 
 It is not a coding agent, and not an API harness. The children are the real CLIs: Claude
 Code and Codex on subscription auth, OpenCode and Kimi on whatever credential each of them
-wants.
-That distinction is the line the project holds — a CLI may need an API key, Conclave may
+wants. That distinction is the line the project holds — a CLI may need an API key, Conclave may
 not have one. It is not consensus-by-committee either. Two models that cannot run the
 code converge on whoever sounds most confident, so the design resists agreement-seeking.
 The reasoning is in [`DESIGN-BRIEF.md`](DESIGN-BRIEF.md).
@@ -376,18 +419,44 @@ lock, so it registers no hooks, writes no permission mode, takes no lock and cre
 participant, and it says the goal would be asked for when you gave it none. It is refused
 together with `--bypass` there, because applying that would leave a permission mode written by
 an invocation that started nothing and skipping it would print launch arguments the real run
-would not use. `relay`
-refuses to run outside a git repository unless you pass `--force` — attribution and rotation
-both diff the tree, so neither means anything without one. `--rounds` bounds how many
-times the advisor gets to steer — one pass of the loop is one advisor turn — and it is the
-only bound a run has unless you set another. `--max-turns` and `--max-minutes` are separate
-ceilings: they stop a run that is still going and exit non-zero, because a silent stop is
-indistinguishable from a run that simply finished. Passing `--max-turns` when you meant
-`--rounds` is accepted and bounds something else, so every launch now prints what each
-ceiling is set to and `status --json` carries them. `--max-minutes` counts the time the run
-is WORKING: time suspended at a pause, waiting on an operator who may be asleep, is not
-charged to it. The ceilings bound
-a run that has gone wrong, and a run interrupted overnight has not.
+would not use. `relay` refuses to run outside a git repository unless you pass `--force` —
+attribution and rotation both diff the tree, so neither means anything without one.
+
+`--rounds` bounds how many times the advisor gets to steer — one pass of the loop is one
+advisor turn — and it is the only bound a run has unless you set another. Four ceilings are
+separate from it, and all four stop a run that is still going and exit non-zero, because a
+silent stop is indistinguishable from a run that simply finished:
+
+| ceiling | bounds |
+|---|---|
+| `--max-turns` | advisor turns, whatever they cost |
+| `--max-minutes` | time the run spends WORKING |
+| `--max-queue-depth` | messages waiting to be delivered |
+| `--max-concurrent-seats` | seats working at once |
+
+Passing `--max-turns` when you meant `--rounds` is accepted and bounds something else, so
+every launch prints what each ceiling is set to and `status --json` carries them. That is the
+whole reason they are printed: two of these are easy to confuse with `--rounds`, and a run
+bounded by something other than what you typed looks identical from outside to one that was
+not bounded at all.
+
+`--max-minutes` counts the time the run is WORKING: time suspended at a pause, waiting on an
+operator who may be asleep, is not charged to it. A ceiling exists to stop a run that has gone
+wrong, and a run interrupted overnight has not gone wrong.
+
+A ceiling bounds the RUN; a deadline bounds a TURN. `--turn-timeout` is how long a seat's turn
+may take before the adapter grades it `timed_out`, and `--silence-timeout` is how long it may
+go without saying anything at all. The second is the one that matters for a child that stopped
+working: a stalled turn stops writing its transcript long before it stops being late, so the
+silence clock reaches it in minutes where the absolute one would take the better part of an
+hour. Both are resolved once and printed in the launch banner, the run report and
+`status --json`, so a run that ended at a deadline can say which deadline.
+
+Three more flags exist for reproducing a fault rather than for ordinary use. `--settle` widens
+how long a turn's transcript is given to catch up with the hook that ended it, and `--salvage`
+how much longer an empty report buys before it is treated as lost — the transcript lags a long
+turn the same way whoever is watching does. `--record` tees the rendered bytes to a file, so a
+display fault can be read in the bytes rather than guessed at from a screenshot.
 
 Every message is recorded to `.conclave/runs/` as it happens, and `--resume <log>` replays it
 into both seats. `relay` ends at every pause point by design, so the normal way a long run
