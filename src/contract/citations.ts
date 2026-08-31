@@ -199,7 +199,7 @@ export const CITED: Record<string, string> = {
   // These citations assert current fact in a section marked `## LIVE:`, so they are checked even
   // though the rest of docs/** is frozen design record.
   'src/adapters/claude.ts:1867-1880': 'containedFallback: true,',
-  'src/adapters/codex.ts:1442-1455': 'containedFallback: true,',
+  'src/adapters/codex.ts:1449-1462': 'containedFallback: true,',
   'src/rotation/rotate.ts:484':
     'const generation = snap.containedFallback ? UNKNOWN_GENERATION : snap.compactionGeneration',
   'src/relay/relay.ts:4578': 'async #considerRotation(',
@@ -249,7 +249,7 @@ export const CITED: Record<string, string> = {
   'src/adapters/opencode.ts:790': 'compactionGeneration: 0,',
   'src/rotation/rotate.ts:412': 'export async function rotate(',
   'src/adapters/claude.ts:1530': "#state: SessionState = 'running'",
-  'src/adapters/codex.ts:1111': "#state: SessionState = 'running'",
+  'src/adapters/codex.ts:1118': "#state: SessionState = 'running'",
   'src/rotation/handoff.ts:74': 'compactionGeneration: CompactionGeneration',
   'src/workspace/sessionRecord.ts:1408': 'snap.turns.map(',
   'src/relay/relay.ts:3743':

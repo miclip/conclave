@@ -233,6 +233,56 @@ test('send -> cancel -> cancelled, proven from the transcript', { skip }, async 
   assertConverges(events, await session.snapshot(), 'cancelled')
 })
 
+test('#12 does /quit produce a SessionEnd on Codex?', { skip }, async (t) => {
+  // `SessionEnd` is registered and trusted and has never fired: every teardown escalated to
+  // SIGTERM, because Codex does not quit promptly on Ctrl-C. #12 asks for a `/quit` fixture
+  // before anything is concluded about it, and this is that experiment.
+  //
+  // An EXPERIMENT rather than an assertion of the answer. Either result is a finding: if the
+  // hook fires, the "never observed" note in `codex.ts` is stale and the capability can be
+  // graded on evidence; if it does not, that is a stronger statement than "we never tried" --
+  // it distinguishes a hook that cannot fire from one nobody had given the chance.
+  const session = await participant()
+  const rec = new Recorder(session)
+
+  // A turn first, so the session is genuinely established rather than quitting from a state
+  // no real run is ever in.
+  await session.send('Reply with exactly READY and nothing else. No tools.', { kind: 'orchestrator' })
+  await rec.waitForSettled(120_000)
+
+  // `/quit` typed into the composer -- the child's own way out, which is the thing never tried.
+  // Not `close()`, which is Ctrl-C then SIGTERM and is what every teardown has always used.
+  session.pty.write('/quit\r')
+
+  // Wait for the child to GO, or for the hook to land, whichever comes first. A fixed sleep
+  // would report "no SessionEnd" for a slow exit and prove nothing.
+  const fired = () => session.receiver.journal.read().some((d) => d.event === 'SessionEnd')
+  const deadline = Date.now() + 60_000
+  while (Date.now() < deadline && session.pty.alive && !fired()) {
+    await new Promise((r) => setTimeout(r, 250))
+  }
+  // One more read after the exit: a hook delivered as the child goes can land after the pty
+  // reports dead, and checking only before would call that a miss.
+  await new Promise((r) => setTimeout(r, 2_000))
+
+  const hooks = session.receiver.journal.read().map((d) => d.event)
+  const sawSessionEnd = hooks.includes('SessionEnd')
+  t.diagnostic(
+    `codex ${currentVersion('codex')} after /quit: alive=${session.pty.alive} ` +
+      `SessionEnd=${sawSessionEnd} hooks=${JSON.stringify([...new Set(hooks)])}`,
+  )
+
+  // ASSERTED, now that it has been seen. A negative result could only have been recorded --
+  // one run failing to observe something cannot distinguish "cannot fire" from "did not this
+  // time" -- but a positive one is reproducible and worth defending: if `SessionEnd` stops
+  // arriving on `/quit`, that is a regression in the cleanest exit conclave has, and it should
+  // be a failing test rather than a note going quietly stale again.
+  assert.equal(sawSessionEnd, true, 'SessionEnd fires when Codex is allowed to quit on its own terms')
+  assert.equal(session.pty.alive, false, 'and the child really did leave')
+
+  await session.close('abandoned').catch(() => undefined)
+})
+
 test('#14 are turn_aborted and Stop still mutually exclusive on this Codex?', { skip }, async (t) => {
   // `turn_aborted > Stop` is covered synthetically in `outcomes/precedence.test.ts`, and #14
   // says the rule never fires in practice because the two records are mutually exclusive --
