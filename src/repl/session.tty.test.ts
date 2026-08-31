@@ -211,6 +211,71 @@ process.exit(code)
   return path
 }
 
+/**
+ * A console that OUTLIVES its run, which is the harness #6 has been missing since 2026-08-06.
+ *
+ * Every other driver here ends with its first run -- not because the console exits (at a
+ * terminal it deliberately does not; see the comment at the bottom of `runSession`), but
+ * because the FAKES are spent. `FakeRotationSession` answers `#replies.shift() ?? ''`, so a
+ * participant asked anything after the run replies with an empty string, and a test built on
+ * that would assert the console had drawn nothing and call it a pass.
+ *
+ * So the reply lists here reserve answers for AFTER the run ends. That is the whole trick, and
+ * it is what makes the between-runs path reachable at all: `relay.ask` is only ever taken with
+ * no run in flight (`if (!run) return void askDirectly(who, rest)`), which is precisely why it
+ * was covered at the relay and never at the console -- and precisely where it failed in a real
+ * terminal.
+ *
+ * Fast rather than slow. The other drivers make turns 1.5s long so a line can be typed while
+ * one is in flight; nothing here needs to type mid-turn, and the test is waiting for a run to
+ * FINISH before it does anything interesting.
+ */
+function betweenRunsDriver(dir: string): string {
+  const path = join(dir, 'between-runs-driver.mjs')
+  writeFileSync(
+    path,
+    `
+import { runSession } from ${JSON.stringify(join(REPO, 'src/repl/session.ts'))}
+import { AgentRegistry } from ${JSON.stringify(join(REPO, 'src/registry/registry.ts'))}
+import { FakeRotationSession } from ${JSON.stringify(join(REPO, 'src/rotation/fakeSession.ts'))}
+import { NO_DEADLINE_CLOCKS } from ${JSON.stringify(join(REPO, 'src/registry/types.ts'))}
+
+const caps = {
+  readinessSignal: 'unknown', turnKeySource: 'prompt_id',
+  outcomes: { completed: 'observed', cancelled: 'reasoned_but_unverified',
+    permission_refused: 'reasoned_but_unverified', process_exited: 'reasoned_but_unverified',
+    timed_out: 'reasoned_but_unverified', transport_lost: 'reasoned_but_unverified',
+    unknown_abnormal_end: 'reasoned_but_unverified' },
+}
+const quick = (id, agent, replies) => {
+  const s = new FakeRotationSession(id, agent, replies)
+  s.delayMs = 200
+  return s
+}
+// Everything after the run's own replies is padded, because ending a run ALSO asks each seat
+// for a closing statement and that consumes one. Padding rather than counting them: the exact
+// number is the relay's business and a test that encoded it would break when it changed.
+const advisor = quick('advisor', 'codex', ['Do it.', 'DONE', ...Array(6).fill('ADVISOR SPOKE AFTER THE RUN')])
+const impl = quick('impl', 'claude', ['ack', 'Did it.', ...Array(6).fill('IMPLEMENTER SPOKE AFTER THE RUN')])
+const registry = new AgentRegistry()
+for (const [agent, session] of [['codex', advisor], ['claude', impl]]) {
+  registry.register({
+    id: agent, displayName: agent, capabilities: { ...caps, agent },
+    deadlines: NO_DEADLINE_CLOCKS,
+    launch: { command: agent, baseArgs: [] }, async create() { return session },
+  })
+}
+
+const code = await runSession({
+  cwd: ${JSON.stringify(dir)}, goal: 'Keep the work moving.',
+  lead: 'codex', implementer: 'claude', rounds: 6, checks: [], registry,
+})
+process.exit(code)
+`,
+  )
+  return path
+}
+
 function repo(gitignore = '.conclave/\n'): string {
   const dir = mkdtempSync(join(tmpdir(), 'conclave-tty-'))
   execFileSync('git', ['init', '-q'], { cwd: dir })
@@ -1024,4 +1089,41 @@ test('an open block is named in the hint row until its terminator closes it', as
     'the block is delivered as it was typed — the trailing blank line included',
   )
   c.proc.kill()
+})
+
+test('#6 the console outlives its run, and a question between runs reaches the participant', async (t) => {
+  // The gap this issue is named for, and the harness that was missing. `relay.ask` is the
+  // BETWEEN-RUNS path -- the console takes it only when no run is in flight
+  // (`if (!run) return void askDirectly(who, rest)`) -- so it was covered at the relay and
+  // never at the console, which is exactly where it failed in a real terminal on 2026-08-06.
+  const dir = repo()
+  const c = await spawnConsole(dir, t, 'Keep the work moving.', true, betweenRunsDriver)
+
+  // `resume with:` is the LAST line of the end-of-run summary and `run = undefined` is set
+  // immediately after it. Waiting on `run ended` instead is too early: the run is still set
+  // while the summary is written, and a line typed then is QUEUED rather than asked -- a
+  // different path, which would pass a weaker version of this test while proving nothing.
+  assert.ok(
+    await c.until((s) => s.includes('resume with:')),
+    'the run must be fully over, not merely reported as ending',
+  )
+
+  // The claim `runSession` makes and nothing had ever observed: "at a terminal, the session
+  // outlives a run: participants stay alive between tasks". Every other driver in this file
+  // ends with its first run, so this is the first assertion in the suite that the console is
+  // still there afterwards -- and the hint row is the console saying so itself.
+  assert.ok(
+    await c.until((s) => s.includes('type a goal to start, or >advisor / >implementer to ask')),
+    'the console must return to its prompt offering the between-runs verbs, not exit with the run',
+  )
+
+  c.type('>advisor explain the change you just made\r')
+
+  // The answer text exists ONLY in the driver's reply list, so it cannot be echoed by the
+  // terminal or drawn by the console from what was typed. Seeing it is the round trip:
+  // console -> relay.ask -> participant -> back. That is the whole of what was uncovered.
+  assert.ok(
+    await c.until((s) => s.includes('ADVISOR SPOKE AFTER THE RUN'), 30_000),
+    `the participant's answer must reach the transcript: ${c.text().slice(-500)}`,
+  )
 })
