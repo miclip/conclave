@@ -65,12 +65,21 @@ import {
 
 const CLIENT = join(import.meta.dirname, '..', 'hooks', 'client.ts')
 /**
- * `SubagentStop` is registered and `SubagentStart` is not, because Claude Code has no such
- * event -- verified against the 2.1.224 bundle. So a delegating turn can be seen to have
- * FINISHED delegating and never to have started, which is why the console falls back to
- * naming the tool call. Kimi has both; see `kimiConfig.ts`.
+ * The events this adapter asks Claude Code to report. Every name is a claim about the OTHER
+ * program, and `hookEventNames.test.ts` checks each one against the installed binary rather
+ * than against this comment -- because Claude Code accepts an unknown event key in silence and
+ * simply never fires it, so a rename upstream reads as a seat that boots, runs, and never says
+ * it finished. See #36 for what that looks like from the outside.
+ *
+ * `SubagentStop` is registered and `SubagentStart` is not. That USED to be because Claude Code
+ * had no such event -- true of the 2.1.224 bundle, and false by 2.1.251, which dispatches
+ * `SubagentStart` like any other. The reason it stays unregistered is now the ordinary one:
+ * nothing consumes it. Registering it would cost a subprocess per delegation and buy a journal
+ * entry no seat reads, which is the trade `kimiConfig.ts` spells out. Until something wants it,
+ * a delegating turn is still seen to have FINISHED delegating and never to have started, and
+ * the console still falls back to naming the tool call.
  */
-const HOOK_EVENTS = [
+export const HOOK_EVENTS = [
   'SessionStart',
   'UserPromptSubmit',
   'PermissionRequest',
