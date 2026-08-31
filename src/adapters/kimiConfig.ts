@@ -78,7 +78,11 @@ export function readKimiConfig(path: string): Record<string, unknown> {
 export const KIMI_HOOK_EVENTS = [
   /** The announced turn end. This is the whole reason for hook mode. */
   'Stop',
-  /** A turn that ended badly, announced. No Claude Code equivalent. */
+  /**
+   * A turn that ended badly, announced. Had no Claude Code equivalent when this list was
+   * written; 2.1.251 dispatches `StopFailure` too. Kimi is no longer the only seat that could
+   * report one -- it is still the only seat that does.
+   */
   'StopFailure',
   /** Correlates a turn with the prompt that started it. */
   'UserPromptSubmit',
@@ -88,9 +92,11 @@ export const KIMI_HOOK_EVENTS = [
   'PreCompact',
   'PostCompact',
   /**
-   * Both halves of subagent work. Claude Code has only `SubagentStop`, which is why
-   * delegation is visible there as an ending and not as a beginning (issue #5). Kimi is the
-   * only participant that can say a subagent STARTED.
+   * Both halves of subagent work. Kimi was once the only participant that COULD say a subagent
+   * started -- Claude Code had only `SubagentStop` at 2.1.224, which is why delegation reads
+   * there as an ending without a beginning (issue #5). Claude Code 2.1.251 dispatches
+   * `SubagentStart`, so #5 is now a question of what conclave registers rather than of what the
+   * CLI can tell it. Kimi remains the only participant that DOES report both halves.
    */
   'SubagentStart',
   'SubagentStop',
