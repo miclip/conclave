@@ -55,6 +55,7 @@ import { BoundedSingleFlight, type Abandonment } from './boundedReconcile.ts'
 import {
   CorruptedPromptError,
   describePromptMismatch,
+  isHarnessBlock,
   isCorruptedPrompt,
   PROMPT_RECOVERY_MS,
   PROMPT_SEND_ATTEMPTS,
@@ -1176,8 +1177,15 @@ export class ClaudePtyHookAdapter implements AgentSession {
         //
         // An unsolicited hook has no pending send and is not a mismatch: the child is allowed
         // to start turns nobody here asked for, and always was.
+        //
+        // A HARNESS block is not an echo either, and unlike an unsolicited turn it arrives
+        // while a send IS pending -- which is what made it look like one (#185). The child is
+        // genuinely working on it, so the turn above stands; what must not happen is comparing
+        // the advisor's envelope against it, calling the send corrupt, and then trying to
+        // recover by cancelling a turn that will never report a `Stop`. The claim is left
+        // untouched, so the echo of our own send still resolves it when it arrives.
         const pending = this.#pendingPrompt
-        if (pending) {
+        if (pending && !isHarnessBlock(turn.prompt)) {
           const corrupted = describePromptMismatch(pending.prompt, turn.prompt)
           if (!corrupted) {
             this.#pendingPrompt = undefined
