@@ -123,6 +123,66 @@ test('start -> ready -> send -> completed', { skip }, async (t) => {
   assert.equal(snap.guarantees.cancellationAttributable, true)
 })
 
+test('#11 permission allow: the Enter encoding is OBSERVED, not presumed', { skip }, async (t) => {
+  // `input.ts` carries per-agent permission encodings, and Claude's is the only one labelled
+  // `allow (unverified encoding)`: Enter is PRESUMED to take the highlighted option and had
+  // never been watched doing it. Codex's `y` is verified; this one was a guess that `/allow`
+  // then made operator-facing.
+  //
+  // The observation is the side effect, not the keystroke. Anyone can send `\r`; what proves
+  // the encoding is that the tool the dialog was guarding actually ran.
+  const probe = join(tmpdir(), `claude-allow-${Date.now()}.txt`)
+  rmSync(probe, { force: true })
+  // `--permission-mode default` explicitly, rather than inheriting whatever this machine is
+  // configured with. A test that needs a dialog must ASK for the mode that produces one: run
+  // without it on a machine set to `acceptEdits` and the write is approved silently, the
+  // precondition below fails, and the failure looks like the encoding being wrong rather than
+  // like the dialog never having been offered.
+  const session = await ClaudePtyHookAdapter.start({
+    cwd: CWD,
+    role: 'implementer',
+    args: ['--permission-mode', 'default'],
+  })
+  t.after(() => {
+    rmSync(probe, { force: true })
+    return session.close('graceful')
+  })
+
+  const events: AgentEvent[] = []
+  const reading = (async () => {
+    for await (const e of session.events()) {
+      events.push(e)
+      if (e.type === 'turn_end') break
+    }
+  })()
+
+  await session.send(
+    `Use your file-writing tool to create ${probe} containing exactly the word probe. Do it now, and do not ask me anything first.`,
+    { kind: 'orchestrator' },
+  )
+
+  // Wait for the dialog rather than for a duration: a decision sent before one is up is a
+  // keystroke into a composer, which would create the file for the wrong reason and prove the
+  // opposite of what this claims.
+  const deadline = Date.now() + 180_000
+  while (Date.now() < deadline && !events.some((e) => e.type === 'permission_requested')) {
+    await new Promise((r) => setTimeout(r, 200))
+  }
+  const asked = events.find((e) => e.type === 'permission_requested')
+  assert.ok(asked, 'expected a permission_requested -- without a dialog this proves nothing')
+
+  await session.decidePermission('allow')
+  await reading
+
+  // THE observation. The dialog was up, Enter was sent, and the guarded tool ran.
+  assert.equal(existsSync(probe), true, 'Enter must have taken the highlighted option')
+
+  const decision = session.inputLog.find((a) => a.kind === 'permission_decision')
+  assert.equal(decision?.bytes, JSON.stringify('\r'), 'and it was Enter that was sent')
+  assert.equal(decision?.origin, 'orchestrator')
+  t.diagnostic(`claude allow encoding confirmed: ${decision?.bytes} created ${probe}`)
+})
+
 test('send -> cancel -> cancelled, and it is only ever assumed', { skip }, async (t) => {
   const session = await ClaudePtyHookAdapter.start({ cwd: CWD, role: 'implementer' })
   t.after(() => session.close('graceful'))

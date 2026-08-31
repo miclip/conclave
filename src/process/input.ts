@@ -206,14 +206,22 @@ export interface PermissionEncoding {
 
 /**
  * Claude Code. ESC on the dialog is "No, and tell Claude what to do differently",
- * observed in spike 3. Allow is presumed to be Enter taking the highlighted first
- * option, but no fixture has exercised it.
+ * observed in spike 3.
+ *
+ * Allow is Enter taking the highlighted first option, and it is OBSERVED now (#11) rather than
+ * presumed: `claude.live.test.ts` raises a real dialog, sends this encoding, and asserts the
+ * guarded tool ran. The side effect is the evidence — anyone can send `\r`; what proves the
+ * encoding is the file the dialog was holding back appearing.
+ *
+ * The test asks for `--permission-mode default` explicitly rather than inheriting the machine's.
+ * Run on a host configured to `acceptEdits` and the write is approved with no dialog at all,
+ * which would have looked like this encoding working while proving nothing about it.
  */
 export const CLAUDE_PERMISSION_ENCODING: PermissionEncoding = {
   allow: '\r',
   deny: '\x1b',
-  allowVerified: false,
-  describeAllow: 'allow (unverified encoding)',
+  allowVerified: true,
+  describeAllow: 'allow',
 }
 
 /**
