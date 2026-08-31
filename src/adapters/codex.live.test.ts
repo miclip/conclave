@@ -19,6 +19,7 @@ import test from 'node:test'
 import type { AgentEvent, SessionSnapshot, TurnEndEvent } from '../contract/session.ts'
 import { defaultRegistry, CODEX_PROMPT_ON_APPROVAL_ARGS } from '../registry/builtin.ts'
 import { squash } from '../process/pty.ts'
+import { currentVersion } from '../conformance/suite.ts'
 import type { CodexPtyHookAdapter } from './codex.ts'
 
 const CWD = process.cwd()
@@ -230,6 +231,62 @@ test('send -> cancel -> cancelled, proven from the transcript', { skip }, async 
   assert.equal(cancelAction?.origin, 'orchestrator')
 
   assertConverges(events, await session.snapshot(), 'cancelled')
+})
+
+test('#14 are turn_aborted and Stop still mutually exclusive on this Codex?', { skip }, async (t) => {
+  // `turn_aborted > Stop` is covered synthetically in `outcomes/precedence.test.ts`, and #14
+  // says the rule never fires in practice because the two records are mutually exclusive --
+  // measured on Codex 0.146.0, and recorded in `capabilities.ts` against that version.
+  //
+  // A version-pinned fact with nothing watching it is a fact that quietly stops being one. If a
+  // later Codex emits both, the precedence rule stops being a guard and becomes live behaviour,
+  // and the thing it protects against -- a cancellation silently upgraded to a completion --
+  // becomes reachable.
+  //
+  // So this observes rather than asserts an answer. Either result is information; only the
+  // absence of anyone looking is a problem.
+  const session = await participant()
+  t.after(() => session.close('graceful'))
+
+  const rec = new Recorder(session)
+  const key = await session.send(
+    'Write a detailed 3000-word technical essay on the history of terminal emulators. ' +
+      'Be exhaustive and do not stop early.',
+    { kind: 'orchestrator' },
+  )
+  await session.pty.waitForOutput((a) => squash(a).includes('esctointerrupt'), 90_000)
+  await new Promise((r) => setTimeout(r, 6000))
+  assert.equal(await session.cancel(), key)
+
+  await rec.waitForSettled(60_000, {
+    until: (e) => e.some((x) => x.type === 'turn_end' && x.verdict.confidence === 'proven'),
+  })
+
+  const end = rec.lastTurnEnd()
+  assert.ok(end, 'expected a terminal verdict')
+  const details = end.verdict.provenance.map((p) => `${p.source}:${p.detail}`)
+  const aborted = details.some((d) => /turn_aborted/.test(d))
+  const stopped = details.some((d) => /\bStop\b/.test(d))
+
+  t.diagnostic(
+    `codex ${currentVersion('codex')} on cancel: turn_aborted=${aborted} Stop=${stopped} ` +
+      `provenance=${JSON.stringify(details)}`,
+  )
+
+  // The cancellation itself must hold whatever the records do -- that is the claim the run
+  // depends on, and it is asserted rather than reported.
+  assert.equal(end.verdict.outcome, 'cancelled')
+  assert.ok(aborted, 'turn_aborted is what proves a Codex cancellation')
+
+  // And the finding #14 rests on, stated as an assertion so a change is a FAILURE rather than a
+  // line in a log nobody reads. If this fires, the precedence rule has become live behaviour and
+  // `capabilities.ts` needs its version note revisited.
+  assert.equal(
+    stopped,
+    false,
+    'Stop fired alongside turn_aborted -- the two are no longer mutually exclusive, so the ' +
+      'precedence guard is now load-bearing and #14 needs reopening',
+  )
 })
 
 test('send -> permission deny -> permission_refused', { skip }, async (t) => {
