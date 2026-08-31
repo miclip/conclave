@@ -166,7 +166,23 @@ onComposerSubmit(function (prompt) {
   if (process.env.ORCH_FAKE_SPEAK) {
     post('PermissionRequest', { prompt_id: id, turn_id: id, tool_name: 'Bash', tool_input: { command: 'ls' } })
   }
-  post('UserPromptSubmit', { prompt_id: id, turn_id: id, prompt: asReceived(prompt, turns) })
+  // ORCH_FAKE_HARNESS_BLOCK: the child's own harness delivering a background-task completion
+  // INTO it, while our send is still in flight (#185). It is a real turn with its own id --
+  // the child genuinely is working on it -- and it arrives BEFORE the echo of what we sent.
+  // Chained rather than fired alongside, because the defect is an ordering one: the adapter has
+  // to see the harness block first for it to be mistaken for our echo.
+  if (process.env.ORCH_FAKE_HARNESS_BLOCK) {
+    const hid = id + '-harness'
+    post('UserPromptSubmit', {
+      prompt_id: hid,
+      turn_id: hid,
+      prompt: '<task-notification>\\n<task-id>bigxjzz62</task-id>\\n<status>completed</status>\\n</task-notification>',
+    }).then(function () {
+      post('UserPromptSubmit', { prompt_id: id, turn_id: id, prompt: asReceived(prompt, turns) })
+    })
+  } else {
+    post('UserPromptSubmit', { prompt_id: id, turn_id: id, prompt: asReceived(prompt, turns) })
+  }
   // ORCH_FAKE_SPEAK: say ONE thing and then go quiet, which is a turn that stopped rather than
   // a child that never started. A PermissionRequest is used because it is the only child-sourced
   // event this stand-in can produce without writing a transcript.

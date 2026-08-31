@@ -34,6 +34,37 @@
  * `<task-notification>` block -- the harness delivering a background-task completion, which
  * arrived while an advisor send was in flight and was correlated against the open turn.
  */
+/**
+ * Tags the HARNESS injects into the child, as distinct from anything a caller sent it.
+ *
+ * Claude Code delivers these itself: `<task-notification>` when a background task it started
+ * completes, `<system-reminder>` for context it wants in front of the model. Each is a real
+ * prompt -- it raises a real `UserPromptSubmit` and the child really works on it -- but it is
+ * not the echo of anything we typed.
+ */
+const HARNESS_TAGS = ['<task-notification>', '<system-reminder>']
+
+/**
+ * Is this text the harness talking to the child, rather than the echo of a send?
+ *
+ * #185: when a background task completed while an advisor send was in flight, the block's
+ * `UserPromptSubmit` arrived first, was correlated against the pending send, and compared
+ * against the advisor's envelope. They share nothing, so the send was refused as corrupt, the
+ * adapter typed ESC to cancel the turn it thought it had spoiled, and waited for a `Stop` that
+ * a harness turn was never going to produce. Two unattended runs died there.
+ *
+ * Anchored at the START, and on the tag alone. A message that merely CONTAINS one of these --
+ * an operator quoting a notification, a seat pasting one back to ask about it -- is still that
+ * message and must still be checked against what was sent. Only a block that IS one is exempt.
+ *
+ * Deliberately not a fifth `MismatchShape`. This is not a verdict about a comparison; it is the
+ * reason not to make the comparison at all.
+ */
+export function isHarnessBlock(text: string): boolean {
+  const head = text.trimStart()
+  return HARNESS_TAGS.some((tag) => head.startsWith(tag))
+}
+
 export type MismatchShape = 'prefix' | 'suffix' | 'interior' | 'unrelated'
 
 export interface PromptMismatch {
