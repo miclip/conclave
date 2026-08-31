@@ -734,9 +734,16 @@ export class CodexPtyHookAdapter implements AgentSession {
         this.#closeTransport(undefined)
         // The child's own account of the ending, so a #174 retry may act on it.
         for (const t of this.#liveTurns()) t.childClosure ??= 'the child ended the session'
-        // Never observed on Codex in any fixture, and deliberately not depended on for
-        // readiness or terminal resolution. Recorded as audit evidence if it appears --
-        // it can only strengthen a process_exited verdict, never create one.
+        // OBSERVED on 0.147.0 (#12), and the reason it had never been seen is worth keeping:
+        // it was not that Codex cannot emit it, but that conclave never gave it the chance.
+        // Every teardown is Ctrl-C then SIGTERM, which kills the child before it can run the
+        // hook. Typing `/quit` -- the child's own way out -- produces
+        // SessionStart, UserPromptSubmit, Stop, SessionEnd.
+        //
+        // Still deliberately not depended on for readiness or terminal resolution, and that is
+        // unchanged by observing it: `close()` does not use `/quit`, so no ordinary teardown
+        // produces this. Recorded as audit evidence if it appears -- it can only strengthen a
+        // process_exited verdict, never create one.
         for (const t of this.#liveTurns()) {
           this.#apply(t, t.tracker.observeHook('SessionEnd', d.payload), true)
         }
