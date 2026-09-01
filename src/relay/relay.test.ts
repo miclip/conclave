@@ -1332,3 +1332,47 @@ test('a turn that streamed nothing either says so, rather than going quiet (#94)
     'a salvage that found nothing must not claim to have rebuilt anything',
   )
 })
+
+test('#189 a second run on the same relay is observable, and the first stayed terminal', async () => {
+  // `run_end` closes the stream, which it must: a child does not stop emitting because the
+  // relay decided the run was over, and the test above pins that those events never reach the
+  // history. But `start()` can be called again on the same relay -- that is what the console
+  // does when you type a second goal -- and the stream stayed shut for the rest of the
+  // session. The second run reached no subscriber and no record while `relay.log` went on
+  // collecting it, so the session's two files disagreed about what happened in it.
+  const { relay } = await twoParty(
+    ['do the thing', 'DONE', 'do it again', 'DONE'],
+    ['done it', 'done it again'],
+  )
+
+  const first = drain(relay.observe())
+  await relay.run('the first goal')
+  const firstEvents = await first
+  assert.equal(firstEvents.at(-1)?.type, 'run_end', 'the first run ends its own subscription')
+
+  // A subscriber for the second run. Attaching BEFORE it starts is the honest ordering: the
+  // stream is closed at this moment, and what makes it work is `start()` reopening it.
+  await relay.run('the second goal')
+  const second = await drain(relay.observe())
+
+  // ACTIVITY is the assertion that matters, and messages are not. A message survives a closed
+  // stream deliberately -- it is the relay's own record of the session, and `relay.ask` between
+  // runs depends on that. Activity does not, so it is the only thing here that can distinguish
+  // a reopened stream from one that merely kept accepting the orchestrator's own writes.
+  const activityIn = (es: RelayEvent[]) => es.filter((e) => e.type === 'activity').length
+  assert.ok(activityIn(firstEvents) > 0, 'precondition: the first run produced activity')
+  assert.ok(
+    activityIn(second) > activityIn(firstEvents),
+    `the second run's ACTIVITY must reach the stream, which needs it reopened: ` +
+      `${activityIn(firstEvents)} then ${activityIn(second)}`,
+  )
+  assert.ok(
+    second.some((e) => e.type === 'message' && e.message.text.includes('the second goal')),
+    'and its routed traffic too',
+  )
+  // And the first run is still in there, in order, because a session record is one file.
+  assert.ok(
+    second.some((e) => e.type === 'message' && e.message.text.includes('the first goal')),
+    'the retained history still carries the first run, so the record stays continuous',
+  )
+})

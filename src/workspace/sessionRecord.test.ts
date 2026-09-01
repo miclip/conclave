@@ -115,6 +115,8 @@ function fakeSeat(id: string, rank: string, agent: string, role: string = rank) 
  * be about.
  */
 function fakeRelay(opts?: {
+  /** A session that outlives its first run, as a console does. See `stopped` below (#189). */
+  multiRun?: boolean
   rotation?: RotationConfig | undefined
   seats?: string[]
   /** A reviewer seat: rank `implementer`, role `reviewer` (D5, #72). */
@@ -127,12 +129,15 @@ function fakeRelay(opts?: {
    */
   ceilings?: RunCeilings
 }): RecordableRelay & {
+  /** Ends the SESSION, as distinct from a run within it ending (#189). */
+  endSession: () => void
   stream: RelayEventStream
   pending: { id: string; tool: string }[]
   messages: unknown[]
   transcripts: Record<string, ReturnType<typeof fakeSeat>['state']>
 } {
   const stream = new RelayEventStream()
+  let sessionOver = false
   const pending: { id: string; tool: string }[] = []
   const messages: unknown[] = []
   const advisor = fakeSeat('advisor', 'advisor', 'codex')
@@ -145,6 +150,23 @@ function fakeRelay(opts?: {
     stream,
     pending,
     messages,
+    // The session/run split the record now depends on (#189).
+    //
+    // Most doubles here are ONE session with ONE run, so their session ends exactly when their
+    // stream does and this reports it -- otherwise the follow loop parks waiting for a run
+    // that is never going to start, and every test pays the two-second detach race.
+    //
+    // `multiRun` is for the cases that model what a console actually does: close a run, keep
+    // the session, start another. There the two are not the same event, and saying so is the
+    // whole point of the fix.
+    get stopped() {
+      return opts?.multiRun ? sessionOver : stream.closed
+    },
+    endSession() {
+      sessionOver = true
+      stream.close()
+    },
+    whenObservable: () => stream.whenReopened(),
     // Named `transcripts` rather than `seats`: `RecordableRelay.seats()` is the dispatcher's
     // per-seat state, and a stand-in whose `seats` was a map of scripted transcripts would
     // satisfy the structural type by accident and mean something else entirely.
@@ -1507,4 +1529,100 @@ test('a stand-in that cannot answer gets no ceilings block, rather than one clai
 
   relay.stream.close()
   await rec.close()
+})
+
+/** Let the recorder's follow loop run. It is asynchronous; a synchronous test outruns it. */
+const tick = () => new Promise((r) => setTimeout(r, 20))
+
+test('#189 a second run reaches the record, and so does anything said between them', async () => {
+  // The record is per SESSION; a subscription is per RUN. Those were the same thing until a
+  // console could start a second run on the same relay -- which is what happens when you type
+  // another goal. `#end` closed the stream, the follow loop returned, and everything after it
+  // went unrecorded while `relay.log` kept collecting: two files describing one session and
+  // disagreeing about it.
+  //
+  // Measured against a real pty before the fix: run 2 ran, the console drew all of it, and
+  // `events.ndjson` stayed at the 8 messages of run 1.
+  const root = dir()
+  const relay = fakeRelay({ multiRun: true })
+  const recording = recordSession(relay, {
+    repoRoot: root,
+    id: 'two-runs',
+    goal: 'first',
+    front: 'session',
+    startedAt: Date.now(),
+    build: 'test-build',
+  })
+
+  relay.stream.emit({ type: 'activity', participant: 'implementer', rank: 'implementer', event: { type: 'turn_start', seq: 1, at: 1, prompt: 'first' } as never })
+  relay.stream.emit({ type: 'run_end', reason: 'done' })
+  relay.stream.close()
+  // The follow loop is asynchronous, and a real session puts time between its runs. Without a
+  // yield here the entire session would happen before the recorder ran once, and the test would
+  // be measuring the scheduler rather than the fix.
+  await tick()
+
+  // Between the runs: the operator asks a participant something. `Relay#ask` records both
+  // halves, and before this they reached `relay.log` and nothing else -- the stream counted
+  // them as dropped, because the RUN was over even though the session was not.
+  relay.stream.emit({ type: 'message', message: { from: 'human', fromRank: 'human', to: ['advisor'], kind: 'constraint', text: 'between the runs', seq: 9, at: 9, visibility: 'normal', excluded: [] } as never })
+
+  // A second goal. `Relay.start` reopens the stream for the new epoch.
+  await tick()
+  relay.stream.reopen()
+  await tick()
+  relay.stream.emit({ type: 'activity', participant: 'implementer', rank: 'implementer', event: { type: 'turn_start', seq: 2, at: 2, prompt: 'second' } as never })
+  relay.stream.emit({ type: 'run_end', reason: 'done' })
+  await tick()
+  // The SESSION ends here, which is a different event from either run ending.
+  relay.endSession()
+  await recording.close()
+
+  const events = readFileSync(recording.recorder.eventsPath, 'utf8').trim().split('\n').map((l) => JSON.parse(l))
+  const prompts = events.filter((e) => e.type === 'activity').map((e) => e.event.prompt)
+  assert.deepEqual(prompts, ['first', 'second'], 'both runs must be in the one session record')
+
+  assert.ok(
+    events.some((e) => e.type === 'message' && e.message.text === 'between the runs'),
+    'a question asked between runs belongs to the session, which has not ended',
+  )
+
+  // Nothing is written twice. The re-attach replays the retained history and skips what the
+  // record already holds, so a naive re-subscribe duplicating run 1 would fail here.
+  assert.equal(
+    events.filter((e) => e.type === 'activity' && e.event.prompt === 'first').length,
+    1,
+    'run 1 must appear once, not again on every re-attach',
+  )
+})
+
+test('#189 late child activity still never reaches the record', async () => {
+  // The other half, and the reason this could not simply leave the stream open. A child does
+  // not stop emitting because the relay decided the run was over, and those events must not
+  // land in the record of the run they came after -- `relay.test.ts` holds the same rule for
+  // subscribers. A MESSAGE is the relay's own account of the session and is kept; ACTIVITY is
+  // a child talking about a turn that has ended and is not.
+  const root = dir()
+  const relay = fakeRelay()
+  const recording = recordSession(relay, {
+    repoRoot: root,
+    id: 'late',
+    goal: 'g',
+    front: 'session',
+    startedAt: Date.now(),
+    build: 'test-build',
+  })
+
+  relay.stream.emit({ type: 'run_end', reason: 'done' })
+  relay.stream.close()
+  relay.stream.emit({ type: 'activity', participant: 'implementer', rank: 'implementer', event: { type: 'tool_use', seq: 3, at: 3, tool: 'LateWrite' } as never })
+  await recording.close()
+
+  const events = readFileSync(recording.recorder.eventsPath, 'utf8').trim().split('\n').map((l) => JSON.parse(l))
+  assert.equal(
+    events.filter((e) => e.type === 'activity').length,
+    0,
+    'a tool call emitted after the run ended must not be recorded against it',
+  )
+  assert.ok(relay.stream.droppedAfterClose >= 1, 'and it is counted as dropped rather than silently eaten')
 })
