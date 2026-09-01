@@ -29,7 +29,8 @@ import test from 'node:test'
 import { AgentRegistry } from '../registry/registry.ts'
 import { NO_DEADLINE_CLOCKS } from '../registry/types.ts'
 import { FakeRotationSession } from '../rotation/fakeSession.ts'
-import type { Ceilings } from './guardrails.ts'
+import { listSessions, recordSession } from '../workspace/sessionRecord.ts'
+import { advisorTurnsLeftNotice, type Ceilings } from './guardrails.ts'
 import { Relay } from './relay.ts'
 
 /** One agent per fake session, so a seat's id and the child behind it stay distinguishable. */
@@ -622,6 +623,100 @@ for (const kase of [
     }
   })
 }
+
+/**
+ * And the ending SAYS which of those two runs it was (#190).
+ *
+ * The drain above is invisible in the outcome: a run that spent its budget with every report
+ * in hand and a run that spent it with a seat mid-turn both ended `budget`, with a detail that
+ * quoted the same number. They are not the same finding. The second was cut off while work was
+ * still moving, and an operator deciding whether to raise the bound and resume is deciding
+ * between exactly those two.
+ *
+ * It can only be read at the boundary, which is what makes it worth a test of its own: the
+ * loop drains to nothing outstanding BEFORE it may end, so the same question asked where the
+ * outcome is finally built answers "nothing was in flight" on every run, this one included.
+ */
+test('the advisor-turn budget says work was in flight when the seat it drained was still working', async () => {
+  const repo = tempRepo()
+  const { relay, alpha } = await twoSeatRun(repo, ['@seat seat-alpha: Slow work.\n@seat seat-beta: Quick work.', 'DONE', 'DONE'], 1, {
+    seatReplies: { alpha: ['ack', 'ALPHA FINISHED', 'NONE', 'NONE'] },
+  })
+  // The same recording the `conclave relay` front-end makes, because the detail reaches
+  // `status --json` only by being carried into the record -- a surface the returned outcome
+  // cannot speak for.
+  const recording = recordSession(relay, { repoRoot: repo, id: 'budget-inflight', goal: 'g', front: 'relay', startedAt: Date.now(), build: 'test-build' })
+  try {
+    // The one advisor turn admits both seats; the budget is therefore exhausted at the top of
+    // the next iteration, while alpha is still typing. Coarse for the reason this file gives:
+    // `#exchange` polls every 250ms, so the seat that must still be working is given more than
+    // a second rather than a margin the poll interval could swallow.
+    alpha.delayMs = 1500
+    const outcome = await relay.run('Keep the work moving.')
+    recording.set('ended', { outcome })
+    await recording.close()
+
+    assert.equal(outcome.reason, 'budget')
+
+    // `status --json` FIRST, for the reason advisorTurns.test.ts gives at the other variant: it
+    // is the surface an operator polls, the returned outcome cannot speak for it, and asserting
+    // it ahead of the return value is what makes a broken phrase fail where the message names
+    // the document instead of being masked by an identical claim about the outcome.
+    const sessions = listSessions(repo)
+    assert.equal(sessions.length, 1, 'the run must have recorded exactly one session')
+    const recorded = sessions[0]!.status.outcome?.detail ?? ''
+    assert.match(
+      recorded,
+      /work was in flight and was drained before the run ended/,
+      'status --json on a budget spent while a seat was still working must say so',
+    )
+    assert.doesNotMatch(recorded, /no work was in flight/, 'and status --json must not claim every turn had reported')
+    assert.equal(outcome.detail, recorded, 'the returned outcome and the recorded status must carry one detail, not two')
+  } finally {
+    await relay.stop()
+    rmSync(repo, { recursive: true, force: true })
+  }
+})
+
+/**
+ * A run that has decided to end does not offer the advisor turns it will never get (#190).
+ *
+ * The hand-back that routes a drained report goes through the same line as every other one, so
+ * a notice attached there without asking whether the run is closing would tell the advisor it
+ * had a final turn to plan with -- on a run whose ending was decided before that report even
+ * arrived. It would be the most misleading place the sentence could possibly appear.
+ *
+ * The fixture has to be a real ending, and DONE is not one: DONE while a seat is still working
+ * does not close the run, it hands the outstanding report over and asks again -- so the turn it
+ * counts is a turn the advisor genuinely gets. A turn ceiling IS one. It fires at the top of
+ * advisor turn 2 while alpha is mid-turn, the loop goes round once to drain, and the hand-back
+ * lands on turn 4 of a bound of 4 -- the final turn, and the loudest of the two sentences.
+ */
+test('a report drained after the run has decided to end carries no turns-left notice', async () => {
+  const repo = tempRepo()
+  const { relay, lead, alpha } = await twoSeatRun(repo, ['@seat seat-alpha: Slow work.\n@seat seat-beta: Quick work.', 'DONE', 'DONE'], 4, {
+    ceilings: { maxTurns: 6 },
+    seatReplies: { alpha: ['ack', 'ALPHA FINISHED', 'NONE', 'NONE'] },
+  })
+  try {
+    alpha.delayMs = 1500
+    const outcome = await relay.run('Keep the work moving.')
+    assert.equal(outcome.reason, 'ceiling', 'the run must have ended on the ceiling, with turns still on its advisor bound')
+
+    const drained = lead.received.filter((m) => /ALPHA FINISHED/.test(m))
+    assert.equal(drained.length, 1, 'the drained report must have reached the advisor exactly once')
+    // Without this the assertion below would pass on a bound nowhere near its threshold, which
+    // is a test that cannot fail rather than a gate that works.
+    assert.notEqual(advisorTurnsLeftNotice(4, 4), '', 'the fixture is only meaningful if that turn would otherwise warn')
+    assert.ok(
+      !drained[0]!.includes(advisorTurnsLeftNotice(4, 4)),
+      'a run that has already decided to end must not offer the advisor a turn it will never get',
+    )
+  } finally {
+    await relay.stop()
+    rmSync(repo, { recursive: true, force: true })
+  }
+})
 
 /**
  * A seat-scoped condition stops that seat. It must not take an unrelated one with it.
