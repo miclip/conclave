@@ -18,6 +18,7 @@ import type {
   InputOwnership,
 } from '../contract/session.ts'
 import { guaranteesFor } from '../contract/session.ts'
+import type { EvidenceLevel } from '../contract/outcome.ts'
 import type { ExecutableRequirement } from './executables.ts'
 import type { ModelSupport } from './models.ts'
 import type { RoleDefinition, RoleId } from './roles.ts'
@@ -149,6 +150,69 @@ export const NO_DEADLINE_CLOCKS: DeadlineSupport = {
   silence: { supported: false },
 }
 
+/**
+ * One capability claim, carrying HOW it is supported and WHAT it was read from.
+ *
+ * `evidence` and `sourceVersion` are orthogonal, and collapsing them corrupts both.
+ * `observed_historically` requires behaviour "Produced in a real run", so reaching for it as
+ * the downgrade for a stale `--help` string would PROMOTE an advertisement into an observed
+ * grade -- the masquerade `EVIDENCE_LEVELS` (`src/contract/outcome.ts`) is written to prevent.
+ * The rule instead: when the installed version differs from `sourceVersion` the claim is STALE,
+ * `evidence` is untouched, and it is unverified for selection until re-derived against the
+ * installed binary. Freshness gates whether a claim may be ACTED ON; it never changes what kind
+ * of evidence it was.
+ */
+export interface GradedClaim {
+  supported: boolean
+  /** HOW the claim is supported. Never changed by the installed version moving. */
+  evidence: EvidenceLevel
+  /**
+   * WHERE the claim comes from, quoted closely enough that a reader can search for it again.
+   * Required when `evidence` is not `unsupported`, because a claim with no source is the thing
+   * this whole axis exists to refuse.
+   */
+  source: string
+  /** WHICH version of the CLI `source` was read from, exactly as that CLI reports itself. */
+  sourceVersion: string
+}
+
+/**
+ * What this agent can be INSTRUCTED to do, as distinct from what the adapter can OBSERVE.
+ *
+ * A SIBLING of `capabilities` rather than a widening of it, and the separation is the whole
+ * point. `checkAdapter` (`src/conformance/suite.ts`) grades each `AdapterCapabilities.outcomes`
+ * entry against a captured RECORDING -- a fixture the suite either finds or does not. A claim
+ * about what an agent can be TOLD has no such fixture and cannot acquire one by the same route:
+ * no recording of a turn witnesses that a flag exists. Putting an ungradeable claim inside the
+ * structure the suite grades would make it look checked by association, which is exactly the
+ * masquerade `EVIDENCE_LEVELS` exists to prevent.
+ *
+ * Field names are CANONICAL terms rather than any vendor's own, and they are finer than all of
+ * them: every one of the four CLIs calls something "background", and those are three separate
+ * capabilities below. Same convention `KIMI_HOOK_EVENTS` sets in `src/adapters/kimiConfig.ts` --
+ * name the thing once, then locate each agent against it.
+ *
+ * Every field is optional for the reason `AgentDefinition.models` gives: silence removes a
+ * briefing block rather than inventing a permission. An absent field is `undeclared`; a declared
+ * `supported: false` is `unsupported`; the two must not report the same.
+ */
+export interface InstructionCapabilities {
+  /** Subagents spawned, AWAITED and reconciled inside one turn. */
+  subagents?: GradedClaim | undefined
+  /** A task started without the starting call waiting for it. Says nothing about when it ends. */
+  backgroundTasks?: GradedClaim | undefined
+  /** That such a task has finished, or is awaited, by `turn_end`. */
+  turnBoundedLifetime?: GradedClaim | undefined
+  /** The session detaches and is reattached by id. Not a turn property. */
+  sessionBackgrounding?: GradedClaim | undefined
+  /** The call returns before the reply; the session stays foreground. */
+  asyncPromptSubmission?: GradedClaim | undefined
+  /** Many steps in one invocation, under a cap. */
+  boundedIteration?: GradedClaim | undefined
+  /** The agent chooses and dispatches a SUBSEQUENT turn. */
+  autonomousLoop?: GradedClaim | undefined
+}
+
 export interface AgentDefinition {
   id: string
   displayName: string
@@ -175,6 +239,15 @@ export interface AgentDefinition {
    * reports as `undeclared`.
    */
   models?: ModelSupport | undefined
+  /**
+   * What this agent can be INSTRUCTED to do (#192), as opposed to what its adapter can observe.
+   *
+   * Optional for the same reason `models` is, and NOT for the reason `deadlines` is required: an
+   * absent declaration here removes a claim rather than inventing one. Nothing reads this yet --
+   * it is declared before it is rendered so the data and its provenance land in one reviewable
+   * step, rather than arriving as a footnote to whichever briefing first needed it.
+   */
+  instructionCapabilities?: InstructionCapabilities | undefined
   launch: LaunchSpec
   /** Runs before `create`. Throwing here prevents the session from starting. */
   preflight?: Preflight
