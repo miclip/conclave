@@ -9,7 +9,9 @@
  * "how do I add a transport" has one answer rather than a convention to discover.
  */
 
-import { EvenRealitiesTransport } from './evenRealities/transport.ts'
+import { basename } from 'node:path'
+
+import { sharedHub } from './evenRealities/hub.ts'
 import { FakeTransport } from './fake.ts'
 import type { Inbound, Transport } from './types.ts'
 
@@ -42,10 +44,27 @@ function fake(): Transport {
  * to an address the operator types, so conclave being that address is what puts its questions in
  * front of them. `EVEN_PORT` and `EVEN_TOKEN` are how the operator points the app at it.
  */
+/**
+ * The name the operator reads on the glasses, defaulting to what they already call the thing.
+ *
+ * The project directory, as tmux would name a session. A run id is unreadable on a HUD and an
+ * unprompted notification carries no other context -- the operator was not looking at a
+ * terminal and may have several projects going (#184).
+ */
+function friendlyName(): string {
+  const given = process.env['CONCLAVE_NOTIFY_NAME']
+  if (given !== undefined && given.trim() !== '') return given.trim()
+  return basename(process.cwd()) || 'conclave'
+}
+
 function evenRealities(): Transport {
   const port = Number(process.env['CONCLAVE_EVEN_PORT'] ?? '3457')
   const token = process.env['CONCLAVE_EVEN_TOKEN']
-  return new EvenRealitiesTransport({ port, ...(token ? { token } : {}) })
+  // A VIEW of the process's one bridge, not a bridge of its own. The glasses are a device:
+  // one pair, one address the operator typed, one connection. Building one per broker meant
+  // the second concurrent run's `listen()` met a bound port -- and had it not, two runs
+  // attached to one device would each have taken whichever answer arrived next (#184).
+  return sharedHub({ port, ...(token ? { token } : {}) }).view(friendlyName())
 }
 
 const BUILT_IN: Record<string, () => Transport> = { fake, 'even-realities': evenRealities }
