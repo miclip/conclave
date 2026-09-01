@@ -23,6 +23,10 @@ import type {
 } from '../contract/session.ts'
 import { formatVerdict, type Verdict } from '../contract/outcome.ts'
 import { AgentRegistry } from '../registry/registry.ts'
+import {
+  CAPABILITY_DESCRIPTORS,
+  instructionBriefingForSeats,
+} from '../registry/instructionBriefing.ts'
 import { launchRecordFor, type ParticipantLaunch } from '../registry/launch.ts'
 import { refuseMissingCommands } from '../registry/executables.ts'
 import { refuseUnknownModels } from '../registry/models.ts'
@@ -6196,6 +6200,27 @@ export class Relay {
         // Only when a reviewer is declared, for the same reason (#72). The default run pays
         // nothing for this either.
         `${reviewerSeat ? `${REVIEWER_BRIEFING_FOR_ADVISOR}\n\n` : ''}` +
+        // What the WRITING seats can be instructed to do (#192). Resolved per seat through the
+        // registry definition that seat was filled from -- the same lookup `deadlines` makes,
+        // for the same reason: the answer is declared once beside the agent and read here,
+        // rather than copied into a table this module would then own.
+        //
+        // `seats` is `#implementers()`, which is the whole of the scoping. The advisor writes
+        // no code and the reviewer writes none either, so neither one's declaration has any
+        // business in a block about what can be ASKED FOR; the reviewer is excluded by role in
+        // that helper already, and the advisor by rank.
+        //
+        // Empty, and therefore absent, whenever no seated agent declares anything supported --
+        // which is every run whose agents predate this field. Silence removes the block.
+        `${((b) => (b === '' ? '' : `${b}\n\n`))(
+          instructionBriefingForSeats(
+            CAPABILITY_DESCRIPTORS,
+            seats.map((s) => ({
+              id: s.id,
+              declared: this.#opts.registry.get(s.agent).instructionCapabilities,
+            })),
+          ),
+        )}` +
         // Only the roles THIS run has, and nothing at all when it has none (#89). Ahead of the
         // goal, with the other conditional blocks, so operator prose cannot displace the
         // instructions below it.

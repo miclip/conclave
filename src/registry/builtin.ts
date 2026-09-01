@@ -29,6 +29,12 @@ import {
   opencodeModels,
   type ModelSupport,
 } from './models.ts'
+import {
+  CLAUDE_INSTRUCTION_CAPABILITIES,
+  CODEX_INSTRUCTION_CAPABILITIES,
+  KIMI_INSTRUCTION_CAPABILITIES,
+  OPENCODE_INSTRUCTION_CAPABILITIES,
+} from './instructionCapabilities.ts'
 import { AgentRegistry } from './registry.ts'
 import type {
   AgentDefinition,
@@ -113,6 +119,7 @@ export const CLAUDE_AGENT: AgentDefinition = {
   capabilities: CLAUDE_CAPABILITIES,
   deadlines: PTY_HOOK_DEADLINES,
   models: CLAUDE_MODELS,
+  instructionCapabilities: CLAUDE_INSTRUCTION_CAPABILITIES,
   launch: {
     command: 'claude',
     // The adapter supplies --settings itself, pointing at a generated hook registration
@@ -162,6 +169,7 @@ export const CODEX_AGENT: AgentDefinition = {
   capabilities: CODEX_CAPABILITIES,
   deadlines: PTY_HOOK_DEADLINES,
   models: CODEX_MODELS,
+  instructionCapabilities: CODEX_INSTRUCTION_CAPABILITIES,
   launch: {
     command: 'codex',
     executable: { install: 'npm install -g @openai/codex', installFrom: INSTALL_HINT_SOURCE },
@@ -258,6 +266,7 @@ export const OPENCODE_AGENT: AgentDefinition = {
   capabilities: OPENCODE_CAPABILITIES,
   deadlines: RUN_PER_TURN_DEADLINES,
   models: OPENCODE_MODELS,
+  instructionCapabilities: OPENCODE_INSTRUCTION_CAPABILITIES,
   launch: {
     command: 'opencode',
     baseArgs: [],
@@ -311,6 +320,7 @@ export const KIMI_AGENT: AgentDefinition = {
   capabilities: KIMI_CAPABILITIES,
   deadlines: RUN_PER_TURN_DEADLINES,
   models: KIMI_MODELS,
+  instructionCapabilities: KIMI_INSTRUCTION_CAPABILITIES,
   launch: {
     command: 'kimi',
     baseArgs: [],
