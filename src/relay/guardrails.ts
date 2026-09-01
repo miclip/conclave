@@ -485,3 +485,34 @@ export function breached(ceilings: Ceilings, now: CeilingState): CeilingBreach |
   }
   return undefined
 }
+
+/**
+ * What the advisor is told, on the turn it is being asked to answer, about the turns it has
+ * left -- or `''` when the run is not near the end of its advisor-turn budget.
+ *
+ * THE THRESHOLD IS TWO, not one. An advisor told on its final turn can only wrap up; one told
+ * with two left can plan a closing instruction and hand over deliberately, and that is the
+ * whole reason for telling it. A warning that arrives too late to change what the advisor does
+ * is a warning that costs tokens and buys nothing.
+ *
+ * THE COUNT INCLUDES THE TURN BEING ANSWERED, and the sentences say so in words rather than
+ * leaving the convention to be inferred. A bare number cannot: "1 left" reads as "this turn" to
+ * one reader and "one more after this" to another, and an advisor that guesses wrong either
+ * hands over a turn early or is cut off mid-plan. So `remaining === 1` says outright that this
+ * is the last turn, and `remaining === 2` names the count AND states that this turn is one of
+ * the two.
+ *
+ * ABOVE THE THRESHOLD IT IS EMPTY, byte-for-byte: no block, no mention of a ceiling, nothing
+ * for a caller to join on. A run with turns to spare is briefed exactly as it always was, which
+ * is the condition `defaultUnchanged.test.ts` holds every conditional briefing block to.
+ *
+ * ZERO AND BELOW ARE EMPTY TOO, and that case is real rather than defensive: a run that has
+ * decided to end keeps iterating while its seats drain, so the turn counter goes past the
+ * bound. Telling an advisor it has minus one turns left is worse than telling it nothing.
+ */
+export function advisorTurnsLeftNotice(turnBeingAnswered: number, maxAdvisorTurns: number): string {
+  const remaining = maxAdvisorTurns - turnBeingAnswered + 1
+  if (remaining === 1) return 'This is your last advisor turn.'
+  if (remaining === 2) return 'You have 2 advisor turns left, including this one.'
+  return ''
+}

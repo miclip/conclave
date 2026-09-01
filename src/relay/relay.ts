@@ -100,7 +100,7 @@ import { rotate, type RotationResult } from '../rotation/rotate.ts'
 import { checkCommand, type CheckSpec } from '../rotation/record.ts'
 import { buildReviewContext, reviewPrompt } from '../rotation/review.ts'
 import { resumeBriefing } from './resume.ts'
-import { breached, type CeilingBreach, type CeilingState, type Ceilings, effectiveCeilings, type RunCeilings } from './guardrails.ts'
+import { advisorTurnsLeftNotice, breached, type CeilingBreach, type CeilingState, type Ceilings, effectiveCeilings, type RunCeilings } from './guardrails.ts'
 import {
   cancelledByFailedDependencies,
   concurrentSeats,
@@ -6179,6 +6179,7 @@ export class Relay {
         `${REVIEWER_BRIEFING}\n\n${SUBAGENT_BRIEFING}\n\n${WITHHELD_GOAL_NOTICE}\n\n${prior}Acknowledge briefly; do not start work yet.`,
       )
     }
+    const maxAdvisorTurns = boundOf(this.#opts)
     let next = await this.#exchange(
       lead,
       `${LEAD_BRIEFING}\n\n${SUBAGENT_BRIEFING}\n\n` +
@@ -6199,11 +6200,10 @@ export class Relay {
         // goal, with the other conditional blocks, so operator prose cannot displace the
         // instructions below it.
         `${((b) => (b === '' ? '' : `${b}\n\n`))(roleBriefingForAdvisor(seats, (r) => this.#roleDescription(r)))}` +
-        `${this.#opts.operator === 'agent' ? `${AGENT_OPERATOR_NOTICE}\n\n` : ''}` +
+        `${this.#opts.operator === 'agent' ? `${AGENT_OPERATOR_NOTICE}\n\n` : ''}${((b) => (b === '' ? '' : `${b}\n\n`))(advisorTurnsLeftNotice(1, maxAdvisorTurns))}` +
         `${prior}The goal for this session:\n\n${goal}\n\nGive the implementer its first instruction.`,
     )
 
-    const maxAdvisorTurns = boundOf(this.#opts)
     this.#startedAt = this.#now()
     // The ceiling window opens here, so the pause ledger is baselined here too. See
     // `#suspendedAtStart`: only suspensions INSIDE the window may be subtracted from it.
@@ -6676,11 +6676,11 @@ export class Relay {
           // `--rounds` to raise -- and "round" is the operator-facing word this option was
           // renamed away from (see `RelayOptions.maxRounds`). The flag belongs to the launch
           // banner, which is the surface that owns flags and now prints every ceiling with one.
-          closing ??= {
-            kind: 'end',
-            reason: 'budget',
-            detail: `advisor turn budget spent: ${maxAdvisorTurns} of a maximum ${maxAdvisorTurns}`,
-          }
+          //
+          // WHETHER WORK WAS IN FLIGHT IS READ HERE and nowhere later: everything below drains to `outstanding() === 0` before a run may end, so the same
+          // question asked where the outcome is finally built answers "nothing was in flight" on every run there has ever been, cut off ones included (#190).
+          const drain = outstanding() > 0 ? 'work was in flight and was drained before the run ended' : 'no work was in flight: every turn sent had been reported'
+          closing ??= { kind: 'end', reason: 'budget', detail: `advisor turn budget spent: ${maxAdvisorTurns} of a maximum ${maxAdvisorTurns}; ${drain}` }
           continue advisor
         }
         const ceiling = this.#breachedNow()
@@ -6745,9 +6745,9 @@ export class Relay {
         if (instruction === '' && notes.length > 0 && next.end.verdict.outcome === 'completed') {
           next = await this.#exchange(
             lead,
-            this.#drain(lead.id) ||
-              'Your note is recorded for the operator. Now give the implementer its next ' +
-                'instruction, or reply exactly DONE.',
+            [this.#drain(lead.id) || 'Your note is recorded for the operator. Now give the implementer its next instruction, or reply exactly DONE.',
+              // `advisorTurn`, NOT `advisorTurn + 1`, and it is the only re-ask of the four that is: this one falls
+              advisorTurnsLeftNotice(advisorTurn, maxAdvisorTurns)].filter(Boolean).join('\n\n'), // through, the others `continue` (#190).
           )
           const second = splitNotes(next.prose)
           for (const note of second.notes) {
@@ -7021,8 +7021,8 @@ export class Relay {
           // advisor is asked again rather than the empty instruction being sent anyway.
           next = await this.#exchange(
             lead,
-            this.#drain(lead.id) ||
-              'Your previous turn produced no instruction. Give the implementer its next one.',
+            [this.#drain(lead.id) || 'Your previous turn produced no instruction. Give the implementer its next one.',
+              advisorTurnsLeftNotice(advisorTurn + 1, maxAdvisorTurns)].filter(Boolean).join('\n\n'), // `continue` below: next turn (#190)
           )
           continue
         }
@@ -7081,7 +7081,7 @@ export class Relay {
               this.#record({ from: seat.id, fromRank: 'implementer', to: [lead.id], kind: 'report', text: extra.prose })
               answers.push(envelope({ from: seat.id, fromRank: 'implementer', fromRole: seat.role, kind: 'report', text: extra.prose }))
             }
-            next = await this.#exchange(lead, [this.#drain(lead.id), ...answers].filter(Boolean).join('\n\n'))
+            next = await this.#exchange(lead, [this.#drain(lead.id), ...answers, advisorTurnsLeftNotice(advisorTurn + 1, maxAdvisorTurns)].filter(Boolean).join('\n\n'))
             // Bounded by the advisor-turn budget like everything else, so a human who keeps talking
             // extends the session rather than making it unstoppable.
             continue
@@ -7110,7 +7110,7 @@ export class Relay {
           }
           // Resumed. The advisor said its piece and the human decided otherwise, so it is
           // asked again rather than having its escalation replayed as an instruction.
-          next = await this.#exchange(lead, this.#drain(lead.id) || 'The human has seen your escalation and asked you to continue. Give the implementer its next instruction.')
+          next = await this.#exchange(lead, [this.#drain(lead.id) || 'The human has seen your escalation and asked you to continue. Give the implementer its next instruction.', advisorTurnsLeftNotice(advisorTurn + 1, maxAdvisorTurns)].filter(Boolean).join('\n\n'))
           continue
         } else {
           // EVERY decision the reply carried, admitted in the order it was written. Taking the
@@ -7571,9 +7571,16 @@ export class Relay {
         }
 
         const leadAside = this.#drain(lead.id)
+        // The turn this reply BECOMES is the next one, not this one: the loop hands the report over here and the
+        // increment happens on the way round, so `advisorTurn + 1` is the turn the advisor is being asked to spend
+        // (#190). And nothing at all while `closing` is set -- a run that has already decided to end is draining its
+        // seats through this same line, and telling the advisor it has two turns left to plan with would be false.
+        //
+        // Placed with the other orchestrator notices rather than after the report, which is where every conditional
+        // block in the opening briefing sits: ahead of the substantive content, so it cannot be displaced by it.
         next = await this.#exchange(
           lead,
-          [leadAside, this.#drainLeadNotices(), envelope({ from: seat.id, fromRank: 'implementer', fromRole: seat.role, kind: 'report', text: report.prose })]
+          [leadAside, this.#drainLeadNotices(), closing ? '' : advisorTurnsLeftNotice(advisorTurn + 1, maxAdvisorTurns), envelope({ from: seat.id, fromRank: 'implementer', fromRole: seat.role, kind: 'report', text: report.prose })]
             .filter(Boolean)
             .join('\n\n'),
         )
