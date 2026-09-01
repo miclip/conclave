@@ -72,18 +72,26 @@ const CLIENT = join(import.meta.dirname, '..', 'hooks', 'client.ts')
  * simply never fires it, so a rename upstream reads as a seat that boots, runs, and never says
  * it finished. See #36 for what that looks like from the outside.
  *
- * `SubagentStop` is registered and `SubagentStart` is not. That USED to be because Claude Code
- * had no such event -- true of the 2.1.224 bundle, and false by 2.1.251, which dispatches
- * `SubagentStart` like any other. The reason it stays unregistered is now the ordinary one:
- * nothing consumes it. Registering it would cost a subprocess per delegation and buy a journal
- * entry no seat reads, which is the trade `kimiConfig.ts` spells out. Until something wants it,
- * a delegating turn is still seen to have FINISHED delegating and never to have started, and
- * the console still falls back to naming the tool call.
+ * Both halves of the subagent lifecycle are here, and `SubagentStart` was the last to arrive.
+ * It was left out twice for two different reasons: Claude Code genuinely had no such event at
+ * 2.1.224, and once 2.1.251 dispatched it, nothing here consumed it -- and an event nothing
+ * consumes costs a hook subprocess per occurrence and buys a journal entry nobody reads, which
+ * is the trade `kimiConfig.ts` spells out. `#onSubagentHook` is that consumer, so the
+ * subprocess now buys something: `outstanding` counts up on a start and down on its own stop,
+ * and the console says how many are running and since when instead of inferring delegation from
+ * the spawning tool's name.
+ *
+ * The inference is still there and still needed. A CLI that does not dispatch the start -- as
+ * 2.1.224 did not -- accepts the key in silence, never fires it, and leaves every stop
+ * `unpaired` with `outstanding` at zero; `relay/subagents.ts` falls back to the tool name for
+ * exactly that seat. That same silence is why the name below is checked against the installed
+ * binary and not against this paragraph.
  */
 export const HOOK_EVENTS = [
   'SessionStart',
   'UserPromptSubmit',
   'PermissionRequest',
+  'SubagentStart',
   'SubagentStop',
   'Stop',
   'SessionEnd',
@@ -97,6 +105,59 @@ interface PendingPrompt {
   resolve: (k: TurnKey) => void
   reject: (e: Error) => void
   prompt: string
+}
+
+/**
+ * What one delivery of a subagent hook did to the turn's bookkeeping.
+ *
+ * `duplicate` is the whole reason this is a pair of SETS rather than a counter: hook delivery
+ * is at-most-once and replayed from a local journal on recovery, so a start that arrives twice
+ * must count one subagent, and a stop that arrives twice must not take two away.
+ */
+export type SubagentChange = 'started' | 'stopped' | 'unpaired' | 'duplicate'
+
+/**
+ * The subagents one turn started, by the child's own id.
+ *
+ * Two sets, not one. `#running` answers "how many now", which is what the console shows;
+ * `#seen` is what makes a REPLAY distinguishable from a genuine second event, and it has to
+ * outlive the running set to do it. With only `#running`, a start redelivered after its stop
+ * has already been processed finds the id absent, reads as news, and resurrects a subagent
+ * that finished -- leaving a count that never comes down again for the rest of the turn.
+ *
+ * A stop for an id that never started is neither of those. `HOOK_EVENTS` registers both halves,
+ * so it is no longer the ordinary case -- but it survives every CLI that does not dispatch
+ * `SubagentStart` (2.1.224), every start lost before the receiver was listening, and every stop
+ * whose payload names no id. It is reported as `unpaired` rather than folded into either --
+ * nothing was counted up, so the count must stay where it is, and a consumer is entitled to
+ * know that what it is looking at is half a lifecycle rather than a completed one.
+ */
+export class TurnSubagents {
+  readonly #running = new Set<string>()
+  readonly #seen = new Set<string>()
+
+  /** Started and not yet seen to stop. */
+  get outstanding(): number {
+    return this.#running.size
+  }
+
+  start(id: string): SubagentChange {
+    if (this.#seen.has(id)) return 'duplicate'
+    this.#seen.add(id)
+    this.#running.add(id)
+    return 'started'
+  }
+
+  stop(id: string): SubagentChange {
+    if (!this.#seen.has(id)) {
+      // Recorded as seen even though nothing was counted, so a redelivery of this same stop is
+      // still recognisable as the same one.
+      this.#seen.add(id)
+      return 'unpaired'
+    }
+    if (!this.#running.delete(id)) return 'duplicate'
+    return 'stopped'
+  }
 }
 
 interface TurnState {
@@ -115,6 +176,14 @@ interface TurnState {
   /** Seq of the last `turn_end` emitted, so a revision can withdraw it by number. */
   endSeq: number | undefined
   assistantText: string | undefined
+  /**
+   * Which subagents this turn has started and not yet been told finished.
+   *
+   * Per turn rather than per session: "what is this seat doing right now" is a question about
+   * the turn in flight, and a subagent belonging to a turn that ended two prompts ago is not
+   * part of the answer. It is dropped with the turn rather than reconciled.
+   */
+  subagents: TurnSubagents
   /**
    * Whether the CHILD has said anything during this turn (#82).
    *
@@ -1147,6 +1216,7 @@ export class ClaudePtyHookAdapter implements AgentSession {
           assistantText: undefined,
           produced: false,
           childClosure: undefined,
+          subagents: new TurnSubagents(),
         }
         if (this.#producedBeforeTurn) {
           this.#producedBeforeTurn = false
@@ -1214,6 +1284,11 @@ export class ClaudePtyHookAdapter implements AgentSession {
         })
         return
       }
+      case 'SubagentStart':
+      case 'SubagentStop': {
+        this.#onSubagentHook(d)
+        return
+      }
       case 'Stop': {
         const key = String(d.turnKey ?? '')
         // A Stop may arrive for a turn already settled by other evidence; the tracker
@@ -1247,6 +1322,76 @@ export class ClaudePtyHookAdapter implements AgentSession {
         return
       }
     }
+  }
+
+  /**
+   * A subagent of this child started, or finished.
+   *
+   * Deliberately NOT fed to the turn's `TurnVerdictTracker`. A subagent is work INSIDE a turn;
+   * it says nothing about how that turn ends, and adding it to the hook evidence list would put
+   * a name in the provenance of a verdict it played no part in. What it does say is that the
+   * child is alive, and that is carried the same way every other sign of life is -- by being an
+   * event `isChildOutput` accepts, which `#emit` acts on without being told twice.
+   *
+   * ## When only the stop arrives
+   *
+   * Both events are in `HOOK_EVENTS`, so against a CLI that dispatches them this method sees
+   * matched pairs and `outstanding` is a real count. Against one that does not dispatch the
+   * start -- Claude Code 2.1.224 -- the key is accepted in silence and never fires, so this
+   * method sees stops only, every one of them `unpaired`, `outstanding` never leaves zero, and
+   * the console falls back to naming the spawning tool. Both readings are supported on purpose;
+   * neither is an error state.
+   */
+  #onSubagentHook(d: HookDelivery): void {
+    // Keyed first. `prompt_id` on a subagent hook is the PARENT turn's -- the hook fires in the
+    // parent session, and the subagent's own transcript arrives as a separate field -- so the
+    // key names the turn the console is showing. `#latestLiveTurn()` is the fallback for a
+    // payload whose key names nothing this adapter armed.
+    const turn = this.#turnFor(String(d.turnKey ?? '')) ?? this.#latestLiveTurn()
+    // Nothing to attribute it to and nothing showing it, so there is nothing to say. A
+    // subagent lifecycle outside any turn of ours is not evidence about a turn of ours.
+    if (!turn) return
+
+    const agentId = typeof d.payload.agent_id === 'string' ? d.payload.agent_id : undefined
+    const agentType = typeof d.payload.agent_type === 'string' ? d.payload.agent_type : undefined
+    const at = Date.now()
+
+    if (d.event === 'SubagentStart') {
+      // Required by Claude Code's own payload schema, so its absence means the payload is not
+      // one this adapter can pair anything with. Counting it would produce an `outstanding`
+      // that no stop can ever bring down -- worse than not counting it, because the console
+      // would then be wrong for the rest of the turn rather than merely uninformed.
+      if (agentId === undefined) return
+      if (turn.subagents.start(agentId) === 'duplicate') return
+      this.#emit({
+        type: 'subagent_start',
+        agentId,
+        ...(agentType === undefined ? {} : { agentType }),
+        outstanding: turn.subagents.outstanding,
+        turnKey: turn.key,
+        seq: this.#next(),
+        at,
+        provisional: false,
+      })
+      return
+    }
+
+    // A stop with no id cannot be deduplicated -- there is nothing to compare -- so a
+    // redelivery of one emits twice. It is still emitted: something finished, and saying so
+    // with `paired: false` and an unchanged count claims no more than that.
+    const change = agentId === undefined ? 'unpaired' : turn.subagents.stop(agentId)
+    if (change === 'duplicate') return
+    this.#emit({
+      type: 'subagent_stop',
+      ...(agentId === undefined ? {} : { agentId }),
+      ...(agentType === undefined ? {} : { agentType }),
+      paired: change === 'stopped',
+      outstanding: turn.subagents.outstanding,
+      turnKey: turn.key,
+      seq: this.#next(),
+      at,
+      provisional: false,
+    })
   }
 
   #allTurns(): TurnState[] {

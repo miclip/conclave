@@ -59,6 +59,16 @@ export class FakeRotationSession implements AgentSession {
    */
   toolsPerTurn: string[] = []
   /**
+   * Subagents to report STARTING each turn, after the tool calls, as the real order is: the
+   * parent enters its spawning tool call and the child's `SubagentStart` hook follows.
+   *
+   * The fake could only ever emit `tool_use`, so the console's observed-count path -- the one
+   * that prefers a counted subagent over a guessed one -- had no way to be exercised at all.
+   */
+  subagentsPerTurn = 0
+  /** How many of those to report stopping again, after the starts. */
+  subagentStopsPerTurn = 0
+  /**
    * Called with the prompt as a turn begins, so a test can make the turn DO something.
    *
    * The fake could only ever talk. Anything keyed to a participant changing the tree -- the
@@ -202,6 +212,32 @@ export class FakeRotationSession implements AgentSession {
         type: 'tool_use',
         tool,
         input: undefined,
+        turnKey: key,
+        seq: ++this.#seq,
+        at: Date.now(),
+        provisional: false,
+      })
+    }
+    // The count is carried ON the event, exactly as the adapters carry it: the console is not
+    // supposed to be counting these itself, and a double that made it possible to would let a
+    // console that did so pass.
+    for (let n = 1; n <= this.subagentsPerTurn; n++) {
+      this.emit({
+        type: 'subagent_start',
+        agentId: `sub-${n}`,
+        outstanding: n,
+        turnKey: key,
+        seq: ++this.#seq,
+        at: Date.now(),
+        provisional: false,
+      })
+    }
+    for (let n = 1; n <= this.subagentStopsPerTurn; n++) {
+      this.emit({
+        type: 'subagent_stop',
+        agentId: `sub-${n}`,
+        paired: n <= this.subagentsPerTurn,
+        outstanding: Math.max(0, this.subagentsPerTurn - n),
         turnKey: key,
         seq: ++this.#seq,
         at: Date.now(),

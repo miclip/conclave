@@ -51,6 +51,51 @@ export function describeTool(tool: string): string | undefined {
 }
 
 /**
+ * What a seat's subagents are, when the child has been HEARD to start them.
+ *
+ * `outstanding` is counted from `subagent_start` / `subagent_stop` (see `contract/session.ts`),
+ * not guessed from a tool name, and that difference is why the wording differs too. The name
+ * list can only say "the seat is inside a tool that usually means delegation", so it says
+ * `waiting on a subagent (Task)` and keeps the tool name as the checkable part. An observed
+ * count knows something stronger and narrower -- how many are running and since when -- and
+ * says exactly that, without the claim that the parent is BLOCKED on them, which nothing here
+ * observed. A parent can spawn work and carry on.
+ *
+ * @param elapsed formatted by the caller, so the duration beside a subagent count and the one
+ * beside the seat itself are produced by the same function rather than by two that agree until
+ * one of them is changed. `undefined` when nothing recorded a start time.
+ */
+export interface ObservedSubagents {
+  /** Started and not yet seen to stop. Zero is the same as having observed nothing. */
+  outstanding: number
+  /** How long the oldest of them has been running, already formatted. */
+  elapsed?: string | undefined
+}
+
+export function describeSubagentWork(
+  /** The call the seat is in, if it is in one. Undefined between tool calls. */
+  tool: string | undefined,
+  observed?: ObservedSubagents | undefined,
+): string | undefined {
+  const n = observed?.outstanding ?? 0
+  // No start was ever heard: the name list is all there is, and it is what the console has
+  // always shown. Still the live path for any CLI that does not dispatch `SubagentStart` --
+  // Claude Code 2.1.224 does not, 2.1.251 does -- and for the stretch of a turn before the
+  // first start lands, so this branch is not a corner case even where both halves are heard.
+  if (n <= 0) return tool === undefined ? undefined : describeTool(tool)
+
+  const since = observed?.elapsed ? ` (${observed.elapsed})` : ''
+  const count = n === 1 ? '1 subagent' : `${n} subagents`
+  // The spawning call adds nothing once the count is known -- "waiting on a subagent (Task)"
+  // and "1 subagent running" are the same sentence, one of them guessed. A tool that is NOT
+  // delegation is different information: the parent is doing its own work alongside, and
+  // dropping it would report a busy seat as idle-but-delegating.
+  return tool === undefined || isSubagentTool(tool)
+    ? `${count} running${since}`
+    : `${tool} · ${count} running${since}`
+}
+
+/**
  * Worktrees attached to a repository, by path.
  *
  * The subagent rule -- "a subagent that MODIFIES anything must work in its own git worktree"

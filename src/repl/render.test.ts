@@ -10,8 +10,9 @@
  */
 
 import { strict as assert } from 'node:assert'
+import { PassThrough } from 'node:stream'
 import test from 'node:test'
-import { markdown, setColor, summaryLine, titleSequence } from './render.ts'
+import { markdown, Progress, setColor, summaryLine, titleSequence } from './render.ts'
 
 test('colour is off when asked, so piped output stays clean', () => {
   setColor(false)
@@ -129,4 +130,25 @@ test('a short summary line keeps its words and its width, and normalises the spa
   assert.equal(summaryLine('===', 'run\tended:\ndone', 96), '=== run ended: done')
   // Including the marker's own gap: the leading run collapses with the rest.
   assert.equal(summaryLine('===', '  8   messages  routed', 96), '===   8 messages routed')
+})
+
+test('a pinned detail may be recomputed at draw time, so a duration in it stays true', () => {
+  // The footer redraws on a timer -- that is what animates the spinner and advances the seat's
+  // own elapsed clock. A detail stored as a fixed string is frozen at the moment of the last
+  // event, so "2 subagents running (12s)" sits there reading 12s beside a seat clock that has
+  // reached four minutes. One of the two numbers is then a lie, and it is the one a reader has
+  // no way to check.
+  setColor(false)
+  const progress = new Progress(new PassThrough(), false)
+  progress.start('implementer')
+
+  let ticks = 0
+  progress.note('implementer', () => `2 subagents running (${++ticks}s)`)
+  assert.match(progress.line(), /2 subagents running \(1s\)/)
+  assert.match(progress.line(), /2 subagents running \(2s\)/, 'the second draw must ask again')
+
+  // A plain string still works and is still fixed, which is what every other caller wants.
+  progress.note('implementer', 'Bash')
+  assert.match(progress.line(), /Bash/)
+  assert.match(progress.line(), /Bash/)
 })

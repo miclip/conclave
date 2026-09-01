@@ -159,20 +159,31 @@ test('every event the Codex sidecar registers is a name the installed Codex know
   checkNames('codex', events, t)
 })
 
-test('SubagentStart stays unregistered on Claude because nothing consumes it, not because it is absent', (t) => {
-  // The distinction matters for #5. While the CLI genuinely lacked the event there was nothing
-  // to decide; now there is, and the reason has to be stated as the trade it actually is --
-  // a subprocess per delegation against a journal entry no seat reads.
-  assert.ok(!(HOOK_EVENTS as readonly string[]).includes('SubagentStart'), 'nothing consumes it yet')
-  assert.ok(HOOK_EVENTS.includes('SubagentStop'), 'the ending is consumed, and is what the console shows')
+test('both halves of the subagent lifecycle are registered on Claude, and the CLI knows both names', (t) => {
+  // #5's symptom was a delegating seat that read as an ending without a beginning, and the
+  // reason moved twice: the CLI genuinely lacked `SubagentStart` at 2.1.224, then it had it and
+  // nothing here consumed it. Both are spent -- `#onSubagentHook` counts the pair -- so the
+  // names are registered.
+  //
+  // Membership is asserted HERE rather than left to the check above, which only reads names OUT
+  // of the list: dropping one would shrink what that test examines and pass, while the console
+  // went quietly back to guessing delegation from the spawning tool's name.
+  for (const event of ['SubagentStart', 'SubagentStop']) {
+    assert.ok(
+      (HOOK_EVENTS as readonly string[]).includes(event),
+      `${event} is not registered, so the adapter never hears it and the count it feeds stays at zero`,
+    )
+  }
 
   const found = bundleOf('claude')
   if ('why' in found) {
     t.diagnostic(`skipped the availability half: ${found.why}`)
     return
   }
-  assert.ok(
-    dispatches(found.bytes, 'SubagentStart'),
-    'if this fails the CLI has dropped the event again and the comment above needs its old wording back',
-  )
+  for (const event of ['SubagentStart', 'SubagentStop']) {
+    assert.ok(
+      dispatches(found.bytes, event),
+      `the installed CLI dispatches no ${event}, so registering it buys silence -- what an operator sees is the tool-name fallback in relay/subagents.ts`,
+    )
+  }
 })

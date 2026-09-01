@@ -309,6 +309,130 @@ test('a session runs to completion and reports the outcome', async () => {
   assert.match(out.text(), /pass --checks/)
 })
 
+test('the console prefers a counted subagent to a guessed one, and keeps the guess until one is counted', async () => {
+  // `⋯ implementer 2m39s · wait_agent` was the whole of what an operator saw during a
+  // delegating turn. The name list improved that to "waiting on a subagent (wait_agent)", which
+  // is still a guess from a tool name: it cannot say how many, or since when.
+  //
+  // Both readings are asserted here, in the order a real turn produces them. The seat enters
+  // its spawning call first and nothing has been counted yet, so the guess is what is shown;
+  // then the starts arrive and the count replaces it. Both halves are registered in
+  // `HOOK_EVENTS`, so a Claude seat reaches the second reading -- and a seat whose CLI never
+  // dispatches the start stays on the first, which is why neither may regress.
+  const dir = repo()
+  const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it.'])
+  impl.toolsPerTurn = ['wait_agent']
+  impl.subagentsPerTurn = 2
+  const out = collect()
+  const code = await runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'claude',
+    rounds: 3,
+    checks: [],
+    // Every event prints. The default throttle is 10s, which on a fixture that finishes in
+    // milliseconds means the FIRST label per participant is the only one ever written -- so the
+    // test would be asserting on the guess and never reach the count.
+    progressEveryMs: 0,
+    registry: registryOf({
+      codex: [new FakeRotationSession('advisor', 'codex', ['Do it.', 'DONE'])],
+      claude: [impl],
+    }),
+    input: script([]),
+    output: out.stream,
+  })
+  assert.equal(code, 0)
+
+  const text = out.text()
+  const guessed = text.indexOf('waiting on a subagent (wait_agent)')
+  const counted = text.search(/2 subagents running \(\d+m?\d*s\)/)
+  assert.ok(guessed >= 0, `the tool-name reading must still be what a seat with nothing counted shows: ${text}`)
+  assert.ok(counted >= 0, `the observed count must reach the operator: ${text}`)
+  assert.ok(counted > guessed, 'the count replaces the guess, rather than the guess winning once it is set')
+  // The elapsed is part of it. A count with no duration cannot answer the question an operator
+  // is actually asking of a quiet seat, which is how long this has been going on.
+  assert.match(text, /1 subagent running \(\d+m?\d*s\)/, 'and singular reads as singular on the way up')
+})
+
+test('with nothing counted the console shows exactly what it always did', async () => {
+  // The control. Without it, "prefers the observed count" would pass on a console that had
+  // simply stopped rendering the tool-name reading at all -- which is the live path today.
+  const dir = repo()
+  const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it.'])
+  impl.toolsPerTurn = ['wait_agent']
+  const out = collect()
+  const code = await runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'claude',
+    rounds: 3,
+    checks: [],
+    progressEveryMs: 0,
+    registry: registryOf({
+      codex: [new FakeRotationSession('advisor', 'codex', ['Do it.', 'DONE'])],
+      claude: [impl],
+    }),
+    input: script([]),
+    output: out.stream,
+  })
+  assert.equal(code, 0)
+  assert.match(out.text(), /waiting on a subagent \(wait_agent\)/)
+  assert.ok(!/subagents? running/.test(out.text()), 'nothing was counted, so nothing may be reported as counted')
+})
+
+test("a turn's subagents are dropped with the turn, not carried into the next one", async () => {
+  // The count answers "what is this seat doing NOW". A subagent belonging to a turn that ended
+  // two prompts ago is not part of that answer, and carrying it forward describes the new turn
+  // with the old one's work -- silently, because the number is plausible either way.
+  //
+  // The shape that shows it: a first turn that delegates, a second that runs an ordinary tool
+  // and delegates nothing. If the count survives the turn boundary the second turn reads
+  // "Bash · 2 subagents running", which is a claim about two subagents that have gone.
+  const dir = repo()
+  const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it.'])
+  impl.toolsPerTurn = ['wait_agent']
+  impl.subagentsPerTurn = 2
+  let turns = 0
+  // `onSend` runs before the turn's events are emitted, so this reconfigures the turn that is
+  // about to happen rather than the one that just did.
+  impl.onSend = () => {
+    if (++turns === 2) {
+      impl.toolsPerTurn = ['Bash']
+      impl.subagentsPerTurn = 0
+    }
+  }
+  const out = collect()
+  const code = await runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'claude',
+    rounds: 3,
+    checks: [],
+    progressEveryMs: 0,
+    registry: registryOf({
+      codex: [new FakeRotationSession('advisor', 'codex', ['Do it.', 'DONE'])],
+      claude: [impl],
+    }),
+    input: script([]),
+    output: out.stream,
+  })
+  assert.equal(code, 0)
+
+  const text = out.text()
+  // Not vacuous: the second turn's tool call really was rendered, so the absence below is the
+  // count being dropped rather than the line never being written.
+  assert.ok(turns >= 2, `the fixture must reach a second implementer turn, reached ${turns}`)
+  assert.match(text, /· Bash\b/, 'the second turn names its own tool')
+  assert.match(text, /2 subagents running/, 'and the first turn really did count two')
+  assert.ok(
+    !/Bash · \d+ subagents? running/.test(text),
+    `the previous turn's subagents must not be reported against this one: ${text}`,
+  )
+})
+
 test('a session registers its hooks in the project, for the CLIs it will actually launch', async () => {
   // Two Claudes is a real configuration. Writing a Codex sidecar for it would then demand
   // a Codex trust decision before anything reported ready — a setup step for a CLI this

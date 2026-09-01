@@ -124,6 +124,59 @@ export interface PermissionRequestedEvent extends EventBase {
 }
 
 /**
+ * Another model has started work on behalf of this one.
+ *
+ * The console could previously say only what the SPAWNING TOOL CALL was called --
+ * `relay/subagents.ts` turns `wait_agent` into "waiting on a subagent" from a name list,
+ * because no adapter had anything better. A name list cannot say how many are running, cannot
+ * say when they started, and is a guess: it fires on a tool that merely looks like delegation
+ * and stays silent on one that does not.
+ *
+ * This pair is the observed alternative, for the adapters that can observe it. The child says
+ * a subagent started, says which one, and later says it stopped, so the count is COUNTED
+ * rather than inferred. Where no start ever arrives the old reading is still there and still
+ * correct; see `describeSubagentWork`.
+ *
+ * ## Why an id and not just a count
+ *
+ * Hook delivery is at-most-once, never retried, and replayed from a local journal on recovery
+ * -- so a duplicate is a matter of time (`hooks/journal.ts`). A counter that increments on
+ * arrival cannot survive one: a redelivered start counts a subagent that does not exist, and
+ * nothing ever takes it back, so the console reads "3 subagents" for the rest of the turn. The
+ * id is the child's own (`agent_id` on Claude Code 2.1.252, required on both events), and it
+ * makes both directions idempotent -- a repeat is recognised as the same subagent rather than
+ * as another one.
+ */
+export interface SubagentStartEvent extends EventBase {
+  type: 'subagent_start'
+  /** The child's own identifier for it. Opaque: only ever compared for equality. */
+  agentId: string
+  /** What the child calls this kind of subagent, when it says. `agent_type` on Claude Code. */
+  agentType?: string | undefined
+  /** Started and not yet seen to stop, on this turn, AFTER this event. */
+  outstanding: number
+}
+
+export interface SubagentStopEvent extends EventBase {
+  type: 'subagent_stop'
+  /** Absent only if the child reported a stop without naming what stopped. */
+  agentId?: string | undefined
+  agentType?: string | undefined
+  /**
+   * False when no `subagent_start` was ever seen for this id.
+   *
+   * Not an anomaly. The Claude adapter registers both halves (see `HOOK_EVENTS`), but a CLI
+   * that does not dispatch `SubagentStart` accepts the key in silence and never fires it, so
+   * against one of those every stop is unpaired and `outstanding` stays at zero. A consumer
+   * must therefore never treat a stop as licence to decrement a count it did not count up --
+   * which is why the count is carried on the event rather than derived by each reader.
+   */
+  paired: boolean
+  /** Started and not yet seen to stop, on this turn, AFTER this event. */
+  outstanding: number
+}
+
+/**
  * The terminal statement. Never a bare `turn_end` -- it always carries what it claims
  * and how strongly, because the adapters genuinely differ in what they can know.
  */
@@ -201,6 +254,8 @@ export type AgentEvent =
   | MessageEvent
   | ToolUseEvent
   | PermissionRequestedEvent
+  | SubagentStartEvent
+  | SubagentStopEvent
   | TurnEndEvent
   | RevisionEvent
   | AdapterErrorEvent
@@ -237,6 +292,14 @@ export function isChildOutput(e: AgentEvent): boolean {
       return e.role === 'assistant'
     case 'tool_use':
     case 'permission_requested':
+    // A delegating turn is the one that goes quiet for longest -- the parent sits in a single
+    // tool call while another model works, producing nothing the tailer can see. These are the
+    // only things it does produce, and they are hook deliveries, so they carry the same
+    // guarantee the arm above rests on: the child fired them, and no repaint or poll can
+    // manufacture one. Counting them keeps the SILENCE deadline off a turn that is delegating
+    // exactly as hard as it is working.
+    case 'subagent_start':
+    case 'subagent_stop':
       return true
     default:
       return false
