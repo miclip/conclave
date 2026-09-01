@@ -245,6 +245,8 @@ export class RelayEventStream {
   #seq = 0
   #closed = false
   #droppedAfterClose = 0
+  /** Waiters for the next epoch. Released by `reopen()`, and by `close()` so teardown cannot hang. */
+  #reopened: (() => void)[] = []
 
   get closed(): boolean {
     return this.#closed
@@ -268,7 +270,15 @@ export class RelayEventStream {
     //
     // Nothing is lost by this. The participant's own event array still holds the event,
     // and `snapshot()` remains authoritative; only the observation stream declines it.
-    if (this.#closed) {
+    // A MESSAGE is the relay's own record of something said in this session; ACTIVITY is a
+    // child still emitting about a turn that is over. The invariant that matters -- a late
+    // subscriber replaying history must see exactly what the live one saw -- is about the
+    // second, and that is what stays refused (#189).
+    //
+    // The first is why `relay.ask` between runs was recorded in `relay.log` and nowhere else:
+    // the run had ended, so the question and its answer were counted as dropped. They belong
+    // to the session, which has not ended, so they are kept.
+    if (this.#closed && input.type !== 'message') {
       this.#droppedAfterClose++
       return
     }
@@ -282,8 +292,44 @@ export class RelayEventStream {
     for (const q of this.#subscribers) q.push(event)
   }
 
+  /**
+   * Open a new observation epoch, for a session that is starting another run (#189).
+   *
+   * `close()` is per RUN -- `#end` calls it, and it must, because a child does not stop
+   * emitting when the relay decides the run is over and those events must not reach the
+   * history of the run they came after. But `Relay.start()` can be called again on the same
+   * relay: that is what the console does when you type a second goal. Without this the
+   * emitter stayed shut for the rest of the session, so the second run and every run after
+   * it reached no subscriber and no record, while `relay.log` went on collecting them --
+   * two files disagreeing about the same session, with nothing to say which was right.
+   *
+   * The history is KEPT. A session record is one file per session, not per run, and a reader
+   * asking what happened here should get all of it in order. What resets is the refusal.
+   */
+  reopen(): void {
+    this.#closed = false
+    for (const w of this.#reopened.splice(0)) w()
+  }
+
+  /**
+   * Resolves when a new run opens the stream, or when the session ends.
+   *
+   * A session-level consumer -- the record -- has to re-attach for the next run, and
+   * `observe()` on a closed stream hands back an already-ended iterator, so it cannot simply
+   * retry. Polling for it would be the alternative, and a recorder spinning between runs is
+   * worse than one that waits to be told.
+   */
+  whenReopened(): Promise<void> {
+    if (!this.#closed) return Promise.resolve()
+    return new Promise((r) => this.#reopened.push(r))
+  }
+
   /** Ends every subscription. Emit the terminal `run_end` before calling this. */
   close(): void {
+    // Waiters are released whether or not this is a repeat close: a consumer parked on
+    // `whenReopened()` when the session ends must be let go, or teardown waits on a run that
+    // is never going to start.
+    for (const w of this.#reopened.splice(0)) w()
     if (this.#closed) return
     this.#closed = true
     for (const q of this.#subscribers) q.close()

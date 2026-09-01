@@ -1029,6 +1029,10 @@ export function projectRootFor(dir: string): string {
 export interface RecordableRelay {
   readonly cwd: string
   readonly operator: 'human' | 'agent'
+  /** Whether the session has been stopped, as opposed to a run within it having ended (#189). */
+  readonly stopped: boolean
+  /** Resolves when another run opens the stream, or when the session ends. See `whenObservable`. */
+  whenObservable(): Promise<void>
   readonly participants: readonly {
     id: string
     rank: string
@@ -1471,13 +1475,40 @@ export function recordSession(
 
   let stop: (() => void) | undefined
   const following = (async () => {
-    const stream = relay.observe({ replay: true })
-    const it = stream[Symbol.asyncIterator]()
-    stop = () => void it.return?.()
+    // The record is per SESSION; a subscription is per RUN. Those were the same thing until a
+    // console could start a second run on the same relay, at which point this loop returned
+    // with the session still going and everything after it went unrecorded -- while
+    // `relay.log` kept collecting, so the two files disagreed about the same session (#189).
+    //
+    // So it re-attaches. `written` is how far the record has got, and a re-attach replays the
+    // whole retained history and skips that many: what is left is exactly the gap, including
+    // anything said BETWEEN runs, which reaches the history but no live subscriber.
+    let detached = false
+    let written = 0
+    let skip = 0
+    let it = relay.observe({ replay: true })[Symbol.asyncIterator]()
+    stop = () => {
+      detached = true
+      void it.return?.()
+    }
     for (;;) {
       const next = await it.next()
-      if (next.done) return
+      if (next.done) {
+        if (detached || relay.stopped) return
+        // Parked rather than polled: nothing is observable until another run starts, and a
+        // recorder spinning between runs is worse than one waiting to be told.
+        await relay.whenObservable()
+        if (detached || relay.stopped) return
+        skip = written
+        it = relay.observe({ replay: true })[Symbol.asyncIterator]()
+        continue
+      }
       const e = next.value
+      if (skip > 0) {
+        skip--
+        continue
+      }
+      written++
       recorder.event(e)
       if (e.type === 'activity') {
         // `turn_end` is left in place deliberately: between turns the interesting fact is
@@ -1531,9 +1562,17 @@ export function recordSession(
       // a heartbeat still ticking during a two-second race would stamp a record the caller is
       // about to replace.
       clearInterval(heartbeat)
-      await Promise.race([following, new Promise((r) => setTimeout(r, 2_000).unref())])
+      // Detach FIRST, then drain. This used to wait for the stream to end on its own and only
+      // then detach, which was right while a stream ending meant the session was over. It no
+      // longer does: between runs the follow loop is parked waiting for the next one, so
+      // waiting for it is waiting for something this call is the end of (#189). Every test that
+      // closed a stream without stopping its relay paid the full two seconds for that.
+      //
+      // Nothing is lost by the order. `it.return()` closes the subscriber's queue, and a closed
+      // `AsyncQueue` still drains what is already in it before reporting done -- and in
+      // production `relay.stop()` has already run, so there is nothing further coming.
       stop?.()
-      await following
+      await Promise.race([following, new Promise((r) => setTimeout(r, 2_000).unref())])
       await refresh()
     },
   }

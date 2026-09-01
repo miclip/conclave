@@ -2723,6 +2723,22 @@ export class Relay {
     return this.#stream.observe(opts)
   }
 
+  /** Whether `stop()` has been called. A session-level reader uses it to know not to re-attach. */
+  get stopped(): boolean {
+    return this.#stopped
+  }
+
+  /**
+   * Resolves when the next run opens the stream, or when the session ends (#189).
+   *
+   * For a consumer whose subject is the SESSION rather than one run -- the record. Its
+   * subscription ends with each run, and `observe()` on a closed stream returns an iterator
+   * that is already done, so it needs to be told when there is something to attach to again.
+   */
+  whenObservable(): Promise<void> {
+    return this.#stream.whenReopened()
+  }
+
   /**
    * Participant events that arrived after the run ended and were refused by the stream.
    * Expected during teardown -- a child can still be emitting -- and reported rather than
@@ -5359,6 +5375,24 @@ export class Relay {
   #looped: Promise<unknown> | undefined
 
   async #loop(goal: string, handle: RunHandle | undefined): Promise<RunOutcome> {
+    // The one place a run BEGINS, mirroring `#end` being the one place it ends -- and both
+    // forms come through here, which `start()` alone did not: `run()` calls this directly.
+    //
+    // The stream was closed by the previous run's `#end`, and must have been: a child does not
+    // stop emitting because the relay decided the run was over, and those events must not land
+    // in the history of the run they came after. But a relay can be run again -- it is what the
+    // console does when you type a second goal -- and without this the second run reached no
+    // subscriber and no record while `relay.log` went on collecting it (#189).
+    //
+    // Not for a STOPPED relay: `#end('stopped')` has already run and there is no next run.
+    // `#ended` is what makes `#end` fire exactly once, and it was scoped to the RELAY rather
+    // than to the run -- so a second run never emitted `run_end`, never stopped its clock and
+    // left every subscriber waiting on a terminal event that was not coming. Reset together
+    // with the stream, because they are the same fact: this run has not ended yet.
+    if (!this.#stopped) {
+      this.#ended = false
+      this.#stream.reopen()
+    }
     this.#looping = true
     try {
       return await this.#runLoop(goal, handle)

@@ -16,7 +16,10 @@ The goal goes to the advisor only, and the advisor decides what the implementer 
 know. The implementer then says two different things to two audiences: `implementer → you`
 is narration, printed live; `implementer → advisor` is the report.
 
-Why it is shaped this way, and what has been measured: [`docs/DESIGN.md`](docs/DESIGN.md).
+In the vocabulary that settled on this in 2026: conclave is loop engineering, and at more
+than one seat it is graph engineering. Both mappings, and what they leave out, are in
+[`docs/DESIGN.md`](docs/DESIGN.md) — along with why it is shaped this way and what has been
+measured.
 
 ## Supported REPLs
 
