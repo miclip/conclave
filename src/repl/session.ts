@@ -24,7 +24,7 @@
  * prompt says so rather than implying otherwise.
  */
 
-import { describeTool } from '../relay/subagents.ts'
+import { describeSubagentWork } from '../relay/subagents.ts'
 import { formatGoalFindings, lintGoal } from '../relay/goalLint.ts'
 import {
   type Ceilings,
@@ -1243,6 +1243,38 @@ export async function runSession(opts: SessionOptions): Promise<number> {
    */
   const pendingNarration = new Map<string, string>()
   const narrating = new Set<string>()
+  /**
+   * Subagents each seat has been OBSERVED to start, and when the oldest started.
+   *
+   * The count is taken from the event rather than kept here, because the adapter is what holds
+   * the id-keyed set that makes a redelivered hook idempotent (`TurnSubagents`). A console that
+   * counted stops itself would decrement a count it never counted up: against a CLI that does
+   * not dispatch `SubagentStart`, every stop arrives unpaired.
+   *
+   * `since` IS kept here, because nothing else records it -- it is the moment this console
+   * first saw the seat go from none to some, and it goes away again when the last one stops so
+   * that a second delegation later in the turn is timed from its own start rather than from
+   * the first.
+   */
+  const subagents = new Map<string, { outstanding: number; since: number | undefined }>()
+  /** The last tool each seat was seen to call, so a subagent event can relabel without one. */
+  const lastTool = new Map<string, string>()
+  /**
+   * The one place the seat's label is decided, for both the tool-call path and the subagent
+   * lifecycle path. Two copies drifted immediately in the draft of this: the lifecycle path
+   * dropped the tool name and a seat working alongside its subagents read as doing nothing.
+   */
+  const labelFor = (participant: string): string | undefined => {
+    const tool = lastTool.get(participant)
+    const seen = subagents.get(participant)
+    const observed = seen && {
+      outstanding: seen.outstanding,
+      // The same formatter the footer uses for the seat's own clock, so the two durations on
+      // one line cannot come to disagree about what `2m39s` means.
+      ...(seen.since === undefined ? {} : { elapsed: elapsedSince(seen.since) }),
+    }
+    return describeSubagentWork(tool, observed) ?? tool
+  }
   const narrate = (participant: string, rank: string, text: string) => {
     if (!text.trim()) return
     if (!narrating.has(participant)) {
@@ -1269,6 +1301,11 @@ export async function runSession(opts: SessionOptions): Promise<number> {
         progress.done(e.participant)
         pendingNarration.delete(e.participant)
         narrating.delete(e.participant)
+        // Per TURN, like the adapter's own set: subagents belonging to a turn that has ended
+        // are not part of "what is this seat doing now", and a count carried across would
+        // describe the next turn with the last one's work.
+        subagents.delete(e.participant)
+        lastTool.delete(e.participant)
         if (startedAt) write(grey(`  ${e.participant} finished in ${elapsedSince(startedAt)}`))
         turnStartedAt.delete(e.participant)
       } else if (ev.type === 'tool_use') {
@@ -1278,10 +1315,26 @@ export async function runSession(opts: SessionOptions): Promise<number> {
         // Named once, used in both paths. The fallback is the branch with NO pinned footer,
         // which is precisely where the operator has nothing else to read -- so it was the one
         // place the raw tool name still leaked through.
-        const label = describeTool(ev.tool) ?? ev.tool
-        progress.note(e.participant, label)
+        lastTool.set(e.participant, ev.tool)
+        const label = labelFor(e.participant) ?? ev.tool
+        // A thunk, so a seat sitting in one long call still shows its subagents' clock moving.
+        progress.note(e.participant, () => labelFor(e.participant) ?? ev.tool)
         if (screen) screen.draw()
         else progress.activity(e.participant, colour, label)
+      } else if (ev.type === 'subagent_start' || ev.type === 'subagent_stop') {
+        // The count changes without any tool call happening, and it is the only thing that
+        // moves during a long delegation -- so the label is recomputed here or not at all.
+        const seen = subagents.get(e.participant)
+        const since = ev.outstanding > 0 ? (seen?.since ?? e.at) : undefined
+        subagents.set(e.participant, { outstanding: ev.outstanding, since })
+        const label = labelFor(e.participant)
+        // Nothing observed and no tool call yet: there is no sentence to write, and writing
+        // one would mean inventing it. The seat's own elapsed clock is already on the footer.
+        if (label !== undefined) {
+          progress.note(e.participant, () => labelFor(e.participant) ?? label)
+          if (screen) screen.draw()
+          else progress.activity(e.participant, colour, label)
+        }
       } else if (ev.type === 'message' && ev.role === 'assistant') {
         if (screen) screen.draw()
         else progress.activity(e.participant, colour)
@@ -2353,7 +2406,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
       // FALSIFIER, stated because it is the strongest argument against this shape: the
       // console has no general "trailing text is a message" rule and does not gain one here.
       // `/rotate <text>` and `/abort <text>` consume their text as a REASON
-      // (`src/repl/session.ts:2406`, `src/repl/session.ts:2439`) and `/pause`, `/queue`, `/audit` ignore
+      // (`src/repl/session.ts:2459`, `src/repl/session.ts:2492`) and `/pause`, `/queue`, `/audit` ignore
       // whatever follows them. So an operator who learns this from `/continue` and carries
       // it to `/pause I'll be back` still loses the sentence. That inconsistency is not
       // repaired by making `/continue` a third behaviour; it is narrowed by it, and the

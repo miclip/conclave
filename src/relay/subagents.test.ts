@@ -6,7 +6,7 @@
 
 import { strict as assert } from 'node:assert'
 import test from 'node:test'
-import { describeTool, isSubagentTool } from './subagents.ts'
+import { describeSubagentWork, describeTool, isSubagentTool } from './subagents.ts'
 import { NO_DEADLINE_CLOCKS } from '../registry/types.ts'
 
 test('the tools each agent delegates through are recognised', () => {
@@ -31,6 +31,44 @@ test('the description says what is happening and keeps the checkable fact', () =
   // parentheses because it is the true, verifiable part; the prose is what it means.
   assert.equal(describeTool('wait_agent'), 'waiting on a subagent (wait_agent)')
   assert.match(describeTool('Task')!, /waiting on a subagent/)
+})
+
+test('a counted subagent is described as counted, and a guessed one as guessed', () => {
+  // The wording is the difference between the two claims, and it is deliberate. The name list
+  // can only say "this seat is inside a tool that usually means delegation" -- so it hedges,
+  // and keeps the tool name as the checkable part. An observed count knows how many and since
+  // when, and says that instead. Neither says the other's sentence.
+  assert.equal(describeSubagentWork('Task', { outstanding: 1, elapsed: '12s' }), '1 subagent running (12s)')
+  assert.equal(describeSubagentWork('wait_agent', { outstanding: 3, elapsed: '2m39s' }), '3 subagents running (2m39s)')
+
+  // Singular and plural, because "1 subagents running" is the kind of thing an operator reads
+  // as a bug in the tool that is reporting it.
+  assert.match(describeSubagentWork('Task', { outstanding: 1, elapsed: '1s' })!, /^1 subagent /)
+  assert.match(describeSubagentWork('Task', { outstanding: 2, elapsed: '1s' })!, /^2 subagents /)
+
+  // No start time recorded: the count is still worth saying, and an invented duration is not.
+  assert.equal(describeSubagentWork('Task', { outstanding: 1 }), '1 subagent running')
+})
+
+test('a parent working alongside its subagents keeps its own tool named', () => {
+  // Delegation does not always block the parent. Replacing `Bash` with a subagent count would
+  // report a busy seat as doing nothing but waiting, which is the same class of error the name
+  // list is kept conservative to avoid -- a line that is false is worse than one that is bare.
+  assert.equal(describeSubagentWork('Bash', { outstanding: 2, elapsed: '5s' }), 'Bash · 2 subagents running (5s)')
+  // Between tool calls there is no tool to name, and the count stands on its own.
+  assert.equal(describeSubagentWork(undefined, { outstanding: 1, elapsed: '5s' }), '1 subagent running (5s)')
+})
+
+test('with nothing observed, the reading is exactly the one the console already had', () => {
+  // The live path wherever no start arrives -- a CLI that does not dispatch `SubagentStart`,
+  // and the stretch of any turn before the first one lands. A change that "improved" this
+  // branch would be changing what an operator sees for every seat that cannot be counted.
+  for (const observed of [undefined, { outstanding: 0 }, { outstanding: 0, elapsed: '9s' }]) {
+    assert.equal(describeSubagentWork('Task', observed), describeTool('Task'))
+    assert.equal(describeSubagentWork('wait_agent', observed), 'waiting on a subagent (wait_agent)')
+    assert.equal(describeSubagentWork('Bash', observed), undefined, 'an ordinary tool still gets no substitute')
+    assert.equal(describeSubagentWork(undefined, observed), undefined, 'and nothing at all is still nothing')
+  }
 })
 
 test('delegation is detected from participant events, which carry the tool name', async () => {

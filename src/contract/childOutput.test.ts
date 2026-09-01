@@ -64,6 +64,25 @@ const CASES: Record<AgentEvent['type'], { what: string; event: AgentEvent; count
       counts: true,
     },
   ],
+  subagent_start: [
+    {
+      what: 'a subagent starting is the child having delegated -- work it did, reported by its own hook',
+      event: { ...base, type: 'subagent_start', agentId: 'a1', agentType: 'Explore', outstanding: 1 },
+      counts: true,
+    },
+  ],
+  subagent_stop: [
+    {
+      what: 'a subagent finishing is the child still there to be told about it',
+      event: { ...base, type: 'subagent_stop', agentId: 'a1', paired: true, outstanding: 0 },
+      counts: true,
+    },
+    {
+      what: 'and an unpaired stop is no weaker as evidence of life -- only as evidence of a count',
+      event: { ...base, type: 'subagent_stop', agentId: 'a1', paired: false, outstanding: 0 },
+      counts: true,
+    },
+  ],
   turn_start: [
     {
       what: 'the adapter announcing it armed a clock says nothing about the child',
@@ -109,7 +128,7 @@ const CASES: Record<AgentEvent['type'], { what: string; event: AgentEvent; count
   ],
 }
 
-test('only assistant messages, tool calls and permission requests count as the child speaking', () => {
+test('only assistant messages, tool calls, permission requests and subagent lifecycle count as the child speaking', () => {
   for (const cases of Object.values(CASES)) {
     for (const c of cases) {
       assert.equal(isChildOutput(c.event), c.counts, c.what)

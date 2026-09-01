@@ -688,7 +688,7 @@ const DECLARED: Record<string, string> = {
     'The sentence is repaired rather than left standing, on this entry’s own rule. Everything ' +
     'else above is still true: the three readings, the wording, the event count as an input, and ' +
     'the pause menu’s `wait` option, which still asks reportsChildOnCpu. No assertion in this ' +
-    'file was relaxed; one citation moved with the code it pins (src/repl/session.ts:1534). ' +
+    'file was relaxed; one citation moved with the code it pins (src/repl/session.ts:1587). ' +
     'Covered in src/outcomes/liveness.test.ts on the reported numbers, and end to end through ' +
     'the console’s refusal path in src/repl/session.test.ts.',
   'a paused run keeps measuring the child, and its evidence says when it was measured (#101)':
@@ -1979,7 +1979,7 @@ async function defaultRunDocuments(): Promise<{ report: unknown; status: unknown
  * blind to that subtree is claiming more than it checks.
  *
  * Built through the real recorder: `recordSession` is what both front-ends call, and
- * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:1534
+ * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:1587
  * with the same object -- a `RunPause` the run handle raised, not one written here. Read back
  * through `main(['status', '--json'])`, so the serialisation and the reconciliation against
  * the pid are the production ones.
@@ -2275,7 +2275,7 @@ async function provoke(
  * The status document of a run paused for one given reason.
  *
  * Built through the real recorder: `recordSession` is what both front-ends call, and
- * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:1534
+ * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:1587
  * with the same object -- a `RunPause` the relay raised, not one written here. Read back
  * through `main(['status', '--json'])`, so the serialisation and the reconciliation against
  * the pid are the production ones.
@@ -2530,7 +2530,7 @@ test('default run works in the run cwd and creates no worktree', async () => {
   )
 
   // A default run with no subagents must not create any git worktree. The relay only samples
-  // the worktree list for its subagent-use report: src/relay/subagents.ts:68 defines
+  // the worktree list for its subagent-use report: src/relay/subagents.ts:113 defines
   // worktreePaths, and src/relay/relay.ts:3210-3211, :3808 and :6212 read it.
   // Prove it by exercising the run in a real temporary repository.
   const repo = mkdtempSync(join(tmpdir(), 'conclave-default-'))

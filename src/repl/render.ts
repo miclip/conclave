@@ -302,7 +302,7 @@ export class Progress {
   #frame = 0
   #started = new Map<string, number>()
   #lastPrinted = new Map<string, number>()
-  #detail = new Map<string, string>()
+  #detail = new Map<string, string | (() => string)>()
 
   /**
    * `enabled` gates nothing about the cursor, because this writes no escape codes — it is
@@ -348,7 +348,13 @@ export class Progress {
     const frame = dim(Progress.SPINNER[this.#frame]!)
     return active
       .map(([participant, startedAt]) => {
-        const detail = this.#detail.get(participant)
+        const held = this.#detail.get(participant)
+        // Resolved HERE rather than at note() time, because this line is redrawn on a timer
+        // and a detail that contains a duration has to be recomputed to contain a true one.
+        // The elapsed beside the participant already works this way; a detail frozen at the
+        // moment of the last event would sit next to it disagreeing, which is worse than
+        // carrying no duration at all.
+        const detail = typeof held === 'function' ? held() : held
         const suffix = detail ? ` ${dim('·')} ${dim(detail)}` : ''
         return `${frame} ${colour(participant)} ${dim(elapsedSince(startedAt))}${suffix}`
       })
@@ -370,8 +376,15 @@ export class Progress {
     this.#frame = (this.#frame + 1) % Progress.SPINNER.length
   }
 
-  /** Remember what a participant is doing, without printing anything. */
-  note(participant: string, detail: string): void {
+  /**
+   * Remember what a participant is doing, without printing anything.
+   *
+   * A function may be given instead of a string when the detail contains something that
+   * CHANGES while the participant does not -- how long its subagents have been running is the
+   * case this exists for. It is called on every draw, so it must stay cheap and must not
+   * depend on anything the caller is midway through updating.
+   */
+  note(participant: string, detail: string | (() => string)): void {
     this.#detail.set(participant, detail)
   }
 
