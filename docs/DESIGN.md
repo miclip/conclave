@@ -34,6 +34,42 @@ The reasoning is in [`DESIGN-BRIEF.md`](../DESIGN-BRIEF.md).
 
 ---
 
+## Loop engineering, and graph engineering
+
+Two names the field settled on in mid-2026, after most of this was already built. They are
+useful here for the same reason any vocabulary is: they say what kind of thing this is to
+someone who has not read the code.
+
+**Loop engineering** is designing the cycle an agent repeats — run, verify, retry, stop — so
+that a human is not the one deciding each next instruction. **Graph engineering** is what you
+reach for when one loop is not enough: specialised nodes, edges that route work between them,
+and shared state travelling along those edges. Every node in a graph is still a loop.
+
+Conclave is the first and has grown into the second:
+
+| the term | what it is here |
+|---|---|
+| the loop | goal → advisor → instruction → implementer → report → advisor |
+| who closes it | code. There is no orchestrator model and no summariser |
+| verify | `--checks`, required, and a rotation rolled back when a replacement cannot reproduce them |
+| stop | four ceilings, two deadlines, and a graded verdict with the evidence behind it |
+| nodes | seats, in roles the operator defines |
+| edges | the task queue, and the advisor's own routing decisions |
+| shared state | the integration tree, checked after every merge and not only per seat |
+
+The advisor is the node that holds the goal, and it is the one deciding which edge is taken
+next: it is inside the loop rather than a step in it. That is the whole reason the goal goes
+to it alone — a node that routes work has to know what the work is for, and one that merely
+executes does not.
+
+What the vocabulary does not capture is the part this project is actually about. A graph says
+which node ran; it does not say whether to believe what came back. `outcomes/` grades every
+turn by the evidence available for it — a `Stop` hook proves completion, a clock reading does
+not — and a run that cannot be graded better than `reasoned_but_unverified` says so. The
+routing is the easy half.
+
+---
+
 ## The ideas that shaped it
 
 **A ranked committee, not a panel of peers.** `human > advisor > implementer`. Rank breaks
