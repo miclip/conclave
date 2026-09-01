@@ -10,6 +10,30 @@ including the parts that contradicted expectations.
 
 ---
 
+## The premise
+
+Two models with different training and different harness prompts have different blind
+spots. The advisor answers architectural questions while the implementer holds the
+implementation context, and never accumulates that context itself.
+
+Different *models*, specifically. Two instances of one model, given no shared context, still
+share their priors — this project has watched two of them make the same wrong call about the
+same code independently, and a third model in the advisor seat is what caught it. Fresh
+context decorrelates reasoning; it does not decorrelate training.
+
+That is also the argument for putting the expensive model where the judgement is rather than
+where the volume is. The implementer reads files, runs suites and edits; the advisor reads a
+report and writes an instruction. Those are not the same token bill.
+
+It is not a coding agent, and not an API harness. The children are the real CLIs: Claude
+Code and Codex on subscription auth, OpenCode and Kimi on whatever credential each of them
+wants. That distinction is the line the project holds — a CLI may need an API key, Conclave may
+not have one. It is not consensus-by-committee either. Two models that cannot run the
+code converge on whoever sounds most confident, so the design resists agreement-seeking.
+The reasoning is in [`DESIGN-BRIEF.md`](../DESIGN-BRIEF.md).
+
+---
+
 ## The ideas that shaped it
 
 **A ranked committee, not a panel of peers.** `human > advisor > implementer`. Rank breaks
@@ -74,7 +98,7 @@ And the response is not automatic. `compaction → rotation candidate` is the de
 pauses and the human decides. Defaulting to automatic rotation would encode *"compaction
 predicts degradation"* as settled on the strength of evidence that only shows *"rotation
 works"* — two different claims, and only the second has evidence. See
-[`spikes/experiments/03-compaction-degradation.md`](spikes/experiments/03-compaction-degradation.md).
+[`spikes/experiments/03-compaction-degradation.md`](../spikes/experiments/03-compaction-degradation.md).
 
 **A terminal event is never bare.** `Stop` proves normal completion and nothing else.
 Every terminal statement carries an outcome, a confidence grade (`proven` / `inferred` /
@@ -113,6 +137,132 @@ adapter as `observed` / `observed_historically` / `inferred_from_documented_even
 `reasoned_but_unverified` / `unsupported`, and *fails* a claim of `observed` with no
 fixture — or one whose only fixture came from an older CLI version. Finding evidence
 produces a recommendation, never an automatic upgrade.
+
+---
+
+---
+
+---
+
+## What works
+
+- Four CLIs under one `AgentSession` contract. Claude Code and Codex have eight live
+  acceptance flows each; OpenCode and Kimi are graded against recorded runs.
+- A two-party relay: prose only in both directions, a ranked committee, and human asides
+  addressed to one participant with an audit trail of who was excluded.
+- Pauses as decision points — rotation candidate, advisor escalation, authority conflict,
+  and an implementer question that would change the build — resolved from the console or from
+  `RunHandle`.
+- Rotation as a transaction: quiesce the old implementer, the advisor authors a handoff,
+  the replacement reproduces the verification, and it rolls back if it cannot. Both
+  branches proven live, rollback included.
+- Subagents, which both participants may use as they judge. A subagent that modifies
+  anything works in its own git worktree.
+- Concurrent implementers. Seats run at the same time, each in its own worktree, dispatched
+  by a task queue rather than by rounds — so a seat that finishes in four minutes does not
+  wait for one taking forty. Completed work merges into the integration tree; a conflict
+  becomes a repair task on the seat that produced it rather than a question for you, and
+  that seat's work stays on its own branch throughout.
+- Checks against the *integration* tree, not only per seat. Two seats can produce work that
+  merges without conflict and fails together — one moves lines the other's new test cited.
+  A failure after a mid-run merge is a repair task naming both contributing tasks; after the
+  final merge it is a reported outcome, because no seat is left to fix it.
+- Seat-local rotation. A degraded seat is replaced without disturbing the others, verified
+  in its own worktree, and an acceptance failure with no observable output at all stops
+  retrying rather than rolling back repeatedly.
+- A reviewer seat, opt-in with `--reviewer`. Rank implementer, so its rejection creates work
+  rather than authority. It reads the diff and the tree, never the producing seat's summary.
+- The advisor can tell you something without stopping the run. A line beginning `NOTE:` is
+  recorded for you and withheld from the implementer, while the rest of the reply is still
+  the instruction. `ESCALATE` remains for when it actually needs an answer before continuing.
+- Subagent work is named rather than shown as a raw tool call, and the run records whether
+  delegation happened without any worktree being created — the shape a violation of the
+  worktree rule takes. It is reported, never enforced: the repository cannot tell a
+  subagent's write from its parent's.
+- Unresolved items carried into the summary. A participant ending a report with a line
+  beginning `FLAG:` has it lifted verbatim into the final lines, so a run that completed
+  while something stayed unchecked does not read as unqualified success.
+- Build-changing scope questions paused for a human answer. A line beginning `UNANSWERED:`
+  in an implementer report means it had to choose a build-changing direction without an
+  answer; the run pauses until the human settles it, while choices about how to build remain
+  the implementer’s. It is distinct from `FLAG:`, which only qualifies the result.
+- Outcomes graded by evidence, and the four agents do not offer the same evidence. `Stop`
+  proves normal completion on Claude Code and Kimi, `step_finish reason=stop` on OpenCode,
+  `task_complete` on Codex; anything weaker is labelled as what it is. A run exiting 0 is
+  not evidence a turn finished, and is not treated as any. `npm run conformance` prints
+  each agent's claims with what backs them.
+
+`--operator agent` tells the advisor a machine is answering escalations: ask readily, but
+about premises and unobservable criteria rather than permission — and treat the answer as an
+opinion with authority over the goal, not as independent confirmation. It is declared rather
+than detected, because an agent and a human at a terminal are indistinguishable from inside
+the relay.
+
+The goal is linted before anything starts — an ask with nothing observable in it cannot be
+graded better than `reasoned_but_unverified` however well the work goes, and a goal is the
+last artefact you can fix for free. Warnings by default; `--strict-goal` refuses.
+
+So is the seating. A seat whose CLI is not installed, or which names a model its CLI does not
+have, is refused before anything is spawned, registered or written — not twelve minutes later
+as a watchdog, and not on the first turn as an abnormal exit. Only the agents this run seats
+are checked.
+
+`--dry-run` resolves configuration, checks and arguments and starts nothing. It is on both
+commands and prints the same plan line for line; on the console it stops above the session
+lock, so it registers no hooks, writes no permission mode, takes no lock and creates no
+participant, and it says the goal would be asked for when you gave it none. It is refused
+together with `--bypass` there, because applying that would leave a permission mode written by
+an invocation that started nothing and skipping it would print launch arguments the real run
+would not use. `relay` refuses to run outside a git repository unless you pass `--force` —
+attribution and rotation both diff the tree, so neither means anything without one.
+
+`--rounds` bounds how many times the advisor gets to steer — one pass of the loop is one
+advisor turn — and it is the only bound a run has unless you set another. Four ceilings are
+separate from it, and all four stop a run that is still going and exit non-zero, because a
+silent stop is indistinguishable from a run that simply finished:
+
+| ceiling | bounds |
+|---|---|
+| `--max-turns` | advisor turns, whatever they cost |
+| `--max-minutes` | time the run spends WORKING |
+| `--max-queue-depth` | messages waiting to be delivered |
+| `--max-concurrent-seats` | seats working at once |
+
+Passing `--max-turns` when you meant `--rounds` is accepted and bounds something else, so
+every launch prints what each ceiling is set to and `status --json` carries them. That is the
+whole reason they are printed: two of these are easy to confuse with `--rounds`, and a run
+bounded by something other than what you typed looks identical from outside to one that was
+not bounded at all.
+
+`--max-minutes` counts the time the run is WORKING: time suspended at a pause, waiting on an
+operator who may be asleep, is not charged to it. A ceiling exists to stop a run that has gone
+wrong, and a run interrupted overnight has not gone wrong.
+
+A ceiling bounds the RUN; a deadline bounds a TURN. `--turn-timeout` is how long a seat's turn
+may take before the adapter grades it `timed_out`, and `--silence-timeout` is how long it may
+go without saying anything at all. The second is the one that matters for a child that stopped
+working: a stalled turn stops writing its transcript long before it stops being late, so the
+silence clock reaches it in minutes where the absolute one would take the better part of an
+hour. Both are resolved once and printed in the launch banner, the run report and
+`status --json`, so a run that ended at a deadline can say which deadline.
+
+Three more flags exist for reproducing a fault rather than for ordinary use. `--settle` widens
+how long a turn's transcript is given to catch up with the hook that ended it, and `--salvage`
+how much longer an empty report buys before it is treated as lost — the transcript lags a long
+turn the same way whoever is watching does. `--record` tees the rendered bytes to a file, so a
+display fault can be read in the bytes rather than guessed at from a screenshot.
+
+Every message is recorded to `.conclave/runs/` as it happens, and `--resume <log>` replays it
+into both seats. `relay` ends at every pause point by design, so the normal way a long run
+stops is with work still in flight — resuming continues it rather than having you transcribe
+what was established into a new goal, where anything you miss is silently re-derived or
+silently lost.
+
+`conclave relay --json` prints the run as a structured record rather than prose: the outcome,
+each turn's verdict with the confidence and provenance behind it, the rotation counters, and
+anything a participant flagged as unresolved. Every human-facing line moves to stderr, so
+stdout parses in full. That is the interface an agent driving Conclave needs — confirming a
+run should not mean grepping a transcript.
 
 ---
 
