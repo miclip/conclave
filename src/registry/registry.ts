@@ -53,6 +53,25 @@ export class AgentRegistry {
     return { ...this.#roles }
   }
 
+  /**
+   * One role's definition, or `undefined` if this registry has never heard of the id.
+   *
+   * `resolve` answers this for a whole spec and THROWS on an unknown id, which is right where
+   * a seat is being validated and wrong for a caller that only wants to read a declaration
+   * back: a run already under way must not end because something asked a question about one of
+   * its own seats.
+   *
+   * The authority is this map and not `BUILTIN_ROLES`. `registerRole` takes an arbitrary
+   * definition, so any role id at all can declare `mutatesWorkspace: false` or
+   * `contextPolicy: 'thin'`, and a reader that consulted the built-ins with a default would
+   * miss every such role while still answering correctly for `advisor`.
+   *
+   * Not copied, matching `roles` above, which copies the map and not the definitions in it.
+   */
+  roleOf(id: RoleId): RoleDefinition | undefined {
+    return this.#roles[id]
+  }
+
   has(id: string): boolean {
     return this.#agents.has(id)
   }

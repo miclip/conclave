@@ -32,7 +32,7 @@ import type { ParticipantLaunch } from '../registry/launch.ts'
 import type { ForceRecord, RunOutcome } from './run.ts'
 import type { RotationRecord } from './rotationIntent.ts'
 import { reportedTargeting, type ReportedTargeting } from './targeting.ts'
-import type { Relay, RunDeadlines } from './relay.ts'
+import type { Relay, RunDeadlines, UnexpectedWrite } from './relay.ts'
 
 /**
  * Bumped when a consumer would break. Present from the first version, because adding it
@@ -219,6 +219,31 @@ export interface RunReport {
    */
   subagents: { delegated: boolean; worktreesCreated: string[] }
   /**
+   * Turns taken by a seat whose ROLE declares it does not write, during which the tree changed.
+   *
+   * The second key in this document that is ABSENT rather than reported when it has nothing to
+   * say, and like `targeting` the exception is argued rather than assumed -- but on different
+   * grounds, and the grounds are the point.
+   *
+   * `flags: []` is a claim: the seats were asked and said nothing is outstanding. `rotations: 0`
+   * is a claim: the watch was armed and never fired. An empty array here would NOT be a claim,
+   * because the instrument cannot make it. The per-turn diff sees only paths that BECAME dirty,
+   * so a non-writing seat that edits a file already dirty leaves nothing behind; and it sees
+   * only inside turn boundaries, so a write between turns is invisible. "We looked and found
+   * nothing" is a sentence this cannot say, and an empty array is how a reader would hear it.
+   *
+   * Absence says the weaker and true thing: nothing was observed. Presence says the only thing
+   * this document is entitled to say -- that on these turns, in these roles, these paths
+   * appeared. Read `UnexpectedWrite` before drawing a conclusion from either: on a shared root,
+   * which is every root on a default run, the paths are not attributed to the seat and the
+   * entry says so.
+   *
+   * Consequently the default run's key set is unchanged, which is a consequence and not the
+   * reason. A field made conditional to keep a pinned baseline green would be exactly the
+   * decision `defaultUnchanged.test.ts` exists to force into the open.
+   */
+  unexpectedWrites?: UnexpectedWrite[] | undefined
+  /**
    * What participants say is left unresolved. Empty is a claim, not a gap.
    *
    * Reconciled, not accumulated (#131): a seat is shown its own flags when the advisor calls
@@ -333,6 +358,10 @@ export async function runReport(relay: Relay, input: ReportInput): Promise<RunRe
   // calls could not disagree today, and a test asserting `'targeting' in report` against a
   // condition evaluated twice is a test one refactor away from meaning nothing.
   const targeting = reportedTargeting(relay.targetingWatch)
+  // Built once, for the reason above it: this decides whether a KEY exists, and a condition
+  // evaluated twice is a condition two callers can answer differently. The accessor already
+  // copies, so what lands in the document is not a list the relay still owns.
+  const unexpectedWrites = relay.unexpectedWrites()
   return {
     schema: REPORT_SCHEMA,
     goal: input.goal,
@@ -380,6 +409,10 @@ export async function runReport(relay: Relay, input: ReportInput): Promise<RunRe
     // constructor, and widening it means editing `ReportedTargeting`.
     ...(targeting ? { targeting } : {}),
     subagents: relay.subagentUse(),
+    // Spread away entirely when nothing was observed, per the argument at the field's
+    // declaration: an empty array here would read as "we looked and found nothing", which is a
+    // claim this instrument is not able to make.
+    ...(unexpectedWrites.length > 0 ? { unexpectedWrites } : {}),
     // Through the relay's own views, which apply the reconciliation. Splitting `relay.flags`
     // here would be a second answer to "is this still outstanding", and the rule at the top of
     // this file is that nothing is re-derived. The arrays are rebuilt per entry either way, so
