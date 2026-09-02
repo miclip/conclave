@@ -124,13 +124,13 @@ test('Claude allows exactly the work-mode changes and refuses exactly the rest',
 
   assert.deepEqual(
     by('allowed'),
-    ['/compact', '/loop'],
-    '/compact preserves the conversation by summarising it; /loop changes how turns are dispatched. Nothing else found changes a mode without ending continuity or rewriting the operator’s setup',
+    ['/compact'],
+    '/compact preserves the conversation by summarising it, and nothing else found changes a mode without ending continuity, rewriting the operator’s setup, or putting the seat’s turns beyond the relay’s accounting',
   )
   assert.deepEqual(
     by('refused'),
-    ['/clear', '/config', '/exit', '/hooks', '/model', '/permissions', '/quit', '/rewind'],
-    'each of these either ends or discards the continuity the relay believes it has, or changes what the operator configured',
+    ['/clear', '/config', '/exit', '/hooks', '/loop', '/model', '/permissions', '/quit', '/rewind'],
+    'each of these either ends or discards the continuity the relay believes it has, changes what the operator configured, or -- /loop alone -- leaves the seat taking turns no counter charges',
   )
 })
 
@@ -177,6 +177,46 @@ test('/model is refused because the launch-model report is immutable, not merely
       `${agent} must name the report that becomes false, or the refusal reads as taste`,
     )
   }
+})
+
+test('/loop is refused for accounting, and stays a declared command checked against the bundle', () => {
+  // The reversal this test exists for: #200 declared /loop ALLOWED as a work-mode change, and
+  // it is one -- the seat, its context and its history all survive it. What it fails is a
+  // clause that rule did not have. `Relay#exchangeTurn` returns on the first `turn_end` after
+  // its send and increments `#turnsTaken` once per dispatch, so a turn the seat gives itself
+  // is charged to neither counter that bounds a run.
+  //
+  // The DISPOSITION is not asserted here; the two lists above own it, and a copy of that
+  // assertion would only mean no mutation could kill either one alone. What is asserted is the
+  // reason, which nothing else reads: an entry that flipped to a refusal while keeping the old
+  // work-mode prose would read as a mistake rather than as a decision, and the next person to
+  // weigh it would weigh the wrong argument.
+  // `?? ''` rather than an `assert.ok` to narrow. A narrowing assertion pins nothing -- the
+  // lists above already require this entry to exist -- and the empty string fails both matches
+  // below anyway, so dropping the entry is still caught here without an assertion of its own.
+  const policy = declared(defaultRegistry().get('claude').commandPolicy, 'claude')
+  const reason = policy.commands.find((c) => c.command === '/loop')?.reason ?? ''
+  assert.match(
+    reason,
+    /--max-turns/,
+    'the reason must name the counter that stops bounding the run, not restate a continuity or configuration clause it does not fail',
+  )
+  assert.match(reason, /--rounds/, 'and the other one: they are two counters, and a looped turn is absent from both')
+
+  // The rule prose and the policy must not answer this in opposite directions. `/loop` stood in
+  // the ALLOWED clause on `CommandPolicy` as its Claude exemplar; a refusal here with that
+  // sentence still there is a rule contradicting its own application.
+  // Bounded by the NEXT BULLET rather than by the next clause's opening words, which is not
+  // fussiness: the refusal clause added for /loop names /loop, and anchoring on a named clause
+  // put it inside the slice and failed this assertion for the opposite of the reason it exists.
+  // A bullet boundary holds however the clauses are ordered or worded.
+  const rule = readFileSync(join(import.meta.dirname, 'types.ts'), 'utf8')
+  const from = rule.indexOf('A work-mode change is ALLOWED')
+  const allowedClause = rule.slice(from, rule.indexOf('\n *   - ', from))
+  assert.ok(
+    !allowedClause.includes('/loop'),
+    'the rule’s allowed-work-mode clause must not still offer /loop as its example of one',
+  )
 })
 
 test('/hooks is refused on the ground that it can remove conclave’s own turn-completion evidence', () => {
@@ -336,10 +376,13 @@ test('an allowed command is allowed, and the ruling carries the reason it was al
 })
 
 test('a command allowed on one adapter is refused on the other when only one declares it', () => {
-  // /loop is a Claude skill and /review is a Codex command; neither exists on the other. The
-  // policy is per adapter, so the same line must not resolve the same way for both.
-  assert.equal(ruleOnCommand(CLAUDE_COMMAND_POLICY, '/loop').verdict, 'allowed')
-  assert.equal(ruleOnCommand(CODEX_COMMAND_POLICY, '/loop').verdict, 'refused')
+  // /review is a Codex command and does not exist on Claude. The policy is per adapter, so the
+  // same line must not resolve the same way for both.
+  //
+  // ONE DIRECTION ONLY, now that /loop is refused on Claude: every command Claude allows,
+  // Codex allows too, so this is the whole of the asymmetry that is left to demonstrate. It is
+  // deliberately not shored up with /loop, whose disposition belongs to the list test above --
+  // an assertion here would make that list untestable in isolation.
   assert.equal(ruleOnCommand(CODEX_COMMAND_POLICY, '/review').verdict, 'allowed')
   assert.equal(ruleOnCommand(CLAUDE_COMMAND_POLICY, '/review').verdict, 'refused')
 })
@@ -361,10 +404,13 @@ test('an undeclared command is refused, and is distinguishable from a declared r
 })
 
 test('a refused command nested in an allowed one is refused', () => {
-  // `/loop 5m /clear` is a `/loop` by its first token and a repeating `/clear` by its effect.
-  // A check that read only the head would let the plainest refusal in the policy through the
-  // middle of its plainest allowance, once per interval.
-  const ruling = ruleOnCommand(CLAUDE_COMMAND_POLICY, '/loop 5m /clear')
+  // `/compact then /clear` leads with the policy's one allowance and carries its plainest
+  // refusal in the tail. A check that read only the head would let the second one through.
+  //
+  // The original fixture was `/loop 5m /clear`, which said this better -- the refusal ran once
+  // per interval -- and cannot be used now that `/loop` is itself refused: the ruling would
+  // stop at the head and prove nothing about the tail.
+  const ruling = ruleOnCommand(CLAUDE_COMMAND_POLICY, '/compact then /clear')
   assert.equal(ruling.verdict, 'refused')
   assert.equal(ruling.command, '/clear', 'the ruling must name the token that decided it, not the one that led')
 })

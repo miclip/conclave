@@ -27,6 +27,8 @@ import {
   CAPABILITY_DESCRIPTORS,
   instructionBriefingForSeats,
 } from '../registry/instructionBriefing.ts'
+import { narrowCapabilities, narrowPolicy, type OperatorDenials } from '../registry/operatorDenied.ts'
+import type { CommandPolicy, InstructionCapabilities } from '../registry/types.ts'
 import { launchRecordFor, type ParticipantLaunch } from '../registry/launch.ts'
 import { refuseMissingCommands } from '../registry/executables.ts'
 import { refuseUnknownModels } from '../registry/models.ts'
@@ -479,6 +481,15 @@ export interface RelayOptions {
    * puts the intended length into the record.
    */
   ceilings?: Ceilings | undefined
+  /**
+   * What the operator switched off for this project, from `.conclave/config.json` (#203).
+   *
+   * ABSENT IS THE IDENTITY, and it is spread in by both front-ends only when a project denies
+   * something, so a run in a project with no maps reaches here with the options it always had.
+   * Deny-only: see `src/registry/operatorDenied.ts` for why a config may narrow an adapter's
+   * declarations and may never widen them.
+   */
+  denied?: OperatorDenials | undefined
   /** The advisor. Steers, and cannot see the implementer's tools. */
   lead: ParticipantSpec
   /**
@@ -4815,7 +4826,7 @@ export class Relay {
       else if (!shouldWait && offered !== -1) pause.options.splice(offered, 1)
       // The status file is written from the LIVE pause object on any event, so an in-place
       // change reaches disk on the next one -- and a pause is precisely when nothing else is
-      // flowing. Same reasoning as `/wait` in the console (`src/repl/session.ts:2437`), and the
+      // flowing. Same reasoning as `/wait` in the console (`src/repl/session.ts:2441`), and the
       // reader who needs it most is the one polling from outside.
       this.#stream.emit({ type: 'liveness', pause })
       if (last) return stop()
@@ -6324,7 +6335,8 @@ export class Relay {
       return
     }
 
-    const policy = this.#opts.registry.get(impl.agent).commandPolicy
+    // The SAME view the opening briefing listed. See `#effectivePolicy`.
+    const policy = this.#effectivePolicy(impl.agent)
     for (const line of lines) {
       const ruling = ruleOnCommand(policy, line)
       if (ruling.verdict === 'refused') {
@@ -6403,6 +6415,26 @@ export class Relay {
    * at each of them. The counts come from `dispatch.ts` for the same reason the transitions
    * do: this class owns the objects, that module owns what their states mean.
    */
+  /**
+   * The command policy this run actually uses for one agent: the registry's, less what the
+   * operator denied.
+   *
+   * ONE FUNCTION FOR BOTH READERS, and that is the whole reason it exists rather than being
+   * inlined twice. The advisor's briefing lists what it may ask for and `#submitAdvisorCommands`
+   * decides what it gets; two narrowings of the same policy could differ by an edit to one of
+   * them, and the failure would be silent in the direction that matters -- an advisor spending
+   * turns asking for a verb the block offered and delivery refuses. `capabilityBriefing.test.ts`
+   * pins that the list shown is the list enforced.
+   */
+  #effectivePolicy(agent: string): CommandPolicy | undefined {
+    return narrowPolicy(this.#opts.registry.get(agent).commandPolicy, this.#opts.denied)
+  }
+
+  /** The capabilities this run briefs for one agent: the registry's, less what was denied. */
+  #effectiveCapabilities(agent: string): InstructionCapabilities | undefined {
+    return narrowCapabilities(this.#opts.registry.get(agent).instructionCapabilities, this.#opts.denied)
+  }
+
   #ceilingState(): CeilingState {
     return {
       // The same getter a report reads, not a second computation of it. Two expressions for one
@@ -6502,9 +6534,17 @@ export class Relay {
         `${((b) => (b === '' ? '' : `${b}\n\n`))(
           instructionBriefingForSeats(
             CAPABILITY_DESCRIPTORS,
-            seats.map((s) => ({
+            seats.map((s, i) => ({
               id: s.id,
-              declared: this.#opts.registry.get(s.agent).instructionCapabilities,
+              declared: this.#effectiveCapabilities(s.agent),
+              // THE LEAD SEAT ONLY, and the asymmetry is delivery's rather than this block's.
+              // `#submitAdvisorCommands` types into `#implementers()[0]`: a `COMMAND:` line
+              // names no seat and `MULTI_SEAT_BRIEFING`'s addressing syntax has no form for a
+              // directive. Listing a policy under any other seat would offer the advisor a
+              // lever that silently operates a different one -- the exact failure the per-seat
+              // attribution in this block exists to prevent -- so the seats that cannot be
+              // reached are given no commands rather than a caveat.
+              ...(i === 0 ? { commands: this.#effectivePolicy(s.agent) } : {}),
             })),
           ),
         )}` +

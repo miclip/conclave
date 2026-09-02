@@ -23,7 +23,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 import { FakeRotationSession } from '../rotation/fakeSession.ts'
 import { AgentRegistry } from '../registry/registry.ts'
-import { NO_DEADLINE_CLOCKS, type GradedClaim, type InstructionCapabilities } from '../registry/types.ts'
+import { NO_DEADLINE_CLOCKS, type CommandPolicy, type GradedClaim, type InstructionCapabilities } from '../registry/types.ts'
 import { CAPABILITY_DESCRIPTORS } from '../registry/instructionBriefing.ts'
 import { Relay } from './relay.ts'
 
@@ -56,7 +56,18 @@ function say(key: keyof InstructionCapabilities): string {
 interface AgentSpec {
   /** Absent means the definition carries no declaration at all, as every agent did before #192. */
   declares?: InstructionCapabilities | undefined
+  /** Absent means the definition carries no command policy, as every agent did before #200. */
+  policy?: CommandPolicy | undefined
   sessions: FakeRotationSession[]
+}
+
+/** One allowed verb, invented, so a fixture never depends on what a real CLI still ships. */
+function policyAllowing(command: string): CommandPolicy {
+  return {
+    kind: 'declared',
+    sourceVersion: 'test',
+    commands: [{ command, disposition: 'allowed', reason: `${command} is allowed in this test.`, source: 'test' }],
+  }
 }
 
 function registryOf(agents: Record<string, AgentSpec>): AgentRegistry {
@@ -82,6 +93,7 @@ function registryOf(agents: Record<string, AgentSpec>): AgentRegistry {
       },
       deadlines: NO_DEADLINE_CLOCKS,
       ...(spec.declares ? { instructionCapabilities: spec.declares } : {}),
+      ...(spec.policy ? { commandPolicy: spec.policy } : {}),
       launch: { command: agent, baseArgs: [] },
       async create() {
         const next = remaining.shift()
@@ -125,7 +137,7 @@ test('a seat whose agent declares reaches the advisor with its claims', async ()
     {
       codex: { sessions: [lead] },
       claude: {
-        declares: { subagents: claim(), autonomousLoop: claim() },
+        declares: { subagents: claim(), backgroundTasks: claim() },
         sessions: [new FakeRotationSession('impl', 'claude', [])],
       },
     },
@@ -134,7 +146,7 @@ test('a seat whose agent declares reaches the advisor with its claims', async ()
   )
   assert.match(opening, /CAN BE INSTRUCTED TO DO THE FOLLOWING/, 'the block is present')
   assert.ok(opening.includes(say('subagents')), 'and carries what was declared')
-  assert.ok(opening.includes(say('autonomousLoop')))
+  assert.ok(opening.includes(say('backgroundTasks')))
   assert.ok(!opening.includes(say('boundedIteration')), 'and only what was declared')
 })
 
@@ -165,7 +177,7 @@ test('a run whose agents declare nothing supported is byte-identical to one befo
   assert.doesNotMatch(undeclared, /\n\n\n/, 'an empty block must not cost the run a paragraph break')
   assert.equal(await baseline({}), undeclared, 'an empty declaration adds nothing')
   assert.equal(
-    await baseline({ subagents: { ...claim(), supported: false }, autonomousLoop: { ...claim(), supported: false } }),
+    await baseline({ subagents: { ...claim(), supported: false }, backgroundTasks: { ...claim(), supported: false } }),
     undeclared,
     'a declaration of nothing but false adds nothing',
   )
@@ -283,4 +295,159 @@ test('the advisor’s and the reviewer’s own declarations never reach the bloc
   assert.ok(!opening.includes(say('sessionBackgrounding')), 'the advisor’s own agent is not')
   assert.ok(!opening.includes(say('asyncPromptSubmission')), 'nor the reviewer’s')
   assert.ok(!opening.includes('SEAT reviewer'), 'and the reviewer is not named as an instructable seat')
+})
+
+test('a claim this orchestrator cannot act on costs the run it is declared for nothing', async () => {
+  // `src/registry/instructionBriefing.test.ts` pins the renderer: which row is withheld, and
+  // that neither its instruction nor its term reaches a block. This pins the only thing a run
+  // can add -- that the withholding survives the whole path from an agent definition, through
+  // the seat it fills, into the opening prompt. A filter that lived in the renderer and was
+  // bypassed by the relay's own composition (passing a descriptor list it had stripped, say, or
+  // labelling a seat whose block came back empty) would leave that unit test green and brief
+  // the advisor anyway.
+  //
+  // ONE ASSERTION, and it is the strong form. A seat whose only supported claim is the withheld
+  // one must produce an opening BYTE-IDENTICAL to a seat that declares nothing at all. Weaker
+  // forms -- "the instruction is absent" -- pass while the run pays for a heading over an empty
+  // list, and the absence itself is already the renderer's test to own.
+  const declaring = new FakeRotationSession('lead', 'codex', ['DONE'])
+  const withOnlyTheWithheldClaim = await openingPrompt(
+    {
+      codex: { sessions: [declaring] },
+      claude: {
+        declares: { autonomousLoop: claim() },
+        sessions: [new FakeRotationSession('impl', 'claude', [])],
+      },
+    },
+    soloSeating(),
+    declaring,
+  )
+  const silent = new FakeRotationSession('lead', 'codex', ['DONE'])
+  const undeclared = await openingPrompt(
+    {
+      codex: { sessions: [silent] },
+      claude: { sessions: [new FakeRotationSession('impl', 'claude', [])] },
+    },
+    soloSeating(),
+    silent,
+  )
+  assert.equal(withOnlyTheWithheldClaim, undeclared, 'the withheld claim costs the run nothing')
+})
+
+
+test('a seat’s allowed commands reach the advisor, and only the seat a command would be typed into', async () => {
+  // Delivery is narrower than declaration and the block must not paper over it.
+  // `#submitAdvisorCommands` types into `#implementers()[0]` -- a `COMMAND:` line names no seat
+  // and the addressing syntax has no form for a directive -- so a policy listed under any other
+  // seat would offer a lever that silently operates a different one.
+  const lead = new FakeRotationSession('lead', 'codex', ['DONE'])
+  const opening = await openingPrompt(
+    {
+      codex: { sessions: [lead] },
+      claude: {
+        declares: { subagents: claim() },
+        policy: policyAllowing('/first-seat'),
+        sessions: [new FakeRotationSession('a', 'claude', [])],
+      },
+      opencode: {
+        policy: policyAllowing('/second-seat'),
+        sessions: [new FakeRotationSession('b', 'opencode', [])],
+      },
+    },
+    {
+      lead: { id: 'advisor', agent: 'codex', role: 'advisor' },
+      implementer: { id: 'implementer', agent: 'claude', role: 'implementer' },
+      implementers: [
+        { id: 'implementer', agent: 'claude', role: 'implementer' },
+        { id: 'implementer-2', agent: 'opencode', role: 'implementer' },
+      ],
+      maxAdvisorTurns: 1,
+    },
+    lead,
+  )
+  // ONE ASSERTION, and it is the negative one. That the reachable seat's commands DO arrive is
+  // the test below's -- proved there on a solo seat, where it is the whole of what that test
+  // says -- and asserting it here too would leave the wiring untestable in isolation: the one
+  // mutation that removes it would fail both.
+  assert.ok(!opening.includes('/second-seat'), 'a seat no command can reach is offered no commands')
+})
+
+test('a policy that allows nothing costs the run nothing, and one with no capabilities still briefs', async () => {
+  const withCommandsOnly = new FakeRotationSession('lead', 'codex', ['DONE'])
+  const commandOnly = await openingPrompt(
+    {
+      codex: { sessions: [withCommandsOnly] },
+      // No `declares` at all: the block here is the command half on its own.
+      claude: { policy: policyAllowing('/only-command'), sessions: [new FakeRotationSession('impl', 'claude', [])] },
+    },
+    soloSeating(),
+    withCommandsOnly,
+  )
+  // The VERB, not the bullet around it. Asserting the rendered shape here would make the
+  // renderer's own test for that shape untestable in isolation -- one format change would fail
+  // both -- and the shape is not what this test is about.
+  assert.ok(
+    commandOnly.includes('/only-command'),
+    'a seat with a policy and no capability claims still gets a block, carrying its commands',
+  )
+
+  // And a policy holding nothing but refusals is as silent as no policy at all -- byte-identical
+  // to an agent that predates both fields, not merely free of the refused verb.
+  const refusing = new FakeRotationSession('lead', 'codex', ['DONE'])
+  const refusalsOnly = await openingPrompt(
+    {
+      codex: { sessions: [refusing] },
+      claude: {
+        policy: {
+          kind: 'declared',
+          sourceVersion: 'test',
+          commands: [{ command: '/nope', disposition: 'refused', reason: 'refused in this test.', source: 'test' }],
+        },
+        sessions: [new FakeRotationSession('impl', 'claude', [])],
+      },
+    },
+    soloSeating(),
+    refusing,
+  )
+  const bare = new FakeRotationSession('lead', 'codex', ['DONE'])
+  const undeclared = await openingPrompt(
+    {
+      codex: { sessions: [bare] },
+      claude: { sessions: [new FakeRotationSession('impl', 'claude', [])] },
+    },
+    soloSeating(),
+    bare,
+  )
+  assert.equal(refusalsOnly, undeclared, 'a policy that permits nothing adds nothing to the opening')
+})
+
+test('a capability the operator switched off is withheld from the briefing, and its neighbours are not', async () => {
+  // The narrowing is a per-run VIEW: the registry still records what was read off the CLI, and
+  // a report that says what the adapter declares goes on saying it. What changes is only what
+  // the advisor is offered. See `src/registry/operatorDenied.ts` for the two rules.
+  const lead = new FakeRotationSession('lead', 'codex', ['DONE'])
+  const repo = tempRepo()
+  const relay = await Relay.start({
+    registry: registryOf({
+      codex: { sessions: [lead] },
+      claude: {
+        declares: { subagents: claim(), backgroundTasks: claim() },
+        sessions: [new FakeRotationSession('impl', 'claude', [])],
+      },
+    }),
+    cwd: repo,
+    ...soloSeating(),
+    denied: { capabilities: ['subagents'], commands: [] },
+  })
+  try {
+    await relay.run('a goal')
+    const opening = lead.received[0] ?? ''
+    // ONE ASSERTION. That the undenied neighbours survive is the narrowing function's own test
+    // (`operatorDenied.test.ts`), asserted there against the claim objects rather than against
+    // rendered prose; repeating it here would leave neither testable on its own.
+    assert.ok(!opening.includes(say('subagents')), 'the denied capability is not offered to the advisor')
+  } finally {
+    await relay.stop()
+    rmSync(repo, { recursive: true, force: true })
+  }
 })
