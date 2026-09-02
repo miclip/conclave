@@ -185,6 +185,33 @@ test('the block also lists the seat’s allowed commands, and teaches how to ask
   )
 })
 
+test('a command that takes an argument is briefed with it, and one that takes none is not', () => {
+  // A command briefed without the argument it requires teaches a line that parses, delivers,
+  // and does nothing -- and because no adapter reads what the composer did with a submitted
+  // command, that silent nothing is indistinguishable from success at every point this run
+  // can observe. The hint is the only thing standing between the advisor and that.
+  const withArg: CommandPolicy = {
+    kind: 'declared',
+    sourceVersion: 'test',
+    commands: [
+      { command: '/takes', disposition: 'allowed', reason: 'takes one.', source: 'x', argumentHint: '[<condition>]' },
+      { command: '/bare', disposition: 'allowed', reason: 'takes none.', source: 'x' },
+    ],
+  }
+  const text = instructionCapabilityBriefing(CAPABILITY_DESCRIPTORS, ALL_SUPPORTED, undefined, withArg)
+
+  assert.ok(
+    text.includes('  - /takes [<condition>] — takes one.'),
+    'a command with a hint renders it between the verb and the reason',
+  )
+  // The absent case is the other half of the claim: an undefined hint must add no separator
+  // and no empty brackets, or every command without one is briefed as though it were broken.
+  assert.ok(
+    text.includes('  - /bare — takes none.'),
+    'a command with no hint renders exactly as it did before hints existed',
+  )
+})
+
 test('a seat with commands and no declared capabilities gets the command half alone', () => {
   // The two fields were read off each CLI by different routes at different times, so a seat
   // with one and not the other is ordinary rather than a corner. What must not happen is a

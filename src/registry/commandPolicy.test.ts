@@ -124,8 +124,8 @@ test('Claude allows exactly the work-mode changes and refuses exactly the rest',
 
   assert.deepEqual(
     by('allowed'),
-    ['/compact'],
-    '/compact preserves the conversation by summarising it, and nothing else found changes a mode without ending continuity, rewriting the operator’s setup, or putting the seat’s turns beyond the relay’s accounting',
+    ['/compact', '/goal'],
+    'both preserve what the relay believes about the seat: /compact summarises the conversation rather than dropping it, and /goal extends the turn already running rather than dispatching another, so neither ends continuity, rewrites the operator’s setup, or puts a turn beyond the relay’s accounting',
   )
   assert.deepEqual(
     by('refused'),

@@ -54,6 +54,31 @@ export const CLAUDE_COMMAND_POLICY: CommandPolicy = {
       source: 'name:"compact",description:"Free up context by summarizing the conversation so far"',
     },
     {
+      command: '/goal',
+      disposition: 'allowed',
+      // Verbatim `argumentHint` from the same declaration. The only command on either agent
+      // that takes one, and the briefing renders it for that reason.
+      argumentHint: '[<condition> | clear]',
+      // ALLOWED WHERE `/loop` IS REFUSED, and the difference is turn accounting rather than
+      // ambition. `/loop` has the seat dispatch its own SUBSEQUENT turns, which land after
+      // `#exchangeTurn` has returned and are charged to neither `--max-turns` nor `--rounds`.
+      // A goal extends the turn already running: the seat keeps working before it stops, so
+      // the relay still takes exactly one `turn_end` per exchange and every ceiling it counts
+      // stays true. What a goal costs is turn DURATION, which `deadlines` already governs and
+      // which the operator already chooses.
+      reason:
+        'Sets a condition the seat checks before it stops, so it keeps working on the turn it is already running rather than dispatching another. Turn accounting is unaffected -- the relay still takes one `turn_end` per exchange -- and the cost is turn duration, which the run’s deadlines already bound.',
+      // `supportsNonInteractive:!0` in the same declaration: it is built to be dispatched
+      // without a human at the composer, which is how every command here is delivered.
+      //
+      // TAKES AN ARGUMENT, unlike every other command declared on either agent:
+      // `argumentHint:"[<condition> | clear]"`. `SLASH_TOKEN` rules on every slash-token in
+      // the line, so a condition carrying a space-preceded slash earns a refusal naming that
+      // token -- the documented over-match, and a safe outcome with a poor message.
+      source:
+        'name:"goal",supportsNonInteractive:!0,thinClientDispatch:"post-text",description:"Set a goal \\u2014 keep working until the condition is met"',
+    },
+    {
       command: '/loop',
       disposition: 'refused',
       reason:
