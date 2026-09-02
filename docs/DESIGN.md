@@ -215,6 +215,17 @@ produces a recommendation, never an automatic upgrade.
   delegation happened without any worktree being created — the shape a violation of the
   worktree rule takes. It is reported, never enforced: the repository cannot tell a
   subagent's write from its parent's.
+- A seat that is not supposed to write, writing. Roles declare `mutatesWorkspace`, and it was
+  a declaration nothing ever looked at; the per-turn tree diff already taken for a lost report
+  is the same diff that notices. When paths appear during the turn of a seat whose role declares
+  it does not write — an advisor or a reviewer, or any role a project defines that way — the run
+  says so and carries on. What a role declares is read from the registry that seats it, not from
+  a list of built-ins, so a role a project registers is checked exactly as a built-in one is.
+  Reported, never enforced, on the same terms as the worktree rule above — on a shared root the
+  diff cannot name who wrote a file, and it can only see paths that BECAME dirty, so its
+  silence is not a clean bill of health. The run
+  report omits the key entirely when nothing was observed rather than reporting an empty array,
+  because an empty array would claim a search this instrument cannot perform.
 - Unresolved items carried into the summary. A participant ending a report with a line
   beginning `FLAG:` has it lifted verbatim into the final lines, so a run that completed
   while something stayed unchecked does not read as unqualified success.

@@ -713,6 +713,61 @@ export interface TurnResult {
 }
 
 /**
+ * A turn taken by a seat whose ROLE says it does not write, during which paths became dirty.
+ *
+ * ## What this is, and the two things it is not
+ *
+ * It is an OBSERVATION. `mutatesWorkspace: false` is a declaration of intent in the registry,
+ * and nothing enforces it -- the same gap `subagentUse` records for subagents, for the same
+ * reason: the repository cannot tell one writer's edit from another's (#8). What can be
+ * recorded is the shape a violation takes, so a reader who was not watching has something to
+ * look at.
+ *
+ * It is not a VERDICT. An advisor that ran `npm test` and left a build artifact behind, a
+ * reviewer whose editor wrote a swapfile, and an advisor that quietly rewrote the
+ * implementer's work all look identical from here. The run is not stopped, graded, or altered
+ * by it; the note is non-blocking by construction, recorded to the log and to this ledger and
+ * read by nothing else.
+ *
+ * And it is not an ATTRIBUTION, on EITHER value of `sharedRoot`. At N=1 -- and for the advisor
+ * at every N -- the tree diffed is the tree every other participant is also working in, so a
+ * path that appeared during this seat's turn need not have been written by this seat, and the
+ * turn boundary is the only thing narrowing it: a background check, a lingering child, or the
+ * operator's own editor are all inside that window.
+ *
+ * An assigned worktree NARROWS that and does not close it. The seat is not the only writer in
+ * its own tree -- the briefing sends its subagents there by design, checks run there, and
+ * nothing stops the operator opening it -- so `sharedRoot: false` means "whoever works in that
+ * tree" and not "this seat". Saying otherwise would be the one overclaim this whole record
+ * exists to avoid, and it would contradict the limit stated two paragraphs up. Both branches of
+ * the note say so, and the note says it unconditionally besides.
+ *
+ * The diff is one-sided besides: it can only see paths that BECAME dirty, so a file this turn
+ * edited again, having been dirty already, leaves no trace here. An empty ledger is therefore
+ * "nothing was observed", never "nothing happened" -- which is why the report omits the key
+ * rather than reporting an empty array. See `RunReport.unexpectedWrites`.
+ */
+export interface UnexpectedWrite {
+  /** The seat whose turn it was. */
+  participant: string
+  /** The role it holds, whose `mutatesWorkspace` is false. Named so the reader can check it. */
+  role: string
+  /** Position in the routing log of the note that reported this, for pairing the two. */
+  seq: number
+  /** Paths that became dirty during that turn, in `git status` order. Never empty. */
+  paths: string[]
+  /**
+   * Whether the diffed root is the shared checkout rather than a worktree assigned to this seat.
+   *
+   * A weaker distinction than it looks, and the reason it is reported rather than resolved:
+   * `false` narrows who could have written these paths to whoever works in that seat's tree,
+   * which is the seat AND its subagents, a check running there, and the operator. It does not
+   * name the writer, and neither value of this field ever does. `true` narrows nothing at all.
+   */
+  sharedRoot: boolean
+}
+
+/**
  * One turn that has come back, waiting for the dispatcher to get to it.
  *
  * The `error` arm is why this is a union rather than a record with an optional field: a turn
@@ -3203,6 +3258,88 @@ export class Relay {
    * A zero is frequently correct. A subagent that only reads is explicitly allowed the shared
    * directory, so this is evidence to weigh and never a verdict.
    */
+  /**
+   * Turns by a non-writing role during which the tree changed, in the order they were observed.
+   *
+   * Accumulated rather than recomputed at the end, because it CANNOT be recomputed: the diff is
+   * per turn, against a baseline taken as that turn started, and by the time a report is
+   * assembled every one of those baselines is gone. Nothing reads this during the run.
+   */
+  #unexpectedWrites: UnexpectedWrite[] = []
+
+  /**
+   * The ledger, copied. See `UnexpectedWrite` for what it is and, more importantly, is not.
+   *
+   * Copied down to the path arrays, per the rule the report already follows for `launch.args`:
+   * a caller keeping a finished run's record must not be holding a list the relay still owns.
+   */
+  unexpectedWrites(): UnexpectedWrite[] {
+    return this.#unexpectedWrites.map((w) => ({ ...w, paths: [...w.paths] }))
+  }
+
+  /**
+   * Say so when a seat that declares it does not write took a turn the tree changed during.
+   *
+   * Non-blocking, and deliberately so: it records and returns. No pause, no escalation, no
+   * effect on the outcome, and nothing downstream branches on the ledger. The reason is that
+   * this cannot tell a violation from a coincidence -- see `UnexpectedWrite` -- and a signal
+   * that stops runs on evidence this weak would be turned off, at which point the evidence
+   * stops being collected too.
+   *
+   * The ROLE decides, never the rank, because the two part company: a reviewer is rank
+   * `implementer` and does not write.
+   *
+   * And the role is read from THE REGISTRY, by id, rather than from `BUILTIN_ROLES`.
+   * `registerRole` takes an arbitrary definition and `resolve` validates every seat against
+   * that same map, so `mutatesWorkspace: false` is reachable on any role id at all -- and a
+   * built-ins-only lookup with a default for the ids it did not recognise would miss every
+   * custom non-writing role there is, silently, while still answering correctly for `advisor`.
+   * The registry is the authority on what a role declares, so it is the thing asked.
+   *
+   * `undefined` is unreachable: a seat cannot be seated without `resolve` finding its
+   * definition in this same map, and roles are only ever added to it. It is handled as silence
+   * rather than asserted because an observation must not be able to end the run it describes,
+   * and it is NOT a policy for unknown roles -- there are none by the time this runs.
+   */
+  #noteUnexpectedWrite(p: RelayParticipant, turnRoot: string, changed: string[]): void {
+    if (changed.length === 0) return
+    const role = this.#opts.registry.roleOf(p.role)
+    if (!role || role.mutatesWorkspace) return
+    // The same expression `#attributeArtifacts` uses to group by root. It says which of two
+    // WEAK readings applies and neither is an attribution: a shared root narrows the writer not
+    // at all, and an assigned one narrows it to whoever works in that seat's tree -- which is
+    // the seat, and also its subagents, a check running there, and the operator's own editor.
+    const sharedRoot = turnRoot === this.#opts.cwd
+    // EVERY path, uncapped, and the same list the report carries. A `, and 4 more` tail was
+    // here and was wrong twice over: it left the one surface a live viewer watches naming
+    // fewer paths than the record does, so the two documents disagreed about the same fact --
+    // and truncating is worst exactly where this matters most, since a seat that should not be
+    // writing at all and has dirtied forty paths is the case whose forty paths you want.
+    //
+    // Deliberately unlike the lost-report escalation, which does cap at eight. That one is a
+    // pause detail a human reads at a glance while deciding whether to resume, and its list is
+    // colour on a decision; this IS the finding, and a finding that names some of its evidence
+    // has not been reported. Nothing here is delivered to a participant -- `to: []`, the log
+    // alone -- so the length costs no one's context, and the log already carries whole reports.
+    const listed = changed.join(', ')
+    const whose = sharedRoot
+      ? `that root is shared with the other participants, so it narrows who wrote them not at all`
+      : `that root is the worktree assigned to ${p.id}, which narrows who could have written ` +
+        `them to whoever works in that tree — the seat, but also its subagents, a check, or the operator`
+    const m = this.#record({
+      from: 'orchestrator',
+      fromRank: 'human',
+      to: [],
+      kind: 'note',
+      text:
+        `${p.id} is seated in role '${p.role}', which is declared not to write to the workspace, ` +
+        `and ${changed.length} path(s) became dirty during its turn: ${listed} — ${whose}. ` +
+        `Evidence, not a verdict: nothing here identifies the writer, the run is unaffected, ` +
+        `and only paths that became dirty during the turn can be seen at all.`,
+    })
+    this.#unexpectedWrites.push({ participant: p.id, role: p.role, seq: m.seq, paths: [...changed], sharedRoot })
+  }
+
   subagentUse(): { delegated: boolean; worktreesCreated: string[] } {
     const before = new Set(this.#worktreesAtStart ?? [])
     // Participant EVENTS, not `#evidence`. Evidence keeps tool arguments and discards the
@@ -3997,7 +4134,16 @@ export class Relay {
     for (const text of extractFlags(prose)) {
       this.#raiseFlag(p.id, text, this.log.length)
     }
-    return { prose, end, unsettled, emittedSinceSend: p.events.length - before, emittedBefore: before, changedDuringTurn: dirtyPaths(turnRoot).filter((f) => !treeBeforeTurn.has(f)) }
+    // The one diff, read once and used twice. `changedDuringTurn` is what a LOST report would
+    // have described (#39); the observation below is what a seat that should not be writing
+    // leaves behind. Two `dirtyPaths` calls here would be two answers to the same question,
+    // taken a moment apart, and the second could disagree with the first.
+    const changedDuringTurn = dirtyPaths(turnRoot).filter((f) => !treeBeforeTurn.has(f))
+    // AFTER the flag loop, which numbers each flag by `this.log.length`. A note recorded above
+    // it would shift every flag position in this turn by one, and those positions are what
+    // `restated` pairs on.
+    this.#noteUnexpectedWrite(p, turnRoot, changedDuringTurn)
+    return { prose, end, unsettled, emittedSinceSend: p.events.length - before, emittedBefore: before, changedDuringTurn }
   }
 
   /**
