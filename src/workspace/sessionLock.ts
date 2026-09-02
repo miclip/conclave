@@ -22,6 +22,26 @@ import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 
+import { writeAtomic } from '../config/install.ts'
+
+/**
+ * Who is live. NOT where they are working, and not what they wrote.
+ *
+ * The distinction is the whole limitation of this file and it is easy to lose. A seat
+ * named here is known to exist; its edits are still located the only way this module can
+ * locate anything -- `git status --porcelain` in `repoRoot`. A participant working in a
+ * separate worktree is therefore invisible to `guard()` no matter how carefully it is
+ * registered here, because its dirty paths are in a checkout this porcelain never runs in.
+ *
+ * And within the shared checkout the list still cannot ATTRIBUTE. Two participants live,
+ * one dirty file: the report names both and says the file "may be a participant's work".
+ * Nothing in `LockedParticipant` closes that gap, and adding a field would not close it
+ * either -- attribution needs a record of writes, which is a different mechanism from a
+ * record of who is running.
+ *
+ * So this stays `{ id, agent }`. It answers "is someone live, and who", which is the
+ * question `assertSafeToStage` actually asks.
+ */
 export interface LockedParticipant {
   id: string
   agent: string
@@ -82,6 +102,77 @@ export function acquire(repoRoot: string, participants: LockedParticipant[]): Li
 
 export function release(repoRoot: string): void {
   rmSync(lockPath(repoRoot), { force: true })
+}
+
+/**
+ * Add a participant to a lock this process already owns.
+ *
+ * A seat can arrive after `acquire()` -- a rotation, a seat added mid-run -- and until it
+ * is in the lock the guard's message names a set of live participants that is missing one
+ * of them. An operator reading "participants are live: advisor" while three are working is
+ * being told something false by the guard that exists to stop them acting on false beliefs.
+ *
+ * Three refusals, and each is a different fact about the lock rather than three shades of
+ * "no":
+ *
+ *   absent    -- there is no session to join. Writing one here would forge a `treeAtStart`
+ *                out of a tree that has already been worked in, which is worse than no lock:
+ *                every path dirtied since the real session began would silently become
+ *                "already dirty at start" and drop out of `changedSinceStart`.
+ *   stale     -- the owning process is gone. `read()` reports a stale lock and does not obey
+ *                it; appending to one would be obeying it, and would relaunch a crashed
+ *                run's bookkeeping as if it were live.
+ *   not ours  -- another live orchestrator owns this file. Two writers and a
+ *                read-modify-write is a lost update, and the update lost is the record of
+ *                who is live.
+ *
+ * Checked in that order deliberately. A dead pid is also not `process.pid`, so ownership
+ * alone would report "another process owns this" about a process that does not exist --
+ * true, useless, and it sends the operator looking for a running orchestrator.
+ */
+export function appendParticipant(
+  repoRoot: string,
+  participant: LockedParticipant,
+): LiveSession {
+  const found = read(repoRoot)
+  if (!found) {
+    throw new Error(
+      `no session lock at ${LOCK_RELATIVE} to add ${participant.id} to. ` +
+        `Acquire the lock at session start; a lock written now would record a tree that ` +
+        `participants have already changed as the tree they started from.`,
+    )
+  }
+  if (found.stale) {
+    throw new Error(
+      `refusing to add ${participant.id} to a stale session lock: pid ${found.session.pid} ` +
+        `is gone, likely a crashed run. Remove ${LOCK_RELATIVE} once you have accounted ` +
+        `for its files, then acquire a new one.`,
+    )
+  }
+  if (found.session.pid !== process.pid) {
+    throw new Error(
+      `refusing to add ${participant.id} to a session lock owned by pid ` +
+        `${found.session.pid}; this process is ${process.pid}. Only the orchestrator that ` +
+        `acquired the lock may write it.`,
+    )
+  }
+
+  // Spread rather than assign field by field: `LiveSession` gains fields, and a lock
+  // rewritten by a build that predates one would drop it silently -- the reader would see
+  // a well-formed lock missing `treeAtStart`, and `guard()` would report every dirty path
+  // in the tree as new since session start.
+  const updated: LiveSession = {
+    ...found.session,
+    participants: [...found.session.participants, participant],
+  }
+  // Atomic by rename, because the guard's readers are not synchronised with its writers.
+  // `guard()` runs from the operator's tooling on a tree with agents in it; a reader that
+  // caught a truncated lock would get a JSON parse error, `read()` would swallow it as a
+  // corrupt lock, and `assertSafeToStage` would wave through the `git add -A` this whole
+  // module exists to refuse. Old-or-new is the property that matters; complete is not
+  // enough on its own.
+  writeAtomic(lockPath(repoRoot), JSON.stringify(updated, null, 2))
+  return updated
 }
 
 /**

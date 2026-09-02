@@ -7,11 +7,19 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import test from 'node:test'
-import { acquire, assertSafeToStage, guard, lockPath, read, release } from './sessionLock.ts'
+import {
+  acquire,
+  appendParticipant,
+  assertSafeToStage,
+  guard,
+  lockPath,
+  read,
+  release,
+} from './sessionLock.ts'
 
 function repo(): string {
   const dir = mkdtempSync(join(tmpdir(), 'conclave-lock-'))
@@ -129,4 +137,100 @@ test('a corrupt lock is ignored rather than crashing the guard', () => {
   writeFileSync(lockPath(dir), 'not json at all')
   assert.equal(read(dir), undefined)
   assert.doesNotThrow(() => assertSafeToStage(dir))
+})
+
+const LATE = { id: 'reviewer', agent: 'codex' }
+
+/** Rewrite the lock's pid, leaving every other field as `acquire` wrote it. */
+function repoint(dir: string, pid: number): void {
+  const raw = JSON.parse(readFileSync(lockPath(dir), 'utf8'))
+  writeFileSync(lockPath(dir), JSON.stringify({ ...raw, pid }, null, 2))
+}
+
+test('a seat added mid-run joins the lock without disturbing what it already recorded', () => {
+  const dir = repo()
+  writeFileSync(join(dir, 'mine.txt'), 'operator edit\n')
+  const before = acquire(dir, PARTICIPANTS)
+  // Dirtied AFTER the session began, so a `treeAtStart` recomputed during the append would
+  // differ from the one recorded. Without this the preservation check below passes against
+  // an implementation that recomputes, because nothing has moved.
+  writeFileSync(join(dir, 'theirs.txt'), 'implementer work in progress\n')
+
+  const after = appendParticipant(dir, LATE)
+
+  assert.deepEqual(after.participants, [...PARTICIPANTS, LATE])
+  // The fields that make the guard's report mean anything. `treeAtStart` in particular:
+  // rewriting it here would reclassify every path dirtied since the session began as
+  // "already dirty", and `changedSinceStart` would go empty for the rest of the run.
+  assert.equal(after.pid, before.pid)
+  assert.equal(after.startedAt, before.startedAt)
+  assert.deepEqual(after.treeAtStart, before.treeAtStart)
+  assert.deepEqual(JSON.parse(readFileSync(lockPath(dir), 'utf8')), after)
+
+  // The point of appending at all: the refusal now names the seat that arrived late.
+  assert.throws(() => assertSafeToStage(dir), (err: Error) => {
+    assert.ok(err.message.includes('reviewer'), 'a late seat must appear in the refusal')
+    return true
+  })
+})
+
+test('a lock owned by another live process is not ours to append to', () => {
+  const dir = repo()
+  acquire(dir, PARTICIPANTS)
+  // `process.ppid` is a real, running process that is not us -- a second orchestrator, as
+  // far as this file can tell. A fabricated pid would be caught by the staleness check
+  // first and prove nothing about ownership.
+  repoint(dir, process.ppid)
+  const raw = readFileSync(lockPath(dir), 'utf8')
+
+  assert.throws(() => appendParticipant(dir, LATE), (err: Error) => {
+    assert.ok(/owned by pid/.test(err.message))
+    assert.ok(err.message.includes(String(process.ppid)))
+    return true
+  })
+  assert.equal(readFileSync(lockPath(dir), 'utf8'), raw, 'a refused append writes nothing')
+})
+
+test('a lock left by a crashed run is not resurrected by appending to it', () => {
+  const dir = repo()
+  acquire(dir, PARTICIPANTS)
+  repoint(dir, 2147483647)
+  const raw = readFileSync(lockPath(dir), 'utf8')
+
+  assert.throws(() => appendParticipant(dir, LATE), (err: Error) => {
+    // Diagnosed as stale, not as someone else's. A dead pid is also not ours, and
+    // reporting it that way sends the operator hunting for a process that is gone.
+    assert.ok(/stale session lock/.test(err.message))
+    return true
+  })
+  assert.equal(readFileSync(lockPath(dir), 'utf8'), raw)
+})
+
+test('with no lock there is no session to join, and none is invented', () => {
+  const dir = repo()
+  assert.throws(() => appendParticipant(dir, LATE), (err: Error) => {
+    assert.ok(/no session lock/.test(err.message))
+    return true
+  })
+  assert.equal(existsSync(lockPath(dir)), false, 'the refusal must not leave a forged lock')
+})
+
+test('the lock is replaced by rename, so a reader gets the old file or the new one', () => {
+  const dir = repo()
+  acquire(dir, PARTICIPANTS)
+  const p = lockPath(dir)
+  const inodeBefore = statSync(p).ino
+
+  appendParticipant(dir, LATE)
+
+  // Truncate-then-write reuses the inode and leaves a window where the file on disk is
+  // neither the old lock nor the new one. A rename into place cannot: the destination is a
+  // different inode, and the name switches between two complete files in one step.
+  assert.notEqual(statSync(p).ino, inodeBefore, 'the lock must be renamed into place')
+  assert.deepEqual(JSON.parse(readFileSync(p, 'utf8')).participants, [...PARTICIPANTS, LATE])
+  assert.deepEqual(
+    readdirSync(dirname(p)).filter((f) => f !== 'session.lock'),
+    [],
+    'no temporary file may be left beside the lock',
+  )
 })
