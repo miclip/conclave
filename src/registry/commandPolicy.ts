@@ -55,17 +55,30 @@ export const CLAUDE_COMMAND_POLICY: CommandPolicy = {
     },
     {
       command: '/loop',
-      disposition: 'allowed',
+      disposition: 'refused',
       reason:
-        'A work-mode change, and the one #192 already told the advisor a Claude seat has: it makes the seat dispatch its own subsequent turns. The seat, its context and its history are untouched.',
+        'Makes the seat’s work unaccountable. It has the seat dispatch its own subsequent turns, and the relay takes one `turn_end` per exchange: a looped turn lands after `#exchangeTurn` has returned, so its report is not the report the relay collected and it is charged to neither `--max-turns` nor `--rounds`. The seat survives; the relay’s ability to say what it did, or to stop it doing more, does not.',
+      // ALLOWED HERE UNTIL THE ACCOUNTING WAS WORKED THROUGH, and the reversal is the entry's
+      // most useful fact. #200 read it as a work-mode change and it IS one -- the seat, its
+      // context and its history are all untouched, which is why it passed the rule's first
+      // clause. What it fails is the clause that clause did not have: `Relay#exchangeTurn`
+      // returns on the FIRST `turn_end` after its send and increments `#turnsTaken` once per
+      // dispatch, BEFORE the send, so every turn the seat gives itself is invisible to both
+      // counters that bound a run. The verb is genuinely provided by the installed CLI and the
+      // literal below is still checked against it; what is refused is our asking for it.
+      //
+      // THE SAME FAILURE `autonomousLoop` IS WITHHELD FOR. `CAPABILITY_DESCRIPTORS` in
+      // `src/registry/instructionBriefing.ts` marks that capability `notInstructable` and the
+      // advisor is never told a seat can be instructed to use it. Allowing the command while
+      // withholding the capability would let the advisor reach by verb exactly what the
+      // briefing declines to offer it by name.
+      //
+      // Stated narrowly: this is an accounting claim about two integers. It says nothing about
+      // `--max-minutes`, which reads wall-clock net of pauses and goes on running throughout.
+      //
       // A SKILL rather than a built-in command, which matters twice. It is shipped in the
       // bundle, so it is not an operator install -- but skill availability is per session and
       // nothing here observes it, so "the bundle ships it" is weaker than "this seat has it".
-      //
-      // And it carries the accounting bound #200 names: a looping seat takes turns that
-      // `#turnsTaken` never sees, so `--max-turns` and `--rounds` stop bounding the run. That
-      // is a constraint to state to whoever is told about this verb, not a reason to withhold
-      // it -- but nothing states it yet, because nothing renders this policy yet.
       source: 'menuDescription:"Repeat a prompt or command on an interval (e.g. /loop 5m /foo)"',
     },
     {

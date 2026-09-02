@@ -220,16 +220,26 @@ export interface InstructionCapabilities {
  * IT EXISTS and never what the OPERATOR configured. Everything in every declaration follows
  * from it.
  *
- *   - A work-mode change is ALLOWED. `/compact` on either pty CLI, `/loop` on Claude,
- *     `/review` on Codex: each alters how the seat spends its turns, and the seat, its
- *     context and its history all survive, so the relay's belief about the seat stays true
- *     across the change.
+ *   - A work-mode change is ALLOWED. `/compact` on either pty CLI, `/review` on Codex: each
+ *     alters how the seat spends its turns, and the seat, its context and its history all
+ *     survive, so the relay's belief about the seat stays true across the change.
  *   - A command that ENDS OR DISCARDS CONTINUITY is REFUSED. The relay is left holding a seat
  *     handle it believes has a history behind it. Nothing observes the loss -- no adapter
  *     reads the composer's error text -- so the run carries on attributing turns to
  *     continuity that is gone.
  *   - A command that ALTERS OPERATOR CONFIGURATION is REFUSED. The operator chose the seat's
  *     model, its permissions and its hooks, and the run report states those choices as fact.
+ *   - A command that MAKES THE SEAT'S WORK UNACCOUNTABLE is REFUSED, even when it changes
+ *     nothing but the work mode. `/loop` on Claude is the only one of these found so far, and
+ *     it was ALLOWED here until the accounting was worked through. It makes the seat dispatch
+ *     its own subsequent turns; `Relay#exchangeTurn` returns on the FIRST `turn_end` after its
+ *     send and increments `#turnsTaken` exactly once per dispatch, before the send. So a
+ *     looped turn is never reconciled -- its report is not the report the relay collected --
+ *     and is charged to neither `--max-turns` nor `--rounds`. The seat survives it. What does
+ *     not survive is the relay's ability to say what the seat did or to stop it doing more,
+ *     which is the same failure `autonomousLoop` is withheld from the advisor's capability
+ *     briefing for (`src/registry/instructionBriefing.ts`). Offering the verb while withholding
+ *     the capability would be the two files answering one question two ways.
  *
  * THREE STATES, AND THEY MUST NOT COLLAPSE INTO TWO. This is a union rather than a list with
  * a nullable field because the three answers have different causes and want different

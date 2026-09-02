@@ -31,6 +31,7 @@ import { AgentRegistry } from '../registry/registry.ts'
 import { NO_DEADLINE_CLOCKS, type CommandPolicy } from '../registry/types.ts'
 import { NO_COMPOSER_COMMAND_POLICY } from '../registry/commandPolicy.ts'
 import type { RelayMessage } from './message.ts'
+import type { OperatorDenials } from '../registry/operatorDenied.ts'
 import { Relay } from './relay.ts'
 
 /** What a raw submission looked like from the seat's side. */
@@ -170,13 +171,21 @@ class CommandSession implements AgentSession {
   }
 }
 
-/** A policy shaped like Claude's, small enough that a test can state what it expects. */
+/**
+ * A policy shaped like a real one, small enough that a test can state what it expects.
+ *
+ * The allowed verb is SYNTHETIC. It was `/loop` until that command was refused on Claude for
+ * putting the seat's turns beyond `--max-turns` and `--rounds`, and a fixture that went on
+ * declaring it allowed would read, to anyone who found this before the policy, as evidence the
+ * verb is permitted. What these tests need is an allowance that takes arguments; which word it
+ * is does not matter, so it is now one no CLI has.
+ */
 const TEST_POLICY: CommandPolicy = {
   kind: 'declared',
   sourceVersion: 'test',
   commands: [
     { command: '/compact', disposition: 'allowed', reason: 'summarises rather than discards', source: 'test' },
-    { command: '/loop', disposition: 'allowed', reason: 'changes how turns are dispatched', source: 'test' },
+    { command: '/focus', disposition: 'allowed', reason: 'changes how the seat spends its turns', source: 'test' },
     { command: '/clear', disposition: 'refused', reason: 'discards the continuity the relay believes it has', source: 'test' },
   ],
 }
@@ -221,6 +230,8 @@ async function run(
   leadReplies: string[],
   opts: {
     policy?: CommandPolicy | undefined
+    /** What the project switched off, as `.conclave/config.json` would have said (#203). */
+    denied?: OperatorDenials | undefined
     composer?: boolean
     implReplies?: string[]
     onImplSend?: (impl: CommandSession) => (message: string, index: number) => void
@@ -244,6 +255,7 @@ async function run(
     lead: { id: 'advisor', agent: 'fake-lead', role: 'advisor' },
     implementer: { id: 'implementer', agent: 'fake-impl', role: 'implementer' },
     maxAdvisorTurns: 4,
+    ...(opts.denied ? { denied: opts.denied } : {}),
     onLog: (m) => log.push(m),
   })
   await relay.run('do the thing')
@@ -294,10 +306,10 @@ test('a reply that is only a command does not end the run, and the advisor is as
 })
 
 test('several commands in one reply are all typed, in the order written', async () => {
-  const { impl } = await run(['COMMAND: /compact\nCOMMAND: /loop 20m keep checking\nGo.', 'DONE'])
+  const { impl } = await run(['COMMAND: /compact\nCOMMAND: /focus on the parser\nGo.', 'DONE'])
   assert.deepEqual(
     impl.rawSubmits.map((r) => r.text),
-    ['/compact', '/loop 20m keep checking'],
+    ['/compact', '/focus on the parser'],
     'order is the advisor’s, and is preserved: two mode changes applied backwards are not the same request',
   )
 })
@@ -407,4 +419,26 @@ test('a reply with no command leaves the run exactly as it was', async () => {
     'and nothing about commands reaches the log',
   )
   assert.match(everythingSentTo(impl), /Carry on with the failing test\./)
+})
+
+test('a command the operator switched off is not offered at startup and is refused if asked for', async () => {
+  // ONE TEST FOR BOTH HALVES, because the guarantee is that they AGREE. `Relay#effectivePolicy`
+  // is the single narrowing both readers go through: the block lists what may be asked for and
+  // delivery decides what is typed, and an advisor offered a verb that delivery refuses spends
+  // turns discovering it. Splitting this into two tests would let one drift green.
+  const { impl, lead, log } = await run(['COMMAND: /focus on the parser\nCarry on.', 'DONE'], {
+    denied: { capabilities: [], commands: ['/focus'] },
+  })
+  const opening = lead.received[0] ?? ''
+  assert.ok(!opening.includes('/focus'), 'the advisor is never offered a command this project disabled')
+  assert.deepEqual(impl.rawSubmits, [], 'and asking for it types nothing into the composer')
+  // NOT the undeclared reason, rather than a match on the operator one. "Nobody read this CLI"
+  // and "the operator declined this verb" are different problems with different repairs, and
+  // the first would send the advisor to a human. The operator reason's own wording is
+  // `operatorDenied.test.ts`'s to pin.
+  assert.doesNotMatch(
+    orchestratorNotes(log).join('\n'),
+    /not declared in this agent/,
+    'a disabled command is refused as disabled, never as one nobody declared',
+  )
 })

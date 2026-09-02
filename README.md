@@ -240,6 +240,34 @@ startup and with both lists.
 
 Roles live in this file, so they do not travel with the repository.
 
+### Turning things off
+
+Two maps switch off what a seat is offered. Both are optional, and a project with neither is
+the run it was before they existed.
+
+```json
+{
+  "capabilities": { "subagents": false },
+  "commands": { "/compact": false }
+}
+```
+
+`capabilities` withholds a capability from the advisor's briefing, by its canonical name
+(`subagents`, `backgroundTasks`, `turnBoundedLifetime`, `sessionBackgrounding`,
+`asyncPromptSubmission`, `boundedIteration`, `autonomousLoop`). `commands` withholds a slash
+command: it disappears from the briefing and is refused if the advisor asks for it anyway,
+with a reason saying the operator declined it.
+
+**Both are deny-only. The only value is `false`.** Writing `true` is refused at startup, and
+so is a name nothing declares. Config may narrow what an adapter declares and may never widen
+it: a capability is listed because someone read it off the installed CLI, and a command is
+allowed because someone argued it cannot break the run. `"/clear": true` is refused with the
+reason `/clear` is refused for — it discards the continuity the relay believes the seat has —
+rather than being accepted and ignored.
+
+Denying something already refused or unsupported changes nothing. See
+`src/registry/operatorDenied.ts` for the argument.
+
 ## Driving it as an agent
 
 Use `conclave session`, not `conclave relay`. `relay` returns an outcome, so it has nowhere

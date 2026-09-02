@@ -22,6 +22,7 @@ import {
   CONFIGURABLE_AGENTS,
   launchArgsFor,
   permissionModeFor,
+  denialsFrom,
   readProjectConfig,
   setPermissionMode,
 } from '../src/config/project.ts'
@@ -1861,6 +1862,10 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
     // Descriptions only: prose is the whole of what the relay uses a role for (#89). Absent
     // when no role is defined, which keeps the briefing byte-identical on a default run.
     ...(projectConfig.roles ? { roleDescriptions: Object.fromEntries(Object.entries(projectConfig.roles).map(([n, r]) => [n, r.description])) } : {}),
+      // Spread in only when the project denies something, so a project with neither map hands
+      // `Relay.start` the options it handed before #203 -- the identity `defaultUnchanged`
+      // pins. `readProjectConfig` has already refused any attempt to widen.
+      ...((d) => (d ? { denied: d } : {}))(denialsFrom(projectConfig)),
       maxAdvisorTurns: runCeilings.advisorTurns,
       // Built by `ceilingsFrom` rather than inline, so this command and `session` cannot
       // disagree about what a ceiling flag means. Read where the launch line above is printed,

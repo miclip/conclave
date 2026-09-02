@@ -334,11 +334,20 @@ function assertFlagHelperOptional(block: string, label: string, valued: readonly
  * here as the change ships rather than recorded only in the pinned list it moves.
  */
 const DECLARED: Record<string, string> = {
+  'deny-only project configuration for capabilities and commands':
+    'A project may switch off a declared capability or an allowed slash command in ' +
+    '.conclave/config.json (#203). Deny-only: `true` is refused at read, because a declaration ' +
+    'is something read off the installed CLI and a command allowance was argued against the ' +
+    'continuity, parser and report guarantees conclave keeps. A project with NEITHER map is ' +
+    'unchanged in every respect, and that is asserted rather than assumed: `denialsFrom` ' +
+    'returns undefined, both front-ends spread the key in only when it is present, and both ' +
+    'narrowing functions return the object they were given. The divergence is therefore visible ' +
+    'only to a project that opted into it.',
   'implementer_unanswered -> advisor':
     'Authority routing (#56, D2) sends implementer_unanswered to the advisor before the operator, ' +
     'so a default run interrupts the human less than today. Real change at N=1, an improvement, ' +
     'declared rather than discovered. The pause reason exists at src/relay/run.ts:52 and the halt ' +
-    'that raises it is at src/relay/relay.ts:7706.',
+    'that raises it is at src/relay/relay.ts:7746.',
   'status.pause.resolution':
     'Classifying unresolved conditions on both axes (#56, D2) added `resolution` to every RunPause ' +
     '(src/relay/run.ts:329), so `conclave status --json` on a paused default run now carries ' +
@@ -620,7 +629,7 @@ const DECLARED: Record<string, string> = {
     'participant and nobody else, and a conclave or workstream scope samples NOBODY. It used to ' +
     'read pause.verdictOf.participant and fall back to scanning participants by rank for ' +
     'implementers — and verdictOf is set at exactly two halt sites, both turn_incomplete ' +
-    '(src/relay/relay.ts:7323, src/relay/relay.ts:7843), so every other pause reached that rank ' +
+    '(src/relay/relay.ts:7363, src/relay/relay.ts:7883), so every other pause reached that rank ' +
     'scan. WHAT CHANGES AT N=1: on the three pauses whose scope names no participant — ' +
     'operator_requested (/pause), advisor_escalated, authority_conflict — the lone implementer ' +
     'child used to be sampled, so a child that measured busy REFUSED the resume and wrote ' +
@@ -629,15 +638,15 @@ const DECLARED: Record<string, string> = {
     'safety guard rather than presented as a pure N>1 fix. The reason it is the right narrowing: ' +
     'the guard exists because continuing SENDS into a child that cannot accept input mid-turn, ' +
     'and on those three pauses the child it measured is not the child being sent to — resuming ' +
-    'advisor_escalated sends to the ADVISOR (src/relay/relay.ts:7440), resuming ' +
+    'advisor_escalated sends to the ADVISOR (src/relay/relay.ts:7480), resuming ' +
     'authority_conflict queues a constraint that is delivered by the dispatcher on the next ' +
     'dispatch to a free seat, and operator_requested is consumed at an advisor-turn boundary ' +
     'whose own evidence line says no turn is in flight. WHAT IS GIVEN UP, named rather than ' +
     'discovered: the advisor_escalated halt raised when a seat’s turn completed and its report ' +
-    'could not be read (src/relay/relay.ts:7757) is conclave-scoped by design, yet the useful ' +
+    'could not be read (src/relay/relay.ts:7797) is conclave-scoped by design, yet the useful ' +
     'question there is whether THAT seat is still writing; at N=1 the rank scan sampled it by ' +
     'coincidence of it being the only implementer, and now nothing does. The pause still carries ' +
-    'that seat’s liveness evidence from the halt site (src/relay/relay.ts:7768), which is what ' +
+    'that seat’s liveness evidence from the halt site (src/relay/relay.ts:7808), which is what ' +
     'the operator actually reads; restoring a refusal there is a change to that halt’s scope, ' +
     'not to the guard. AT N>1 the old behaviour was unsafe in the other direction: a pause about ' +
     'one seat could be refused because a DIFFERENT seat was mid-turn, and the operator was told ' +
@@ -688,7 +697,7 @@ const DECLARED: Record<string, string> = {
     'The sentence is repaired rather than left standing, on this entry’s own rule. Everything ' +
     'else above is still true: the three readings, the wording, the event count as an input, and ' +
     'the pause menu’s `wait` option, which still asks reportsChildOnCpu. No assertion in this ' +
-    'file was relaxed; one citation moved with the code it pins (src/repl/session.ts:1587). ' +
+    'file was relaxed; one citation moved with the code it pins (src/repl/session.ts:1591). ' +
     'Covered in src/outcomes/liveness.test.ts on the reported numbers, and end to end through ' +
     'the console’s refusal path in src/repl/session.test.ts.',
   'a paused run keeps measuring the child, and its evidence says when it was measured (#101)':
@@ -1733,6 +1742,7 @@ const DECLARED: Record<string, string> = {
 
 test('DECLARED contains exactly the routing, pause-resolution, attribution, ceiling-flag, seat-flag, seat-status, launch-record, flag-reader, integration-check, per-seat-rotation, reviewer, resume-guard, mixed-liveness, timestamped-liveness, model-validation, executable-preflight, compaction-survival, rotation-reporting, send-precondition, process-tree-liveness, ceiling-reporting, record-heartbeat, rotation-intent, console-dry-run, flag-reconciliation, paused-time, advisor-targeting, silence-timeout, launch-bounds, origin-reconciliation and capability-briefing entries', () => {
   assert.deepEqual(Object.keys(DECLARED), [
+    'deny-only project configuration for capabilities and commands',
     'implementer_unanswered -> advisor',
     'status.pause.resolution',
     'per-seat artifact attribution',
@@ -1957,7 +1967,7 @@ async function seatsFromSessionCli(): Promise<{ creates: CreateRecord[]; cwd: st
  * The two machine-readable documents a default run actually emits.
  *
  * Both come out of one `relay --json` run in a temporary repository, through the production
- * call sites: the report is what `bin/conclave.ts:1944` prints, and the status record is what
+ * call sites: the report is what `bin/conclave.ts:1949` prints, and the status record is what
  * `recordSession` wrote during that same run, read back by `main(['status', '--json'])` --
  * which resolves the most recent session in `process.cwd()`, so the record has to have been
  * written where an operator would look for it.
@@ -2002,7 +2012,7 @@ async function defaultRunDocuments(): Promise<{ report: unknown; status: unknown
  * blind to that subtree is claiming more than it checks.
  *
  * Built through the real recorder: `recordSession` is what both front-ends call, and
- * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:1587
+ * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:1591
  * with the same object -- a `RunPause` the run handle raised, not one written here. Read back
  * through `main(['status', '--json'])`, so the serialisation and the reconciliation against
  * the pid are the production ones.
@@ -2210,7 +2220,7 @@ async function provokeReviewBlocked(repo: string): Promise<{ relay: Relay; run: 
  * Drive a real relay into one condition and return the pause it raised.
  *
  * The provocations are the ones `resolution.test.ts`'s own `provoke` already uses, deliberately:
- * the same triggers reaching the same single halt site (src/relay/relay.ts:4477), where the
+ * the same triggers reaching the same single halt site (src/relay/relay.ts:4488), where the
  * classification is computed by production `resolutionFor` from the subject the caller passed.
  * Nothing here writes a `RunPause`.
  *
@@ -2298,7 +2308,7 @@ async function provoke(
  * The status document of a run paused for one given reason.
  *
  * Built through the real recorder: `recordSession` is what both front-ends call, and
- * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:1587
+ * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:1591
  * with the same object -- a `RunPause` the relay raised, not one written here. Read back
  * through `main(['status', '--json'])`, so the serialisation and the reconciliation against
  * the pid are the production ones.
@@ -2318,7 +2328,7 @@ async function pausedStatusDocument(reason: PauseReason): Promise<unknown> {
     goal: 'a default goal',
     front: 'session',
     startedAt: Date.now(),
-    // Passed because the console always passes one (src/repl/session.ts:1216), so the status
+    // Passed because the console always passes one (src/repl/session.ts:1220), so the status
     // documents this file pins differ only in what a pause actually changes.
     logPath: join(repo, '.conclave', 'runs', 'session-test.ndjson'),
     build: 'test',
@@ -2502,9 +2512,9 @@ test('default run works in the run cwd and creates no worktree', async () => {
     assert.equal(c.cwd, fromCli.cwd, `the session CLI must create ${c.id} in the run cwd`)
   }
 
-  // The relay CLI passes process.cwd() as the run cwd: bin/conclave.ts:1849-1851.
-  // The relay hands that same cwd to each participant adapter: src/relay/relay.ts:2478-2484.
-  // The cwd getter simply returns the option: src/relay/relay.ts:2179-2181.
+  // The relay CLI passes process.cwd() as the run cwd: bin/conclave.ts:1850-1852.
+  // The relay hands that same cwd to each participant adapter: src/relay/relay.ts:2489-2495.
+  // The cwd getter simply returns the option: src/relay/relay.ts:2190-2192.
   assert.match(relay, /cwd:\s*process\.cwd\(\)/, 'relay block must start in process.cwd')
   // Both creation sites now pass a NAMED context object rather than an inline literal, because
   // the same object composes the launch args that get recorded -- see
@@ -2554,7 +2564,7 @@ test('default run works in the run cwd and creates no worktree', async () => {
 
   // A default run with no subagents must not create any git worktree. The relay only samples
   // the worktree list for its subagent-use report: src/relay/subagents.ts:113 defines
-  // worktreePaths, and src/relay/relay.ts:3386-3387, :3984 and :6524 read it.
+  // worktreePaths, and src/relay/relay.ts:3397-3398, :3995 and :6564 read it.
   // Prove it by exercising the run in a real temporary repository.
   const repo = mkdtempSync(join(tmpdir(), 'conclave-default-'))
   try {
@@ -3053,3 +3063,23 @@ for (const reason of Object.keys(PAUSED_SUBTREE) as PauseReason[]) {
     )
   })
 }
+
+test('a project that denies nothing reaches Relay.start with no denial key on either front-end', () => {
+  // THE IDENTITY RULE, pinned at the only place it can be broken cheaply. `denialsFrom` returns
+  // undefined for a project with no maps, and each front-end spreads `denied` only when it is
+  // present -- so the options object a default run builds is the one it built before #203
+  // existed, rather than one carrying an empty denial that behaves the same.
+  //
+  // Read off the SOURCE because that is what this guard protects: a run asserting behaviour
+  // would pass just as well against `denied: { capabilities: [], commands: [] }`, which is the
+  // exact shape this rule exists to keep out of a default run.
+  const SESSION = readFileSync(join(import.meta.dirname, '..', 'repl', 'session.ts'), 'utf8')
+  const conditional = '...((d) => (d ? { denied: d } : {}))(denialsFrom(projectConfig))'
+  for (const [where, source] of [['bin/conclave.ts', CLI], ['src/repl/session.ts', SESSION]] as const) {
+    assert.ok(
+      source.includes(conditional),
+      `${where} must spread 'denied' only when the project denies something, so a project with ` +
+        `no maps passes no key at all`,
+    )
+  }
+})

@@ -37,6 +37,12 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { BUILTIN_ROLES } from '../registry/roles.ts'
+import {
+  DENIABLE_CAPABILITIES,
+  DENIABLE_COMMANDS,
+  policyReasonFor,
+  type OperatorDenials,
+} from '../registry/operatorDenied.ts'
 import { dirname, join } from 'node:path'
 import type { AgentKind } from './install.ts'
 import { AGENT_KINDS } from './install.ts'
@@ -94,6 +100,27 @@ export interface ProjectConfig {
    * #89 asked for and would need its own decision about precedence.
    */
   roles?: Record<string, RoleConfig>
+  /**
+   * Capabilities this project withholds from the advisor's briefing, by canonical name.
+   *
+   * DENY-ONLY, and the type says so: the value may only be `false`. See `operatorDenied.ts`
+   * for why -- a declaration is something read off the installed CLI, and a config file that
+   * could write `true` would be asserting a fact about another program on no evidence.
+   *
+   * Absent means absent. A project with no map here produces the run it produced before this
+   * field existed, byte for byte, which is the identity `defaultUnchanged.test.ts` pins.
+   */
+  capabilities?: Record<string, false>
+  /**
+   * Slash commands this project withholds, by the name a policy declares, leading slash included.
+   *
+   * Also deny-only, and for a stronger reason. The refusals in `commandPolicy.ts` are not
+   * preferences: they protect the continuity the relay believes it has, the transcript path
+   * the parser latched, and the launch facts the run report states. Those are conclave's
+   * guarantees, so `"/clear": true` is refused at read with the policy's own reason rather
+   * than accepted and quietly dropped.
+   */
+  commands?: Record<string, false>
 }
 
 /**
@@ -221,6 +248,77 @@ export function validateRoles(config: ProjectConfig, path: string): void {
   }
 }
 
+/**
+ * Refuse a `capabilities` or `commands` map that is malformed, names something unknown, or
+ * tries to turn anything ON.
+ *
+ * AT READ, which is startup, for the reason `validateRoles` gives: a run that starts with a
+ * configuration nobody can honour is a run that will behave wrongly later, having already
+ * spent a boot and told the operator it was working. A denial that silently did nothing is
+ * the worst of the three -- the operator believes a capability is withheld and briefs a human
+ * accordingly, and it is not.
+ *
+ * WIDENING IS NAMED, NOT IGNORED. `true` gets its own refusal quoting the policy's reason
+ * where there is one, because an operator writing `"/clear": true` has a model of what this
+ * file can do, and the repair is to that model rather than to the line.
+ */
+export function validateDenials(config: ProjectConfig, path: string): void {
+  const maps = [
+    ['capabilities', config.capabilities, DENIABLE_CAPABILITIES, 'capability'],
+    ['commands', config.commands, DENIABLE_COMMANDS, 'command'],
+  ] as const
+  for (const [field, map, known, noun] of maps) {
+    if (map === undefined) continue
+    if (typeof map !== 'object' || map === null || Array.isArray(map)) {
+      throw new Error(
+        `${path}: ${field} must be an object mapping ${noun} names to false, not ${JSON.stringify(map)}`,
+      )
+    }
+    // Read as `unknown`, because the declared type is `false` and the file on disk is not
+    // bound by it. TypeScript would call `value === true` unreachable and it is the single
+    // most likely thing an operator actually writes.
+    for (const [key, value] of Object.entries(map as Record<string, unknown>)) {
+      if (!known.includes(key)) {
+        throw new Error(
+          `${path}: ${field}.${key} is not a ${noun} anything declares. Known: ${known.join(', ')}`,
+        )
+      }
+      if (value === true) {
+        const because = noun === 'command' ? policyReasonFor(key) : undefined
+        throw new Error(
+          `${path}: ${field}.${key} is true. This file may only NARROW what an adapter ` +
+            `declares, never widen it: a ${noun} is available because it was read off the ` +
+            `installed CLI and weighed there, and turning one on here would assert something ` +
+            `nobody checked.${because ? ` ${key} is refused because: ${because}` : ''} Remove ` +
+            `the entry to leave ${key} as declared, or set it to false to withhold it.`,
+        )
+      }
+      if (value !== false) {
+        throw new Error(
+          `${path}: ${field}.${key} must be false, not ${JSON.stringify(value)}. The only thing ` +
+            `this file can say about a ${noun} is that this project declines it.`,
+        )
+      }
+    }
+  }
+}
+
+/**
+ * What one project denies, or `undefined` when it denies nothing.
+ *
+ * `undefined` rather than a pair of empty arrays, and the distinction is the identity rule:
+ * `Relay.start` spreads this key in only when it is present, so a project with no maps hands
+ * the relay exactly the options it handed before the maps existed. An empty-array denial would
+ * be equivalent in behaviour and not identical in what is passed, and equivalence is what
+ * erodes.
+ */
+export function denialsFrom(config: ProjectConfig): OperatorDenials | undefined {
+  const capabilities = Object.keys(config.capabilities ?? {})
+  const commands = Object.keys(config.commands ?? {})
+  if (capabilities.length === 0 && commands.length === 0) return undefined
+  return { capabilities, commands }
+}
+
 export function readProjectConfig(projectRoot: string): ProjectConfig {
   const path = configPath(projectRoot)
   if (!existsSync(path)) return {}
@@ -245,6 +343,7 @@ export function readProjectConfig(projectRoot: string): ProjectConfig {
   }
   check(config.permissions, 'permissions')
   validateRoles(config, path)
+  validateDenials(config, path)
   for (const [agent, entry] of Object.entries(config.agents ?? {})) {
     if (!(CONFIGURABLE_AGENTS as readonly string[]).includes(agent)) {
       throw new Error(
