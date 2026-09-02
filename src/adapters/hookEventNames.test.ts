@@ -28,6 +28,7 @@ import { dirname, join } from 'node:path'
 import test from 'node:test'
 
 import { HOOK_EVENTS } from './claude.ts'
+import { KIMI_HOOK_EVENTS } from './kimiConfig.ts'
 import { findExecutable } from '../registry/executables.ts'
 
 /**
@@ -157,6 +158,45 @@ test('every event the Codex sidecar registers is a name the installed Codex know
   const events = Object.keys(sidecar.hooks)
   assert.ok(events.length > 0, 'the sidecar template registers nothing, so this test proves nothing')
   checkNames('codex', events, t)
+})
+
+test('the installed Codex knows both compaction events, whichever seat registers them', (t) => {
+  // The test above reads the sidecar's own keys, which is what keeps IT from going stale and
+  // is exactly why it cannot see this. `config/templates/codex-hooks.json` registers no
+  // compaction event, so `PreCompact` and `PostCompact` fall outside everything it examines --
+  // and the "Codex does not" on `KIMI_HOOK_EVENTS` sat unchecked through the very commit that
+  // turned this file's other two dated comments into checks. A claim about another program is
+  // checked against that program or it is not checked.
+  //
+  // The pair is read OUT of `KIMI_HOOK_EVENTS` and then pinned back against the literal names,
+  // so one misspelling in the adapter's list trips this and nothing else: the availability
+  // assertion stops finding the name in the bundle, and the membership assertion stops finding
+  // the pair in the list.
+  const compaction = (KIMI_HOOK_EVENTS as readonly string[]).filter((e) => e.includes('Compact'))
+
+  const found = bundleOf('codex')
+  if ('why' in found) {
+    t.diagnostic(`skipped the availability half: ${found.why}`)
+  } else {
+    t.diagnostic(`checked against ${found.at} (${found.bytes.byteLength}B)`)
+    assert.equal(
+      dispatches(found.bytes, CANARY),
+      false,
+      'the canary was found, so the search matches anything and the assertions below are vacuous',
+    )
+    const missing = compaction.filter((e) => !dispatches(found.bytes, e))
+    assert.deepEqual(
+      missing,
+      [],
+      `the installed Codex knows no event by these names, so the comment on KIMI_HOOK_EVENTS should say which version stopped dispatching them: ${missing.join(', ')}`,
+    )
+  }
+
+  assert.deepEqual(
+    compaction,
+    ['PreCompact', 'PostCompact'],
+    'these hooks are the only compaction evidence the Kimi adapter has -- it reads no transcript, so nothing else counts a generation for that seat; dropping either half removes the evidence without removing the claim',
+  )
 })
 
 test('both halves of the subagent lifecycle are registered on Claude, and the CLI knows both names', (t) => {

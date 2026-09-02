@@ -88,7 +88,23 @@ export const KIMI_HOOK_EVENTS = [
   'UserPromptSubmit',
   /** Tool failure, which `--output-format stream-json` cannot distinguish at all. */
   'PostToolUseFailure',
-  /** Compaction, announced on both sides. Claude Code has these; Codex does not. */
+  /**
+   * Compaction, announced on both sides. "Codex does not" stood here from this file's first
+   * commit and is false: Codex 0.147.0 carries a `hook_event_name` schema for each, and
+   * DESIGN-BRIEF.md has listed both among Codex's documented events since the survey. Claude
+   * Code 2.1.258 dispatches them too. The claim outlived #36 -- the commit that turned this
+   * file's other two dated comments into checks -- because the Codex half of
+   * `hookEventNames.test.ts` reads the sidecar's own registered keys, and the sidecar
+   * registers no compaction event, so the names were outside everything it examined.
+   *
+   * What survives is not "only Kimi hears compaction" either, and the reason is worth having
+   * here: on the other two seats compaction is counted from the TRANSCRIPT, by
+   * `transcript/reconcile.ts`, which is where `compactionGeneration` comes from -- the Codex
+   * sidecar registers neither event and loses nothing by it. Kimi's adapter reads no
+   * transcript; it rebuilds from the stream and its `snapshot()` returns
+   * `compactionGeneration: 0` and says so. These two hooks are the only evidence of compaction
+   * this adapter can get at all, which is why they are registered here and nowhere else.
+   */
   'PreCompact',
   'PostCompact',
   /**
