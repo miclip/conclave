@@ -475,6 +475,35 @@ export interface AgentSession {
   send(message: string, provenance: SendProvenance): Promise<TurnKey>
 
   /**
+   * Type a raw line at the seat's composer and press Enter, WITHOUT starting a turn (#200).
+   *
+   * The one thing on this seam that is write-only, and the return type is the whole point.
+   * `send` hands back a `TurnKey` because a prompt begins a turn the orchestrator will wait
+   * for, count against `--max-turns`, and reconcile a report out of. A slash command begins
+   * none of that: it is an instruction to the CLI rather than work for the model, so there is
+   * no key to give back and nothing to await. Returning `void` is what stops a caller treating
+   * it as a turn, because it has nothing it could treat as one.
+   *
+   * WHAT IT CANNOT TELL YOU, stated here because the omission is permanent rather than
+   * pending. It resolves when THIS PROCESS TYPED -- the same limit `InputQueue.submit` has
+   * (see the comment above `#input` in the Claude adapter) -- and no adapter reads the
+   * composer's reply. So a command the CLI rejects, does not recognise, or has disabled looks
+   * from here exactly like one it ran. Any caller that records this must record the
+   * submission and NOT the outcome, or it is writing down something nobody checked.
+   *
+   * OPTIONAL, and its absence is a fact about the transport rather than a gap. An adapter that
+   * runs one process per turn with the prompt in argv has no composer to type into and no
+   * session between turns to type at; `NO_COMPOSER_COMMAND_POLICY`
+   * (`src/registry/commandPolicy.ts`) is the same fact declared where a policy can be read
+   * off it. The two must agree, and `commandPolicy.test.ts` pins that they do.
+   *
+   * Ordering is the queue's, not the caller's: `InputQueue` serialises everything typed at a
+   * pty, so two of these submitted in order arrive in that order, and neither can interleave
+   * with a `send` on the same seat.
+   */
+  submitRaw?(text: string, detail?: string): Promise<void>
+
+  /**
    * Stop accepting work without ending the session. Cheap: an idle session costs nothing
    * and keeps its context. Reversible by `unquiesce()`.
    */

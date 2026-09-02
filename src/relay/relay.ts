@@ -30,6 +30,7 @@ import {
 import { launchRecordFor, type ParticipantLaunch } from '../registry/launch.ts'
 import { refuseMissingCommands } from '../registry/executables.ts'
 import { refuseUnknownModels } from '../registry/models.ts'
+import { ruleOnCommand } from '../registry/commandPolicy.ts'
 import type { ParticipantSpec } from '../registry/types.ts'
 import type { RoleId } from '../registry/roles.ts'
 import { acquire, release } from '../workspace/sessionLock.ts'
@@ -1155,6 +1156,40 @@ export function splitNotes(prose: string): { notes: string[]; rest: string } {
   // instruction, which is the pollution this exists to remove.
   const rest = prose.replace(NOTE_MARKER, '').replace(/\n{3,}/g, '\n\n').trim()
   return { notes, rest }
+}
+
+/**
+ * How the advisor asks for a slash command instead of describing one (#200).
+ *
+ * Everything the advisor writes is wrapped in an envelope and delivered as prose, which is
+ * correct for an instruction and useless for a mode change: an implementer told "run /compact"
+ * reads a sentence, and whether anything happens depends on it choosing to type the command.
+ * A `COMMAND:` line is taken OUT of the reply by the same mechanism `NOTE:` uses, so it is
+ * never forwarded as prose and never read as part of the instruction. The remainder is still
+ * the instruction, exactly as with a note.
+ *
+ * Same marker shape as `NOTE:` deliberately, including accepting a payload that is not a
+ * slash command at all. The alternative -- matching only a line whose payload starts with `/`
+ * -- looks stricter and is worse: a malformed `COMMAND: compact` would fall through the marker
+ * and be delivered to the implementer as an instruction to do something, which is the one
+ * outcome this must not produce. Lifting the line out unconditionally means a malformed
+ * request is REFUSED and RECORDED rather than silently becoming prose. `ruleOnCommand`
+ * (`src/registry/commandPolicy.ts`) is what refuses it.
+ *
+ * `#submitAdvisorCommands` is what acts on the result, and it runs BEFORE `parseDecisions`
+ * sees the remainder -- so a directive is never both lifted and delivered, and never read as
+ * part of an assignment.
+ */
+export const COMMAND_MARKER = /^[ \t]*COMMAND:[ \t]*(.+)$/gim
+
+export function splitCommands(prose: string): { commands: string[]; rest: string } {
+  const commands: string[] = []
+  for (const m of prose.matchAll(COMMAND_MARKER)) {
+    const text = m[1]?.trim()
+    if (text) commands.push(text)
+  }
+  const rest = prose.replace(COMMAND_MARKER, '').replace(/\n{3,}/g, '\n\n').trim()
+  return { commands, rest }
 }
 
 /** A reviewer's verdict, read off its report (#72). See `REVIEWER_BRIEFING`. */
@@ -6233,6 +6268,112 @@ export class Relay {
   }
 
   /** Queue a mechanical fact for the advisor's next prompt. See `#leadNotices`. */
+  /**
+   * Act on the `COMMAND:` lines lifted out of an advisor reply (#200).
+   *
+   * The gap this closes: everything the advisor writes is wrapped in an envelope and delivered
+   * as prose, so it could DESCRIBE a mode change and never cause one. What it could not do was
+   * put the seat into a mode. Now it can, for the verbs its adapter's policy allows.
+   *
+   * Four properties, and each is a thing that would be wrong if it were absent:
+   *
+   *   RULED FIRST, SENT SECOND. `ruleOnCommand` decides against the policy of the agent in the
+   *   seat, not against a list here. A refusal never reaches the composer, so a command that
+   *   the rule forbids cannot be typed by mistake.
+   *
+   *   THE TURN BOUNDARY IS WAITED FOR. `#awaitSendable` is the same precondition every peer
+   *   send goes through and exists because a send landing mid-turn ends the run (#117). A
+   *   slash command typed into a live turn is the same hazard wearing a different hat.
+   *
+   *   UNENVELOPED. `envelope()` prefixes a rank header, which is right for something a
+   *   participant said and fatal here: `[advisor] /compact` is not a command, it is a line of
+   *   text beginning with a bracket. What goes to the composer is the command and nothing else.
+   *
+   *   THE SUBMISSION IS RECORDED; THE OUTCOME IS NOT. No adapter reads the composer's reply, so
+   *   whether the CLI ran the command, refused it, or has it disabled is unknown here and is
+   *   written down as unknown. A log that said "compacted" would be inventing the half nobody
+   *   checked, and this is the one place in the run where an orchestrator action has no
+   *   verdict to pair with it.
+   *
+   * NOT A TURN, anywhere. `session.submitRaw` bypasses `#exchange` entirely: no `TurnKey`, no
+   * `#turnsTaken` increment, no participant turn synthesized, nothing for the reconciler to
+   * find. A command is the orchestrator operating the seat, not the seat doing work, and
+   * counting it against `--max-turns` would charge the operator's allowance for a housekeeping
+   * keystroke.
+   *
+   * ONE SEAT. Commands go to the configured lead implementer -- `#implementers()[0]` -- because
+   * a mode is a property of a seat and the advisor's line names no seat. At N>1 the other seats
+   * are untouched, which is a limitation rather than a design: the addressing syntax
+   * `MULTI_SEAT_BRIEFING` teaches applies to instructions and has no form for a directive.
+   */
+  async #submitAdvisorCommands(lead: RelayParticipant, lines: readonly string[]): Promise<void> {
+    // The default identity. A reply with no directive must leave this run byte-identical to
+    // one from before commands existed: no seat looked up, no policy read, nothing recorded.
+    if (lines.length === 0) return
+
+    const impl = this.#implementers()[0]
+    const refuse = (command: string | undefined, why: string) => {
+      const named = command ? `${command}: ` : ''
+      const text = `the command \`${command ?? lines[0]}\` you asked for was NOT run. ${named}${why}`
+      this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text })
+      this.#tellLead(text)
+    }
+
+    if (!impl) {
+      for (const line of lines) refuse(line, 'this run has no implementer seat to run it in')
+      return
+    }
+
+    const policy = this.#opts.registry.get(impl.agent).commandPolicy
+    for (const line of lines) {
+      const ruling = ruleOnCommand(policy, line)
+      if (ruling.verdict === 'refused') {
+        refuse(ruling.command ?? ruling.line, ruling.reason)
+        continue
+      }
+      // Belt and braces, and the two are not the same check. The policy says whether this VERB
+      // is permitted; this says whether the transport can carry any verb at all. They agree on
+      // every built-in -- `commandPolicy.test.ts` pins that the two adapters with a declared
+      // list are exactly the two that can type into a composer -- so reaching this is a
+      // registration that declared a list for an adapter that cannot deliver one, and refusing
+      // is better than typing into something that has no composer.
+      if (!impl.session.submitRaw) {
+        refuse(ruling.command, `${impl.agent} has no composer to deliver a command to, whatever its policy declares`)
+        continue
+      }
+
+      try {
+        // The same wait, and the same consequences, as any other send. If the bound expires
+        // this cancels and closes the seat and throws, exactly as it would for an instruction:
+        // a command is input, and a seat that cannot take input cannot take this either.
+        await this.#awaitSendable(impl)
+        await impl.session.submitRaw(ruling.line, `advisor command via ${lead.id}`)
+      } catch (e) {
+        // Caught rather than propagated, and only here. `#awaitSendable`'s give-up path has
+        // already cancelled and closed the seat by the time it throws, so the run is ending
+        // either way; letting this escape would end it from the advisor-reply path, which no
+        // caller above expects and which would lose the record of what was being attempted.
+        // The remaining commands are abandoned because the seat they were for is gone.
+        const why = e instanceof Error ? e.message : String(e)
+        refuse(ruling.command, `it could not be delivered to ${impl.id}: ${why}`)
+        return
+      }
+
+      // Submitted, and that is ALL this says. See the doc above: the outcome is not observable
+      // from here and is not claimed.
+      this.#record({
+        from: 'orchestrator',
+        fromRank: 'human',
+        to: [impl.id],
+        kind: 'note',
+        text:
+          `orchestrator submitted \`${ruling.line}\` to ${impl.id} on ${lead.id}'s instruction, ` +
+          `unenveloped and between turns. Outcome UNOBSERVED: no adapter reads the composer's ` +
+          `reply, so whether ${impl.agent} ran it, rejected it or has it disabled is not known here.`,
+      })
+    }
+  }
+
   #tellLead(text: string): void {
     this.#leadNotices.push(`[ORCHESTRATOR — mechanical, not a participant speaking]\n\n${text}`)
   }
@@ -6906,14 +7047,24 @@ export class Relay {
           this.#record({ from: lead.id, fromRank: 'advisor', to: [], kind: 'note', text: note })
         }
 
-        let instruction = withoutNotes.trim()
+        // Lifted BEFORE assignment parsing, and acted on before it too. A `COMMAND:` line is a
+        // directive to the orchestrator, not text for the implementer: left in, it would reach
+        // the seat as an instruction to type something -- which is the delivery this replaces --
+        // and `parseDecisions` would read it as part of an assignment.
+        const { commands, rest: withoutDirectives } = splitCommands(withoutNotes)
+        await this.#submitAdvisorCommands(lead, commands)
+
+        let instruction = withoutDirectives.trim()
 
         // A reply that was ONLY notes is not a failure to instruct -- it is the advisor using
         // the channel that was just given to it. Halting there would end a run because the
         // advisor said something useful, so it is asked once for the instruction that goes with
         // the note. Bounded: this happens inside the advisor turn, and the guard below still catches a
         // second empty reply.
-        if (instruction === '' && notes.length > 0 && next.end.verdict.outcome === 'completed') {
+        // Commands count alongside notes here. A reply that was ONLY a directive is the advisor
+        // using the channel it was given, exactly as a note-only reply is, and halting the run
+        // for it would end a session because the advisor did the thing it was told it could do.
+        if (instruction === '' && (notes.length > 0 || commands.length > 0) && next.end.verdict.outcome === 'completed') {
           next = await this.#exchange(
             lead,
             [this.#drain(lead.id) || 'Your note is recorded for the operator. Now give the implementer its next instruction, or reply exactly DONE.',
@@ -6924,11 +7075,16 @@ export class Relay {
           for (const note of second.notes) {
             this.#record({ from: lead.id, fromRank: 'advisor', to: [], kind: 'note', text: note })
           }
-          next = { ...next, prose: second.rest }
+          // The re-ask is a reply like any other, so its directives are lifted and run like any
+          // other. Omitting this would make a `COMMAND:` line silently inert in exactly the
+          // branch an advisor reaches by having sent one already.
+          const secondCommands = splitCommands(second.rest)
+          await this.#submitAdvisorCommands(lead, secondCommands.commands)
+          next = { ...next, prose: secondCommands.rest }
           // Recomputed, not left stale: everything below -- the DONE check, the guard, the
           // routing -- reads `instruction`, and after a re-ask the old value is a different
           // turn's reply.
-          instruction = second.rest.trim()
+          instruction = secondCommands.rest.trim()
         }
 
         // The reply, read as assignment decisions. Fails closed: a reply that does not parse
