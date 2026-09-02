@@ -213,6 +213,97 @@ export interface InstructionCapabilities {
   autonomousLoop?: GradedClaim | undefined
 }
 
+/**
+ * Whether the advisor may put a seat into a given mode by naming a slash command (#200).
+ *
+ * THE RULE, and it is one sentence: the advisor may change HOW the seat works, never WHETHER
+ * IT EXISTS and never what the OPERATOR configured. Everything in every declaration follows
+ * from it.
+ *
+ *   - A work-mode change is ALLOWED. `/compact` on either pty CLI, `/loop` on Claude,
+ *     `/review` on Codex: each alters how the seat spends its turns, and the seat, its
+ *     context and its history all survive, so the relay's belief about the seat stays true
+ *     across the change.
+ *   - A command that ENDS OR DISCARDS CONTINUITY is REFUSED. The relay is left holding a seat
+ *     handle it believes has a history behind it. Nothing observes the loss -- no adapter
+ *     reads the composer's error text -- so the run carries on attributing turns to
+ *     continuity that is gone.
+ *   - A command that ALTERS OPERATOR CONFIGURATION is REFUSED. The operator chose the seat's
+ *     model, its permissions and its hooks, and the run report states those choices as fact.
+ *
+ * THREE STATES, AND THEY MUST NOT COLLAPSE INTO TWO. This is a union rather than a list with
+ * a nullable field because the three answers have different causes and want different
+ * repairs:
+ *
+ *   `declared`     Someone read this CLI's installed bundle and wrote down what it has.
+ *                  Within it, an entry may still be a refusal -- see `CommandDeclaration`.
+ *   `unsupported`  Someone looked and there is nowhere to type a command AT ALL. Not a
+ *                  refusal of any particular verb: the adapter has no composer, so the
+ *                  question does not arise. Repairing it would mean a different adapter.
+ *   absent         Nobody looked. The honest state for an agent registered without one, and
+ *                  the reason the field is optional. Repairing it means reading a binary.
+ *
+ * Collapsing `unsupported` into absence would report a structural fact as an oversight, and
+ * collapsing it the other way would report an oversight as a structural fact. Both are wrong
+ * in the direction that stops anyone fixing it.
+ *
+ * REFUSAL IS THE DEFAULT IN ALL THREE, and that is the one place this differs from
+ * `InstructionCapabilities`. There, an absent field withholds a CLAIM, so silence is safe by
+ * removing an assertion. Here, an entry grants a PERMISSION to act on another program, so
+ * silence must be safe by removing the permission. Both directions are the conservative one;
+ * they only look opposite because the two fields carry opposite kinds of thing.
+ */
+export type CommandPolicy =
+  | {
+      kind: 'declared'
+      /**
+       * The version of the CLI every entry was read from, verbatim as that CLI reports
+       * itself -- the same freshness convention `GradedClaim.sourceVersion` sets, and for the
+       * same reason: a permission to type a command into another program expires when that
+       * program moves, and a string comparison against `--version` needs no parser.
+       */
+      sourceVersion: string
+      /**
+       * Every command CONSIDERED, refusals included.
+       *
+       * A refusal is a declaration, not an omission, and it is checked against the installed
+       * bundle exactly as an allowance is. A refusal naming a command the CLI no longer has is
+       * every bit as stale as a permission naming one -- it reads as a live guard against a
+       * hazard that no longer exists, and hides that nobody has looked recently.
+       */
+      commands: readonly CommandDeclaration[]
+    }
+  | {
+      kind: 'unsupported'
+      /** What was looked at, and why no command could be delivered whatever it said. */
+      reason: string
+    }
+
+/** What the policy says about one command. */
+export type CommandDisposition = 'allowed' | 'refused'
+
+export interface CommandDeclaration {
+  /** Exactly as it would be typed into the composer, leading slash included. */
+  command: string
+  disposition: CommandDisposition
+  /** Which clause of the rule on `CommandPolicy` decides it, in that clause's own terms. */
+  reason: string
+  /**
+   * A literal from the installed bundle that this command's existence was read from, quoted
+   * closely enough to be searched for again.
+   *
+   * The FORM varies per command AND per CLI, and it is not normalised, because normalising it
+   * would be a lie. On Claude, a bundled JavaScript program, commands are declared as
+   * `name:"..."` -- except `/quit`, which exists only as an alias inside another command's
+   * declaration, and `/loop`, which is a SKILL the bundle ships rather than a command at all.
+   * On Codex, a Rust binary, the names are interned into a packed table with no separators, so
+   * searching for a bare name proves nothing whatsoever and the pinnable literal is the
+   * command's DESCRIPTION instead. One search shape over all of that would either miss most of
+   * it or match too loosely to prove anything.
+   */
+  source: string
+}
+
 export interface AgentDefinition {
   id: string
   displayName: string
@@ -248,6 +339,14 @@ export interface AgentDefinition {
    * step, rather than arriving as a footnote to whichever briefing first needed it.
    */
   instructionCapabilities?: InstructionCapabilities | undefined
+  /**
+   * Which slash commands the advisor may ask this seat to run, and which are refused (#200).
+   *
+   * Optional, and its absence is the THIRD state rather than a shorthand for either declared
+   * one: nobody has read this agent's binary. It refuses every command, as the other two
+   * states also can, but for a reason that names a different repair. See `CommandPolicy`.
+   */
+  commandPolicy?: CommandPolicy | undefined
   launch: LaunchSpec
   /** Runs before `create`. Throwing here prevents the session from starting. */
   preflight?: Preflight

@@ -30,6 +30,11 @@ import {
   type ModelSupport,
 } from './models.ts'
 import {
+  CLAUDE_COMMAND_POLICY,
+  CODEX_COMMAND_POLICY,
+  NO_COMPOSER_COMMAND_POLICY,
+} from './commandPolicy.ts'
+import {
   CLAUDE_INSTRUCTION_CAPABILITIES,
   CODEX_INSTRUCTION_CAPABILITIES,
   KIMI_INSTRUCTION_CAPABILITIES,
@@ -120,6 +125,12 @@ export const CLAUDE_AGENT: AgentDefinition = {
   deadlines: PTY_HOOK_DEADLINES,
   models: CLAUDE_MODELS,
   instructionCapabilities: CLAUDE_INSTRUCTION_CAPABILITIES,
+  // All four definitions in this file declare a policy (#200), in one of the two shapes the
+  // union offers: the pty seats carry a list read out of their installed bundle, and the two
+  // run-per-turn seats carry `unsupported`, which is a statement about having no composer
+  // rather than a refusal of any particular verb. Absence would mean a third thing -- nobody
+  // looked -- and after this change no built-in is in that state.
+  commandPolicy: CLAUDE_COMMAND_POLICY,
   launch: {
     command: 'claude',
     // The adapter supplies --settings itself, pointing at a generated hook registration
@@ -170,6 +181,7 @@ export const CODEX_AGENT: AgentDefinition = {
   deadlines: PTY_HOOK_DEADLINES,
   models: CODEX_MODELS,
   instructionCapabilities: CODEX_INSTRUCTION_CAPABILITIES,
+  commandPolicy: CODEX_COMMAND_POLICY,
   launch: {
     command: 'codex',
     executable: { install: 'npm install -g @openai/codex', installFrom: INSTALL_HINT_SOURCE },
@@ -267,6 +279,7 @@ export const OPENCODE_AGENT: AgentDefinition = {
   deadlines: RUN_PER_TURN_DEADLINES,
   models: OPENCODE_MODELS,
   instructionCapabilities: OPENCODE_INSTRUCTION_CAPABILITIES,
+  commandPolicy: NO_COMPOSER_COMMAND_POLICY,
   launch: {
     command: 'opencode',
     baseArgs: [],
@@ -321,6 +334,7 @@ export const KIMI_AGENT: AgentDefinition = {
   deadlines: RUN_PER_TURN_DEADLINES,
   models: KIMI_MODELS,
   instructionCapabilities: KIMI_INSTRUCTION_CAPABILITIES,
+  commandPolicy: NO_COMPOSER_COMMAND_POLICY,
   launch: {
     command: 'kimi',
     baseArgs: [],

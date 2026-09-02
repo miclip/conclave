@@ -1147,6 +1147,33 @@ export class CodexPtyHookAdapter implements AgentSession {
     this.#state = 'rotating'
   }
 
+  /**
+   * A slash command, typed and submitted, with no turn started (#200).
+   *
+   * Deliberately NOT `send`, and the list of what it skips is the specification. It takes no
+   * `PendingPrompt` claim, so it neither waits for a `UserPromptSubmit` hook nor blocks the
+   * next real send; it does not call `#refuseOverlappingSend`, because it is not a prompt and
+   * cannot be the overlapping one; it verifies no prompt fidelity, because there is no echoed
+   * prompt to compare against; and it hands back nothing, because there is no key.
+   *
+   * The state guards are `send`'s, unchanged and for the same reason: a session that is
+   * quiesced, rotating or closed is not accepting input, and typing at it anyway would put
+   * characters into a seat the run believes is out of service.
+   *
+   * What lands afterwards is the CLI's business and is not observed here -- see `submitRaw`
+   * on the seam. If the CLI happens to dispatch its ordinary prompt hooks for a slash command,
+   * the adapter will see a turn it did not send; that is a fact about the CLI rather than a
+   * thing this method can prevent, and it is why the relay records a submission and never an
+   * outcome.
+   */
+  async submitRaw(text: string, detail?: string): Promise<void> {
+    if (this.#state !== 'running') {
+      throw new Error(`session is ${this.#state}; it is not accepting input`)
+    }
+    if (!this.acceptsInput) throw new Error('session is not accepting input')
+    await this.#input.submit(text, detail ?? `raw command: ${text.slice(0, 80)}`)
+  }
+
   async send(message: string, _provenance: SendProvenance): Promise<TurnKey> {
     if (this.#state !== 'running') {
       throw new Error(`session is ${this.#state}; it is not accepting work`)
