@@ -23,6 +23,7 @@ import {
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
+import { isChildOutput } from '../contract/session.ts'
 import { suiteTempDir, tempDir } from '../testkit/tempDir.ts'
 import { TranscriptSessionView } from './reconcile.ts'
 import { parseClaude, parseCodex } from './parse.ts'
@@ -200,6 +201,40 @@ test('SYNTHETIC: truncation is treated as a rewrite', async () => {
   const after = await tail.poll()
   assert.equal(after.rewritten, true)
   assert.equal(after.all?.length, 1)
+})
+
+test('#198 SYNTHETIC: a turn that has only thought is emitting child output', async () => {
+  // Extended thinking is the one state where a Claude seat is working and silent by every other
+  // measure: no assistant text, no tool call, no hook. Claude Code writes each thinking block as
+  // its OWN transcript entry -- 1,736 of them in the session this was written from, none carrying
+  // anything else -- so the file grows while the seat looks dead to the silence clock.
+  const p = join(SCRATCH, 'thinking-only.jsonl')
+  const user = (c: string) => JSON.stringify({ type: 'user', message: { content: c } }) + '\n'
+  const thought = () =>
+    JSON.stringify({ type: 'assistant', message: { content: [{ type: 'thinking', thinking: 'weighing two approaches', signature: 'x' }] } }) + '\n'
+
+  writeFileSync(p, user('do the hard one') + thought() + thought())
+  const v = view(p, 'claude')
+
+  const out = await v.poll()
+  const thinking = out.filter((e) => e.type === 'thinking')
+  assert.equal(thinking.length, 2, `one event per block written; got ${JSON.stringify(out.map((e) => e.type))}`)
+  assert.ok(
+    thinking.every((e) => isChildOutput(e)),
+    'and each must count as the child working, or the silence clock is no better off',
+  )
+
+  // The count is a diff, like every other derivation here: polling again with nothing appended
+  // must not re-report blocks already seen, or a stalled turn would look alive forever.
+  assert.deepEqual((await v.poll()).filter((e) => e.type === 'thinking'), [], 'no new blocks, no new events')
+
+  // A third block appended is the turn continuing to reason, and must be reported on its own.
+  writeFileSync(p, user('do the hard one') + thought() + thought() + thought())
+  assert.equal(
+    (await v.poll()).filter((e) => e.type === 'thinking').length,
+    1,
+    'only the newly written block is emitted',
+  )
 })
 
 test('SYNTHETIC: re-emitted history is marked as replay, and fresh output is not', async () => {

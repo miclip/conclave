@@ -45,6 +45,24 @@ const CASES: Record<AgentEvent['type'], { what: string; event: AgentEvent; count
       counts: false,
     },
   ],
+  thinking: [
+    {
+      // #198: the case this event exists for. A seat in extended thinking emits no assistant
+      // text, no tool call and no hook, so by every other clause here it has gone silent --
+      // while being at its most productive, on precisely the hard problems an advisor delegates.
+      what: 'reasoning is the child working, even though it is not the child speaking',
+      event: { ...base, type: 'thinking' },
+      counts: true,
+    },
+    {
+      // The same rule every other event obeys, and it matters more here: a transcript replayed
+      // after a rotation carries every thinking block the old turn ever wrote, and counting them
+      // would hold the silence deadline open on a seat that has said nothing since.
+      what: 'a replayed thinking block is history, not a seat that is thinking now',
+      event: { ...base, type: 'thinking', replay: true },
+      counts: false,
+    },
+  ],
   tool_use: [
     {
       what: 'a tool call is work',

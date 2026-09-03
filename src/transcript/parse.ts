@@ -119,6 +119,12 @@ export function parseClaude(records: Record<string, any>[]): ParsedTranscript {
               : block.text
             // The last text block of the turn is its report; earlier ones are narration.
             current.report = block.text
+          } else if (block?.type === 'thinking') {
+            // #198: COUNTED, never accumulated. The reasoning text is not narration and has no
+            // audience here; what the count buys is a liveness signal for a state that produces
+            // no other one -- Claude Code writes each thinking block as its own transcript
+            // entry, so the count grows while a turn is otherwise silent.
+            current.thinkingCount = (current.thinkingCount ?? 0) + 1
           } else if (block?.type === 'tool_use') {
             // `input` carries `file_path` on Write/Edit and `command` on Bash. Verified
             // present on 1883/1883 Edit and 475/475 Write calls across 173 sessions; Bash

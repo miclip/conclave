@@ -304,10 +304,10 @@ export class FakeRotationSession implements AgentSession {
          * it two ways, and only one of them can withdraw anything.
          *
          *   - a transcript that DECLARES a compaction yields `replaces: []`
-         *     (`src/transcript/reconcile.ts:679`), which withdraws nothing;
+         *     (`src/transcript/reconcile.ts:681`), which withdraws nothing;
          *   - a rewrite yields `reason: fresh > 0 ? 'compaction' : 'rewrite'`
-         *     (`src/transcript/reconcile.ts:593`) over whatever it found already emitted
-         *     (`src/transcript/reconcile.ts:594`).
+         *     (`src/transcript/reconcile.ts:595`) over whatever it found already emitted
+         *     (`src/transcript/reconcile.ts:596`).
          *
          * So `compaction` WITH a withdrawal is one shape rather than a guarantee of the rewrite
          * path: a fresh compaction marker, and a verdict already emitted for the rewrite to
