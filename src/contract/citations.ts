@@ -198,7 +198,7 @@ export const CITED: Record<string, string> = {
   // Live-claim section in docs/NOTES.md: #156's premise and the unverified-generation guards.
   // These citations assert current fact in a section marked `## LIVE:`, so they are checked even
   // though the rest of docs/** is frozen design record.
-  'src/adapters/claude.ts:2108-2121': 'containedFallback: true,',
+  'src/adapters/claude.ts:2183-2196': 'containedFallback: true,',
   'src/adapters/codex.ts:1476-1489': 'containedFallback: true,',
   'src/rotation/rotate.ts:484':
     'const generation = snap.containedFallback ? UNKNOWN_GENERATION : snap.compactionGeneration',
@@ -236,7 +236,7 @@ export const CITED: Record<string, string> = {
   'src/relay/relay.ts:7903':
     'const rotated = await this.#considerRotation(seat, report.prose, handle)',
   'src/adapters/codex.ts:620-626': 'this.#view = new TranscriptSessionView({',
-  'src/adapters/claude.ts:1210-1214': 'this.#view = new TranscriptSessionView({',
+  'src/adapters/claude.ts:1262-1266': 'this.#view = new TranscriptSessionView({',
   'src/relay/relay.ts:2496':
     'const p: RelayParticipant = { id: spec.id, agent: spec.agent, rank, role: spec.role, launch, session, events: [], baselineGeneration: 0, degradationCursor: 0 }',
   'src/relay/report.ts:311-321': 'const snap = await p.session.snapshot()',
@@ -248,7 +248,7 @@ export const CITED: Record<string, string> = {
   'src/adapters/kimi.ts:752': 'compactionGeneration: 0,',
   'src/adapters/opencode.ts:790': 'compactionGeneration: 0,',
   'src/rotation/rotate.ts:412': 'export async function rotate(',
-  'src/adapters/claude.ts:1724': "#state: SessionState = 'running'",
+  'src/adapters/claude.ts:1799': "#state: SessionState = 'running'",
   'src/adapters/codex.ts:1118': "#state: SessionState = 'running'",
   'src/rotation/handoff.ts:74': 'compactionGeneration: CompactionGeneration',
   'src/workspace/sessionRecord.ts:1412': 'snap.turns.map(',

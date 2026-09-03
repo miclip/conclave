@@ -47,6 +47,47 @@ function collector(): { updates: VerdictUpdate[]; onUpdate: (t: Turn, u?: Verdic
   return { updates, onUpdate: (_t, u) => { if (u) updates.push(u) } }
 }
 
+test('#193 a turn blocked inside a long tool call is not idle', async () => {
+  // The one state the subagent rule does not cover, and the common one: the child emitted a
+  // tool call and is waiting on it. Measured across 4,055 real calls -- median 0.2s, p99 508s,
+  // max 11,912s -- so most are invisible and the few that are not are the ones that matter. A
+  // seat running a test suite as its `--checks` is silent for most of the budget every time.
+  const turn = turnAt(Date.now())
+  turn.tools = { outstanding: 1 }
+  const { updates, onUpdate } = collector()
+  const w = new TurnWatchdog<Turn>(MS * 40, onUpdate, MS)
+
+  w.arm(turn.key, turn)
+  await sleep(MS * 6)
+
+  assert.equal(updates.length, 0, `a turn waiting on a command must not be called idle; got ${JSON.stringify(updates.map((u) => u.verdict?.outcome))}`)
+
+  w.disarmAll()
+})
+
+test('#193 the clock resumes when the command returns', async () => {
+  // The suspension lasts exactly as long as the call. Without this the fix would be "a seat that
+  // ever ran a tool is never timed again", which is worse than the bug.
+  const turn = turnAt(Date.now())
+  turn.tools = { outstanding: 1 }
+  const { updates, onUpdate } = collector()
+  const w = new TurnWatchdog<Turn>(MS * 40, onUpdate, MS)
+
+  w.arm(turn.key, turn)
+  await sleep(MS * 4)
+  assert.equal(updates.length, 0, 'still waiting on the command')
+
+  turn.tools = { outstanding: 0 }
+  turn.lastActivityAt = Date.now()
+  w.touch(turn.key)
+
+  await sleep(MS * 6)
+  assert.equal(updates.length, 1, 'once nothing is outstanding the seat is measurable again')
+  assert.equal(updates[0]?.verdict?.outcome, 'timed_out')
+
+  w.disarmAll()
+})
+
 test('#214 a quiet turn with a subagent outstanding is delegating, not hung', async () => {
   // The whole mechanism: a delegating parent sits in one tool call while another model works
   // and produces nothing a tailer can see. `isChildOutput` counts the start and the stop, so
