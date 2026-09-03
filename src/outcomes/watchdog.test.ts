@@ -47,6 +47,75 @@ function collector(): { updates: VerdictUpdate[]; onUpdate: (t: Turn, u?: Verdic
   return { updates, onUpdate: (_t, u) => { if (u) updates.push(u) } }
 }
 
+test('#214 a quiet turn with a subagent outstanding is delegating, not hung', async () => {
+  // The whole mechanism: a delegating parent sits in one tool call while another model works
+  // and produces nothing a tailer can see. `isChildOutput` counts the start and the stop, so
+  // the silence deadline is pushed at each END of the delegation and the middle is unmeasured
+  // -- which means the clock is timing the SUBAGENT'S duration against a budget argued for
+  // builds and test suites.
+  const turn = turnAt(Date.now())
+  turn.subagents = { outstanding: 1 }
+  const { updates, onUpdate } = collector()
+  // Idle far shorter than absolute, so only the silence clock can be what fires here.
+  const w = new TurnWatchdog<Turn>(MS * 40, onUpdate, MS)
+
+  w.arm(turn.key, turn)
+  await sleep(MS * 6)
+
+  assert.equal(updates.length, 0, `a turn with work delegated must not be called idle; got ${JSON.stringify(updates.map((u) => u.verdict?.outcome))}`)
+  assert.equal(turn.tracker.settled, false, 'and nothing may have settled its verdict')
+
+  w.disarmAll()
+})
+
+test('#214 delegation that begins after the clock is armed still suspends it', async () => {
+  // Reaches `#fire` rather than `#nextDelay`, and the distinction matters: a turn already
+  // delegating when the timer is set never wakes at the idle deadline at all, so a test that
+  // only covers that case passes with the guard in `#fire` deleted. Here the seat is quiet and
+  // NOT delegating when the clock is armed -- the idle timer is genuinely scheduled -- and the
+  // subagent starts before it expires, which is the ordering a real turn produces: the parent
+  // works, then delegates.
+  const turn = turnAt(Date.now())
+  const { updates, onUpdate } = collector()
+  const w = new TurnWatchdog<Turn>(MS * 40, onUpdate, MS)
+
+  w.arm(turn.key, turn)
+  // Before the idle deadline, and with no touch: the armed timer still expects to fire.
+  turn.subagents = { outstanding: 1 }
+
+  await sleep(MS * 6)
+
+  assert.equal(updates.length, 0, `the fire path must refuse to call a delegating turn idle; got ${JSON.stringify(updates.map((u) => u.verdict?.outcome))}`)
+  assert.equal(turn.tracker.settled, false)
+
+  w.disarmAll()
+})
+
+test('#214 silence times again from the STOP, once the subagent is done', async () => {
+  // The other half, and the one that keeps this from being "never time a delegating seat": the
+  // suspension lasts exactly as long as the delegation. `subagent_stop` is child output, so the
+  // adapter touches the clock and silence restarts -- from the stop, not from the start.
+  const turn = turnAt(Date.now())
+  turn.subagents = { outstanding: 1 }
+  const { updates, onUpdate } = collector()
+  const w = new TurnWatchdog<Turn>(MS * 40, onUpdate, MS)
+
+  w.arm(turn.key, turn)
+  await sleep(MS * 4)
+  assert.equal(updates.length, 0, 'still delegating')
+
+  // The subagent finished: the adapter clears it and touches, exactly as `#onHook` does.
+  turn.subagents = { outstanding: 0 }
+  turn.lastActivityAt = Date.now()
+  w.touch(turn.key)
+
+  await sleep(MS * 6)
+  assert.equal(updates.length, 1, 'silence must be measurable again once nothing is delegated')
+  assert.equal(updates[0]?.verdict?.outcome, 'timed_out')
+
+  w.disarmAll()
+})
+
 test('a turn that reports nothing at all is classified timed_out once the deadline passes', async () => {
   const turn = turnAt(Date.now())
   const { updates, onUpdate } = collector()
