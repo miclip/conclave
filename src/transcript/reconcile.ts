@@ -49,6 +49,8 @@ interface EmittedTurn {
   seqs: number[]
   textLength: number
   toolCount: number
+  /** How many thinking blocks this turn has already been reported for (#198). */
+  thinkingCount: number
   ended: boolean
 }
 
@@ -712,7 +714,7 @@ export class TranscriptSessionView {
       let seen = this.#emitted.get(key)
 
       if (!seen) {
-        seen = { seqs: [], textLength: 0, toolCount: 0, ended: false }
+        seen = { seqs: [], textLength: 0, toolCount: 0, thinkingCount: 0, ended: false }
         this.#emitted.set(key, seen)
         const seq = this.#next()
         seen.seqs.push(seq)
@@ -744,6 +746,18 @@ export class TranscriptSessionView {
         })
       }
       seen.toolCount = turn.toolCalls.length
+
+      // #198: one event per newly-seen thinking block, on the same seen-count diff every other
+      // derivation here uses. Emitted BEFORE the text below for the same reason the tool loop is:
+      // the child reasons and then speaks, and a stream that reports it the other way round
+      // describes a turn that did not happen.
+      const thinking = turn.thinkingCount ?? 0
+      for (let i = seen.thinkingCount; i < thinking; i++) {
+        const seq = this.#next()
+        seen.seqs.push(seq)
+        out.push({ type: 'thinking', turnKey: turn.key, seq, at: this.#builtAt, provisional: true })
+      }
+      seen.thinkingCount = thinking
 
       const text = turn.assistantText ?? ''
       if (text.length > seen.textLength) {

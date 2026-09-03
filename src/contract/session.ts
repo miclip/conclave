@@ -103,6 +103,22 @@ export interface TurnStartEvent extends EventBase {
   prompt: string
 }
 
+/**
+ * The child wrote a block of reasoning (#198).
+ *
+ * CARRIES NOTHING. Its whole purpose is to be counted as child output, and a payload would
+ * invite a consumer to render reasoning as though the seat had said it.
+ *
+ * It exists because extended thinking is the one state in which a Claude seat is genuinely
+ * working and genuinely silent by `isChildOutput`'s definition -- no assistant text, no tool
+ * call, no hook -- and it lasts longest on exactly the hard problems an advisor delegates. The
+ * silence clock fired on such a turn in session `20260901-112850-98711` while the pause
+ * evidence it printed said, in as many words, that output was still arriving.
+ */
+export interface ThinkingEvent extends EventBase {
+  type: 'thinking'
+}
+
 export interface MessageEvent extends EventBase {
   type: 'message'
   role: 'assistant' | 'user'
@@ -252,6 +268,7 @@ export interface AdapterErrorEvent extends EventBase {
 export type AgentEvent =
   | TurnStartEvent
   | MessageEvent
+  | ThinkingEvent
   | ToolUseEvent
   | PermissionRequestedEvent
   | SubagentStartEvent
@@ -290,6 +307,10 @@ export function isChildOutput(e: AgentEvent): boolean {
   switch (e.type) {
     case 'message':
       return e.role === 'assistant'
+    // #198: reasoning is the child working. It is not the child SAYING anything, which is why
+    // it carries no text and never reaches narration -- but "has this turn stopped" and "has
+    // this turn spoken" are different questions, and this is evidence for the first.
+    case 'thinking':
     case 'tool_use':
     case 'permission_requested':
     // A delegating turn is the one that goes quiet for longest -- the parent sits in a single
@@ -349,6 +370,18 @@ export interface TurnRecord {
    * 0.2% -- so the only representation both express is the text itself.
    */
   toolCalls: { tool: string; failed: boolean; args?: string | undefined }[]
+  /**
+   * How many thinking blocks the child has written this turn (#198).
+   *
+   * A COUNT, and deliberately not the text. What is needed is proof the child is working, not
+   * what it was working on: the reasoning is verbose, it is not the seat's narration, and
+   * putting it on the record would send it to every consumer that reads narration -- including
+   * the other participant, which is the one audience it is certainly not for.
+   *
+   * Absent on a transcript with no thinking in it, which is every Codex transcript and any
+   * Claude turn that answered without reasoning.
+   */
+  thinkingCount?: number | undefined
   startedAt?: number | undefined
   endedAt?: number | undefined
 }
