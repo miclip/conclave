@@ -258,10 +258,26 @@ the run it was before they existed.
 command: it disappears from the briefing and is refused if the advisor asks for it anyway,
 with a reason saying the operator declined it.
 
+The advisor is told at startup which commands its seat allows, and may ask for one on a line
+of its own. What a Claude seat allows by default:
+
+| command | what it costs |
+| --- | --- |
+| `/compact` | nothing the run depends on: the conversation is summarised, not dropped |
+| `/goal [<condition> \| clear]` | turn duration. The seat keeps working on the turn it is already running, so the count stays right and `deadlines` still bounds it |
+| `/loop [interval] [prompt]` | **the turn count.** The seat drives its own subsequent turns; they are charged to neither `--max-turns` nor `--rounds`, and the relay does not collect their reports |
+
+A Codex seat allows `/compact` and `/review`.
+
+`/loop` is on by default and is the one to think about before leaving it that way. It is
+allowed because a loop the operator permitted and the advisor then chose to delegate is work
+that was sanctioned twice, not work nobody asked for — but a run that uses it can exceed the
+turn ceiling it was given. `{"commands": {"/loop": false}}` takes it away.
+
 **Both are deny-only. The only value is `false`.** Writing `true` is refused at startup, and
 so is a name nothing declares. Config may narrow what an adapter declares and may never widen
 it: a capability is listed because someone read it off the installed CLI, and a command is
-allowed because someone argued it cannot break the run. `"/clear": true` is refused with the
+allowed because someone weighed what it costs and wrote the cost down. `"/clear": true` is refused with the
 reason `/clear` is refused for — it discards the continuity the relay believes the seat has —
 rather than being accepted and ignored.
 

@@ -299,13 +299,26 @@ export interface CommandDeclaration {
   /** Which clause of the rule on `CommandPolicy` decides it, in that clause's own terms. */
   reason: string
   /**
+   * What the command takes after its name, in the installed bundle's own words, for the
+   * commands that take anything. Absent on the ones that do not, which is most of them.
+   *
+   * It exists because a command that needs an argument and is briefed without one teaches the
+   * advisor to write a line that parses, delivers, and does nothing -- a failure that looks
+   * exactly like success from every vantage point this run has, since the outcome of a
+   * submitted command is not observed.
+   */
+  argumentHint?: string
+  /**
    * A literal from the installed bundle that this command's existence was read from, quoted
    * closely enough to be searched for again.
    *
    * The FORM varies per command AND per CLI, and it is not normalised, because normalising it
    * would be a lie. On Claude, a bundled JavaScript program, commands are declared as
    * `name:"..."` -- except `/quit`, which exists only as an alias inside another command's
-   * declaration, and `/loop`, which is a SKILL the bundle ships rather than a command at all.
+   * declaration, and `/loop`, whose declaration the bundle carries as a shipped file
+   * (`/loop (loop.md)`) rather than under a `name:` key. It IS a command: the composer renders
+   * it with its arguments, `[interval] [prompt]`, like any other. The pinnable literal for it
+   * is the menu description.
    * On Codex, a Rust binary, the names are interned into a packed table with no separators, so
    * searching for a bare name proves nothing whatsoever and the pinnable literal is the
    * command's DESCRIPTION instead. One search shape over all of that would either miss most of
