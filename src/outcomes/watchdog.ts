@@ -69,10 +69,22 @@ export const TAIL_INTERVAL_MS = 400
  * `late_signal` revision. The evidence model recovered, but the run had already paused and
  * asked a human to adjudicate a turn that was merely long.
  *
- * Forty-five minutes still bounds the wait a genuinely hung turn imposes on this run -- which
- * is all this is for; the turn itself it does not bound, and cannot -- and stops manufacturing
- * pauses out of ordinary work. Override with `--turn-timeout <seconds>`,
- * on either front-end. It is a default of THIS clock rather than of the system: the adapters
+ * TRIPLED TO 135 MINUTES as an interim (#213), and the number is not the point. What this
+ * clock catches is nothing: a turn cannot REACH it without having produced child output inside
+ * every `DEFAULT_IDLE_MS` window, or the silence deadline would have fired first. So every turn
+ * it ends is, by construction, one that was demonstrably working. It is not a hang detector --
+ * `idleMs` is -- and its remaining job is the ceiling argument below.
+ *
+ * `/goal` sharpened this into a defect rather than an inefficiency (#204). An advisor can now
+ * tell a seat not to stop until a condition holds, so a turn running long is a DESIGNED outcome
+ * rather than a symptom; the first run to use it paused on this clock while the transport was
+ * reporting three descendants working and output still arriving. Forty-five minutes was chosen
+ * a month before that was possible.
+ *
+ * Widening is a stopgap, not the fix: it moves the point at which a healthy turn gets a wrong
+ * verdict. The fix is to stop ending turns that are working -- either by letting activity
+ * evidence veto the verdict, or by making ceilings checkable during a turn so this can default
+ * to off. Override with `--turn-timeout <seconds>`, on either front-end. It is a default of THIS clock rather than of the system: the adapters
  * that run no absolute deadline unless asked never reach it, which is why the terminal record
  * reports each seat's resolved clocks instead of this number.
  *
@@ -86,11 +98,13 @@ export const TAIL_INTERVAL_MS = 400
  * `--max-turns` and `--max-minutes` are checked at TURN BOUNDARIES and nowhere else
  * (`guardrails.breached`), and the relay reaches one only when it stops awaiting an exchange.
  * So a turn no clock will stop waiting for is a run no ceiling can end, and one child talking
- * forever takes the whole run with it. Forty-five minutes is the concession to the false
- * positive instead -- long enough that ordinary work does not reach it, and what it produces is
- * `timed_out (uncertain)`, which a `late_signal` revision supersedes if the turn does finish.
+ * forever takes the whole run with it. That argument is why this constant still exists at all,
+ * and it survives every objection above intact -- which is why the answer is #208 (ceilings
+ * that can be evaluated mid-turn) rather than deleting this line. Until then the number is the
+ * concession to the false positive, and what it produces is `timed_out (uncertain)`, which a
+ * `late_signal` revision supersedes if the turn does finish.
  */
-export const DEFAULT_WATCHDOG_MS = 45 * 60 * 1000
+export const DEFAULT_WATCHDOG_MS = 135 * 60 * 1000
 
 /**
  * How long a turn may produce NOTHING before it is called hung.
