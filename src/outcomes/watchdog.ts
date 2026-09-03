@@ -47,6 +47,22 @@ export interface WatchdogTarget {
    * once. Measured, not stopped: neither clock ends a turn. See `#nextDelay`.
    */
   lastActivityAt?: number
+  /**
+   * Subagents this turn has started and not yet been told finished, when the adapter counts
+   * them at all (#214).
+   *
+   * STRUCTURAL, and deliberately not the adapter's class: `outcomes/` describing a type from
+   * `adapters/` to read one number would be a dependency this direction has never had. Claude's
+   * turn state satisfies it as it stands; Codex's has no subagent bookkeeping, so the field is
+   * absent there and that seat behaves exactly as it did.
+   *
+   * What it is FOR is `#fire`. A delegating parent sits in a single tool call while another
+   * model works and produces nothing the tailer can see -- `isChildOutput` already counts the
+   * start and the stop, which pushes the silence deadline at each END of the delegation and
+   * leaves the middle unmeasured. So what the silence clock actually times across a delegated
+   * stretch is the SUBAGENT'S OWN DURATION, against a budget argued for builds and test suites.
+   */
+  subagents?: { readonly outstanding: number }
   tracker: TurnVerdictTracker
 }
 
@@ -123,6 +139,17 @@ export const DEFAULT_WATCHDOG_MS = 135 * 60 * 1000
  * thinking. Twelve is comfortably past those and far short of forty-five.
  */
 export const DEFAULT_IDLE_MS = 12 * 60 * 1000
+
+/**
+ * Whether this turn has work delegated to a subagent that has not been seen to finish (#214).
+ *
+ * `false` for every target that does not count subagents, which is the honest answer rather
+ * than a conservative one: a seat with no subagent bookkeeping has no evidence of delegation,
+ * and inventing some would suspend a clock on a turn that might simply have stopped.
+ */
+function delegating(target: WatchdogTarget): boolean {
+  return (target.subagents?.outstanding ?? 0) > 0
+}
 
 export class TurnWatchdog<T extends WatchdogTarget> {
   readonly #ms: number
@@ -211,6 +238,11 @@ export class TurnWatchdog<T extends WatchdogTarget> {
   #nextDelay(target: T): number {
     const now = Date.now()
     const absolute = this.#ms - (now - target.startedAt)
+    // #214: no idle deadline to wake for while a subagent is outstanding. Waking anyway would
+    // be harmless -- `#fire` refuses to report idle for the same reason -- but it would arm a
+    // timer per idle budget for the length of the delegation, and the honest spelling of "this
+    // clock does not apply right now" is not scheduling it.
+    if (delegating(target)) return Math.max(0, absolute)
     const idle = this.#idleMs - (now - (target.lastActivityAt ?? target.startedAt))
     return Math.max(0, Math.min(absolute, idle))
   }
@@ -281,7 +313,31 @@ export class TurnWatchdog<T extends WatchdogTarget> {
     // Silence first when BOTH have passed. A turn that stopped talking an hour ago and also
     // ran past its cap is diagnosed by the more specific finding: "no output for 720s" says
     // where it stopped, "3600s with no Stop" only says it was long.
-    if (idlePassed) {
+    // #214: SILENCE IS NOT EVIDENCE WHILE WORK IS DELEGATED. The turn holds positive proof that
+    // something is running -- a subagent started and has not been seen to stop -- so quiet is
+    // what a delegating parent looks like rather than what a hung one does.
+    //
+    // Re-armed on the absolute clock rather than falling through to it, because falling through
+    // is the exact bug this function's own comment above describes: the absolute branch re-arms
+    // for the whole remaining budget and the idle deadline is then skipped for the rest of the
+    // turn. When the subagent stops, `subagent_stop` is child output, `touch()` sets
+    // `lastActivityAt`, and silence begins timing again from the STOP.
+    //
+    // THE COST, because it is real and belongs here rather than in a commit message: a subagent
+    // that hangs and never reports leaves the parent quiet with nothing to catch it but the
+    // absolute deadline. That is deliberate. Today this clock kills legitimate delegation at
+    // twelve minutes; after this it tolerates a hung one for as long as the absolute budget --
+    // and it is why that budget must keep existing (#213).
+    // `!absolutePassed` is load-bearing, not defensive. Re-arming on a remainder that has
+    // already gone negative would schedule 1ms, fire, take this branch again and spin -- so a
+    // delegating turn that has ALSO outrun the absolute cap falls through to `observeElapsed`
+    // below, which is the correct diagnosis anyway: what caught it was the cap, not the quiet.
+    if (idlePassed && !absolutePassed && delegating(target)) {
+      this.#armIn(key, target, Math.max(1, this.#ms - elapsedMs))
+      return
+    }
+
+    if (idlePassed && !delegating(target)) {
       this.#onUpdate(target, target.tracker.observeIdle(idleMs / 1000))
       return
     }
