@@ -91,6 +91,15 @@ export const HOOK_EVENTS = [
   'SessionStart',
   'UserPromptSubmit',
   'PermissionRequest',
+  'PreToolUse',
+  // BOTH halves of the completion, and the pair is not optional (#193). The installed bundle
+  // documents them as two events -- "Run after successful tool" and "Run after tool fails" --
+  // so a run registering only `PostToolUse` never hears about a failing tool and leaves the
+  // outstanding count high for the rest of the turn. That is the same
+  // an-outstanding-nothing-can-bring-down hazard `SubagentStart` guards against, arrived at
+  // from the other direction.
+  'PostToolUse',
+  'PostToolUseFailure',
   'SubagentStart',
   'SubagentStop',
   'Stop',
@@ -132,6 +141,47 @@ export type SubagentChange = 'started' | 'stopped' | 'unpaired' | 'duplicate'
  * nothing was counted up, so the count must stay where it is, and a consumer is entitled to
  * know that what it is looking at is half a lifecycle rather than a completed one.
  */
+/**
+ * Tool calls this turn has started and not yet been told finished (#193).
+ *
+ * PAIRED BY `tool_use_id`, like `TurnSubagents` and for the same reason: a count drifts, and a
+ * start that never gets its stop would suspend the silence clock for the rest of the turn.
+ *
+ * The id is not assumed. Probed against the installed bundle (2.1.258) by running `claude -p`
+ * with a settings file registering these hooks and reading what arrived: `PreToolUse` and
+ * `PostToolUse` both fired, and both payloads carried `tool_use_id`. `PostToolUseFailure` is
+ * registered beside them because the bundle documents the pair as two events -- "Run after
+ * successful tool" and "Run after tool fails" -- so a failing tool never reaches `PostToolUse`
+ * and would otherwise strand its start forever.
+ */
+export class TurnTools {
+  readonly #running = new Set<string>()
+  readonly #seen = new Set<string>()
+
+  /** Started and not yet seen to finish. */
+  get outstanding(): number {
+    return this.#running.size
+  }
+
+  start(id: string): SubagentChange {
+    if (this.#seen.has(id)) return 'duplicate'
+    this.#seen.add(id)
+    this.#running.add(id)
+    return 'started'
+  }
+
+  finish(id: string): SubagentChange {
+    if (!this.#seen.has(id)) {
+      // Seen, though nothing was counted: a redelivery of this same completion must still be
+      // recognisable as the same one rather than read as a second tool finishing.
+      this.#seen.add(id)
+      return 'unpaired'
+    }
+    if (!this.#running.delete(id)) return 'duplicate'
+    return 'stopped'
+  }
+}
+
 export class TurnSubagents {
   readonly #running = new Set<string>()
   readonly #seen = new Set<string>()
@@ -184,6 +234,8 @@ interface TurnState {
    * part of the answer. It is dropped with the turn rather than reconciled.
    */
   subagents: TurnSubagents
+  /** Tool calls started and not yet finished, which is why the silence clock waits (#193). */
+  tools: TurnTools
   /**
    * Whether the CHILD has said anything during this turn (#82).
    *
@@ -1244,6 +1296,7 @@ export class ClaudePtyHookAdapter implements AgentSession {
           produced: false,
           childClosure: undefined,
           subagents: new TurnSubagents(),
+          tools: new TurnTools(),
         }
         if (this.#producedBeforeTurn) {
           this.#producedBeforeTurn = false
@@ -1314,6 +1367,28 @@ export class ClaudePtyHookAdapter implements AgentSession {
           at: Date.now(),
           provisional: false,
         })
+        return
+      }
+      // #193: BOOKKEEPING ONLY -- no event is emitted for either. The transcript already
+      // produces `tool_use` and the console already shows it; a second one from the hook stream
+      // would double every tool call in the record for a counter nobody reads directly.
+      //
+      // The turn is resolved the same way the subagent hooks resolve it, and a tool call
+      // belonging to no turn of ours is not evidence about a turn of ours.
+      case 'PreToolUse': {
+        const turn = this.#turnFor(String(d.turnKey ?? '')) ?? this.#latestLiveTurn()
+        const id = typeof d.payload.tool_use_id === 'string' ? d.payload.tool_use_id : undefined
+        // No id is no pairing, and an unpairable start is worse than an uncounted one: it would
+        // hold the silence clock open for the rest of the turn with nothing able to bring it
+        // down. Verified present on this bundle; dropped rather than guessed if it ever is not.
+        if (turn && id !== undefined) turn.tools.start(id)
+        return
+      }
+      case 'PostToolUse':
+      case 'PostToolUseFailure': {
+        const turn = this.#turnFor(String(d.turnKey ?? '')) ?? this.#latestLiveTurn()
+        const id = typeof d.payload.tool_use_id === 'string' ? d.payload.tool_use_id : undefined
+        if (turn && id !== undefined) turn.tools.finish(id)
         return
       }
       case 'SubagentStart':

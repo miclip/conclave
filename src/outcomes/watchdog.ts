@@ -63,6 +63,16 @@ export interface WatchdogTarget {
    * stretch is the SUBAGENT'S OWN DURATION, against a budget argued for builds and test suites.
    */
   subagents?: { readonly outstanding: number }
+  /**
+   * Tool calls started and not yet finished, when the adapter counts them (#193).
+   *
+   * The same structural shape and the same argument as `subagents` above, for the one state that
+   * one does not cover: a child BLOCKED inside a single long tool call. It emits nothing while it
+   * waits -- measured across 4,055 real calls, a median of 0.2s but a p99 of 508s and a maximum of
+   * 11,912s -- and a seat running a test suite as its `--checks` is silent for most of the budget
+   * every time.
+   */
+  tools?: { readonly outstanding: number }
   tracker: TurnVerdictTracker
 }
 
@@ -141,14 +151,19 @@ export const DEFAULT_WATCHDOG_MS = 135 * 60 * 1000
 export const DEFAULT_IDLE_MS = 12 * 60 * 1000
 
 /**
- * Whether this turn has work delegated to a subagent that has not been seen to finish (#214).
+ * Whether this turn has work in flight that it is waiting on rather than producing.
  *
- * `false` for every target that does not count subagents, which is the honest answer rather
- * than a conservative one: a seat with no subagent bookkeeping has no evidence of delegation,
- * and inventing some would suspend a clock on a turn that might simply have stopped.
+ * TWO SOURCES, one question. A subagent started and not seen to stop (#214), or a tool call
+ * started and not seen to finish (#193). Both are states in which the child emits nothing and is
+ * nonetheless working -- the first because another model is doing the talking, the second
+ * because the child is blocked on a command.
+ *
+ * `false` for every target that counts neither, which is the honest answer rather than a
+ * conservative one: a seat with no such bookkeeping has no evidence of work in flight, and
+ * inventing some would suspend a clock on a turn that might simply have stopped.
  */
-function delegating(target: WatchdogTarget): boolean {
-  return (target.subagents?.outstanding ?? 0) > 0
+function workInFlight(target: WatchdogTarget): boolean {
+  return (target.subagents?.outstanding ?? 0) > 0 || (target.tools?.outstanding ?? 0) > 0
 }
 
 export class TurnWatchdog<T extends WatchdogTarget> {
@@ -242,7 +257,7 @@ export class TurnWatchdog<T extends WatchdogTarget> {
     // be harmless -- `#fire` refuses to report idle for the same reason -- but it would arm a
     // timer per idle budget for the length of the delegation, and the honest spelling of "this
     // clock does not apply right now" is not scheduling it.
-    if (delegating(target)) return Math.max(0, absolute)
+    if (workInFlight(target)) return Math.max(0, absolute)
     const idle = this.#idleMs - (now - (target.lastActivityAt ?? target.startedAt))
     return Math.max(0, Math.min(absolute, idle))
   }
@@ -313,9 +328,10 @@ export class TurnWatchdog<T extends WatchdogTarget> {
     // Silence first when BOTH have passed. A turn that stopped talking an hour ago and also
     // ran past its cap is diagnosed by the more specific finding: "no output for 720s" says
     // where it stopped, "3600s with no Stop" only says it was long.
-    // #214: SILENCE IS NOT EVIDENCE WHILE WORK IS DELEGATED. The turn holds positive proof that
-    // something is running -- a subagent started and has not been seen to stop -- so quiet is
-    // what a delegating parent looks like rather than what a hung one does.
+    // SILENCE IS NOT EVIDENCE WHILE WORK IS IN FLIGHT. The turn holds positive proof that
+    // something is running: a subagent started and not seen to stop (#214), or a tool call
+    // started and not seen to finish (#193). Quiet is what both of those look like from here,
+    // and neither is what a hung turn looks like -- a hung turn has nothing outstanding.
     //
     // Re-armed on the absolute clock rather than falling through to it, because falling through
     // is the exact bug this function's own comment above describes: the absolute branch re-arms
@@ -324,20 +340,21 @@ export class TurnWatchdog<T extends WatchdogTarget> {
     // `lastActivityAt`, and silence begins timing again from the STOP.
     //
     // THE COST, because it is real and belongs here rather than in a commit message: a subagent
-    // that hangs and never reports leaves the parent quiet with nothing to catch it but the
-    // absolute deadline. That is deliberate. Today this clock kills legitimate delegation at
-    // twelve minutes; after this it tolerates a hung one for as long as the absolute budget --
-    // and it is why that budget must keep existing (#213).
+    // or a command that hangs and never reports leaves the parent quiet with nothing to catch it
+    // but the absolute deadline. That is deliberate. Before this the clock killed legitimate
+    // delegation at twelve minutes, and killed any seat running a test suite as its checks; after
+    // it, a hung one is tolerated for as long as the absolute budget -- which is why that budget
+    // must keep existing (#213).
     // `!absolutePassed` is load-bearing, not defensive. Re-arming on a remainder that has
     // already gone negative would schedule 1ms, fire, take this branch again and spin -- so a
     // delegating turn that has ALSO outrun the absolute cap falls through to `observeElapsed`
     // below, which is the correct diagnosis anyway: what caught it was the cap, not the quiet.
-    if (idlePassed && !absolutePassed && delegating(target)) {
+    if (idlePassed && !absolutePassed && workInFlight(target)) {
       this.#armIn(key, target, Math.max(1, this.#ms - elapsedMs))
       return
     }
 
-    if (idlePassed && !delegating(target)) {
+    if (idlePassed && !workInFlight(target)) {
       this.#onUpdate(target, target.tracker.observeIdle(idleMs / 1000))
       return
     }
