@@ -155,8 +155,22 @@ function post(event, extra) {
 process.stdout.write('\\x1b[?2004h')
 ${COMPOSER_JS}
 let turns = 0
+// ORCH_FAKE_DEFER_SLASH: a slash command's prompt hook that lands LATE -- after the next real
+// prompt has been typed (#207). Observed in the live run that first issued one: the command was
+// submitted between turns, the instruction went out behind it, and the command's echo arrived
+// while that send was in flight and was correlated against it.
+//
+// The command still gets its echo and still opens its turn; only the ORDER moves, because the
+// order is the entire defect. Held rather than dropped, chained ahead of the next echo for the
+// same reason ORCH_FAKE_HARNESS_BLOCK chains its own.
+let deferredSlash = null
 onComposerSubmit(function (prompt) {
   if (!prompt.trim()) return
+  if (process.env.ORCH_FAKE_DEFER_SLASH && prompt.trim().charAt(0) === '/' && !deferredSlash) {
+    turns += 1
+    deferredSlash = { id: 'fake-turn-' + turns, prompt: prompt }
+    return
+  }
   turns += 1
   const id = 'fake-turn-' + turns
   // ORCH_FAKE_SPEAK posts BEFORE the submit on purpose. Hooks are independent POSTs that
@@ -178,6 +192,12 @@ onComposerSubmit(function (prompt) {
       turn_id: hid,
       prompt: '<task-notification>\\n<task-id>bigxjzz62</task-id>\\n<status>completed</status>\\n</task-notification>',
     }).then(function () {
+      post('UserPromptSubmit', { prompt_id: id, turn_id: id, prompt: asReceived(prompt, turns) })
+    })
+  } else if (deferredSlash) {
+    const held = deferredSlash
+    deferredSlash = null
+    post('UserPromptSubmit', { prompt_id: held.id, turn_id: held.id, prompt: held.prompt }).then(function () {
       post('UserPromptSubmit', { prompt_id: id, turn_id: id, prompt: asReceived(prompt, turns) })
     })
   } else {

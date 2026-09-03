@@ -488,6 +488,15 @@ const DEADLINE_OUTCOMES = new Set(['timed_out', 'unknown_abnormal_end'])
  */
 const RECOVERY_POLL_MS = 50
 
+/**
+ * How many raw submissions may be awaiting their echo at once (#207).
+ *
+ * Commands are typed one at a time between turns and their hooks come back immediately, so the
+ * live depth is one. The margin is for a CLI that dispatches no hook for some command at all,
+ * where the unmatched entry would otherwise sit in the list forever.
+ */
+const RAW_ECHO_MEMORY = 8
+
 const SUBMIT_LANDED_MS = 6_000
 
 /** How long to wait after the repair keystroke before concluding the text never landed. */
@@ -773,6 +782,24 @@ export class ClaudePtyHookAdapter implements AgentSession {
   #closed = false
   #closeMode: 'graceful' | 'abandoned' | undefined
   #pendingPrompt: PendingPrompt | undefined
+  /**
+   * Text handed to `submitRaw` whose `UserPromptSubmit` hook has not come back yet (#207).
+   *
+   * A slash command is typed into the same composer a prompt goes into, and the CLI dispatches
+   * its ordinary prompt hooks for it. That echo is a turn this adapter did not send -- which
+   * was documented on `submitRaw` and then not followed through: when the echo lands while a
+   * REAL send is in flight, the correlation in `#onHook` compares the command against the
+   * instruction, finds two unrelated strings and calls the send corrupt.
+   *
+   * So each raw submission is remembered until its echo is seen and matched. A hit means the
+   * turn belongs to the command, exactly as an unsolicited turn does, and the pending claim is
+   * left alone so the instruction's own echo still resolves it when it arrives.
+   *
+   * BOUNDED, because a CLI that dispatches no hook for a command would otherwise grow this
+   * forever. The bound discards the OLDEST, so the entry most likely to still be in flight is
+   * the one kept.
+   */
+  #rawSubmissions: string[] = []
   #opts: ClaudeAdapterOptions
   #folderTrust: FolderTrustAcceptance | undefined
   #notices: string[] = []
@@ -1254,8 +1281,13 @@ export class ClaudePtyHookAdapter implements AgentSession {
         // the advisor's envelope against it, calling the send corrupt, and then trying to
         // recover by cancelling a turn that will never report a `Stop`. The claim is left
         // untouched, so the echo of our own send still resolves it when it arrives.
+        // #207: taken UNCONDITIONALLY, before the pending claim is even read. A command's echo
+        // is its own turn whether or not a send happens to be in flight behind it, and leaving
+        // the entry in place because nothing was pending would let it suppress a later prompt
+        // that genuinely was corrupt.
+        const rawEcho = this.#takeRawEcho(turn.prompt)
         const pending = this.#pendingPrompt
-        if (pending && !isHarnessBlock(turn.prompt)) {
+        if (pending && !isHarnessBlock(turn.prompt) && !rawEcho) {
           const corrupted = describePromptMismatch(pending.prompt, turn.prompt)
           if (!corrupted) {
             this.#pendingPrompt = undefined
@@ -1735,16 +1767,36 @@ export class ClaudePtyHookAdapter implements AgentSession {
    * characters into a seat the run believes is out of service.
    *
    * What lands afterwards is the CLI's business and is not observed here -- see `submitRaw`
-   * on the seam. If the CLI happens to dispatch its ordinary prompt hooks for a slash command,
-   * the adapter will see a turn it did not send; that is a fact about the CLI rather than a
-   * thing this method can prevent, and it is why the relay records a submission and never an
-   * outcome.
+   * on the seam. It is why the relay records a submission and never an outcome.
+   *
+   * The CLI DOES dispatch its ordinary prompt hooks for a slash command -- observed, in the
+   * first live run that ever issued one (#207). So the adapter sees a turn it did not send,
+   * and the text is remembered in `#rawSubmissions` until that echo arrives: unremembered, it
+   * was correlated against whatever real send happened to be in flight and killed the run.
    */
+  /**
+   * Whether this prompt is the echo of a raw submission still waiting for one, consuming it.
+   *
+   * EXACT on the trimmed text, deliberately. A looser match -- a prefix, or the leading verb --
+   * would let a genuine corruption of an instruction be mistaken for a command's echo, which is
+   * the failure this whole correlation exists to catch, reintroduced through its exemption.
+   */
+  #takeRawEcho(prompt: string): boolean {
+    const i = this.#rawSubmissions.indexOf(prompt.trim())
+    if (i < 0) return false
+    this.#rawSubmissions.splice(i, 1)
+    return true
+  }
+
   async submitRaw(text: string, detail?: string): Promise<void> {
     if (this.#state !== 'running') {
       throw new Error(`session is ${this.#state}; it is not accepting input`)
     }
     if (!this.acceptsInput) throw new Error('session is not accepting input')
+    // BEFORE the keystrokes, not after: the hook for this text can land while `submit` is still
+    // resolving, and an echo that arrives before it was recorded is the bug itself.
+    this.#rawSubmissions.push(text.trim())
+    if (this.#rawSubmissions.length > RAW_ECHO_MEMORY) this.#rawSubmissions.shift()
     await this.#input.submit(text, detail ?? `raw command: ${text.slice(0, 80)}`)
   }
 
