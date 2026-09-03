@@ -7,10 +7,11 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import test from 'node:test'
+import type { TestContext } from 'node:test'
+import { tempDir } from '../testkit/tempDir.ts'
 import {
   acquire,
   appendParticipant,
@@ -21,8 +22,8 @@ import {
   release,
 } from './sessionLock.ts'
 
-function repo(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'conclave-lock-'))
+function repo(t: TestContext): string {
+  const dir = tempDir(t, 'conclave-lock')
   execFileSync('git', ['init', '-q'], { cwd: dir })
   writeFileSync(join(dir, 'tracked.txt'), 'original\n')
   execFileSync('git', ['add', '.'], { cwd: dir })
@@ -37,8 +38,8 @@ const PARTICIPANTS = [
   { id: 'implementer', agent: 'claude' },
 ]
 
-test('a clean repo with no session reports nothing to guard against', () => {
-  const dir = repo()
+test('a clean repo with no session reports nothing to guard against', (t) => {
+  const dir = repo(t)
   const report = guard(dir)
   assert.equal(report.live, false)
   assert.equal(report.stale, false)
@@ -46,8 +47,8 @@ test('a clean repo with no session reports nothing to guard against', () => {
   assert.doesNotThrow(() => assertSafeToStage(dir))
 })
 
-test('acquiring records who is live and what was already dirty', () => {
-  const dir = repo()
+test('acquiring records who is live and what was already dirty', (t) => {
+  const dir = repo(t)
   // Dirty before the session starts: this is the operator's own work, not a participant's.
   writeFileSync(join(dir, 'mine.txt'), 'operator edit\n')
 
@@ -65,8 +66,8 @@ test('acquiring records who is live and what was already dirty', () => {
   )
 })
 
-test('changes made after the session started are surfaced as possible participant work', () => {
-  const dir = repo()
+test('changes made after the session started are surfaced as possible participant work', (t) => {
+  const dir = repo(t)
   acquire(dir, PARTICIPANTS)
   writeFileSync(join(dir, 'theirs.txt'), 'implementer work in progress\n')
 
@@ -75,8 +76,8 @@ test('changes made after the session started are surfaced as possible participan
   assert.ok(report.messages.some((m) => m.includes('theirs.txt')))
 })
 
-test('staging broadly is refused while participants are live, and says why', () => {
-  const dir = repo()
+test('staging broadly is refused while participants are live, and says why', (t) => {
+  const dir = repo(t)
   acquire(dir, PARTICIPANTS)
   writeFileSync(join(dir, 'theirs.txt'), 'work in progress\n')
 
@@ -90,8 +91,8 @@ test('staging broadly is refused while participants are live, and says why', () 
   })
 })
 
-test('releasing lets staging proceed again', () => {
-  const dir = repo()
+test('releasing lets staging proceed again', (t) => {
+  const dir = repo(t)
   acquire(dir, PARTICIPANTS)
   assert.throws(() => assertSafeToStage(dir))
   release(dir)
@@ -99,10 +100,10 @@ test('releasing lets staging proceed again', () => {
   assert.doesNotThrow(() => assertSafeToStage(dir))
 })
 
-test('a lock from a dead process is stale, not binding', () => {
+test('a lock from a dead process is stale, not binding', (t) => {
   // The run that motivated this guard ended by crashing. A guard that refuses forever
   // after a crash gets deleted within a day, so a stale lock is reported and not obeyed.
-  const dir = repo()
+  const dir = repo(t)
   acquire(dir, PARTICIPANTS)
   const raw = JSON.parse(readFileSync(lockPath(dir), 'utf8'))
   // A pid that cannot be running: process 0 is not addressable by kill(pid, 0) as a
@@ -119,8 +120,8 @@ test('a lock from a dead process is stale, not binding', () => {
   assert.doesNotThrow(() => assertSafeToStage(dir), 'a crash must not block the repo forever')
 })
 
-test('a stale lock still reports the files, so they are accounted for rather than absorbed', () => {
-  const dir = repo()
+test('a stale lock still reports the files, so they are accounted for rather than absorbed', (t) => {
+  const dir = repo(t)
   acquire(dir, PARTICIPANTS)
   writeFileSync(join(dir, 'orphaned.txt'), 'left behind by the crashed run\n')
   const raw = JSON.parse(readFileSync(lockPath(dir), 'utf8'))
@@ -130,8 +131,8 @@ test('a stale lock still reports the files, so they are accounted for rather tha
   assert.deepEqual(report.changedSinceStart, ['orphaned.txt'])
 })
 
-test('a corrupt lock is ignored rather than crashing the guard', () => {
-  const dir = repo()
+test('a corrupt lock is ignored rather than crashing the guard', (t) => {
+  const dir = repo(t)
   writeFileSync(join(dir, '.conclave-tmp'), '')
   acquire(dir, PARTICIPANTS)
   writeFileSync(lockPath(dir), 'not json at all')
@@ -147,8 +148,8 @@ function repoint(dir: string, pid: number): void {
   writeFileSync(lockPath(dir), JSON.stringify({ ...raw, pid }, null, 2))
 }
 
-test('a seat added mid-run joins the lock without disturbing what it already recorded', () => {
-  const dir = repo()
+test('a seat added mid-run joins the lock without disturbing what it already recorded', (t) => {
+  const dir = repo(t)
   writeFileSync(join(dir, 'mine.txt'), 'operator edit\n')
   const before = acquire(dir, PARTICIPANTS)
   // Dirtied AFTER the session began, so a `treeAtStart` recomputed during the append would
@@ -174,8 +175,8 @@ test('a seat added mid-run joins the lock without disturbing what it already rec
   })
 })
 
-test('a lock owned by another live process is not ours to append to', () => {
-  const dir = repo()
+test('a lock owned by another live process is not ours to append to', (t) => {
+  const dir = repo(t)
   acquire(dir, PARTICIPANTS)
   // `process.ppid` is a real, running process that is not us -- a second orchestrator, as
   // far as this file can tell. A fabricated pid would be caught by the staleness check
@@ -191,8 +192,8 @@ test('a lock owned by another live process is not ours to append to', () => {
   assert.equal(readFileSync(lockPath(dir), 'utf8'), raw, 'a refused append writes nothing')
 })
 
-test('a lock left by a crashed run is not resurrected by appending to it', () => {
-  const dir = repo()
+test('a lock left by a crashed run is not resurrected by appending to it', (t) => {
+  const dir = repo(t)
   acquire(dir, PARTICIPANTS)
   repoint(dir, 2147483647)
   const raw = readFileSync(lockPath(dir), 'utf8')
@@ -206,8 +207,8 @@ test('a lock left by a crashed run is not resurrected by appending to it', () =>
   assert.equal(readFileSync(lockPath(dir), 'utf8'), raw)
 })
 
-test('with no lock there is no session to join, and none is invented', () => {
-  const dir = repo()
+test('with no lock there is no session to join, and none is invented', (t) => {
+  const dir = repo(t)
   assert.throws(() => appendParticipant(dir, LATE), (err: Error) => {
     assert.ok(/no session lock/.test(err.message))
     return true
@@ -215,8 +216,8 @@ test('with no lock there is no session to join, and none is invented', () => {
   assert.equal(existsSync(lockPath(dir)), false, 'the refusal must not leave a forged lock')
 })
 
-test('the lock is replaced by rename, so a reader gets the old file or the new one', () => {
-  const dir = repo()
+test('the lock is replaced by rename, so a reader gets the old file or the new one', (t) => {
+  const dir = repo(t)
   acquire(dir, PARTICIPANTS)
   const p = lockPath(dir)
   const inodeBefore = statSync(p).ino

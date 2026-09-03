@@ -11,14 +11,15 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync, spawn, spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { resolveSession } from '../workspace/sessionRecord.ts'
 import { acquire as acquireLock, lockPath } from '../workspace/sessionLock.ts'
 import { formatSessionJson } from '../workspace/sessionView.ts'
-import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PassThrough, Readable, Writable } from 'node:stream'
 import test from 'node:test'
+import type { TestContext } from 'node:test'
+import { tempDir } from '../testkit/tempDir.ts'
 import type { Verdict } from '../contract/outcome.ts'
 import type { ChildLiveness } from '../outcomes/liveness.ts'
 import { IDLE_CPU_PERCENT } from '../outcomes/liveness.ts'
@@ -32,8 +33,8 @@ import type { ResolutionSubject } from '../relay/resolution.ts'
 import { resolutionFor } from '../relay/resolution.ts'
 import type { RunPause } from '../relay/run.ts'
 
-function repo(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'conclave-repl-'))
+function repo(t: TestContext): string {
+  const dir = tempDir(t, 'conclave-repl')
   execFileSync('git', ['init', '-q'], { cwd: dir })
   writeFileSync(join(dir, '.gitignore'), '.conclave/\n')
   writeFileSync(join(dir, 'work.ts'), 'export const a = 1\n')
@@ -278,8 +279,8 @@ async function observedTurn(impl: FakeRotationSession, dir: string, seat = 'impl
   )
 }
 
-test('a session runs to completion and reports the outcome', async () => {
-  const dir = repo()
+test('a session runs to completion and reports the outcome', async (t) => {
+  const dir = repo(t)
   const out = collect()
   const code = await runSession({
     cwd: dir,
@@ -309,7 +310,7 @@ test('a session runs to completion and reports the outcome', async () => {
   assert.match(out.text(), /pass --checks/)
 })
 
-test('the console prefers a counted subagent to a guessed one, and keeps the guess until one is counted', async () => {
+test('the console prefers a counted subagent to a guessed one, and keeps the guess until one is counted', async (t) => {
   // `⋯ implementer 2m39s · wait_agent` was the whole of what an operator saw during a
   // delegating turn. The name list improved that to "waiting on a subagent (wait_agent)", which
   // is still a guess from a tool name: it cannot say how many, or since when.
@@ -319,7 +320,7 @@ test('the console prefers a counted subagent to a guessed one, and keeps the gue
   // then the starts arrive and the count replaces it. Both halves are registered in
   // `HOOK_EVENTS`, so a Claude seat reaches the second reading -- and a seat whose CLI never
   // dispatches the start stays on the first, which is why neither may regress.
-  const dir = repo()
+  const dir = repo(t)
   const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it.'])
   impl.toolsPerTurn = ['wait_agent']
   impl.subagentsPerTurn = 2
@@ -355,10 +356,10 @@ test('the console prefers a counted subagent to a guessed one, and keeps the gue
   assert.match(text, /1 subagent running \(\d+m?\d*s\)/, 'and singular reads as singular on the way up')
 })
 
-test('with nothing counted the console shows exactly what it always did', async () => {
+test('with nothing counted the console shows exactly what it always did', async (t) => {
   // The control. Without it, "prefers the observed count" would pass on a console that had
   // simply stopped rendering the tool-name reading at all -- which is the live path today.
-  const dir = repo()
+  const dir = repo(t)
   const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it.'])
   impl.toolsPerTurn = ['wait_agent']
   const out = collect()
@@ -382,7 +383,7 @@ test('with nothing counted the console shows exactly what it always did', async 
   assert.ok(!/subagents? running/.test(out.text()), 'nothing was counted, so nothing may be reported as counted')
 })
 
-test("a turn's subagents are dropped with the turn, not carried into the next one", async () => {
+test("a turn's subagents are dropped with the turn, not carried into the next one", async (t) => {
   // The count answers "what is this seat doing NOW". A subagent belonging to a turn that ended
   // two prompts ago is not part of that answer, and carrying it forward describes the new turn
   // with the old one's work -- silently, because the number is plausible either way.
@@ -390,7 +391,7 @@ test("a turn's subagents are dropped with the turn, not carried into the next on
   // The shape that shows it: a first turn that delegates, a second that runs an ordinary tool
   // and delegates nothing. If the count survives the turn boundary the second turn reads
   // "Bash · 2 subagents running", which is a claim about two subagents that have gone.
-  const dir = repo()
+  const dir = repo(t)
   const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it.'])
   impl.toolsPerTurn = ['wait_agent']
   impl.subagentsPerTurn = 2
@@ -433,11 +434,11 @@ test("a turn's subagents are dropped with the turn, not carried into the next on
   )
 })
 
-test('a session registers its hooks in the project, for the CLIs it will actually launch', async () => {
+test('a session registers its hooks in the project, for the CLIs it will actually launch', async (t) => {
   // Two Claudes is a real configuration. Writing a Codex sidecar for it would then demand
   // a Codex trust decision before anything reported ready — a setup step for a CLI this
   // session never launches.
-  const dir = repo()
+  const dir = repo(t)
   const out = collect()
   const code = await runSession({
     cwd: dir,
@@ -465,10 +466,10 @@ test('a session registers its hooks in the project, for the CLIs it will actuall
   assert.ok(!settings.includes(dir), 'a command must not point into the project being registered')
 })
 
-test('a bypass config reaches the launch, and the console says so', async () => {
+test('a bypass config reaches the launch, and the console says so', async (t) => {
   // The flags are the whole point — a config that parsed correctly and never reached the
   // child would look identical from here until a permission prompt appeared mid-run.
-  const dir = repo()
+  const dir = repo(t)
   mkdirSync(join(dir, '.conclave'), { recursive: true })
   writeFileSync(join(dir, '.conclave', 'config.json'), '{"permissions":"bypass"}')
 
@@ -500,11 +501,11 @@ test('a bypass config reaches the launch, and the console says so', async () => 
   assert.match(out.text(), /permission prompts bypassed for advisor \(codex\) and implementer \(claude\)/)
 })
 
-test('#177 a bypassed seat reports the permission as taken, not as one to answer', async () => {
+test('#177 a bypassed seat reports the permission as taken, not as one to answer', async (t) => {
   // The banner says prompts are bypassed and then the log asked for a decision anyway. Nothing
   // was blocked -- the seat carried on within seconds -- so it was a contradiction rather than
   // a stall, and it cost the operator a check every time it appeared.
-  const dir = repo()
+  const dir = repo(t)
   mkdirSync(join(dir, '.conclave'), { recursive: true })
   writeFileSync(join(dir, '.conclave', 'config.json'), '{"permissions":"bypass"}')
 
@@ -548,11 +549,11 @@ test('#177 a bypassed seat reports the permission as taken, not as one to answer
   assert.match(out.text(), /npm run verify/)
 })
 
-test('#6 /allow at the console reaches the participant', async () => {
+test('#6 /allow at the console reaches the participant', async (t) => {
   // `decidePermission` was covered at the relay and not at the console -- and both it and
   // `relay.ask` passed their tests and then failed in a real terminal. A console test is the
   // only place the routing from a typed command to a seat is exercised at all.
-  const dir = repo()
+  const dir = repo(t)
   const impl = slow('impl', 'claude', ['ack', 'Did it.'])
   impl.onSend = () => {
     impl.emit({
@@ -591,10 +592,10 @@ test('#6 /allow at the console reaches the participant', async () => {
   assert.deepEqual(impl.permissionDecisions, ['allow'], 'the seat was told, once')
 })
 
-test('#177 a seat that is NOT bypassed still asks, and now says what for', async () => {
+test('#177 a seat that is NOT bypassed still asks, and now says what for', async (t) => {
   // The other half, and the one that must not be broken by the fix: with no bypass configured
   // a permission request genuinely blocks, and the operator does need to answer it.
-  const dir = repo()
+  const dir = repo(t)
 
   const impl = slow('impl', 'claude', ['ack'])
   impl.onSend = () => {
@@ -627,12 +628,12 @@ test('#177 a seat that is NOT bypassed still asks, and now says what for', async
   assert.doesNotMatch(out.text(), /auto-allowed/)
 })
 
-test('#173 a command handed only a heredoc opener is refused, and the body is not leaked', async () => {
+test('#173 a command handed only a heredoc opener is refused, and the body is not leaked', async (t) => {
   // Hit while operating a live run. `/continue <<TAG` made `<<TAG` the ANSWER, and the 19 body
   // lines then arrived as 19 separate unaddressed messages at human rank -- every line looking
   // accepted, because every line WAS accepted. `heredocOpen` deliberately does not fire for a
   // command head, and that rule is right; the defect is the consequence of falling through.
-  const dir = repo()
+  const dir = repo(t)
   const impl = slow('impl', 'claude', ['ack', 'Did it.'])
   const out = collect()
   const input = new PassThrough()
@@ -743,14 +744,14 @@ test('#173 only trailing text that is ENTIRELY an opener is refused', () => {
   assert.equal(commandOpeningBlock('/continue'), undefined)
 })
 
-test('#173 the refusal is exact: a real argument that merely mentions a tag still goes through', async () => {
+test('#173 the refusal is exact: a real argument that merely mentions a tag still goes through', async (t) => {
   // The rule this must not break. `heredocOpen` enumerates its heads precisely so a permissive
   // rule cannot silently reinterpret input that is already correct, and a refusal added beside
   // it has to hold the same line: only trailing text that is ENTIRELY an opener is refused.
   //
   // `/rotate the seat is stuck <<HERE` is the case the comment beside `heredocOpen` names, and
   // it is a rotate reason. Refusing it would take a working input away.
-  const dir = repo()
+  const dir = repo(t)
   const out = collect()
   const input = new PassThrough()
   const running = runSession({
@@ -778,8 +779,8 @@ test('#173 the refusal is exact: a real argument that merely mentions a tag stil
   assert.doesNotMatch(out.text(), /does not open a block/, 'a real argument is not refused')
 })
 
-test('a pause is rendered with its evidence and the operator resumes it', async () => {
-  const dir = repo()
+test('a pause is rendered with its evidence and the operator resumes it', async (t) => {
+  const dir = repo(t)
   // Compacts deterministically on its second turn rather than on a timer.
   const impl = slow('impl', 'claude', ['ack', 'Did it.', 'And again.'])
   impl.compactOnTurn = 1
@@ -833,8 +834,8 @@ test('a pause is rendered with its evidence and the operator resumes it', async 
   assert.equal(end?.['reason'], 'done')
 })
 
-test('an addressed line is queued, restricted, and reported as such', async () => {
-  const dir = repo()
+test('an addressed line is queued, restricted, and reported as such', async (t) => {
+  const dir = repo(t)
   const impl = slow('impl', 'claude', ['ack', 'Did it.', 'And again.'])
   const out = collect()
   const code = await runSession({
@@ -864,11 +865,11 @@ test('an addressed line is queued, restricted, and reported as such', async () =
   assert.ok(impl.received.some((m) => m.includes('src/adapters')), 'and it reaches the participant')
 })
 
-test('narration streams to the human, and only the report is shown going to the advisor', async () => {
+test('narration streams to the human, and only the report is shown going to the advisor', async (t) => {
   // The routing has to be legible: what was written for you, and what the other
   // participant actually received. The closing message is held back rather than streamed,
   // because the routed copy prints it a moment later and twice is harder to read.
-  const dir = repo()
+  const dir = repo(t)
   const impl = slow('impl', 'claude', ['ack', 'IGNORED'])
   impl.narrate(["I'll start by finding the relevant code.", 'Now the guard report shape.'], 'Done. guard --json is in.')
   const out = collect()
@@ -918,8 +919,8 @@ test('narration streams to the human, and only the report is shown going to the 
   assert.ok(report.to.includes('advisor'), 'and it went to the advisor')
 })
 
-test('the banner names the participants, the checks and the colour legend', async () => {
-  const dir = repo()
+test('the banner names the participants, the checks and the colour legend', async (t) => {
+  const dir = repo(t)
   const out = collect()
   await runSession({
     cwd: dir,
@@ -943,12 +944,12 @@ test('the banner names the participants, the checks and the colour legend', asyn
   assert.match(text, /rotation:.*npm test/)
 })
 
-test('the banner says what bounds the run, between the cwd and the rotation line', async () => {
+test('the banner says what bounds the run, between the cwd and the rotation line', async (t) => {
   // #119: a run ended at an advisor budget of 8 with four files of uncommitted work in the
   // tree, because `--max-turns` was passed to raise it and `--rounds` is what raises it. The
   // banner already prints the seats, the cwd and the rotation checks; the bound was the one
   // thing it did not say, and it is the thing that decides when the run stops.
-  const dir = repo()
+  const dir = repo(t)
   const out = collect()
   await runSession({
     cwd: dir,
@@ -987,10 +988,10 @@ test('the banner says what bounds the run, between the cwd and the rotation line
   assert.ok(rotationAt > ceilingsAt, 'and before the rotation line')
 })
 
-test('with no checks the console reads as a possible mistake, not a statement of fact', async () => {
+test('with no checks the console reads as a possible mistake, not a statement of fact', async (t) => {
   // A shell that splits a multi-line paste drops the flag entirely, which is
   // indistinguishable from never passing one. It has cost two sessions their rotation.
-  const dir = repo()
+  const dir = repo(t)
   const out = collect()
   await runSession({
     cwd: dir,
@@ -1009,10 +1010,10 @@ test('with no checks the console reads as a possible mistake, not a statement of
   assert.match(out.text(), /pass --checks/)
 })
 
-test('typed instructions queue visibly and are listed on demand', async () => {
+test('typed instructions queue visibly and are listed on demand', async (t) => {
   // Nothing is delivered mid-turn, so the operator has to be able to see what is stacked
   // up. `/queue` reads back their own words, not the enveloped copy a participant gets.
-  const dir = repo()
+  const dir = repo(t)
   const impl = slow('impl', 'claude', ['ack', 'Did it.', 'And again.'])
   const out = collect()
   await runSession({
@@ -1038,8 +1039,8 @@ test('typed instructions queue visibly and are listed on demand', async () => {
   )
 })
 
-test('the console refuses to start while another session holds the lock', async () => {
-  const dir = repo()
+test('the console refuses to start while another session holds the lock', async (t) => {
+  const dir = repo(t)
   const { acquire } = await import('../workspace/sessionLock.ts')
   acquire(dir, [{ id: 'implementer', agent: 'claude' }])
   const out = collect()
@@ -1060,7 +1061,7 @@ test('the console refuses to start while another session holds the lock', async 
   assert.match(out.text(), /refusing to start/)
 })
 
-test('a flag in the goal position is flags, not a goal named --lead', async () => {
+test('a flag in the goal position is flags, not a goal named --lead', async (t) => {
   // `conclave session --lead codex` once started a session whose objective was the literal
   // string "--lead", picking the right agents by coincidence. The goal is optional now, so
   // that invocation is legitimate — what must not happen is the flag being eaten as a goal.
@@ -1085,7 +1086,7 @@ test('a flag in the goal position is flags, not a goal named --lead', async () =
   let stdout = ''
   try {
     execFileSync(process.execPath, [join(root, 'bin/conclave.ts'), 'session', '--lead', 'nope'], {
-      cwd: repo(),
+      cwd: repo(t),
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
       timeout: 30_000,
@@ -1117,8 +1118,8 @@ test('a flag in the goal position is flags, not a goal named --lead', async () =
  * The participants named in it are the ones #130 was reported against, so a refusal quoted in a
  * failure message here reads the same as the one the issue quotes.
  */
-function lockedRepo(): string {
-  const dir = repo()
+function lockedRepo(t: TestContext): string {
+  const dir = repo(t)
   acquireLock(dir, [
     { id: 'advisor', agent: 'codex' },
     { id: 'implementer', agent: 'claude' },
@@ -1141,7 +1142,7 @@ function runCli(cwd: string, argv: readonly string[]): { status: number | null; 
   return { status: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' }
 }
 
-test('a live lock does not preempt an unknown agent name (#130)', () => {
+test('a live lock does not preempt an unknown agent name (#130)', (t) => {
   // The open half of #130. `--lead nope` is a PURE VALIDATION invocation: the spelling is wrong
   // whatever else is happening in the tree, and no run is going to start either way — so the
   // lock has nothing to protect there, and answering the operator's actual mistake is strictly
@@ -1151,7 +1152,7 @@ test('a live lock does not preempt an unknown agent name (#130)', () => {
   // directory), so this is not about the suite being runnable. It is about the CLI's answer to
   // an operator who typed a name that does not exist while a session runs in their checkout:
   // today they are told about the session and not about the name.
-  const r = runCli(lockedRepo(), ['session', '--lead', 'nope'])
+  const r = runCli(lockedRepo(t), ['session', '--lead', 'nope'])
   const said = `${r.stdout}${r.stderr}`
   assert.equal(r.status, 1, `an unresolvable agent must be refused; output was:\n${said}`)
   // Combined rather than stderr alone, deliberately. The existing test above pins the stream
@@ -1165,7 +1166,7 @@ test('a live lock does not preempt an unknown agent name (#130)', () => {
   )
 })
 
-test('every seat is checked before the lock, not just the advisor (#130)', () => {
+test('every seat is checked before the lock, not just the advisor (#130)', (t) => {
   // `--lead` is the spelling the issue was reported against, and pinning only that would leave
   // the fix half-applied in exactly the way this codebase keeps rediscovering: a capability
   // wired into one seat and not its neighbours. Every seat a run can name is resolved together
@@ -1179,7 +1180,7 @@ test('every seat is checked before the lock, not just the advisor (#130)', () =>
     ['session', 'a goal', '--implementers', 'claude,nope'],
     ['session', 'a goal', '--reviewer', 'nope'],
   ]) {
-    const r = runCli(lockedRepo(), argv)
+    const r = runCli(lockedRepo(t), argv)
     const said = `${r.stdout}${r.stderr}`
     assert.equal(r.status, 1, `${argv.join(' ')}: output was:\n${said}`)
     assert.match(said, /unknown agent 'nope'/, `${argv.join(' ')}: output was:\n${said}`)
@@ -1187,7 +1188,7 @@ test('every seat is checked before the lock, not just the advisor (#130)', () =>
   }
 })
 
-test('a run-starting session is still refused by a live lock (#130)', () => {
+test('a run-starting session is still refused by a live lock (#130)', (t) => {
   // The control, and the reason the two tests above are safe to want. Whatever moves ahead of
   // the lock check, an invocation that WOULD start participants must still be stopped by it —
   // otherwise the fix for a validation wart has quietly disabled the guard that keeps two runs
@@ -1197,7 +1198,7 @@ test('a run-starting session is still refused by a live lock (#130)', () => {
   // refusal ever stopped happening. That is the honest shape of the assertion — the refusal is
   // the only thing standing between this argv and two live children — and the timeout in `runCli`
   // bounds it.
-  const r = runCli(lockedRepo(), ['session', 'Keep the work moving.'])
+  const r = runCli(lockedRepo(t), ['session', 'Keep the work moving.'])
   const said = `${r.stdout}${r.stderr}`
   assert.equal(r.status, 1, `a live lock refuses a run; output was:\n${said}`)
   assert.match(said, /refusing to start/, `output was:\n${said}`)
@@ -1205,12 +1206,12 @@ test('a run-starting session is still refused by a live lock (#130)', () => {
   assert.ok(!/joined as/.test(said), `no participant may start; output was:\n${said}`)
 })
 
-test('an address and a path compose: >advisor read @path', async () => {
+test('an address and a path compose: >advisor read @path', async (t) => {
   // The address is consumed by the console; everything after it is forwarded verbatim, so
   // the participant's own CLI resolves `@path` exactly as it would if typed there. That is
   // the reason paths are references rather than inlined text — a reference survives the
   // hop, and pasted contents would go stale the moment either participant edited the file.
-  const dir = repo()
+  const dir = repo(t)
   const impl = slow('impl', 'claude', ['ack', 'Did it.', 'And again.'])
   const advisor = slow('advisor', 'codex', ['Do it.', 'More.', 'DONE'])
   const out = collect()
@@ -1234,8 +1235,8 @@ test('an address and a path compose: >advisor read @path', async () => {
   assert.ok(!advisor.received.some((m) => m.includes('read @src/relay/relay.ts')))
 })
 
-test('/exit ends the session, stopping the participants with it', async () => {
-  const dir = repo()
+test('/exit ends the session, stopping the participants with it', async (t) => {
+  const dir = repo(t)
   const advisor = slow('advisor', 'codex', ['Keep going.', 'Still going.', 'And on.'])
   const impl = slow('impl', 'claude', ['ack', 'Working.', 'Still working.'])
   const out = collect()
@@ -1257,10 +1258,10 @@ test('/exit ends the session, stopping the participants with it', async () => {
   assert.equal(impl.state, 'terminated')
 })
 
-test('/abort ends the run but keeps the console, and says so when there is no run', async () => {
+test('/abort ends the run but keeps the console, and says so when there is no run', async (t) => {
   // These were one command: `/abort` with nothing running used to exit. That made abort mean
   // two different things depending on state the operator could not see.
-  const dir = repo()
+  const dir = repo(t)
   const out = collect()
   const code = await runSession({
     cwd: dir,
@@ -1281,11 +1282,11 @@ test('/abort ends the run but keeps the console, and says so when there is no ru
 })
 
 
-test('a delivered message becomes a turn in the transcript, not a note about one', async () => {
+test('a delivered message becomes a turn in the transcript, not a note about one', async (t) => {
   // It was rendered as a grey `› hello — read by advisor`, which sat among the run's own
   // logging and read as more logging. The point of pinning a message while it waits is that
   // being read CHANGES it, and the change has to be visible.
-  const dir = repo()
+  const dir = repo(t)
   const out = collect()
   await runSession({
     cwd: dir,
@@ -1402,8 +1403,8 @@ async function untilText(what: string, text: () => string, re: RegExp, ms = 5000
   }
 }
 
-test('a verdict withdrawn while the operator reads the pause is surfaced in the console', async () => {
-  const dir = repo()
+test('a verdict withdrawn while the operator reads the pause is surfaced in the console', async (t) => {
+  const dir = repo(t)
   const impl = slow('impl', 'claude', ['ack', 'Did it, slowly.', 'And again.'])
   impl.endTurn = { index: 1, verdict: TIMED_OUT }
   const out = collect()
@@ -1476,7 +1477,7 @@ test('a verdict withdrawn while the operator reads the pause is surfaced in the 
 })
 
 test('the console prints the targeting reading, and on truncated-only evidence it is INCONCLUSIVE', async (t) => {
-  const dir = repo()
+  const dir = repo(t)
   // The CONSOLE renderer of the shared targeting conclusion (#79). Both front-ends write
   // `relay.targetingSummary()` and nothing else, and this is where that string is pinned as
   // something an operator actually sees.
@@ -1542,8 +1543,8 @@ test('the console prints the targeting reading, and on truncated-only evidence i
   assert.doesNotMatch(flat, /IS reaching the advisor/, 'which is the same certification in other clothes')
 })
 
-test('another timeout on the still-running turn is shown as the turn still running', async () => {
-  const dir = repo()
+test('another timeout on the still-running turn is shown as the turn still running', async (t) => {
+  const dir = repo(t)
   const impl = slow('impl', 'claude', ['ack', 'Did it, slowly.', 'And again.'])
   impl.endTurn = { index: 1, verdict: TIMED_OUT }
   const out = collect()
@@ -1657,7 +1658,7 @@ test('the setup heartbeat appends when there is no cursor to move', async () => 
  * Asserted across the commands that SPAWN something, since those are the ones where being
  * wrong costs quota rather than a confusing message.
  */
-test('both help surfaces say what /rotate does with the reason you type (#75)', () => {
+test('both help surfaces say what /rotate does with the reason you type (#75)', (t) => {
   // Neither help string was asserted by anything before this. That is how `/rotate [reason]` came
   // to be documented as an optional, unconditional argument while it was neither: a reason is
   // REQUIRED for an operator-initiated rotation and is REFUSED, and at a rotation candidate the
@@ -1677,8 +1678,9 @@ test('both help surfaces say what /rotate does with the reason you type (#75)', 
   assert.match(HELP, /PROXY'S words|proxy's own words|proxy's words/i)
 
   const root = join(import.meta.dirname, '..', '..')
+  const cwd = tempDir(t, 'conclave-help')
   const stdout = execFileSync(process.execPath, [join(root, 'bin/conclave.ts'), 'session', '--help'], {
-    cwd: mkdtempSync(join(tmpdir(), 'conclave-help-')),
+    cwd,
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
     timeout: 30_000,
@@ -1723,8 +1725,8 @@ test('--help is answered by every command, and starts nothing', () => {
  * Driven through `runSession` rather than against `titleSequence` alone, because the string
  * being right and the console never emitting it is the failure this codebase keeps finding.
  */
-test('the terminal title tracks what the session wants from the operator', async () => {
-  const dir = repo()
+test('the terminal title tracks what the session wants from the operator', async (t) => {
+  const dir = repo(t)
   const out = collect()
   // A title is only written to a real terminal; nothing else about this run is a TTY.
   ;(out.stream as unknown as { isTTY: boolean }).isTTY = true
@@ -1757,8 +1759,8 @@ test('the terminal title tracks what the session wants from the operator', async
   assert.equal(titles.at(-1), '', `the title must be released last: ${JSON.stringify(titles)}`)
 })
 
-test('no title escape reaches a stream that is not a terminal', async () => {
-  const dir = repo()
+test('no title escape reaches a stream that is not a terminal', async (t) => {
+  const dir = repo(t)
   const out = collect()
   await runSession({
     cwd: dir,
@@ -1790,9 +1792,9 @@ test('no title escape reaches a stream that is not a terminal', async () => {
  * collected output passed against the unfixed code. The stream under test is the process's,
  * and observing it means owning the process.
  */
-test('a plain directory produces no raw git error', () => {
+test('a plain directory produces no raw git error', (t) => {
   const root = join(import.meta.dirname, '..', '..')
-  const dir = mkdtempSync(join(tmpdir(), 'conclave-nogit-'))
+  const dir = tempDir(t, 'conclave-nogit')
   const driver = join(dir, 'driver.mjs')
   writeFileSync(
     driver,
@@ -1845,8 +1847,8 @@ process.exit(await runSession({ cwd: ${JSON.stringify(dir)}, goal: 'Keep the wor
  * event existed and the recorded stream just stopped — with no line saying the run had
  * finished, which is the exact ambiguity these files exist to remove.
  */
-test('a console session records a status and an event stream a stranger can read', async () => {
-  const dir = repo()
+test('a console session records a status and an event stream a stranger can read', async (t) => {
+  const dir = repo(t)
   const out = collect()
   const code = await runSession({
     cwd: dir,
@@ -1883,8 +1885,8 @@ test('a console session records a status and an event stream a stranger can read
   assert.equal(events.at(-1)?.type, 'run_end', `the stream must end with run_end:\n${events.slice(-3).map((e) => e.type).join(', ')}`)
 })
 
-test('the recorded session build matches the CLI version for this checkout', async () => {
-  const dir = repo()
+test('the recorded session build matches the CLI version for this checkout', async (t) => {
+  const dir = repo(t)
   const out = collect()
   const expected = execFileSync(process.execPath, [join(import.meta.dirname, '..', '..', 'bin', 'conclave.ts'), 'version'], {
     encoding: 'utf8',
@@ -1925,8 +1927,8 @@ test('the recorded session build matches the CLI version for this checkout', asy
  * the last turn is graded moments before it, so a recorder that stopped re-reading when the
  * state was reported would lose exactly the verdicts worth keeping.
  */
-test('a finished console run leaves graded turns in its status, and in its JSON', async () => {
-  const dir = repo()
+test('a finished console run leaves graded turns in its status, and in its JSON', async (t) => {
+  const dir = repo(t)
   const out = collect()
   const code = await runSession({
     cwd: dir,
@@ -1988,8 +1990,8 @@ test('a finished console run leaves graded turns in its status, and in its JSON'
  * saying the session was over. A reader then cannot tell a session that was killed from one
  * still running whose writer is merely quiet — the exact ambiguity these files remove.
  */
-test('a session killed mid-run still records how it ended', async () => {
-  const dir = repo()
+test('a session killed mid-run still records how it ended', async (t) => {
+  const dir = repo(t)
   const out = collect()
   // Input closed immediately, participants slow enough that the run is unquestionably in
   // flight when the console tears down.
@@ -2035,8 +2037,8 @@ test('a session killed mid-run still records how it ended', async () => {
  * times — "Nobody is attending this run, so it ends here" — while the flag it had passed
  * claimed somebody was.
  */
-test('the console takes --operator agent, and reports it', async () => {
-  const dir = repo()
+test('the console takes --operator agent, and reports it', async (t) => {
+  const dir = repo(t)
   const out = collect()
   await runSession({
     cwd: dir,
@@ -2061,11 +2063,11 @@ test('the console takes --operator agent, and reports it', async () => {
   assert.equal(found.session.status.operator, 'agent')
 })
 
-test('a pause is held open for a piped driver, and resolvable from stdin', async () => {
+test('a pause is held open for a piped driver, and resolvable from stdin', async (t) => {
   // The property `relay` does not have and cannot have: a call that returns an outcome has
   // nowhere to suspend to. Here the run suspends, the process stays alive, and the pause is
   // readable as DATA — reason, evidence, options — so an agent never scrapes the console.
-  const dir = repo()
+  const dir = repo(t)
   const out = collect()
   const input = new PassThrough() // held open, as a driver would hold it
   const running = runSession({
@@ -2148,8 +2150,8 @@ test('a pause is held open for a piped driver, and resolvable from stdin', async
  *
  * There is deliberately NO sleep here. A sleep would be the assumption under test.
  */
-test('a command buffered before startup reaches a live run, and is not told nothing is running', async () => {
-  const dir = repo()
+test('a command buffered before startup reaches a live run, and is not told nothing is running', async (t) => {
+  const dir = repo(t)
   const out = collect()
   const input = new PassThrough()
   // The earliest observable moment there is: already on the stream before `runSession` exists to
@@ -2214,8 +2216,8 @@ test('a command buffered before startup reaches a live run, and is not told noth
  * All three are asserted below, because a fix that only merged the lines would still leave
  * the routing and the resume keyed to whichever fragment happened to arrive first.
  */
-test('a <<EOF block written to a paused session is one message, addressed once', async () => {
-  const dir = repo()
+test('a <<EOF block written to a paused session is one message, addressed once', async (t) => {
+  const dir = repo(t)
   const out = collect()
   const input = new PassThrough() // held open, as the FIFO and its background `sleep` do
   const asked = 'Started.\n\nUNANSWERED: Should the new framing be opt-in or the default?'
@@ -2314,11 +2316,11 @@ test('a <<EOF block written to a paused session is one message, addressed once',
   await running.catch(() => {})
 })
 
-test('input that ends inside an unterminated block says so, and delivers nothing', async () => {
+test('input that ends inside an unterminated block says so, and delivers nothing', async (t) => {
   // The one thing that cannot be done honestly here: stdin closing is what ends the
   // session, so a flushed half-message would be racing teardown and whether any of it
   // reached a seat would come down to timing. Naming what was buffered is always true.
-  const dir = repo()
+  const dir = repo(t)
   const out = collect()
   const input = new PassThrough()
   const running = runSession({
@@ -2376,8 +2378,8 @@ test('input that ends inside an unterminated block says so, and delivers nothing
  * whitespace normalisation it has always had rather than inheriting the verbatim treatment a
  * block needs.
  */
-test('framing changes nothing about the lines that were already legal', async () => {
-  const dir = repo()
+test('framing changes nothing about the lines that were already legal', async (t) => {
+  const dir = repo(t)
   const out = collect()
   const input = new PassThrough()
   const running = runSession({
@@ -2494,8 +2496,8 @@ test('framing changes nothing about the lines that were already legal', async ()
  * neither. It also pins the ordering the docs promise for answering a pause -- the block is
  * the answer, `/continue` is the decision, and the second is a command and not text.
  */
-test('a command after a block is a command, and clears the pause the block answered', async () => {
-  const dir = repo()
+test('a command after a block is a command, and clears the pause the block answered', async (t) => {
+  const dir = repo(t)
   const out = collect()
   const input = new PassThrough()
   const asked = 'Started.\n\nUNANSWERED: opt-in or default?'
@@ -2549,13 +2551,13 @@ test('a command after a block is a command, and clears the pause the block answe
   await running.catch(() => {})
 })
 
-test('only a line equal to the tag closes a block; a padded one is content', async () => {
+test('only a line equal to the tag closes a block; a padded one is content', async (t) => {
   // Exact, with no trim, and the trade is deliberate: `  EOF  ` closing would make the rule
   // "the tag, roughly", which is not a rule a driver can generate against — and it would
   // make a line of an answer that merely mentions the tag able to end the message early.
   // The cost is that a stray trailing space fails to close, which is loud rather than
   // silent: the block stays open, the hint row says so, and stdin closing names it.
-  const dir = repo()
+  const dir = repo(t)
   const out = collect()
   const input = new PassThrough()
   const running = runSession({
@@ -2599,10 +2601,10 @@ test('only a line equal to the tag closes a block; a padded one is content', asy
   await running.catch(() => {})
 })
 
-test('a block keeps its leading and trailing blank lines', async () => {
+test('a block keeps its leading and trailing blank lines', async (t) => {
   // Verbatim means verbatim. The operator's spacing is the message, and a framing that
   // tidies its own payload is one they have to reason about instead of use.
-  const dir = repo()
+  const dir = repo(t)
   const out = collect()
   const input = new PassThrough()
   const running = runSession({
@@ -2691,8 +2693,8 @@ async function untilRecorded(dir: string, detail: () => string): Promise<{ id: s
   )
 }
 
-test('an operator-requested pause reaches the event stream with its reason and its options', async () => {
-  const dir = repo()
+test('an operator-requested pause reaches the event stream with its reason and its options', async (t) => {
+  const dir = repo(t)
   const out = collect()
   const input = new PassThrough() // held open, as a driver would hold it
   const running = runSession({
@@ -2750,8 +2752,8 @@ test('an operator-requested pause reaches the event stream with its reason and i
   await running
 })
 
-test('continuing that run puts the matching resume after the pause in the stream', async () => {
-  const dir = repo()
+test('continuing that run puts the matching resume after the pause in the stream', async (t) => {
+  const dir = repo(t)
   const out = collect()
   const input = new PassThrough()
   const running = runSession({
@@ -2813,9 +2815,9 @@ test('continuing that run puts the matching resume after the pause in the stream
  * file only when the run moves again -- which would be invisible in every test above, and
  * would leave `--follow` silent for exactly as long as the operator was needed.
  */
-test('conclave events --follow delivers the pause line while the session is still paused', async () => {
+test('conclave events --follow delivers the pause line while the session is still paused', async (t) => {
   const root = join(import.meta.dirname, '..', '..')
-  const dir = repo()
+  const dir = repo(t)
   const out = collect()
   const input = new PassThrough()
   const running = runSession({
@@ -2897,8 +2899,8 @@ test('conclave events --follow delivers the pause line while the session is stil
  * resumed run that hits one immediately ends again; the four hand-resumes an agent operator
  * reported were each a manual reconstruction of state a held-open pause would have kept.
  */
-test('a console run records a routing log it can be resumed from', async () => {
-  const dir = repo()
+test('a console run records a routing log it can be resumed from', async (t) => {
+  const dir = repo(t)
   const log = join(dir, 'first.ndjson')
   const first = collect()
   await runSession({
@@ -2967,11 +2969,11 @@ test('a console run records a routing log it can be resumed from', async () => {
   assert.match(second.text(), /messages replayed into both seats/)
 })
 
-test('a console refuses to start on a resume log that is not there', async () => {
+test('a console refuses to start on a resume log that is not there', async (t) => {
   // Rather than starting fresh and looking like it resumed. A run that silently discards the
   // state it was asked to continue from is the failure `--resume` exists to prevent, dressed
   // as success.
-  const dir = repo()
+  const dir = repo(t)
   const out = collect()
   const code = await runSession({
     cwd: dir,
@@ -2992,12 +2994,12 @@ test('a console refuses to start on a resume log that is not there', async () =>
   assert.match(out.text(), /no run log at/)
 })
 
-test('a reply typed at a pause is delivered and resumes the run', async () => {
+test('a reply typed at a pause is delivered and resumes the run', async (t) => {
   // Reported after it happened: a reply typed at a pause sat queued with the run still
   // stopped, and a separate `/continue` was needed to make it count. That is the same
   // failure as a menu option that no-ops — the operator acted, something was recorded, and
   // nothing moved. Answering a pause IS the decision.
-  const dir = repo()
+  const dir = repo(t)
   const out = collect()
   const input = new PassThrough()
   const running = runSession({
@@ -3050,14 +3052,14 @@ test('a reply typed at a pause is delivered and resumes the run', async () => {
   await running
 })
 
-test('/continue carries a message, delivered at human rank before the run resumes', async () => {
+test('/continue carries a message, delivered at human rank before the run resumes', async (t) => {
   // The same decision as the test above, said the other way round. A pause draws a menu of
   // slash commands with "or type a message" beside it, and an operator with something to say
   // who reaches for the command they were just shown used to lose every word of it:
   // `/continue prefer the smaller change` resumed, silently, having discarded the sentence.
   // Both spellings now go through `answerPause`, so neither can start meaning something the
   // other does not.
-  const dir = repo()
+  const dir = repo(t)
   const out = collect()
   const input = new PassThrough()
   const running = runSession({
@@ -3112,7 +3114,7 @@ test('/continue carries a message, delivered at human rank before the run resume
   await running
 })
 
-test('/continue force is the whole word: force with text after it is a message, not an override', async () => {
+test('/continue force is the whole word: force with text after it is a message, not an override', async (t) => {
   // The ambiguity this shape has to resolve, resolved in the direction whose failure is
   // recoverable. `/continue force it through` could be read as a forced resume carrying a
   // note; it is read as a MESSAGE. Guessing the other way sends into a live turn — the
@@ -3123,7 +3125,7 @@ test('/continue force is the whole word: force with text after it is a message, 
   // The child is put mid-turn for real below, rather than left resting on a withdrawn verdict:
   // a bare withdrawal is a resumption now (#66), and a fixture that resumed would prove nothing
   // about whether `force it through` was read as an override.
-  const dir = repo()
+  const dir = repo(t)
   const impl = slow('impl', 'claude', ['ack', 'Did it, slowly.', 'And again.'])
   impl.endTurn = { index: 1, verdict: TIMED_OUT, withdraw: 'no_replacement' }
   impl.childPid = 1
@@ -3192,12 +3194,12 @@ test('/continue force is the whole word: force with text after it is a message, 
   await running
 })
 
-test('a force that overrode a right refusal records refusedFirst: true and the live turn evidence', async () => {
+test('a force that overrode a right refusal records refusedFirst: true and the live turn evidence', async (t) => {
   // The ledger exists so a reader can separate "the operator was refused and forced anyway" from
   // "the operator forced blind". This case is the first population: the child is genuinely
   // mid-turn, `/continue` is refused, and `/continue force` records that refusal plus the guard's
   // reading at the moment of the force.
-  const dir = repo()
+  const dir = repo(t)
   const impl = slow('impl', 'claude', ['ack', 'Did it, slowly.', 'And again.'])
   impl.endTurn = { index: 1, verdict: TIMED_OUT, withdraw: 'no_replacement' }
   impl.childPid = 1
@@ -3265,13 +3267,13 @@ test('a force that overrode a right refusal records refusedFirst: true and the l
   await running
 })
 
-test('a force into a held turn ends peer_busy, and the send is recorded as expired', async () => {
+test('a force into a held turn ends peer_busy, and the send is recorded as expired', async (t) => {
   // The death-side population of #125: the same `/continue force` command, the same record
   // shape, but the run dies in the only attributable window. The mirror test ended normally with
   // a `sent` record and further turns completed; here the entry reads `send.outcome === 'expired'`
   // and the run ends `peer_busy`. No causal label separates a justified force from a fatal one —
   // the send's own fate and the outcome distance do.
-  const dir = repo()
+  const dir = repo(t)
   const out = collect()
   const input = new PassThrough()
   const impl = slow('impl', 'claude', ['ack', 'Did it.'])
@@ -3354,10 +3356,10 @@ test('a force into a held turn ends peer_busy, and the send is recorded as expir
   )
 })
 
-test('a blind force records refusedFirst: false and null turns when no sampled seat is mid-turn', async () => {
+test('a blind force records refusedFirst: false and null turns when no sampled seat is mid-turn', async (t) => {
   // The second population: no refusal happened, the operator forced anyway, and the guard found
   // no open turn. The ledger must record the explicit absence of a turn, not omit the field.
-  const dir = repo()
+  const dir = repo(t)
   const out = collect()
   const input = new PassThrough()
   const running = runSession({
@@ -3415,11 +3417,11 @@ test('a blind force records refusedFirst: false and null turns when no sampled s
   await running
 })
 
-test('a blind force on an idle seat ends normally, and the send is recorded as sent', async () => {
+test('a blind force on an idle seat ends normally, and the send is recorded as sent', async (t) => {
   // The mirror population of #125: the guard finds no open turn at all, so the force is recorded
   // against an explicit idle seat and the first post-force send goes immediately. The same
   // command, the same record shape, but the entry's `send` reads `sent` and the run ends normally.
-  const dir = repo()
+  const dir = repo(t)
   const out = collect()
   const input = new PassThrough()
   const impl = slow('impl', 'claude', ['ack', 'Did it.'])
@@ -3497,7 +3499,7 @@ test('a blind force on an idle seat ends normally, and the send is recorded as s
   assert.ok(entry.followedBy!.ms >= 0, 'distance in milliseconds is non-negative')
 })
 
-test('the trailing-text rule stops at /continue: /pause still drops a suffix, /abort still keeps one', async () => {
+test('the trailing-text rule stops at /continue: /pause still drops a suffix, /abort still keeps one', async (t) => {
   // The falsifier, made checkable rather than argued. There is no general "text after a
   // command is a message" rule in this console and this change does not create one:
   // `/rotate` and `/abort` already spend their argument on a REASON, and the argumentless
@@ -3508,7 +3510,7 @@ test('the trailing-text rule stops at /continue: /pause still drops a suffix, /a
   //
   // Pinned so that a later attempt to spread the rule has to come here and change what this
   // test claims, which is the point at which the inconsistency gets argued about again.
-  const dir = repo()
+  const dir = repo(t)
   const out = collect()
   const input = new PassThrough()
   const running = runSession({
@@ -3570,14 +3572,14 @@ test('the trailing-text rule stops at /continue: /pause still drops a suffix, /a
   await running
 })
 
-test('waiting at a pause is recorded, sends nothing, and leaves the run paused', async () => {
+test('waiting at a pause is recorded, sends nothing, and leaves the run paused', async (t) => {
   // Reported by an operator who read the liveness evidence, judged the child healthy, and
   // correctly declined every option — then had no way to say so. Declining to answer and
   // choosing to wait were indistinguishable: the status file said `paused` either way, and
   // so did a monitor polling it. Worse, `state` never changes across the whole episode,
   // because the run stays paused through the supersession too — so a watcher observing
   // state alone is silent through exactly the event it is waiting for.
-  const dir = repo()
+  const dir = repo(t)
   const out = collect()
   const input = new PassThrough()
   const running = runSession({
@@ -3629,7 +3631,7 @@ test('waiting at a pause is recorded, sends nothing, and leaves the run paused',
   await running
 })
 
-test('--turn-timeout reaches the relay from the console, not just the argv parser', async () => {
+test('--turn-timeout reaches the relay from the console, not just the argv parser', async (t) => {
   // It never did. `bin/conclave.ts` has parsed `--turn-timeout` into `{ turnWatchdogMs }`
   // since it was written, inside a conditional spread — which slips past TypeScript's
   // excess-property check — and `SessionOptions` had no field to receive it. Constructed,
@@ -3641,7 +3643,7 @@ test('--turn-timeout reaches the relay from the console, not just the argv parse
   //
   // So this asserts on ARRIVAL rather than on the source text. A test that grepped either
   // file would have passed against the broken version, which is how it survived.
-  const dir = repo()
+  const dir = repo(t)
   const out = collect()
   let seen: number | undefined
   await runSession({
@@ -3668,14 +3670,14 @@ test('--turn-timeout reaches the relay from the console, not just the argv parse
   assert.equal(seen, 4242, 'the console must hand the configured deadline to the adapters')
 })
 
-test('the console hands the configured SILENCE budget to the adapters, not only the absolute one', async () => {
+test('the console hands the configured SILENCE budget to the adapters, not only the absolute one', async (t) => {
   // The sibling of the test above, and written the same way for the same reason: on ARRIVAL
   // at the registry rather than on the source text. `--turn-timeout` was parsed into a console
   // option that did not exist, slipped past excess-property checking inside a conditional
   // spread, and did nothing for its whole life -- and a test that grepped either file would
   // have passed against that. Adding a second flag on the same path without the same test
   // would be repeating the mistake with the lesson already written down.
-  const dir = repo()
+  const dir = repo(t)
   const out = collect()
   let idle: number | undefined
   let absolute: number | undefined
@@ -3706,7 +3708,7 @@ test('the console hands the configured SILENCE budget to the adapters, not only 
   assert.equal(absolute, undefined, 'and must not invent an absolute budget from it')
 })
 
-test('the banner says what each seat’s silence clock resolved to, including the seats that have none', async () => {
+test('the banner says what each seat’s silence clock resolved to, including the seats that have none', async (t) => {
   // The launch reading that did not exist. `--turn-timeout` has been reportable per seat in
   // the run REPORT since that block was written, but a report is read after the run; the
   // banner is the three lines an operator takes in before there is any work to lose, and it
@@ -3717,7 +3719,7 @@ test('the banner says what each seat’s silence clock resolved to, including th
   // implementer has none and keeps saying so. A seat with no silence clock that goes quiet
   // forever produces NO verdict at all, so an operator who read the configured number as
   // applying everywhere would be waiting on a timeout that cannot arrive.
-  const dir = repo()
+  const dir = repo(t)
   const out = collect()
   await runSession({
     cwd: dir,
@@ -3761,7 +3763,7 @@ test('the banner says what each seat’s silence clock resolved to, including th
   assert.ok(rotationAt > silenceAt, 'and before the rotation line')
 })
 
-test('the banner says what each seat’s absolute cap resolved to, beside the silence line', async () => {
+test('the banner says what each seat’s absolute cap resolved to, beside the silence line', async (t) => {
   // The other clock, and the last launch surface that was silent about it. The argument for
   // printing only silence was that `--turn-timeout` had been reportable per seat since the
   // report block was written -- true of the run REPORT and of `status --json`, and both of
@@ -3772,7 +3774,7 @@ test('the banner says what each seat’s absolute cap resolved to, beside the si
   // The mixed pairing again, and inverted from the silence test on purpose: here it is the
   // IMPLEMENTER that has the clock and the advisor that does not, so a line that reported the
   // silence resolution twice under two labels would fail rather than read plausibly.
-  const dir = repo()
+  const dir = repo(t)
   const out = collect()
   await runSession({
     cwd: dir,
@@ -3832,7 +3834,7 @@ test('the banner says what each seat’s absolute cap resolved to, beside the si
   assert.ok(rotationAt > silenceAt, 'and the pair sits above the rotation line')
 })
 
-test('a refusal to continue re-samples, so it can lift', async () => {
+test('a refusal to continue re-samples, so it can lift', async (t) => {
   // The deadlock. The first version matched the liveness line in `pause.evidence` — a string
   // captured when the pause was RAISED — so the check deciding "is it safe NOW" was made
   // from a snapshot of the past and could never change its mind. An operator sat on it for
@@ -3842,7 +3844,7 @@ test('a refusal to continue re-samples, so it can lift', async () => {
   // A guard that cannot lift is not a guard, it is a wall. This asserts the lifting, which
   // is the half that was missing — the refusing half was already tested and was never the
   // problem.
-  const dir = repo()
+  const dir = repo(t)
   const out = collect()
   const input = new PassThrough()
   const running = runSession({
@@ -3907,13 +3909,13 @@ test('a refusal to continue re-samples, so it can lift', async () => {
 // wrong one.
 // ---------------------------------------------------------------------------------------
 
-test('a completed replacement verdict bypasses child liveness sampling on /continue', async () => {
+test('a completed replacement verdict bypasses child liveness sampling on /continue', async (t) => {
   // The pause rests on a timed_out verdict, but the child later proves it completed. The
   // sampler must not be asked: the replacement Stop verdict is the authority on whether the
   // turn ended, and the child may still be alive without that meaning a turn is in flight.
   // A busy reading would falsely refuse a resumption the evidence has already cleared.
   // The replacement is emitted AFTER the pause is raised, so the pause actually exists.
-  const dir = repo()
+  const dir = repo(t)
   const impl = slow('impl', 'claude', ['ack', 'Did it, slowly.', 'And again.'])
   impl.endTurn = { index: 1, verdict: TIMED_OUT }
   impl.childPid = 1
@@ -3965,7 +3967,7 @@ test('a completed replacement verdict bypasses child liveness sampling on /conti
   await running
 })
 
-test('a withdrawal with no replacement lets /continue through instead of refusing forever', async () => {
+test('a withdrawal with no replacement lets /continue through instead of refusing forever', async (t) => {
   // #66. The verdict is gone and `activeTurn` reads the turn as open again -- correctly, since
   // the `turn_end` that closed it has been retracted -- and this used to refuse on that reading.
   // It cannot: a bare withdrawal comes only from `Tracker.resetTranscript`, which withdraws a
@@ -3976,7 +3978,7 @@ test('a withdrawal with no replacement lets /continue through instead of refusin
   //
   // The CPU sampler still runs and still decides nothing: it is printed beside the resumption
   // so an operator whose child turns out to have been working can see what they were told.
-  const dir = repo()
+  const dir = repo(t)
   const impl = slow('impl', 'claude', ['ack', 'Did it, slowly.', 'And again.'])
   impl.endTurn = { index: 1, verdict: TIMED_OUT, withdraw: 'no_replacement' }
   impl.childPid = 1
@@ -4045,7 +4047,7 @@ test('a withdrawal with no replacement lets /continue through instead of refusin
   await running
 })
 
-test('a compaction-driven withdrawal lets /continue through, the same as any other', async () => {
+test('a compaction-driven withdrawal lets /continue through, the same as any other', async (t) => {
   // The withdrawal an operator actually met (#66): `the timed_out verdict this pause was raised
   // on has been withdrawn (compaction)`. It is the SAME state as the test above -- the relay
   // matches a revision by the sequence it replaces and never looks at the reason -- and this
@@ -4068,7 +4070,7 @@ test('a compaction-driven withdrawal lets /continue through, the same as any oth
   // reading the original refusal was made on and the one that made it permanent. A Claude Code
   // session outlives its turn, so `alive` never goes false and a child sitting above the line
   // never falls below it; if this state is going to resume at all it has to resume like this.
-  const dir = repo()
+  const dir = repo(t)
   const impl = slow('impl', 'claude', ['ack', 'Did it, slowly.', 'And again.'])
   impl.endTurn = { index: 1, verdict: TIMED_OUT, withdraw: 'no_replacement', withdrawReason: 'compaction' }
   impl.childPid = 1
@@ -4208,7 +4210,7 @@ test('a compaction-driven withdrawal lets /continue through, the same as any oth
   await running
 })
 
-test('a refusal to continue is recorded on the paused session status', async () => {
+test('a refusal to continue is recorded on the paused session status', async (t) => {
   // The run stays paused, so `state` alone cannot tell an outside reader that a decision was
   // attempted and rejected. The refusal must be on the pause record, rewritten to disk, so
   // `conclave status --json` can observe it without scraping the console.
@@ -4216,7 +4218,7 @@ test('a refusal to continue is recorded on the paused session status', async () 
   // Refused on a turn the child was SEEN to begin. The withdrawn verdict beneath it no longer
   // refuses on its own (#66), so the record this asserts is the record of the guard still
   // doing its job rather than of the state that made it a wall.
-  const dir = repo()
+  const dir = repo(t)
   const impl = slow('impl', 'claude', ['ack', 'Did it, slowly.', 'And again.'])
   impl.endTurn = { index: 1, verdict: TIMED_OUT, withdraw: 'no_replacement' }
   impl.childPid = 1
@@ -4273,7 +4275,7 @@ test('a refusal to continue is recorded on the paused session status', async () 
   await running
 })
 
-test('a mixed CPU reading with no turn open no longer refuses the continue', async () => {
+test('a mixed CPU reading with no turn open no longer refuses the continue', async (t) => {
   // The obstructive half of #117, and the reason CPU stopped deciding. A finished child that
   // twitched once samples 0.3%, 0.2%, 7.2% -- three readings in a three-sample window, all
   // accurate -- and the old guard refused on the blip. Reported from a run that sat stuck for
@@ -4282,7 +4284,7 @@ test('a mixed CPU reading with no turn open no longer refuses the continue', asy
   //
   // The verdict here is NOT withdrawn: the turn ended, so `activeTurn` says there is nothing in
   // flight, and no CPU reading may stand in the way of that.
-  const dir = repo()
+  const dir = repo(t)
   const impl = slow('impl', 'claude', ['ack', 'Did it, slowly.', 'And again.'])
   impl.endTurn = { index: 1, verdict: TIMED_OUT }
   impl.childPid = 1
@@ -4330,7 +4332,7 @@ test('a mixed CPU reading with no turn open no longer refuses the continue', asy
   await running
 })
 
-test('the refusal #124 reports is unreachable: the blip it named is never sampled', async () => {
+test('the refusal #124 reports is unreachable: the blip it named is never sampled', async (t) => {
   // #124 asks a refusal that admits its own evidence is thin -- "no output count was taken with
   // this reading", "the samples disagree" -- to widen the sample before refusing. The refusal it
   // asks about cannot happen any more. Since #117 this guard refuses on `activeTurn`, and it
@@ -4339,7 +4341,7 @@ test('the refusal #124 reports is unreachable: the blip it named is never sample
   //
   // Distinct from the #83 test above, which proves the same path with different numbers. This
   // one is the report's own reading, so the issue's exact claim has an exact falsifier.
-  const dir = repo()
+  const dir = repo(t)
   const impl = slow('impl', 'claude', ['ack', 'Did it, slowly.', 'And again.'])
   impl.endTurn = { index: 1, verdict: TIMED_OUT }
   impl.childPid = 1
@@ -4398,7 +4400,7 @@ test('the refusal #124 reports is unreachable: the blip it named is never sample
   await running
 })
 
-test('a child mid-turn is refused however idle it reads', async () => {
+test('a child mid-turn is refused however idle it reads', async (t) => {
   // The unsafe half, and the reporter's own test. A child blocked in `sleep` inside a Bash tool
   // call is mid-turn and samples at 3.2%; the old guard read that as idle, said go, and the
   // send killed the run. The same path that refuses a CPU-busy child must refuse this one, and
@@ -4408,7 +4410,7 @@ test('a child mid-turn is refused however idle it reads', async () => {
   // OBSERVED turn. The bypass turns on `activeTurn`'s `withdrawn` mark, so the one thing that
   // would quietly retire this test is a mark that survived a `turn_start` -- and that is
   // exactly what this fixture puts in front of it.
-  const dir = repo()
+  const dir = repo(t)
   const impl = slow('impl', 'claude', ['ack', 'Did it, slowly.', 'And again.'])
   impl.endTurn = { index: 1, verdict: TIMED_OUT, withdraw: 'no_replacement' }
   impl.childPid = 1
@@ -4545,7 +4547,7 @@ test('a rotation_candidate pause on one seat resumes while the OTHER seat is gen
   // seat is a rotation CANDIDATE that pauses rather than a run that ends. The pause names
   // `implementer-2`; the child that measures busy is `implementer`, the seat the pause is not
   // about.
-  const dir = repo()
+  const dir = repo(t)
   // Two seats mean linked worktrees, and those are cut from a COMMIT -- so the console refuses
   // to start with anything uncommitted (`requireCleanBase`). Starting the console installs hook
   // files for the agents it was named, which land untracked in this fixture, so they are
@@ -4602,77 +4604,84 @@ test('a rotation_candidate pause on one seat resumes while the OTHER seat is gen
     input,
     output: out.stream,
   })
-  // WHATEVER happens below, the held turn is released and the console is closed. A held turn is
-  // the one fixture in this file that cannot be left behind: an assertion that throws before the
-  // release would leave a turn nothing is ever going to finish and a session promise nobody
-  // settles, so the failure stops being a failing test and becomes a hung suite -- which is what
-  // the first version of this test did when it was run against the mutation it exists to catch.
-  t.after(async () => {
+  try {
+    const until = async (pred: (f: ReturnType<typeof resolveSession>) => boolean, ms = 30_000) => {
+      const started = Date.now()
+      while (Date.now() - started < ms) {
+        const f = resolveSession(dir)
+        if (pred(f)) return f
+        await new Promise((r) => setTimeout(r, 50))
+      }
+      throw new Error(`timed out; console said:\n${out.text().slice(-1200)}`)
+    }
+
+    const paused = await until(
+      (f) => 'session' in f && f.session.status.state === 'paused' && f.session.status.pause?.reason === 'rotation_candidate',
+    )
+    assert.ok('session' in paused)
+    const pause = paused.session.status.pause!
+    assert.deepEqual(
+      pause.resolution.scope,
+      { kind: 'participant', participantId: 'implementer-2' },
+      'the pause must be scoped to the degraded seat',
+    )
+    assert.equal(pause.verdictOf, undefined, 'and it must carry no verdictOf -- which is why the old fallback fired here')
+
+    // The other seat is in flight according to the DISPATCHER, read out of the status document
+    // rather than inferred from the sampler this test is measuring. `running` with a task id is
+    // the scheduler saying it sent work and has not seen it come back (`SeatExecution`).
+    const other = paused.session.status.participants.find((p) => p.id === 'implementer')
+    assert.ok(other?.seat, 'the two-seat status document must carry a seat block')
+    assert.equal(other.seat.state, 'running', 'the other seat must be mid-turn, not idle')
+    // The task block exists ONLY between dispatch and release, so its presence is half the proof
+    // on its own; `state: 'running'` is the other half — the instruction was sent and no report
+    // has come back. Both are asserted rather than either alone.
+    assert.match(other.seat.task?.instruction ?? '', /rebuild the parser/, 'holding the task it was dispatched')
+    assert.equal(other.seat.task?.state, 'running', 'and that task must be in flight, not reported')
+    // The child's side of the same fact, and the reason it is not a timing accident: two sends --
+    // its briefing and this instruction -- and its second turn is being HELD, so no `turn_end` for
+    // it can exist until this test allows one. Deliberately NOT asserted through `session.state`,
+    // which reads `running` whether or not a turn is in flight.
+    assert.equal(busySeat.received.length, 2, 'the busy seat was sent work it has not answered')
+    assert.equal(busySeat.holding, true, 'and its turn is held open, not merely slow')
+
+    input.write('/continue\n')
+    const resumedAfter = await until((f) => 'session' in f && f.session.status.state === 'running')
+    // An ABSENCE, off the record: the resumed status carries no pause, and so no refusal at all.
+    assert.ok('session' in resumedAfter)
+    assert.equal(resumedAfter.session.status.pause, undefined, 'a busy seat the pause is not about must not refuse')
+    // Nothing is sampled at all now, and that is the stronger form of the same claim: the seat
+    // the pause NAMES is between turns, so there is nothing to describe -- and the seat that is
+    // genuinely mid-turn is not this pause's to consult, which is what the scope rule decides.
+    assert.equal(asked.includes(11), false, 'the seat the pause is not about must never be consulted')
+    assert.deepEqual(asked, [], 'and a seat between turns needs no reading either, so nothing is sampled')
+
+    // Everything this test is about has been observed. The release and the shutdown are in the
+    // `finally` below rather than here, so they run on the failing path too.
+  } finally {
+    // WHATEVER happened above, the held turn is released and the console is closed. A held turn
+    // is the one fixture in this file that cannot be left behind: an assertion that throws before
+    // the release would leave a turn nothing is ever going to finish and a session promise nobody
+    // settles, so the failure stops being a failing test and becomes a hung suite -- which is what
+    // the first version of this test did when it was run against the mutation it exists to catch.
+    //
+    // A `finally` rather than the `t.after` this used to be, and the difference is not cosmetic:
+    // shutting the console down WRITES the session record and the worktree manifest, `repo(t)`
+    // registered the scratch directory's cleanup before this test ran, and node:test runs `after`
+    // hooks in registration order -- so a hooked shutdown fired after the directory was deleted
+    // and recreated it. `finally` still runs on the failing path, which is why it was a hook.
     if (busySeat.holding) busySeat.releaseTurn()
     input.end()
     await running
-  })
-  const until = async (pred: (f: ReturnType<typeof resolveSession>) => boolean, ms = 30_000) => {
-    const started = Date.now()
-    while (Date.now() - started < ms) {
-      const f = resolveSession(dir)
-      if (pred(f)) return f
-      await new Promise((r) => setTimeout(r, 50))
-    }
-    throw new Error(`timed out; console said:\n${out.text().slice(-1200)}`)
   }
-
-  const paused = await until(
-    (f) => 'session' in f && f.session.status.state === 'paused' && f.session.status.pause?.reason === 'rotation_candidate',
-  )
-  assert.ok('session' in paused)
-  const pause = paused.session.status.pause!
-  assert.deepEqual(
-    pause.resolution.scope,
-    { kind: 'participant', participantId: 'implementer-2' },
-    'the pause must be scoped to the degraded seat',
-  )
-  assert.equal(pause.verdictOf, undefined, 'and it must carry no verdictOf -- which is why the old fallback fired here')
-
-  // The other seat is in flight according to the DISPATCHER, read out of the status document
-  // rather than inferred from the sampler this test is measuring. `running` with a task id is
-  // the scheduler saying it sent work and has not seen it come back (`SeatExecution`).
-  const other = paused.session.status.participants.find((p) => p.id === 'implementer')
-  assert.ok(other?.seat, 'the two-seat status document must carry a seat block')
-  assert.equal(other.seat.state, 'running', 'the other seat must be mid-turn, not idle')
-  // The task block exists ONLY between dispatch and release, so its presence is half the proof
-  // on its own; `state: 'running'` is the other half — the instruction was sent and no report
-  // has come back. Both are asserted rather than either alone.
-  assert.match(other.seat.task?.instruction ?? '', /rebuild the parser/, 'holding the task it was dispatched')
-  assert.equal(other.seat.task?.state, 'running', 'and that task must be in flight, not reported')
-  // The child's side of the same fact, and the reason it is not a timing accident: two sends --
-  // its briefing and this instruction -- and its second turn is being HELD, so no `turn_end` for
-  // it can exist until this test allows one. Deliberately NOT asserted through `session.state`,
-  // which reads `running` whether or not a turn is in flight.
-  assert.equal(busySeat.received.length, 2, 'the busy seat was sent work it has not answered')
-  assert.equal(busySeat.holding, true, 'and its turn is held open, not merely slow')
-
-  input.write('/continue\n')
-  const resumedAfter = await until((f) => 'session' in f && f.session.status.state === 'running')
-  // An ABSENCE, off the record: the resumed status carries no pause, and so no refusal at all.
-  assert.ok('session' in resumedAfter)
-  assert.equal(resumedAfter.session.status.pause, undefined, 'a busy seat the pause is not about must not refuse')
-  // Nothing is sampled at all now, and that is the stronger form of the same claim: the seat
-  // the pause NAMES is between turns, so there is nothing to describe -- and the seat that is
-  // genuinely mid-turn is not this pause's to consult, which is what the scope rule decides.
-  assert.equal(asked.includes(11), false, 'the seat the pause is not about must never be consulted')
-  assert.deepEqual(asked, [], 'and a seat between turns needs no reading either, so nothing is sampled')
-
-  // Everything this test is about has been observed. The release and the shutdown are in
-  // `t.after` above rather than here, so they run on the failing path too.
 })
 
-test('an operator-requested pause samples nobody, even with a busy implementer child', async () => {
+test('an operator-requested pause samples nobody, even with a busy implementer child', async (t) => {
   // Conclave scope: the operator stopped the run and the operator is starting it again, and no
   // participant is named. The rank scan used to sample the implementer here, so a child that
   // measured busy refused the resumption of a pause that was never about it -- and resuming
   // this pause sends nothing, it drops back into the advisor turn boundary it was taken at.
-  const dir = repo()
+  const dir = repo(t)
   const impl = slow('impl', 'claude', ['ack', 'Did it.', 'Again.'], 300)
   impl.childPid = 7
   const out = collect()
@@ -4723,7 +4732,7 @@ test('an operator-requested pause samples nobody, even with a busy implementer c
   await running
 })
 
-test('a turn that ends lets /continue resume on retry, however busy the child reads', async () => {
+test('a turn that ends lets /continue resume on retry, however busy the child reads', async (t) => {
   // The guard re-reads rather than remembering the past. A turn that was open the first time
   // and ended the second must resume, or the guard is a wall again -- and it must resume while
   // the CPU sampler is still shouting `working`, because that reading is not what it consults.
@@ -4731,7 +4740,7 @@ test('a turn that ends lets /continue resume on retry, however busy the child re
   // The open turn here is one the child was seen to begin, not a withdrawn verdict: a bare
   // withdrawal resumes on the first attempt now (#66), and there would be no second attempt to
   // make a claim about.
-  const dir = repo()
+  const dir = repo(t)
   const impl = slow('impl', 'claude', ['ack', 'Did it, slowly.', 'And again.'])
   impl.endTurn = { index: 1, verdict: TIMED_OUT, withdraw: 'no_replacement' }
   impl.childPid = 1
@@ -4835,8 +4844,8 @@ test('a turn that ends lets /continue resume on retry, however busy the child re
 // `src/relay/rotation.test.ts`.
 // ---------------------------------------------------------------------------------------
 
-test('a bare /rotate away from a rotation candidate asks why, and the next line is the reason (#75)', async () => {
-  const dir = repo()
+test('a bare /rotate away from a rotation candidate asks why, and the next line is the reason (#75)', async (t) => {
+  const dir = repo(t)
   const out = collect()
   const input = new PassThrough()
   const running = runSession({
@@ -4916,7 +4925,7 @@ Carry on.`
 /** What a replacement says when it has run the one configured check and agrees with the record. */
 const CONSOLE_ACCEPTED = 'CHECK 1: exit 0\n\nRead work.ts and ran the check. It matches the handoff.'
 
-test('a rotation with an unconfirmed disposal warns the operator at the pause (#155)', async () => {
+test('a rotation with an unconfirmed disposal warns the operator at the pause (#155)', async (t) => {
   /**
    * The console half of `rotated_cleanup_failed`, and the reason it is said HERE and not only
    * in the run report.
@@ -4931,7 +4940,7 @@ test('a rotation with an unconfirmed disposal warns the operator at the pause (#
    * console that reported the warning INSTEAD of the rotation would be describing a rollback
    * that did not occur.
    */
-  const dir = repo()
+  const dir = repo(t)
   const out = collect()
   const input = new PassThrough()
   // The failure at the position the adapters actually fail from: `terminated` is their last
@@ -5012,10 +5021,10 @@ test('a rotation with an unconfirmed disposal warns the operator at the pause (#
   await running
 })
 
-test('a /command typed at the reason prompt cancels the rotation and runs the command (#75)', async () => {
+test('a /command typed at the reason prompt cancels the rotation and runs the command (#75)', async (t) => {
   // An operator who changes their mind at the prompt is the likeliest person to type one, and
   // the alternative is recording `/state` as why a seat was replaced.
-  const dir = repo()
+  const dir = repo(t)
   const out = collect()
   const input = new PassThrough()
   const running = runSession({
@@ -5054,11 +5063,11 @@ test('a /command typed at the reason prompt cancels the rotation and runs the co
   await running
 })
 
-test('/rotate at a rotation candidate still costs nothing to answer (#75)', async () => {
+test('/rotate at a rotation candidate still costs nothing to answer (#75)', async (t) => {
   // The other half, and the one that keeps the prompt from being a toll. At THIS pause the
   // proxy is what spoke; agreeing with it is the whole of the operator's contribution, so the
   // pause's own detail is the honest record and no question is put.
-  const dir = repo()
+  const dir = repo(t)
   const impl = slow('impl', 'claude', ['ack', 'Did it.', 'And again.', 'NONE'])
   impl.compactOnTurn = 1
   const out = collect()
@@ -5093,14 +5102,14 @@ test('/rotate at a rotation candidate still costs nothing to answer (#75)', asyn
   await running
 })
 
-test('/rotate WITH a reason at a candidate says the reason was not recorded (#75)', async () => {
+test('/rotate WITH a reason at a candidate says the reason was not recorded (#75)', async (t) => {
   // `/rotate the session is wedged` at a candidate is a natural thing to type, and the record
   // still carries the proxy's words: accepting a candidate is agreement, and `candidate_accepted`
   // beside a sentence the proxy never said is a record whose two fields describe different
   // events. Dropping the sentence is right; dropping it in silence is not. The operator watched
   // their words go into a command and would reasonably assume the record now carries them --
   // which is the same false belief about what the record says that #75 exists to remove.
-  const dir = repo()
+  const dir = repo(t)
   const impl = slow('impl', 'claude', ['ack', 'Did it.', 'And again.', 'NONE'])
   impl.compactOnTurn = 1
   const out = collect()
@@ -5155,7 +5164,7 @@ test('any live seat is addressable by its own id, and a name no seat has is refu
   // where the message went. `to` is the whole answer: it is exactly one seat, so every other
   // live seat is excluded by construction, and `/audit` is asserted beside it because that is
   // the surface an operator asks the same question through.
-  const dir = repo()
+  const dir = repo(t)
   // Two seats mean linked worktrees cut from a COMMIT, so the console refuses to start with
   // anything uncommitted. The hook files it installs land untracked here, so they are ignored
   // and committed before the run rather than tripping a guard this test is not about.
@@ -5324,7 +5333,7 @@ test('with no run in flight, a named seat is asked DIRECTLY, and only that seat 
   //
   // NO GOAL, so no run ever starts. That is the state being tested, not a shortcut to it: the
   // seats are launched by `Relay.start` and are alive; only the loop is absent.
-  const dir = repo()
+  const dir = repo(t)
   writeFileSync(join(dir, '.gitignore'), '.conclave/\n.claude/\n.codex/\n')
   execFileSync('git', ['add', '.'], { cwd: dir })
   execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'ignore agent hook files'], { cwd: dir })
@@ -5399,7 +5408,7 @@ test('with no run in flight, a named seat is asked DIRECTLY, and only that seat 
   )
 })
 
-test('a well-formed id naming no seat in THIS run is refused, and the refusal names exactly the live ones', async () => {
+test('a well-formed id naming no seat in THIS run is refused, and the refusal names exactly the live ones', async (t) => {
   // The case a drifted seat list gets wrong, and the one an operator hits first: a DEFAULT
   // run, one implementer, and `>implementer-2` typed at it. The id is well-formed -- it is
   // what a second seat would be called, and the operator has seen it in the help -- but no
@@ -5410,7 +5419,7 @@ test('a well-formed id naming no seat in THIS run is refused, and the refusal na
   // apart from a hardcoded list that has drifted -- which is exactly the second-list failure
   // the design was picked to prevent, and it survived until this test. Found by the operator's
   // independent mutation: replacing `addressable()` with a fixed superset left the suite green.
-  const dir = repo()
+  const dir = repo(t)
   const impl = slow('impl', 'claude', ['ack', 'Did it.', 'And again.'])
   const advisor = slow('advisor', 'codex', ['Do it.', 'More.', 'DONE'])
   const out = collect()

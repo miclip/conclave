@@ -27,13 +27,14 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
+import type { TestContext } from 'node:test'
 import { AgentRegistry } from '../registry/registry.ts'
 import { NO_DEADLINE_CLOCKS } from '../registry/types.ts'
 import { FakeRotationSession } from '../rotation/fakeSession.ts'
+import { tempDir } from '../testkit/tempDir.ts'
 import { Relay } from './relay.ts'
 
 /** A check that passes, so nothing here is about a red tree -- that is `integrationRed`'s. */
@@ -43,8 +44,8 @@ function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
 }
 
-function tempRepo(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'conclave-lane-'))
+function tempRepo(t: TestContext): string {
+  const dir = tempDir(t, 'conclave-lane')
   git(dir, 'init', '--quiet')
   git(dir, 'config', 'user.email', 'test@example.com')
   git(dir, 'config', 'user.name', 'Test')
@@ -115,59 +116,51 @@ async function twoSeatRelay(repo: string, advisorReplies: string[]): Promise<Rel
   return relay
 }
 
-test('every merge boundary takes the lane exactly once, checks included', async () => {
-  const repo = tempRepo()
-  try {
-    const relay = await twoSeatRelay(repo, ['Write one.', 'Write two.', 'DONE', 'DONE'])
-    await relay.run('Keep the work moving.')
+test('every merge boundary takes the lane exactly once, checks included', async (t) => {
+  const repo = tempRepo(t)
+  const relay = await twoSeatRelay(repo, ['Write one.', 'Write two.', 'DONE', 'DONE'])
+  await relay.run('Keep the work moving.')
 
-    const boundaries = relay.checkLane.history().filter((r) => r.station === 'integration')
-    const merged = relay.tasks().filter(({ runtime }) => runtime.integratedAt !== undefined)
-    assert.ok(merged.length >= 2, 'the scenario must actually have merged both seats')
-    assert.equal(
-      boundaries.length,
-      merged.length,
-      'one lane section per boundary. More would mean the checks `integrateSeat` runs for ' +
-        'itself are queueing separately from the boundary that contains them (#80).',
-    )
-    // The double-queue signature, said as data: the same seat taking the lane twice for the
-    // same task is the shape that deadlocks a one-slot lane the moment the two overlap.
-    const keys = boundaries.map((r) => `${r.seat}/${r.detail}`)
-    assert.deepEqual([...new Set(keys)].sort(), [...keys].sort(), 'no seat may take the lane twice for one task')
-    // And nothing else took it: rotation never ran here, and a run that had silently rotated
-    // would make the count above mean something different.
-    assert.deepEqual(
-      relay.checkLane.history().filter((r) => r.station === 'rotation'),
-      [],
-      'no rotation happened in this scenario',
-    )
-  } finally {
-    rmSync(repo, { recursive: true, force: true })
-  }
+  const boundaries = relay.checkLane.history().filter((r) => r.station === 'integration')
+  const merged = relay.tasks().filter(({ runtime }) => runtime.integratedAt !== undefined)
+  assert.ok(merged.length >= 2, 'the scenario must actually have merged both seats')
+  assert.equal(
+    boundaries.length,
+    merged.length,
+    'one lane section per boundary. More would mean the checks `integrateSeat` runs for ' +
+      'itself are queueing separately from the boundary that contains them (#80).',
+  )
+  // The double-queue signature, said as data: the same seat taking the lane twice for the
+  // same task is the shape that deadlocks a one-slot lane the moment the two overlap.
+  const keys = boundaries.map((r) => `${r.seat}/${r.detail}`)
+  assert.deepEqual([...new Set(keys)].sort(), [...keys].sort(), 'no seat may take the lane twice for one task')
+  // And nothing else took it: rotation never ran here, and a run that had silently rotated
+  // would make the count above mean something different.
+  assert.deepEqual(
+    relay.checkLane.history().filter((r) => r.station === 'rotation'),
+    [],
+    'no rotation happened in this scenario',
+  )
 })
 
-test('a default run never touches the lane, because there is no boundary to serialise', async () => {
-  const repo = tempRepo()
-  try {
-    const advisor = new FakeRotationSession('advisor', 'codex', ['Do the thing.', 'DONE', 'DONE'])
-    const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it.', 'NONE'])
-    const relay = await Relay.start({
-      registry: registryOf(advisor, [impl]),
-      cwd: repo,
-      lead: { id: 'advisor', agent: 'codex', role: 'advisor' },
-      implementer: { id: 'implementer', agent: 'claude', role: 'implementer' },
-      maxAdvisorTurns: 3,
-      rotation: { checks: CHECKS, checkTimeoutMs: 30_000 },
-    })
-    assert.equal(relay.worktrees, undefined, 'one seat means one tree, and it is the operator’s own')
-    await relay.run('Keep the work moving.')
-    assert.deepEqual(
-      relay.checkLane.history(),
-      [],
-      'nothing at N=1 goes through the lane: there is no merge, so the station it serialises ' +
-        'is not reached at all',
-    )
-  } finally {
-    rmSync(repo, { recursive: true, force: true })
-  }
+test('a default run never touches the lane, because there is no boundary to serialise', async (t) => {
+  const repo = tempRepo(t)
+  const advisor = new FakeRotationSession('advisor', 'codex', ['Do the thing.', 'DONE', 'DONE'])
+  const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it.', 'NONE'])
+  const relay = await Relay.start({
+    registry: registryOf(advisor, [impl]),
+    cwd: repo,
+    lead: { id: 'advisor', agent: 'codex', role: 'advisor' },
+    implementer: { id: 'implementer', agent: 'claude', role: 'implementer' },
+    maxAdvisorTurns: 3,
+    rotation: { checks: CHECKS, checkTimeoutMs: 30_000 },
+  })
+  assert.equal(relay.worktrees, undefined, 'one seat means one tree, and it is the operator’s own')
+  await relay.run('Keep the work moving.')
+  assert.deepEqual(
+    relay.checkLane.history(),
+    [],
+    'nothing at N=1 goes through the lane: there is no merge, so the station it serialises ' +
+      'is not reached at all',
+  )
 })

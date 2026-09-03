@@ -38,13 +38,31 @@
  */
 
 import { strict as assert } from 'node:assert'
-import { mkdtempSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
+import type { TestContext } from 'node:test'
 import type { AgentEvent, AgentSession, TurnEndEvent } from '../contract/session.ts'
 import { ClaudePtyHookAdapter } from './claude.ts'
 import { installFakeClis } from './fakeCli.ts'
+import { suiteTempDir, tempDir } from '../testkit/tempDir.ts'
+
+/**
+ * The run directories the adapters this file boots make for themselves, contained.
+ *
+ * `Claude.#boot` and `Codex.#boot` each `mkdtemp` a run directory under `os.tmpdir()` and
+ * never remove it. That is PRODUCTION behaviour and issue #203's business, not this file's --
+ * so rather than change it, the floor it lands on moves: `tmpdir()` re-reads `TMPDIR` on every
+ * call, so pointing it at a directory the testkit issued puts every run directory booted here
+ * inside something whose lifetime the helper already owns.
+ *
+ * Per FILE, and that is what makes it safe rather than a shared global: every test file runs
+ * in its own process under `node --test`, so this reaches no other suite, and the tests in
+ * this one stay isolated from each other exactly as before -- by `tempDir` handing each its
+ * own uniquely named child of this root.
+ */
+const ADAPTER_TMP_ROOT = suiteTempDir('adapter-run-root')
+process.env['TMPDIR'] = ADAPTER_TMP_ROOT
 
 const { dir: RUN } = installFakeClis()
 
@@ -128,15 +146,15 @@ async function sessionOver(
   }
 }
 
-function scratch(name: string): string {
-  return join(mkdtempSync(join(tmpdir(), 'orch-deadline-')), name)
+function scratch(t: TestContext, name: string): string {
+  return join(tempDir(t, 'orch-deadline'), name)
 }
 
-test('claude: a deadline on a turn the transcript shows FINISHED is superseded by completed', async () => {
+test('claude: a deadline on a turn the transcript shows FINISHED is superseded by completed', async (t) => {
   // The lost-`Stop` population, which is #107's nine pauses in one afternoon: a child that did
   // the work, wrote it down, and whose hook never arrived. Before this the run held that seat up
   // and asked a human about a turn that had been over for minutes.
-  const transcript = scratch('finished.jsonl')
+  const transcript = scratch(t, 'finished.jsonl')
   // Written before the session starts, so the ordinary tailer has no NEW content to emit while
   // the turn runs. That keeps the silence clock free of touches, which is what makes the
   // deadline land on schedule -- and it means every event this test reads comes from the
@@ -177,11 +195,11 @@ test('claude: a deadline on a turn the transcript shows FINISHED is superseded b
   }
 })
 
-test('claude: a deadline on a turn the transcript shows IN PROGRESS stands, and refuses a send', async () => {
+test('claude: a deadline on a turn the transcript shows IN PROGRESS stands, and refuses a send', async (t) => {
   // The other population, and #117's whole subject. The child is mid-work: narration and a tool
   // call on the record, no `stop_reason`. Nothing has observed it stop, so nothing may be typed
   // at it -- neither CLI accepts input mid-turn, and what lands there is spliced into the turn.
-  const transcript = scratch('working.jsonl')
+  const transcript = scratch(t, 'working.jsonl')
   writeFileSync(transcript, [userRecord('hang please'), workingRecord('still working on it')].join('\n') + '\n')
   const session = await sessionOver(transcript)
   try {
@@ -211,7 +229,7 @@ test('claude: a deadline on a turn the transcript shows IN PROGRESS stands, and 
   }
 })
 
-test('claude: a transcript that cannot be read leaves the deadline exactly as it was', async () => {
+test('claude: a transcript that cannot be read leaves the deadline exactly as it was', async (t) => {
   // The deliberate default, and the uncomfortable one. Reading a directory throws, which stands
   // in for the ways the check can produce NO ANSWER AT ALL: no transcript announced, a file that
   // is gone, or a record set too ambiguous to credit this turn.
@@ -224,7 +242,7 @@ test('claude: a transcript that cannot be read leaves the deadline exactly as it
   // "finished" would reopen #117 on precisely the runs where the evidence is hardest to get --
   // and that is not a coincidence, since an unreadable transcript and a wedged child have causes
   // in common.
-  const unreadable = mkdtempSync(join(tmpdir(), 'orch-deadline-dir-'))
+  const unreadable = tempDir(t, 'orch-deadline-dir')
   const session = await sessionOver(unreadable)
   try {
     await session.send('hang please', { kind: 'orchestrator' })
@@ -244,7 +262,7 @@ test('claude: a transcript that cannot be read leaves the deadline exactly as it
   }
 })
 
-test('claude: EXTERNAL input ownership still recovers a turn the transcript proves finished', async () => {
+test('claude: EXTERNAL input ownership still recovers a turn the transcript proves finished', async (t) => {
   // The ownership branch, on the Claude adapter this time. `#reconsiderDeadline` runs from the
   // watchdog callback, and under external ownership that callback's verdict is
   // `unknown_abnormal_end (uncertain)` rather than `timed_out`: the deadline rule degrades its
@@ -256,7 +274,7 @@ test('claude: EXTERNAL input ownership still recovers a turn the transcript prov
   // wrote in its own file: `stop_reason=end_turn` is positive proof the turn finished, and who
   // else could type at the terminal does not weaken it. Both adapters carry the same gate, so
   // both carry this test.
-  const transcript = scratch('finished-external.jsonl')
+  const transcript = scratch(t, 'finished-external.jsonl')
   writeFileSync(
     transcript,
     [userRecord('hang please'), finishedRecord('finished while you were away')].join('\n') + '\n',
@@ -303,7 +321,7 @@ test('claude: EXTERNAL input ownership still recovers a turn the transcript prov
   }
 })
 
-test('claude: a re-check that lands AFTER its bound proves nothing, even holding proof of completion', async () => {
+test('claude: a re-check that lands AFTER its bound proves nothing, even holding proof of completion', async (t) => {
   // The case the bound exists for, driven end to end rather than argued from a unit test.
   //
   // The transcript here is the SAME one the first test in this file recovers from: it proves the
@@ -361,7 +379,7 @@ test('claude: a re-check that lands AFTER its bound proves nothing, even holding
     return snap
   }
 
-  const transcript = scratch('slow.jsonl')
+  const transcript = scratch(t, 'slow.jsonl')
   writeFileSync(transcript, [userRecord('hang please'), finishedRecord('all done, actually')].join('\n') + '\n')
   let session: AgentSession | undefined
   try {

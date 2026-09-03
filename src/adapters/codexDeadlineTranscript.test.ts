@@ -34,13 +34,31 @@
  */
 
 import { strict as assert } from 'node:assert'
-import { mkdtempSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
+import type { TestContext } from 'node:test'
 import type { AgentEvent, AgentSession, RevisionEvent, TurnEndEvent } from '../contract/session.ts'
 import { CodexPtyHookAdapter } from './codex.ts'
 import { installFakeClis } from './fakeCli.ts'
+import { suiteTempDir, tempDir } from '../testkit/tempDir.ts'
+
+/**
+ * The run directories the adapters this file boots make for themselves, contained.
+ *
+ * `Claude.#boot` and `Codex.#boot` each `mkdtemp` a run directory under `os.tmpdir()` and
+ * never remove it. That is PRODUCTION behaviour and issue #203's business, not this file's --
+ * so rather than change it, the floor it lands on moves: `tmpdir()` re-reads `TMPDIR` on every
+ * call, so pointing it at a directory the testkit issued puts every run directory booted here
+ * inside something whose lifetime the helper already owns.
+ *
+ * Per FILE, and that is what makes it safe rather than a shared global: every test file runs
+ * in its own process under `node --test`, so this reaches no other suite, and the tests in
+ * this one stay isolated from each other exactly as before -- by `tempDir` handing each its
+ * own uniquely named child of this root.
+ */
+const ADAPTER_TMP_ROOT = suiteTempDir('adapter-run-root')
+process.env['TMPDIR'] = ADAPTER_TMP_ROOT
 
 const { dir: RUN } = installFakeClis()
 
@@ -74,8 +92,8 @@ const failed = (turnId: string, info: string, message: string) =>
     error: { codex_error_info: info, message },
   })
 
-function transcriptOf(...lines: string[]): string {
-  const path = join(mkdtempSync(join(tmpdir(), 'orch-codex-deadline-')), 'rollout.jsonl')
+function transcriptOf(t: TestContext, ...lines: string[]): string {
+  const path = join(tempDir(t, 'orch-codex-deadline'), 'rollout.jsonl')
   writeFileSync(path, lines.join('\n') + '\n')
   return path
 }
@@ -131,10 +149,10 @@ async function sessionOver(
   }
 }
 
-test('codex: a deadline on a turn the transcript shows COMPLETE is superseded by completed', async () => {
+test('codex: a deadline on a turn the transcript shows COMPLETE is superseded by completed', async (t) => {
   // The lost-end-of-turn population. Codex says `task_complete` outright, so this needs no
   // positional credit at all -- the record is keyed by the same `turn_id` the hook armed.
-  const path = transcriptOf(started(TURN), prompt('hang please'), finished(TURN, 'all done, actually'))
+  const path = transcriptOf(t, started(TURN), prompt('hang please'), finished(TURN, 'all done, actually'))
   const session = await sessionOver(path)
   try {
     await session.send('hang please', { kind: 'orchestrator' })
@@ -165,7 +183,7 @@ test('codex: a deadline on a turn the transcript shows COMPLETE is superseded by
   }
 })
 
-test('codex: a deadline on a turn whose task_complete carried an ERROR is superseded, and the seat recovers (#35)', async () => {
+test('codex: a deadline on a turn whose task_complete carried an ERROR is superseded, and the seat recovers (#35)', async (t) => {
   // The record that made #35 expensive, now arriving through the deadline path. Observed live as
   // `usage_limit_exceeded` with `last_agent_message: null` -- the workspace was out of credits.
   //
@@ -174,6 +192,7 @@ test('codex: a deadline on a turn whose task_complete carried an ERROR is supers
   // PROVEN from the transcript rather than inferred, because the child wrote it down; and the
   // seat must be sendable, because a turn that ended badly is still a turn that ended.
   const path = transcriptOf(
+    t,
     started(TURN),
     prompt('hang please'),
     spoke('starting on it'),
@@ -226,10 +245,10 @@ test('codex: a deadline on a turn whose task_complete carried an ERROR is supers
   }
 })
 
-test('codex: a deadline on a turn the transcript shows IN PROGRESS stands, and refuses a send', async () => {
+test('codex: a deadline on a turn the transcript shows IN PROGRESS stands, and refuses a send', async (t) => {
   // #117's subject. `task_started` and narration, no terminal record of any kind. Nothing has
   // observed the child stop, so nothing may be typed at it.
-  const path = transcriptOf(started(TURN), prompt('hang please'), spoke('still working on it'))
+  const path = transcriptOf(t, started(TURN), prompt('hang please'), spoke('still working on it'))
   const session = await sessionOver(path)
   try {
     await session.send('hang please', { kind: 'orchestrator' })
@@ -258,11 +277,11 @@ test('codex: a deadline on a turn the transcript shows IN PROGRESS stands, and r
   }
 })
 
-test('codex: a transcript that cannot be read leaves the deadline exactly as it was', async () => {
+test('codex: a transcript that cannot be read leaves the deadline exactly as it was', async (t) => {
   // Reading a directory throws, standing in for every way the check can fail to answer. All of
   // them keep the verdict and keep the transport open: an unreadable transcript and a wedged
   // child have causes in common, so "cannot tell" must never be resolved as "finished".
-  const unreadable = mkdtempSync(join(tmpdir(), 'orch-codex-deadline-dir-'))
+  const unreadable = tempDir(t, 'orch-codex-deadline-dir')
   const session = await sessionOver(unreadable)
   try {
     await session.send('hang please', { kind: 'orchestrator' })
@@ -282,7 +301,7 @@ test('codex: a transcript that cannot be read leaves the deadline exactly as it 
   }
 })
 
-test('codex: EXTERNAL input ownership still recovers a turn the transcript proves finished', async () => {
+test('codex: EXTERNAL input ownership still recovers a turn the transcript proves finished', async (t) => {
   // The ownership branch, and the reason it is a test rather than a comment.
   //
   // Under external ownership the deadline rule degrades its own verdict to
@@ -294,7 +313,7 @@ test('codex: EXTERNAL input ownership still recovers a turn the transcript prove
   // The degradation is about ATTRIBUTING AN UNSEEN ENDING. It says nothing about a record the
   // child wrote down: `task_complete` is positive proof of completion, and who else could type
   // at the terminal does not weaken it. So the recovery has to be exactly as good here.
-  const path = transcriptOf(started(TURN), prompt('hang please'), finished(TURN, 'finished while you were away'))
+  const path = transcriptOf(t, started(TURN), prompt('hang please'), finished(TURN, 'finished while you were away'))
   const session = await sessionOver(path, 'external')
   try {
     assert.equal(session.guarantees.inputOwnership, 'external', 'precondition: the seat is externally owned')

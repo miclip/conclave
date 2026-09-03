@@ -5,8 +5,7 @@
  */
 
 import { strict as assert } from 'node:assert'
-import { mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { readFileSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
 import {
@@ -15,15 +14,12 @@ import {
   withConclaveHooks,
   writeKimiConfig,
 } from './kimiConfig.ts'
+import { tempDir } from '../testkit/tempDir.ts'
 
-function dir(): string {
-  return mkdtempSync(join(tmpdir(), 'kimi-cfg-'))
-}
-
-test('a TOML config is read through python tomllib', () => {
+test('a TOML config is read through python tomllib', (t) => {
   // Node has no TOML parser, and `kimi-cli` requires Python >= 3.12, where `tomllib` is
   // standard library. A machine that can run Kimi can always parse Kimi's config.
-  const d = dir()
+  const d = tempDir(t, 'kimi-cfg')
   const path = join(d, 'config.toml')
   writeFileSync(
     path,
@@ -36,10 +32,10 @@ test('a TOML config is read through python tomllib', () => {
   assert.equal((c.models as Record<string, { max_context_size: number }>).k!.max_context_size, 262144)
 })
 
-test('a missing config is empty rather than an error', () => {
+test('a missing config is empty rather than an error', (t) => {
   // Kimi creates a default when none exists. A run failing only because the operator has not
   // written a config yet would be reporting the wrong problem.
-  assert.deepEqual(readKimiConfig(join(dir(), 'absent.toml')), {})
+  assert.deepEqual(readKimiConfig(join(tempDir(t, 'kimi-cfg'), 'absent.toml')), {})
 })
 
 test('the operator\'s own hooks are preserved, not replaced', () => {
@@ -63,10 +59,10 @@ test('only the events something consumes are registered', () => {
   assert.ok(!(KIMI_HOOK_EVENTS as readonly string[]).includes('Notification'))
 })
 
-test('the generated config keeps the credential and is not world-readable', () => {
+test('the generated config keeps the credential and is not world-readable', (t) => {
   // It is a copy of the operator's config, so it carries whatever key that carries. Conclave
   // does not ask for the key and does not transmit it, but it does briefly hold a copy.
-  const d = dir()
+  const d = tempDir(t, 'kimi-cfg')
   const path = writeKimiConfig(d, withConclaveHooks({ providers: { m: { api_key: 'sk-x' } } }, 'cmd'))
 
   const written = JSON.parse(readFileSync(path, 'utf8'))
@@ -74,8 +70,8 @@ test('the generated config keeps the credential and is not world-readable', () =
   assert.equal(statSync(path).mode & 0o077, 0, 'no group or other access')
 })
 
-test('a JSON config is read directly, since kimi accepts one', () => {
-  const d = dir()
+test('a JSON config is read directly, since kimi accepts one', (t) => {
+  const d = tempDir(t, 'kimi-cfg')
   const path = join(d, 'config.json')
   writeFileSync(path, JSON.stringify({ default_model: 'j' }))
   assert.equal(readKimiConfig(path).default_model, 'j')

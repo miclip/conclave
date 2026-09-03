@@ -17,11 +17,12 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
+import type { TestContext } from 'node:test'
 import { AsyncQueue } from '../adapters/asyncQueue.ts'
+import { tempDir } from '../testkit/tempDir.ts'
 import type { AgentEvent, AgentSession, CloseMode, SessionSnapshot, SessionState, TurnKey } from '../contract/session.ts'
 import { guaranteesFor, turnKey } from '../contract/session.ts'
 import { AgentRegistry } from '../registry/registry.ts'
@@ -35,8 +36,8 @@ function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
 }
 
-function tempRepo(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'conclave-attr-'))
+function tempRepo(t: TestContext): string {
+  const dir = tempDir(t, 'conclave-attr')
   git(dir, 'init', '--quiet')
   git(dir, 'config', 'user.email', 'test@example.com')
   git(dir, 'config', 'user.name', 'Test')
@@ -223,12 +224,12 @@ async function twoSeats(repo: string, sessions: { lead: ToolingFakeSession; alph
   })
 }
 
-test('a seat artifacts are read from its own tree, and named with the seat that wrote them', async () => {
-  const repo = tempRepo()
+test('a seat artifacts are read from its own tree, and named with the seat that wrote them', async (t) => {
+  const repo = tempRepo(t)
   const lead = new ToolingFakeSession('lead-1', 'lead', ['Write the notes.', 'DONE'])
   const alpha = new ToolingFakeSession('alpha-1', 'alpha', ['ack', 'Wrote them.', 'NONE'])
   const beta = new ToolingFakeSession('beta-1', 'beta', ['ack', 'NONE'])
-  try {
+  {
     const relay = await twoSeats(repo, { lead, alpha, beta })
     try {
       // Only the file the aside asked for, and only on the working turn. `alsoNames` puts a
@@ -262,17 +263,15 @@ test('a seat artifacts are read from its own tree, and named with the seat that 
     } finally {
       await relay.stop()
     }
-  } finally {
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
-test('a change in the integration checkout is not swept into a seat attribution', async () => {
-  const repo = tempRepo()
+test('a change in the integration checkout is not swept into a seat attribution', async (t) => {
+  const repo = tempRepo(t)
   const lead = new ToolingFakeSession('lead-1', 'lead', ['Write the notes.', 'DONE'])
   const alpha = new ToolingFakeSession('alpha-1', 'alpha', ['ack', 'Wrote them.', 'NONE'])
   const beta = new ToolingFakeSession('beta-1', 'beta', ['ack', 'NONE'])
-  try {
+  {
     const relay = await twoSeats(repo, { lead, alpha, beta })
     try {
       alpha.work = (message) =>
@@ -298,17 +297,15 @@ test('a change in the integration checkout is not swept into a seat attribution'
     } finally {
       await relay.stop()
     }
-  } finally {
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
-test('a seat that was never told is not evidence, and its tree is not read', async () => {
-  const repo = tempRepo()
+test('a seat that was never told is not evidence, and its tree is not read', async (t) => {
+  const repo = tempRepo(t)
   const lead = new ToolingFakeSession('lead-1', 'lead', ['Write the notes.', 'Now you write them.', 'DONE'])
   const alpha = new ToolingFakeSession('alpha-1', 'alpha', ['ack', 'Wrote them.', 'NONE'])
   const beta = new ToolingFakeSession('beta-1', 'beta', ['ack', 'Wrote them too.', 'NONE'])
-  try {
+  {
     const relay = await twoSeats(repo, { lead, alpha, beta })
     try {
       // BETA writes the file the aside asked about, and beta was never told about the aside.
@@ -333,8 +330,6 @@ test('a seat that was never told is not evidence, and its tree is not read', asy
     } finally {
       await relay.stop()
     }
-  } finally {
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
@@ -384,11 +379,11 @@ test('the same relative path in two trees is two attributions, not one', () => {
   })
 })
 
-test('a default run attributes from the operator cwd, unnamed and un-upgraded', async () => {
-  const repo = tempRepo()
+test('a default run attributes from the operator cwd, unnamed and un-upgraded', async (t) => {
+  const repo = tempRepo(t)
   const lead = new ToolingFakeSession('lead-1', 'lead', ['Write the notes.', 'DONE'])
   const impl = new ToolingFakeSession('impl-1', 'impl', ['ack', 'Wrote them.', 'NONE'])
-  try {
+  {
     const relay = await Relay.start({
       registry: registryOf({ lead, impl, unused: new ToolingFakeSession('x', 'unused') }),
       cwd: repo,
@@ -427,8 +422,6 @@ test('a default run attributes from the operator cwd, unnamed and un-upgraded', 
     } finally {
       await relay.stop()
     }
-  } finally {
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
@@ -442,12 +435,12 @@ test('a default run attributes from the operator cwd, unnamed and un-upgraded', 
  * clean integration checkout at the moment of the aside, so none of them can see that — this
  * one dirties it first, with the very path the seat then changes.
  */
-test('an operator edit of the same path does not cancel out the seat own artifact', async () => {
-  const repo = tempRepo()
+test('an operator edit of the same path does not cancel out the seat own artifact', async (t) => {
+  const repo = tempRepo(t)
   const lead = new ToolingFakeSession('lead-1', 'lead', ['Update the readme.', 'DONE'])
   const alpha = new ToolingFakeSession('alpha-1', 'alpha', ['ack', 'Updated it.', 'NONE'])
   const beta = new ToolingFakeSession('beta-1', 'beta', ['ack', 'NONE'])
-  try {
+  {
     const relay = await twoSeats(repo, { lead, alpha, beta })
     try {
       alpha.work = (message) =>
@@ -472,8 +465,6 @@ test('an operator edit of the same path does not cancel out the seat own artifac
     } finally {
       await relay.stop()
     }
-  } finally {
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
@@ -521,13 +512,13 @@ test('evidence for a root comes only from informed participants working in that 
  * and "no new paths appeared" is precisely the false negative the message warns against
  * trusting: a reader who believes it restarts work that was already done.
  */
-test('a lost report is explained with the diff of the seat own tree', async () => {
-  const repo = tempRepo()
+test('a lost report is explained with the diff of the seat own tree', async (t) => {
+  const repo = tempRepo(t)
   const lead = new ToolingFakeSession('lead-1', 'lead', ['Write the notes.', 'DONE'])
   // An empty reply on the working turn: the turn ended, and its account of itself did not.
   const alpha = new ToolingFakeSession('alpha-1', 'alpha', ['ack', ''])
   const beta = new ToolingFakeSession('beta-1', 'beta', ['ack', 'NONE'])
-  try {
+  {
     const relay = await Relay.start({
       registry: registryOf({ lead, alpha, beta }),
       cwd: repo,
@@ -556,8 +547,6 @@ test('a lost report is explained with the diff of the seat own tree', async () =
     } finally {
       await relay.stop()
     }
-  } finally {
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
@@ -570,12 +559,12 @@ test('a lost report is explained with the diff of the seat own tree', async () =
  * checkout would answer a question nobody asked — and would answer it with the operator's own
  * unrelated edits, which reads as evidence that the seat did something.
  */
-test('a lost report with no new paths counts the seat own tree, not the operator', async () => {
-  const repo = tempRepo()
+test('a lost report with no new paths counts the seat own tree, not the operator', async (t) => {
+  const repo = tempRepo(t)
   const lead = new ToolingFakeSession('lead-1', 'lead', ['Think about it.', 'DONE'])
   const alpha = new ToolingFakeSession('alpha-1', 'alpha', ['ack', ''])
   const beta = new ToolingFakeSession('beta-1', 'beta', ['ack', 'NONE'])
-  try {
+  {
     const relay = await Relay.start({
       registry: registryOf({ lead, alpha, beta }),
       cwd: repo,
@@ -605,7 +594,5 @@ test('a lost report with no new paths counts the seat own tree, not the operator
     } finally {
       await relay.stop()
     }
-  } finally {
-    rmSync(repo, { recursive: true, force: true })
   }
 })

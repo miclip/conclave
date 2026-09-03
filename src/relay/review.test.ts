@@ -7,19 +7,20 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
+import type { TestContext } from 'node:test'
 import { AgentRegistry } from '../registry/registry.ts'
 import { NO_DEADLINE_CLOCKS } from '../registry/types.ts'
 import { FakeRotationSession } from '../rotation/fakeSession.ts'
+import { tempDir } from '../testkit/tempDir.ts'
 import { newSessionId, recordSession, sessionDir } from '../workspace/sessionRecord.ts'
 import { Relay } from './relay.ts'
 import type { RunPause } from './run.ts'
 
-function repo(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'conclave-review-relay-'))
+function repo(t: TestContext): string {
+  const dir = tempDir(t, 'conclave-review-relay')
   execFileSync('git', ['init', '-q'], { cwd: dir })
   execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '--allow-empty', '-qm', 'init'], {
     cwd: dir,
@@ -60,8 +61,8 @@ function registryOf(queues: Record<string, FakeRotationSession[]>): AgentRegistr
   return r
 }
 
-test('no reviewer declared: no review task is ever admitted, and the run behaves exactly as before', async () => {
-  const dir = repo()
+test('no reviewer declared: no review task is ever admitted, and the run behaves exactly as before', async (t) => {
+  const dir = repo(t)
   const advisor = new FakeRotationSession('advisor', 'codex', ['Write the answer.', 'DONE'])
   const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Wrote it.'])
   const relay = await Relay.start({
@@ -84,8 +85,8 @@ test('no reviewer declared: no review task is ever admitted, and the run behaves
   }
 })
 
-test('the reviewer is briefed as a reviewer, not as an implementer, and holds no goal', async () => {
-  const dir = repo()
+test('the reviewer is briefed as a reviewer, not as an implementer, and holds no goal', async (t) => {
+  const dir = repo(t)
   const advisor = new FakeRotationSession('advisor', 'codex', ['DONE'])
   const impl = new FakeRotationSession('impl', 'claude', [])
   const reviewer = new FakeRotationSession('reviewer', 'claude', [])
@@ -117,8 +118,8 @@ test('the reviewer is briefed as a reviewer, not as an implementer, and holds no
   }
 })
 
-test('a run with no reviewer never mentions one to the advisor', async () => {
-  const dir = repo()
+test('a run with no reviewer never mentions one to the advisor', async (t) => {
+  const dir = repo(t)
   const advisor = new FakeRotationSession('advisor', 'codex', ['DONE'])
   const impl = new FakeRotationSession('impl', 'claude', [])
   const relay = await Relay.start({
@@ -136,8 +137,8 @@ test('a run with no reviewer never mentions one to the advisor', async () => {
   }
 })
 
-test('an ACCEPTed review admits nothing further and lets the work complete', async () => {
-  const dir = repo()
+test('an ACCEPTed review admits nothing further and lets the work complete', async (t) => {
+  const dir = repo(t)
   const advisor = new FakeRotationSession('advisor', 'codex', ['Write the answer.', 'DONE', 'DONE'])
   const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Wrote it.'])
   const reviewer = new FakeRotationSession('reviewer', 'claude', ['ack', 'ACCEPT'])
@@ -168,8 +169,8 @@ test('an ACCEPTed review admits nothing further and lets the work complete', asy
   }
 })
 
-test('a REJECTed review admits an automatic repair addressed to the producing seat', async () => {
-  const dir = repo()
+test('a REJECTed review admits an automatic repair addressed to the producing seat', async (t) => {
+  const dir = repo(t)
   const advisor = new FakeRotationSession('advisor', 'codex', [
     'Write the answer.',
     'DONE',
@@ -245,8 +246,8 @@ test('a REJECTed review admits an automatic repair addressed to the producing se
  * assertions below require the evidence to name the PRODUCING seat's file and to name neither
  * the other seat's nor the integration checkout's.
  */
-test('a review_blocked halt names the uncommitted work actually sitting in the producing seat tree', async () => {
-  const dir = repo()
+test('a review_blocked halt names the uncommitted work actually sitting in the producing seat tree', async (t) => {
+  const dir = repo(t)
   execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: dir })
   execFileSync('git', ['config', 'user.name', 'Test'], { cwd: dir })
 

@@ -38,20 +38,19 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test, { type TestContext } from 'node:test'
 import { AgentRegistry } from '../registry/registry.ts'
 import { NO_DEADLINE_CLOCKS } from '../registry/types.ts'
 import { FakeRotationSession } from '../rotation/fakeSession.ts'
+import { tempDir } from '../testkit/tempDir.ts'
 import { Relay } from './relay.ts'
 import type { RunPause } from './run.ts'
 
 /** A real repository, because `dirtyPaths` runs against the root on every restricted message. */
 function tempRepo(t: TestContext): string {
-  const dir = mkdtempSync(join(tmpdir(), 'conclave-authority-seq-'))
-  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const dir = tempDir(t, 'conclave-authority-seq')
   execFileSync('git', ['init', '--quiet'], { cwd: dir })
   execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: dir })
   execFileSync('git', ['config', 'user.name', 'Test'], { cwd: dir })

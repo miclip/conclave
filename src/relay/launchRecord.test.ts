@@ -24,16 +24,17 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { PassThrough, Writable } from 'node:stream'
 import test from 'node:test'
+import type { TestContext } from 'node:test'
 import { main } from '../../bin/conclave.ts'
 import { effectiveLaunchArgs, modelFromArgs } from '../registry/launch.ts'
 import { AgentRegistry } from '../registry/registry.ts'
 import { NO_DEADLINE_CLOCKS } from '../registry/types.ts'
 import { FakeRotationSession } from '../rotation/fakeSession.ts'
+import { tempDir } from '../testkit/tempDir.ts'
 import { newSessionId, recordSession } from '../workspace/sessionRecord.ts'
 import { Relay } from './relay.ts'
 import { runReport } from './report.ts'
@@ -154,8 +155,8 @@ function registryOf(
   return r
 }
 
-function tempRepo(prefix: string): string {
-  const dir = mkdtempSync(join(tmpdir(), prefix))
+function tempRepo(t: TestContext, prefix: string): string {
+  const dir = tempDir(t, prefix)
   execFileSync('git', ['init', '--quiet'], { cwd: dir })
   execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: dir })
   execFileSync('git', ['config', 'user.name', 'Test'], { cwd: dir })
@@ -232,8 +233,8 @@ function keysIn(value: unknown, into: Set<string> = new Set()): Set<string> {
   return into
 }
 
-test('the relay report and status name the model each seat was launched with', async () => {
-  const repo = tempRepo('conclave-launch-relay-')
+test('the relay report and status name the model each seat was launched with', async (t) => {
+  const repo = tempRepo(t, 'conclave-launch-relay')
   const before = process.cwd()
   const handed: Record<string, string[]> = {}
   const registry = registryOf(
@@ -293,12 +294,11 @@ test('the relay report and status name the model each seat was launched with', a
     }
   } finally {
     process.chdir(before)
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
-test('the console front-end records the same launch, and a run given no args records no model', async () => {
-  const repo = tempRepo('conclave-launch-session-')
+test('the console front-end records the same launch, and a run given no args records no model', async (t) => {
+  const repo = tempRepo(t, 'conclave-launch-session')
   const before = process.cwd()
   const registry = registryOf({
     'fake-lead': new FakeRotationSession('lead-1', 'fake-lead', ['DONE']),
@@ -346,7 +346,6 @@ test('the console front-end records the same launch, and a run given no args rec
     assert.ok('model' in advisor.launch, 'the key is present on a seat that has no model to name')
   } finally {
     process.chdir(before)
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
@@ -369,8 +368,8 @@ test('the console front-end records the same launch, and a run given no args rec
  * still the production ones: `runReport` is what `bin/conclave.ts:1949` prints, and the status
  * is read back through `main(['status', '--json'])` after the real recorder wrote it.
  */
-test('two seats launched with two different models are recorded apart, in both documents', async () => {
-  const repo = tempRepo('conclave-launch-seats-')
+test('two seats launched with two different models are recorded apart, in both documents', async (t) => {
+  const repo = tempRepo(t, 'conclave-launch-seats')
   const before = process.cwd()
   const handed: Record<string, string[]> = {}
   const registry = registryOf(
@@ -445,17 +444,16 @@ test('two seats launched with two different models are recorded apart, in both d
     process.chdir(before)
     await recording.close()
     await relay.stop()
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
-test('neither document reports a token count or a cost, anywhere', async () => {
+test('neither document reports a token count or a cost, anywhere', async (t) => {
   // The other half of #71, deferred with its reason: real usage would mean the enterprise
   // analytics API or OTEL on the operator's own machine, and scraping whatever one adapter's
   // transcript happens to expose would produce a confident partial number for a multi-seat run.
   // Asserted rather than left to nobody having built it, because the tempting version is easy
   // to add by accident alongside the model.
-  const repo = tempRepo('conclave-launch-nocost-')
+  const repo = tempRepo(t, 'conclave-launch-nocost')
   const before = process.cwd()
   const registry = registryOf({
     'fake-lead': new FakeRotationSession('lead-1', 'fake-lead', ['DONE']),
@@ -478,6 +476,5 @@ test('neither document reports a token count or a cost, anywhere', async () => {
     }
   } finally {
     process.chdir(before)
-    rmSync(repo, { recursive: true, force: true })
   }
 })

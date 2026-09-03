@@ -19,19 +19,19 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync } from 'node:fs'
-import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
+import type { TestContext } from 'node:test'
 import { AgentRegistry } from '../registry/registry.ts'
 import { FakeRotationSession } from '../rotation/fakeSession.ts'
+import { tempDir } from '../testkit/tempDir.ts'
 import { Relay } from './relay.ts'
 import { runReport } from './report.ts'
 
 const BUILD = 'test-build'
 
-function repo(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'conclave-flags-'))
+function repo(t: TestContext): string {
+  const dir = tempDir(t, 'conclave-flags')
   execFileSync('git', ['init', '-q', '.'], { cwd: dir })
   return dir
 }
@@ -78,11 +78,12 @@ function registryOf(sessions: Record<string, FakeRotationSession[]>): AgentRegis
  * way to write a test that passes because the flag it was about never got raised.
  */
 async function run(
+  t: TestContext,
   advisorReplies: string[],
   implReplies: string[],
   over: { failImplSendOnTurn?: number } = {},
 ) {
-  const dir = repo()
+  const dir = repo(t)
   const advisor = new FakeRotationSession('advisor', 'codex', advisorReplies)
   const impl = new FakeRotationSession('impl', 'claude', implReplies)
   if (over.failImplSendOnTurn !== undefined) impl.failSendOnTurn = over.failImplSendOnTurn
@@ -106,11 +107,11 @@ const HANDOFF = `## BRIEF\nKeep the work moving.\n\n## STATE\nHalf done.\n\n## D
 const UNRUN = 'conformance.sh remains unrun; inherited reasoning, not confirmed.'
 const GOLDENS = 'the goldens were regenerated, not reviewed.'
 
-test('the closing question shows the seat the flags it is being asked to settle (#131)', async () => {
+test('the closing question shows the seat the flags it is being asked to settle (#131)', async (t) => {
   // The judgement asked for is "which of THESE still stand", and a seat cannot make it against
   // a list it was never shown -- fifteen turns earlier is exactly where the items it raised
   // have gone. The prompt has to carry them.
-  const { impl } = await run(
+  const { impl } = await run(t,
     ['do the thing', 'DONE'],
     ['ack', `Did it.\nFLAG: ${UNRUN}\nFLAG: ${GOLDENS}`, 'NONE'],
   )
@@ -123,10 +124,10 @@ test('the closing question shows the seat the flags it is being asked to settle 
   assert.match(asked, /word for word/, 'restating verbatim is what makes a restatement recognisable')
 })
 
-test('a closing statement that restates an earlier flag reports one item, not two (#131)', async () => {
+test('a closing statement that restates an earlier flag reports one item, not two (#131)', async (t) => {
   // The defect, exactly. A conscientious seat restates what still stands, and the restatement
   // used to arrive as a SECOND flag beside the one it was repeating.
-  const { relay, report } = await run(
+  const { relay, report } = await run(t,
     ['do the thing', 'DONE'],
     ['ack', `Did it.\nFLAG: ${UNRUN}`, `FLAG: ${UNRUN}`],
   )
@@ -147,10 +148,10 @@ test('a closing statement that restates an earlier flag reports one item, not tw
   assert.deepEqual(report.supersededFlags, [])
 })
 
-test('a closing statement that raises something new retires what it did not restate (#131)', async () => {
+test('a closing statement that raises something new retires what it did not restate (#131)', async (t) => {
   // The seat's own judgement is the only thing that can say the turn-two concern was settled by
   // turn four. It says so by leaving it out, and by naming the thing that replaced it.
-  const { relay, report } = await run(
+  const { relay, report } = await run(t,
     ['do the first thing', 'do the second thing', 'DONE'],
     [
       'ack',
@@ -188,11 +189,11 @@ test('a closing statement that raises something new retires what it did not rest
   assert.equal(report.supersededFlags.length, 2, 'and the retired ones are still in the record')
 })
 
-test('a stale flag whose subject was removed goes quiet while its neighbour stands (#131)', async () => {
+test('a stale flag whose subject was removed goes quiet while its neighbour stands (#131)', async (t) => {
   // The case the reconciliation exists for: two concerns, one of them fixed later in the run.
   // Nothing outside the seat can read that off the text -- the flag says the same words it said
   // when it was true -- and guessing it would be the same class of error as the defect.
-  const { relay } = await run(
+  const { relay } = await run(t,
     ['delete the dead adapter', 'now check the rest', 'DONE'],
     [
       'ack',
@@ -222,11 +223,11 @@ test('a stale flag whose subject was removed goes quiet while its neighbour stan
   assert.ok((outstanding[0]!.restated ?? [])[0]! >= closing.seq - 1, 'and the close is where it was restated')
 })
 
-test('NONE after earlier flags retires them and the summary still says so (#131)', async () => {
+test('NONE after earlier flags retires them and the summary still says so (#131)', async (t) => {
   // The failure that replacement alone would introduce. A seat that answers NONE because it
   // fixed everything and a seat that answers NONE because it was truncated produce the same
   // four characters, so the summary must not go quiet on either. Noisy beats silent.
-  const { relay, report } = await run(
+  const { relay, report } = await run(t,
     ['do the thing', 'DONE'],
     ['ack', `Did it.\nFLAG: ${UNRUN}\nFLAG: ${GOLDENS}`, 'NONE'],
   )
@@ -244,11 +245,11 @@ test('NONE after earlier flags retires them and the summary still says so (#131)
   assert.deepEqual(report.supersededFlags.map((f) => f.text), [UNRUN, GOLDENS])
 })
 
-test('the same flag raised verbatim on three turns is one carried item (#131)', async () => {
+test('the same flag raised verbatim on three turns is one carried item (#131)', async (t) => {
   // Repetition is how a participant says "still", and counting it is how a summary says
   // something false about how much is outstanding. Collapsed on exact text from the same
   // participant, and only exact text -- anything looser is reading the words for meaning.
-  const { relay, report } = await run(
+  const { relay, report } = await run(t,
     ['first', 'second', 'DONE'],
     ['ack', `Still going.\nFLAG: ${UNRUN}`, `Still going.\nFLAG: ${UNRUN}`, `FLAG: ${UNRUN}`],
   )
@@ -262,11 +263,11 @@ test('the same flag raised verbatim on three turns is one carried item (#131)', 
   assert.equal(report.flags[0]!.restated.length, 2, 'the record retains where it was raised again')
 })
 
-test('a near-duplicate is a distinct item, because deciding otherwise is reading the words (#131)', async () => {
+test('a near-duplicate is a distinct item, because deciding otherwise is reading the words (#131)', async (t) => {
   // The boundary, stated on purpose. Two differently worded flags MIGHT be the same concern,
   // and a machine that ruled on that would be making exactly the judgement #131 says belongs to
   // the participant. A seat that wants them treated as one restates one of them verbatim.
-  const { relay } = await run(
+  const { relay } = await run(t,
     ['do the thing', 'DONE'],
     ['ack', `Did it.\nFLAG: ${UNRUN}`, 'FLAG: conformance.sh is still unrun.'],
   )
@@ -278,10 +279,10 @@ test('a near-duplicate is a distinct item, because deciding otherwise is reading
   assert.match(summary[2]!, /1 earlier item superseded at the close/)
 })
 
-test('an unstructured closing answer still supersedes, and is still carried whole (#38, #131)', async () => {
+test('an unstructured closing answer still supersedes, and is still carried whole (#38, #131)', async (t) => {
   // #38: an answer without the marker is a real answer and is carried. #131: it is also a
   // judgement about what still stands, so it reconciles like any other.
-  const { relay } = await run(
+  const { relay } = await run(t,
     ['do the thing', 'DONE'],
     ['ack', `Did it.\nFLAG: ${UNRUN}`, 'I never ran the conformance script and I did not check the goldens.'],
   )
@@ -293,11 +294,11 @@ test('an unstructured closing answer still supersedes, and is still carried whol
   assert.deepEqual(relay.supersededFlags().map((f) => f.text), [UNRUN])
 })
 
-test('a closing question that cannot be asked leaves every historical flag standing (#131)', async () => {
+test('a closing question that cannot be asked leaves every historical flag standing (#131)', async (t) => {
   // Nothing was reconciled because nothing was answered. Retiring a flag on the strength of a
   // send that threw would be the machine making the judgement, with no participant involved at
   // all -- which is worse than the defect, because it looks like an answer.
-  const { relay, report, outcome } = await run(
+  const { relay, report, outcome } = await run(t,
     ['do the thing', 'DONE'],
     ['ack', `Did it.\nFLAG: ${UNRUN}`, 'NONE'],
     // 0 is the briefing and 1 is the working turn, so the closing question is send 2.
@@ -315,10 +316,10 @@ test('a closing question that cannot be asked leaves every historical flag stand
   )
 })
 
-test('an empty closing answer is not a judgement, so it retires nothing (#131)', async () => {
+test('an empty closing answer is not a judgement, so it retires nothing (#131)', async (t) => {
   // A seat that says nothing has not said everything is fine. The existing behaviour records
   // `(no reply)` and carries on; what it must not now do is read the silence as NONE.
-  const { relay } = await run(['do the thing', 'DONE'], ['ack', `Did it.\nFLAG: ${UNRUN}`, ''])
+  const { relay } = await run(t, ['do the thing', 'DONE'], ['ack', `Did it.\nFLAG: ${UNRUN}`, ''])
 
   assert.deepEqual(relay.outstandingFlags().map((f) => f.text), [UNRUN])
   assert.deepEqual(relay.supersededFlags(), [])
@@ -328,7 +329,7 @@ test('an empty closing answer is not a judgement, so it retires nothing (#131)',
   )
 })
 
-test('a flag raised while auditioning belongs to the seat once the audition is promoted (#131)', async () => {
+test('a flag raised while auditioning belongs to the seat once the audition is promoted (#131)', async (t) => {
   // The route by which #131's own defect reappears inside the fix for it, found by an
   // independent review rather than by a test -- there was no coverage of a flag raised during
   // an audition, and this is it.
@@ -339,7 +340,7 @@ test('a flag raised while auditioning belongs to the seat once the audition is p
   // stable id -- so an audition flag was shown to nobody, superseded by nothing, and if the
   // promoted seat happened to restate it at the close it became a SECOND outstanding entry
   // saying the same thing. Inflated duplicates, which is the whole complaint.
-  const dir = repo()
+  const dir = repo(t)
   const advisor = new FakeRotationSession('advisor', 'codex', [HANDOFF])
   const old = new FakeRotationSession('old', 'claude')
   const fresh = new FakeRotationSession('fresh', 'claude', [
@@ -371,11 +372,11 @@ test('a flag raised while auditioning belongs to the seat once the audition is p
   }
 })
 
-test("one seat's closing statement does not retire another participant's flags (#131)", async () => {
+test("one seat's closing statement does not retire another participant's flags (#131)", async (t) => {
   // The question asked is "what are YOU still carrying". An advisor that flagged something is
   // never asked it, and answering on its behalf would silently drop the one flag in the run
   // that nobody was in a position to settle.
-  const { relay } = await run(
+  const { relay } = await run(t,
     ['do the thing\nFLAG: the goal names a file this repo does not have.', 'DONE'],
     ['ack', `Did it.\nFLAG: ${UNRUN}`, 'NONE'],
   )

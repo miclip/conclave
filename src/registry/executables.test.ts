@@ -25,13 +25,14 @@
  */
 
 import { strict as assert } from 'node:assert'
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { execFileSync as run } from 'node:child_process'
-import { tmpdir } from 'node:os'
 import { delimiter, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { PassThrough, Writable } from 'node:stream'
 import test from 'node:test'
+import type { TestContext } from 'node:test'
+import { tempDir } from '../testkit/tempDir.ts'
 import { main } from '../../bin/conclave.ts'
 import { FakeRotationSession } from '../rotation/fakeSession.ts'
 import { Relay } from '../relay/relay.ts'
@@ -86,10 +87,6 @@ function agentWith(id: string, command: string, executable?: ExecutableRequireme
   }
 }
 
-function tempDir(): string {
-  return mkdtempSync(join(tmpdir(), 'conclave-exec-'))
-}
-
 /** A real executable file: a shell wrapper, which is what a version manager's shim actually is. */
 function wrapper(dir: string, name: string): string {
   const path = join(dir, name)
@@ -100,150 +97,127 @@ function wrapper(dir: string, name: string): string {
 
 /* ------------------------------------------------------------------- the lookup ---------- */
 
-test('a bare command is found along PATH, in PATH order, and only where a real executable is', () => {
-  const first = tempDir()
-  const second = tempDir()
-  try {
-    // A DIRECTORY with the command's name in the first entry, and the real thing in the second.
-    // PATH entries routinely contain a directory of the same name as a command, and matching it
-    // would resolve to something the OS would never execute.
-    mkdirSync(join(first, 'agent'))
-    const real = wrapper(second, 'agent')
-    const env = { PATH: [first, second].join(delimiter) }
-    assert.equal(findExecutable('agent', { cwd: first, env, platform: 'linux' }), real)
+test('a bare command is found along PATH, in PATH order, and only where a real executable is', (t) => {
+  const first = tempDir(t, 'conclave-exec')
+  const second = tempDir(t, 'conclave-exec')
+  // A DIRECTORY with the command's name in the first entry, and the real thing in the second.
+  // PATH entries routinely contain a directory of the same name as a command, and matching it
+  // would resolve to something the OS would never execute.
+  mkdirSync(join(first, 'agent'))
+  const real = wrapper(second, 'agent')
+  const env = { PATH: [first, second].join(delimiter) }
+  assert.equal(findExecutable('agent', { cwd: first, env, platform: 'linux' }), real)
 
-    // ...and now the same name earlier in PATH, as a real executable: first match wins.
-    const earlier = wrapper(first, 'other')
-    assert.equal(
-      findExecutable('other', { cwd: first, env: { PATH: [first, second].join(delimiter) }, platform: 'linux' }),
-      earlier,
-    )
+  // ...and now the same name earlier in PATH, as a real executable: first match wins.
+  const earlier = wrapper(first, 'other')
+  assert.equal(
+    findExecutable('other', { cwd: first, env: { PATH: [first, second].join(delimiter) }, platform: 'linux' }),
+    earlier,
+  )
 
-    // A file with the right name and NO executable bit is not what the OS would run.
-    writeFileSync(join(second, 'unarmed'), 'not executable\n')
-    chmodSync(join(second, 'unarmed'), 0o644)
-    assert.equal(findExecutable('unarmed', { cwd: first, env, platform: 'linux' }), undefined)
+  // A file with the right name and NO executable bit is not what the OS would run.
+  writeFileSync(join(second, 'unarmed'), 'not executable\n')
+  chmodSync(join(second, 'unarmed'), 0o644)
+  assert.equal(findExecutable('unarmed', { cwd: first, env, platform: 'linux' }), undefined)
 
-    // Absent everywhere.
-    assert.equal(findExecutable(ABSENT, { cwd: first, env, platform: 'linux' }), undefined)
-    // An UNSET PATH has no entries and searches nowhere. It does not fall back to this process's
-    // own environment, which would make the answer depend on who happened to run the check.
-    assert.equal(findExecutable('agent', { cwd: second, env: {}, platform: 'linux' }), undefined)
-  } finally {
-    rmSync(first, { recursive: true, force: true })
-    rmSync(second, { recursive: true, force: true })
-  }
+  // Absent everywhere.
+  assert.equal(findExecutable(ABSENT, { cwd: first, env, platform: 'linux' }), undefined)
+  // An UNSET PATH has no entries and searches nowhere. It does not fall back to this process's
+  // own environment, which would make the answer depend on who happened to run the check.
+  assert.equal(findExecutable('agent', { cwd: second, env: {}, platform: 'linux' }), undefined)
 })
 
-test('an empty PATH entry is the seat cwd, because that is the setup POSIX actually launches', () => {
-  const cwd = tempDir()
-  const other = tempDir()
-  try {
-    // `PATH=":/usr/bin"` with a wrapper in the working directory is a setup that RUNS: `execvp`
-    // treats a zero-length element as the current directory, and the adapter spawns with the
-    // seat's cwd set, so that is the directory the empty entry names at exec time. Refusing it --
-    // which this did first -- rejects a configuration the OS would have launched, and a check that
-    // refuses valid input is worse than no check: it gets switched off, and then nothing is
-    // validated. Whether such a setup is reproducible is a fair objection and not this function's
-    // to make.
-    const real = wrapper(cwd, 'agent')
-    assert.equal(findExecutable('agent', { cwd, env: { PATH: `:${other}` }, platform: 'linux' }), real)
-    // In every position an empty entry can take, and in PATH ORDER: an earlier real entry wins.
-    assert.equal(findExecutable('agent', { cwd, env: { PATH: `${other}:` }, platform: 'linux' }), real)
-    const earlier = wrapper(other, 'agent')
-    assert.equal(findExecutable('agent', { cwd, env: { PATH: `${other}:` }, platform: 'linux' }), earlier)
-    // PATH set to the empty string is ONE empty entry, so it names the cwd -- distinct from PATH
-    // being unset, which has no entries at all.
-    assert.equal(findExecutable('agent', { cwd, env: { PATH: '' }, platform: 'linux' }), real)
-    assert.equal(findExecutable('agent', { cwd, env: {}, platform: 'linux' }), undefined)
-    // The rule is the same on Windows, where an empty entry is rare and erring towards finding the
-    // command is the direction this check must err in.
-    writeFileSync(join(cwd, 'winagent.cmd'), '@echo off\n')
-    assert.equal(
-      findExecutable('winagent', { cwd, env: { PATH: ';C:\\nowhere', PATHEXT: '.cmd' }, platform: 'win32' }),
-      join(cwd, 'winagent.cmd'),
-    )
-  } finally {
-    rmSync(cwd, { recursive: true, force: true })
-    rmSync(other, { recursive: true, force: true })
-  }
+test('an empty PATH entry is the seat cwd, because that is the setup POSIX actually launches', (t) => {
+  const cwd = tempDir(t, 'conclave-exec')
+  const other = tempDir(t, 'conclave-exec')
+  // `PATH=":/usr/bin"` with a wrapper in the working directory is a setup that RUNS: `execvp`
+  // treats a zero-length element as the current directory, and the adapter spawns with the
+  // seat's cwd set, so that is the directory the empty entry names at exec time. Refusing it --
+  // which this did first -- rejects a configuration the OS would have launched, and a check that
+  // refuses valid input is worse than no check: it gets switched off, and then nothing is
+  // validated. Whether such a setup is reproducible is a fair objection and not this function's
+  // to make.
+  const real = wrapper(cwd, 'agent')
+  assert.equal(findExecutable('agent', { cwd, env: { PATH: `:${other}` }, platform: 'linux' }), real)
+  // In every position an empty entry can take, and in PATH ORDER: an earlier real entry wins.
+  assert.equal(findExecutable('agent', { cwd, env: { PATH: `${other}:` }, platform: 'linux' }), real)
+  const earlier = wrapper(other, 'agent')
+  assert.equal(findExecutable('agent', { cwd, env: { PATH: `${other}:` }, platform: 'linux' }), earlier)
+  // PATH set to the empty string is ONE empty entry, so it names the cwd -- distinct from PATH
+  // being unset, which has no entries at all.
+  assert.equal(findExecutable('agent', { cwd, env: { PATH: '' }, platform: 'linux' }), real)
+  assert.equal(findExecutable('agent', { cwd, env: {}, platform: 'linux' }), undefined)
+  // The rule is the same on Windows, where an empty entry is rare and erring towards finding the
+  // command is the direction this check must err in.
+  writeFileSync(join(cwd, 'winagent.cmd'), '@echo off\n')
+  assert.equal(
+    findExecutable('winagent', { cwd, env: { PATH: ';C:\\nowhere', PATHEXT: '.cmd' }, platform: 'win32' }),
+    join(cwd, 'winagent.cmd'),
+  )
 })
 
-test('a seat whose wrapper is found through an empty PATH entry is not refused', () => {
-  const cwd = tempDir()
-  try {
-    // The whole point, one level up from the lookup: this is the seat a false refusal would have
-    // stopped, and it starts.
-    wrapper(cwd, 'wrapped-agent')
-    const agent = agentWith('wrapped', 'wrapped-agent', { install: 'never needed' })
-    const check = checkCommandAvailable({ participant: 'implementer', agent, cwd }, { env: { PATH: ':/nowhere' } })
-    assert.equal(check?.refusal, undefined, 'the command is present, so there is nothing to refuse')
-    assert.equal(check?.resolved, join(cwd, 'wrapped-agent'))
-    assert.deepEqual(
-      refuseMissingCommands([{ participant: 'implementer', agent, cwd }], { env: { PATH: ':/nowhere' } }).map(
-        (c) => c.resolved,
-      ),
-      [join(cwd, 'wrapped-agent')],
-    )
-  } finally {
-    rmSync(cwd, { recursive: true, force: true })
-  }
+test('a seat whose wrapper is found through an empty PATH entry is not refused', (t) => {
+  const cwd = tempDir(t, 'conclave-exec')
+  // The whole point, one level up from the lookup: this is the seat a false refusal would have
+  // stopped, and it starts.
+  wrapper(cwd, 'wrapped-agent')
+  const agent = agentWith('wrapped', 'wrapped-agent', { install: 'never needed' })
+  const check = checkCommandAvailable({ participant: 'implementer', agent, cwd }, { env: { PATH: ':/nowhere' } })
+  assert.equal(check?.refusal, undefined, 'the command is present, so there is nothing to refuse')
+  assert.equal(check?.resolved, join(cwd, 'wrapped-agent'))
+  assert.deepEqual(
+    refuseMissingCommands([{ participant: 'implementer', agent, cwd }], { env: { PATH: ':/nowhere' } }).map(
+      (c) => c.resolved,
+    ),
+    [join(cwd, 'wrapped-agent')],
+  )
 })
 
-test('a command with a separator is a path, resolved against the seat cwd and never searched for', () => {
-  const dir = tempDir()
-  const elsewhere = tempDir()
-  try {
-    mkdirSync(join(dir, 'bin'))
-    const real = wrapper(join(dir, 'bin'), 'agent-wrapper')
-    // Relative, against the SEAT's cwd rather than this process's -- that directory is where the
-    // adapter will spawn, so `./bin/agent-wrapper` has to mean the same thing in both places.
-    assert.equal(findExecutable('./bin/agent-wrapper', { cwd: dir, env: { PATH: '' }, platform: 'linux' }), real)
-    assert.equal(findExecutable('bin/agent-wrapper', { cwd: dir, env: { PATH: '' }, platform: 'linux' }), real)
-    // Absolute, and the cwd is irrelevant to it.
-    assert.equal(findExecutable(real, { cwd: elsewhere, env: { PATH: '' }, platform: 'linux' }), real)
-    // A separated command is NOT searched for on PATH, even when a match is sitting there.
-    wrapper(elsewhere, 'agent-wrapper')
-    assert.equal(
-      findExecutable('./agent-wrapper', { cwd: dir, env: { PATH: elsewhere }, platform: 'linux' }),
-      undefined,
-      'a path that does not exist is not rescued by a PATH entry that happens to contain the name',
-    )
-    // The empty command names nothing and is not resolved to the cwd itself.
-    assert.equal(findExecutable('', { cwd: dir, env: { PATH: dir }, platform: 'linux' }), undefined)
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
-    rmSync(elsewhere, { recursive: true, force: true })
-  }
+test('a command with a separator is a path, resolved against the seat cwd and never searched for', (t) => {
+  const dir = tempDir(t, 'conclave-exec')
+  const elsewhere = tempDir(t, 'conclave-exec')
+  mkdirSync(join(dir, 'bin'))
+  const real = wrapper(join(dir, 'bin'), 'agent-wrapper')
+  // Relative, against the SEAT's cwd rather than this process's -- that directory is where the
+  // adapter will spawn, so `./bin/agent-wrapper` has to mean the same thing in both places.
+  assert.equal(findExecutable('./bin/agent-wrapper', { cwd: dir, env: { PATH: '' }, platform: 'linux' }), real)
+  assert.equal(findExecutable('bin/agent-wrapper', { cwd: dir, env: { PATH: '' }, platform: 'linux' }), real)
+  // Absolute, and the cwd is irrelevant to it.
+  assert.equal(findExecutable(real, { cwd: elsewhere, env: { PATH: '' }, platform: 'linux' }), real)
+  // A separated command is NOT searched for on PATH, even when a match is sitting there.
+  wrapper(elsewhere, 'agent-wrapper')
+  assert.equal(
+    findExecutable('./agent-wrapper', { cwd: dir, env: { PATH: elsewhere }, platform: 'linux' }),
+    undefined,
+    'a path that does not exist is not rescued by a PATH entry that happens to contain the name',
+  )
+  // The empty command names nothing and is not resolved to the cwd itself.
+  assert.equal(findExecutable('', { cwd: dir, env: { PATH: dir }, platform: 'linux' }), undefined)
 })
 
-test('on Windows the search tries PATHEXT, which is how an npm-installed CLI is found at all', () => {
-  const dir = tempDir()
-  try {
-    // `npm i -g opencode-ai` puts `opencode.cmd` on PATH, not `opencode`. A lookup that only
-    // tried the bare name would report every npm-installed agent as missing -- a false refusal,
-    // which is the one failure mode this whole check must not have.
-    writeFileSync(join(dir, 'opencode.cmd'), '@echo off\n')
-    const env = { PATH: dir, PATHEXT: '.cmd' }
-    assert.equal(findExecutable('opencode', { cwd: dir, env, platform: 'win32' }), join(dir, 'opencode.cmd'))
-    // The extension may already be written out, and must not be doubled into `opencode.cmd.cmd`.
-    assert.equal(findExecutable('opencode.cmd', { cwd: dir, env, platform: 'win32' }), join(dir, 'opencode.cmd'))
-    // Windows separates PATH with `;`, not `:`.
-    assert.equal(
-      findExecutable('opencode', { cwd: dir, env: { PATH: `C:\\nowhere;${dir}`, PATHEXT: '.cmd' }, platform: 'win32' }),
-      join(dir, 'opencode.cmd'),
-    )
-    // With PATHEXT unset the documented default applies.
-    writeFileSync(join(dir, 'codex.EXE'), '')
-    assert.equal(findExecutable('codex', { cwd: dir, env: { PATH: dir }, platform: 'win32' }), join(dir, 'codex.EXE'))
-    // The executable BIT is not consulted on Windows -- nothing above was chmod'ed -- and it still
-    // is on posix, where the same directory yields nothing.
-    assert.equal(findExecutable('opencode', { cwd: dir, env: { PATH: dir }, platform: 'linux' }), undefined)
-    // A backslash makes it a path on Windows and an ordinary character elsewhere.
-    assert.equal(findExecutable('a\\b', { cwd: dir, env: { PATH: dir }, platform: 'win32' }), undefined)
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
-  }
+test('on Windows the search tries PATHEXT, which is how an npm-installed CLI is found at all', (t) => {
+  const dir = tempDir(t, 'conclave-exec')
+  // `npm i -g opencode-ai` puts `opencode.cmd` on PATH, not `opencode`. A lookup that only
+  // tried the bare name would report every npm-installed agent as missing -- a false refusal,
+  // which is the one failure mode this whole check must not have.
+  writeFileSync(join(dir, 'opencode.cmd'), '@echo off\n')
+  const env = { PATH: dir, PATHEXT: '.cmd' }
+  assert.equal(findExecutable('opencode', { cwd: dir, env, platform: 'win32' }), join(dir, 'opencode.cmd'))
+  // The extension may already be written out, and must not be doubled into `opencode.cmd.cmd`.
+  assert.equal(findExecutable('opencode.cmd', { cwd: dir, env, platform: 'win32' }), join(dir, 'opencode.cmd'))
+  // Windows separates PATH with `;`, not `:`.
+  assert.equal(
+    findExecutable('opencode', { cwd: dir, env: { PATH: `C:\\nowhere;${dir}`, PATHEXT: '.cmd' }, platform: 'win32' }),
+    join(dir, 'opencode.cmd'),
+  )
+  // With PATHEXT unset the documented default applies.
+  writeFileSync(join(dir, 'codex.EXE'), '')
+  assert.equal(findExecutable('codex', { cwd: dir, env: { PATH: dir }, platform: 'win32' }), join(dir, 'codex.EXE'))
+  // The executable BIT is not consulted on Windows -- nothing above was chmod'ed -- and it still
+  // is on posix, where the same directory yields nothing.
+  assert.equal(findExecutable('opencode', { cwd: dir, env: { PATH: dir }, platform: 'linux' }), undefined)
+  // A backslash makes it a path on Windows and an ordinary character elsewhere.
+  assert.equal(findExecutable('a\\b', { cwd: dir, env: { PATH: dir }, platform: 'win32' }), undefined)
 })
 
 /* ------------------------------------------------------------------ the refusal ---------- */
@@ -320,8 +294,8 @@ test('every built-in declares its executable and a way to obtain it', () => {
 /* ------------------------------------------------------------ where it happens ---------- */
 
 /** A repository for a run to happen in. Every front-end refuses to start outside one. */
-function tempRepo(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'conclave-execrun-'))
+function tempRepo(t: TestContext): string {
+  const dir = tempDir(t, 'conclave-execrun')
   run('git', ['init', '--quiet'], { cwd: dir })
   run('git', ['config', 'user.email', 'test@example.com'], { cwd: dir })
   run('git', ['config', 'user.name', 'Test'], { cwd: dir })
@@ -365,121 +339,105 @@ function registryOf(side: Side, agents: Record<string, string>): AgentRegistry {
   return registry
 }
 
-test('Relay.start refuses before the relay, the worktrees, any preflight and any child', async () => {
-  const repo = tempRepo()
+test('Relay.start refuses before the relay, the worktrees, any preflight and any child', async (t) => {
+  const repo = tempRepo(t)
   const side: Side = { preflights: [], creates: [] }
   // Two implementer seats, so the run WOULD create worktrees -- and the absent command is on the
   // second seat, so a check that ran inside participant construction would already have written
   // hooks and launched a child for the first.
   const registry = registryOf(side, { lead: process.execPath, good: process.execPath, missing: ABSENT })
-  try {
-    await assert.rejects(
-      Relay.start({
-        registry,
-        cwd: repo,
-        lead: { id: 'advisor', agent: 'lead', role: 'advisor' },
-        implementer: { id: 'implementer', agent: 'good', role: 'implementer' },
-        implementers: [
-          { id: 'implementer', agent: 'good', role: 'implementer' },
-          { id: 'implementer-2', agent: 'missing', role: 'implementer' },
-        ],
-        maxAdvisorTurns: 1,
-      }),
-      (e: Error) => {
-        assert.match(e.message, /implementer-2 is seated/)
-        assert.match(e.message, new RegExp(ABSENT))
-        return true
-      },
-    )
-    assert.deepEqual(side.creates, [], 'no child is constructed for any seat, including the valid ones')
-    assert.deepEqual(side.preflights, [], 'no adapter preflight runs, so nothing is written or trusted')
-    // Counted rather than compared by path: on macOS the temporary directory is reached through
-    // a symlink, so git reports the resolved `/private/var/...` and the string `mkdtemp` returned
-    // is not the string git prints. The claim is that the repository still has ONE working tree.
-    assert.deepEqual(
-      worktreePaths(repo).length,
-      1,
-      'no seat worktree is created: the refusal is above createSeatWorktrees, not beside it',
-    )
-  } finally {
-    rmSync(repo, { recursive: true, force: true })
-  }
-})
-
-test('a run whose seats are all installed starts exactly as before', async () => {
-  const repo = tempRepo()
-  const side: Side = { preflights: [], creates: [] }
-  // The control case, and the reason the test above proves anything: the same wiring with present
-  // commands runs. Without this, "refuses everything" would pass.
-  const registry = registryOf(side, { lead: process.execPath, good: process.execPath })
-  try {
-    const relay = await Relay.start({
+  await assert.rejects(
+    Relay.start({
       registry,
       cwd: repo,
       lead: { id: 'advisor', agent: 'lead', role: 'advisor' },
       implementer: { id: 'implementer', agent: 'good', role: 'implementer' },
+      implementers: [
+        { id: 'implementer', agent: 'good', role: 'implementer' },
+        { id: 'implementer-2', agent: 'missing', role: 'implementer' },
+      ],
       maxAdvisorTurns: 1,
-    })
-    try {
-      assert.deepEqual(side.creates, ['advisor', 'implementer'])
-      assert.deepEqual(side.preflights, ['advisor', 'implementer'])
-      // And the preflight is SILENT on success: a note per checked seat is a note nobody reads,
-      // and the default run must not gain a line for a check that found nothing wrong.
-      assert.deepEqual(
-        relay.log.filter((m) => m.kind === 'note' && /install|PATH|not found/i.test(m.text)).map((m) => m.text),
-        [],
-      )
-    } finally {
-      await relay.stop()
-    }
+    }),
+    (e: Error) => {
+      assert.match(e.message, /implementer-2 is seated/)
+      assert.match(e.message, new RegExp(ABSENT))
+      return true
+    },
+  )
+  assert.deepEqual(side.creates, [], 'no child is constructed for any seat, including the valid ones')
+  assert.deepEqual(side.preflights, [], 'no adapter preflight runs, so nothing is written or trusted')
+  // Counted rather than compared by path: on macOS the temporary directory is reached through
+  // a symlink, so git reports the resolved `/private/var/...` and the string `mkdtemp` returned
+  // is not the string git prints. The claim is that the repository still has ONE working tree.
+  assert.deepEqual(
+    worktreePaths(repo).length,
+    1,
+    'no seat worktree is created: the refusal is above createSeatWorktrees, not beside it',
+  )
+})
+
+test('a run whose seats are all installed starts exactly as before', async (t) => {
+  const repo = tempRepo(t)
+  const side: Side = { preflights: [], creates: [] }
+  // The control case, and the reason the test above proves anything: the same wiring with present
+  // commands runs. Without this, "refuses everything" would pass.
+  const registry = registryOf(side, { lead: process.execPath, good: process.execPath })
+  const relay = await Relay.start({
+    registry,
+    cwd: repo,
+    lead: { id: 'advisor', agent: 'lead', role: 'advisor' },
+    implementer: { id: 'implementer', agent: 'good', role: 'implementer' },
+    maxAdvisorTurns: 1,
+  })
+  try {
+    assert.deepEqual(side.creates, ['advisor', 'implementer'])
+    assert.deepEqual(side.preflights, ['advisor', 'implementer'])
+    // And the preflight is SILENT on success: a note per checked seat is a note nobody reads,
+    // and the default run must not gain a line for a check that found nothing wrong.
+    assert.deepEqual(
+      relay.log.filter((m) => m.kind === 'note' && /install|PATH|not found/i.test(m.text)).map((m) => m.text),
+      [],
+    )
   } finally {
-    rmSync(repo, { recursive: true, force: true })
+    await relay.stop()
   }
 })
 
-test('only SEATED agents are checked, so a registry may describe an agent nobody installed', async () => {
-  const repo = tempRepo()
+test('only SEATED agents are checked, so a registry may describe an agent nobody installed', async (t) => {
+  const repo = tempRepo(t)
   const side: Side = { preflights: [], creates: [] }
   // The registry knows about an uninstalled agent and the run does not use it. `list()` exists to
   // describe agents an operator has not seated, and refusing a run because one of them is absent
   // would make the registry's breadth a liability.
   const registry = registryOf(side, { lead: process.execPath, good: process.execPath, unused: ABSENT })
-  try {
-    const relay = await Relay.start({
+  const relay = await Relay.start({
+    registry,
+    cwd: repo,
+    lead: { id: 'advisor', agent: 'lead', role: 'advisor' },
+    implementer: { id: 'implementer', agent: 'good', role: 'implementer' },
+    maxAdvisorTurns: 1,
+  })
+  await relay.stop()
+  assert.deepEqual(side.creates, ['advisor', 'implementer'])
+  assert.ok(registry.has('unused'), 'and the uninstalled agent is still registered and listable')
+})
+
+test('a reviewer seat is checked too, because it is a seat the run fills', async (t) => {
+  const repo = tempRepo(t)
+  const side: Side = { preflights: [], creates: [] }
+  const registry = registryOf(side, { lead: process.execPath, good: process.execPath, missing: ABSENT })
+  await assert.rejects(
+    Relay.start({
       registry,
       cwd: repo,
       lead: { id: 'advisor', agent: 'lead', role: 'advisor' },
       implementer: { id: 'implementer', agent: 'good', role: 'implementer' },
+      reviewer: { id: 'reviewer', agent: 'missing', role: 'reviewer' },
       maxAdvisorTurns: 1,
-    })
-    await relay.stop()
-    assert.deepEqual(side.creates, ['advisor', 'implementer'])
-    assert.ok(registry.has('unused'), 'and the uninstalled agent is still registered and listable')
-  } finally {
-    rmSync(repo, { recursive: true, force: true })
-  }
-})
-
-test('a reviewer seat is checked too, because it is a seat the run fills', async () => {
-  const repo = tempRepo()
-  const side: Side = { preflights: [], creates: [] }
-  const registry = registryOf(side, { lead: process.execPath, good: process.execPath, missing: ABSENT })
-  try {
-    await assert.rejects(
-      Relay.start({
-        registry,
-        cwd: repo,
-        lead: { id: 'advisor', agent: 'lead', role: 'advisor' },
-        implementer: { id: 'implementer', agent: 'good', role: 'implementer' },
-        reviewer: { id: 'reviewer', agent: 'missing', role: 'reviewer' },
-        maxAdvisorTurns: 1,
-      }),
-      /reviewer is seated/,
-    )
-    assert.deepEqual(side.creates, [])
-  } finally {
-    rmSync(repo, { recursive: true, force: true })
-  }
+    }),
+    /reviewer is seated/,
+  )
+  assert.deepEqual(side.creates, [])
 })
 
 test('createParticipant refuses too, so a caller that never goes through Relay.start is still checked', async () => {
@@ -503,7 +461,7 @@ test('createParticipant refuses too, so a caller that never goes through Relay.s
 
 /* --------------------------------------------- the validated field is the spawned one ---- */
 
-test('the command the preflight validates is the command the adapter actually spawns', async () => {
+test('the command the preflight validates is the command the adapter actually spawns', async (t) => {
   // THE INTEGRITY THIS CHECK RESTS ON, and it was briefly false. Every built-in used to hardcode
   // its own filename -- `PtyProcess.spawn({file: 'claude'})` on the pty adapters, and the two
   // run-per-turn adapters had a `command` option their `create` never passed -- so pointing
@@ -514,43 +472,39 @@ test('the command the preflight validates is the command the adapter actually sp
   // Proved end to end on OpenCode, whose adapter spawns an ordinary child rather than a pty, and
   // against the recorded stdout of a real `opencode run --format json` -- so the wrapper is a real
   // executable running a real turn, not a probe of the spawn call.
-  const dir = mkdtempSync(join(tmpdir(), 'conclave-wrapper-'))
+  const dir = tempDir(t, 'conclave-wrapper')
+  const ran = join(dir, 'ran.log')
+  const wrapped = join(dir, 'opencode-wrapper')
+  writeFileSync(
+    wrapped,
+    `#!/bin/sh\nprintf 'ran\\n' >> ${JSON.stringify(ran)}\ncat ${JSON.stringify(FIXTURE)}\n`,
+  )
+  chmodSync(wrapped, 0o755)
+
+  // The real built-in with one field changed, so this is the production `create` and the
+  // production adapter -- not a definition written to make the point.
+  const registry = new AgentRegistry().register({
+    ...OPENCODE_AGENT,
+    launch: { ...OPENCODE_AGENT.launch, command: wrapped },
+  })
+
+  // ACCEPTED: the preflight resolves the absolute wrapper path rather than refusing it.
+  const check = checkCommandAvailable({ participant: 'implementer', agent: registry.get('opencode'), cwd: dir })
+  assert.equal(check?.refusal, undefined)
+  assert.equal(check?.resolved, wrapped)
+
+  // EXECUTED: the seat is constructed through the registry funnel and takes a turn.
+  const session = await registry.createParticipant(
+    { id: 'implementer', agent: 'opencode', role: 'implementer' },
+    { cwd: dir },
+  )
   try {
-    const ran = join(dir, 'ran.log')
-    const wrapped = join(dir, 'opencode-wrapper')
-    writeFileSync(
-      wrapped,
-      `#!/bin/sh\nprintf 'ran\\n' >> ${JSON.stringify(ran)}\ncat ${JSON.stringify(FIXTURE)}\n`,
-    )
-    chmodSync(wrapped, 0o755)
-
-    // The real built-in with one field changed, so this is the production `create` and the
-    // production adapter -- not a definition written to make the point.
-    const registry = new AgentRegistry().register({
-      ...OPENCODE_AGENT,
-      launch: { ...OPENCODE_AGENT.launch, command: wrapped },
-    })
-
-    // ACCEPTED: the preflight resolves the absolute wrapper path rather than refusing it.
-    const check = checkCommandAvailable({ participant: 'implementer', agent: registry.get('opencode'), cwd: dir })
-    assert.equal(check?.refusal, undefined)
-    assert.equal(check?.resolved, wrapped)
-
-    // EXECUTED: the seat is constructed through the registry funnel and takes a turn.
-    const session = await registry.createParticipant(
-      { id: 'implementer', agent: 'opencode', role: 'implementer' },
-      { cwd: dir },
-    )
-    try {
-      await session.send('do the thing', { kind: 'orchestrator' })
-      for await (const e of session.events()) if (e.type === 'turn_end') break
-    } finally {
-      await session.close()
-    }
-    assert.equal(readFileSync(ran, 'utf8'), 'ran\n', 'the configured wrapper is what ran, exactly once')
+    await session.send('do the thing', { kind: 'orchestrator' })
+    for await (const e of session.events()) if (e.type === 'turn_end') break
   } finally {
-    rmSync(dir, { recursive: true, force: true })
+    await session.close()
   }
+  assert.equal(readFileSync(ran, 'utf8'), 'ran\n', 'the configured wrapper is what ran, exactly once')
 })
 
 test('all four built-in adapters are handed the command their definition declares', () => {
@@ -581,11 +535,12 @@ test('all four built-in adapters are handed the command their definition declare
 /* ------------------------------------------------------------------- front-ends ---------- */
 
 async function runFrontEnd(
+  t: TestContext,
   front: 'relay' | 'session',
   agents: Record<string, string>,
   flags: string[],
 ): Promise<{ side: Side; error: Error | undefined; repo: string }> {
-  const repo = tempRepo()
+  const repo = tempRepo(t)
   const before = process.cwd()
   const side: Side = { preflights: [], creates: [] }
   const [log, error] = [console.log, console.error]
@@ -616,62 +571,52 @@ async function runFrontEnd(
 }
 
 for (const front of ['relay', 'session'] as const) {
-  test(`${front} refuses a seat whose CLI is not installed, before any child is constructed`, async () => {
+  test(`${front} refuses a seat whose CLI is not installed, before any child is constructed`, async (t) => {
     // The invocation from the issue, in this suite's agent ids: an implementer seated on an agent
     // whose binary was never installed.
-    const { side, error, repo } = await runFrontEnd(
+    const { side, error } = await runFrontEnd(
+      t,
       front,
       { lead: process.execPath, good: process.execPath, missing: ABSENT },
       ['--advisor', 'lead', '--implementers', 'good, missing'],
     )
-    try {
-      assert.ok(error, 'the run must not start')
-      assert.match(error!.message, /implementer-2 is seated/)
-      assert.match(error!.message, new RegExp(ABSENT))
-      assert.deepEqual(side.creates, [], 'no child is constructed for any seat, including the valid one')
-      assert.deepEqual(side.preflights, [], 'and nothing is written or trusted on the operator’s behalf')
-    } finally {
-      rmSync(repo, { recursive: true, force: true })
-    }
+    assert.ok(error, 'the run must not start')
+    assert.match(error!.message, /implementer-2 is seated/)
+    assert.match(error!.message, new RegExp(ABSENT))
+    assert.deepEqual(side.creates, [], 'no child is constructed for any seat, including the valid one')
+    assert.deepEqual(side.preflights, [], 'and nothing is written or trusted on the operator’s behalf')
   })
 
-  test(`${front} refuses an unknown agent for BEING unknown, not for its neighbour's missing CLI`, async () => {
+  test(`${front} refuses an unknown agent for BEING unknown, not for its neighbour's missing CLI`, async (t) => {
     // CI caught this and the developer machine could not have: `conclave session --lead nope`
     // resolves no lead and a default implementer, and where neither CLI is installed the
     // executable check refused the IMPLEMENTER's missing binary -- so the operator was told to
     // install something while the actual mistake, an agent named `nope`, went unmentioned. Here
     // the seat that DOES resolve is the one with the absent command, which is the arrangement
     // that produced the wrong message.
-    const { side, error, repo } = await runFrontEnd(front, { present: ABSENT }, [
+    const { side, error } = await runFrontEnd(t, front, { present: ABSENT }, [
       '--advisor',
       'nope',
       '--implementer',
       'present',
     ])
-    try {
-      assert.ok(error, 'the run must not start')
-      assert.match(error!.message, /nope/, 'the unknown agent is what the operator is told about')
-      assert.ok(
-        !new RegExp(ABSENT).test(error!.message),
-        'and not about installing a CLI for a seating that could never have been filled',
-      )
-      assert.deepEqual(side.creates, [])
-    } finally {
-      rmSync(repo, { recursive: true, force: true })
-    }
+    assert.ok(error, 'the run must not start')
+    assert.match(error!.message, /nope/, 'the unknown agent is what the operator is told about')
+    assert.ok(
+      !new RegExp(ABSENT).test(error!.message),
+      'and not about installing a CLI for a seating that could never have been filled',
+    )
+    assert.deepEqual(side.creates, [])
   })
 
-  test(`${front} starts a run whose seats all name an installed CLI`, async () => {
-    const { side, error, repo } = await runFrontEnd(
+  test(`${front} starts a run whose seats all name an installed CLI`, async (t) => {
+    const { side, error } = await runFrontEnd(
+      t,
       front,
       { lead: process.execPath, good: process.execPath },
       ['--advisor', 'lead', '--implementers', 'good, good'],
     )
-    try {
-      assert.equal(error, undefined)
-      assert.deepEqual(side.creates, ['advisor', 'implementer', 'implementer-2'])
-    } finally {
-      rmSync(repo, { recursive: true, force: true })
-    }
+    assert.equal(error, undefined)
+    assert.deepEqual(side.creates, ['advisor', 'implementer', 'implementer-2'])
   })
 }

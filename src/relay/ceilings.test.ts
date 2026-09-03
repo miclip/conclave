@@ -27,22 +27,23 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { PassThrough, Writable } from 'node:stream'
 import test from 'node:test'
+import type { TestContext } from 'node:test'
 import { main } from '../../bin/conclave.ts'
 import type { AgentSession } from '../contract/session.ts'
 import { AgentRegistry } from '../registry/registry.ts'
 import { NO_DEADLINE_CLOCKS } from '../registry/types.ts'
 import { FakeRotationSession } from '../rotation/fakeSession.ts'
+import { tempDir } from '../testkit/tempDir.ts'
 import { listSessions, type SessionStatus } from '../workspace/sessionRecord.ts'
 import { concurrentSeats, queueDepth, type SeatExecution, type Task, type TaskRuntime } from './dispatch.ts'
 import { Relay, type RelayOptions } from './relay.ts'
 
-function repo(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'conclave-ceilings-'))
+function repo(t: TestContext): string {
+  const dir = tempDir(t, 'conclave-ceilings')
   execFileSync('git', ['init', '-q'], { cwd: dir })
   writeFileSync(join(dir, 'work.ts'), 'export const answer = 42\n')
   writeFileSync(join(dir, '.gitignore'), '.conclave/\n')
@@ -122,9 +123,10 @@ function participants(): [FakeRotationSession, FakeRotationSession] {
  * back cannot be mutated by anything the relay does afterwards.
  */
 async function outcomeWith(
+  t: TestContext,
   over: Partial<RelayOptions>,
 ): Promise<{ reason: string; detail: string; tasks: { task: Task; runtime: TaskRuntime }[]; seats: SeatExecution[] }> {
-  const dir = repo()
+  const dir = repo(t)
   const [advisor, impl] = participants()
   const relay = await Relay.start({
     registry: registryOf({ codex: [advisor], claude: [impl] }),
@@ -139,7 +141,6 @@ async function outcomeWith(
     return { reason: outcome.reason, detail: outcome.detail ?? '', tasks: relay.tasks(), seats: relay.seats() }
   } finally {
     relay.stop()
-    rmSync(dir, { recursive: true, force: true })
   }
 }
 
@@ -154,8 +155,8 @@ async function outcomeWith(
  * was stopped. It is also the probe that would catch a value parsed and dropped, which is the
  * #69 failure this whole test exists for.
  */
-async function dispatchesVia(command: 'relay' | 'session', flags: string[]): Promise<number> {
-  const dir = repo()
+async function dispatchesVia(t: TestContext, command: 'relay' | 'session', flags: string[]): Promise<number> {
+  const dir = repo(t)
   const before = process.cwd()
   const [advisor, impl] = participants()
   const registry = registryOf({ 'fake-advisor': [advisor], 'fake-impl': [impl] })
@@ -169,7 +170,6 @@ async function dispatchesVia(command: 'relay' | 'session', flags: string[]): Pro
     )
   } finally {
     process.chdir(before)
-    rmSync(dir, { recursive: true, force: true })
   }
   // Minus the briefing, which no advisor turn paid for.
   return impl.received.length - 1
@@ -229,8 +229,8 @@ test('concurrentSeats counts seats working, and not seats integrating or idle', 
 // Firing, against a real run.
 // ---------------------------------------------------------------------------------------
 
-test('a queue ceiling ends a real run before admitting the task it would have queued', async () => {
-  const { reason, detail, tasks, seats } = await outcomeWith({ ceilings: { maxQueueDepth: 0 } })
+test('a queue ceiling ends a real run before admitting the task it would have queued', async (t) => {
+  const { reason, detail, tasks, seats } = await outcomeWith(t, { ceilings: { maxQueueDepth: 0 } })
   assert.equal(reason, 'ceiling', 'the run must end on the ceiling, not run to its advisor-turn budget')
   assert.match(detail, /queue ceiling exceeded: 1 task\(s\) waiting for a seat, above a maximum of 0/)
   // D8: checked before the mutation it forbids. The projected reading is what makes that
@@ -245,8 +245,8 @@ test('a queue ceiling ends a real run before admitting the task it would have qu
   )
 })
 
-test('a concurrency ceiling ends a real run before assigning the seat it would have used', async () => {
-  const { reason, detail, tasks, seats } = await outcomeWith({ ceilings: { maxConcurrentSeats: 0 } })
+test('a concurrency ceiling ends a real run before assigning the seat it would have used', async (t) => {
+  const { reason, detail, tasks, seats } = await outcomeWith(t, { ceilings: { maxConcurrentSeats: 0 } })
   assert.equal(reason, 'ceiling')
   assert.match(detail, /concurrency ceiling exceeded: 1 seat\(s\) working, above a maximum of 0/)
   // This ceiling stops later than the queue one -- the task IS admitted, because admitting it
@@ -270,18 +270,18 @@ test('a concurrency ceiling ends a real run before assigning the seat it would h
   )
 })
 
-test('a ceiling set above what the run reaches never fires', async () => {
+test('a ceiling set above what the run reaches never fires', async (t) => {
   // The other side of every firing test, and the one that would catch a ceiling wired to the
   // wrong comparison: at N=1 a queue never exceeds one and a seat is never two, so neither of
   // these can be reached and the run must finish on its advisor-turn budget instead.
-  const { reason } = await outcomeWith({ ceilings: { maxQueueDepth: 1, maxConcurrentSeats: 1 } })
+  const { reason } = await outcomeWith(t, { ceilings: { maxQueueDepth: 1, maxConcurrentSeats: 1 } })
   assert.equal(reason, 'budget', 'a ceiling that permits what the run does must not end it')
 })
 
-test('absent ceilings are behaviourless', async () => {
+test('absent ceilings are behaviourless', async (t) => {
   // The constraint the operator set: a run given no ceiling behaves exactly as it did before
   // any of this existed. Asserted against the same run with ceilings omitted entirely.
-  const { reason } = await outcomeWith({})
+  const { reason } = await outcomeWith(t, {})
   assert.equal(reason, 'budget')
 })
 
@@ -290,29 +290,29 @@ test('absent ceilings are behaviourless', async () => {
 // ---------------------------------------------------------------------------------------
 
 for (const command of ['relay', 'session'] as const) {
-  test(`every ceiling flag bounds a run started by \`conclave ${command}\``, async () => {
+  test(`every ceiling flag bounds a run started by \`conclave ${command}\``, async (t) => {
     // The unbounded baseline first, so each ceiling is compared against what the same run
     // does without it. A hard-coded expectation would pass a front-end that dropped the flag
     // if the number happened to match.
-    const unbounded = await dispatchesVia(command, [])
+    const unbounded = await dispatchesVia(t, command, [])
     assert.equal(unbounded, 4, `${command} with no ceiling must run its full --rounds 4`)
 
     // Fires before the seat is ever assigned, so the implementer is sent nothing at all.
     assert.equal(
-      await dispatchesVia(command, ['--max-queue-depth', '0']),
+      await dispatchesVia(t, command, ['--max-queue-depth', '0']),
       0,
       `${command} must apply --max-queue-depth, not merely parse it`,
     )
     // Fires after assignment and before the send, so likewise nothing reaches the seat.
     assert.equal(
-      await dispatchesVia(command, ['--max-concurrent-seats', '0']),
+      await dispatchesVia(t, command, ['--max-concurrent-seats', '0']),
       0,
       `${command} must apply --max-concurrent-seats, not merely parse it`,
     )
     // `--max-turns` counts turns across BOTH participants, and the advisor has taken one
     // before the first dispatch, so a ceiling of 2 stops the run partway rather than at 2
     // dispatches. The assertion that matters is that it stopped SHORT of the unbounded run.
-    const turnBounded = await dispatchesVia(command, ['--max-turns', '2'])
+    const turnBounded = await dispatchesVia(t, command, ['--max-turns', '2'])
     assert.ok(
       turnBounded < unbounded,
       `${command} must apply --max-turns (${turnBounded} dispatches, unbounded run does ${unbounded})`,
@@ -323,7 +323,7 @@ for (const command of ['relay', 'session'] as const) {
     // minutes-to-milliseconds conversion in `ceilingsFrom`, and the `>=` on elapsed time --
     // and without it this test named every ceiling flag while leaving one unexercised.
     assert.equal(
-      await dispatchesVia(command, ['--max-minutes', '0']),
+      await dispatchesVia(t, command, ['--max-minutes', '0']),
       0,
       `${command} must apply --max-minutes, not merely parse it`,
     )
@@ -350,10 +350,11 @@ for (const command of ['relay', 'session'] as const) {
  * is how a capability comes to exist on one command and not the other for the tenth time.
  */
 async function launchVia(
+  t: TestContext,
   command: 'relay' | 'session',
   flags: string[],
 ): Promise<{ text: string; status: SessionStatus }> {
-  const dir = repo()
+  const dir = repo(t)
   const before = process.cwd()
   const [advisor, impl] = participants()
   const registry = registryOf({ 'fake-advisor': [advisor], 'fake-impl': [impl] })
@@ -380,17 +381,16 @@ async function launchVia(
     console.log = log
     console.error = error
     process.chdir(before)
-    rmSync(dir, { recursive: true, force: true })
   }
 }
 
 for (const command of ['relay', 'session'] as const) {
-  test(`\`conclave ${command}\` names every ceiling before it starts work`, async () => {
+  test(`\`conclave ${command}\` names every ceiling before it starts work`, async (t) => {
     // The run that produced #119 was launched with `--max-turns 40` to raise the advisor
     // budget. It does not raise it -- `--rounds` does -- so the run ended at the default while
     // the flag the operator typed bounded something else entirely. Both numbers on one line,
     // before any work exists to lose, is the whole of suggestion 1.
-    const { text } = await launchVia(command, ['--max-turns', '40'])
+    const { text } = await launchVia(t, command, ['--max-turns', '40'])
     const line = text.split('\n').find((l) => l.includes('ceilings:'))
     assert.ok(line, `${command} must print a ceilings line at launch`)
     // The two adjacent flags, with the values that were actually in force. Asserted against
@@ -404,11 +404,11 @@ for (const command of ['relay', 'session'] as const) {
     assert.match(line, /--max-concurrent-seats none/)
   })
 
-  test(`\`conclave ${command}\` records every ceiling in the status document`, async () => {
+  test(`\`conclave ${command}\` records every ceiling in the status document`, async (t) => {
     // Suggestion 3, and the same argument #103 made for rotation state: an agent operator has
     // no console to read the banner from, so a flag it passed is unconfirmable and a
     // misunderstood ceiling is invisible to the interface that exists to replace the console.
-    const { status } = await launchVia(command, ['--max-minutes', '5', '--max-queue-depth', '3'])
+    const { status } = await launchVia(t, command, ['--max-minutes', '5', '--max-queue-depth', '3'])
     assert.deepEqual(
       status.ceilings,
       {
@@ -426,19 +426,19 @@ for (const command of ['relay', 'session'] as const) {
   })
 }
 
-test('the recorded ceilings are the ones the run obeyed, not the ones it was asked for', async () => {
+test('the recorded ceilings are the ones the run obeyed, not the ones it was asked for', async (t) => {
   // The sharpest version of the claim, and the reason the document is built from
   // `Relay.ceilings` rather than from the front-end's own flags: a run given NO ceiling flags
   // still has an advisor budget, and the document must carry the number the loop will stop at.
   // Read against the reason it stopped, so a document agreeing with the flags while the loop
   // used something else would be caught here rather than believed.
-  const { status } = await launchVia('relay', [])
+  const { status } = await launchVia(t, 'relay', [])
   assert.equal(status.ceilings?.advisorTurns, 2)
   assert.equal(status.outcome?.reason, 'budget', 'the run must have ended on that budget')
   assert.match(status.outcome?.detail ?? '', /2 of a maximum 2/, 'and the ending must quote the same number')
 })
 
-test('a detached run reports its ceilings from the first status, before the child exists', async () => {
+test('a detached run reports its ceilings from the first status, before the child exists', async (t) => {
   // The window an agent operator actually polls. `--detach` returns an id immediately and the
   // child takes seconds to come up, so a `ceilings` block written only by the recorder would be
   // missing for exactly as long as the operator is waiting to find out what they launched --
@@ -449,7 +449,7 @@ test('a detached run reports its ceilings from the first status, before the chil
   // fastidiousness: the detach path re-executes `process.argv[1]`, which under `node --test` is
   // THIS FILE. Calling it here would spawn the test file as a program, which would run this
   // test again, which would spawn again.
-  const dir = repo()
+  const dir = repo(t)
   const bin = join(import.meta.dirname, '..', '..', 'bin', 'conclave.ts')
   /** The child's pid, off the document, so the test can end the run it just started. */
   let detached: number | undefined
@@ -491,6 +491,5 @@ test('a detached run reports its ceilings from the first status, before the chil
         // Already gone, which is the other legitimate ending.
       }
     }
-    rmSync(dir, { recursive: true, force: true })
   }
 })

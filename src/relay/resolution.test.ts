@@ -24,8 +24,7 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test, { type TestContext } from 'node:test'
 import type { Verdict } from '../contract/outcome.ts'
@@ -33,6 +32,7 @@ import type { AgentSession } from '../contract/session.ts'
 import { AgentRegistry } from '../registry/registry.ts'
 import { NO_DEADLINE_CLOCKS } from '../registry/types.ts'
 import { FakeRotationSession } from '../rotation/fakeSession.ts'
+import { tempDir } from '../testkit/tempDir.ts'
 import { Relay, type RelayOptions } from './relay.ts'
 import {
   actorFor,
@@ -171,8 +171,8 @@ test('the classification is pure: the same subject and configuration give the sa
 // The six conditions, against a real relay. Nothing here may change.
 // ---------------------------------------------------------------------------
 
-function repo(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'conclave-resolution-'))
+function repo(t: TestContext): string {
+  const dir = tempDir(t, 'conclave-resolution')
   execFileSync('git', ['init', '-q'], { cwd: dir })
   writeFileSync(join(dir, 'work.ts'), 'export const answer = 42\n')
   writeFileSync(join(dir, '.gitignore'), '.conclave/\n')
@@ -251,9 +251,13 @@ interface Provoked {
  *
  * The provocations are the ones `run.test.ts` already uses, deliberately: this file is about
  * what did NOT change, and reproducing the same trigger is what makes that comparable.
+ *
+ * The relay is RETURNED and stopping it is the caller's job. It used to be hooked with
+ * `t.after` here, which put teardown after the scratch directory's own cleanup hook and let
+ * `stop()`'s manifest write recreate a directory that had just been deleted.
  */
 async function provoke(t: TestContext, reason: RunPause['reason']): Promise<Provoked> {
-  const dir = repo()
+  const dir = repo(t)
   let advisor: FakeRotationSession
   let impl: FakeRotationSession
 
@@ -262,7 +266,6 @@ async function provoke(t: TestContext, reason: RunPause['reason']): Promise<Prov
       advisor = new FakeRotationSession('advisor', 'codex', ['Do the thing.', 'DONE'])
       impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it.'])
       const relay = await relayOf(dir, advisor, [impl])
-      t.after(() => relay.stop())
       const run = relay.start('Keep the work moving.')
       impl.compact()
       const pause = await run.untilPause()
@@ -277,7 +280,6 @@ async function provoke(t: TestContext, reason: RunPause['reason']): Promise<Prov
       ])
       impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it.'])
       const relay = await relayOf(dir, advisor, [impl])
-      t.after(() => relay.stop())
       const run = relay.start('Keep the work moving.')
       const pause = await run.untilPause()
       assert.ok(pause)
@@ -296,7 +298,6 @@ async function provoke(t: TestContext, reason: RunPause['reason']): Promise<Prov
         'NONE',
       ])
       const relay = await relayOf(dir, advisor, [impl])
-      t.after(() => relay.stop())
       const run = relay.start('Add the endpoint.')
       const pause = await run.untilPause()
       assert.ok(pause)
@@ -306,7 +307,6 @@ async function provoke(t: TestContext, reason: RunPause['reason']): Promise<Prov
       advisor = new FakeRotationSession('advisor', 'codex', ['Do it.', 'Remove two.txt and wait.', 'DONE'])
       impl = new FakeRotationSession('impl', 'claude', ['ack', 'Wrote two.txt.', 'Removed it.'])
       const relay = await relayOf(dir, advisor, [impl])
-      t.after(() => relay.stop())
       const run = relay.start('Keep the work moving.')
       relay.say('Also write the word into two.txt.', { only: 'implementer' }, 'aside')
       const pause = await run.untilPause()
@@ -318,7 +318,6 @@ async function provoke(t: TestContext, reason: RunPause['reason']): Promise<Prov
       impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it, slowly.'])
       impl.endTurn = { index: 1, verdict: TIMED_OUT }
       const relay = await relayOf(dir, advisor, [impl])
-      t.after(() => relay.stop())
       const run = relay.start('Keep the work moving.')
       const pause = await run.untilPause()
       assert.ok(pause)
@@ -330,7 +329,7 @@ async function provoke(t: TestContext, reason: RunPause['reason']): Promise<Prov
       // second cannot, and its repair turn changes nothing — which is the second failure
       // against the same integration parent, and the only thing that escalates.
       //
-      // The repo() above commits with `-c user.email` rather than configuring the repository,
+      // The repo(t) above commits with `-c user.email` rather than configuring the repository,
       // so a boundary commit made by the relay would have no identity to use.
       execFileSync('git', ['config', 'user.email', 't@t'], { cwd: dir })
       execFileSync('git', ['config', 'user.name', 't'], { cwd: dir })
@@ -349,7 +348,6 @@ async function provoke(t: TestContext, reason: RunPause['reason']): Promise<Prov
         ],
         maxAdvisorTurns: 5,
       })
-      t.after(() => relay.stop())
       const trees = Object.fromEntries(relay.worktrees!.seats.map((s) => [s.seatId, s.worktreePath]))
       // Each seat writes into ITS OWN tree, which is the only reason these conflict at merge
       // time rather than overwriting each other as they go.
@@ -369,7 +367,6 @@ async function provoke(t: TestContext, reason: RunPause['reason']): Promise<Prov
       advisor.delayMs = 20
       impl.delayMs = 20
       const relay = await relayOf(dir, advisor, [impl])
-      t.after(() => relay.stop())
       const run = relay.start('Keep the work moving.')
       const pause = await run.requestPause('the operator asked to pause')
       assert.ok(pause)
@@ -389,7 +386,6 @@ async function provoke(t: TestContext, reason: RunPause['reason']): Promise<Prov
         reviewer: { id: 'reviewer', agent: 'claude', role: 'reviewer' },
         maxAdvisorTurns: 6,
       })
-      t.after(() => relay.stop())
       const run = relay.start('Keep the work moving.')
       const pause = await run.untilPause()
       assert.ok(pause)
@@ -470,25 +466,33 @@ const EXPECTED: Record<
 
 for (const reason of Object.keys(EXPECTED) as RunPause['reason'][]) {
   test(`${reason} still pauses exactly as it does today, and carries both axes`, async (t) => {
-    const { pause, run } = await provoke(t, reason)
-    const expected = EXPECTED[reason]
+    const { pause, run, relay } = await provoke(t, reason)
+    try {
+      const expected = EXPECTED[reason]
 
-    // Unchanged: the reason, the menu, and the fact that the run is suspended waiting for a
-    // decision. Two of these six are classified `mechanical` and one `advisor`; all three
-    // still stop here, because nothing exists yet that could resolve them and dropping the
-    // pause first would lose the decision point rather than automate it.
-    assert.equal(pause.reason, reason)
-    assert.deepEqual(pause.options, expected.options, 'the operator menu must not change')
-    assert.equal(run.state, 'paused', 'the run must still be waiting for a decision')
+      // Unchanged: the reason, the menu, and the fact that the run is suspended waiting for a
+      // decision. Two of these six are classified `mechanical` and one `advisor`; all three
+      // still stop here, because nothing exists yet that could resolve them and dropping the
+      // pause first would lose the decision point rather than automate it.
+      assert.equal(pause.reason, reason)
+      assert.deepEqual(pause.options, expected.options, 'the operator menu must not change')
+      assert.equal(run.state, 'paused', 'the run must still be waiting for a decision')
 
-    // Added: the classification, on the pause the operator was handed.
-    assert.equal(pause.resolution.authority, expected.authority)
-    assert.deepEqual(pause.resolution.scope, expected.scope)
-    // One condition, one classification. The loose `reason` field is what every existing
-    // reader is written against, and it cannot be allowed to disagree with the new one.
-    assert.equal(pause.resolution.reason, pause.reason)
+      // Added: the classification, on the pause the operator was handed.
+      assert.equal(pause.resolution.authority, expected.authority)
+      assert.deepEqual(pause.resolution.scope, expected.scope)
+      // One condition, one classification. The loose `reason` field is what every existing
+      // reader is written against, and it cannot be allowed to disagree with the new one.
+      assert.equal(pause.resolution.reason, pause.reason)
 
-    await run.abort()
+      await run.abort()
+    } finally {
+      // Stopped HERE rather than from a `t.after` inside `provoke`. `stop()` writes the worktree
+      // manifest, `repo(t)` registered the scratch directory's cleanup first, and node:test runs
+      // `after` hooks in registration order -- so a hooked stop fires after the directory is gone
+      // and writes it back into existence.
+      await relay.stop()
+    }
   })
 }
 
@@ -497,7 +501,7 @@ test('an advisor turn that ends badly scopes to the advisor, not to the implemen
   // `src/relay/relay.ts:7359` for the advisor, `:7879` for the implementer -- and a scope
   // read off "the implementer" rather than off the seat would be silently wrong for half of
   // them, in a way no N=1 run with one implementer would ever reveal.
-  const dir = repo()
+  const dir = repo(t)
   const advisor = new FakeRotationSession('advisor', 'codex', ['', 'Do the thing.', 'DONE'])
   advisor.endTurn = { index: 0, verdict: TIMED_OUT }
   const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it.'])
@@ -528,7 +532,7 @@ test('an unarmed run PAUSES on degradation, and the pause is the operator\'s to 
   // coincide) and in the configuration with the least means to check. Observed on oath-lang: a
   // healthy seat compacted mid-work and the run ended, telling a human it needed them while
   // that human was at the console.
-  const dir = repo()
+  const dir = repo(t)
   const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it.'])
   // Built without the `rotation` key rather than with an undefined one: `--checks` absent
   // means the option was never supplied, which is the state being tested.
@@ -592,14 +596,22 @@ test('an advisor-authority condition is not routed to the advisor', async (t) =>
   // classified `advisor` and the question goes nowhere near the advisor: the run stops and
   // the operator is asked, exactly as before. When that changes it will be #60's doing, and
   // this assertion is what will say so.
-  const { pause, run, advisor } = await provoke(t, 'implementer_unanswered')
-  assert.equal(pause.resolution.authority, 'advisor')
-  assert.ok(
-    !advisor.received.some((m) => m.includes('UNANSWERED')),
-    'the question must not have reached the advisor while the operator is deciding',
-  )
-  assert.equal(run.state, 'paused')
-  await run.abort()
+  const { pause, run, advisor, relay } = await provoke(t, 'implementer_unanswered')
+  try {
+    assert.equal(pause.resolution.authority, 'advisor')
+    assert.ok(
+      !advisor.received.some((m) => m.includes('UNANSWERED')),
+      'the question must not have reached the advisor while the operator is deciding',
+    )
+    assert.equal(run.state, 'paused')
+    await run.abort()
+  } finally {
+    // Stopped HERE rather than from a `t.after` inside `provoke`. `stop()` writes the worktree
+    // manifest, `repo(t)` registered the scratch directory's cleanup first, and node:test runs
+    // `after` hooks in registration order -- so a hooked stop fires after the directory is gone
+    // and writes it back into existence.
+    await relay.stop()
+  }
 })
 
 test('a mechanical condition still ends an unattended run rather than resolving itself', async (t) => {
@@ -607,7 +619,7 @@ test('a mechanical condition still ends an unattended run rather than resolving 
   // `mechanical`, and if that classification ever started being acted on, the most likely
   // first symptom is an unattended run carrying on past a turn that did not complete --
   // which is the run with nobody watching it happen.
-  const dir = repo()
+  const dir = repo(t)
   const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it, slowly.'])
   impl.endTurn = { index: 1, verdict: TIMED_OUT }
   const relay = await relayOf(dir, new FakeRotationSession('advisor', 'codex', ['Do it.', 'DONE']), [impl])
@@ -623,19 +635,27 @@ test('the routing log says what it said before; the classification is not narrat
   // other suites match on the exact `paused (<reason>):` prefix. Metadata that leaked into
   // prose would be a rendering change wearing a data change's clothes.
   const { run, relay } = await provoke(t, 'rotation_candidate')
-  await run.continue()
+  try {
+    await run.continue()
 
-  const notes = relay.log.filter((m) => m.kind === 'note').map((m) => m.text)
-  assert.ok(
-    notes.some((n) => n.startsWith('paused (rotation_candidate): ')),
-    notes.join('\n'),
-  )
-  assert.ok(notes.some((n) => n === 'resumed from rotation_candidate'), notes.join('\n'))
-  assert.ok(
-    !notes.some((n) => /mechanical|authority:|scope:|workstream|conclave/i.test(n)),
-    'no note may narrate the classification',
-  )
-  await run.abort()
+    const notes = relay.log.filter((m) => m.kind === 'note').map((m) => m.text)
+    assert.ok(
+      notes.some((n) => n.startsWith('paused (rotation_candidate): ')),
+      notes.join('\n'),
+    )
+    assert.ok(notes.some((n) => n === 'resumed from rotation_candidate'), notes.join('\n'))
+    assert.ok(
+      !notes.some((n) => /mechanical|authority:|scope:|workstream|conclave/i.test(n)),
+      'no note may narrate the classification',
+    )
+    await run.abort()
+  } finally {
+    // Stopped HERE rather than from a `t.after` inside `provoke`. `stop()` writes the worktree
+    // manifest, `repo(t)` registered the scratch directory's cleanup first, and node:test runs
+    // `after` hooks in registration order -- so a hooked stop fires after the directory is gone
+    // and writes it back into existence.
+    await relay.stop()
+  }
 })
 
 /**

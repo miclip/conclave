@@ -45,10 +45,11 @@
 
 import { strict as assert } from 'node:assert'
 import { spawnSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import test from 'node:test'
+import type { TestContext } from 'node:test'
+import { tempDir } from '../testkit/tempDir.ts'
 import {
   CITED,
   DOCS_ROOTS,
@@ -131,48 +132,44 @@ test('the registry and its fixtures are not scanned as sources', () => {
   assert.ok(files.includes('src/relay/relay.ts'), 'and the tree it guards still is')
 })
 
-test('the scanner only enforces citations inside docs `## LIVE:` sections', () => {
+test('the scanner only enforces citations inside docs `## LIVE:` sections', (t) => {
   // Frozen design records in docs/** are intentionally out of scope. The guard must still catch
   // live claims, which are marked by a `## LIVE:` heading and end at the next sibling `## `.
-    const root = mkdtempSync(join(tmpdir(), 'conclave-citations-docs-'))
-    try {
-      const docs = join(root, 'docs')
-      mkdirSync(docs)
-      const liveFile = join(docs, 'live.md')
-    writeFileSync(
-      liveFile,
-      [
-        '# Frozen document',
-        '',
-        '## Frozen: a section that is not live',
-        'This is a frozen claim `src/relay/relay.ts:1`.',
-        '',
-        '## LIVE: a section that asserts current fact',
-        'This is a live claim `src/relay/relay.ts:2`.',
-        '',
-        '### A subsection does not exit the live section',
-        'Still live, so `src/relay/relay.ts:3` is enforced too.',
-        '',
-        '## Another frozen section',
-        'Not live again `src/relay/relay.ts:4`.',
-        '',
-      ].join('\n'),
-    )
+  const root = tempDir(t, 'conclave-citations-docs')
+  const docs = join(root, 'docs')
+  mkdirSync(docs)
+  const liveFile = join(docs, 'live.md')
+  writeFileSync(
+    liveFile,
+    [
+      '# Frozen document',
+      '',
+      '## Frozen: a section that is not live',
+      'This is a frozen claim `src/relay/relay.ts:1`.',
+      '',
+      '## LIVE: a section that asserts current fact',
+      'This is a live claim `src/relay/relay.ts:2`.',
+      '',
+      '### A subsection does not exit the live section',
+      'Still live, so `src/relay/relay.ts:3` is enforced too.',
+      '',
+      '## Another frozen section',
+      'Not live again `src/relay/relay.ts:4`.',
+      '',
+    ].join('\n'),
+  )
 
-    const found = docsLiveClaimCitations(root)
-      .filter((c) => c.at.startsWith('docs/live.md'))
-      .sort((a, b) => a.start - b.start)
-    assert.deepEqual(
-      found.map((c) => ({ cite: c.cite, at: c.at })),
-      [
-        { cite: 'src/relay/relay.ts:2', at: 'docs/live.md:7' },
-        { cite: 'src/relay/relay.ts:3', at: 'docs/live.md:10' },
-      ],
-      'only the live section and its subsection are returned',
-    )
-  } finally {
-    rmSync(root, { recursive: true, force: true })
-  }
+  const found = docsLiveClaimCitations(root)
+    .filter((c) => c.at.startsWith('docs/live.md'))
+    .sort((a, b) => a.start - b.start)
+  assert.deepEqual(
+    found.map((c) => ({ cite: c.cite, at: c.at })),
+    [
+      { cite: 'src/relay/relay.ts:2', at: 'docs/live.md:7' },
+      { cite: 'src/relay/relay.ts:3', at: 'docs/live.md:10' },
+    ],
+    'only the live section and its subsection are returned',
+  )
 })
 
 test('the scanner sees both citation forms, so neither can be added unnoticed', () => {
@@ -202,113 +199,105 @@ test('the scanner sees both citation forms, so neither can be added unnoticed', 
   assert.ok(!(invented[0]!.text in CITED), 'an invented citation must not already be declared')
 })
 
-test('both ways a citation rots are caught, against a tree written for the purpose', () => {
+test('both ways a citation rots are caught, against a tree written for the purpose', (t) => {
   // A fixture tree rather than an edit to a real source. The alternative -- break a file, run,
   // put it back -- proves the same thing once, in a session nobody else can see, and leaves the
   // repository one interrupted run away from carrying the damage. This runs on every `npm test`.
-  const root = mkdtempSync(join(tmpdir(), 'conclave-citations-'))
-  try {
-    writeFileSync(
-      join(root, 'moved.ts'),
-      ['export const first = 1', 'export const second = 2', 'export const third = 3', ''].join('\n'),
-    )
+  const root = tempDir(t, 'conclave-citations')
+  writeFileSync(
+    join(root, 'moved.ts'),
+    ['export const first = 1', 'export const second = 2', 'export const third = 3', ''].join('\n'),
+  )
 
-    // Mode one: the cited line is GONE. The file used to be longer, the citation still names a
-    // line past its end, and nothing about reading the prose would tell you.
-    assert.equal(
-      citationFault('moved.ts:9', 'export const ninth = 9', root),
-      'moved.ts:9: the file ends at line 4',
-    )
-    // The same for a range whose tail has fallen off the end, which is the commoner shape --
-    // a block shrinks and the citation keeps the width it was written with.
-    assert.equal(
-      citationFault('moved.ts:2-9', 'export const second = 2', root),
-      'moved.ts:2-9: the file ends at line 4',
-    )
+  // Mode one: the cited line is GONE. The file used to be longer, the citation still names a
+  // line past its end, and nothing about reading the prose would tell you.
+  assert.equal(
+    citationFault('moved.ts:9', 'export const ninth = 9', root),
+    'moved.ts:9: the file ends at line 4',
+  )
+  // The same for a range whose tail has fallen off the end, which is the commoner shape --
+  // a block shrinks and the citation keeps the width it was written with.
+  assert.equal(
+    citationFault('moved.ts:2-9', 'export const second = 2', root),
+    'moved.ts:2-9: the file ends at line 4',
+  )
 
-    // Mode two, and the one line numbers alone can never catch: the line EXISTS and says
-    // something else. Code moved down, the citation kept its number, and it now points at a
-    // real line that supports a different claim -- exactly how a reader is misled.
-    //
-    // The message names where the token went. That sentence is the difference between a repair
-    // that is one command and a repair that starts by re-deriving what this function already
-    // knows -- which is how four throwaway scripts got written in one session on this branch.
-    assert.equal(
-      citationFault('moved.ts:1', 'export const second = 2', root),
-      'moved.ts:1: expected "export const second = 2", found "export const first = 1"' +
-        ' — it is now at moved.ts:2; `npm run citations:fix` repairs this',
-    )
-    // Range form: the token has to be inside the cited range, not merely in the file.
-    //
-    // And a range does NOT get told where it went, which is the honest answer. The token sat
-    // somewhere inside the range and the current file cannot say where, so several windows of
-    // the cited width contain it and each implies a different shift. Anchoring the token to the
-    // range's first line was the obvious guess; it re-frames the range around the token and
-    // reports a shift one or two lines off the one the file actually took. `planRepairs` settles
-    // these from the shift its unambiguous neighbours measured, which is evidence rather than a
-    // preference between equally good guesses.
-    assert.equal(
-      citationFault('moved.ts:1-2', 'export const third = 3', root),
-      'moved.ts:1-2: expected "export const third = 3", found "export const first = 1\\nexport const second = 2"' +
-        ' — the token is inside 2 windows of the cited width, so its offset in the range is not' +
-        ' recoverable from the file alone',
-    )
+  // Mode two, and the one line numbers alone can never catch: the line EXISTS and says
+  // something else. Code moved down, the citation kept its number, and it now points at a
+  // real line that supports a different claim -- exactly how a reader is misled.
+  //
+  // The message names where the token went. That sentence is the difference between a repair
+  // that is one command and a repair that starts by re-deriving what this function already
+  // knows -- which is how four throwaway scripts got written in one session on this branch.
+  assert.equal(
+    citationFault('moved.ts:1', 'export const second = 2', root),
+    'moved.ts:1: expected "export const second = 2", found "export const first = 1"' +
+      ' — it is now at moved.ts:2; `npm run citations:fix` repairs this',
+  )
+  // Range form: the token has to be inside the cited range, not merely in the file.
+  //
+  // And a range does NOT get told where it went, which is the honest answer. The token sat
+  // somewhere inside the range and the current file cannot say where, so several windows of
+  // the cited width contain it and each implies a different shift. Anchoring the token to the
+  // range's first line was the obvious guess; it re-frames the range around the token and
+  // reports a shift one or two lines off the one the file actually took. `planRepairs` settles
+  // these from the shift its unambiguous neighbours measured, which is evidence rather than a
+  // preference between equally good guesses.
+  assert.equal(
+    citationFault('moved.ts:1-2', 'export const third = 3', root),
+    'moved.ts:1-2: expected "export const third = 3", found "export const first = 1\\nexport const second = 2"' +
+      ' — the token is inside 2 windows of the cited width, so its offset in the range is not' +
+      ' recoverable from the file alone',
+  )
 
-    // And the true cases, so the two above are not passing because everything fails.
-    assert.equal(citationFault('moved.ts:2', 'export const second = 2', root), undefined)
-    assert.equal(citationFault('moved.ts:1-3', 'export const third = 3', root), undefined)
+  // And the true cases, so the two above are not passing because everything fails.
+  assert.equal(citationFault('moved.ts:2', 'export const second = 2', root), undefined)
+  assert.equal(citationFault('moved.ts:1-3', 'export const third = 3', root), undefined)
 
-    // A path that resolves nowhere is its own fault, and it is what a bare filename citation
-    // (`relay.ts:1818`) becomes once someone declares it: the check demands a real root.
-    assert.equal(
-      citationFault('nested/gone.ts:1', 'anything', root),
-      'nested/gone.ts:1: no such file (citations must be repo-root-relative)',
-    )
-  } finally {
-    rmSync(root, { recursive: true, force: true })
-  }
+  // A path that resolves nowhere is its own fault, and it is what a bare filename citation
+  // (`relay.ts:1818`) becomes once someone declares it: the check demands a real root.
+  assert.equal(
+    citationFault('nested/gone.ts:1', 'anything', root),
+    'nested/gone.ts:1: no such file (citations must be repo-root-relative)',
+  )
 })
 
-test('a token that is gone, or no longer unique, is refused rather than relocated', () => {
+test('a token that is gone, or no longer unique, is refused rather than relocated', (t) => {
   // The whole safety argument for having a repair tool. Relocation is only ever inferred from a
   // token that appears EXACTLY once: zero means the cited thing is gone, and more than one means
   // the pin was never a pin. Both are the cases the guard exists to raise, and a tool that
   // guessed at either would launder real rot into a green build.
-  const root = mkdtempSync(join(tmpdir(), 'conclave-citations-refuse-'))
-  try {
-    writeFileSync(
-      join(root, 'twice.ts'),
-      ['const a = 1', 'const dup = 2', 'const b = 3', 'const dup = 4', ''].join('\n'),
-    )
+  const root = tempDir(t, 'conclave-citations-refuse')
+  writeFileSync(
+    join(root, 'twice.ts'),
+    ['const a = 1', 'const dup = 2', 'const b = 3', 'const dup = 4', ''].join('\n'),
+  )
 
-    const gone = relocate('twice.ts:1', 'const vanished = 9', root)
-    assert.equal(gone.to, undefined)
-    assert.match(gone.why, /appears nowhere/)
+  const gone = relocate('twice.ts:1', 'const vanished = 9', root)
+  assert.equal(gone.to, undefined)
+  assert.match(gone.why, /appears nowhere/)
 
-    const ambiguous = relocate('twice.ts:1', 'const dup =', root)
-    assert.equal(ambiguous.to, undefined)
-    assert.match(ambiguous.why, /appears on 2 lines \(2, 4\)/)
-    assert.deepEqual(ambiguous.lines, [2, 4])
+  const ambiguous = relocate('twice.ts:1', 'const dup =', root)
+  assert.equal(ambiguous.to, undefined)
+  assert.match(ambiguous.why, /appears on 2 lines \(2, 4\)/)
+  assert.deepEqual(ambiguous.lines, [2, 4])
 
-    // And the plan refuses both, naming each, rather than dropping them silently.
-    const plan = planRepairs({ 'twice.ts:1': 'const vanished = 9', 'twice.ts:3': 'const dup =' }, root)
-    assert.deepEqual(plan.repairs, [])
-    assert.deepEqual(
-      plan.refused.map((r) => r.cite),
-      ['twice.ts:1', 'twice.ts:3'],
-    )
+  // And the plan refuses both, naming each, rather than dropping them silently.
+  const plan = planRepairs({ 'twice.ts:1': 'const vanished = 9', 'twice.ts:3': 'const dup =' }, root)
+  assert.deepEqual(plan.repairs, [])
+  assert.deepEqual(
+    plan.refused.map((r) => r.cite),
+    ['twice.ts:1', 'twice.ts:3'],
+  )
 
-    // The single-match case in the same tree, so the refusals above are not passing because
-    // nothing ever relocates.
-    const moved = planRepairs({ 'twice.ts:1': 'const b = 3' }, root)
-    assert.deepEqual(moved.refused, [])
-    assert.deepEqual(moved.repairs, [{ from: 'twice.ts:1', to: 'twice.ts:3', expected: 'const b = 3' }])
-  } finally {
-    rmSync(root, { recursive: true, force: true })
-  }
+  // The single-match case in the same tree, so the refusals above are not passing because
+  // nothing ever relocates.
+  const moved = planRepairs({ 'twice.ts:1': 'const b = 3' }, root)
+  assert.deepEqual(moved.refused, [])
+  assert.deepEqual(moved.repairs, [{ from: 'twice.ts:1', to: 'twice.ts:3', expected: 'const b = 3' }])
 })
 
-test('a token that spans lines is found, and counted, like any other', () => {
+test('a token that spans lines is found, and counted, like any other', (t) => {
   // The blind spot that shipped. `relocate` and `weakPins` both searched line by line, and no
   // single line contains a multi-line token — so both silently treated one as ZERO occurrences.
   //
@@ -320,45 +309,41 @@ test('a token that spans lines is found, and counted, like any other', () => {
   // And the entries it could not see were the ones created BY strengthening the weakest pins:
   // when a token has an identical twin, widening the citation to a range whose distinguishing
   // text spans two lines is the fix. Two of this repo's own citations are that shape.
-  const root = mkdtempSync(join(tmpdir(), 'conclave-citations-span-'))
-  try {
-    const span = 'const start = {\n  key: 1,'
-    writeFileSync(
-      join(root, 'span.ts'),
-      ['// header', 'const start = {', '  key: 1,', '}', ''].join('\n'),
-    )
+  const root = tempDir(t, 'conclave-citations-span')
+  const span = 'const start = {\n  key: 1,'
+  writeFileSync(
+    join(root, 'span.ts'),
+    ['// header', 'const start = {', '  key: 1,', '}', ''].join('\n'),
+  )
 
-    // Found, at the line it STARTS on, and reported as the single occurrence it is.
-    const moved = relocate('span.ts:1-2', span, root)
-    assert.equal(moved.to, 'span.ts:2-3', 'the range moves as a block onto the token')
-    assert.deepEqual(moved.lines, [2], 'reported at the line the token starts on')
-    assert.equal(citationFault('span.ts:2-3', span, root), undefined)
-    assert.deepEqual(weakPins({ 'span.ts:2-3': span }, root), [], 'one occurrence is not weak')
+  // Found, at the line it STARTS on, and reported as the single occurrence it is.
+  const moved = relocate('span.ts:1-2', span, root)
+  assert.equal(moved.to, 'span.ts:2-3', 'the range moves as a block onto the token')
+  assert.deepEqual(moved.lines, [2], 'reported at the line the token starts on')
+  assert.equal(citationFault('span.ts:2-3', span, root), undefined)
+  assert.deepEqual(weakPins({ 'span.ts:2-3': span }, root), [], 'one occurrence is not weak')
 
-    // A citation NARROWER than its own token has no answer, and saying so is right rather than a
-    // gap: one line cannot contain two, so there is nothing to relocate onto. The old code
-    // reached the same refusal by a different route — it could not see the token anywhere — and
-    // the distinction matters, because that route also refused the satisfiable case above.
-    const tooNarrow = relocate('span.ts:1', span, root)
-    assert.equal(tooNarrow.to, undefined)
-    assert.match(tooNarrow.why, /no window of the cited width contains it/)
-    assert.deepEqual(tooNarrow.lines, [2], 'the token was still FOUND; only the width is wrong')
+  // A citation NARROWER than its own token has no answer, and saying so is right rather than a
+  // gap: one line cannot contain two, so there is nothing to relocate onto. The old code
+  // reached the same refusal by a different route — it could not see the token anywhere — and
+  // the distinction matters, because that route also refused the satisfiable case above.
+  const tooNarrow = relocate('span.ts:1', span, root)
+  assert.equal(tooNarrow.to, undefined)
+  assert.match(tooNarrow.why, /no window of the cited width contains it/)
+  assert.deepEqual(tooNarrow.lines, [2], 'the token was still FOUND; only the width is wrong')
 
-    // Twice over, and it is a weak pin like any other rather than an invisible one.
-    writeFileSync(
-      join(root, 'twice.ts'),
-      ['const start = {', '  key: 1,', '}', 'const start = {', '  key: 1,', '}', ''].join('\n'),
-    )
-    assert.deepEqual(weakPins({ 'twice.ts:1-2': span }, root), [{ cite: 'twice.ts:1-2', hits: 2 }])
-    const ambiguous = relocate('twice.ts:5-6', span, root)
-    assert.equal(ambiguous.to, undefined, 'two occurrences cannot be told apart')
-    assert.deepEqual(ambiguous.lines, [1, 4])
-  } finally {
-    rmSync(root, { recursive: true, force: true })
-  }
+  // Twice over, and it is a weak pin like any other rather than an invisible one.
+  writeFileSync(
+    join(root, 'twice.ts'),
+    ['const start = {', '  key: 1,', '}', 'const start = {', '  key: 1,', '}', ''].join('\n'),
+  )
+  assert.deepEqual(weakPins({ 'twice.ts:1-2': span }, root), [{ cite: 'twice.ts:1-2', hits: 2 }])
+  const ambiguous = relocate('twice.ts:5-6', span, root)
+  assert.equal(ambiguous.to, undefined, 'two occurrences cannot be told apart')
+  assert.deepEqual(ambiguous.lines, [1, 4])
 })
 
-test('a weak pin is relocated by the shift its neighbours measured, or not at all', () => {
+test('a weak pin is relocated by the shift its neighbours measured, or not at all', (t) => {
   // The pass that made this tool worth having. Eight of the repo's thirty-eight tokens are not
   // unique in their file, and on the first run against a real edit the tool repaired eleven
   // citations and refused three of them -- which would have left me finishing the job by hand,
@@ -368,38 +353,34 @@ test('a weak pin is relocated by the shift its neighbours measured, or not at al
   // everything below it by the SAME amount, and the citations that DO pin uniquely have already
   // measured that shift. So the file lends its consensus to the ones that cannot speak, and the
   // answer is only taken if it lands on a line that actually holds the token.
-  const root = mkdtempSync(join(tmpdir(), 'conclave-citations-shift-'))
-  try {
-    const cited = { 'shift.ts:3': 'const b = 3', 'shift.ts:5': 'dup()' }
-    const body = ['const a = 1', 'dup()', 'const b = 3', 'filler', 'dup()', '']
+  const root = tempDir(t, 'conclave-citations-shift')
+  const cited = { 'shift.ts:3': 'const b = 3', 'shift.ts:5': 'dup()' }
+  const body = ['const a = 1', 'dup()', 'const b = 3', 'filler', 'dup()', '']
 
-    // Correct to begin with, so what follows is caused by the edit and not by the fixture.
-    writeFileSync(join(root, 'shift.ts'), body.join('\n'))
-    assert.deepEqual(planRepairs(cited, root), { repairs: [], refused: [] })
+  // Correct to begin with, so what follows is caused by the edit and not by the fixture.
+  writeFileSync(join(root, 'shift.ts'), body.join('\n'))
+  assert.deepEqual(planRepairs(cited, root), { repairs: [], refused: [] })
 
-    // One line inserted at the top: everything below shifts by exactly one.
-    writeFileSync(join(root, 'shift.ts'), ['// inserted', ...body].join('\n'))
-    const plan = planRepairs(cited, root)
-    assert.deepEqual(plan.refused, [])
-    assert.deepEqual(plan.repairs, [
-      // Pass one. Unique token, so it needs nothing but itself -- and it is what measures +1.
-      { from: 'shift.ts:3', to: 'shift.ts:4', expected: 'const b = 3' },
-      // Pass two. `dup()` is on lines 3 and 6 and cannot choose; +1 picks 6, which is one of
-      // them, so it is taken. Note the order: repairs come out in the order they were settled,
-      // not in the order they were declared.
-      { from: 'shift.ts:5', to: 'shift.ts:6', expected: 'dup()' },
-    ])
+  // One line inserted at the top: everything below shifts by exactly one.
+  writeFileSync(join(root, 'shift.ts'), ['// inserted', ...body].join('\n'))
+  const plan = planRepairs(cited, root)
+  assert.deepEqual(plan.refused, [])
+  assert.deepEqual(plan.repairs, [
+    // Pass one. Unique token, so it needs nothing but itself -- and it is what measures +1.
+    { from: 'shift.ts:3', to: 'shift.ts:4', expected: 'const b = 3' },
+    // Pass two. `dup()` is on lines 3 and 6 and cannot choose; +1 picks 6, which is one of
+    // them, so it is taken. Note the order: repairs come out in the order they were settled,
+    // not in the order they were declared.
+    { from: 'shift.ts:5', to: 'shift.ts:6', expected: 'dup()' },
+  ])
 
-    // And alone, with nothing to measure the shift from, the same citation is refused rather
-    // than guessed at. This is the assertion that keeps pass two evidence rather than a
-    // preference: strip the neighbour and the answer disappears with it.
-    const lonely = planRepairs({ 'shift.ts:5': 'dup()' }, root)
-    assert.deepEqual(lonely.repairs, [])
-    assert.equal(lonely.refused.length, 1)
-    assert.match(lonely.refused[0]!.why, /no citation in its file relocated on its own evidence/)
-  } finally {
-    rmSync(root, { recursive: true, force: true })
-  }
+  // And alone, with nothing to measure the shift from, the same citation is refused rather
+  // than guessed at. This is the assertion that keeps pass two evidence rather than a
+  // preference: strip the neighbour and the answer disappears with it.
+  const lonely = planRepairs({ 'shift.ts:5': 'dup()' }, root)
+  assert.deepEqual(lonely.repairs, [])
+  assert.equal(lonely.refused.length, 1)
+  assert.match(lonely.refused[0]!.why, /no citation in its file relocated on its own evidence/)
 })
 
 test('a repair rewrites the citation it was asked to, in the form it was written in', () => {
@@ -509,23 +490,19 @@ test('the fixer is wired into package.json under the name the guard tells you to
  * than against the repository, because the repository is green and the failures being proven are
  * what happens when it is not.
  */
-const withTree = (files: Record<string, string>, fn: (root: string) => void): void => {
-  const root = mkdtempSync(join(tmpdir(), 'conclave-citations-pair-'))
-  try {
-    // Every configured root, whether or not this fixture puts a file in it. The scanner refuses
-    // to read a missing one as an empty one -- see `walkRoot` -- so a fixture without `bin/` is
-    // not a smaller tree, it is a tree the scanner would not run on, and creating them here is
-    // what keeps these fixtures the same shape as the repository they stand in for.
-    for (const dir of [...SOURCE_ROOTS, ...DOCS_ROOTS]) mkdirSync(join(root, dir), { recursive: true })
-    for (const [file, text] of Object.entries(files)) {
-      const path = join(root, file)
-      mkdirSync(dirname(path), { recursive: true })
-      writeFileSync(path, text)
-    }
-    fn(root)
-  } finally {
-    rmSync(root, { recursive: true, force: true })
+const withTree = (t: TestContext, files: Record<string, string>, fn: (root: string) => void): void => {
+  const root = tempDir(t, 'conclave-citations-pair')
+  // Every configured root, whether or not this fixture puts a file in it. The scanner refuses
+  // to read a missing one as an empty one -- see `walkRoot` -- so a fixture without `bin/` is
+  // not a smaller tree, it is a tree the scanner would not run on, and creating them here is
+  // what keeps these fixtures the same shape as the repository they stand in for.
+  for (const dir of [...SOURCE_ROOTS, ...DOCS_ROOTS]) mkdirSync(join(root, dir), { recursive: true })
+  for (const [file, text] of Object.entries(files)) {
+    const path = join(root, file)
+    mkdirSync(dirname(path), { recursive: true })
+    writeFileSync(path, text)
   }
+  fn(root)
 }
 
 /** The cited file, with its token three lines below where the table still says it is. */
@@ -538,7 +515,7 @@ const SHIFTED_THING = [
   '',
 ].join('\n')
 
-test('a repair moves the declaration, the prose and the live docs claim together', () => {
+test('a repair moves the declaration, the prose and the live docs claim together', (t) => {
   // #170. Before this, `citations:fix` repaired CITED and the sources and never looked at
   // `docs/**` at all, so a pair whose docs half was brought into scope by #164 came out half
   // done -- and the tree went from a failure the tool could finish to one only a human could,
@@ -560,6 +537,7 @@ test('a repair moves the declaration, the prose and the live docs claim together
     '',
   ].join('\n')
   withTree(
+    t,
     {
       [REGISTRY_FILE]: registry,
       'src/thing.ts': SHIFTED_THING,
@@ -649,8 +627,8 @@ const PAIR_TABLE = {
   'src/thing.ts:1': 'a token that was deleted',
 }
 
-test('a pair that cannot be rewritten whole is declined by name, and neither side of it moves', () => {
-  withTree(PAIR_TREE, (root) => {
+test('a pair that cannot be rewritten whole is declined by name, and neither side of it moves', (t) => {
+  withTree(t, PAIR_TREE, (root) => {
     const plan = planPairedRepairs(PAIR_TABLE, root)
 
     assert.deepEqual(
@@ -704,14 +682,14 @@ test('a pair that cannot be rewritten whole is declined by name, and neither sid
   })
 })
 
-test('a live docs claim is never repaired while its declaration stays stale', () => {
+test('a live docs claim is never repaired while its declaration stays stale', (t) => {
   // The reverse of #170, asked structurally rather than hoped for. The docs half of the declined
   // pair is perfectly rewritable ON ITS OWN -- proven here by rewriting it -- and the fixer still
   // does not write it, because the plan is per PAIR and its registry half was refused. There is
   // no path from a rewritable docs claim to a written one that does not carry the declaration
   // with it: every file's new text comes from the same surviving map, computed once, after the
   // declaration check has already removed what it removed.
-  withTree(PAIR_TREE, (root) => {
+  withTree(t, PAIR_TREE, (root) => {
     const alone = repairDocsText(
       PAIR_TREE['docs/THING.md'],
       new Map([['src/thing.ts:2', 'src/thing.ts:5']]),
@@ -802,8 +780,8 @@ const DECLINE_ONLY_TREE = {
 
 const DECLINE_ONLY_TABLE = { 'src/thing.ts:2': 'export function thing(' }
 
-test('a declined pair leaves the whole tree byte for byte, and says which pair it declined', () => {
-  withTree(DECLINE_ONLY_TREE, (root) => {
+test('a declined pair leaves the whole tree byte for byte, and says which pair it declined', (t) => {
+  withTree(t, DECLINE_ONLY_TREE, (root) => {
     // Planning first, then the command, because they are different claims: the plan proposes no
     // writes, and the command -- which is what an operator actually runs -- makes none.
     const plan = planPairedRepairs(DECLINE_ONLY_TABLE, root)
@@ -834,7 +812,7 @@ test('a declined pair leaves the whole tree byte for byte, and says which pair i
   })
 })
 
-test('--check writes nothing and exits on what it WOULD have done', () => {
+test('--check writes nothing and exits on what it WOULD have done', (t) => {
   // The flag's whole contract, asserted through the command rather than around it. Testing the
   // planner and calling that `--check` proves that nothing wrote because nothing was asked to,
   // which is the reasoning rather than the behaviour.
@@ -848,7 +826,7 @@ test('--check writes nothing and exits on what it WOULD have done', () => {
     'src/thing.ts': SHIFTED_THING,
     'docs/THING.md': ['# Thing', '', '## LIVE: now', 'It is at `src/thing.ts:2`.', ''].join('\n'),
   }
-  withTree(clean, (root) => {
+  withTree(t, clean, (root) => {
     const run = collect()
     assert.equal(runFixer(['--check'], run.out, DECLINE_ONLY_TABLE, root), 0, 'nothing refused, so 0')
     assertUnchanged(root, clean, 'was written by --check')
@@ -865,7 +843,7 @@ test('--check writes nothing and exits on what it WOULD have done', () => {
     assert.ok(readFileSync(join(root, 'docs/THING.md'), 'utf8').includes('src/thing.ts:5'))
   })
 
-  withTree(DECLINE_ONLY_TREE, (root) => {
+  withTree(t, DECLINE_ONLY_TREE, (root) => {
     const run = collect()
     assert.equal(runFixer(['--check'], run.out, DECLINE_ONLY_TABLE, root), 1, 'a refusal exits 1')
     assertUnchanged(root, DECLINE_ONLY_TREE, 'was written by --check over a refusal')
@@ -885,39 +863,35 @@ test('the command line runs the same function this file tests', () => {
   assert.match(ran.stdout, /^citations: /m, 'and it reported through the same lines')
 })
 
-test('a configured scan root that is not there is raised, not read as an empty one', () => {
+test('a configured scan root that is not there is raised, not read as an empty one', (t) => {
   // The failure this shape invites, and the reason it is worth a test of its own: an unreadable
   // root makes every guard over it pass. `docs/**` came into scope with #164 and is the newest
   // and least load-bearing-looking of them, so a `docs` that had been renamed or not checked out
   // would report zero live claims, take the two-way pin over them with it, and look like a clean
   // run. Nothing downstream can tell that apart from a tree with no live claims in it.
-  const root = mkdtempSync(join(tmpdir(), 'conclave-citations-roots-'))
-  try {
-    for (const dir of [...SOURCE_ROOTS, ...DOCS_ROOTS]) mkdirSync(join(root, dir), { recursive: true })
-    writeFileSync(
-      join(root, 'docs/LIVE.md'),
-      ['# Doc', '', '## LIVE: now', 'It is at `src/thing.ts:2`.', ''].join('\n'),
-    )
-    assert.equal(docsLiveClaimCitations(root).length, 1, 'the tree it is about does have a live claim')
+  const root = tempDir(t, 'conclave-citations-roots')
+  for (const dir of [...SOURCE_ROOTS, ...DOCS_ROOTS]) mkdirSync(join(root, dir), { recursive: true })
+  writeFileSync(
+    join(root, 'docs/LIVE.md'),
+    ['# Doc', '', '## LIVE: now', 'It is at `src/thing.ts:2`.', ''].join('\n'),
+  )
+  assert.equal(docsLiveClaimCitations(root).length, 1, 'the tree it is about does have a live claim')
 
-    for (const dir of DOCS_ROOTS) rmSync(join(root, dir), { recursive: true, force: true })
-    assert.throws(
-      () => docsLiveClaimCitations(root),
-      /'docs' is a configured scan root and could not be read/,
-      'a missing docs root is raised rather than reported as no live claims',
-    )
-    // And through the fixer, because that is what would act on the emptiness.
-    assert.throws(() => planPairedRepairs({}, root), /configured scan root/)
+  for (const dir of DOCS_ROOTS) rmSync(join(root, dir), { recursive: true, force: true })
+  assert.throws(
+    () => docsLiveClaimCitations(root),
+    /'docs' is a configured scan root and could not be read/,
+    'a missing docs root is raised rather than reported as no live claims',
+  )
+  // And through the fixer, because that is what would act on the emptiness.
+  assert.throws(() => planPairedRepairs({}, root), /configured scan root/)
 
-    // The same for the source roots, whose absence takes the found-must-be-declared half with it.
-    mkdirSync(join(root, 'docs'))
-    rmSync(join(root, SOURCE_ROOTS[1]!), { recursive: true, force: true })
-    assert.throws(
-      () => allCitations(root),
-      new RegExp(`'${SOURCE_ROOTS[1]}' is a configured scan root`),
-      'and a missing source root is not zero citations either',
-    )
-  } finally {
-    rmSync(root, { recursive: true, force: true })
-  }
+  // The same for the source roots, whose absence takes the found-must-be-declared half with it.
+  mkdirSync(join(root, 'docs'))
+  rmSync(join(root, SOURCE_ROOTS[1]!), { recursive: true, force: true })
+  assert.throws(
+    () => allCitations(root),
+    new RegExp(`'${SOURCE_ROOTS[1]}' is a configured scan root`),
+    'and a missing source root is not zero citations either',
+  )
 })

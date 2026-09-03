@@ -28,15 +28,16 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
+import type { TestContext } from 'node:test'
 import type { Verdict } from '../contract/outcome.ts'
 import type { AgentEvent, AgentSession, CloseMode } from '../contract/session.ts'
 import { AgentRegistry } from '../registry/registry.ts'
 import { NO_DEADLINE_CLOCKS } from '../registry/types.ts'
 import { FakeRotationSession } from '../rotation/fakeSession.ts'
+import { tempDir } from '../testkit/tempDir.ts'
 import { runReport } from './report.ts'
 import { Relay, type RelayOptions } from './relay.ts'
 import { resolutionFor } from './resolution.ts'
@@ -63,8 +64,8 @@ function clockFrom(start = 1_700_000_000_000): { now: () => number; advance: (ms
   }
 }
 
-function repo(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'conclave-stop-paused-'))
+function repo(t: TestContext): string {
+  const dir = tempDir(t, 'conclave-stop-paused')
   execFileSync('git', ['init', '-q'], { cwd: dir })
   writeFileSync(join(dir, 'work.ts'), 'export const answer = 42\n')
   writeFileSync(join(dir, '.gitignore'), '.conclave/\n')
@@ -208,8 +209,7 @@ class LaggingSession extends FakeRotationSession {
 // ---------------------------------------------------------------------------------------
 
 test('a run stopped while paused ends, and says it was stopped', async (t) => {
-  const dir = repo()
-  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const dir = repo(t)
   const relay = await relayOf(
     dir,
     new FakeRotationSession('advisor', 'codex', endlessly('Keep going')),
@@ -235,8 +235,7 @@ test('the suspension ledger closes where the run stopped, not where the object d
   // The reported figures have to be TRUE after `stop()`, not merely present. A ledger left open
   // keeps accruing against a run that ended, so `pausedMs` grows and `activeMs` -- which is
   // wall-clock less the paused total -- shrinks, on a run nothing is doing anything to.
-  const dir = repo()
-  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const dir = repo(t)
   const clock = clockFrom()
   const impl = new FakeRotationSession('impl', 'claude', endlessly('Did step'))
   /** A minute of work per working turn, so active time is a number the test chose. */
@@ -304,8 +303,7 @@ test('a run stopped mid-turn ends too, and is not reported as the fault its tear
   // Both now end as `stopped`, which is what `run_end` said all along. That is a deliberate
   // change to the second case rather than a side effect: a handle and a stream describing one
   // run must not disagree about how it ended.
-  const dir = repo()
-  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const dir = repo(t)
   const impl = new FakeRotationSession('impl', 'claude', endlessly('Did step'))
   // Withholds `turn_end` on the implementer's first working turn: a long real turn, held open by
   // the test rather than by a timer, so the stop below lands mid-turn every time.
@@ -353,8 +351,7 @@ test('a turn_end that arrives during the graceful close is used, not discarded',
   // So the session here does what a reconciling adapter does: the held turn ends, with its
   // verdict, inside `close('graceful')`. The turn must complete normally -- report recorded,
   // nothing called lost -- even though the relay was already stopped when it arrived.
-  const dir = repo()
-  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const dir = repo(t)
   const impl = new ReconcilingSession('impl', 'claude', endlessly('Did step'))
   impl.holdTurn = 1
   const relay = await relayOf(dir, new FakeRotationSession('advisor', 'codex', endlessly('Keep going')), impl)
@@ -394,8 +391,7 @@ test('a turn_end delivered long after the close returns is still used', async (t
   // once the close has returned AND that reader has drained, which is a fact about the stream
   // instead of a bet on its speed. `AgentSession.events()` ending with the session is what makes
   // the barrier terminate, and is now stated in the contract.
-  const dir = repo()
-  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const dir = repo(t)
   const impl = new LaggingSession('impl', 'claude', endlessly('Did step'))
   impl.holdTurn = 1
   const relay = await relayOf(dir, new FakeRotationSession('advisor', 'codex', endlessly('Keep going')), impl)
@@ -428,8 +424,7 @@ test('a close that FAILS still hands on what it said before it failed (#143)', a
   // The other half is in the adapters. Each closes its event queue in a `finally` now, so a
   // throwing close still ends the iteration; without that, draining here on the exceptional path
   // would have replaced a discarded verdict with a hang.
-  const dir = repo()
-  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const dir = repo(t)
   const impl = new LaggingSession('impl', 'claude', endlessly('Did step'))
   impl.holdTurn = 1
   impl.closeThrows = 'terminate: pty refused to die'
@@ -458,8 +453,7 @@ test('a run that already ended keeps the reason it ended for', async (t) => {
   // Teardown is not a second outcome, and `stop()` is called on every finished run by whatever
   // owns the relay. A `done` run that reported `stopped` because someone cleaned up after it
   // would be the same class of untrue figure this issue is about, in the field readers read first.
-  const dir = repo()
-  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const dir = repo(t)
   const relay = await relayOf(
     dir,
     new FakeRotationSession('advisor', 'codex', ['Do it.', 'DONE']),
@@ -493,8 +487,7 @@ test('a halt reached after the run was stopped raises no pause, and cannot resta
   // suspension ledger `settle()` had just closed, and parked on a question nothing would ever
   // answer -- every symptom of this issue restored one halt site later, with #112's figures
   // untrue again beside them.
-  const dir = repo()
-  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const dir = repo(t)
   const clock = clockFrom()
   const impl = new FakeRotationSession('impl', 'claude', endlessly('Did step'))
   impl.holdTurn = 1

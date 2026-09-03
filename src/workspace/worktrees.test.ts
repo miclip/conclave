@@ -12,10 +12,11 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join, resolve, sep } from 'node:path'
 import test from 'node:test'
+import type { TestContext } from 'node:test'
+import { tempDir } from '../testkit/tempDir.ts'
 import {
   cleanupSeatWorktrees,
   createSeatWorktrees,
@@ -38,8 +39,8 @@ function git(cwd: string, ...args: string[]): string {
 }
 
 /** A repository with one commit and `.conclave/` ignored, which is what a real project has. */
-function tempRepo(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'conclave-wt-'))
+function tempRepo(t: TestContext): string {
+  const dir = tempDir(t, 'conclave-wt')
   git(dir, 'init', '--quiet')
   git(dir, 'config', 'user.email', 'test@example.com')
   git(dir, 'config', 'user.name', 'Test')
@@ -56,13 +57,8 @@ function branches(repo: string): string[] {
     .filter(Boolean)
 }
 
-function withRepo(work: (repo: string) => void): void {
-  const repo = tempRepo()
-  try {
-    work(repo)
-  } finally {
-    rmSync(repo, { recursive: true, force: true })
-  }
+function withRepo(t: TestContext, work: (repo: string) => void): void {
+  work(tempRepo(t))
 }
 
 test('sanitize lowercases, collapses, trims, and never yields an empty segment', () => {
@@ -92,8 +88,8 @@ test('uniqueSlugs breaks collisions deterministically and keeps the first bare',
   )
 })
 
-test('a clean checkout passes, and every kind of uncommitted work is refused by name', () => {
-  withRepo((repo) => {
+test('a clean checkout passes, and every kind of uncommitted work is refused by name', (t) => {
+  withRepo(t, (repo) => {
     assert.deepEqual(uncleanPaths(repo), [], 'a freshly committed repository is clean')
     requireCleanBase(repo)
 
@@ -137,8 +133,8 @@ test('a clean checkout passes, and every kind of uncommitted work is refused by 
   })
 })
 
-test('createSeatWorktrees refuses a dirty base and creates nothing', () => {
-  withRepo((repo) => {
+test('createSeatWorktrees refuses a dirty base and creates nothing', (t) => {
+  withRepo(t, (repo) => {
     writeFileSync(join(repo, 'stray.txt'), 'x\n')
     assert.throws(
       () => createSeatWorktrees({ repoRoot: repo, runId: 'r1', seatIds: ['a', 'b'] }),
@@ -149,8 +145,8 @@ test('createSeatWorktrees refuses a dirty base and creates nothing', () => {
   })
 })
 
-test('two seats get distinct trees, distinct branches off one base, and a manifest that names both', () => {
-  withRepo((repo) => {
+test('two seats get distinct trees, distinct branches off one base, and a manifest that names both', (t) => {
+  withRepo(t, (repo) => {
     const base = git(repo, 'rev-parse', 'HEAD').trim()
     const manifest = createSeatWorktrees({ repoRoot: repo, runId: 'r1', seatIds: ['impl-a', 'impl-b'] })
 
@@ -184,8 +180,8 @@ test('two seats get distinct trees, distinct branches off one base, and a manife
   })
 })
 
-test('an operator seat id cannot put a worktree outside the run directory', () => {
-  withRepo((repo) => {
+test('an operator seat id cannot put a worktree outside the run directory', (t) => {
+  withRepo(t, (repo) => {
     const root = resolve(worktreesRoot(repo, 'r1'))
     const manifest = createSeatWorktrees({
       repoRoot: repo,
@@ -206,8 +202,8 @@ test('an operator seat id cannot put a worktree outside the run directory', () =
   })
 })
 
-test('a failure partway through creation unwinds the trees it had already made', () => {
-  withRepo((repo) => {
+test('a failure partway through creation unwinds the trees it had already made', (t) => {
+  withRepo(t, (repo) => {
     // The second seat cannot be created: its branch name is already taken. Anything that makes
     // `git worktree add` fail would do; this one needs no permissions games.
     git(repo, 'branch', 'conclave/r1/beta')
@@ -228,8 +224,8 @@ test('a failure partway through creation unwinds the trees it had already made',
   })
 })
 
-test('cleanup removes merged and clean trees, and deletes their branches without force', () => {
-  withRepo((repo) => {
+test('cleanup removes merged and clean trees, and deletes their branches without force', (t) => {
+  withRepo(t, (repo) => {
     const manifest = createSeatWorktrees({ repoRoot: repo, runId: 'r1', seatIds: ['a', 'b'] })
     const report = cleanupSeatWorktrees(manifest)
 
@@ -246,8 +242,8 @@ test('cleanup removes merged and clean trees, and deletes their branches without
   })
 })
 
-test('cleanup retains a dirty tree with its work intact and prints what to run', () => {
-  withRepo((repo) => {
+test('cleanup retains a dirty tree with its work intact and prints what to run', (t) => {
+  withRepo(t, (repo) => {
     const manifest = createSeatWorktrees({ repoRoot: repo, runId: 'r1', seatIds: ['a', 'b'] })
     const dirty = manifest.seats[0]!
     writeFileSync(join(dirty.worktreePath, 'unsaved.txt'), 'the only copy\n')
@@ -283,8 +279,8 @@ test('cleanup retains a dirty tree with its work intact and prints what to run',
   })
 })
 
-test('cleanup retains a blocked seat and a seat holding unmerged commits', () => {
-  withRepo((repo) => {
+test('cleanup retains a blocked seat and a seat holding unmerged commits', (t) => {
+  withRepo(t, (repo) => {
     const manifest = createSeatWorktrees({ repoRoot: repo, runId: 'r1', seatIds: ['blocked', 'ahead'] })
     const blocked = manifest.seats[0]!
     const ahead = manifest.seats[1]!
@@ -314,8 +310,8 @@ test('cleanup retains a blocked seat and a seat holding unmerged commits', () =>
   })
 })
 
-test('a missing directory is retained rather than pruned', () => {
-  withRepo((repo) => {
+test('a missing directory is retained rather than pruned', (t) => {
+  withRepo(t, (repo) => {
     const manifest = createSeatWorktrees({ repoRoot: repo, runId: 'r1', seatIds: ['gone'] })
     // What a network mount that is not there yet looks like, and what `git worktree prune`
     // would take as permission to forget the seat.
@@ -332,8 +328,8 @@ test('a missing directory is retained rather than pruned', () => {
   })
 })
 
-test('a run id is chronological, path-safe, and stepped aside when one is already on disk', () => {
-  withRepo((repo) => {
+test('a run id is chronological, path-safe, and stepped aside when one is already on disk', (t) => {
+  withRepo(t, (repo) => {
     const at = new Date(2026, 7, 10, 9, 5, 3).getTime()
     assert.equal(newRunId(at, 4242), '20260810-090503-4242')
     assert.match(newRunId(at, 4242), /^[a-z0-9-]+$/)
@@ -358,8 +354,8 @@ test('a run id is chronological, path-safe, and stepped aside when one is alread
  * behaviour and not a protocol guarantee — if this assertion starts looking pointless after a
  * Codex upgrade, re-measure before deleting it.
  */
-test('every seat worktree can be given the empty .codex trigger, idempotently', () => {
-  withRepo((repo) => {
+test('every seat worktree can be given the empty .codex trigger, idempotently', (t) => {
+  withRepo(t, (repo) => {
     const manifest = createSeatWorktrees({ repoRoot: repo, runId: 'r1', seatIds: ['a'] })
     const seat = manifest.seats[0]!
     assert.ok(!existsSync(join(seat.worktreePath, '.codex')), 'git creates no such thing on its own')
@@ -395,8 +391,8 @@ test('every seat worktree can be given the empty .codex trigger, idempotently', 
  * wrong. The assertions are on content that can only have come from reading the tree: file
  * names the notice could not have guessed.
  */
-test('a blocked seat is described from its tree, not from its manifest state', () => {
-  withRepo((repo) => {
+test('a blocked seat is described from its tree, not from its manifest state', (t) => {
+  withRepo(t, (repo) => {
     const manifest = createSeatWorktrees({ repoRoot: repo, runId: 'r1', seatIds: ['blocked'] })
     const seat = manifest.seats[0]!
 
@@ -440,8 +436,8 @@ test('a blocked seat is described from its tree, not from its manifest state', (
  * were dirty. A notice that cried wolf on every retained tree would be ignored on the one that
  * mattered, which is the same failure from the other side.
  */
-test('a blocked seat with a clean tree says so, and says which tree it read', () => {
-  withRepo((repo) => {
+test('a blocked seat with a clean tree says so, and says which tree it read', (t) => {
+  withRepo(t, (repo) => {
     const manifest = createSeatWorktrees({ repoRoot: repo, runId: 'r1', seatIds: ['blocked'] })
     const seat = manifest.seats[0]!
     writeFileSync(join(seat.worktreePath, 'work.txt'), 'done\n')
@@ -463,8 +459,8 @@ test('a blocked seat with a clean tree says so, and says which tree it read', ()
  * `merge_blocked` returns before the missing-directory check, so this is the path that would
  * otherwise assert the work was safe on a branch while the tree it names is not there.
  */
-test('a blocked seat whose tree cannot be read says that, rather than nothing', () => {
-  withRepo((repo) => {
+test('a blocked seat whose tree cannot be read says that, rather than nothing', (t) => {
+  withRepo(t, (repo) => {
     const manifest = createSeatWorktrees({ repoRoot: repo, runId: 'r1', seatIds: ['blocked'] })
     const seat = manifest.seats[0]!
     seat.mergeState = 'merge_blocked'
@@ -482,8 +478,8 @@ test('a blocked seat whose tree cannot be read says that, rather than nothing', 
  * and useless: an operator who cannot triage a retained tree in one command eventually removes
  * it unexamined, which is the loss the retain existed to prevent.
  */
-test('a retained dirty tree names what is in it, by kind', () => {
-  withRepo((repo) => {
+test('a retained dirty tree names what is in it, by kind', (t) => {
+  withRepo(t, (repo) => {
     const manifest = createSeatWorktrees({ repoRoot: repo, runId: 'r1', seatIds: ['a'] })
     const seat = manifest.seats[0]!
     writeFileSync(join(seat.worktreePath, 'README.md'), '# changed\n')
@@ -500,8 +496,8 @@ test('a retained dirty tree names what is in it, by kind', () => {
  * Long lists are capped, and the cap SAYS it capped. A notice that silently showed ten of
  * forty would read as a complete account of the tree.
  */
-test('a tree holding more than the notice names says how many it left out', () => {
-  withRepo((repo) => {
+test('a tree holding more than the notice names says how many it left out', (t) => {
+  withRepo(t, (repo) => {
     const manifest = createSeatWorktrees({ repoRoot: repo, runId: 'r1', seatIds: ['a'] })
     const seat = manifest.seats[0]!
     for (let i = 0; i < 14; i++) writeFileSync(join(seat.worktreePath, `f${i}.txt`), `${i}\n`)

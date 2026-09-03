@@ -15,8 +15,7 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test, { type TestContext } from 'node:test'
 import { AsyncQueue } from '../adapters/asyncQueue.ts'
@@ -30,6 +29,7 @@ import type {
 } from '../contract/session.ts'
 import { guaranteesFor, turnKey } from '../contract/session.ts'
 import { AgentRegistry } from '../registry/registry.ts'
+import { tempDir } from '../testkit/tempDir.ts'
 import { Relay } from './relay.ts'
 import { outranks, type RelayMessage } from './message.ts'
 import type { RelayEvent } from './observe.ts'
@@ -1003,8 +1003,7 @@ test('observing changes neither the routing log numbering nor onLog', async () =
 
 /** A throwaway git repo, so `dirtyPaths` has something true to report. */
 function scratchRepo(t: TestContext): string {
-  const dir = mkdtempSync(join(tmpdir(), 'relay-attribution-'))
-  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const dir = tempDir(t, 'relay-attribution')
   const git = (...args: string[]) => execFileSync('git', args, { cwd: dir, stdio: 'ignore' })
   git('init', '-q')
   git('config', 'user.email', 'test@example.com')
@@ -1226,11 +1225,11 @@ test('an empty report from a completed turn is waited for, not discarded', async
   )
 })
 
-test('a report that never arrives escalates in terms of what was lost', async () => {
+test('a report that never arrives escalates in terms of what was lost', async (t) => {
   // When it genuinely cannot be recovered the run still stops -- but the message has to say
   // what that costs. The first version read as a routing detail ("the transcript had not
   // settled"), when what it means is that a completed turn's entire account was discarded.
-  const dir = mkdtempSync(join(tmpdir(), 'conclave-lost-'))
+  const dir = tempDir(t, 'conclave-lost')
   execFileSync('git', ['init', '-q'], { cwd: dir })
   writeFileSync(join(dir, '.gitignore'), '.conclave/\n')
   execFileSync('git', ['add', '.'], { cwd: dir })
@@ -1262,7 +1261,6 @@ test('a report that never arrives escalates in terms of what was lost', async ()
   assert.ok(escalation, `the escalation must name the failure:\n${relay.log.map((m) => m.text).join('\n---\n')}`)
   assert.match(escalation.text, /record-\d\.md/, 'and name the file that changed, so the loss is legible')
   assert.match(escalation.text, /resume/, 'and warn that a resume starts from a turn saying nothing')
-  rmSync(dir, { recursive: true, force: true })
 })
 
 test('a completed turn whose transcript yields nothing is rebuilt from what it was seen to say', async () => {

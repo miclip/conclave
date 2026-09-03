@@ -16,10 +16,11 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync, spawnSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
+import type { TestContext } from 'node:test'
+import { tempDir } from '../testkit/tempDir.ts'
 import { resolveRepoRoot } from '../config/install.ts'
 import { acquire, lockPath, release } from './sessionLock.ts'
 
@@ -30,8 +31,8 @@ const PARTICIPANTS = [
   { id: 'implementer', agent: 'claude' },
 ]
 
-function repo(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'conclave-guard-cli-'))
+function repo(t: TestContext): string {
+  const dir = tempDir(t, 'conclave-guard-cli')
   execFileSync('git', ['init', '-q'], { cwd: dir })
   writeFileSync(join(dir, 'tracked.txt'), 'original\n')
   execFileSync('git', ['add', '.'], { cwd: dir })
@@ -53,8 +54,8 @@ function orphan(dir: string) {
   writeFileSync(lockPath(dir), JSON.stringify({ ...raw, pid: 2147483647 }))
 }
 
-test('guard exits non-zero while a participant session is live', () => {
-  const dir = repo()
+test('guard exits non-zero while a participant session is live', (t) => {
+  const dir = repo(t)
   // `acquire` stamps this test process's pid, which is by definition alive when the child
   // checks it -- so the child sees a genuinely live session, not a mocked one.
   acquire(dir, PARTICIPANTS)
@@ -72,8 +73,8 @@ test('guard exits non-zero while a participant session is live', () => {
   assert.ok(stdout.includes('advisor'))
 })
 
-test('guard names the paths that appeared after the session started', () => {
-  const dir = repo()
+test('guard names the paths that appeared after the session started', (t) => {
+  const dir = repo(t)
   writeFileSync(join(dir, 'mine.txt'), 'operator edit before the session\n')
   acquire(dir, PARTICIPANTS)
   writeFileSync(join(dir, 'theirs.txt'), 'implementer work in progress\n')
@@ -88,19 +89,19 @@ test('guard names the paths that appeared after the session started', () => {
   )
 })
 
-test('guard exits zero when no session is live', () => {
-  const dir = repo()
+test('guard exits zero when no session is live', (t) => {
+  const dir = repo(t)
   const { status, stdout } = runGuard(dir)
 
   assert.equal(status, 0)
   assert.ok(stdout.includes('no participant sessions are live'))
 })
 
-test('a crashed session is reported but does not fail the command', () => {
+test('a crashed session is reported but does not fail the command', (t) => {
   // The deliberate asymmetry in the subcommand: live exits 1, stale exits 0. A guard that
   // refused forever after a crash would be deleted within a day, so the crash is surfaced
   // for accounting rather than made binding.
-  const dir = repo()
+  const dir = repo(t)
   acquire(dir, PARTICIPANTS)
   writeFileSync(join(dir, 'orphaned.txt'), 'left behind by the crashed run\n')
   orphan(dir)
@@ -112,8 +113,8 @@ test('a crashed session is reported but does not fail the command', () => {
   assert.ok(stdout.includes('orphaned.txt'), 'the orphaned files must still be accounted for')
 })
 
-test('--json prints the report as JSON and nothing else', () => {
-  const dir = repo()
+test('--json prints the report as JSON and nothing else', (t) => {
+  const dir = repo(t)
   acquire(dir, PARTICIPANTS)
   writeFileSync(join(dir, 'theirs.txt'), 'implementer work in progress\n')
 
@@ -135,8 +136,8 @@ test('--json prints the report as JSON and nothing else', () => {
   assert.equal(status, 1, 'a live session must still exit non-zero under --json')
 })
 
-test('--json reports a quiet repository without prose', () => {
-  const dir = repo()
+test('--json reports a quiet repository without prose', (t) => {
+  const dir = repo(t)
   const { status, stdout } = runGuard(dir, '--json')
   const report = JSON.parse(stdout)
 
@@ -150,8 +151,8 @@ test('--json reports a quiet repository without prose', () => {
   assert.equal(status, 0)
 })
 
-test('--json carries the crashed-run asymmetry', () => {
-  const dir = repo()
+test('--json carries the crashed-run asymmetry', (t) => {
+  const dir = repo(t)
   acquire(dir, PARTICIPANTS)
   writeFileSync(join(dir, 'orphaned.txt'), 'left behind by the crashed run\n')
   orphan(dir)
@@ -166,19 +167,19 @@ test('--json carries the crashed-run asymmetry', () => {
   assert.equal(status, 0, 'a stale lock must not block the repository under --json either')
 })
 
-test('the exit code is the same with and without --json', () => {
-  const live = repo()
+test('the exit code is the same with and without --json', (t) => {
+  const live = repo(t)
   acquire(live, PARTICIPANTS)
   assert.equal(runGuard(live).status, 1)
   assert.equal(runGuard(live, '--json').status, 1)
 
-  const quiet = repo()
+  const quiet = repo(t)
   assert.equal(runGuard(quiet).status, 0)
   assert.equal(runGuard(quiet, '--json').status, 0)
 })
 
-test('prose remains the default output', () => {
-  const dir = repo()
+test('prose remains the default output', (t) => {
+  const dir = repo(t)
   acquire(dir, PARTICIPANTS)
 
   const { status, stdout } = runGuard(dir)
@@ -188,8 +189,8 @@ test('prose remains the default output', () => {
   assert.equal(status, 1)
 })
 
-test('a released session stops failing the command', () => {
-  const dir = repo()
+test('a released session stops failing the command', (t) => {
+  const dir = repo(t)
   acquire(dir, PARTICIPANTS)
   assert.equal(runGuard(dir).status, 1)
 

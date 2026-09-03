@@ -44,17 +44,17 @@
  */
 
 import { strict as assert } from 'node:assert'
-import { appendFileSync, mkdtempSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { appendFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
+import { suiteTempDir } from '../testkit/tempDir.ts'
 import { TranscriptReadAbandoned, TranscriptSessionView } from './reconcile.ts'
 import { RewriteAwareTail, parseJsonLine, type ReadLease } from './tail.ts'
 import { wedgeOneTailPoll, type TailWedge } from './tailWedge.ts'
 import { guaranteesFor } from '../contract/session.ts'
 import type { AgentEvent } from '../contract/session.ts'
 
-const SCRATCH = mkdtempSync(join(tmpdir(), 'read-lease-'))
+const SCRATCH = suiteTempDir('read-lease')
 
 /**
  * Short enough to run, long enough that no ordinary read in this file trips it.

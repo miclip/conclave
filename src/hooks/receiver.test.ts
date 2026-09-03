@@ -10,13 +10,13 @@
  */
 
 import { strict as assert } from 'node:assert'
-import { existsSync, mkdtempSync, readFileSync, readdirSync, statSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
+import { suiteTempDir } from '../testkit/tempDir.ts'
 import { HookReceiver } from './receiver.ts'
 
-const SCRATCH = mkdtempSync(join(tmpdir(), 'orch-receiver-auth-'))
+const SCRATCH = suiteTempDir('orch-receiver-auth')
 
 /** The same URL with the token segment removed -- what a port scanner can construct. */
 function withoutToken(url: string): string {

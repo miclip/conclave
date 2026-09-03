@@ -37,10 +37,11 @@
  */
 
 import { test, after } from 'node:test'
+import type { TestContext } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, writeFile, rename, rm } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { writeFile, rename } from 'node:fs/promises'
 import { join } from 'node:path'
+import { tempDirAsync } from '../testkit/tempDir.ts'
 import { wedgeTailReads } from './fsWedge.ts'
 import { RewriteAwareTail, parseJsonLine, type ReadLease } from './tail.ts'
 
@@ -72,9 +73,8 @@ interface Poll {
 const applyPoll = (projection: string[], poll: Poll): string[] =>
   poll.rewritten ? ids(poll.all ?? []) : [...projection, ...ids(poll.appended)]
 
-async function scratch(): Promise<string> {
-  const dir = await mkdtemp(join(tmpdir(), 'conclave-167-'))
-  after(() => rm(dir, { recursive: true, force: true }))
+async function scratch(t: TestContext): Promise<string> {
+  const dir = await tempDirAsync(t, 'conclave-167')
   return join(dir, 'transcript.jsonl')
 }
 
@@ -131,8 +131,8 @@ const modes = [
 ] as const
 
 for (const [how, replace] of modes) {
-  test(`a transcript ${how} mid-poll is not reported as a plain append`, async () => {
-    const path = await scratch()
+  test(`a transcript ${how} mid-poll is not reported as a plain append`, async (t) => {
+    const path = await scratch(t)
     const { p2, projection, tail } = await pollAcrossRewrite(path, replace)
 
     assert.equal(wedge.fired, 1, 'the rewrite must actually have been performed inside the poll')
@@ -161,8 +161,8 @@ for (const [how, replace] of modes) {
  * has to be shown to change nothing when it does nothing. A redirected `open` and a proxied
  * `read` that perturbed the poll on their own would produce the same red as the bug does.
  */
-test('with nothing done mid-poll, the same poll reads the append correctly', async () => {
-  const path = await scratch()
+test('with nothing done mid-poll, the same poll reads the append correctly', async (t) => {
+  const path = await scratch(t)
   const { p2, projection } = await pollAcrossRewrite(path, async () => {})
 
   assert.equal(wedge.fired, 1, 'the seam still reached its trigger point')
@@ -192,8 +192,8 @@ test('with nothing done mid-poll, the same poll reads the append correctly', asy
  * twenty-byte prefix against it, fail, and report a rewrite. Getting a plain append of `c` back
  * is the proof that neither half moved.
  */
-test('a lease abandoned after the read commits nothing, and the next poll still gets the append', async () => {
-  const path = await scratch()
+test('a lease abandoned after the read commits nothing, and the next poll still gets the append', async (t) => {
+  const path = await scratch(t)
   await writeFile(path, rec('a') + rec('b'))
 
   const tail = new RewriteAwareTail(path, parseJsonLine)
@@ -248,8 +248,8 @@ test('a lease abandoned after the read commits nothing, and the next poll still 
  * is live the first time it is consulted and expired the second, which is exactly a deadline
  * passing in between.
  */
-test('a lease that expires between the two checks is caught by the one before the commit', async () => {
-  const path = await scratch()
+test('a lease that expires between the two checks is caught by the one before the commit', async (t) => {
+  const path = await scratch(t)
   await writeFile(path, rec('a') + rec('b'))
 
   const tail = new RewriteAwareTail(path, parseJsonLine)
@@ -309,8 +309,8 @@ test('a lease that expires between the two checks is caught by the one before th
  * the read is short, which is why the wedge has to falsify the COUNT rather than the file: a real
  * short read hands back a full buffer and tells you how far to trust it.
  */
-test('a short read is rejected, commits nothing, and the next poll recovers the append', async () => {
-  const path = await scratch()
+test('a short read is rejected, commits nothing, and the next poll recovers the append', async (t) => {
+  const path = await scratch(t)
   await writeFile(path, rec('a') + rec('b'))
 
   const tail = new RewriteAwareTail(path, parseJsonLine)
@@ -366,8 +366,8 @@ test('a short read is rejected, commits nothing, and the next poll recovers the 
  * path would still be sizing something, and nothing else downstream would notice. The projection
  * says the answer was right.
  */
-test('the size comes from the handle: a rename between open and sizing still reads coherently', async () => {
-  const path = await scratch()
+test('the size comes from the handle: a rename between open and sizing still reads coherently', async (t) => {
+  const path = await scratch(t)
   const before = BEFORE.slice(0, 2).map(rec).join('')
   await writeFile(path, before)
 

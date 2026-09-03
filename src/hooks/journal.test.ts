@@ -5,14 +5,14 @@
  */
 
 import { strict as assert } from 'node:assert'
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
+import { suiteTempDir } from '../testkit/tempDir.ts'
 import { HookJournal, mintDeliveryId } from './journal.ts'
 import { HookReceiver } from './receiver.ts'
 
-const SCRATCH = mkdtempSync(join(tmpdir(), 'orch-journal-'))
+const SCRATCH = suiteTempDir('orch-journal')
 
 function delivery(id: string, event = 'Stop') {
   return {

@@ -6,16 +6,16 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync, spawnSync } from 'node:child_process'
-import { mkdtempSync, realpathSync } from 'node:fs'
-import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
+import type { TestContext } from 'node:test'
+import { tempDir } from '../testkit/tempDir.ts'
 import { FAKE_REPLY_ENV, resolveTransport, transportNames } from './registry.ts'
 
 const CLI = join(import.meta.dirname, '..', '..', 'bin', 'conclave.ts')
 
-function repo(): string {
-  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'conclave-notify-cli-')))
+function repo(t: TestContext): string {
+  const dir = tempDir(t, 'conclave-notify-cli')
   execFileSync('git', ['init', '-q'], { cwd: dir })
   return dir
 }
@@ -29,20 +29,20 @@ function run(args: string[], cwd: string, reply?: string): { code: number; out: 
   return { code: r.status ?? -1, out: `${r.stdout}${r.stderr}` }
 }
 
-test('#184 a name that is not a transport says what the names are', () => {
+test('#184 a name that is not a transport says what the names are', (t) => {
   // A registry that answered only "not found" would give the same message for a typo and for
   // an adapter nobody has written yet.
-  const r = run(['tell', 'x', '--transport', 'glasses'], repo())
+  const r = run(['tell', 'x', '--transport', 'glasses'], repo(t))
   assert.equal(r.code, 2)
   assert.match(r.out, /no transport named glasses/)
   for (const n of transportNames()) assert.ok(r.out.includes(n), `it must list ${n}`)
 })
 
-test('#184 a tap comes back as an option, and speech comes back as text', () => {
+test('#184 a tap comes back as an option, and speech comes back as text', (t) => {
   // The distinction the whole inbound design rests on. An action is an id that was offered; an
   // utterance is text the CALLER interprets, because the caller is the operating agent and has
   // the context. Nothing here parses English into a conclave command.
-  const dir = repo()
+  const dir = repo(t)
 
   const tapped = run(
     ['ask', 'Merge?', '--options', 'yes:Merge,no:Hold'],
@@ -63,18 +63,18 @@ test('#184 a tap comes back as an option, and speech comes back as text', () => 
   assert.equal(answer.text, 'hold off until the advisor finishes')
 })
 
-test('#184 a question that carried no answer exits non-zero', () => {
+test('#184 a question that carried no answer exits non-zero', (t) => {
   // The caller asked and did not get an answer. The decision it was asking about has not gone
   // away, so success would be a lie an unattended caller acts on.
-  const r = run(['ask', 'Merge?', '--options', 'yes:Merge'], repo())
+  const r = run(['ask', 'Merge?', '--options', 'yes:Merge'], repo(t))
   assert.equal(r.code, 1)
   assert.match(r.out, /carried no answer/)
 })
 
-test('#184 a tell never waits, says nothing, and is not recorded as unanswered', () => {
+test('#184 a tell never waits, says nothing, and is not recorded as unanswered', (t) => {
   // Silent on success by design: a notification that printed would become output the caller has
   // to read, and the caller is an agent with a transcript to spend.
-  const dir = repo()
+  const dir = repo(t)
   const told = run(['tell', 'run started'], dir)
   assert.equal(told.code, 0)
   assert.equal(told.out.trim(), '', 'a delivered notification says nothing')
@@ -84,8 +84,8 @@ test('#184 a tell never waits, says nothing, and is not recorded as unanswered',
   assert.doesNotMatch(log.out, /unanswered/, 'nothing asked it anything, so it is not unanswered')
 })
 
-test('#184 the log distinguishes answered, unanswered and undelivered', () => {
-  const dir = repo()
+test('#184 the log distinguishes answered, unanswered and undelivered', (t) => {
+  const dir = repo(t)
   run(['ask', 'Answered?', '--options', 'y:Yes'], dir, '{"option":"y","from":{"id":"mic","kind":"human"}}')
   run(['ask', 'Unanswered?', '--options', 'y:Yes'], dir)
 
@@ -95,9 +95,9 @@ test('#184 the log distinguishes answered, unanswered and undelivered', () => {
   assert.match(json[1]?.undelivered ?? '', /no reply configured/, 'the other says why not')
 })
 
-test('#184 a malformed scripted reply produces no answer rather than an invented one', () => {
+test('#184 a malformed scripted reply produces no answer rather than an invented one', (t) => {
   // An answer nobody gave is the one output this must never produce.
-  const r = run(['ask', 'Merge?', '--options', 'y:Yes'], repo(), 'not json at all')
+  const r = run(['ask', 'Merge?', '--options', 'y:Yes'], repo(t), 'not json at all')
   assert.equal(r.code, 1)
   assert.match(r.out, /carried no answer/)
 })

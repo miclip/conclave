@@ -17,11 +17,12 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { join, relative } from 'node:path'
 import { PassThrough, Writable } from 'node:stream'
 import test from 'node:test'
+import type { TestContext } from 'node:test'
+import { tempDir } from '../testkit/tempDir.ts'
 import { main } from '../../bin/conclave.ts'
 import { CONFIG_RELATIVE } from '../config/project.ts'
 import { AgentRegistry } from '../registry/registry.ts'
@@ -29,8 +30,8 @@ import { NO_DEADLINE_CLOCKS } from '../registry/types.ts'
 import { FakeRotationSession } from '../rotation/fakeSession.ts'
 import { acquire as acquireLock, lockPath } from '../workspace/sessionLock.ts'
 
-function repo(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'conclave-dryrun-'))
+function repo(t: TestContext): string {
+  const dir = tempDir(t, 'conclave-dryrun')
   execFileSync('git', ['init', '-q'], { cwd: dir })
   writeFileSync(join(dir, '.gitignore'), '.conclave/\n')
   writeFileSync(join(dir, 'work.ts'), 'export const a = 1\n')
@@ -147,57 +148,53 @@ async function runIn(dir: string, argv: readonly string[]): Promise<Ran> {
   }
 }
 
-test('a dry run describes the run and leaves the project byte for byte as it found it', { timeout: 60_000 }, async () => {
-  const dir = repo()
-  try {
-    const before = snapshot(dir)
-    const { code, said, created } = await runIn(dir, [
-      'session',
-      'a goal that would start two seats',
-      '--checks',
-      'npm test',
-      // Inside the project deliberately. The tee is opened at the very top of `runSession`,
-      // above everything else it does, so it is the one side effect that could happen before
-      // the plan is even composed.
-      '--record',
-      join(dir, 'render.log'),
-      '--dry-run',
-    ])
-    const output = said.join('\n')
-    assert.equal(code, 0, `a dry run must succeed; it said:\n${output}`)
-    assert.match(output, /^dry run — nothing was started$/m, `no plan was printed:\n${output}`)
+test('a dry run describes the run and leaves the project byte for byte as it found it', { timeout: 60_000 }, async (t) => {
+  const dir = repo(t)
+  const before = snapshot(dir)
+  const { code, said, created } = await runIn(dir, [
+    'session',
+    'a goal that would start two seats',
+    '--checks',
+    'npm test',
+    // Inside the project deliberately. The tee is opened at the very top of `runSession`,
+    // above everything else it does, so it is the one side effect that could happen before
+    // the plan is even composed.
+    '--record',
+    join(dir, 'render.log'),
+    '--dry-run',
+  ])
+  const output = said.join('\n')
+  assert.equal(code, 0, `a dry run must succeed; it said:\n${output}`)
+  assert.match(output, /^dry run — nothing was started$/m, `no plan was printed:\n${output}`)
 
-    // The whole claim, in one comparison: same paths, same bytes.
-    assert.deepEqual(
-      snapshot(dir),
-      before,
-      'a dry run wrote something into the project. Whatever it is, an invocation that reports ' +
-        'starting nothing must not leave it behind.',
-    )
-    // ...and named, one by one, so a failure says WHICH step ran rather than only that the
-    // tree differs. Each of these is a thing a real console run does, in the order it does
-    // them, and every one lives below the point the dry run returns from.
-    for (const [path, what] of [
-      ['.claude/settings.json', 'Claude hooks were registered'],
-      ['.codex/hooks.json', 'the Codex sidecar was registered'],
-      [CONFIG_RELATIVE, 'a permission mode was written'],
-      ['.conclave/session.lock', 'the session lock was taken'],
-      ['.conclave/runs', 'a run log was opened'],
-      ['render.log', 'the --record tee was opened'],
-    ] as const) {
-      assert.ok(!existsSync(join(dir, path)), `${what} (${path}) during a dry run`)
-    }
-    // The Codex trust probe writes nothing here -- it spawns `codex app-server` and edits the
-    // operator's GLOBAL config -- so the tree cannot see it. It is reached from the same place
-    // as the hook registration above, and the source-order test at the end of this file is
-    // what pins it.
-    assert.deepEqual(created, [], 'a dry run created a participant')
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
+  // The whole claim, in one comparison: same paths, same bytes.
+  assert.deepEqual(
+    snapshot(dir),
+    before,
+    'a dry run wrote something into the project. Whatever it is, an invocation that reports ' +
+      'starting nothing must not leave it behind.',
+  )
+  // ...and named, one by one, so a failure says WHICH step ran rather than only that the
+  // tree differs. Each of these is a thing a real console run does, in the order it does
+  // them, and every one lives below the point the dry run returns from.
+  for (const [path, what] of [
+    ['.claude/settings.json', 'Claude hooks were registered'],
+    ['.codex/hooks.json', 'the Codex sidecar was registered'],
+    [CONFIG_RELATIVE, 'a permission mode was written'],
+    ['.conclave/session.lock', 'the session lock was taken'],
+    ['.conclave/runs', 'a run log was opened'],
+    ['render.log', 'the --record tee was opened'],
+  ] as const) {
+    assert.ok(!existsSync(join(dir, path)), `${what} (${path}) during a dry run`)
   }
+  // The Codex trust probe writes nothing here -- it spawns `codex app-server` and edits the
+  // operator's GLOBAL config -- so the tree cannot see it. It is reached from the same place
+  // as the hook registration above, and the source-order test at the end of this file is
+  // what pins it.
+  assert.deepEqual(created, [], 'a dry run created a participant')
 })
 
-test('a dry run neither consults nor takes the session lock', { timeout: 60_000 }, async () => {
+test('a dry run neither consults nor takes the session lock', { timeout: 60_000 }, async (t) => {
   // #130's reasoning, applied one step further. A live lock means someone else's participants
   // are working in this tree, and refusing to start is the right answer to an invocation that
   // would start something. A dry run is not one: it is going to start nothing whatever the lock
@@ -205,32 +202,28 @@ test('a dry run neither consults nor takes the session lock', { timeout: 60_000 
   //
   // The lock is real and belongs to this process -- `read()` decides liveness with
   // `kill(pid, 0)` -- so no agent CLI is spawned to manufacture a live session.
-  const dir = repo()
-  try {
-    acquireLock(dir, [
-      { id: 'advisor', agent: 'codex' },
-      { id: 'implementer', agent: 'claude' },
-    ])
-    const held = readFileSync(lockPath(dir), 'utf8')
+  const dir = repo(t)
+  acquireLock(dir, [
+    { id: 'advisor', agent: 'codex' },
+    { id: 'implementer', agent: 'claude' },
+  ])
+  const held = readFileSync(lockPath(dir), 'utf8')
 
-    const dry = await runIn(dir, ['session', 'a goal', '--dry-run'])
-    assert.equal(dry.code, 0, `a dry run must answer, not refuse; it said:\n${dry.said.join('\n')}`)
-    assert.match(dry.said.join('\n'), /^dry run — nothing was started$/m)
-    assert.equal(readFileSync(lockPath(dir), 'utf8'), held, 'the dry run rewrote the live lock')
+  const dry = await runIn(dir, ['session', 'a goal', '--dry-run'])
+  assert.equal(dry.code, 0, `a dry run must answer, not refuse; it said:\n${dry.said.join('\n')}`)
+  assert.match(dry.said.join('\n'), /^dry run — nothing was started$/m)
+  assert.equal(readFileSync(lockPath(dir), 'utf8'), held, 'the dry run rewrote the live lock')
 
-    // The control, and the reason this test is not vacuous: the SAME invocation without
-    // `--dry-run` is still refused by the lock. A fix that let a dry run past by weakening the
-    // guard would pass every assertion above and fail here.
-    const real = await runIn(dir, ['session', 'a goal'])
-    assert.equal(real.code, 1, 'a run that would start participants must still be refused')
-    assert.match(real.said.join('\n'), /participants are live/)
-    assert.deepEqual(real.created, [], 'and it must not have created one on the way to refusing')
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
-  }
+  // The control, and the reason this test is not vacuous: the SAME invocation without
+  // `--dry-run` is still refused by the lock. A fix that let a dry run past by weakening the
+  // guard would pass every assertion above and fail here.
+  const real = await runIn(dir, ['session', 'a goal'])
+  assert.equal(real.code, 1, 'a run that would start participants must still be refused')
+  assert.match(real.said.join('\n'), /participants are live/)
+  assert.deepEqual(real.created, [], 'and it must not have created one on the way to refusing')
 })
 
-test('--dry-run and --bypass are refused together, and nothing is written', { timeout: 60_000 }, async () => {
+test('--dry-run and --bypass are refused together, and nothing is written', { timeout: 60_000 }, async (t) => {
   // Refused rather than resolved either way, because both resolutions are wrong. Applying the
   // bypass leaves a permission mode written into the project -- for this run AND future ones --
   // by an invocation whose own last line says nothing was started. Skipping it prints a plan
@@ -240,48 +233,40 @@ test('--dry-run and --bypass are refused together, and nothing is written', { ti
   // `relay` has a third option: `withBypass` overlays the requested mode in memory, so its plan
   // is composed as the run would be while nothing is written. The console reads the config
   // inside `runSession` and has no such overlay.
-  const dir = repo()
-  try {
-    const { code, said } = await runIn(dir, ['session', 'a goal', '--bypass', '--dry-run'])
-    assert.equal(code, 1, `the pair must be refused; it said:\n${said.join('\n')}`)
-    const output = said.join('\n')
-    assert.match(output, /--dry-run and --bypass/, `the refusal must name both flags:\n${output}`)
-    assert.ok(
-      !existsSync(join(dir, CONFIG_RELATIVE)),
-      'the refused invocation wrote a permission mode anyway',
-    )
-    assert.ok(
-      !/dry run — nothing was started/.test(output),
-      'and it must not print a plan it has just said it will not resolve',
-    )
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
-  }
+  const dir = repo(t)
+  const { code, said } = await runIn(dir, ['session', 'a goal', '--bypass', '--dry-run'])
+  assert.equal(code, 1, `the pair must be refused; it said:\n${said.join('\n')}`)
+  const output = said.join('\n')
+  assert.match(output, /--dry-run and --bypass/, `the refusal must name both flags:\n${output}`)
+  assert.ok(
+    !existsSync(join(dir, CONFIG_RELATIVE)),
+    'the refused invocation wrote a permission mode anyway',
+  )
+  assert.ok(
+    !/dry run — nothing was started/.test(output),
+    'and it must not print a plan it has just said it will not resolve',
+  )
 })
 
-test('the bypass write this refusal prevents is one the project would really have received', async () => {
+test('the bypass write this refusal prevents is one the project would really have received', async (t) => {
   // The control for the test above, which otherwise proves only that a file this run never
   // creates was not created. `--bypass` with an unresolvable advisor gets PAST
   // `applyBypassFlag` -- the write happens in the CLI block -- and then ends at seat
   // resolution inside `runSession`, above the lock and above everything that starts a run.
   // So the config file appears, which is exactly what the refusal above is preventing.
-  const dir = repo()
-  try {
-    await assert.rejects(
-      runIn(dir, ['session', 'a goal', '--bypass', '--advisor', 'nope']),
-      /unknown agent 'nope'/,
-    )
-    assert.ok(
-      existsSync(join(dir, CONFIG_RELATIVE)),
-      'if this file is absent, the test above is asserting nothing',
-    )
-    assert.match(readFileSync(join(dir, CONFIG_RELATIVE), 'utf8'), /"bypass"/)
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
-  }
+  const dir = repo(t)
+  await assert.rejects(
+    runIn(dir, ['session', 'a goal', '--bypass', '--advisor', 'nope']),
+    /unknown agent 'nope'/,
+  )
+  assert.ok(
+    existsSync(join(dir, CONFIG_RELATIVE)),
+    'if this file is absent, the test above is asserting nothing',
+  )
+  assert.match(readFileSync(join(dir, CONFIG_RELATIVE), 'utf8'), /"bypass"/)
 })
 
-test('a dry run resolves every seat rather than merely describing what was typed', async () => {
+test('a dry run resolves every seat rather than merely describing what was typed', async (t) => {
   // A plan is worth something only if it is a plan of a run that could happen. Resolution is
   // above the return (#130 put it above the lock, and the dry run returns between the two), so
   // an agent name no registry knows is refused HERE, with the registry's own sentence, rather
@@ -295,12 +280,8 @@ test('a dry run resolves every seat rather than merely describing what was typed
     ['session', 'a goal', '--implementers', 'claude,nope', '--dry-run'],
     ['session', 'a goal', '--reviewer', 'nope', '--dry-run'],
   ]) {
-    const dir = repo()
-    try {
-      await assert.rejects(runIn(dir, argv), /unknown agent 'nope'/, `not refused: ${argv.join(' ')}`)
-    } finally {
-      rmSync(dir, { recursive: true, force: true })
-    }
+    const dir = repo(t)
+    await assert.rejects(runIn(dir, argv), /unknown agent 'nope'/, `not refused: ${argv.join(' ')}`)
   }
 })
 

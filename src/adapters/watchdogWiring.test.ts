@@ -25,14 +25,31 @@
  */
 
 import { strict as assert } from 'node:assert'
-import { chmodSync, mkdtempSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { chmodSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
 import type { AgentEvent, TurnEndEvent } from '../contract/session.ts'
 import { ClaudePtyHookAdapter } from './claude.ts'
 import { CodexPtyHookAdapter } from './codex.ts'
 import { COMPOSER_JS } from './fakeCli.ts'
+import { suiteTempDir } from '../testkit/tempDir.ts'
+
+/**
+ * The run directories the adapters this file boots make for themselves, contained.
+ *
+ * `Claude.#boot` and `Codex.#boot` each `mkdtemp` a run directory under `os.tmpdir()` and
+ * never remove it. That is PRODUCTION behaviour and issue #203's business, not this file's --
+ * so rather than change it, the floor it lands on moves: `tmpdir()` re-reads `TMPDIR` on every
+ * call, so pointing it at a directory the testkit issued puts every run directory booted here
+ * inside something whose lifetime the helper already owns.
+ *
+ * Per FILE, and that is what makes it safe rather than a shared global: every test file runs
+ * in its own process under `node --test`, so this reaches no other suite, and the tests in
+ * this one stay isolated from each other exactly as before -- by `tempDir` handing each its
+ * own uniquely named child of this root.
+ */
+const ADAPTER_TMP_ROOT = suiteTempDir('adapter-run-root')
+process.env['TMPDIR'] = ADAPTER_TMP_ROOT
 
 /**
  * Stands in for `claude` / `codex` on PATH. Extensionless and shebanged, so Node runs it
@@ -99,7 +116,7 @@ post('SessionStart', { transcript_path: process.env.ORCH_FAKE_TRANSCRIPT })
 setInterval(function () {}, 1 << 30)
 `
 
-const RUN = mkdtempSync(join(tmpdir(), 'orch-fake-cli-'))
+const RUN = suiteTempDir('orch-fake-cli')
 const TRANSCRIPT = join(RUN, 'fake-transcript.jsonl')
 
 for (const name of ['claude', 'codex']) {

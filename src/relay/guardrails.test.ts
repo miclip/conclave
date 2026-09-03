@@ -6,10 +6,8 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
 import test from 'node:test'
+import { tempDir } from '../testkit/tempDir.ts'
 import {
   breached,
   ceilingSummary,
@@ -38,10 +36,10 @@ function at(over: Partial<CeilingState> = {}): CeilingState {
   return { elapsedMs: 0, turns: 0, queueDepth: 0, concurrentSeats: 0, ...over }
 }
 
-test('a directory with no repository is refused, with a remedy', () => {
+test('a directory with no repository is refused, with a remedy', (t) => {
   // A real relay was once started in /tmp/ignoretest purely to check a log line: two agent
   // sessions spawned and billed before it was killed. This check alone would have caught it.
-  const bare = mkdtempSync(join(tmpdir(), 'conclave-norepo-'))
+  const bare = tempDir(t, 'conclave-norepo')
   const refusals = preflightRefusals(bare)
 
   assert.equal(refusals.length, 1)
@@ -51,23 +49,23 @@ test('a directory with no repository is refused, with a remedy', () => {
   assert.match(refusals[0]!.remedy, /--force/)
 })
 
-test('--force overrides it, because a scratch directory is a real if unusual case', () => {
-  const bare = mkdtempSync(join(tmpdir(), 'conclave-norepo-'))
+test('--force overrides it, because a scratch directory is a real if unusual case', (t) => {
+  const bare = tempDir(t, 'conclave-norepo')
   assert.deepEqual(preflightRefusals(bare, { force: true }), [])
 })
 
-test('a repository passes, including a subdirectory of one', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'conclave-repo-'))
+test('a repository passes, including a subdirectory of one', (t) => {
+  const dir = tempDir(t, 'conclave-repo')
   execFileSync('git', ['init', '-q', '.'], { cwd: dir })
   assert.equal(insideGitRepo(dir), true)
   assert.deepEqual(preflightRefusals(dir), [])
 })
 
-test('nothing else is refused: Conclave must work in a project it has never seen', () => {
+test('nothing else is refused: Conclave must work in a project it has never seen', (t) => {
   // No check for an empty directory or a missing package.json. `config install` exists
   // precisely so a fresh checkout needs nothing, and refusing on those would break the
   // supported case to guard an unsupported one.
-  const dir = mkdtempSync(join(tmpdir(), 'conclave-empty-'))
+  const dir = tempDir(t, 'conclave-empty')
   execFileSync('git', ['init', '-q', '.'], { cwd: dir })
   assert.deepEqual(preflightRefusals(dir), [], 'an empty repository is a legitimate start')
 })
@@ -97,8 +95,8 @@ test('an unreadable volume refuses nothing, because a guard that cannot see must
   assert.equal(spaceWarning('/w', undefined), undefined)
 })
 
-test('--force overrides the disk floor, because the reading is evidence and not proof', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'conclave-disk-'))
+test('--force overrides the disk floor, because the reading is evidence and not proof', (t) => {
+  const dir = tempDir(t, 'conclave-disk')
   execFileSync('git', ['init', '-q', '.'], { cwd: dir })
   // Real volume, so this asserts the wiring rather than the threshold: the operator who forces
   // has been told the number and has decided.
@@ -163,10 +161,10 @@ test('an unrelated failure is not mistaken for a full volume, and a cause cycle 
   assert.equal(outOfSpace(a), false, 'terminates rather than hanging')
 })
 
-test('the floor is wired into the preflight, not merely defined beside it', () => {
+test('the floor is wired into the preflight, not merely defined beside it', (t) => {
   // Without this, every threshold test above would still pass with the check never called --
   // a guard that looks configured and does nothing, which is the worst failure a guard has.
-  const dir = mkdtempSync(join(tmpdir(), 'conclave-disk-wired-'))
+  const dir = tempDir(t, 'conclave-disk-wired')
   execFileSync('git', ['init', '-q', '.'], { cwd: dir })
   const refusals = preflightRefusals(dir, { readFree: () => DISK_FLOOR_BYTES - 1 })
   assert.equal(refusals.length, 1)
@@ -175,8 +173,8 @@ test('the floor is wired into the preflight, not merely defined beside it', () =
   assert.deepEqual(preflightRefusals(dir, { force: true, readFree: () => 0 }), [])
 })
 
-test('the warning band is wired in too, and stays non-fatal', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'conclave-disk-warn-'))
+test('the warning band is wired in too, and stays non-fatal', (t) => {
+  const dir = tempDir(t, 'conclave-disk-warn')
   execFileSync('git', ['init', '-q', '.'], { cwd: dir })
   const free = DISK_FLOOR_BYTES + 1
   assert.equal(preflightWarnings(dir, { readFree: () => free }).length, 1)

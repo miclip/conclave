@@ -6,14 +6,15 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
+import type { TestContext } from 'node:test'
+import { tempDir } from '../testkit/tempDir.ts'
 import { buildReviewContext, captureDiff, changedFiles, reviewPrompt } from './review.ts'
 
-function repo(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'conclave-review-'))
+function repo(t: TestContext): string {
+  const dir = tempDir(t, 'conclave-review')
   execFileSync('git', ['init', '-q'], { cwd: dir })
   writeFileSync(join(dir, 'work.ts'), 'export const answer = 42\n')
   execFileSync('git', ['add', '.'], { cwd: dir })
@@ -21,8 +22,8 @@ function repo(): string {
   return dir
 }
 
-test('captureDiff reads what changed against a base, committed or not', () => {
-  const dir = repo()
+test('captureDiff reads what changed against a base, committed or not', (t) => {
+  const dir = repo(t)
   const base = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: dir, encoding: 'utf8' }).trim()
   writeFileSync(join(dir, 'work.ts'), 'export const answer = 43\n')
   const diff = captureDiff({ root: dir, base })
@@ -30,19 +31,19 @@ test('captureDiff reads what changed against a base, committed or not', () => {
   assert.match(diff, /\+export const answer = 43/)
 })
 
-test('captureDiff sees UNCOMMITTED changes, not only committed ones', () => {
+test('captureDiff sees UNCOMMITTED changes, not only committed ones', (t) => {
   // The whole reason the diff is taken with one argument rather than `base..HEAD`: a seat
   // with no worktree does its work directly in the shared checkout, and nothing forces it
   // to commit before its turn ends.
-  const dir = repo()
+  const dir = repo(t)
   const base = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: dir, encoding: 'utf8' }).trim()
   writeFileSync(join(dir, 'work.ts'), 'export const answer = 99\n')
   const diff = captureDiff({ root: dir, base })
   assert.match(diff, /\+export const answer = 99/)
 })
 
-test('changedFiles names exactly the paths the diff touches', () => {
-  const dir = repo()
+test('changedFiles names exactly the paths the diff touches', (t) => {
+  const dir = repo(t)
   const base = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: dir, encoding: 'utf8' }).trim()
   writeFileSync(join(dir, 'work.ts'), 'export const answer = 43\n')
   writeFileSync(join(dir, 'new.ts'), 'export const other = 1\n')
@@ -50,15 +51,15 @@ test('changedFiles names exactly the paths the diff touches', () => {
   assert.deepEqual(changedFiles({ root: dir, base }).sort(), ['new.ts', 'work.ts'])
 })
 
-test('an unchanged tree produces an empty diff and no files', () => {
-  const dir = repo()
+test('an unchanged tree produces an empty diff and no files', (t) => {
+  const dir = repo(t)
   const base = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: dir, encoding: 'utf8' }).trim()
   assert.equal(captureDiff({ root: dir, base }).trim(), '')
   assert.deepEqual(changedFiles({ root: dir, base }), [])
 })
 
-test('buildReviewContext derives its file list from the diff, never from the caller', () => {
-  const dir = repo()
+test('buildReviewContext derives its file list from the diff, never from the caller', (t) => {
+  const dir = repo(t)
   const base = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: dir, encoding: 'utf8' }).trim()
   writeFileSync(join(dir, 'work.ts'), 'export const answer = 43\n')
   const ctx = buildReviewContext({

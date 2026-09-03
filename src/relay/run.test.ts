@@ -12,22 +12,23 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
+import type { TestContext } from 'node:test'
 import type { Verdict } from '../contract/outcome.ts'
 import type { AgentSession } from '../contract/session.ts'
 import { AgentRegistry } from '../registry/registry.ts'
 import { FakeRotationSession } from '../rotation/fakeSession.ts'
+import { tempDir } from '../testkit/tempDir.ts'
 import type { RelayEvent } from './observe.ts'
 import { Relay, type RelayOptions } from './relay.ts'
 import { RunHandle, type RunControl } from './run.ts'
 import { resolutionFor } from './resolution.ts'
 import { NO_DEADLINE_CLOCKS } from '../registry/types.ts'
 
-function repo(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'conclave-run-'))
+function repo(t: TestContext): string {
+  const dir = tempDir(t, 'conclave-run')
   execFileSync('git', ['init', '-q'], { cwd: dir })
   writeFileSync(join(dir, 'work.ts'), 'export const answer = 42\n')
   writeFileSync(join(dir, '.gitignore'), '.conclave/\n')
@@ -111,7 +112,7 @@ async function relayOf(
 }
 
 test('a run with nothing to decide ends without ever pausing', async (t) => {
-  const dir = repo()
+  const dir = repo(t)
   const relay = await relayOf(
     dir,
     new FakeRotationSession('advisor', 'codex', ['Do the thing.', 'DONE']),
@@ -126,7 +127,7 @@ test('a run with nothing to decide ends without ever pausing', async (t) => {
 })
 
 test('a rotation candidate pauses the loop and reports its evidence', async (t) => {
-  const dir = repo()
+  const dir = repo(t)
   const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it.'])
   const relay = await relayOf(dir, new FakeRotationSession('advisor', 'codex', ['Do the thing.', 'DONE']), [impl])
   t.after(() => relay.stop())
@@ -147,7 +148,7 @@ test('a rotation candidate pauses the loop and reports its evidence', async (t) 
 test('continuing resumes the loop where it was, rather than replaying the goal', async (t) => {
   // The whole point. Restarting run() was always available; continuing from the advisor turn the
   // session had actually reached was not.
-  const dir = repo()
+  const dir = repo(t)
   const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did the first thing.', 'Did the second thing.', 'NONE'])
   const advisor = new FakeRotationSession('advisor', 'codex', ['Do the first thing.', 'Do the second thing.', 'DONE'])
   const relay = await relayOf(dir, advisor, [impl])
@@ -170,7 +171,7 @@ test('continuing resumes the loop where it was, rather than replaying the goal',
 })
 
 test('rotating from a pause replaces the implementer and the loop carries on with it', async (t) => {
-  const dir = repo()
+  const dir = repo(t)
   const old = new FakeRotationSession('old', 'claude', ['ack', 'Did the first thing.'])
   const fresh = new FakeRotationSession('fresh', 'claude', [ACCEPTED, 'Carried on.', 'NONE'])
   const advisor = new FakeRotationSession('advisor', 'codex', ['Do the first thing.', HANDOFF, 'Do the second thing.', 'DONE'])
@@ -200,7 +201,7 @@ test('rotating from a pause replaces the implementer and the loop carries on wit
 })
 
 test('a failed rotation leaves the run paused with the original still in service', async (t) => {
-  const dir = repo()
+  const dir = repo(t)
   const old = new FakeRotationSession('old', 'claude', ['ack', 'Did it.', 'Did it again.'])
   const advisor = new FakeRotationSession('advisor', 'codex', ['Do it.', 'no headings here', 'Do it again.', 'DONE'])
   const relay = await relayOf(dir, advisor, [old, new FakeRotationSession('fresh', 'claude', [ACCEPTED])])
@@ -221,7 +222,7 @@ test('a failed rotation leaves the run paused with the original still in service
 })
 
 test('a constraint injected at a pause reaches the next turn at human rank', async (t) => {
-  const dir = repo()
+  const dir = repo(t)
   const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did the first thing.', 'Did the second.', 'NONE'])
   const advisor = new FakeRotationSession('advisor', 'codex', ['Do the first thing.', 'Do the second thing.', 'DONE'])
   const relay = await relayOf(dir, advisor, [impl])
@@ -244,7 +245,7 @@ test('a constraint injected at a pause reaches the next turn at human rank', asy
 })
 
 test('aborting from a pause ends the run and does not take another turn', async (t) => {
-  const dir = repo()
+  const dir = repo(t)
   const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it.', 'should never be sent'])
   const relay = await relayOf(dir, new FakeRotationSession('advisor', 'codex', ['Do it.', 'More.', 'DONE']), [impl])
   t.after(() => relay.stop())
@@ -264,7 +265,7 @@ test('aborting from a pause ends the run and does not take another turn', async 
 test('an advisor escalation is a pause, and continuing asks it again rather than replaying it', async (t) => {
   // Replaying `ESCALATE: ...` as an instruction would send the implementer a message with
   // no action in it, and the advisor would have no way to know the human had answered.
-  const dir = repo()
+  const dir = repo(t)
   const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it.'])
   const advisor = new FakeRotationSession('advisor', 'codex', [
     'ESCALATE: I do not know whether this is in scope.',
@@ -291,7 +292,7 @@ test('an implementer UNANSWERED marker pauses the run with the question and what
   // A FLAG: qualifies the result; an UNANSWERED: line asks a question that would change the
   // build if the implementer answered it itself. The loop stops before the advisor reasons
   // from an instruction that has not actually settled the scope.
-  const dir = repo()
+  const dir = repo(t)
   const impl = new FakeRotationSession('impl', 'claude', [
     'ack',
     'Read the existing routes.\n' +
@@ -333,7 +334,7 @@ test('a FLAG marker does not pause the run', async (t) => {
   // A FLAG: is a result-qualifying concern, not a build-blocking question. It is carried into
   // the summary and the run continues, so the distinction from UNANSWERED: is enforced by
   // behaviour rather than only by the briefing.
-  const dir = repo()
+  const dir = repo(t)
   const relay = await relayOf(
     dir,
     new FakeRotationSession('advisor', 'codex', ['Do it.', 'DONE']),
@@ -365,7 +366,7 @@ test('a declined candidate closes at its own generation, so a LATER compaction i
   // unchanged class (#118). `rotation.test.ts` owns the other side of #118: an evidence class
   // the operator has NOT ruled on -- a compaction the seat also complains about -- is a new
   // question and is still put, so declining once is not standing consent for anything else.
-  const dir = repo()
+  const dir = repo(t)
   const impl = new FakeRotationSession('impl', 'claude', ['ack', 'One.', 'Two.', 'Three.'])
   const advisor = new FakeRotationSession('advisor', 'codex', ['Do one.', 'Do two.', 'Do three.', 'DONE'])
   const relay = await relayOf(dir, advisor, [impl])
@@ -422,7 +423,7 @@ test('the advisor cannot end a session out from under an outstanding human instr
   // at the exact moment the advisor says DONE, and polling for that against fake sessions
   // is a race the poller always loses. The pause is how a human reaches this state; it is
   // not what is being tested.
-  const dir = repo()
+  const dir = repo(t)
   const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it.', 'Did the extra thing too.'])
   const advisor = new FakeRotationSession('advisor', 'codex', ['Do it.', 'DONE', 'DONE'])
   let relay: Relay
@@ -449,7 +450,7 @@ test('the advisor cannot end a session out from under an outstanding human instr
 })
 
 test('an advisor DONE with nothing outstanding ends the session as before', async (t) => {
-  const dir = repo()
+  const dir = repo(t)
   const relay = await relayOf(
     dir,
     new FakeRotationSession('advisor', 'codex', ['Do it.', 'DONE']),
@@ -470,7 +471,7 @@ test('a run that pauses with nobody watching fails result() instead of hanging',
   //
   // Not a timeout: at the moment of a pause with no watcher, result() provably cannot
   // settle without an operator action the caller has demonstrably not arranged.
-  const dir = repo()
+  const dir = repo(t)
   const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it.', 'And more.'])
   const advisor = new FakeRotationSession('advisor', 'codex', ['Do it.', 'Do more.', 'DONE'])
   const relay = await relayOf(dir, advisor, [impl])
@@ -489,7 +490,7 @@ test('a run that pauses with nobody watching fails result() instead of hanging',
 })
 
 test('settled() gives one await covering both a pause and the end', async (t) => {
-  const dir = repo()
+  const dir = repo(t)
   const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it.', 'And more.'])
   const advisor = new FakeRotationSession('advisor', 'codex', ['Do it.', 'Do more.', 'DONE'])
   const relay = await relayOf(dir, advisor, [impl])
@@ -511,7 +512,7 @@ test('settled() gives one await covering both a pause and the end', async (t) =>
 })
 
 test('settled() resolves immediately when the run is already paused or ended', async (t) => {
-  const dir = repo()
+  const dir = repo(t)
   const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it.'])
   const relay = await relayOf(dir, new FakeRotationSession('advisor', 'codex', ['Do it.', 'DONE']), [impl])
   t.after(() => relay.stop())
@@ -528,7 +529,7 @@ test('an advisor instruction that would undo an aside pauses BEFORE it is delive
   // The live case, in miniature. The advisor never saw the aside, meets work it did not
   // ask for, and says to remove it. The orchestrator neither adjudicates nor prohibits --
   // it stops before the instruction reaches the implementer and hands the human both sides.
-  const dir = repo()
+  const dir = repo(t)
   const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Wrote two.txt.', 'Removed it.'])
   const advisor = new FakeRotationSession('advisor', 'codex', ['Do it.', 'Remove two.txt and wait.', 'DONE'])
   const relay = await relayOf(dir, advisor, [impl])
@@ -602,7 +603,7 @@ test('relaying a removal-shaped restricted finding runs to the end without pausi
     'jira_projects, figma_files, atlassian_site and AHA_DOMAIN — and do not emit them from render_status ' +
     'or dt-access.'
 
-  const dir = repo()
+  const dir = repo(t)
   const impl = new FakeRotationSession('impl', 'claude', [
     'ack',
     'Removed the four scope strings.',
@@ -657,7 +658,7 @@ test('relaying a removal-shaped restricted finding runs to the end without pausi
 test('an adjudicated conflict is not raised again for the same instruction', async (t) => {
   // Same rule as a declined rotation candidate: a decision the human has already made must
   // not re-present itself, or the pause becomes noise and stops being read.
-  const dir = repo()
+  const dir = repo(t)
   const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Wrote two.txt.', 'Removed it.', 'Again.'])
   const advisor = new FakeRotationSession('advisor', 'codex', [
     'Do it.',
@@ -682,7 +683,7 @@ test('an adjudicated conflict is not raised again for the same instruction', asy
 })
 
 test('an advisor instruction unrelated to the aside is delivered without a pause', async (t) => {
-  const dir = repo()
+  const dir = repo(t)
   const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it.'])
   const advisor = new FakeRotationSession('advisor', 'codex', ['Remove the unused import.', 'DONE'])
   const relay = await relayOf(dir, advisor, [impl])
@@ -704,7 +705,7 @@ test('a pause suspends orchestration, not observation', async (t) => {
   // The adapter-side halves of this -- hook ingestion, transcript reconciliation, watchdog
   // supervision -- are not observable through fakes. They are pinned in
   // `pause.live.test.ts`, which is the only place they can be.
-  const dir = repo()
+  const dir = repo(t)
   const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it.', 'And again.'])
   const advisor = new FakeRotationSession('advisor', 'codex', ['Do it.', 'Do it again.', 'DONE'])
   const relay = await relayOf(dir, advisor, [impl])
@@ -741,7 +742,7 @@ test('a pause suspends orchestration, not observation', async (t) => {
 })
 
 test('untilPause resolves immediately for an operator that attaches late', async (t) => {
-  const dir = repo()
+  const dir = repo(t)
   const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it.'])
   const relay = await relayOf(dir, new FakeRotationSession('advisor', 'codex', ['Do it.', 'DONE']), [impl])
   t.after(() => relay.stop())
@@ -757,7 +758,7 @@ test('untilPause resolves immediately for an operator that attaches late', async
 })
 
 test('continuing a run that is not paused throws rather than doing nothing', async (t) => {
-  const dir = repo()
+  const dir = repo(t)
   const relay = await relayOf(
     dir,
     new FakeRotationSession('advisor', 'codex', ['Do it.', 'DONE']),
@@ -772,7 +773,7 @@ test('continuing a run that is not paused throws rather than doing nothing', asy
 })
 
 test('result() resolves for a caller that asks after the run already ended', async (t) => {
-  const dir = repo()
+  const dir = repo(t)
   const relay = await relayOf(
     dir,
     new FakeRotationSession('advisor', 'codex', ['Do it.', 'DONE']),
@@ -823,7 +824,7 @@ async function until<T>(what: string, f: () => T | undefined, ms = 3000): Promis
 }
 
 test('a verdict withdrawn while the human is deciding is surfaced on the pause itself', async (t) => {
-  const dir = repo()
+  const dir = repo(t)
   const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it, slowly.'])
   impl.endTurn = { index: 1, verdict: TIMED_OUT }
   const relay = await relayOf(dir, new FakeRotationSession('advisor', 'codex', ['Do it.', 'DONE']), [impl])
@@ -855,7 +856,7 @@ test('a verdict withdrawn while the human is deciding is surfaced on the pause i
 })
 
 test('the withdrawal is recorded, so the log says why the pause stopped meaning anything', async (t) => {
-  const dir = repo()
+  const dir = repo(t)
   const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it, slowly.'])
   impl.endTurn = { index: 1, verdict: TIMED_OUT }
   const relay = await relayOf(dir, new FakeRotationSession('advisor', 'codex', ['Do it.', 'DONE']), [impl])
@@ -875,7 +876,7 @@ test('the withdrawal is recorded, so the log says why the pause stopped meaning 
 })
 
 test('a verdict withdrawn BEFORE the check never raises a pause at all', async (t) => {
-  const dir = repo()
+  const dir = repo(t)
   const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it, slowly.'])
   // The window the relay used to lose: `#exchange` settles on the first turn_end, and the
   // late signal lands while it is still waiting for the transcript to catch up.
@@ -894,7 +895,7 @@ test('a verdict withdrawn BEFORE the check never raises a pause at all', async (
 })
 
 test('a withdrawal with no replacement pauses, and says so from the moment it is raised', async (t) => {
-  const dir = repo()
+  const dir = repo(t)
   const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it, slowly.'])
   impl.delayMs = 10
   impl.endTurn = { index: 1, verdict: TIMED_OUT, withdraw: 'no_replacement' }
@@ -912,7 +913,7 @@ test('a withdrawal with no replacement pauses, and says so from the moment it is
 })
 
 test("an ADVISOR verdict pause is amended when the verdict behind it is withdrawn", async (t) => {
-  const dir = repo()
+  const dir = repo(t)
   // The same watch, on the other seat, and it was registered for only one of them. `#halt` is
   // reached from both paths, but `#verdictPause` -- the field `#trackSupersession` keys off and
   // the only thing that can match a late revision to a live pause -- was set on the implementer
@@ -943,7 +944,7 @@ test("an ADVISOR verdict pause is amended when the verdict behind it is withdraw
 })
 
 test('a compaction revision does not mark a verdict pause superseded', async (t) => {
-  const dir = repo()
+  const dir = repo(t)
   const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it, slowly.'])
   impl.endTurn = { index: 1, verdict: TIMED_OUT }
   const relay = await relayOf(dir, new FakeRotationSession('advisor', 'codex', ['Do it.', 'DONE']), [impl])
@@ -962,7 +963,7 @@ test('a compaction revision does not mark a verdict pause superseded', async (t)
 })
 
 test('a late signal does not amend a pause that was never about a verdict', async (t) => {
-  const dir = repo()
+  const dir = repo(t)
   const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it.'])
   const relay = await relayOf(dir, new FakeRotationSession('advisor', 'codex', ['Do it.', 'DONE']), [impl])
   t.after(() => relay.stop())
@@ -986,7 +987,7 @@ test('a late signal does not amend a pause that was never about a verdict', asyn
 // ---------------------------------------------------------------------------------------
 
 test('supersession by completed says the turn ended', async (t) => {
-  const dir = repo()
+  const dir = repo(t)
   const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it, slowly.'])
   impl.endTurn = { index: 1, verdict: TIMED_OUT }
   const relay = await relayOf(dir, new FakeRotationSession('advisor', 'codex', ['Do it.', 'DONE']), [impl])
@@ -1006,7 +1007,7 @@ test('supersession by completed says the turn ended', async (t) => {
 })
 
 test('supersession by another timed_out says the turn is still running', async (t) => {
-  const dir = repo()
+  const dir = repo(t)
   const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it, slowly.'])
   impl.endTurn = { index: 1, verdict: TIMED_OUT }
   const relay = await relayOf(dir, new FakeRotationSession('advisor', 'codex', ['Do it.', 'DONE']), [impl])
@@ -1026,7 +1027,7 @@ test('supersession by another timed_out says the turn is still running', async (
 })
 
 test('supersession by a terminal verdict other than completed uses neutral formatVerdict wording', async (t) => {
-  const dir = repo()
+  const dir = repo(t)
   const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it, slowly.'])
   impl.endTurn = { index: 1, verdict: TIMED_OUT }
   const relay = await relayOf(dir, new FakeRotationSession('advisor', 'codex', ['Do it.', 'DONE']), [impl])
@@ -1046,7 +1047,7 @@ test('supersession by a terminal verdict other than completed uses neutral forma
 })
 
 test('an unexpired /wait carries across a re-raised pause with the same verdictOf', async (t) => {
-  const dir = repo()
+  const dir = repo(t)
   const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it, slowly.'])
   impl.endTurn = { index: 1, verdict: TIMED_OUT }
   const relay = await relayOf(dir, new FakeRotationSession('advisor', 'codex', ['Do it.', 'DONE']), [impl])
@@ -1070,7 +1071,7 @@ test('an unexpired /wait carries across a re-raised pause with the same verdictO
 })
 
 test('a /wait is not carried across a re-raised pause after it has expired', async (t) => {
-  const dir = repo()
+  const dir = repo(t)
   const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it, slowly.'])
   impl.endTurn = { index: 1, verdict: TIMED_OUT }
   const relay = await relayOf(dir, new FakeRotationSession('advisor', 'codex', ['Do it.', 'DONE']), [impl])
@@ -1090,7 +1091,7 @@ test('a /wait is not carried across a re-raised pause after it has expired', asy
 })
 
 test('a /wait is not carried to a fresh pause on a different turn', async (t) => {
-  const dir = repo()
+  const dir = repo(t)
   const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it, slowly.', 'Did it again.'])
   impl.endTurn = { index: 1, verdict: TIMED_OUT }
   const relay = await relayOf(dir, new FakeRotationSession('advisor', 'codex', ['Do it.', 'Do it again.', 'DONE']), [impl])
@@ -1256,7 +1257,7 @@ function collect(relay: Relay): { events: RelayEvent[]; detach: () => void } {
 }
 
 test('a pause and its resume reach an observer, bracketing the suspension', async (t) => {
-  const dir = repo()
+  const dir = repo(t)
   const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it.'])
   const relay = await relayOf(dir, new FakeRotationSession('advisor', 'codex', ['Do it.', 'DONE']), [impl])
   t.after(() => relay.stop())
@@ -1301,7 +1302,7 @@ test('a pause and its resume reach an observer, bracketing the suspension', asyn
 test('an aborted pause is never resumed', async (t) => {
   // The end of the run is what says the operator declined, and `run_end` already says it. A
   // resume followed immediately by the end would read as a session that carried on.
-  const dir = repo()
+  const dir = repo(t)
   const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it.'])
   const relay = await relayOf(dir, new FakeRotationSession('advisor', 'codex', ['Do it.', 'DONE']), [impl])
   t.after(() => relay.stop())
@@ -1324,7 +1325,7 @@ test('the pause on the stream is the one that gets amended, not a snapshot of it
   // handed here must be able to show that the verdict underneath it has been withdrawn --
   // there is no second event to tell it, because `supersede()` mutates in place precisely
   // because everyone who will hear about the pause already holds it.
-  const dir = repo()
+  const dir = repo(t)
   const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it, slowly.'])
   impl.endTurn = { index: 1, verdict: TIMED_OUT }
   const relay = await relayOf(dir, new FakeRotationSession('advisor', 'codex', ['Do it.', 'DONE']), [impl])

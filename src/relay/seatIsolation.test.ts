@@ -17,11 +17,12 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import test from 'node:test'
+import type { TestContext } from 'node:test'
 import { AsyncQueue } from '../adapters/asyncQueue.ts'
+import { tempDir } from '../testkit/tempDir.ts'
 import type { Verdict } from '../contract/outcome.ts'
 import type { AgentEvent, AgentSession, CloseMode, SessionSnapshot, SessionState, TurnKey } from '../contract/session.ts'
 import { guaranteesFor, turnKey } from '../contract/session.ts'
@@ -35,8 +36,8 @@ function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
 }
 
-function tempRepo(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'conclave-seat-'))
+function tempRepo(t: TestContext): string {
+  const dir = tempDir(t, 'conclave-seat')
   git(dir, 'init', '--quiet')
   git(dir, 'config', 'user.email', 'test@example.com')
   git(dir, 'config', 'user.name', 'Test')
@@ -241,10 +242,10 @@ function conclaveBranches(repo: string): string[] {
     .filter((b) => b.startsWith('conclave/'))
 }
 
-test('each seat is launched in its own worktree, and the advisor stays in the integration checkout', async () => {
-  const repo = tempRepo()
+test('each seat is launched in its own worktree, and the advisor stays in the integration checkout', async (t) => {
+  const repo = tempRepo(t)
   const created: Created[] = []
-  try {
+  {
     const relay = await Relay.start({
       registry: registryOf(
         {
@@ -285,15 +286,13 @@ test('each seat is launched in its own worktree, and the advisor stays in the in
     } finally {
       await relay.stop()
     }
-  } finally {
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
-test('a default run creates no worktree, no branch and no manifest', async () => {
-  const repo = tempRepo()
+test('a default run creates no worktree, no branch and no manifest', async (t) => {
+  const repo = tempRepo(t)
   const created: Created[] = []
-  try {
+  {
     const relay = await Relay.start({
       registry: registryOf(
         { lead: new SeatFakeSession('lead-1', 'lead', ['DONE']), impl: new SeatFakeSession('impl-1', 'impl') },
@@ -318,15 +317,13 @@ test('a default run creates no worktree, no branch and no manifest', async () =>
     } finally {
       await relay.stop()
     }
-  } finally {
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
-test('a default run still starts on a dirty checkout; the clean-base rule is for concurrency only', async () => {
-  const repo = tempRepo()
+test('a default run still starts on a dirty checkout; the clean-base rule is for concurrency only', async (t) => {
+  const repo = tempRepo(t)
   const created: Created[] = []
-  try {
+  {
     writeFileSync(join(repo, 'README.md'), '# the operator was mid-edit\n')
     writeFileSync(join(repo, 'scratch.txt'), 'untracked\n')
     const relay = await Relay.start({
@@ -340,15 +337,13 @@ test('a default run still starts on a dirty checkout; the clean-base rule is for
     })
     await relay.stop()
     assert.equal(created.length, 2, 'the default run has always started here and must keep doing so')
-  } finally {
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
-test('two implementers refuse to start on a dirty checkout, and launch nothing', async () => {
-  const repo = tempRepo()
+test('two implementers refuse to start on a dirty checkout, and launch nothing', async (t) => {
+  const repo = tempRepo(t)
   const created: Created[] = []
-  try {
+  {
     writeFileSync(join(repo, 'scratch.txt'), 'untracked\n')
     await assert.rejects(
       () =>
@@ -371,15 +366,13 @@ test('two implementers refuse to start on a dirty checkout, and launch nothing',
     )
     assert.deepEqual(created, [], 'the refusal must come before any adapter is launched')
     assert.ok(!existsSync(join(repo, '.conclave', 'worktrees')))
-  } finally {
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
-test('a seat that cannot be launched unwinds the trees the start had already created', async () => {
-  const repo = tempRepo()
+test('a seat that cannot be launched unwinds the trees the start had already created', async (t) => {
+  const repo = tempRepo(t)
   const created: Created[] = []
-  try {
+  {
     await assert.rejects(
       () =>
         Relay.start({
@@ -407,18 +400,16 @@ test('a seat that cannot be launched unwinds the trees the start had already cre
     )
     assert.deepEqual(conclaveBranches(repo), [], 'nor branches for seats that never existed')
     assert.equal(git(repo, 'status', '--porcelain').trim(), '', 'and the operator checkout is untouched')
-  } finally {
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
-test('a seat work reaches the integration checkout at its task boundary, and the trees go at stop', async () => {
-  const repo = tempRepo()
+test('a seat work reaches the integration checkout at its task boundary, and the trees go at stop', async (t) => {
+  const repo = tempRepo(t)
   const created: Created[] = []
   const lead = new SeatFakeSession('lead-1', 'lead', ['Do the thing.', 'DONE'])
   const alpha = new SeatFakeSession('alpha-1', 'alpha', ['ack', 'Wrote it.', 'NONE'])
   const beta = new SeatFakeSession('beta-1', 'beta', ['ack', 'NONE'])
-  try {
+  {
     const relay = await Relay.start({
       registry: registryOf({ lead, alpha, beta }, created),
       cwd: repo,
@@ -458,16 +449,14 @@ test('a seat work reaches the integration checkout at its task boundary, and the
     assert.deepEqual(conclaveBranches(repo), [], 'and their merged branches are deleted')
     assert.ok(!existsSync(worktreesRoot(repo, manifest.runId)), 'nothing retained means nothing left behind')
     assert.equal(readFileSync(join(repo, 'built.txt'), 'utf8'), 'by seat alpha\n', 'the work survives cleanup')
-  } finally {
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
-test('a seat holding work git cannot remove is retained at stop, with the commands to deal with it', async () => {
-  const repo = tempRepo()
+test('a seat holding work git cannot remove is retained at stop, with the commands to deal with it', async (t) => {
+  const repo = tempRepo(t)
   const created: Created[] = []
   const lead = new SeatFakeSession('lead-1', 'lead', ['DONE'])
-  try {
+  {
     const relay = await Relay.start({
       registry: registryOf(
         { lead, alpha: new SeatFakeSession('alpha-1', 'alpha'), beta: new SeatFakeSession('beta-1', 'beta') },
@@ -496,15 +485,13 @@ test('a seat holding work git cannot remove is retained at stop, with the comman
     assert.match(notes, /uncommitted work/)
     assert.ok(notes.includes(beta.worktreePath) && notes.includes(beta.branch))
     for (const verb of ['inspect:', 'merge:', 'discard:']) assert.ok(notes.includes(verb))
-  } finally {
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
-test('seat worktrees are not reported as subagent worktrees', async () => {
-  const repo = tempRepo()
+test('seat worktrees are not reported as subagent worktrees', async (t) => {
+  const repo = tempRepo(t)
   const created: Created[] = []
-  try {
+  {
     const relay = await Relay.start({
       registry: registryOf(
         {
@@ -530,8 +517,6 @@ test('seat worktrees are not reported as subagent worktrees', async () => {
     } finally {
       await relay.stop()
     }
-  } finally {
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
@@ -547,12 +532,12 @@ test('seat worktrees are not reported as subagent worktrees', async () => {
  * Driven through `ask` rather than a run, so nothing has crossed a task boundary yet: what is
  * asserted is the state of the trees while the seats are still working in them.
  */
-test('two seats writing the same filename write into two different checkouts', async () => {
-  const repo = tempRepo()
+test('two seats writing the same filename write into two different checkouts', async (t) => {
+  const repo = tempRepo(t)
   const created: Created[] = []
   const alpha = new SeatFakeSession('alpha-1', 'alpha', ['done alpha'])
   const beta = new SeatFakeSession('beta-1', 'beta', ['done beta'])
-  try {
+  {
     const relay = await Relay.start({
       registry: registryOf({ lead: new SeatFakeSession('lead-1', 'lead'), alpha, beta }, created),
       cwd: repo,
@@ -576,8 +561,6 @@ test('two seats writing the same filename write into two different checkouts', a
     } finally {
       await relay.stop()
     }
-  } finally {
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
@@ -593,11 +576,11 @@ test('two seats writing the same filename write into two different checkouts', a
  * only moment at which it helps: a directory created afterwards is a directory Codex has
  * already looked for and not found.
  */
-test('every seat worktree has its Codex hook trigger before its adapter is launched', async () => {
-  const repo = tempRepo()
+test('every seat worktree has its Codex hook trigger before its adapter is launched', async (t) => {
+  const repo = tempRepo(t)
   const created: Created[] = []
   const seenAtLaunch: Record<string, boolean> = {}
-  try {
+  {
     const registry = registryOf(
       {
         lead: new SeatFakeSession('lead-1', 'lead', ['DONE']),
@@ -634,8 +617,6 @@ test('every seat worktree has its Codex hook trigger before its adapter is launc
     } finally {
       await relay.stop()
     }
-  } finally {
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
@@ -648,12 +629,12 @@ test('every seat worktree has its Codex hook trigger before its adapter is launc
  * case that leaked every child already launched. Both halves are asserted here: the sessions
  * are closed AND the tree with work in it survives.
  */
-test('a failed start closes every launched session even when a tree has to be retained', async () => {
-  const repo = tempRepo()
+test('a failed start closes every launched session even when a tree has to be retained', async (t) => {
+  const repo = tempRepo(t)
   const created: Created[] = []
   const lead = new SeatFakeSession('lead-1', 'lead')
   const alpha = new SeatFakeSession('alpha-1', 'alpha')
-  try {
+  {
     await assert.rejects(
       () =>
         Relay.start({
@@ -679,8 +660,6 @@ test('a failed start closes every launched session even when a tree has to be re
     assert.equal(trees.length, 2, 'exactly the main worktree and the one that could not be unwound')
     assert.deepEqual(conclaveBranches(repo).length, 1)
     assert.equal(git(repo, 'status', '--porcelain').trim(), '', 'the operator checkout is untouched either way')
-  } finally {
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
@@ -704,9 +683,9 @@ async function conflictingRun(repo: string, seatReplies: { alpha: string[]; beta
   return { relay, lead, alpha, beta }
 }
 
-test('a seat whose merge conflicts is blocked, told to the advisor, and repaired by name', async () => {
-  const repo = tempRepo()
-  try {
+test('a seat whose merge conflicts is blocked, told to the advisor, and repaired by name', async (t) => {
+  const repo = tempRepo(t)
+  {
     const { relay, alpha, beta, lead } = await conflictingRun(
       repo,
       { alpha: ['ack', 'Set it to one.', 'NONE'], beta: ['ack', 'Set it to two.', 'Reconciled.', 'NONE'] },
@@ -760,14 +739,12 @@ test('a seat whose merge conflicts is blocked, told to the advisor, and repaired
     } finally {
       await relay.stop()
     }
-  } finally {
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
-test('a second failure against the same parent escalates, and blocks only that seat', async () => {
-  const repo = tempRepo()
-  try {
+test('a second failure against the same parent escalates, and blocks only that seat', async (t) => {
+  const repo = tempRepo(t)
+  {
     const { relay, alpha, beta } = await conflictingRun(
       repo,
       { alpha: ['ack', 'Set it to one.', 'NONE'], beta: ['ack', 'Set it to two.', 'Still stuck.', 'NONE'] },
@@ -807,8 +784,6 @@ test('a second failure against the same parent escalates, and blocks only that s
     } finally {
       await relay.stop()
     }
-  } finally {
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
@@ -821,9 +796,9 @@ test('a second failure against the same parent escalates, and blocks only that s
  * dependent of a conflicted task would be released to run against a base that never absorbed
  * it. The absence of `integratedAt` is the assertion; `failed` is the record of why.
  */
-test('a task whose merge conflicted is failed, not integrated, and never complete', async () => {
-  const repo = tempRepo()
-  try {
+test('a task whose merge conflicted is failed, not integrated, and never complete', async (t) => {
+  const repo = tempRepo(t)
+  {
     const { relay, alpha, beta } = await conflictingRun(
       repo,
       { alpha: ['ack', 'Set it to one.', 'NONE'], beta: ['ack', 'Set it to two.', 'Still stuck.', 'NONE'] },
@@ -865,8 +840,6 @@ test('a task whose merge conflicted is failed, not integrated, and never complet
     } finally {
       await relay.stop()
     }
-  } finally {
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
@@ -881,9 +854,9 @@ test('a task whose merge conflicted is failed, not integrated, and never complet
  * Provoked by making the seat's own worktree unusable mid-run, which is what a removed mount,
  * a permissions change, or an operator tidying up looks like from in here.
  */
-test('a boundary that throws blocks the seat and retains its work rather than releasing it', async () => {
-  const repo = tempRepo()
-  try {
+test('a boundary that throws blocks the seat and retains its work rather than releasing it', async (t) => {
+  const repo = tempRepo(t)
+  {
     const { relay, alpha } = await conflictingRun(
       repo,
       { alpha: ['ack', 'Did it.', 'NONE'], beta: ['ack', 'NONE'] },
@@ -922,8 +895,6 @@ test('a boundary that throws blocks the seat and retains its work rather than re
     } finally {
       await relay.stop()
     }
-  } finally {
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
@@ -934,9 +905,9 @@ test('a boundary that throws blocks the seat and retains its work rather than re
  * dispatcher's rule is unit-tested; this asserts the relay actually builds tasks that carry
  * the designation, which is the half a pure-function test cannot see.
  */
-test('only the designated repair enters a blocked seat, and it is designated by routing', async () => {
-  const repo = tempRepo()
-  try {
+test('only the designated repair enters a blocked seat, and it is designated by routing', async (t) => {
+  const repo = tempRepo(t)
+  {
     const { relay, alpha, beta } = await conflictingRun(
       repo,
       // One instruction MORE than the repair, so there is a later task to look at: the point is
@@ -969,8 +940,6 @@ test('only the designated repair enters a blocked seat, and it is designated by 
     } finally {
       await relay.stop()
     }
-  } finally {
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
@@ -988,9 +957,9 @@ test('only the designated repair enters a blocked seat, and it is designated by 
  * which at N=1 is the same question and at N>1 is this test. The advisor reaches a blocked seat
  * the way it is told to: by name.
  */
-test('an untargeted instruction goes to a free seat rather than to the blocked one', async () => {
-  const repo = tempRepo()
-  try {
+test('an untargeted instruction goes to a free seat rather than to the blocked one', async (t) => {
+  const repo = tempRepo(t)
+  {
     const { relay, alpha, beta, lead } = await conflictingRun(
       repo,
       {
@@ -1048,8 +1017,6 @@ test('an untargeted instruction goes to a free seat rather than to the blocked o
     } finally {
       await relay.stop()
     }
-  } finally {
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
@@ -1086,9 +1053,9 @@ function writeAfterEveryCommitOn(repo: string, branch: string, script: string): 
  *
  * The assertion is on a filename the notice could not have produced without reading the tree.
  */
-test('a conflict notice names what the seat wrote after its boundary commit', async () => {
-  const repo = tempRepo()
-  try {
+test('a conflict notice names what the seat wrote after its boundary commit', async (t) => {
+  const repo = tempRepo(t)
+  {
     const { relay, alpha, beta, lead } = await conflictingRun(
       repo,
       { alpha: ['ack', 'Set it to one.', 'NONE'], beta: ['ack', 'Set it to two.', 'Reconciled.', 'NONE'] },
@@ -1131,8 +1098,6 @@ test('a conflict notice names what the seat wrote after its boundary commit', as
     } finally {
       await relay.stop()
     }
-  } finally {
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
@@ -1143,9 +1108,9 @@ test('a conflict notice names what the seat wrote after its boundary commit', as
  * <branch> and its worktree is retained" whatever the worktree held, so the one reader with
  * the authority to discard the tree was the one reader given a reason not to look at it.
  */
-test('the merge_blocked halt evidence is read from the tree too', async () => {
-  const repo = tempRepo()
-  try {
+test('the merge_blocked halt evidence is read from the tree too', async (t) => {
+  const repo = tempRepo(t)
+  {
     const { relay, alpha, beta } = await conflictingRun(
       repo,
       { alpha: ['ack', 'Set it to one.', 'NONE'], beta: ['ack', 'Set it to two.', 'Still stuck.', 'NONE'] },
@@ -1175,8 +1140,6 @@ test('the merge_blocked halt evidence is read from the tree too', async () => {
     } finally {
       await relay.stop()
     }
-  } finally {
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
@@ -1193,9 +1156,9 @@ test('the merge_blocked halt evidence is read from the tree too', async () => {
  * gone can only be reported as unreadable, which proves the notice handles absence and not
  * that it reads content.
  */
-test('a boundary that throws reports the work still sitting in the tree', async () => {
-  const repo = tempRepo()
-  try {
+test('a boundary that throws reports the work still sitting in the tree', async (t) => {
+  const repo = tempRepo(t)
+  {
     const { relay, alpha, lead } = await conflictingRun(
       repo,
       { alpha: ['ack', 'Did it.', 'NONE'], beta: ['ack', 'NONE'] },
@@ -1233,8 +1196,6 @@ test('a boundary that throws reports the work still sitting in the tree', async 
     } finally {
       await relay.stop()
     }
-  } finally {
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
@@ -1245,9 +1206,9 @@ test('a boundary that throws reports the work still sitting in the tree', async 
  * evidence used to end "its branch is untouched" -- true, and beside the point, because the
  * branch is not where the work is when the boundary never got as far as committing.
  */
-test('a repeated boundary failure escalates with the tree state in its evidence', async () => {
-  const repo = tempRepo()
-  try {
+test('a repeated boundary failure escalates with the tree state in its evidence', async (t) => {
+  const repo = tempRepo(t)
+  {
     const { relay, alpha } = await conflictingRun(
       repo,
       { alpha: ['ack', 'Did it.', 'Tried again.', 'NONE'], beta: ['ack', 'NONE'] },
@@ -1278,8 +1239,6 @@ test('a repeated boundary failure escalates with the tree state in its evidence'
     } finally {
       await relay.stop()
     }
-  } finally {
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
@@ -1301,9 +1260,9 @@ test('a repeated boundary failure escalates with the tree state in its evidence'
  * about the turn is added beside it. Both facts appear in one operator notice, because an
  * operator who has to assemble them from two places will assemble them wrong.
  */
-test('an uncertain turn end is trailered on the commit and named in the notice', async () => {
-  const repo = tempRepo()
-  try {
+test('an uncertain turn end is trailered on the commit and named in the notice', async (t) => {
+  const repo = tempRepo(t)
+  {
     const { relay, alpha, beta, lead } = await conflictingRun(
       repo,
       { alpha: ['ack', 'Set it to one.', 'NONE'], beta: ['ack', 'Set it to two.', 'NONE'] },
@@ -1376,8 +1335,6 @@ test('an uncertain turn end is trailered on the commit and named in the notice',
     } finally {
       await relay.stop()
     }
-  } finally {
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
@@ -1387,9 +1344,9 @@ test('an uncertain turn end is trailered on the commit and named in the notice',
  * A turn that ended `completed (proven)` has a positive signal behind it. Recording doubt there
  * would train an operator to skip the line, which is how the one that mattered gets skipped.
  */
-test('an ordinary completed turn earns no turn-end trailer and no snapshot caveat', async () => {
-  const repo = tempRepo()
-  try {
+test('an ordinary completed turn earns no turn-end trailer and no snapshot caveat', async (t) => {
+  const repo = tempRepo(t)
+  {
     const { relay, alpha } = await conflictingRun(
       repo,
       { alpha: ['ack', 'Did it.', 'NONE'], beta: ['ack', 'NONE'] },
@@ -1415,8 +1372,6 @@ test('an ordinary completed turn earns no turn-end trailer and no snapshot cavea
     } finally {
       await relay.stop()
     }
-  } finally {
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
@@ -1427,9 +1382,9 @@ test('an ordinary completed turn earns no turn-end trailer and no snapshot cavea
  * changes that choice. Carried as its own evidence entry rather than appended to a sentence
  * about branches, because an operator scanning a list does not read into the middle of one.
  */
-test('a merge_blocked halt raised on an uncertain turn says the commit is a snapshot', async () => {
-  const repo = tempRepo()
-  try {
+test('a merge_blocked halt raised on an uncertain turn says the commit is a snapshot', async (t) => {
+  const repo = tempRepo(t)
+  {
     const { relay, alpha, beta } = await conflictingRun(
       repo,
       { alpha: ['ack', 'Set it to one.', 'NONE'], beta: ['ack', 'Set it to two.', 'Still stuck.', 'NONE'] },
@@ -1473,8 +1428,6 @@ test('a merge_blocked halt raised on an uncertain turn says the commit is a snap
     } finally {
       await relay.stop()
     }
-  } finally {
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
@@ -1491,9 +1444,9 @@ test('a merge_blocked halt raised on an uncertain turn says the commit is a snap
  * So the note is a timestamped observation plus the uncertainty, and cleanup is left to be the
  * thing that decides -- which it does here, on the file that arrived after the check.
  */
-test('a boundary that found nothing reports when it looked, and does not certify a no-op', async () => {
-  const repo = tempRepo()
-  try {
+test('a boundary that found nothing reports when it looked, and does not certify a no-op', async (t) => {
+  const repo = tempRepo(t)
+  {
     const { relay, alpha } = await conflictingRun(
       repo,
       { alpha: ['ack', 'Nothing to do.', 'NONE'], beta: ['ack', 'NONE'] },
@@ -1561,8 +1514,6 @@ test('a boundary that found nothing reports when it looked, and does not certify
     } finally {
       await relay.stop()
     }
-  } finally {
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
@@ -1578,9 +1529,9 @@ test('a boundary that found nothing reports when it looked, and does not certify
  * combination: the work is integrated, the trailer records that the turn was never confirmed,
  * and a named file is sitting in a tree everything else describes as finished with.
  */
-test('a merged boundary names what the child wrote after its commit', async () => {
-  const repo = tempRepo()
-  try {
+test('a merged boundary names what the child wrote after its commit', async (t) => {
+  const repo = tempRepo(t)
+  {
     const { relay, alpha } = await conflictingRun(
       repo,
       { alpha: ['ack', 'Did it.', 'NONE'], beta: ['ack', 'NONE'] },
@@ -1630,7 +1581,5 @@ test('a merged boundary names what the child wrote after its commit', async () =
     } finally {
       await relay.stop()
     }
-  } finally {
-    rmSync(repo, { recursive: true, force: true })
   }
 })

@@ -20,14 +20,15 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
+import type { TestContext } from 'node:test'
 import { AgentRegistry } from '../registry/registry.ts'
 import type { CreateParticipantContext, ResolvedParticipant } from '../registry/types.ts'
 import { NO_DEADLINE_CLOCKS } from '../registry/types.ts'
 import { FakeRotationSession } from '../rotation/fakeSession.ts'
+import { tempDir } from '../testkit/tempDir.ts'
 import { Relay, rotationFor, type RelayOptions } from './relay.ts'
 
 const HANDOFF = `## BRIEF
@@ -58,8 +59,8 @@ function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
 }
 
-function tempRepo(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'conclave-seat-rot-'))
+function tempRepo(t: TestContext): string {
+  const dir = tempDir(t, 'conclave-seat-rot')
   git(dir, 'init', '--quiet')
   git(dir, 'config', 'user.email', 'test@example.com')
   git(dir, 'config', 'user.name', 'Test')
@@ -178,11 +179,11 @@ test('rotationFor: the run policy is the default, and a seat amends it field by 
   assert.deepEqual(rotationFor({ checks: ['x'], seats: { implementer: { checks: [] } } }, 'implementer')?.checks, [])
 })
 
-test('a per-seat policy for a seat that does not exist is refused at start', async () => {
+test('a per-seat policy for a seat that does not exist is refused at start', async (t) => {
   // Ignoring it would leave the seat it was meant for on the run default -- which is the
   // configuration the operator was overriding -- and nothing would say so.
-  const repo = tempRepo()
-  try {
+  const repo = tempRepo(t)
+  {
     await assert.rejects(
       () =>
         twoSeatRelay(
@@ -193,19 +194,17 @@ test('a per-seat policy for a seat that does not exist is refused at start', asy
         ),
       /rotation\.seats names 'implementer-3'.*implementer, implementer-2/s,
     )
-  } finally {
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
-test('rotating one seat replaces that seat’s session and verifies it in that seat’s worktree', async () => {
-  const repo = tempRepo()
+test('rotating one seat replaces that seat’s session and verifies it in that seat’s worktree', async (t) => {
+  const repo = tempRepo(t)
   const advisor = new FakeRotationSession('advisor', 'codex', [HANDOFF])
   const one = new FakeRotationSession('one', 'claude')
   const two = new FakeRotationSession('two', 'claude')
   const fresh = new FakeRotationSession('two-fresh', 'claude', [ACCEPTED])
   const creates: CreateRecord[] = []
-  try {
+  {
     const relay = await twoSeatRelay(
       repo,
       advisor,
@@ -262,17 +261,15 @@ test('rotating one seat replaces that seat’s session and verifies it in that s
     } finally {
       await relay.stop()
     }
-  } finally {
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
-test('rotateSeat refuses a seat this run does not have, and a seat whose policy disarms it', async () => {
-  const repo = tempRepo()
+test('rotateSeat refuses a seat this run does not have, and a seat whose policy disarms it', async (t) => {
+  const repo = tempRepo(t)
   const advisor = new FakeRotationSession('advisor', 'codex', [HANDOFF])
   const one = new FakeRotationSession('one', 'claude')
   const two = new FakeRotationSession('two', 'claude')
-  try {
+  {
     const relay = await twoSeatRelay(repo, advisor, [one, two], {
       checks: ['exit 0'],
       checkTimeoutMs: 30_000,
@@ -297,8 +294,6 @@ test('rotateSeat refuses a seat this run does not have, and a seat whose policy 
     } finally {
       await relay.stop()
     }
-  } finally {
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
@@ -306,7 +301,7 @@ test('a seat set to act rotates on degradation while the run’s other seats onl
   // D7 as behaviour rather than as a resolved object: one policy, two seats, two different
   // responses to the same evidence. Both seats compact; only the one whose own policy says
   // `automatic` is replaced, and the other is recorded as a candidate and left alone.
-  const repo = tempRepo()
+  const repo = tempRepo(t)
   const advisor = new FakeRotationSession('advisor', 'codex', [
     '@seat implementer-2: Do the second thing.',
     HANDOFF,
@@ -320,7 +315,7 @@ test('a seat set to act rotates on degradation while the run’s other seats onl
   let during: { state: string; graded: boolean } | undefined
   /** A same-seat rotation attempted from outside while the LOOP's own one is in progress. */
   let concurrent: Promise<unknown> | undefined
-  try {
+  {
     const relay = await twoSeatRelay(repo, advisor, [one, two, fresh], {
       checks: ['exit 0'],
       checkTimeoutMs: 30_000,
@@ -348,50 +343,55 @@ test('a seat set to act rotates on degradation while the run’s other seats onl
         },
       },
     })
-    t.after(() => relay.stop())
+    try {
+      two.compactOnTurn = 1
+      const outcome = await relay.run('Keep the work moving.')
 
-    two.compactOnTurn = 1
-    const outcome = await relay.run('Keep the work moving.')
+      assert.notEqual(outcome.reason, 'transport_failed')
+      assert.equal(relay.rotationWatch.rotations, 1, 'the seat that opted in was replaced')
+      assert.equal(two.state, 'terminated')
+      assert.equal(relay.participants.find((p) => p.id === 'implementer-2')!.session, fresh)
+      // The run's own default is untouched by the override: the other seat is still under
+      // `candidate`, so nothing is spent on it.
+      assert.equal(one.state, 'running')
+      assert.ok(
+        relay.log.some((m) => /^rotating implementer-2/.test(m.text)),
+        'and the log names the seat that rotated, not "the implementer"',
+      )
 
-    assert.notEqual(outcome.reason, 'transport_failed')
-    assert.equal(relay.rotationWatch.rotations, 1, 'the seat that opted in was replaced')
-    assert.equal(two.state, 'terminated')
-    assert.equal(relay.participants.find((p) => p.id === 'implementer-2')!.session, fresh)
-    // The run's own default is untouched by the override: the other seat is still under
-    // `candidate`, so nothing is spent on it.
-    assert.equal(one.state, 'running')
-    assert.ok(
-      relay.log.some((m) => /^rotating implementer-2/.test(m.text)),
-      'and the log names the seat that rotated, not "the implementer"',
-    )
+      // The loop's rotation point, measured from inside the transaction. Both halves matter and
+      // both are claims a later reordering could falsify silently:
+      //
+      //   graded    the turn was observed and its verdict resolved BEFORE the session was
+      //             quiesced. This is what makes the loop's own rotation legal under the
+      //             mid-turn refusal in `rotateSeat` -- if this stopped holding, the loop would
+      //             start throwing at itself rather than rotating.
+      //   state     the seat is out of `running` before this and reports `rotation_pending`
+      //             while it happens, so nothing dispatches to a seat whose session is being
+      //             replaced and an operator polling the status is not told it is `integrating`
+      //             for the length of two agent turns.
+      assert.deepEqual(during, { state: 'rotation_pending', graded: true })
 
-    // The loop's rotation point, measured from inside the transaction. Both halves matter and
-    // both are claims a later reordering could falsify silently:
-    //
-    //   graded    the turn was observed and its verdict resolved BEFORE the session was
-    //             quiesced. This is what makes the loop's own rotation legal under the
-    //             mid-turn refusal in `rotateSeat` -- if this stopped holding, the loop would
-    //             start throwing at itself rather than rotating.
-    //   state     the seat is out of `running` before this and reports `rotation_pending`
-    //             while it happens, so nothing dispatches to a seat whose session is being
-    //             replaced and an operator polling the status is not told it is `integrating`
-    //             for the length of two agent turns.
-    assert.deepEqual(during, { state: 'rotation_pending', graded: true })
-
-    // And the same-seat guard holds for a scheduled seat, against the loop's own transaction:
-    // refused outright, so the loop's rotation is the one that completed and the operator's
-    // second request left no trace in the record.
-    const refusal = await concurrent
-    assert.ok(refusal instanceof Error, 'a second rotation of a seat already rotating must be refused')
-    assert.match(refusal.message, /implementer-2 is already being rotated/)
-    assert.equal(
-      relay.log.filter((m) => /^rotating implementer-2:/.test(m.text)).length,
-      1,
-      'one transaction announced, because one transaction happened',
-    )
-    assert.ok(!relay.log.some((m) => m.text.includes('reaching in mid-rotation')))
-  } finally {
-    rmSync(repo, { recursive: true, force: true })
+      // And the same-seat guard holds for a scheduled seat, against the loop's own transaction:
+      // refused outright, so the loop's rotation is the one that completed and the operator's
+      // second request left no trace in the record.
+      const refusal = await concurrent
+      assert.ok(refusal instanceof Error, 'a second rotation of a seat already rotating must be refused')
+      assert.match(refusal.message, /implementer-2 is already being rotated/)
+      assert.equal(
+        relay.log.filter((m) => /^rotating implementer-2:/.test(m.text)).length,
+        1,
+        'one transaction announced, because one transaction happened',
+      )
+      assert.ok(!relay.log.some((m) => m.text.includes('reaching in mid-rotation')))
+    } finally {
+      // Awaited HERE rather than from `t.after`, and that is not a style choice. `stop()`
+      // rewrites the worktree manifest, `repo(t)` registered the scratch directory's cleanup
+      // before this test ran, and node:test runs `after` hooks in registration order -- so a
+      // `t.after` stop would fire after the directory was deleted and write it back into
+      // existence. A `finally` in the body finishes before any hook starts.
+      await relay.stop()
+    }
   }
 })
 
@@ -404,7 +404,7 @@ test('a seat with a turn in flight is refused, and the run it was working on is 
   // then terminates it, and `quiesce()` drains input without waiting for the turn already
   // running -- so the seat's work would be in flight while its session was retired: no verdict,
   // no report, and a handoff record captured from a tree that turn was still writing to.
-  const repo = tempRepo()
+  const repo = tempRepo(t)
   const advisor = new FakeRotationSession('advisor', 'codex', [
     '@seat implementer-2: Do the second thing.',
     'DONE',
@@ -414,7 +414,7 @@ test('a seat with a turn in flight is refused, and the run it was working on is 
   const two = new FakeRotationSession('two', 'claude', ['ack', 'Did the second thing.', 'NONE'])
   const spare = new FakeRotationSession('two-fresh', 'claude', [ACCEPTED])
   const creates: CreateRecord[] = []
-  try {
+  {
     const relay = await twoSeatRelay(
       repo,
       advisor,
@@ -422,50 +422,55 @@ test('a seat with a turn in flight is refused, and the run it was working on is 
       { checks: ['exit 0'], checkTimeoutMs: 30_000 },
       creates,
     )
-    t.after(() => relay.stop())
+    try {
+      // A turn that actually spans time, so the attempt lands in the middle of one rather than in
+      // a gap between two. The request is made from the seat's own send, which is the instant the
+      // dispatcher has marked it `running` with an ungraded task.
+      two.delayMs = 80
+      let attempt: Promise<unknown> | undefined
+      two.onSend = (message: string) => {
+        if (!message.includes('Do the second thing')) return
+        // Settled to a value rather than left rejecting: an unhandled rejection would take the
+        // process down before the assertion below could read it.
+        attempt ??= relay.rotateSeat('implementer-2', 'an operator got impatient').then(
+          () => 'rotated',
+          (e: Error) => e,
+        )
+      }
 
-    // A turn that actually spans time, so the attempt lands in the middle of one rather than in
-    // a gap between two. The request is made from the seat's own send, which is the instant the
-    // dispatcher has marked it `running` with an ungraded task.
-    two.delayMs = 80
-    let attempt: Promise<unknown> | undefined
-    two.onSend = (message: string) => {
-      if (!message.includes('Do the second thing')) return
-      // Settled to a value rather than left rejecting: an unhandled rejection would take the
-      // process down before the assertion below could read it.
-      attempt ??= relay.rotateSeat('implementer-2', 'an operator got impatient').then(
-        () => 'rotated',
-        (e: Error) => e,
+      const outcome = await relay.run('Keep the work moving.')
+
+      const refusal = await attempt
+      assert.ok(refusal instanceof Error, 'a rotation over a live turn must be refused, not performed')
+      assert.match(refusal.message, /still working on/)
+      assert.match(refusal.message, /has not been observed and graded/)
+      // The refusal names what a caller has to do differently, not just that it said no.
+      assert.match(refusal.message, /does not wait for the turn already running/)
+
+      // Nothing was touched: the session was never quiesced, never retired, and no replacement was
+      // started for it.
+      assert.deepEqual(two.transitions, [], 'the live session must not have been put through a single transition')
+      assert.equal(relay.participants.find((p) => p.id === 'implementer-2')!.session, two)
+      assert.equal(relay.rotationWatch.rotations, 0)
+      assert.equal(creates.filter((c) => c.id === 'implementer-2').length, 1, 'no replacement was created')
+      assert.equal(spare.state, 'running')
+      assert.deepEqual(spare.received, [])
+
+      // And the run carried on through it. A refusal from an out-of-band caller is that caller's
+      // problem: the turn finished, was graded, and its report reached the advisor.
+      assert.equal(outcome.reason, 'done')
+      assert.ok(
+        advisor.received.some((m) => m.includes('Did the second thing')),
+        'the turn the rotation would have destroyed completed and was routed',
       )
+    } finally {
+      // Awaited HERE rather than from `t.after`, and that is not a style choice. `stop()`
+      // rewrites the worktree manifest, `repo(t)` registered the scratch directory's cleanup
+      // before this test ran, and node:test runs `after` hooks in registration order -- so a
+      // `t.after` stop would fire after the directory was deleted and write it back into
+      // existence. A `finally` in the body finishes before any hook starts.
+      await relay.stop()
     }
-
-    const outcome = await relay.run('Keep the work moving.')
-
-    const refusal = await attempt
-    assert.ok(refusal instanceof Error, 'a rotation over a live turn must be refused, not performed')
-    assert.match(refusal.message, /still working on/)
-    assert.match(refusal.message, /has not been observed and graded/)
-    // The refusal names what a caller has to do differently, not just that it said no.
-    assert.match(refusal.message, /does not wait for the turn already running/)
-
-    // Nothing was touched: the session was never quiesced, never retired, and no replacement was
-    // started for it.
-    assert.deepEqual(two.transitions, [], 'the live session must not have been put through a single transition')
-    assert.equal(relay.participants.find((p) => p.id === 'implementer-2')!.session, two)
-    assert.equal(relay.rotationWatch.rotations, 0)
-    assert.equal(creates.filter((c) => c.id === 'implementer-2').length, 1, 'no replacement was created')
-    assert.equal(spare.state, 'running')
-    assert.deepEqual(spare.received, [])
-
-    // And the run carried on through it. A refusal from an out-of-band caller is that caller's
-    // problem: the turn finished, was graded, and its report reached the advisor.
-    assert.equal(outcome.reason, 'done')
-    assert.ok(
-      advisor.received.some((m) => m.includes('Did the second thing')),
-      'the turn the rotation would have destroyed completed and was routed',
-    )
-  } finally {
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
@@ -479,13 +484,13 @@ test('a rotation requested while the ADVISOR is mid-turn is refused, and touches
   //
   // The target seat here is IDLE and its own guards would all pass -- which is the point of
   // driving it this way. Only the advisor's state makes this unsafe.
-  const repo = tempRepo()
+  const repo = tempRepo(t)
   const advisor = new FakeRotationSession('advisor', 'codex', ['@seat implementer: Do the thing.', 'DONE', 'DONE'])
   const one = new FakeRotationSession('one', 'claude', ['ack', 'Did it.', 'NONE'])
   const two = new FakeRotationSession('two', 'claude', ['ack', 'NONE', 'NONE'])
   const spare = new FakeRotationSession('spare', 'claude', [ACCEPTED])
   const creates: CreateRecord[] = []
-  try {
+  {
     const relay = await twoSeatRelay(
       repo,
       advisor,
@@ -493,49 +498,54 @@ test('a rotation requested while the ADVISOR is mid-turn is refused, and touches
       { checks: ['exit 0'], checkTimeoutMs: 30_000 },
       creates,
     )
-    t.after(() => relay.stop())
+    try {
+      // An advisor turn that spans time, so the request lands inside one rather than between two.
+      advisor.delayMs = 80
+      let attempt: Promise<unknown> | undefined
+      advisor.onSend = (message: string) => {
+        // The first advisor turn is its briefing; this fires on the turn that routes the seat's
+        // report, which is an ordinary mid-run advisor exchange.
+        if (!message.includes('Did it.')) return
+        attempt ??= relay.rotateSeat('implementer-2', 'an operator got impatient').then(
+          () => 'rotated',
+          (e: Error) => e,
+        )
+      }
 
-    // An advisor turn that spans time, so the request lands inside one rather than between two.
-    advisor.delayMs = 80
-    let attempt: Promise<unknown> | undefined
-    advisor.onSend = (message: string) => {
-      // The first advisor turn is its briefing; this fires on the turn that routes the seat's
-      // report, which is an ordinary mid-run advisor exchange.
-      if (!message.includes('Did it.')) return
-      attempt ??= relay.rotateSeat('implementer-2', 'an operator got impatient').then(
-        () => 'rotated',
-        (e: Error) => e,
-      )
+      const outcome = await relay.run('Keep the work moving.')
+
+      const refusal = await attempt
+      assert.ok(refusal instanceof Error, 'a rotation over a live advisor turn must be refused')
+      assert.match(refusal.message, /the advisor \(advisor\) has a turn in flight/)
+      assert.match(refusal.message, /second concurrent send/)
+      // Named the seat it declined to rotate, so the caller is not left guessing which request
+      // this answers when several are in flight.
+      assert.match(refusal.message, /rotating implementer-2/)
+
+      // NEITHER session was touched. The advisor's turn is the one that would have been corrupted,
+      // and the seat's is the one that would have been retired for it.
+      assert.deepEqual(two.transitions, [], 'the target seat was never quiesced')
+      assert.equal(relay.participants.find((p) => p.id === 'implementer-2')!.session, two)
+      assert.equal(relay.participants.find((p) => p.rank === 'advisor')!.session, advisor)
+      assert.equal(advisor.state, 'running')
+      assert.equal(relay.rotationWatch.rotations, 0)
+      assert.equal(creates.filter((c) => c.id === 'implementer-2').length, 1, 'no replacement was created')
+      assert.deepEqual(spare.received, [], 'and none was spoken to')
+      // The advisor was never asked for a handoff, which is the send that would have collided.
+      assert.ok(!advisor.received.some((m) => /## BRIEF|handoff/i.test(m)))
+
+      // And the run finished normally: the refusal belongs to the caller that made it, not to the
+      // run it was made against.
+      assert.equal(outcome.reason, 'done')
+      assert.ok(advisor.received.some((m) => m.includes('Did it.')), 'the advisor turn completed and was read')
+    } finally {
+      // Awaited HERE rather than from `t.after`, and that is not a style choice. `stop()`
+      // rewrites the worktree manifest, `repo(t)` registered the scratch directory's cleanup
+      // before this test ran, and node:test runs `after` hooks in registration order -- so a
+      // `t.after` stop would fire after the directory was deleted and write it back into
+      // existence. A `finally` in the body finishes before any hook starts.
+      await relay.stop()
     }
-
-    const outcome = await relay.run('Keep the work moving.')
-
-    const refusal = await attempt
-    assert.ok(refusal instanceof Error, 'a rotation over a live advisor turn must be refused')
-    assert.match(refusal.message, /the advisor \(advisor\) has a turn in flight/)
-    assert.match(refusal.message, /second concurrent send/)
-    // Named the seat it declined to rotate, so the caller is not left guessing which request
-    // this answers when several are in flight.
-    assert.match(refusal.message, /rotating implementer-2/)
-
-    // NEITHER session was touched. The advisor's turn is the one that would have been corrupted,
-    // and the seat's is the one that would have been retired for it.
-    assert.deepEqual(two.transitions, [], 'the target seat was never quiesced')
-    assert.equal(relay.participants.find((p) => p.id === 'implementer-2')!.session, two)
-    assert.equal(relay.participants.find((p) => p.rank === 'advisor')!.session, advisor)
-    assert.equal(advisor.state, 'running')
-    assert.equal(relay.rotationWatch.rotations, 0)
-    assert.equal(creates.filter((c) => c.id === 'implementer-2').length, 1, 'no replacement was created')
-    assert.deepEqual(spare.received, [], 'and none was spoken to')
-    // The advisor was never asked for a handoff, which is the send that would have collided.
-    assert.ok(!advisor.received.some((m) => /## BRIEF|handoff/i.test(m)))
-
-    // And the run finished normally: the refusal belongs to the caller that made it, not to the
-    // run it was made against.
-    assert.equal(outcome.reason, 'done')
-    assert.ok(advisor.received.some((m) => m.includes('Did it.')), 'the advisor turn completed and was read')
-  } finally {
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
@@ -549,14 +559,14 @@ test('a second rotation of the SAME seat is refused before anything happens, and
   // the first is already replacing, and asked the advisor for a second handoff describing a state
   // that is being handed over as it reads it. What the lane then says — "its rotation section
   // would wait for itself" — describes a mutex to an operator who asked to replace a seat twice.
-  const repo = tempRepo()
+  const repo = tempRepo(t)
   const advisor = new FakeRotationSession('advisor', 'codex', [HANDOFF, HANDOFF])
   const impl = new FakeRotationSession('impl', 'claude')
   const fresh = new FakeRotationSession('fresh', 'claude', [ACCEPTED])
   const spare = new FakeRotationSession('spare', 'claude', [ACCEPTED])
   const creates: CreateRecord[] = []
   let second: Promise<unknown> | undefined
-  try {
+  {
     const relay = await Relay.start({
       registry: registryOf({ codex: [advisor], claude: [impl, fresh, spare] }, creates),
       cwd: repo,
@@ -620,8 +630,6 @@ test('a second rotation of the SAME seat is refused before anything happens, and
       'one section, so the second never acquired the lane at all',
     )
     assert.equal(relay.rotationWatch.rotations, 1)
-  } finally {
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
@@ -634,11 +642,11 @@ test('a rotation that fails releases the seat, so the next one is not refused by
   // Both ways out of the transaction are exercised, because they leave by different doors: a
   // throw from `rotate()` before anything is negotiated, and an ordinary rolled-back result.
   // Each step passing IS the assertion that the step before it released the seat.
-  const repo = tempRepo()
+  const repo = tempRepo(t)
   const advisor = new FakeRotationSession('advisor', 'codex', ['this is not a handoff', HANDOFF])
   const impl = new FakeRotationSession('impl', 'claude')
   const fresh = new FakeRotationSession('fresh', 'claude', [ACCEPTED])
-  try {
+  {
     const relay = await Relay.start({
       registry: registryOf({ codex: [advisor], claude: [impl, fresh] }),
       cwd: repo,
@@ -681,8 +689,6 @@ test('a rotation that fails releases the seat, so the next one is not refused by
       ['implementer/rotation', 'implementer/rotation', 'implementer/rotation'],
       'three sections reached the lane and three released it',
     )
-  } finally {
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
@@ -694,7 +700,7 @@ test('a rotation that only CONTENDS for the check lane still runs — it queues,
   // Constructed through the transaction's own barrier: inside `implementer`'s rotation, with the
   // lane held and the advisor idle (its handoff turn is already done), a second rotation is
   // started for the other seat. It must be admitted, wait, and then complete.
-  const repo = tempRepo()
+  const repo = tempRepo(t)
   const advisor = new FakeRotationSession('advisor', 'codex', [HANDOFF, HANDOFF])
   const one = new FakeRotationSession('one', 'claude')
   const two = new FakeRotationSession('two', 'claude')
@@ -702,7 +708,7 @@ test('a rotation that only CONTENDS for the check lane still runs — it queues,
   const twoFresh = new FakeRotationSession('two-fresh', 'claude', [ACCEPTED])
   let second: Promise<unknown> | undefined
   let heldDuring: string | undefined
-  try {
+  {
     const relay = await twoSeatRelay(repo, advisor, [one, two, oneFresh, twoFresh], {
       checks: ['exit 0'],
       checkTimeoutMs: 30_000,
@@ -725,36 +731,41 @@ test('a rotation that only CONTENDS for the check lane still runs — it queues,
         },
       },
     })
-    t.after(() => relay.stop())
+    try {
+      const first = await relay.rotateSeat('implementer', 'the first seat')
+      const secondResult = await second
 
-    const first = await relay.rotateSeat('implementer', 'the first seat')
-    const secondResult = await second
-
-    assert.equal(heldDuring, 'implementer/rotation', 'the barrier really did run with the lane held')
-    assert.equal(first.status, 'rotated')
-    assert.equal(
-      secondResult,
-      'rotated',
-      'a rotation that merely contends for the lane must be admitted and queued, never refused',
-    )
-    // Serialised, and in the order they asked. Overlapping them is what would let a merge move
-    // the tree between a rotation's two captures.
-    assert.deepEqual(
-      relay.checkLane.history().map((h) => `${h.seat}/${h.station}`),
-      ['implementer/rotation', 'implementer-2/rotation'],
-    )
-    // The wait was narrated where an operator would otherwise see an unexplained gap.
-    assert.ok(
-      relay.log.some((m) => /implementer-2's rotation section is waiting for the check lane/.test(m.text)),
-      'a wait of this length that says nothing is the silence the note exists to fill',
-    )
-    assert.ok(relay.log.some((m) => /queued, not blocked/.test(m.text)))
-    // Both seats really were replaced, in their own trees.
-    assert.equal(relay.participants.find((p) => p.id === 'implementer')!.session, oneFresh)
-    assert.equal(relay.participants.find((p) => p.id === 'implementer-2')!.session, twoFresh)
-    assert.equal(relay.rotationWatch.rotations, 2)
-  } finally {
-    rmSync(repo, { recursive: true, force: true })
+      assert.equal(heldDuring, 'implementer/rotation', 'the barrier really did run with the lane held')
+      assert.equal(first.status, 'rotated')
+      assert.equal(
+        secondResult,
+        'rotated',
+        'a rotation that merely contends for the lane must be admitted and queued, never refused',
+      )
+      // Serialised, and in the order they asked. Overlapping them is what would let a merge move
+      // the tree between a rotation's two captures.
+      assert.deepEqual(
+        relay.checkLane.history().map((h) => `${h.seat}/${h.station}`),
+        ['implementer/rotation', 'implementer-2/rotation'],
+      )
+      // The wait was narrated where an operator would otherwise see an unexplained gap.
+      assert.ok(
+        relay.log.some((m) => /implementer-2's rotation section is waiting for the check lane/.test(m.text)),
+        'a wait of this length that says nothing is the silence the note exists to fill',
+      )
+      assert.ok(relay.log.some((m) => /queued, not blocked/.test(m.text)))
+      // Both seats really were replaced, in their own trees.
+      assert.equal(relay.participants.find((p) => p.id === 'implementer')!.session, oneFresh)
+      assert.equal(relay.participants.find((p) => p.id === 'implementer-2')!.session, twoFresh)
+      assert.equal(relay.rotationWatch.rotations, 2)
+    } finally {
+      // Awaited HERE rather than from `t.after`, and that is not a style choice. `stop()`
+      // rewrites the worktree manifest, `repo(t)` registered the scratch directory's cleanup
+      // before this test ran, and node:test runs `after` hooks in registration order -- so a
+      // `t.after` stop would fire after the directory was deleted and write it back into
+      // existence. A `finally` in the body finishes before any hook starts.
+      await relay.stop()
+    }
   }
 })
 
@@ -764,7 +775,7 @@ test('rotate at a pause replaces the seat the pause is ABOUT, not "the implement
   // act on the seat the operator is looking at. A `rotate` that quietly replaced the lead
   // instead would retire a healthy session and leave the degraded one in place -- and both
   // sessions are alive afterwards either way, so nothing but this assertion would notice.
-  const repo = tempRepo()
+  const repo = tempRepo(t)
   const advisor = new FakeRotationSession('advisor', 'codex', [
     '@seat implementer-2: Do the second thing.',
     HANDOFF,
@@ -774,38 +785,43 @@ test('rotate at a pause replaces the seat the pause is ABOUT, not "the implement
   const one = new FakeRotationSession('one', 'claude', ['ack', 'NONE', 'NONE'])
   const two = new FakeRotationSession('two', 'claude', ['ack', 'Did the second thing.', 'NONE'])
   const fresh = new FakeRotationSession('two-fresh', 'claude', [ACCEPTED, 'NONE'])
-  try {
+  {
     // The run default, which is what makes this a pause rather than an automatic rotation: the
     // policy to act unattended is not earned, so degradation raises a candidate and asks.
     const relay = await twoSeatRelay(repo, advisor, [one, two, fresh], {
       checks: ['exit 0'],
       checkTimeoutMs: 30_000,
     })
-    t.after(() => relay.stop())
+    try {
+      two.compactOnTurn = 1
+      const run = relay.start('Keep the work moving.')
+      const pause = await run.untilPause()
 
-    two.compactOnTurn = 1
-    const run = relay.start('Keep the work moving.')
-    const pause = await run.untilPause()
+      assert.ok(pause, 'a rotation candidate must reach the operator')
+      assert.equal(pause.reason, 'rotation_candidate')
+      assert.deepEqual(pause.resolution.scope, { kind: 'participant', participantId: 'implementer-2' })
+      assert.ok(
+        pause.options.includes('rotate'),
+        'the option must be offered at N>1 now that rotation can name the seat this pause is about',
+      )
 
-    assert.ok(pause, 'a rotation candidate must reach the operator')
-    assert.equal(pause.reason, 'rotation_candidate')
-    assert.deepEqual(pause.resolution.scope, { kind: 'participant', participantId: 'implementer-2' })
-    assert.ok(
-      pause.options.includes('rotate'),
-      'the option must be offered at N>1 now that rotation can name the seat this pause is about',
-    )
+      const result = await run.rotateImplementer('the operator chose to replace it')
+      assert.equal(result.status, 'rotated')
+      assert.equal(relay.participants.find((p) => p.id === 'implementer-2')!.session, fresh)
+      assert.equal(two.state, 'terminated')
+      // The seat nobody asked about.
+      assert.equal(relay.participants.find((p) => p.id === 'implementer')!.session, one)
+      assert.equal(one.state, 'running')
 
-    const result = await run.rotateImplementer('the operator chose to replace it')
-    assert.equal(result.status, 'rotated')
-    assert.equal(relay.participants.find((p) => p.id === 'implementer-2')!.session, fresh)
-    assert.equal(two.state, 'terminated')
-    // The seat nobody asked about.
-    assert.equal(relay.participants.find((p) => p.id === 'implementer')!.session, one)
-    assert.equal(one.state, 'running')
-
-    await run.abort()
-  } finally {
-    rmSync(repo, { recursive: true, force: true })
+      await run.abort()
+    } finally {
+      // Awaited HERE rather than from `t.after`, and that is not a style choice. `stop()`
+      // rewrites the worktree manifest, `repo(t)` registered the scratch directory's cleanup
+      // before this test ran, and node:test runs `after` hooks in registration order -- so a
+      // `t.after` stop would fire after the directory was deleted and write it back into
+      // existence. A `finally` in the body finishes before any hook starts.
+      await relay.stop()
+    }
   }
 })
 
@@ -814,14 +830,14 @@ test('acceptance with no observable output is reported as unobservable, not as a
   // what was missing is that the operator could not tell "this replacement did not meet the bar"
   // from "nothing can meet it while this holds", and the first invites a retry that the second
   // turns into a loop.
-  const repo = tempRepo()
+  const repo = tempRepo(t)
   const advisor = new FakeRotationSession('advisor', 'codex', [HANDOFF, HANDOFF])
   const impl = new FakeRotationSession('impl', 'claude')
   // A replacement that starts, takes the send, ends its turn -- and produces no prose at all,
   // which is what a wedged transport looks like from here.
   const silent = new FakeRotationSession('silent', 'claude', [])
   const spare = new FakeRotationSession('spare', 'claude', [ACCEPTED])
-  try {
+  {
     const relay = await Relay.start({
       registry: registryOf({ codex: [advisor], claude: [impl, silent, spare] }),
       cwd: repo,
@@ -870,7 +886,5 @@ test('acceptance with no observable output is reported as unobservable, not as a
     )
     assert.ok(relay.log.some((m) => /no replacement can pass while that holds/.test(m.text)))
     assert.equal(relay.rotationWatch.rotations, 0)
-  } finally {
-    rmSync(repo, { recursive: true, force: true })
   }
 })

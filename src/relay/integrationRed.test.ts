@@ -22,11 +22,12 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync, spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { existsSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
+import type { TestContext } from 'node:test'
 import { FakeRotationSession } from '../rotation/fakeSession.ts'
+import { tempDir } from '../testkit/tempDir.ts'
 import { AgentRegistry } from '../registry/registry.ts'
 import { NO_DEADLINE_CLOCKS } from '../registry/types.ts'
 import { Relay } from './relay.ts'
@@ -44,8 +45,8 @@ function git(cwd: string, ...args: string[]): string {
  * The guard arrives as one seat's WORK, which is what makes each half individually green: it
  * does not exist in the other seat's tree, and the rename has not happened in its own.
  */
-function tempRepo(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'conclave-red-'))
+function tempRepo(t: TestContext): string {
+  const dir = tempDir(t, 'conclave-red')
   git(dir, 'init', '--quiet')
   git(dir, 'config', 'user.email', 'test@example.com')
   git(dir, 'config', 'user.name', 'Test')
@@ -155,9 +156,9 @@ function orchestratorNotices(advisor: FakeRotationSession): string {
   return advisor.received.filter((m) => m.includes('[ORCHESTRATOR — mechanical')).join('\n\n')
 }
 
-test('a red integration tree mid-run is repaired: a task is dispatched, taken, merged, and the tree measured green', async () => {
-  const repo = tempRepo()
-  try {
+test('a red integration tree mid-run is repaired: a task is dispatched, taken, merged, and the tree measured green', async (t) => {
+  const repo = tempRepo(t)
+  {
     // One instruction per turn, so the second merge happens with the run still admitting work
     // and a seat still free to take a repair. The third reply is the advisor acting on the
     // notice — this test's subject is that the repair becomes REAL WORK, not that prose asking
@@ -234,14 +235,12 @@ test('a red integration tree mid-run is repaired: a task is dispatched, taken, m
     } finally {
       await relay.stop()
     }
-  } finally {
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
-test('an unrepaired red tree still ends the run unsuccessfully, however ordinary the advisor thinks it went', async () => {
-  const repo = tempRepo()
-  try {
+test('an unrepaired red tree still ends the run unsuccessfully, however ordinary the advisor thinks it went', async (t) => {
+  const repo = tempRepo(t)
+  {
     // The same mid-run failure with no repair dispatched: the advisor is told, does nothing
     // about it, and calls the work done. The tree is what it is.
     const { relay, advisor, outcome } = await twoSeatRun(
@@ -260,14 +259,12 @@ test('an unrepaired red tree still ends the run unsuccessfully, however ordinary
     } finally {
       await relay.stop()
     }
-  } finally {
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
-test('a red tree after the final merge is a reported outcome rather than a task nobody can take', async () => {
-  const repo = tempRepo()
-  try {
+test('a red tree after the final merge is a reported outcome rather than a task nobody can take', async (t) => {
+  const repo = tempRepo(t)
+  {
     // Both seats dispatched in ONE advisor reply, with a one-turn budget. The second seat's
     // work therefore crosses its boundary during the drain, after the run has decided to end:
     // no admission, no seat left to instruct, exactly the addendum's dangerous case.
@@ -308,8 +305,6 @@ test('a red tree after the final merge is a reported outcome rather than a task 
     } finally {
       await relay.stop()
     }
-  } finally {
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
@@ -322,9 +317,9 @@ test('a red tree after the final merge is a reported outcome rather than a task 
  * Proved by counting EXECUTIONS — a check that fired once would append a line here — rather
  * than by asserting the outcome, which would pass just as well if the command ran and passed.
  */
-test('one seat runs the configured checks exactly as often as it did before: never, at the boundary', async () => {
-  const repo = tempRepo()
-  try {
+test('one seat runs the configured checks exactly as often as it did before: never, at the boundary', async (t) => {
+  const repo = tempRepo(t)
+  {
     const marks = join(repo, 'ran.log')
     const advisor = new FakeRotationSession('advisor', 'codex', ['Do the thing.', 'DONE', 'DONE'])
     const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it.', 'NONE'])
@@ -357,14 +352,12 @@ test('one seat runs the configured checks exactly as often as it did before: nev
     } finally {
       await relay.stop()
     }
-  } finally {
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
-test('a green integration tree changes nothing about the run', async () => {
-  const repo = tempRepo()
-  try {
+test('a green integration tree changes nothing about the run', async (t) => {
+  const repo = tempRepo(t)
+  {
     // The same two seats and the same arming, with the guard REMOVED from the scenario: both
     // seats do work that survives the merge. Nothing is told to the advisor and the run ends
     // as it always did — the station must be silent when the tree is fine.
@@ -399,7 +392,5 @@ test('a green integration tree changes nothing about the run', async () => {
     } finally {
       await relay.stop()
     }
-  } finally {
-    rmSync(repo, { recursive: true, force: true })
   }
 })

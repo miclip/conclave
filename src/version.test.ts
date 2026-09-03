@@ -15,16 +15,18 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync, spawnSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
+import type { TestContext } from 'node:test'
+import { tempDir } from './testkit/tempDir.ts'
 
 const REPO = realpathSync(join(import.meta.dirname, '..'))
 
 /** A temp directory with the same package.json + version.ts layout, and no git. */
-function releaseTree(version: string): string {
-  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'conclave-version-release-')))
+function releaseTree(t: TestContext, version: string): string {
+  const dir = tempDir(t, 'conclave-version-release')
   mkdirSync(join(dir, 'src'), { recursive: true })
   writeFileSync(join(dir, 'package.json'), JSON.stringify({ version }))
   // Copy the module itself so its `import.meta.dirname` points inside the temp tree.
@@ -33,8 +35,8 @@ function releaseTree(version: string): string {
 }
 
 /** A temp directory with the same layout, initialised as a git checkout. */
-function checkout(version: string): string {
-  const dir = releaseTree(version)
+function checkout(t: TestContext, version: string): string {
+  const dir = releaseTree(t, version)
   execFileSync('git', ['init', '-q'], { cwd: dir })
   execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'add', '.'], { cwd: dir })
   execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'init'], { cwd: dir })
@@ -61,8 +63,8 @@ console.log(version())
  * version. A plain version number alone is not enough for a working tree that can move after
  * the release tag.
  */
-test('a checkout reports its package version and short commit', () => {
-  const dir = checkout('9.9.9')
+test('a checkout reports its package version and short commit', (t) => {
+  const dir = checkout(t, '9.9.9')
   const v = versionIn(dir)
   const commit = execFileSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: dir, encoding: 'utf8' }).trim()
 
@@ -76,8 +78,8 @@ test('a checkout reports its package version and short commit', () => {
  * uncommitted changes. Reporting the commit alone would claim the checkout is exactly that
  * commit, which is false; the `-dirty` suffix is the difference between exact and close.
  */
-test('a dirty checkout appends -dirty to the reported identity', () => {
-  const dir = checkout('9.9.9')
+test('a dirty checkout appends -dirty to the reported identity', (t) => {
+  const dir = checkout(t, '9.9.9')
   writeFileSync(join(dir, 'marker.txt'), 'changed')
 
   const v = versionIn(dir)
@@ -93,8 +95,8 @@ test('a dirty checkout appends -dirty to the reported identity', () => {
  * here was a working tree that reported only the tag; the release case is the inverse: it
  * must not try to report what it does not have.
  */
-test('a release tree with no git returns only the package version', () => {
-  const dir = releaseTree('1.2.3')
+test('a release tree with no git returns only the package version', (t) => {
+  const dir = releaseTree(t, '1.2.3')
   const v = versionIn(dir)
 
   assert.equal(v, '1.2.3', `release tree must return only the package version, got: ${v}`)
@@ -108,8 +110,8 @@ test('a release tree with no git returns only the package version', () => {
  * identity; the current one guards against that by comparing `--show-toplevel` to the install
  * root.
  */
-test('a non-checkout inside another git repo returns only the package version', () => {
-  const outer = realpathSync(mkdtempSync(join(tmpdir(), 'conclave-version-outer-')))
+test('a non-checkout inside another git repo returns only the package version', (t) => {
+  const outer = tempDir(t, 'conclave-version-outer')
   execFileSync('git', ['init', '-q'], { cwd: outer })
   // Put the release tree INSIDE the outer repo so git is reachable from the install root.
   const dir = join(outer, 'nested', 'conclave')
@@ -128,8 +130,8 @@ test('a non-checkout inside another git repo returns only the package version', 
  * reached through a symlink, and the repository root resolves elsewhere. The function must not
  * misidentify the working tree.
  */
-test('a checkout reached through a symlink still reports its own commit', () => {
-  const dir = checkout('7.8.9')
+test('a checkout reached through a symlink still reports its own commit', (t) => {
+  const dir = checkout(t, '7.8.9')
   const link = join(tmpdir(), `conclave-version-link-${Date.now()}`)
   symlinkSync(dir, link)
   const v = versionIn(link)

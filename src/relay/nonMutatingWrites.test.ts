@@ -28,15 +28,16 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
+import type { TestContext } from 'node:test'
 import type { AgentSession } from '../contract/session.ts'
 import { AgentRegistry } from '../registry/registry.ts'
 import { NO_DEADLINE_CLOCKS } from '../registry/types.ts'
 import type { RoleDefinition } from '../registry/roles.ts'
 import { FakeRotationSession } from '../rotation/fakeSession.ts'
+import { tempDir } from '../testkit/tempDir.ts'
 import type { RelayEvent } from './observe.ts'
 import { Relay } from './relay.ts'
 import { runReport } from './report.ts'
@@ -44,8 +45,8 @@ import { runReport } from './report.ts'
 /** The stable half of the note's wording, so a test matches the claim and not the prose. */
 const MARKER = 'declared not to write to the workspace'
 
-function tempRepo(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'conclave-nonmutating-'))
+function tempRepo(t: TestContext): string {
+  const dir = tempDir(t, 'conclave-nonmutating')
   execFileSync('git', ['init', '-q'], { cwd: dir })
   writeFileSync(join(dir, '.gitignore'), '.conclave/\n')
   writeFileSync(join(dir, 'work.ts'), 'export const answer = 42\n')
@@ -169,15 +170,15 @@ const AUDITOR: RoleDefinition = {
   isModel: true,
 }
 
-test('a seat whose role does not write, writing: both surfaces, every path, and nothing else changed', async () => {
+test('a seat whose role does not write, writing: both surfaces, every path, and nothing else changed', async (t) => {
   // ---- run one: a BUILT-IN non-writing role, nine paths, and a flag on the same turn ----
   //
   // Nine because it is the smallest number that puts a path past a cap of eight, which is what
   // the note used to truncate at while the report carried the whole list -- two surfaces
   // disagreeing about the same fact. `git status` orders by path, so `dirty-09.txt` is the tail
   // and the first thing any cap drops.
-  const repo = tempRepo()
-  try {
+  const repo = tempRepo(t)
+  {
     const paths = Array.from({ length: 9 }, (_, i) => `dirty-${String(i + 1).padStart(2, '0')}.txt`)
     const { relay, outcome, events, report } = await defaultRun(repo, (dir) => {
       for (const f of paths) writeFileSync(join(dir, f), `${f}\n`)
@@ -226,8 +227,6 @@ test('a seat whose role does not write, writing: both surfaces, every path, and 
     // And the run is untouched by all of it.
     assert.equal(outcome.reason, 'done', 'an observation does not change how the run ended')
     assert.equal(relay.log.filter((m) => m.text.startsWith('paused (')).length, 0, 'and it pauses nothing')
-  } finally {
-    rmSync(repo, { recursive: true, force: true })
   }
 
   // ---- run two: a role the REGISTRY WAS HANDED, which no built-in map has heard of ----
@@ -241,8 +240,8 @@ test('a seat whose role does not write, writing: both surfaces, every path, and 
   // Seated at rank `implementer`, so the run's only writing-RANK seat is one whose role says it
   // does not write. That is also what makes this the run that fails if the check is ever asked
   // about the rank instead of the role.
-  const repo2 = tempRepo()
-  try {
+  const repo2 = tempRepo(t)
+  {
     const advisor = new FakeRotationSession('advisor-1', 'fake-advisor', ['Do the work.', 'DONE'])
     const auditor = new FakeRotationSession('auditor-1', 'fake-auditor', ['ack', 'Did it.', 'NONE'])
     auditor.onSend = () => writeFileSync(join(repo2, 'auditor-edit.ts'), 'export const x = 1\n')
@@ -267,8 +266,6 @@ test('a seat whose role does not write, writing: both surfaces, every path, and 
     } finally {
       await relay.stop()
     }
-  } finally {
-    rmSync(repo2, { recursive: true, force: true })
   }
 
   // ---- run three: the seat has a worktree of its OWN, and that still does not name the writer ----
@@ -282,8 +279,8 @@ test('a seat whose role does not write, writing: both surfaces, every path, and 
   // Two implementer seats, because that is what makes the relay create linked worktrees at all;
   // the auditor's is read back off the manifest after `start` so the write lands where the
   // adapter was actually launched.
-  const repo3 = tempRepo()
-  try {
+  const repo3 = tempRepo(t)
+  {
     const advisor = new FakeRotationSession('advisor-1', 'fake-advisor', ['Do the work.', 'DONE'])
     const auditor = new FakeRotationSession('auditor-1', 'fake-auditor', ['ack', 'Did it.', 'NONE'])
     const other = new FakeRotationSession('other-1', 'fake-impl', ['ack', 'NONE', 'NONE'])
@@ -322,8 +319,6 @@ test('a seat whose role does not write, writing: both surfaces, every path, and 
     } finally {
       await relay.stop()
     }
-  } finally {
-    rmSync(repo3, { recursive: true, force: true })
   }
 })
 
@@ -334,14 +329,14 @@ test('a seat whose role does not write, writing: both surfaces, every path, and 
  * a registered `frontend` are decided by the same expression, so no production mutation can
  * separate them, and as two tests they would be a pair that always fails together.
  */
-test('a writing role is not observed, built-in or custom', async () => {
+test('a writing role is not observed, built-in or custom', async (t) => {
   const writingRoles: { seat: string; agent: string; role: string; register?: RoleDefinition }[] = [
     { seat: 'implementer', agent: 'fake-impl', role: 'implementer' },
     { seat: 'frontend', agent: 'fake-frontend', role: 'frontend', register: { ...AUDITOR, id: 'frontend', displayName: 'Frontend', mutatesWorkspace: true } },
   ]
   for (const { seat, agent, role, register } of writingRoles) {
-    const repo = tempRepo()
-    try {
+    const repo = tempRepo(t)
+    {
       const advisor = new FakeRotationSession('advisor-1', 'fake-advisor', ['Do the work.', 'DONE'])
       const worker = new FakeRotationSession(`${seat}-1`, agent, ['ack', 'Did it.', 'NONE'])
       worker.onSend = () => writeFileSync(join(repo, `${seat}-work.ts`), 'export const x = 1\n')
@@ -364,8 +359,6 @@ test('a writing role is not observed, built-in or custom', async () => {
       } finally {
         await relay.stop()
       }
-    } finally {
-      rmSync(repo, { recursive: true, force: true })
     }
   }
 })

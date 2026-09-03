@@ -64,13 +64,14 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
+import type { TestContext } from 'node:test'
 import { AgentRegistry } from '../registry/registry.ts'
 import { NO_DEADLINE_CLOCKS } from '../registry/types.ts'
 import { FakeRotationSession } from '../rotation/fakeSession.ts'
+import { tempDir } from '../testkit/tempDir.ts'
 import { listSessions, newSessionId, readSession, recordSession } from '../workspace/sessionRecord.ts'
 import { formatSession, formatSessionJson } from '../workspace/sessionView.ts'
 import { Relay } from './relay.ts'
@@ -118,8 +119,8 @@ function registryOf(sessions: Record<string, FakeRotationSession>): AgentRegistr
 }
 
 /** A repository to run in: the lock samples `git status`, and the relay lists worktrees. */
-function tempRepo(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'conclave-targeting-'))
+function tempRepo(t: TestContext): string {
+  const dir = tempDir(t, 'conclave-targeting')
   execFileSync('git', ['init', '--quiet'], { cwd: dir })
   execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: dir })
   execFileSync('git', ['config', 'user.name', 'Test'], { cwd: dir })
@@ -186,8 +187,8 @@ async function twoSeatRun(
   return { relay, outcome }
 }
 
-test('an advisor that addresses every turn is counted as having done so, and named seats are recorded', async () => {
-  const repo = tempRepo()
+test('an advisor that addresses every turn is counted as having done so, and named seats are recorded', async (t) => {
+  const repo = tempRepo(t)
   const { relay, outcome } = await twoSeatRun(repo, [
     '@seat seat-alpha: Add the parser tests.\n@seat seat-beta: Sweep the docs.',
     '@role implementer: Run the suite and report what fails.',
@@ -223,12 +224,11 @@ test('an advisor that addresses every turn is counted as having done so, and nam
     assert.match(relay.targetingSummary() ?? '', /@seat seat-alpha \(1\), @seat seat-beta \(1\), @role implementer \(1\)/)
   } finally {
     await relay.stop()
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
-test('an advisor that never addresses a seat is the finding, and the run says so in the log, the counters and the report', async () => {
-  const repo = tempRepo()
+test('an advisor that never addresses a seat is the finding, and the run says so in the log, the counters and the report', async (t) => {
+  const repo = tempRepo(t)
   const { relay, outcome } = await twoSeatRun(repo, [
     'Add the parser tests.',
     'Now sweep the docs for the old flag name.',
@@ -292,12 +292,11 @@ test('an advisor that never addresses a seat is the finding, and the run says so
     )
   } finally {
     await relay.stop()
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
-test('an advisor that addresses some turns and not others is counted both ways, in order', async () => {
-  const repo = tempRepo()
+test('an advisor that addresses some turns and not others is counted both ways, in order', async (t) => {
+  const repo = tempRepo(t)
   const { relay, outcome } = await twoSeatRun(repo, [
     '@seat seat-beta: Sweep the docs.',
     'Add the parser tests.',
@@ -332,12 +331,11 @@ test('an advisor that addresses some turns and not others is counted both ways, 
     assert.doesNotMatch(line, /NONE/, 'a run that used the syntax twice is not the never-addressed finding')
   } finally {
     await relay.stop()
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
-test('a record is keyed to the run\'s advisor turn, not to the advisor session\'s own sequence', async () => {
-  const repo = tempRepo()
+test('a record is keyed to the run\'s advisor turn, not to the advisor session\'s own sequence', async (t) => {
+  const repo = tempRepo(t)
   // A reply that is ONLY a NOTE is not a failure to instruct -- the advisor is asked once more,
   // inside the same pass of the advisor loop. That re-ask spends a turn of the advisor's CHILD
   // and no turn of the RUN, so from here on the session's `TurnEndEvent.seq` runs permanently
@@ -372,12 +370,11 @@ test('a record is keyed to the run\'s advisor turn, not to the advisor session\'
     )
   } finally {
     await relay.stop()
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
-test('a reply that named a seat the run does not have is counted as having USED the syntax, not as silence', async () => {
-  const repo = tempRepo()
+test('a reply that named a seat the run does not have is counted as having USED the syntax, not as silence', async (t) => {
+  const repo = tempRepo(t)
   // The correction this test used to enshrine. It previously asserted that a refused reply is
   // recorded as NOTHING, on the reasoning that it assigned no work -- which is true and is the
   // wrong question. `@seat nobody-here:` is positive evidence that the briefing ELICITED the
@@ -442,12 +439,11 @@ test('a reply that named a seat the run does not have is counted as having USED 
     assert.equal(report.targeting?.invalidTurns, 1, 'and it survives into the record a reader has afterwards')
   } finally {
     await relay.stop()
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
-test('a run whose every targeted turn was refused reports the briefing as WORKING, never as NONE', async () => {
-  const repo = tempRepo()
+test('a run whose every targeted turn was refused reports the briefing as WORKING, never as NONE', async (t) => {
+  const repo = tempRepo(t)
   // The reading the whole correction is for, and the one the summary got backwards. Here the
   // advisor addresses a seat on its only instructing turn and the reply is refused for a reason
   // that is not the target at all -- a preamble outside every directive (`stray_prose`), the
@@ -533,12 +529,11 @@ test('a run whose every targeted turn was refused reports the briefing as WORKIN
     }
   } finally {
     await relay.stop()
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
-test('a targeted reply on a turn that TIMED OUT is recorded, and the run reads INCONCLUSIVE — not elicited, not NONE', async () => {
-  const repo = tempRepo()
+test('a targeted reply on a turn that TIMED OUT is recorded, and the run reads INCONCLUSIVE — not elicited, not NONE', async (t) => {
+  const repo = tempRepo(t)
   // The exclusion this instrument used to make, and it was the same false negative in a
   // different coat. A turn that dies holding an `@seat` line is weaker evidence -- the reply may
   // have been cut between the directive and its body -- but a run whose advisor targets every
@@ -660,12 +655,11 @@ test('a targeted reply on a turn that TIMED OUT is recorded, and the run reads I
     }
   } finally {
     await relay.stop()
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
-test('a run that dispatched by name AND lost a targeted turn reports both, in the line and the prose', async () => {
-  const repo = tempRepo()
+test('a run that dispatched by name AND lost a targeted turn reports both, in the line and the prose', async (t) => {
+  const repo = tempRepo(t)
   // The mixed reading, which is the common one on a real run: the advisor is using the syntax,
   // most of it lands, and one turn dies holding it. The leading count must stay what it was --
   // one turn really did dispatch by name -- and the lost turn must be a tail rather than a
@@ -745,12 +739,11 @@ test('a run that dispatched by name AND lost a targeted turn reports both, in th
     }
   } finally {
     await relay.stop()
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
-test('a VALID addressed batch the queue ceiling refuses is counted as elicitation, not lost with the run', async () => {
-  const repo = tempRepo()
+test('a VALID addressed batch the queue ceiling refuses is counted as elicitation, not lost with the run', async (t) => {
+  const repo = tempRepo(t)
   // The last place recording still sat below the exit, and the worst of them: the evidence
   // thrown away here is the BEST this instrument can collect short of admission. This reply is
   // written whole, `parseDecisions` accepts it, and both seats it names exist -- and then the
@@ -871,12 +864,11 @@ test('a VALID addressed batch the queue ceiling refuses is counted as elicitatio
     }
   } finally {
     await relay.stop()
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
-test('an addressed turn whose timed_out verdict is withdrawn and replaced with completed is reconciled, not filed as incomplete', async () => {
-  const repo = tempRepo()
+test('an addressed turn whose timed_out verdict is withdrawn and replaced with completed is reconciled, not filed as incomplete', async (t) => {
+  const repo = tempRepo(t)
   // The advisor path was not resolving supersession, and the implementer path has been doing it
   // since the pause it was written for. `#exchange` settles on the FIRST `turn_end`, and the
   // late signal that withdraws it lands during the transcript settle window that follows -- the
@@ -930,7 +922,6 @@ test('an addressed turn whose timed_out verdict is withdrawn and replaced with c
     assert.doesNotMatch(relay.targetingSummary() ?? '', /INCONCLUSIVE/)
   } finally {
     await relay.stop()
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
@@ -957,8 +948,8 @@ async function until<T>(what: string, f: () => T | undefined, ms = 5000): Promis
   }
 }
 
-test('an advisor turn whose verdict is replaced DURING the pause is reconciled, not filed as incomplete', async () => {
-  const repo = tempRepo()
+test('an advisor turn whose verdict is replaced DURING the pause is reconciled, not filed as incomplete', async (t) => {
+  const repo = tempRepo(t)
   // The other half of the reconciliation, and the half the earlier fix could not reach. When the
   // withdrawal arrives before the guard, `current` is the replacement and the turn simply
   // dispatches. When it arrives WHILE THE OPERATOR IS READING THE PAUSE, the dispatch decision
@@ -1044,12 +1035,11 @@ test('an advisor turn whose verdict is replaced DURING the pause is reconciled, 
     )
   } finally {
     await relay.stop()
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
-test('an addressed turn paused BEFORE its record exists reads as open, never as NONE, and lands exactly once', async () => {
-  const repo = tempRepo()
+test('an addressed turn paused BEFORE its record exists reads as open, never as NONE, and lands exactly once', async (t) => {
+  const repo = tempRepo(t)
   // The live half of the one-recording-site design, and the cost it was always going to have.
   // Recording once, on the turn's way out, is what makes the denominator honest -- but it also
   // makes the record LATE, and the gap it leaves open is not a millisecond. A `turn_incomplete`
@@ -1189,7 +1179,6 @@ test('an addressed turn paused BEFORE its record exists reads as open, never as 
   } finally {
     await recording.close()
     await relay.stop()
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
@@ -1264,8 +1253,8 @@ test('an open turn is an observation on every surface: reported, in no count, an
   assert.doesNotMatch(targetingSummary(settled) ?? '', /still being taken/)
 })
 
-test('a verdict withdrawn with NOTHING behind it leaves the turn open, and the record never quotes it — unattended', async () => {
-  const repo = tempRepo()
+test('a verdict withdrawn with NOTHING behind it leaves the turn open, and the record never quotes it — unattended', async (t) => {
+  const repo = tempRepo(t)
   // The third state of `supersessionOf`, which the finalizer used to collapse into the first. A
   // revision can withdraw a `turn_end` and put nothing in its place: the adapter has retracted
   // its claim about how the turn ended and has not made another, so the turn has NO verdict.
@@ -1331,12 +1320,11 @@ test('a verdict withdrawn with NOTHING behind it leaves the turn open, and the r
     assert.match(outcome.detail ?? '', /advisor turn ended timed_out/)
   } finally {
     await relay.stop()
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
-test('a verdict withdrawn with nothing behind it during the pause is reconciled when the OPERATOR aborts', async () => {
-  const repo = tempRepo()
+test('a verdict withdrawn with nothing behind it during the pause is reconciled when the OPERATOR aborts', async (t) => {
+  const repo = tempRepo(t)
   // The other way out of that pause, and the one an operator actually takes: the withdrawal
   // arrives while they are reading it, and they end the run rather than resuming it. The turn
   // still unwinds through the finalizer as the released halt returns, so the record is written
@@ -1398,12 +1386,11 @@ test('a verdict withdrawn with nothing behind it during the pause is reconciled 
     assert.doesNotMatch(relay.targetingSummary() ?? '', /ELICITED/)
   } finally {
     await relay.stop()
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
-test('a refused reply that named NOBODY is in the denominator and credited to neither conclusion', async () => {
-  const repo = tempRepo()
+test('a refused reply that named NOBODY is in the denominator and credited to neither conclusion', async (t) => {
+  const repo = tempRepo(t)
   // The asymmetry, asserted rather than left to be inferred. An empty reply is refused on the
   // unaddressed path, and it is not evidence about the briefing in either direction -- the
   // advisor said nothing at all. Counting it as `unaddressedTurns` would push the record toward
@@ -1446,12 +1433,11 @@ test('a refused reply that named NOBODY is in the denominator and credited to ne
     )
   } finally {
     await relay.stop()
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
-test('an UNADDRESSED batch a run ceiling refuses is counted too, and credited to nothing', async () => {
-  const repo = tempRepo()
+test('an UNADDRESSED batch a run ceiling refuses is counted too, and credited to nothing', async (t) => {
+  const repo = tempRepo(t)
   // The other unaddressed failure, and the one that is genuinely real evidence: this reply was
   // written whole, `parseDecisions` accepted it, and it named nobody. It is still credited to
   // nothing -- `unaddressedTurns` means one instruction went out by fallback, and nothing went
@@ -1478,7 +1464,6 @@ test('an UNADDRESSED batch a run ceiling refuses is counted too, and credited to
     assert.doesNotMatch(line, /ELICITED/)
   } finally {
     await relay.stop()
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
@@ -1583,7 +1568,7 @@ test('the counters are a PARTITION of the records, so no turn is lost or counted
   assert.equal(block.conclusion, reading.conclusion.kind)
 })
 
-test('all four surfaces render ONE conclusion, and none quotes an uncertain turn as usage', async () => {
+test('all four surfaces render ONE conclusion, and none quotes an uncertain turn as usage', async (t) => {
   // The defect this pins is not a wrong reading, it is two surfaces giving an operator opposite
   // readings of one run. The end-of-run summary was taught that truncated-only evidence settles
   // nothing; the live status line went on certifying "the syntax IS reaching the advisor" from
@@ -1651,7 +1636,7 @@ test('all four surfaces render ONE conclusion, and none quotes an uncertain turn
       ],
     },
   ]) {
-    const repo = tempRepo()
+    const repo = tempRepo(t)
     const { relay, outcome } = await twoSeatRun(repo, shape.replies, shape.script)
     const id = newSessionId(Date.now(), process.pid)
     const recording = recordSession(relay, {
@@ -1698,12 +1683,11 @@ test('all four surfaces render ONE conclusion, and none quotes an uncertain turn
     } finally {
       await recording.close()
       await relay.stop()
-      rmSync(repo, { recursive: true, force: true })
     }
   }
 })
 
-test('a cut-off turn that named nobody withholds NONE too, on every surface, and a whole-reply run still reports it', async () => {
+test('a cut-off turn that named nobody withholds NONE too, on every surface, and a whole-reply run still reports it', async (t) => {
   // The under-use finding is a claim about EVERY recorded turn -- `NONE of 2 instructing turns
   // used @seat/@role` -- so it may only be made when every one of them was read out whole. This
   // rule used to be written as "every ADDRESSED turn", and the two are indistinguishable on a
@@ -1747,7 +1731,7 @@ test('a cut-off turn that named nobody withholds NONE too, on every surface, and
       never: [/INCONCLUSIVE/, /ELICITED/],
     },
   ]) {
-    const repo = tempRepo()
+    const repo = tempRepo(t)
     const { relay, outcome } = await twoSeatRun(repo, shape.replies, shape.script)
     const id = newSessionId(Date.now(), process.pid)
     const recording = recordSession(relay, {
@@ -1802,7 +1786,6 @@ test('a cut-off turn that named nobody withholds NONE too, on every surface, and
     } finally {
       await recording.close()
       await relay.stop()
-      rmSync(repo, { recursive: true, force: true })
     }
   }
 })
@@ -1930,8 +1913,8 @@ test('each kind of unsettled turn is described as what it actually was, on both 
   }
 })
 
-test('a one-seat run reports nothing about targeting: no counting, no note, no line, no key', async () => {
-  const repo = tempRepo()
+test('a one-seat run reports nothing about targeting: no counting, no note, no line, no key', async (t) => {
+  const repo = tempRepo(t)
   const relay = await Relay.start({
     registry: registryOf({
       lead: new FakeRotationSession('lead-1', 'lead', ['Add the parser tests.', 'Now sweep the docs.', 'DONE']),
@@ -2002,12 +1985,11 @@ test('a one-seat run reports nothing about targeting: no counting, no note, no l
     }
   } finally {
     await relay.stop()
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
-test('a multi-seat run that instructed nothing still carries the block, so the instrument is demonstrably live', async () => {
-  const repo = tempRepo()
+test('a multi-seat run that instructed nothing still carries the block, so the instrument is demonstrably live', async (t) => {
+  const repo = tempRepo(t)
   // The reading the omission rule must not take with it. This advisor ends the run on its first
   // reply, so there is nothing to measure -- and `{applicable: true, addressedTurns: 0}` on a run
   // with two seats is exactly the "armed, and the run ended before anything was assessed" state
@@ -2041,12 +2023,11 @@ test('a multi-seat run that instructed nothing still carries the block, so the i
     assert.match(relay.targetingSummary() ?? '', /0 turns produced an instruction, so nothing was measured/)
   } finally {
     await relay.stop()
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
-test('the counters reach conclave status --json, through the recorder a real run writes with', async () => {
-  const repo = tempRepo()
+test('the counters reach conclave status --json, through the recorder a real run writes with', async (t) => {
+  const repo = tempRepo(t)
   const { relay, outcome } = await twoSeatRun(repo, ['Add the parser tests.', '@seat seat-beta: Sweep the docs.'])
   const id = newSessionId(Date.now(), process.pid)
   const recording = recordSession(relay, {
@@ -2097,11 +2078,10 @@ test('the counters reach conclave status --json, through the recorder a real run
   } finally {
     await recording.close()
     await relay.stop()
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
-test('a detached multi-seat run carries the block from the parent\'s first status, and a one-seat run does not', async () => {
+test('a detached multi-seat run carries the block from the parent\'s first status, and a one-seat run does not', async (t) => {
   // The document an agent operator polls FIRST, and until now the emitting half of it was
   // executed by no test: the only `--detach` coverage spawns one seat, so it exercised the
   // omission branch and never the branch that writes anything. That branch is also the third
@@ -2135,7 +2115,7 @@ test('a detached multi-seat run carries the block from the parent\'s first statu
     ],
     [['--implementer', 'fake-impl'], undefined],
   ] as const) {
-    const dir = tempRepo()
+    const dir = tempRepo(t)
     let detached: number | undefined
     try {
       // The grandchild gets agent names no registry knows, so it fails at resolution and never
@@ -2165,7 +2145,6 @@ test('a detached multi-seat run carries the block from the parent\'s first statu
           // Already gone, which is the other legitimate ending.
         }
       }
-      rmSync(dir, { recursive: true, force: true })
     }
   }
 })

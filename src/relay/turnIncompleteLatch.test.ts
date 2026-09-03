@@ -26,16 +26,17 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
+import type { TestContext } from 'node:test'
 import type { Verdict } from '../contract/outcome.ts'
 import type { AgentSession } from '../contract/session.ts'
 import type { ChildLiveness } from '../outcomes/liveness.ts'
 import { AgentRegistry } from '../registry/registry.ts'
 import { NO_DEADLINE_CLOCKS } from '../registry/types.ts'
 import { FakeRotationSession } from '../rotation/fakeSession.ts'
+import { tempDir } from '../testkit/tempDir.ts'
 import { Relay, type RelayOptions } from './relay.ts'
 import type { RunPause } from './run.ts'
 
@@ -139,8 +140,8 @@ Carry on.`
 /** What the replacement writes back, having run the one configured check. */
 const ACCEPTED = 'CHECK 1: exit 0\n\nRead work.ts and ran the check. It matches.'
 
-function repo(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'conclave-incomplete-latch-'))
+function repo(t: TestContext): string {
+  const dir = tempDir(t, 'conclave-incomplete-latch')
   execFileSync('git', ['init', '-q'], { cwd: dir })
   writeFileSync(join(dir, 'work.ts'), 'export const answer = 42\n')
   writeFileSync(join(dir, '.gitignore'), '.conclave/\n')
@@ -253,7 +254,7 @@ function suppressions(relay: Relay): string[] {
 test('a seat that trips the deadline three times with the child still working is asked once', async (t) => {
   // The reported defect, at the smallest size that shows it. Before the latch this raised three
   // pauses whose `detail` strings were character-for-character identical.
-  const dir = repo()
+  const dir = repo(t)
   const impl = new FakeRotationSession('impl', 'claude', ['ack', 'still going', 'still going', 'still going'])
   impl.childPid = CHILD_PID
   verdictsPerTurn(impl, { 1: TIMED_OUT, 2: TIMED_OUT, 3: TIMED_OUT })
@@ -298,7 +299,7 @@ test('the same seat is asked again the moment the child stops looking alive', as
   // THE TENSION, and the half that must not be lost. The operator answered about a seat that was
   // working. A seat that has gone quiet is a different question with the same words on it, and a
   // run that answers it out of memory tells them nothing at the one moment it matters.
-  const dir = repo()
+  const dir = repo(t)
   const impl = new FakeRotationSession('impl', 'claude', ['ack', 'still going', 'still going', 'still going'])
   impl.childPid = CHILD_PID
   verdictsPerTurn(impl, { 1: TIMED_OUT, 2: TIMED_OUT, 3: TIMED_OUT })
@@ -329,7 +330,7 @@ test('a child that goes quiet and comes back is asked all three times, not twice
   // And it is right on its own terms, not merely structurally safer. A child alternating between
   // working and idle is a child behaving oddly, which is worth MORE of an operator's attention
   // than one steadily working, not less.
-  const dir = repo()
+  const dir = repo(t)
   const impl = new FakeRotationSession('impl', 'claude', ['ack', 'still going', 'still going', 'still going'])
   impl.childPid = CHILD_PID
   verdictsPerTurn(impl, { 1: TIMED_OUT, 2: TIMED_OUT, 3: TIMED_OUT })
@@ -355,7 +356,7 @@ test('an outcome that changes and changes back is asked all three times too', as
   // cumulative on its own. `transport_lost` between two `timed_out`s is not a third question the
   // operator has now consented to — it is evidence that the seat's situation moved, and the
   // `timed_out` after it is being put for the first time since it did.
-  const dir = repo()
+  const dir = repo(t)
   const impl = new FakeRotationSession('impl', 'claude', ['ack', 'still going', 'still going', 'still going'])
   impl.childPid = CHILD_PID
   verdictsPerTurn(impl, { 1: TIMED_OUT, 2: TRANSPORT_LOST, 3: TIMED_OUT })
@@ -386,7 +387,7 @@ test('a reading that could not be taken forgets the answer rather than assuming 
   // all, so there is nothing to arm from — and an answer left standing through that would be
   // matched again by the next readable deadline, on the strength of a claim ("the character has
   // not changed") the run had no measurement to support.
-  const dir = repo()
+  const dir = repo(t)
   const impl = new FakeRotationSession('impl', 'claude', ['ack', 'still going', 'still going', 'still going'])
   impl.childPid = CHILD_PID
   verdictsPerTurn(impl, { 1: TIMED_OUT, 2: TIMED_OUT, 3: TIMED_OUT })
@@ -414,7 +415,7 @@ test('the suppression count is cumulative for the session, across a latch that r
   // about the whole run — so it is NOT reset when the character changes and the latch re-arms.
   // A counter that restarted on every re-arm would read lowest on exactly the oscillating runs
   // where the total matters most.
-  const dir = repo()
+  const dir = repo(t)
   const impl = new FakeRotationSession('impl', 'claude', ['ack', 'one', 'two', 'three', 'four', 'five'])
   impl.childPid = CHILD_PID
   verdictsPerTurn(impl, { 1: TIMED_OUT, 2: TIMED_OUT, 3: TIMED_OUT, 4: TIMED_OUT, 5: TIMED_OUT })
@@ -454,7 +455,7 @@ test('a child that is not computing is asked about every time, however often it 
   // Here nothing changes at all. Three deadlines, three identical quiet readings, and the run
   // asks all three times, because "the child is idle" is not a finding an operator agreed to
   // stop hearing. It is the finding a pause exists for.
-  const dir = repo()
+  const dir = repo(t)
   const impl = new FakeRotationSession('impl', 'claude', ['ack', 'still going', 'still going', 'still going'])
   impl.childPid = CHILD_PID
   verdictsPerTurn(impl, { 1: TIMED_OUT, 2: TIMED_OUT, 3: TIMED_OUT })
@@ -479,7 +480,7 @@ test('“working” and “barely running” are two readings, and answering one
   // shown. #83 went to some trouble to stop a mixed sample being announced as a working one, and
   // folding the two back together HERE would undo that where nobody would think to look — the
   // operator would simply stop being told that the evidence had weakened.
-  const dir = repo()
+  const dir = repo(t)
   const impl = new FakeRotationSession('impl', 'claude', ['ack', 'still going', 'still going', 'still going'])
   impl.childPid = CHILD_PID
   verdictsPerTurn(impl, { 1: TIMED_OUT, 2: TIMED_OUT, 3: TIMED_OUT })
@@ -509,7 +510,7 @@ test('a different verdict outcome is a different question, however alive the chi
   // The class half of the signature, and #118's argument one condition over: `transport_lost` is
   // not the thing the operator ruled on when they ruled on `timed_out`, and folding the two into
   // "the run already asked about this seat" would answer a question nobody put.
-  const dir = repo()
+  const dir = repo(t)
   const impl = new FakeRotationSession('impl', 'claude', ['ack', 'still going', 'still going', 'still going'])
   impl.childPid = CHILD_PID
   verdictsPerTurn(impl, { 1: TIMED_OUT, 2: TIMED_OUT, 3: TRANSPORT_LOST })
@@ -535,7 +536,7 @@ test('two timeouts with different evidence are two questions, not one (#107)', a
   // into one question and answered the second with the first one's answer, while the child still
   // read `working`. That is this latch silencing a pause the operator needed, reached from the
   // inside, and an independent review found it rather than a test.
-  const dir = repo()
+  const dir = repo(t)
   const impl = new FakeRotationSession('impl', 'claude', ['ack', 'still going', 'still going'])
   impl.childPid = CHILD_PID
   verdictsPerTurn(impl, { 1: TIMED_OUT, 2: TIMED_OUT_ELSEWHERE })
@@ -563,7 +564,7 @@ test('a replacement is asked on its own merits, and the count starts again with 
   // about a session that has since been retired; a replacement that trips the same deadline is a
   // question nobody has been asked, and the run that answers it from its predecessor's record
   // would silence the very first thing a new seat did.
-  const dir = repo()
+  const dir = repo(t)
   const old = new FakeRotationSession('old', 'claude', ['ack', 'still going', 'still going'])
   old.childPid = CHILD_PID
   verdictsPerTurn(old, { 1: TIMED_OUT, 2: TIMED_OUT })
@@ -614,7 +615,7 @@ test('a rotation clears an answer that HAD been given, so the new session starts
   // the remembered answer voids it on sight, so a second deadline could never leave one standing
   // to be carried across a rotation. A `rotation_candidate` touches none of this, which makes it
   // the point where an answer really is still held when the seat changes underneath it.
-  const dir = repo()
+  const dir = repo(t)
   const old = new FakeRotationSession('old', 'claude', ['ack', 'still going', 'did the next bit'])
   old.childPid = CHILD_PID
   verdictsPerTurn(old, { 1: TIMED_OUT })
@@ -662,7 +663,7 @@ test('a seat with no measurable child is asked every time, because nothing says 
   // that cannot measure the child cannot make that claim — so it asks, exactly as it did before
   // any of this existed. An adapter that names no child pid is the common case, not a corner:
   // the pause simply carries no liveness line, as `pauseLiveness.test.ts` pins.
-  const dir = repo()
+  const dir = repo(t)
   const impl = new FakeRotationSession('impl', 'claude', ['ack', 'still going', 'still going', 'still going'])
   verdictsPerTurn(impl, { 1: TIMED_OUT, 2: TIMED_OUT, 3: TIMED_OUT })
   const advisor = new FakeRotationSession('advisor', 'codex', ['Do it.', 'Keep going.', 'Keep going.', 'DONE'])

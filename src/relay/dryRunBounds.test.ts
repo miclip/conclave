@@ -36,19 +36,20 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { PassThrough, Writable } from 'node:stream'
 import test from 'node:test'
+import type { TestContext } from 'node:test'
 import { main } from '../../bin/conclave.ts'
 import { AgentRegistry } from '../registry/registry.ts'
 import type { DeadlineSupport } from '../registry/types.ts'
 import { FakeRotationSession } from '../rotation/fakeSession.ts'
+import { tempDir } from '../testkit/tempDir.ts'
 
 /** A git repository, because `relay` refuses to start outside one. */
-function repo(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'conclave-dryrun-bounds-'))
+function repo(t: TestContext): string {
+  const dir = tempDir(t, 'conclave-dryrun-bounds')
   execFileSync('git', ['init', '-q'], { cwd: dir })
   writeFileSync(join(dir, '.gitignore'), '.conclave/\n')
   writeFileSync(join(dir, 'work.ts'), 'export const a = 1\n')
@@ -211,9 +212,9 @@ const SEATS = [
   'nodefault, neither',
 ]
 
-test('a dry run reports the ceilings and the deadlines the invocation configured', async () => {
-  const dir = repo()
-  try {
+test('a dry run reports the ceilings and the deadlines the invocation configured', async (t) => {
+  const dir = repo(t)
+  {
     const plan = await planJson(dir, [
       'relay',
       'a goal that would be measured against something',
@@ -271,14 +272,12 @@ test('a dry run reports the ceilings and the deadlines the invocation configured
     // is per seat: refusing the flag outright would have discarded it for the other two.
     assert.deepEqual(at('implementer-2').absolute, { status: 'unsupported' })
     assert.deepEqual(at('implementer-2').silence, { status: 'unsupported' })
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
   }
 })
 
-test('a dry run that configured nothing says so with the keys present and null', async () => {
-  const dir = repo()
-  try {
+test('a dry run that configured nothing says so with the keys present and null', async (t) => {
+  const dir = repo(t)
+  {
     const plan = await planJson(dir, ['relay', 'a goal with no bounds named at all', ...SEATS])
 
     // PRESENT, and that is the assertion. `null` and absent are the same to a reader who does
@@ -310,20 +309,18 @@ test('a dry run that configured nothing says so with the keys present and null',
     assert.deepEqual(at('implementer').silence, { status: 'disabled' })
     assert.deepEqual(at('implementer-2').absolute, { status: 'unsupported' })
     assert.deepEqual(at('implementer-2').silence, { status: 'unsupported' })
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
   }
 })
 
-test('the prose plan names the flag that sets each clock, and agrees with the JSON', async () => {
+test('the prose plan names the flag that sets each clock, and agrees with the JSON', async (t) => {
   // The prose is the form BOTH front-ends print -- `session` has no `--json` at all, so for a
   // console operator these lines are the only place any of this appears. Naming the flag is
   // the point rather than a nicety: the reader is deciding whether what they typed took
   // effect, and `absolute: 900s` cannot answer that where `--turn-timeout 900s` can. It is the
   // argument `ceilingSummary` was written around, and #119 is what it costs when the line
   // names the concept instead of the flag.
-  const dir = repo()
-  try {
+  const dir = repo(t)
+  {
     const argv = [
       'relay',
       'a goal whose plan is read by a human',
@@ -374,12 +371,10 @@ test('the prose plan names the flag that sets each clock, and agrees with the JS
       'unsupported',
       'the word the prose printed must be the status the document carries',
     )
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
   }
 })
 
-test('a relay dry run states each bound exactly once, and it is the plan that states it', async () => {
+test('a relay dry run states each bound exactly once, and it is the plan that states it', async (t) => {
   // THE REGRESSION. `relay` prints a launch preamble -- `ceilings:`, then the two clock lines,
   // then the rotation line -- and the shared plan grew the same three. So a relay dry run said
   // each of them twice, three lines apart, in two column alignments, from one resolution.
@@ -389,8 +384,8 @@ test('a relay dry run states each bound exactly once, and it is the plan that st
   // the second copy buys nothing and costs a comparison. The console never had it (`runSession`
   // returns above its banner), so the duplicate was also the two front-ends' dry runs reading
   // differently in the one place they are meant to read identically.
-  const dir = repo()
-  try {
+  const dir = repo(t)
+  {
     const argv = [
       'relay',
       'a goal whose bounds are stated once',
@@ -427,20 +422,18 @@ test('a relay dry run states each bound exactly once, and it is the plan that st
         `${label} must survive inside the plan; the plan was:\n${plan.join('\n')}`,
       )
     }
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
   }
 })
 
-test('a real relay launch still says what bounds it, in the preamble it is the only reader of', async () => {
+test('a real relay launch still says what bounds it, in the preamble it is the only reader of', async (t) => {
   // The control, and the reason the test above is not asserting that three lines were deleted.
   // A run that prints no plan has nowhere else to say any of this, and these lines are the
   // reading #119 is about: what stops the run, told before there is work to lose.
   //
   // Stopped by a registry that throws out of `create`, which is well past every line asserted
   // here and before any relay loop exists to wait on.
-  const dir = repo()
-  try {
+  const dir = repo(t)
+  {
     const { code, said, created } = await runCli(
       dir,
       [
@@ -469,19 +462,17 @@ test('a real relay launch still says what bounds it, in the preamble it is the o
     assert.match(line('silence:') ?? '', /--silence-timeout 300s/)
     // Resolved per seat here too, including the seat the setting could not reach.
     assert.match(line('turn:') ?? '', /implementer-2 unsupported/)
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
   }
 })
 
-test('suppressing relay’s preamble left the plan itself identical on both front-ends', async () => {
+test('suppressing relay’s preamble left the plan itself identical on both front-ends', async (t) => {
   // The parity claim, narrowed to this fix. `frontEndParity.test.ts` compares the two plans
   // line for line over every kind of launch argument and is the general guard; what is asserted
   // HERE is that the change made to relay's preamble did not reach the plan -- the cheapest
   // wrong fix for the duplication is to render fewer lines when the caller is relay, which
   // would pass a count of one and silently give the two commands different plans.
-  const dir = repo()
-  try {
+  const dir = repo(t)
+  {
     const argv = (front: 'relay' | 'session') => [
       front,
       'a goal both front-ends resolve identically',
@@ -518,7 +509,5 @@ test('suppressing relay’s preamble left the plan itself identical on both fron
         '  silence:     --silence-timeout 300s — advisor 300s · implementer 300s · implementer-2 unsupported',
       ],
     )
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
   }
 })

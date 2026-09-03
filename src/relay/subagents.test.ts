@@ -8,6 +8,7 @@ import { strict as assert } from 'node:assert'
 import test from 'node:test'
 import { describeSubagentWork, describeTool, isSubagentTool } from './subagents.ts'
 import { NO_DEADLINE_CLOCKS } from '../registry/types.ts'
+import { tempDir } from '../testkit/tempDir.ts'
 
 test('the tools each agent delegates through are recognised', () => {
   // Four agents, four names, none of which announces "this is delegation" in any structured
@@ -71,7 +72,7 @@ test('with nothing observed, the reading is exactly the one the console already 
   }
 })
 
-test('delegation is detected from participant events, which carry the tool name', async () => {
+test('delegation is detected from participant events, which carry the tool name', async (t) => {
   // The first version of this read the relay's `#evidence`, which keeps tool ARGUMENTS and
   // discards the tool name (#8). It would have reported `delegated: false` for every run
   // while looking entirely correct.
@@ -79,11 +80,8 @@ test('delegation is detected from participant events, which carry the tool name'
   const { FakeRotationSession } = await import('../rotation/fakeSession.ts')
   const { AgentRegistry } = await import('../registry/registry.ts')
   const { execFileSync } = await import('node:child_process')
-  const { mkdtempSync } = await import('node:fs')
-  const { tmpdir } = await import('node:os')
-  const { join } = await import('node:path')
 
-  const dir = mkdtempSync(join(tmpdir(), 'conclave-sub-'))
+  const dir = tempDir(t, 'conclave-sub')
   execFileSync('git', ['init', '-q', '.'], { cwd: dir })
 
   const impl = new FakeRotationSession('impl', 'claude', ['done', 'NONE'])
@@ -119,18 +117,16 @@ test('delegation is detected from participant events, which carry the tool name'
   assert.deepEqual(use.worktreesCreated, [])
 })
 
-test('a worktree created and removed within the run still counts as compliance', async () => {
+test('a worktree created and removed within the run still counts as compliance', async (t) => {
   // A subagent that FOLLOWS the briefing creates a worktree, works in it, and removes it. An
   // end-of-run diff sees nothing and is indistinguishable from never having made one, so the
   // "no worktree was created" signal fired on the compliant case as readily as on the
   // violation -- worse than not having it.
   const { execFileSync } = await import('node:child_process')
-  const { mkdtempSync } = await import('node:fs')
-  const { tmpdir } = await import('node:os')
   const { join } = await import('node:path')
   const { worktreePaths } = await import('./subagents.ts')
 
-  const dir = mkdtempSync(join(tmpdir(), 'conclave-wt-'))
+  const dir = tempDir(t, 'conclave-wt')
   execFileSync('git', ['init', '-q', '.'], { cwd: dir })
   execFileSync('git', ['config', 'user.email', 't@t'], { cwd: dir })
   execFileSync('git', ['config', 'user.name', 't'], { cwd: dir })

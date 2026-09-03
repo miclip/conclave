@@ -10,7 +10,7 @@
 
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, realpathSync, rmdirSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, realpathSync, rmdirSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -178,14 +178,18 @@ test('the gate refuses a grandchild of the root, prefix or no prefix', (t) => {
 
 test('the gate refuses a direct child whose name does not carry the prefix', (t) => {
   const fakeRoot = realpathSync(tempDir(t, 'fake-root'))
-  const unprefixed = mkdtempSync(join(fakeRoot, 'notours-'))
+  // A fixed name is unique enough: `fakeRoot` is itself a fresh directory owned by this
+  // test, so nothing else can be writing into it.
+  const unprefixed = join(fakeRoot, 'notours-child')
+  mkdirSync(unprefixed)
 
   assert.throws(() => canonicalTempTarget(unprefixed, fakeRoot), /does not carry the/)
 })
 
 test('the gate refuses a name that merely contains the prefix', (t) => {
   const fakeRoot = realpathSync(tempDir(t, 'fake-root'))
-  const inside = mkdtempSync(join(fakeRoot, `x-${TEMP_DIR_PREFIX}`))
+  const inside = join(fakeRoot, `x-${TEMP_DIR_PREFIX}child`)
+  mkdirSync(inside)
 
   assert.throws(() => canonicalTempTarget(inside, fakeRoot), /does not carry the/)
 })

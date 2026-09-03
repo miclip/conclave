@@ -14,16 +14,16 @@ import { strict as assert } from 'node:assert'
 import {
   appendFileSync,
   existsSync,
-  mkdtempSync,
   readdirSync,
   readFileSync,
   renameSync,
   statSync,
   writeFileSync,
 } from 'node:fs'
-import { homedir, tmpdir } from 'node:os'
+import { homedir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
+import { suiteTempDir, tempDir } from '../testkit/tempDir.ts'
 import { TranscriptSessionView } from './reconcile.ts'
 import { parseClaude, parseCodex } from './parse.ts'
 import { guaranteesFor } from '../contract/session.ts'
@@ -31,7 +31,7 @@ import type { AgentEvent, SessionSnapshot } from '../contract/session.ts'
 import { assess, detectDegradation } from '../rotation/degradation.ts'
 import { RewriteAwareTail, parseJsonLine } from './tail.ts'
 
-const SCRATCH = mkdtempSync(join(tmpdir(), 'reconcile-'))
+const SCRATCH = suiteTempDir('reconcile')
 
 function view(path: string, agent: string) {
   return new TranscriptSessionView({
@@ -592,7 +592,7 @@ test('OBSERVED: a transcript that does not exist yet is not an error', async () 
   assert.equal(after.filter((e) => e.type === 'turn_start').length, 1)
 })
 
-test('an APPENDED compaction marker raises the generation (#10)', async () => {
+test('an APPENDED compaction marker raises the generation (#10)', async (t) => {
   // The instrument bug behind every null result in the degradation experiment.
   //
   // The generation used to increment only when the tail reported a rewritten prefix. Claude
@@ -601,7 +601,7 @@ test('an APPENDED compaction marker raises the generation (#10)', async () => {
   // So on Claude Code the counter could never move, and across four live runs and 34
   // assessments it never did. A true null and an instrument that cannot fire are
   // indistinguishable from outside, which made every negative unfalsifiable.
-  const dir = mkdtempSync(join(tmpdir(), 'conclave-compact-'))
+  const dir = tempDir(t, 'conclave-compact')
   const path = join(dir, 'transcript.jsonl')
 
   const user = (text: string) =>

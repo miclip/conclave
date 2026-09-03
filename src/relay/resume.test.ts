@@ -5,10 +5,10 @@
  */
 
 import { strict as assert } from 'node:assert'
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
+import { tempDir } from '../testkit/tempDir.ts'
 import type { RelayMessage } from './message.ts'
 import { readRunLog, resumeBriefing, RunLogWriter } from './resume.ts'
 
@@ -27,10 +27,10 @@ function msg(seq: number, text: string, over: Partial<RelayMessage> = {}): Relay
   } as RelayMessage
 }
 
-test('the log is written as it happens, not assembled at the end', () => {
+test('the log is written as it happens, not assembled at the end', (t) => {
   // A record written on exit is exactly the record a crash destroys, and a crash is one of
   // the endings a resume exists for.
-  const dir = mkdtempSync(join(tmpdir(), 'conclave-resume-'))
+  const dir = tempDir(t, 'conclave-resume')
   const path = join(dir, 'nested', 'run.ndjson')
   const w = new RunLogWriter(path)
 
@@ -41,10 +41,10 @@ test('the log is written as it happens, not assembled at the end', () => {
   assert.deepEqual(readRunLog(path).map((m) => m.text), ['first', 'second'])
 })
 
-test('a truncated final line is dropped, not thrown on', () => {
+test('a truncated final line is dropped, not thrown on', (t) => {
   // The expected shape of a log whose writer was killed mid-append -- precisely the case a
   // resume is for. Refusing to read it would make the crash unrecoverable a second time.
-  const dir = mkdtempSync(join(tmpdir(), 'conclave-resume-'))
+  const dir = tempDir(t, 'conclave-resume')
   const path = join(dir, 'run.ndjson')
   writeFileSync(path, `${JSON.stringify(msg(1, 'complete'))}\n{"seq":2,"text":"cut off`)
 
