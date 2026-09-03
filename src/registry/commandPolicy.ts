@@ -80,9 +80,22 @@ export const CLAUDE_COMMAND_POLICY: CommandPolicy = {
     },
     {
       command: '/loop',
-      disposition: 'refused',
+      disposition: 'allowed',
+      // DELEGATION, not a loss of control, and the distinction is who chose it. The turns a
+      // loop dispatches land after `#exchangeTurn` has returned and are charged to neither
+      // `--max-turns` nor `--rounds` (#208) -- but a run reaches this only when the operator
+      // permitted the command and the advisor then decided to hand the loop to its seat. Turns
+      // going uncounted because work was deliberately delegated is the delegation working.
+      // A ceiling exists to stop what nobody sanctioned; this was sanctioned twice.
+      //
+      // It was refused here first, on the accounting alone. That made conclave's own missing
+      // feature read as a fact about the command, and withheld it from the briefing so the
+      // advisor could not weigh the trade for itself. #208 is the feature; it is worth having
+      // and it is not a precondition for this.
       reason:
-        'Makes the seat’s work unaccountable. It has the seat dispatch its own subsequent turns, and the relay takes one `turn_end` per exchange: a looped turn lands after `#exchangeTurn` has returned, so its report is not the report the relay collected and it is charged to neither `--max-turns` nor `--rounds`. The seat survives; the relay’s ability to say what it did, or to stop it doing more, does not.',
+        'Hands the seat a prompt to repeat on an interval, so it drives its own subsequent turns. Those turns are not charged to `--max-turns` or `--rounds` and the relay does not collect their reports -- delegate the loop only when losing that count is the intended trade.',
+      // As the composer renders it: typing `/loop` shows `[interval] [prompt]` beside it.
+      argumentHint: '[interval] [prompt]',
       // ALLOWED HERE UNTIL THE ACCOUNTING WAS WORKED THROUGH, and the reversal is the entry's
       // most useful fact. #200 read it as a work-mode change and it IS one -- the seat, its
       // context and its history are all untouched, which is why it passed the rule's first

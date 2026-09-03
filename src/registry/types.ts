@@ -315,7 +315,10 @@ export interface CommandDeclaration {
    * The FORM varies per command AND per CLI, and it is not normalised, because normalising it
    * would be a lie. On Claude, a bundled JavaScript program, commands are declared as
    * `name:"..."` -- except `/quit`, which exists only as an alias inside another command's
-   * declaration, and `/loop`, which is a SKILL the bundle ships rather than a command at all.
+   * declaration, and `/loop`, whose declaration the bundle carries as a shipped file
+   * (`/loop (loop.md)`) rather than under a `name:` key. It IS a command: the composer renders
+   * it with its arguments, `[interval] [prompt]`, like any other. The pinnable literal for it
+   * is the menu description.
    * On Codex, a Rust binary, the names are interned into a packed table with no separators, so
    * searching for a bare name proves nothing whatsoever and the pinnable literal is the
    * command's DESCRIPTION instead. One search shape over all of that would either miss most of
