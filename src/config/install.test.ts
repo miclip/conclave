@@ -12,17 +12,16 @@ import { execFileSync } from 'node:child_process'
 import {
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readdirSync,
   readFileSync,
   realpathSync,
-  rmSync,
   statSync,
   writeFileSync,
 } from 'node:fs'
-import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import test from 'node:test'
+import type { TestContext } from 'node:test'
+import { tempDir } from '../testkit/tempDir.ts'
 import {
   formatInstallResult,
   hasDrift,
@@ -39,8 +38,8 @@ import {
 
 const REPO = resolveRepoRoot(import.meta.dirname)
 
-function fixtureRepo(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'conclave-cfg-'))
+function fixtureRepo(t: TestContext): string {
+  const dir = tempDir(t, 'conclave-cfg')
   writeFileSync(join(dir, 'package.json'), '{}')
   for (const t of TARGETS) {
     const src = join(REPO, t.template)
@@ -61,14 +60,18 @@ function git(cwd: string, ...args: string[]): string {
  * exercises is one git makes on disk (`.git` as a file rather than a directory). A
  * hand-built fake would test the mock.
  */
-function fixtureWorktreePair(): { main: string; linked: string } {
-  const main = fixtureRepo()
+function fixtureWorktreePair(t: TestContext): { main: string; linked: string } {
+  const main = fixtureRepo(t)
   git(main, 'init', '--quiet', '--initial-branch=main')
   git(main, 'config', 'user.email', 'test@example.invalid')
   git(main, 'config', 'user.name', 'Test')
   git(main, 'add', '-A')
   git(main, 'commit', '--quiet', '-m', 'templates')
-  const linked = join(main, '..', `linked-${Date.now().toString(36)}`)
+  // Inside a container the testkit issued, rather than beside `main` in the temp root. A
+  // sibling is nobody's to remove: `main` is cleaned up because the helper made it, and a
+  // directory one level up from it is simply orphaned -- which is what this used to leave
+  // behind on every run, passing or failing.
+  const linked = join(tempDir(t, 'linked-worktree'), 'linked')
   git(main, 'worktree', 'add', '--quiet', '--detach', linked)
   return { main, linked: realpathSync(linked) }
 }
@@ -105,8 +108,8 @@ test('render refuses to emit invalid JSON', () => {
   assert.throws(() => render(`{"a": "${TEMPLATE_TOKEN}"`, '/repo'), /JSON/)
 })
 
-test('installing renders both targets, and is idempotent', async () => {
-  const repo = fixtureRepo()
+test('installing renders both targets, and is idempotent', async (t) => {
+  const repo = fixtureRepo(t)
 
   const first = await installConfig({ projectRoot: repo, conclaveRoot: repo, diagnose: false })
   assert.equal(first.written.length, TARGETS.length)
@@ -125,9 +128,9 @@ test('installing renders both targets, and is idempotent', async () => {
   assert.ok(second.written.every((w) => !w.changed))
 })
 
-test('rendering is checkout-relative, so two checkouts differ', async () => {
-  const a = fixtureRepo()
-  const b = fixtureRepo()
+test('rendering is checkout-relative, so two checkouts differ', async (t) => {
+  const a = fixtureRepo(t)
+  const b = fixtureRepo(t)
   await installConfig({ projectRoot: a, conclaveRoot: a, diagnose: false })
   await installConfig({ projectRoot: b, conclaveRoot: b, diagnose: false })
 
@@ -140,18 +143,18 @@ test('rendering is checkout-relative, so two checkouts differ', async () => {
 })
 
 /** A project with no Conclave in it: package.json and nothing else. The common case. */
-function fixtureProject(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'conclave-target-'))
+function fixtureProject(t: TestContext): string {
+  const dir = tempDir(t, 'conclave-target')
   writeFileSync(join(dir, 'package.json'), '{}')
   return dir
 }
 
-test('registering a project that is not Conclave writes there and runs from here', async () => {
+test('registering a project that is not Conclave writes there and runs from here', async (t) => {
   // The capability the CLI on PATH exists for. The target has no templates, no
   // `src/hooks/client.ts`, and no dependency on Conclave -- which is exactly why the
   // rendered commands must point back at Conclave rather than at the project.
-  const conclave = fixtureRepo()
-  const project = fixtureProject()
+  const conclave = fixtureRepo(t)
+  const project = fixtureProject(t)
 
   const result = await installConfig({ projectRoot: project, conclaveRoot: conclave, diagnose: false })
 
@@ -174,10 +177,10 @@ test('registering a project that is not Conclave writes there and runs from here
   assert.ok(!claude.includes(project))
 })
 
-test('the same Conclave registers many projects, each with its own trust identity', async () => {
-  const conclave = fixtureRepo()
-  const one = fixtureProject()
-  const two = fixtureProject()
+test('the same Conclave registers many projects, each with its own trust identity', async (t) => {
+  const conclave = fixtureRepo(t)
+  const one = fixtureProject(t)
+  const two = fixtureProject(t)
   await installConfig({ projectRoot: one, conclaveRoot: conclave, diagnose: false })
   await installConfig({ projectRoot: two, conclaveRoot: conclave, diagnose: false })
 
@@ -189,12 +192,12 @@ test('the same Conclave registers many projects, each with its own trust identit
   assert.equal(a, b)
 })
 
-test('naming one CLI registers only that one', async () => {
+test('naming one CLI registers only that one', async (t) => {
   // Both roles filled by Claude is a real configuration, and writing a Codex sidecar for
   // it is not merely untidy: the sidecar would then need TRUSTING before anything
   // reported ready, inventing a setup step for a CLI the session never launches.
-  const conclave = fixtureRepo()
-  const project = fixtureProject()
+  const conclave = fixtureRepo(t)
+  const project = fixtureProject(t)
 
   const result = await installConfig({
     projectRoot: project,
@@ -212,10 +215,10 @@ test('naming one CLI registers only that one', async () => {
   assert.equal(existsSync(join(project, '.codex/hooks.json')), false, 'no sidecar for an unused CLI')
 })
 
-test('a repeated CLI is registered once, not twice', async () => {
+test('a repeated CLI is registered once, not twice', async (t) => {
   // What a session passes when the same CLI fills both roles.
-  const conclave = fixtureRepo()
-  const project = fixtureProject()
+  const conclave = fixtureRepo(t)
+  const project = fixtureProject(t)
   const result = await installConfig({
     projectRoot: project,
     conclaveRoot: conclave,
@@ -226,12 +229,12 @@ test('a repeated CLI is registered once, not twice', async () => {
   assert.equal(result.written.length, 1)
 })
 
-test('a Claude-only install never asks Codex anything', async () => {
+test('a Claude-only install never asks Codex anything', async (t) => {
   // `diagnose: true` would normally spawn `codex app-server`. With no Codex sidecar
   // written, diagnosing would report the file we deliberately skipped as missing — so the
   // report carries no Codex section at all rather than a misleading one.
-  const conclave = fixtureRepo()
-  const project = fixtureProject()
+  const conclave = fixtureRepo(t)
+  const project = fixtureProject(t)
   const result = await installConfig({
     projectRoot: project,
     conclaveRoot: conclave,
@@ -242,19 +245,19 @@ test('a Claude-only install never asks Codex anything', async () => {
   assert.ok(!formatInstallResult(result).includes('Codex'))
 })
 
-test('a project missing its templates blames Conclave, not the project', async () => {
+test('a project missing its templates blames Conclave, not the project', async (t) => {
   // The old message said "the checkout is incomplete", which pointed the reader at the
   // repository they were standing in — the one place that is guaranteed not to be at fault.
-  const project = fixtureProject()
-  const brokenConclave = mkdtempSync(join(tmpdir(), 'conclave-broken-'))
+  const project = fixtureProject(t)
+  const brokenConclave = tempDir(t, 'conclave-broken')
   await assert.rejects(
     () => installConfig({ projectRoot: project, conclaveRoot: brokenConclave, diagnose: false }),
     (e: Error) => e.message.includes(brokenConclave) && !e.message.includes(project),
   )
 })
 
-test('a plain checkout is its own Codex project root', () => {
-  const repo = fixtureRepo()
+test('a plain checkout is its own Codex project root', (t) => {
+  const repo = fixtureRepo(t)
   // No `.git` at all, and a normal checkout with a `.git` directory: neither has
   // anywhere else to redirect to, and neither should cost a git invocation.
   assert.equal(resolveCodexProjectRoot(repo), repo)
@@ -262,18 +265,18 @@ test('a plain checkout is its own Codex project root', () => {
   assert.equal(resolveCodexProjectRoot(repo), repo)
 })
 
-test('a linked worktree resolves its Codex project root to the MAIN worktree', () => {
-  const { main, linked } = fixtureWorktreePair()
+test('a linked worktree resolves its Codex project root to the MAIN worktree', (t) => {
+  const { main, linked } = fixtureWorktreePair(t)
   assert.equal(statSync(join(linked, '.git')).isFile(), true, 'a linked worktree has a .git file')
   assert.equal(resolveCodexProjectRoot(linked), realpathSync(main))
   assert.equal(resolveCodexProjectRoot(main), main, 'the main worktree still resolves to itself')
 })
 
-test('installing from a linked worktree puts the sidecar where Codex will read it', async () => {
+test('installing from a linked worktree puts the sidecar where Codex will read it', async (t) => {
   // The regression this guards: rendering the sidecar into the linked worktree writes a
   // file that looks installed, and that Codex never reads. `hooks/list` then reports the
   // main worktree's registration -- or none -- and the hooks silently do not run.
-  const { main, linked } = fixtureWorktreePair()
+  const { main, linked } = fixtureWorktreePair(t)
   const result = await installConfig({ projectRoot: linked, conclaveRoot: linked, diagnose: false })
 
   assert.equal(result.codexProjectRoot, realpathSync(main))
@@ -296,14 +299,14 @@ test('installing from a linked worktree puts the sidecar where Codex will read i
   assert.ok(!sidecar.includes(`${realpathSync(main)}/src/hooks/client.ts`))
 })
 
-test('a missing template fails loudly rather than rendering nothing', async () => {
-  const repo = mkdtempSync(join(tmpdir(), 'conclave-empty-'))
+test('a missing template fails loudly rather than rendering nothing', async (t) => {
+  const repo = tempDir(t, 'conclave-empty')
   writeFileSync(join(repo, 'package.json'), '{}')
   await assert.rejects(() => installConfig({ projectRoot: repo, conclaveRoot: repo, diagnose: false }), /missing template/)
 })
 
-test('writeAtomic leaves no temporary file behind', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'conclave-atomic-'))
+test('writeAtomic leaves no temporary file behind', (t) => {
+  const dir = tempDir(t, 'conclave-atomic')
   const target = join(dir, 'nested', 'out.json')
   writeAtomic(target, '{"ok":true}')
   assert.equal(readFileSync(target, 'utf8'), '{"ok":true}')
@@ -319,10 +322,10 @@ test('resolveRepoRoot finds this checkout', () => {
   assert.ok(existsSync(join(REPO, 'config', 'templates')))
 })
 
-test('a bare directory is its own project root rather than an error', () => {
+test('a bare directory is its own project root rather than an error', (t) => {
   // Neither git nor a package.json anywhere above it. Refusing here would deny a session
   // in an ordinary scratch directory the only thing that gives it a completion signal.
-  const bare = mkdtempSync(join(tmpdir(), 'conclave-bare-'))
+  const bare = tempDir(t, 'conclave-bare')
   // The directory as given, not its realpath: this answers "which project", and resolving
   // symlinks would silently relocate a project reached through one.
   assert.equal(resolveRepoRoot(bare), bare)
@@ -335,7 +338,7 @@ test('resolveConclaveRoot survives being reached through a symlink', () => {
   for (const t of TARGETS) assert.ok(existsSync(join(resolveConclaveRoot(), t.template)))
 })
 
-test('a dry run detects a perturbed registration, and does not repair it', async () => {
+test('a dry run detects a perturbed registration, and does not repair it', async (t) => {
   // This replaces a test that compared THIS CHECKOUT's installed registrations against its
   // templates. That test was ambient: its verdict came from the directory it happened to run
   // in rather than from anything the suite set up. In a Conclave seat worktree it failed
@@ -350,7 +353,7 @@ test('a dry run detects a perturbed registration, and does not repair it', async
   // The live signal that this checkout's own registrations are current now lives in `config
   // check`, which is a command an operator or CI runs against a specific root, and which
   // reports `not_applicable` in a seat worktree instead of red. See src/config/checkCli.test.ts.
-  const repo = fixtureRepo()
+  const repo = fixtureRepo(t)
   const opts = { projectRoot: repo, conclaveRoot: repo, diagnose: false } as const
 
   const installed = await installConfig(opts)
@@ -374,11 +377,11 @@ test('a dry run detects a perturbed registration, and does not repair it', async
   assert.equal(readFileSync(sidecar, 'utf8'), perturbed, 'a dry run must not repair what it reports')
 })
 
-test('a dry run detects a template that has moved away from what is installed', async () => {
+test('a dry run detects a template that has moved away from what is installed', async (t) => {
   // The other direction, and the one the original ambient test was written for: the
   // registrations are untouched and the TEMPLATE changed, which is what happens when someone
   // edits config/templates/ and does not re-run the installer.
-  const repo = fixtureRepo()
+  const repo = fixtureRepo(t)
   const opts = { projectRoot: repo, conclaveRoot: repo, diagnose: false } as const
   await installConfig(opts)
   assert.equal(hasDrift(await installConfig({ ...opts, dryRun: true })), false)
@@ -413,11 +416,11 @@ test('a registration owned by another Conclave is not reported as drift', () => 
   assert.equal(renderedRootOf(template, drifted), undefined)
 })
 
-test('a shared registration says what running the installer would cost', async () => {
+test('a shared registration says what running the installer would cost', async (t) => {
   // The first version called this DRIFT, which sent the reader to `config install` -- and
   // running it is exactly what hijacks the sidecar and drops the other checkout's trust.
   // A diagnostic that recommends the damage is worse than one that says nothing.
-  const dir = mkdtempSync(join(tmpdir(), 'conclave-shared-'))
+  const dir = tempDir(t, 'conclave-shared')
   execFileSync('git', ['init', '-q'], { cwd: dir })
   const sidecar = join(dir, '.codex', 'hooks.json')
   mkdirSync(dirname(sidecar), { recursive: true })
@@ -449,7 +452,6 @@ test('a shared registration says what running the installer would cost', async (
     /Registrations differ from the templates/,
     'the drift advice must not also appear; it is the advice that causes the damage',
   )
-  rmSync(dir, { recursive: true, force: true })
 })
 
 test('no tracked source file hardcodes an absolute home path', () => {
@@ -490,8 +492,8 @@ test('no tracked source file hardcodes an absolute home path', () => {
   )
 })
 
-test('dry run reports drift without writing', async () => {
-  const repo = fixtureRepo()
+test('dry run reports drift without writing', async (t) => {
+  const repo = fixtureRepo(t)
   await installConfig({ projectRoot: repo, conclaveRoot: repo, diagnose: false })
 
   // Perturb one registration, then check without installing.
@@ -512,10 +514,10 @@ test('dry run reports drift without writing', async () => {
   assert.notEqual(readFileSync(codexOut, 'utf8'), perturbed, 'install does write')
 })
 
-test('an unchanged checkout is a true no-op, not a rewrite', async () => {
+test('an unchanged checkout is a true no-op, not a rewrite', async (t) => {
   // The property the pre-fixture guidance depends on: running install before an
   // experiment must not cause a deployment-state transition.
-  const repo = fixtureRepo()
+  const repo = fixtureRepo(t)
   await installConfig({ projectRoot: repo, conclaveRoot: repo, diagnose: false })
   const before = TARGETS.map((t) => statSync(join(repo, t.output)).mtimeMs)
 
@@ -530,13 +532,13 @@ test('an unchanged checkout is a true no-op, not a rewrite', async () => {
   )
 })
 
-test('registrations a project does not ignore are reported, not fixed', async () => {
+test('registrations a project does not ignore are reported, not fixed', async (t) => {
   // Found by pointing Conclave at a fresh repository: these files carry absolute paths and
   // are machine-local by construction, so writing them into a repo that does not ignore
   // them leaves untracked files someone had no reason to expect. In a repo with a
   // `git add -A` habit that is a real hazard, not untidiness.
-  const conclave = fixtureRepo()
-  const project = fixtureProject()
+  const conclave = fixtureRepo(t)
+  const project = fixtureProject(t)
   git(project, 'init', '--quiet')
 
   const dirty = await installConfig({ projectRoot: project, conclaveRoot: conclave, diagnose: false })
@@ -557,11 +559,11 @@ test('registrations a project does not ignore are reported, not fixed', async ()
   assert.equal(readFileSync(join(project, '.gitignore'), 'utf8'), '.claude/\n.codex/\n')
 })
 
-test('a project that is not a git repository reports nothing to ignore', async () => {
+test('a project that is not a git repository reports nothing to ignore', async (t) => {
   // `git check-ignore` cannot answer outside a repository, and a warning nobody can act on
   // is worse than none.
-  const conclave = fixtureRepo()
-  const project = fixtureProject()
+  const conclave = fixtureRepo(t)
+  const project = fixtureProject(t)
   const result = await installConfig({ projectRoot: project, conclaveRoot: conclave, diagnose: false })
   assert.deepEqual(result.unignored, [])
 })
@@ -578,7 +580,7 @@ test('SessionEnd asks for the timeout Codex will actually honour', () => {
   }
 })
 
-test('a linked worktree gets an empty .codex/ so Codex looks for the sidecar at all', async () => {
+test('a linked worktree gets an empty .codex/ so Codex looks for the sidecar at all', async (t) => {
   // Measured on codex 0.146.0, from a linked worktree whose MAIN worktree had a valid
   // sidecar:
   //
@@ -592,12 +594,15 @@ test('a linked worktree gets an empty .codex/ so Codex looks for the sidecar at 
   // makes Codex go and read it. Without this, `codex` in ANY linked worktree loads no hooks,
   // has no turn-completion signal, and the preflight refuses to start a session -- with a
   // diagnostic that names neither cause.
-  const main = mkdtempSync(join(tmpdir(), 'wt-main-'))
+  const main = tempDir(t, 'wt-main')
   execFileSync('git', ['init', '-q', '.'], { cwd: main })
   execFileSync('git', ['config', 'user.email', 't@t'], { cwd: main })
   execFileSync('git', ['config', 'user.name', 't'], { cwd: main })
   execFileSync('git', ['commit', '-q', '--allow-empty', '-m', 'init'], { cwd: main })
-  const linked = join(main, '..', `wt-linked-${process.pid}`)
+  // As in `fixtureWorktreePair`: the linked worktree goes inside a container the testkit
+  // owns, not beside `main`. The `git worktree remove` that used to end this test removed it
+  // only when every assertion below passed, so a failure left the directory behind for good.
+  const linked = join(tempDir(t, 'wt-linked'), 'linked')
   execFileSync('git', ['worktree', 'add', '-q', '-b', 'probe', linked], { cwd: main })
 
   await installConfig({
@@ -612,19 +617,18 @@ test('a linked worktree gets an empty .codex/ so Codex looks for the sidecar at 
   // ...and the linked worktree needs the directory, without which Codex never looks.
   assert.ok(existsSync(join(linked, '.codex')), 'trigger directory in the linked worktree')
 
-  execFileSync('git', ['worktree', 'remove', '--force', linked], { cwd: main })
 })
 
-test('a plain checkout gets no stray .codex directory', async () => {
+test('a plain checkout gets no stray .codex directory', async (t) => {
   // The trigger is only needed when the roots diverge. Creating it unconditionally would
   // leave an empty directory in every project Conclave has ever registered.
-  const plain = mkdtempSync(join(tmpdir(), 'wt-plain-'))
+  const plain = tempDir(t, 'wt-plain')
   execFileSync('git', ['init', '-q', '.'], { cwd: plain })
   await installConfig({ projectRoot: plain, conclaveRoot: REPO, agents: ['claude'], diagnose: false })
   assert.equal(existsSync(join(plain, '.codex')), false, 'no codex agent, no codex directory')
 })
 
-test('#41 the ready line says what it cannot see', async () => {
+test('#41 the ready line says what it cannot see', async (t) => {
   // A run that dies with "no UserPromptSubmit hook after send" sends its operator here, and this
   // reported that everything was fine. Three states produce that death and this distinguishes
   // only two: registration and trust are static facts about configuration, and whether a handler
@@ -633,7 +637,7 @@ test('#41 the ready line says what it cannot see', async () => {
   // Built from a real install rather than a hand-made object: `formatInstallResult` reads
   // several fields, and a fixture that guesses which ones is a fixture that breaks when the
   // shape moves for unrelated reasons.
-  const project = fixtureProject()
+  const project = fixtureProject(t)
   const result = await installConfig({
     projectRoot: project,
     conclaveRoot: REPO,

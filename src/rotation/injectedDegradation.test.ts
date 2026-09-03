@@ -23,15 +23,16 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync } from 'node:child_process'
-import { appendFileSync, mkdtempSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { appendFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
+import type { TestContext } from 'node:test'
+import { tempDir } from '../testkit/tempDir.ts'
 import { guaranteesFor } from '../contract/session.ts'
 import { TranscriptSessionView } from '../transcript/reconcile.ts'
 
-function repo(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'conclave-injected-'))
+function repo(t: TestContext): string {
+  const dir = tempDir(t, 'conclave-injected')
   execFileSync('git', ['init', '-q', '.'], { cwd: dir })
   return dir
 }
@@ -56,8 +57,8 @@ function viewOver(path: string): TranscriptSessionView {
   })
 }
 
-test('an injected compaction raises the generation a snapshot reports', async () => {
-  const dir = repo()
+test('an injected compaction raises the generation a snapshot reports', async (t) => {
+  const dir = repo(t)
   const path = join(dir, 'transcript.jsonl')
   writeFileSync(path, `${userRecord('do the work')}\n`)
 
@@ -73,11 +74,11 @@ test('an injected compaction raises the generation a snapshot reports', async ()
   assert.equal(snap.compactionGeneration, 1, 'the trigger can fire at all')
 })
 
-test('the generation a snapshot reports is what degradation is measured against', async () => {
+test('the generation a snapshot reports is what degradation is measured against', async (t) => {
   // The relay compares `impl.baselineGeneration` with `snap.compactionGeneration`. Both come
   // from here, so a counter that cannot move makes `assess` structurally unable to see
   // degradation -- which is what "34 assessments, zero degraded" was actually measuring.
-  const dir = repo()
+  const dir = repo(t)
   const path = join(dir, 'transcript.jsonl')
   writeFileSync(path, `${userRecord('first')}\n`)
 
@@ -96,11 +97,11 @@ test('the generation a snapshot reports is what degradation is measured against'
   assert.ok(current > baseline, 'which is the comparison the relay actually makes')
 })
 
-test('a DECLARED compaction counts however it was written down', async () => {
+test('a DECLARED compaction counts however it was written down', async (t) => {
   // Codex rewrites, Claude Code appends. Rotation cares that context was DISCARDED, not how
   // the CLI chose to write it down -- counting only rewrites made the trigger a property of
   // one vendor's file format. What makes it count is the marker, not the byte pattern.
-  const dir = repo()
+  const dir = repo(t)
   const path = join(dir, 'transcript.jsonl')
   writeFileSync(path, `${userRecord('first')}\n`)
 
@@ -120,7 +121,7 @@ test('a DECLARED compaction counts however it was written down', async () => {
   assert.equal(afterRewrite, 2, 'a rewrite that declares a compaction still counts')
 })
 
-test('a rewrite with no marker is not a compaction (#122)', async () => {
+test('a rewrite with no marker is not a compaction (#122)', async (t) => {
   // This test asserted the opposite until #122, on the reasoning that a rewrite is itself
   // evidence of discarded context. Measured, it is not: 13 child transcripts from four runs
   // held zero `compact_file_reference` attachments and zero boundary records while nine
@@ -131,7 +132,7 @@ test('a rewrite with no marker is not a compaction (#122)', async () => {
   // reaches this counter, records really have changed. Rotation, which reads only
   // `compactionGeneration`, is still left alone -- a changed record is not a discarded
   // context, and only a declared marker says context was discarded.
-  const dir = repo()
+  const dir = repo(t)
   const path = join(dir, 'transcript.jsonl')
   writeFileSync(path, `${userRecord('first')}\n`)
 
@@ -161,11 +162,11 @@ test('a rewrite with no marker is not a compaction (#122)', async () => {
   )
 })
 
-test('polling with nothing new does not inflate the generation', async () => {
+test('polling with nothing new does not inflate the generation', async (t) => {
   // The failure in the other direction. A counter that climbed on every poll would make
   // degradation fire constantly, and a trigger that always fires is as useless as one that
   // never does -- worse, because it looks like it is working.
-  const dir = repo()
+  const dir = repo(t)
   const path = join(dir, 'transcript.jsonl')
   writeFileSync(path, `${userRecord('first')}\n${COMPACTION}\n`)
 

@@ -17,14 +17,15 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { existsSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
+import type { TestContext } from 'node:test'
 import { main } from '../../bin/conclave.ts'
 import { AgentRegistry } from '../registry/registry.ts'
 import { NO_DEADLINE_CLOCKS } from '../registry/types.ts'
 import { FakeRotationSession } from '../rotation/fakeSession.ts'
+import { tempDir } from '../testkit/tempDir.ts'
 import { newSessionId, recordSession, type SessionParticipantStatus } from '../workspace/sessionRecord.ts'
 import { Relay } from './relay.ts'
 
@@ -60,8 +61,8 @@ function registryOf(sessions: Record<string, FakeRotationSession>): AgentRegistr
 }
 
 /** A repository to run in: two seats mean real worktrees, and those need a real checkout. */
-function tempRepo(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'conclave-seat-status-'))
+function tempRepo(t: TestContext): string {
+  const dir = tempDir(t, 'conclave-seat-status')
   execFileSync('git', ['init', '--quiet'], { cwd: dir })
   execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: dir })
   execFileSync('git', ['config', 'user.name', 'Test'], { cwd: dir })
@@ -99,13 +100,13 @@ const BOTH = '@seat seat-alpha: rebuild the parser\n@seat seat-beta: rewrite the
  * this block, exists only between dispatch and grading. Reading the file after the run would
  * show two idle seats and prove nothing about the field that matters most.
  */
-async function statusWhileBusy(): Promise<{
+async function statusWhileBusy(t: TestContext): Promise<{
   participants: SessionParticipantStatus[]
   repo: string
   /** What git said about each claimed worktree path, asked WHILE the trees still existed. */
   observed: Record<string, { exists: boolean; branch?: string }>
 }> {
-  const repo = tempRepo()
+  const repo = tempRepo(t)
   const before = process.cwd()
   const lead = new FakeRotationSession('lead-1', 'lead', [BOTH, 'DONE', 'DONE'])
   const alpha = new FakeRotationSession('alpha-1', 'alpha', ['ack', 'Did it.', 'NONE', 'NONE'])
@@ -183,9 +184,9 @@ async function statusWhileBusy(): Promise<{
   }
 }
 
-test('every implementer seat of a two-seat run reports its task, tree, branch and scheduler state', async () => {
-  const { participants, repo, observed } = await statusWhileBusy()
-  try {
+test('every implementer seat of a two-seat run reports its task, tree, branch and scheduler state', async (t) => {
+  const { participants, repo, observed } = await statusWhileBusy(t)
+  {
     const seats = participants.filter((p) => p.rank === 'implementer')
     assert.deepEqual(
       seats.map((p) => p.id),
@@ -239,18 +240,16 @@ test('every implementer seat of a two-seat run reports its task, tree, branch an
     assert.notEqual((alpha.seat as Seat).task!.id, (beta.seat as Seat).task!.id)
     assert.notEqual((alpha.seat as Seat).worktree!.path, (beta.seat as Seat).worktree!.path)
     assert.notEqual((alpha.seat as Seat).worktree!.branch, (beta.seat as Seat).worktree!.branch)
-  } finally {
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
-test('a one-seat run carries no seat block at all, on any participant', async () => {
+test('a one-seat run carries no seat block at all, on any participant', async (t) => {
   // D1's identity case for this field, and the reason the block is gated rather than always
   // emitted: a key that appeared on the single implementer of a default run is a key every
   // existing consumer of `status --json` would start seeing. `defaultUnchanged.test.ts` pins
   // the whole document; this says the same thing about the one field, close to the code that
   // decides it, so a change here fails with the reason rather than as a shape diff.
-  const repo = tempRepo()
+  const repo = tempRepo(t)
   const before = process.cwd()
   const lead = new FakeRotationSession('lead-1', 'lead', ['do the thing', 'DONE'])
   const impl = new FakeRotationSession('impl-1', 'impl', ['ack', 'Did it.', 'NONE'])
@@ -299,6 +298,5 @@ test('a one-seat run carries no seat block at all, on any participant', async ()
     process.chdir(before)
     await recording.close()
     await relay.stop()
-    rmSync(repo, { recursive: true, force: true })
   }
 })

@@ -35,17 +35,18 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { PassThrough, Writable } from 'node:stream'
 import test from 'node:test'
+import type { TestContext } from 'node:test'
 import { FLAG_SURFACE, main } from '../../bin/conclave.ts'
 import { PASS_THROUGH_FLAGS } from '../config/cliFlags.ts'
 import { effectiveLaunchArgs } from '../registry/launch.ts'
 import { AgentRegistry } from '../registry/registry.ts'
 import { NO_DEADLINE_CLOCKS } from '../registry/types.ts'
 import { FakeRotationSession } from '../rotation/fakeSession.ts'
+import { tempDir } from '../testkit/tempDir.ts'
 import { COMMANDS } from '../repl/session.ts'
 
 const CLI = readFileSync(join(import.meta.dirname, '..', '..', 'bin', 'conclave.ts'), 'utf8')
@@ -475,8 +476,8 @@ function recordingRegistry(handed: Record<string, string[]>): AgentRegistry {
   return registry
 }
 
-function tempRepo(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'conclave-parity-'))
+function tempRepo(t: TestContext): string {
+  const dir = tempDir(t, 'conclave-parity')
   execFileSync('git', ['init', '--quiet'], { cwd: dir })
   execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: dir })
   execFileSync('git', ['config', 'user.name', 'Test'], { cwd: dir })
@@ -529,7 +530,7 @@ function knownAgents(agents: readonly string[], created: string[]): AgentRegistr
   return registry
 }
 
-test('both front-ends describe the same plan, line for line, from one invocation', async () => {
+test('both front-ends describe the same plan, line for line, from one invocation', async (t) => {
   // `--dry-run` is on both commands as of this test, which is what retires the DECLARED entry
   // above. Existing on both is the weak claim, and this file has been fooled by it before
   // (#81): what matters is that the two commands describe the SAME resolution.
@@ -548,7 +549,7 @@ test('both front-ends describe the same plan, line for line, from one invocation
   // Every kind of launch argument at once, since composition is where the two could differ:
   // config-derived (`--auto`, from the bypass mode written into .conclave/config.json),
   // per-invocation (`--implementer-args`), and per-seat (inside `--implementers`).
-  const repo = tempRepo()
+  const repo = tempRepo(t)
   mkdirSync(join(repo, '.conclave'), { recursive: true })
   writeFileSync(
     join(repo, '.conclave', 'config.json'),
@@ -642,7 +643,6 @@ test('both front-ends describe the same plan, line for line, from one invocation
     }
   } finally {
     process.chdir(before)
-    rmSync(repo, { recursive: true, force: true })
   }
 
   assert.deepEqual(
@@ -676,7 +676,7 @@ test('both front-ends describe the same plan, line for line, from one invocation
   assert.deepEqual(created, [], 'a dry run must start nothing, on either command')
 })
 
-test('the same --implementer-args value reaches the same launch from both front-ends', async () => {
+test('the same --implementer-args value reaches the same launch from both front-ends', async (t) => {
   // #81 end to end, and the half the acceptance table above cannot reach: a front-end could
   // accept a value and then drop it, which reads as agreement everywhere except at the child.
   //
@@ -701,7 +701,7 @@ test('the same --implementer-args value reaches the same launch from both front-
   const launches: Record<string, Record<string, string[]>> = {}
   const before = process.cwd()
   for (const front of ['relay', 'session'] as const) {
-    const repo = tempRepo()
+    const repo = tempRepo(t)
     const handed: Record<string, string[]> = {}
     try {
       process.chdir(repo)
@@ -721,7 +721,6 @@ test('the same --implementer-args value reaches the same launch from both front-
       launches[front] = handed
     } finally {
       process.chdir(before)
-      rmSync(repo, { recursive: true, force: true })
     }
   }
 

@@ -15,10 +15,11 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync, spawnSync } from 'node:child_process'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
+import type { TestContext } from 'node:test'
+import { tempDir } from '../testkit/tempDir.ts'
 import { resolveRepoRoot } from '../config/install.ts'
 import { sessionDir, type SessionRunState, type SessionStatus } from './sessionRecord.ts'
 
@@ -28,8 +29,8 @@ const DAY = 24 * 60 * 60 * 1000
 /** A pid that cannot be running, i.e. a session whose process is gone. */
 const DEAD_PID = 2 ** 30
 
-function repo(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'conclave-sessions-cli-'))
+function repo(t: TestContext): string {
+  const dir = tempDir(t, 'conclave-sessions-cli')
   execFileSync('git', ['init', '-q'], { cwd: dir })
   writeFileSync(join(dir, 'tracked.txt'), 'original\n')
   execFileSync('git', ['add', '.'], { cwd: dir })
@@ -98,8 +99,8 @@ function bulkRecords(dir: string, count: number): void {
   }
 }
 
-test('the default cutoff is seven days', () => {
-  const dir = repo()
+test('the default cutoff is seven days', (t) => {
+  const dir = repo(t)
   const old = record(dir, 'ended-8d', { state: 'ended', pid: DEAD_PID, ageDays: 8 })
   const recent = record(dir, 'ended-6d', { state: 'ended', pid: DEAD_PID, ageDays: 6 })
 
@@ -121,8 +122,8 @@ test('the default cutoff is seven days', () => {
  * An operator shown only the plan has to assume the rest, which for a delete is the one thing
  * they should never have to do.
  */
-test('each id is printed before the deletion and again as an outcome', () => {
-  const dir = repo()
+test('each id is printed before the deletion and again as an outcome', (t) => {
+  const dir = repo(t)
   record(dir, 'ended-30d', { state: 'ended', pid: DEAD_PID, ageDays: 30 })
   record(dir, 'ended-40d', { state: 'ended', pid: DEAD_PID, ageDays: 40 })
 
@@ -139,8 +140,8 @@ test('each id is printed before the deletion and again as an outcome', () => {
   }
 })
 
-test('a skipped record is named with its reason alongside the removals', () => {
-  const dir = repo()
+test('a skipped record is named with its reason alongside the removals', (t) => {
+  const dir = repo(t)
   record(dir, 'ended-30d', { state: 'ended', pid: DEAD_PID, ageDays: 30 })
   record(dir, 'ended-live-30d', { state: 'ended', pid: process.pid, ageDays: 30 })
 
@@ -154,8 +155,8 @@ test('a skipped record is named with its reason alongside the removals', () => {
   assert.equal(existsSync(sessionDir(dir, 'ended-live-30d')), true)
 })
 
-test('--days takes a cutoff, and zero means everything that qualifies', () => {
-  const dir = repo()
+test('--days takes a cutoff, and zero means everything that qualifies', (t) => {
+  const dir = repo(t)
   const twoDays = record(dir, 'ended-2d', { state: 'ended', pid: DEAD_PID, ageDays: 2 })
   const oneDay = record(dir, 'ended-1d', { state: 'ended', pid: DEAD_PID, ageDays: 1 })
 
@@ -179,8 +180,8 @@ test('--days takes a cutoff, and zero means everything that qualifies', () => {
  * were already clean. Negative is refused rather than clamped: a cutoff in the future is not
  * something anyone meant to ask for.
  */
-test('a missing, malformed, or negative --days is refused and deletes nothing', () => {
-  const dir = repo()
+test('a missing, malformed, or negative --days is refused and deletes nothing', (t) => {
+  const dir = repo(t)
   const old = record(dir, 'ended-90d', { state: 'ended', pid: DEAD_PID, ageDays: 90 })
 
   for (const flags of [
@@ -208,8 +209,8 @@ test('a missing, malformed, or negative --days is refused and deletes nothing', 
  * reading is not a milder version of the intended command; it is a different one, and it is
  * the destructive one.
  */
-test('an unrecognised argument is refused rather than ignored, and nothing is deleted', () => {
-  const dir = repo()
+test('an unrecognised argument is refused rather than ignored, and nothing is deleted', (t) => {
+  const dir = repo(t)
   const old = record(dir, 'ended-90d', { state: 'ended', pid: DEAD_PID, ageDays: 90 })
 
   for (const flags of [
@@ -238,8 +239,8 @@ test('an unrecognised argument is refused rather than ignored, and nothing is de
  * silently took the last would delete everything for an operator who was editing the line
  * and forgot to remove the first.
  */
-test('a repeated flag is refused, and nothing is deleted', () => {
-  const dir = repo()
+test('a repeated flag is refused, and nothing is deleted', (t) => {
+  const dir = repo(t)
   const old = record(dir, 'ended-90d', { state: 'ended', pid: DEAD_PID, ageDays: 90 })
 
   for (const [flags, expected] of [
@@ -255,8 +256,8 @@ test('a repeated flag is refused, and nothing is deleted', () => {
   }
 })
 
-test('--days without --prune is refused rather than quietly ignored', () => {
-  const dir = repo()
+test('--days without --prune is refused rather than quietly ignored', (t) => {
+  const dir = repo(t)
   const old = record(dir, 'ended-90d', { state: 'ended', pid: DEAD_PID, ageDays: 90 })
   const { status, stderr } = sessions(dir, '--days', '3')
   assert.equal(status, 1)
@@ -271,8 +272,8 @@ test('--days without --prune is refused rather than quietly ignored', () => {
  * run — `running`, nobody home — is the evidence of the crash that made a retry
  * indistinguishable from a double start in the first place.
  */
-test('a live session and an abandoned run both survive a prune of everything', () => {
-  const dir = repo()
+test('a live session and an abandoned run both survive a prune of everything', (t) => {
+  const dir = repo(t)
   const live = record(dir, 'live-99d', { state: 'running', pid: process.pid, ageDays: 99 })
   const endedLive = record(dir, 'ended-live-99d', { state: 'ended', pid: process.pid, ageDays: 99 })
   const abandoned = record(dir, 'abandoned-99d', { state: 'running', pid: DEAD_PID, ageDays: 99 })
@@ -295,8 +296,8 @@ test('a live session and an abandoned run both survive a prune of everything', (
  * nothing may be deleted unannounced. stderr satisfies both, and a consumer redirecting it to
  * a log is exactly who wants that record.
  */
-test('--prune --json keeps stdout to the result and announces on stderr', () => {
-  const dir = repo()
+test('--prune --json keeps stdout to the result and announces on stderr', (t) => {
+  const dir = repo(t)
   record(dir, 'ended-30d', { state: 'ended', pid: DEAD_PID, ageDays: 30 })
   record(dir, 'live-30d', { state: 'running', pid: process.pid, ageDays: 30 })
 
@@ -318,8 +319,8 @@ test('--prune --json keeps stdout to the result and announces on stderr', () => 
   assert.match(stderr, /ended-30d/)
 })
 
-test('--prune --json says on stderr when there is nothing to do', () => {
-  const dir = repo()
+test('--prune --json says on stderr when there is nothing to do', (t) => {
+  const dir = repo(t)
   record(dir, 'live-30d', { state: 'running', pid: process.pid, ageDays: 30 })
 
   const { status, stdout, stderr } = sessions(dir, '--prune', '--json')
@@ -341,32 +342,37 @@ test('--prune --json says on stderr when there is nothing to do', () => {
 test('a record that cannot be removed is reported and exits non-zero', (t) => {
   // As root every removal succeeds and there is no failure to observe.
   if (process.getuid?.() === 0) return t.skip('runs as root')
-  const dir = repo()
+  const dir = repo(t)
   record(dir, 'ended-30d', { state: 'ended', pid: DEAD_PID, ageDays: 30 })
   const sessionsRoot = join(dir, '.conclave', 'sessions')
   // Removing a directory needs write permission on its PARENT, so this makes the record
   // unremovable without touching the record itself -- which still has to be readable for the
   // prune to choose it in the first place.
   chmodSync(sessionsRoot, 0o500)
-  // Restored regardless, or the fixture itself cannot be cleaned up afterwards.
-  t.after(() => chmodSync(sessionsRoot, 0o700))
+  // Restored regardless, and BEFORE the test returns -- `tempDir`'s own cleanup hook was
+  // registered first (inside `repo(t)`, above) and `t.after` hooks run in registration order,
+  // so a restore parked in another `t.after` would run second, after cleanup had already
+  // tried and failed to remove a tree it cannot write to.
+  try {
+    const { status, stdout, stderr } = sessions(dir, '--prune')
 
-  const { status, stdout, stderr } = sessions(dir, '--prune')
-
-  assert.equal(status, 1, 'a failed removal must not exit zero')
-  assert.match(stdout, /ended-30d/, 'it is still announced before the attempt')
-  assert.match(stderr, /could not remove ended-30d/)
-  assert.equal(existsSync(sessionDir(dir, 'ended-30d')), true)
+    assert.equal(status, 1, 'a failed removal must not exit zero')
+    assert.match(stdout, /ended-30d/, 'it is still announced before the attempt')
+    assert.match(stderr, /could not remove ended-30d/)
+    assert.equal(existsSync(sessionDir(dir, 'ended-30d')), true)
+  } finally {
+    chmodSync(sessionsRoot, 0o700)
+  }
 })
 
-test('pruning a project with no sessions says so and exits zero', () => {
-  const { status, stdout } = sessions(repo(), '--prune')
+test('pruning a project with no sessions says so and exits zero', (t) => {
+  const { status, stdout } = sessions(repo(t), '--prune')
   assert.equal(status, 0)
   assert.match(stdout, /no session records are older than 7d and finished/)
 })
 
-test('listing is unchanged without --prune', () => {
-  const dir = repo()
+test('listing is unchanged without --prune', (t) => {
+  const dir = repo(t)
   record(dir, 'ended-90d', { state: 'ended', pid: DEAD_PID, ageDays: 90 })
   record(dir, 'live-1d', { state: 'running', pid: process.pid, ageDays: 1 })
 
@@ -384,8 +390,8 @@ test('listing is unchanged without --prune', () => {
   assert.equal(JSON.parse(asJson.stdout).length, 2)
 })
 
-test('an empty project still lists rather than erroring', () => {
-  const { status, stdout } = sessions(repo())
+test('an empty project still lists rather than erroring', (t) => {
+  const { status, stdout } = sessions(repo(t))
   assert.equal(status, 0)
   assert.match(stdout, /no sessions have been recorded in this project/)
 })
@@ -407,8 +413,8 @@ test('an empty project still lists rather than erroring', () => {
  * so `status`, `guard`, `config show` and relay's JSON all ride on the same fix; this is
  * the cheapest command to make large on demand, which is why the guard lives here.
  */
-test('a --json listing larger than a pipe buffer arrives whole', () => {
-  const dir = repo()
+test('a --json listing larger than a pipe buffer arrives whole', (t) => {
+  const dir = repo(t)
   const count = 200
   bulkRecords(dir, count)
 
@@ -452,8 +458,8 @@ test('a --json listing larger than a pipe buffer arrives whole', () => {
  * exit code has to be the one the COMMAND chose -- a broken pipe is the reader's decision to
  * stop reading, not a failure of the listing -- and stderr has to stay clean.
  */
-test('a reader that stops early gets the command exit code, not a stack trace', () => {
-  const dir = repo()
+test('a reader that stops early gets the command exit code, not a stack trace', (t) => {
+  const dir = repo(t)
   bulkRecords(dir, 200)
 
   const errPath = join(dir, 'cli-stderr.txt')

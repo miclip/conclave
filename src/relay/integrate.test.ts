@@ -12,10 +12,11 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
+import type { TestContext } from 'node:test'
+import { tempDir } from '../testkit/tempDir.ts'
 import { createSeatWorktrees, readManifest, type SeatWorktree, type WorktreeManifest } from '../workspace/worktrees.ts'
 import {
   commitSeatWork,
@@ -29,8 +30,8 @@ function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
 }
 
-function tempRepo(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'conclave-int-'))
+function tempRepo(t: TestContext): string {
+  const dir = tempDir(t, 'conclave-int')
   git(dir, 'init', '--quiet')
   git(dir, 'config', 'user.email', 'test@example.com')
   git(dir, 'config', 'user.name', 'Test')
@@ -44,21 +45,18 @@ function tempRepo(): string {
 const META = { taskId: 't1', seq: 1, advisorTurn: 1 }
 
 function withSeats(
+  t: TestContext,
   seatIds: string[],
   work: (repo: string, manifest: WorktreeManifest, seats: Record<string, SeatWorktree>) => void,
 ): void {
-  const repo = tempRepo()
-  try {
-    const manifest = createSeatWorktrees({ repoRoot: repo, runId: 'r1', seatIds })
-    const seats = Object.fromEntries(manifest.seats.map((s) => [s.seatId, s]))
-    work(repo, manifest, seats)
-  } finally {
-    rmSync(repo, { recursive: true, force: true })
-  }
+  const repo = tempRepo(t)
+  const manifest = createSeatWorktrees({ repoRoot: repo, runId: 'r1', seatIds })
+  const seats = Object.fromEntries(manifest.seats.map((s) => [s.seatId, s]))
+  work(repo, manifest, seats)
 }
 
-test('a seat commit carries tracked and untracked work, with the task in its trailers', () => {
-  withSeats(['a'], (repo, _manifest, seats) => {
+test('a seat commit carries tracked and untracked work, with the task in its trailers', (t) => {
+  withSeats(t, ['a'], (repo, _manifest, seats) => {
     const seat = seats.a!
     writeFileSync(join(seat.worktreePath, 'shared.txt'), 'edited\n')
     writeFileSync(join(seat.worktreePath, 'brand-new.txt'), 'created\n')
@@ -81,8 +79,8 @@ test('a seat commit carries tracked and untracked work, with the task in its tra
   })
 })
 
-test('a seat that changed nothing produces no commit and no merge', () => {
-  withSeats(['a'], (repo, manifest, seats) => {
+test('a seat that changed nothing produces no commit and no merge', (t) => {
+  withSeats(t, ['a'], (repo, manifest, seats) => {
     const before = git(repo, 'rev-parse', 'HEAD').trim()
     assert.equal(commitSeatWork(seats.a!, META), undefined, 'a read-only task is not a failed boundary')
 
@@ -93,8 +91,8 @@ test('a seat that changed nothing produces no commit and no merge', () => {
   })
 })
 
-test('a successful boundary merges the work, records it, and resets the seat onto the new HEAD', () => {
-  withSeats(['a'], (repo, manifest, seats) => {
+test('a successful boundary merges the work, records it, and resets the seat onto the new HEAD', (t) => {
+  withSeats(t, ['a'], (repo, manifest, seats) => {
     const seat = seats.a!
     const base = seat.baseSha
     writeFileSync(join(seat.worktreePath, 'from-seat.txt'), 'work\n')
@@ -131,8 +129,8 @@ test('a successful boundary merges the work, records it, and resets the seat ont
   })
 })
 
-test('two seats integrate one after the other and both diffs land', () => {
-  withSeats(['a', 'b'], (repo, manifest, seats) => {
+test('two seats integrate one after the other and both diffs land', (t) => {
+  withSeats(t, ['a', 'b'], (repo, manifest, seats) => {
     writeFileSync(join(seats.a!.worktreePath, 'a.txt'), 'from a\n')
     writeFileSync(join(seats.b!.worktreePath, 'b.txt'), 'from b\n')
 
@@ -154,8 +152,8 @@ test('two seats integrate one after the other and both diffs land', () => {
   })
 })
 
-test('a conflicting merge is aborted, marks only that seat, and discards nothing', () => {
-  withSeats(['a', 'b'], (repo, manifest, seats) => {
+test('a conflicting merge is aborted, marks only that seat, and discards nothing', (t) => {
+  withSeats(t, ['a', 'b'], (repo, manifest, seats) => {
     // Both seats rewrite the same line from the same base. Nothing about this is exotic; it is
     // two implementers touching one file, which is the case isolation exists for.
     writeFileSync(join(seats.a!.worktreePath, 'shared.txt'), 'seat a wrote this\n')
@@ -191,8 +189,8 @@ test('a conflicting merge is aborted, marks only that seat, and discards nothing
   })
 })
 
-test('a blocked seat integrates once its own worktree resolves the conflict', () => {
-  withSeats(['a', 'b'], (repo, manifest, seats) => {
+test('a blocked seat integrates once its own worktree resolves the conflict', (t) => {
+  withSeats(t, ['a', 'b'], (repo, manifest, seats) => {
     writeFileSync(join(seats.a!.worktreePath, 'shared.txt'), 'seat a wrote this\n')
     writeFileSync(join(seats.b!.worktreePath, 'shared.txt'), 'seat b wrote this\n')
     integrateSeat(manifest, seats.a!, { taskId: 't1', seq: 1, advisorTurn: 1 })
@@ -230,9 +228,9 @@ test('a blocked seat integrates once its own worktree resolves the conflict', ()
  * because that is what makes each half individually green: `b`'s guard does not exist in `a`'s
  * tree, and `a`'s rename has not happened in `b`'s.
  */
-test('two individually green trees merge cleanly into a tree that fails its checks', () => {
+test('two individually green trees merge cleanly into a tree that fails its checks', (t) => {
   const CHECKS = ['sh check.sh']
-  withSeats(['a', 'b'], (repo, manifest, seats) => {
+  withSeats(t, ['a', 'b'], (repo, manifest, seats) => {
     // The base: a symbol, and a check that has nothing to say about it yet.
     writeFileSync(join(repo, 'api.txt'), 'alpha\n')
     writeFileSync(join(repo, 'check.sh'), 'exit 0\n')
@@ -282,8 +280,8 @@ test('two individually green trees merge cleanly into a tree that fails its chec
   })
 })
 
-test('an unconfigured boundary reports no checks, and an unchecked tree is not a green one', () => {
-  withSeats(['a'], (_repo, manifest, seats) => {
+test('an unconfigured boundary reports no checks, and an unchecked tree is not a green one', (t) => {
+  withSeats(t, ['a'], (_repo, manifest, seats) => {
     writeFileSync(join(seats.a!.worktreePath, 'x.txt'), 'x\n')
     const result = integrateSeat(manifest, seats.a!, META)
     assert.equal(result.status, 'merged')
@@ -295,8 +293,8 @@ test('an unconfigured boundary reports no checks, and an unchecked tree is not a
   })
 })
 
-test('a check that cannot be launched is not a check that passed', () => {
-  withSeats(['a'], (repo) => {
+test('a check that cannot be launched is not a check that passed', (t) => {
+  withSeats(t, ['a'], (repo) => {
     const [result] = runIntegrationChecks(repo, ['exit 3'])
     assert.equal(result!.exitCode, 3)
     assert.equal(failedRequired([result!]).length, 1)
@@ -307,8 +305,8 @@ test('a check that cannot be launched is not a check that passed', () => {
   })
 })
 
-test('mergeIntoIntegration on its own reports the merge without touching the manifest', () => {
-  withSeats(['a'], (repo, manifest, seats) => {
+test('mergeIntoIntegration on its own reports the merge without touching the manifest', (t) => {
+  withSeats(t, ['a'], (repo, manifest, seats) => {
     writeFileSync(join(seats.a!.worktreePath, 'x.txt'), 'x\n')
     commitSeatWork(seats.a!, META)
 
@@ -333,8 +331,8 @@ test('mergeIntoIntegration on its own reports the merge without touching the man
  * the `git status` behind it returned at -- a caller stamping `Date.now()` while formatting the
  * notice would report a different moment wearing this one's clothes.
  */
-test('a boundary that found nothing dates the observation from inside the boundary', () => {
-  withSeats(['a'], (repo, manifest, seats) => {
+test('a boundary that found nothing dates the observation from inside the boundary', (t) => {
+  withSeats(t, ['a'], (repo, manifest, seats) => {
     const before = Date.now()
     const result = integrateSeat(manifest, seats.a!, META)
     const after = Date.now()
@@ -353,8 +351,8 @@ test('a boundary that found nothing dates the observation from inside the bounda
  * A note that says only "still dirty" there is the single line saying otherwise, and it does
  * not say what was left -- so it reads as a formality and gets treated as one.
  */
-test('a tree left dirty after its boundary commit is reported by name', () => {
-  withSeats(['a'], (repo, manifest, seats) => {
+test('a tree left dirty after its boundary commit is reported by name', (t) => {
+  withSeats(t, ['a'], (repo, manifest, seats) => {
     // `post-commit` survives `commit --no-verify`, so this fires in the one window the
     // post-merge check exists to guard: after `add -A` has taken its snapshot, before the
     // boundary reports. `add -A` cannot have swept up something written later.

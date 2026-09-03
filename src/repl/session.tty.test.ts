@@ -19,10 +19,11 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
+import type { TestContext } from 'node:test'
+import { tempDir } from '../testkit/tempDir.ts'
 import { Progress } from './render.ts'
 
 const REPO = join(import.meta.dirname, '..', '..')
@@ -158,11 +159,11 @@ process.exit(code)
  * seat list, and threading both through the single-seat driver would leave every existing test
  * carrying arguments about a case it is not about.
  */
-function twoSeatDriver(dir: string): string {
+function twoSeatDriver(t: TestContext, dir: string): string {
   // OUTSIDE the repository, unlike the single-seat driver. Two seats take linked worktrees, and
   // that refuses to start over an unclean base -- so a driver written into the checkout is a
   // stray untracked file that stops the very run it starts.
-  const path = join(mkdtempSync(join(tmpdir(), 'conclave-tty-driver-')), 'two-seat-driver.mjs')
+  const path = join(tempDir(t, 'conclave-tty-driver'), 'two-seat-driver.mjs')
   writeFileSync(
     path,
     `
@@ -276,8 +277,8 @@ process.exit(code)
   return path
 }
 
-function repo(gitignore = '.conclave/\n'): string {
-  const dir = mkdtempSync(join(tmpdir(), 'conclave-tty-'))
+function repo(t: TestContext, gitignore = '.conclave/\n'): string {
+  const dir = tempDir(t, 'conclave-tty')
   execFileSync('git', ['init', '-q'], { cwd: dir })
   writeFileSync(join(dir, '.gitignore'), gitignore)
   execFileSync('git', ['add', '.'], { cwd: dir })
@@ -557,7 +558,7 @@ function flowed(rendered: string): string {
 }
 
 test('typed-but-unsubmitted text survives asynchronous output', async (t) => {
-  const dir = repo()
+  const dir = repo(t)
   const c = await spawnConsole(dir, t)
   assert.ok(await c.until((s) => s.includes('›')), 'the prompt should appear')
 
@@ -606,7 +607,7 @@ test('the pinned status keeps moving, so a silent turn cannot read as a hung one
   // line frozen through a single long tool call — same glyph, same elapsed time, for
   // minutes — and a motionless status is indistinguishable from a dead session. So what is
   // asserted is motion, and specifically motion during a window with no events at all.
-  const dir = repo()
+  const dir = repo(t)
   const c = await spawnConsole(dir, t)
   const plain = (s: string) => s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '')
   const frames = new RegExp(`[${Progress.SPINNER.join('')}]`, 'g')
@@ -632,7 +633,7 @@ test('a typed message appears once, not as a block and a queued row at the same 
   // a `● you → advisor` block, AND the queue put the same sentence in the pinned rows — so
   // the transcript showed it delivered while the box below still showed it waiting. Two
   // copies, disagreeing about whether it had been read.
-  const dir = repo()
+  const dir = repo(t)
   const c = await spawnConsole(dir, t)
   const plain = (s: string) => s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '')
   assert.ok(await c.until((s) => s.includes('›')))
@@ -670,7 +671,7 @@ test('Ctrl-C tears the session down instead of orphaning it', async (t) => {
   // minutes: children with nothing to reap them. A fake has no PTY, so what is asserted
   // here is that the interrupt reaches the run and the process exits — the adapter-side
   // termination is covered by the rollback suite.
-  const dir = repo()
+  const dir = repo(t)
   const c = await spawnConsole(dir, t)
   assert.ok(await c.until((s) => s.includes('›')))
 
@@ -690,7 +691,7 @@ test('the box is pinned below the transcript, and progress lives only in it', as
   // plus an absolutely-addressed box cannot be judged by substring: the same text appears
   // in the stream whether it landed in the box, above it, or was overwritten a frame later.
   // Replaying the escapes into a grid answers where it actually IS.
-  const dir = repo()
+  const dir = repo(t)
   // The observer stays on, and it is the regression guard rather than scaffolding left behind.
   //
   // WHAT IT REPRODUCED. The wait below used to stop at the first prefix in which the input row
@@ -808,7 +809,7 @@ test('the banner stays visible and the first post-open transcript line is close 
   // Reconstructed from the byte stream rather than searched in it. The first line written
   // after Screen.open() is the no-goal prompt; the rule printed before it is the last startup
   // line. The gap between them must be small, not the entire empty scroll region.
-  const dir = repo()
+  const dir = repo(t)
   const c = await spawnConsole(dir, t, null, true)
   const rows = 30
   const cols = 100
@@ -857,7 +858,7 @@ test('the box is drawn under the newest line, and nothing is scrolled to make ro
   // it, as the whole terminal lurching downward and taking their shell prompt with it. The
   // old assertion held throughout both, because a console that puts every line at the floor
   // satisfies it whether or not it moved the screen to get there.
-  const dir = repo()
+  const dir = repo(t)
   const c = await spawnConsole(dir, t)
   const rows = 30
   const cols = 100
@@ -930,8 +931,8 @@ test('two working seats get a row each above the box, and come off the status ru
   // this instant it is on a pinned row, which only a replayed screen can answer.
   // `.codex/` as well: the console registers its sidecar hooks in the checkout at startup, and
   // seat worktrees refuse to be created over anything uncommitted -- including that.
-  const dir = repo('.conclave/\n.codex/\n')
-  const c = await spawnConsole(dir, t, undefined, true, twoSeatDriver)
+  const dir = repo(t, '.conclave/\n.codex/\n')
+  const c = await spawnConsole(dir, t, undefined, true, (d) => twoSeatDriver(t, d))
   const rows = 30
   const cols = 100
 
@@ -993,7 +994,7 @@ test('a one-seat console reserves the four rows it always did, even while the se
   // and a row rendered for it would push the transcript up by one and name the implementer
   // twice — once on its own row and once on the status rule beside it. Removing the N=1 guard
   // in `seatRows` passed the entire console suite before this test existed.
-  const dir = repo()
+  const dir = repo(t)
   const c = await spawnConsole(dir, t, undefined, true)
   // The turn is read from the RECORD. Waiting for `Did it.` in the byte stream looked like a
   // check on the reply and was not one: `wrap()` had already collapsed the whitespace, so a
@@ -1032,7 +1033,7 @@ test('a one-seat console reserves the four rows it always did, even while the se
  * it rather than announce it once and scroll away.
  */
 test('an open block is named in the hint row until its terminator closes it', async (t) => {
-  const dir = repo()
+  const dir = repo(t)
   const c = await spawnConsole(dir, t, null, true)
   const plain = (s: string) => s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '')
   assert.ok(
@@ -1096,7 +1097,7 @@ test('#6 the console outlives its run, and a question between runs reaches the p
   // BETWEEN-RUNS path -- the console takes it only when no run is in flight
   // (`if (!run) return void askDirectly(who, rest)`) -- so it was covered at the relay and
   // never at the console, which is exactly where it failed in a real terminal on 2026-08-06.
-  const dir = repo()
+  const dir = repo(t)
   const c = await spawnConsole(dir, t, 'Keep the work moving.', true, betweenRunsDriver)
 
   // `resume with:` is the LAST line of the end-of-run summary and `run = undefined` is set

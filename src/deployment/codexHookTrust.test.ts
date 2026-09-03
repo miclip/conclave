@@ -23,10 +23,12 @@
  */
 
 import { strict as assert } from 'node:assert'
-import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
-import { homedir, tmpdir } from 'node:os'
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
+import type { TestContext } from 'node:test'
+import { tempDir } from '../testkit/tempDir.ts'
 import {
   CONCLAVE_HOOK_MATCH,
   diagnoseHookTrust,
@@ -57,11 +59,11 @@ const skipReal =
  * A throwaway project directory with a rendered sidecar, so trust behaviour can be
  * exercised without touching the registration this checkout depends on.
  */
-function tempProject(): { dir: string; hooksJson: string } {
-  // realpath matters on macOS: mkdtemp returns /var/... while Codex resolves and reports
-  // /private/var/..., so an unresolved path makes every trust key and sourcePath
-  // comparison silently miss.
-  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'conclave-trust-')))
+function tempProject(t: TestContext): { dir: string; hooksJson: string } {
+  // `tempDir` resolves the canonical path itself, which matters here: on macOS `mkdtemp`
+  // returns /var/... while Codex resolves and reports /private/var/..., so an unresolved
+  // path makes every trust key and sourcePath comparison silently miss.
+  const dir = tempDir(t, 'conclave-trust')
   const target = TARGETS.find((t) => t.output.includes('.codex'))!
   const template = readFileSync(join(ROOT, target.template), 'utf8')
   const hooksJson = join(dir, target.output)
@@ -94,7 +96,7 @@ function trustedHashes(): Record<string, string> {
 test('hook trust is content-based, invalidates on edit, and survives a byte-exact revert', { skip }, async (t) => {
   // Snapshot the real trust store BEFORE tempProject() seeds directory trust into it.
   const originalConfig = readFileSync(CODEX_CONFIG)
-  const { dir: PROJECT, hooksJson: HOOKS_JSON } = tempProject()
+  const { dir: PROJECT, hooksJson: HOOKS_JSON } = tempProject(t)
   const originalHooks = readFileSync(HOOKS_JSON)
 
   t.after(() => {
@@ -182,7 +184,7 @@ test('hook trust is content-based, invalidates on edit, and survives a byte-exac
 
 test('re-trusting a changed hook writes a new trusted_hash', { skip }, async (t) => {
   const originalConfig = readFileSync(CODEX_CONFIG)
-  const { dir: PROJECT, hooksJson: HOOKS_JSON } = tempProject()
+  const { dir: PROJECT, hooksJson: HOOKS_JSON } = tempProject(t)
   const originalHooks = readFileSync(HOOKS_JSON)
 
   t.after(() => {

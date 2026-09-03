@@ -5,15 +5,12 @@
  */
 
 import { strict as assert } from 'node:assert'
-import { mkdtempSync, realpathSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
 import test from 'node:test'
+import { tempDir } from '../../testkit/tempDir.ts'
 import { Broker } from '../broker.ts'
 import { transportNames, resolveTransport } from '../registry.ts'
 import { EvenRealitiesTransport } from './transport.ts'
 
-const repo = () => realpathSync(mkdtempSync(join(tmpdir(), 'conclave-er-')))
 
 async function up(): Promise<EvenRealitiesTransport> {
   const t = new EvenRealitiesTransport({ port: 0, token: 'tok', sessionId: 's' })
@@ -44,7 +41,7 @@ test('#184 a tap on an offered option comes back as that option', async (t2) => 
   // action rather than prose.
   const t = await up()
   t2.after(() => t.close())
-  const dir = repo()
+  const dir = tempDir(t2, 'conclave-er')
 
   const asking = new Broker(dir).ask(
     {
@@ -72,7 +69,7 @@ test('#184 speech that is not an offered label comes back as text for the caller
   const t = await up()
   t2.after(() => t.close())
 
-  const asking = new Broker(repo()).ask(
+  const asking = new Broker(tempDir(t2, 'conclave-er')).ask(
     { kind: 'approval', headline: 'Merge?', options: [{ id: 'yes', label: 'Merge' }] },
     t,
   )
@@ -89,7 +86,7 @@ test('#184 a tell is a notification and never opens a question', async (t2) => {
   const t = await up()
   t2.after(() => t.close())
 
-  await new Broker(repo()).tell({ kind: 'decided', headline: 'letting the advisor fix land' }, t)
+  await new Broker(tempDir(t2, 'conclave-er')).tell({ kind: 'decided', headline: 'letting the advisor fix land' }, t)
 
   const msgs = (await (await fetch(`${t.bridge.url}/api/messages?token=tok`)).json()) as {
     type: string
@@ -105,7 +102,7 @@ test('#184 a veto tapped after the decision reaches the broker through poll', as
   // arrives with nothing waiting for it, and the broker attaching it to the decision it vetoes.
   const t = await up()
   t2.after(() => t.close())
-  const dir = repo()
+  const dir = tempDir(t2, 'conclave-er')
   const b = new Broker(dir)
 
   await b.tell(

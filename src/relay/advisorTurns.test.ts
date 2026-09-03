@@ -24,22 +24,23 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import { PassThrough, Writable } from 'node:stream'
 import test from 'node:test'
+import type { TestContext } from 'node:test'
 import { main } from '../../bin/conclave.ts'
 import type { AgentSession } from '../contract/session.ts'
 import { AgentRegistry } from '../registry/registry.ts'
 import { NO_DEADLINE_CLOCKS } from '../registry/types.ts'
 import { FakeRotationSession } from '../rotation/fakeSession.ts'
+import { tempDir } from '../testkit/tempDir.ts'
 import { listSessions, recordSession } from '../workspace/sessionRecord.ts'
 import { advisorTurnsLeftNotice } from './guardrails.ts'
 import { boundOf, DEFAULT_ADVISOR_TURNS, Relay, type RelayOptions } from './relay.ts'
 
-function repo(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'conclave-advisor-turns-'))
+function repo(t: TestContext): string {
+  const dir = tempDir(t, 'conclave-advisor-turns')
   execFileSync('git', ['init', '-q'], { cwd: dir })
   writeFileSync(join(dir, 'work.ts'), 'export const answer = 42\n')
   writeFileSync(join(dir, '.gitignore'), '.conclave/\n')
@@ -133,8 +134,8 @@ function busyImplementer(id: string, agent: string): FakeRotationSession {
  * rather than the advisor is the sharper measure: the advisor is asked once BEFORE the loop
  * starts, so its own tally is off by one from the thing being bounded.
  */
-async function dispatchesUnder(command: 'relay' | 'session', n: number): Promise<number> {
-  const dir = repo()
+async function dispatchesUnder(t: TestContext, command: 'relay' | 'session', n: number): Promise<number> {
+  const dir = repo(t)
   const before = process.cwd()
   const advisor = tirelessAdvisor('advisor-1', 'fake-advisor')
   const impl = busyImplementer('impl-1', 'fake-impl')
@@ -151,7 +152,6 @@ async function dispatchesUnder(command: 'relay' | 'session', n: number): Promise
     assert.equal(code, 0, `conclave ${command} --rounds ${n} must succeed`)
   } finally {
     process.chdir(before)
-    rmSync(dir, { recursive: true, force: true })
   }
   return impl.received.length - 1
 }
@@ -163,8 +163,8 @@ async function dispatchesUnder(command: 'relay' | 'session', n: number): Promise
  * deliberately do not populate it, and a test that went through `main()` could not distinguish
  * a working alias from an unread one.
  */
-async function dispatchesWithOptions(over: Partial<RelayOptions>): Promise<number> {
-  const dir = repo()
+async function dispatchesWithOptions(t: TestContext, over: Partial<RelayOptions>): Promise<number> {
+  const dir = repo(t)
   const advisor = tirelessAdvisor('advisor-1', 'codex')
   const impl = busyImplementer('impl-1', 'claude')
   const relay = await Relay.start({
@@ -179,34 +179,33 @@ async function dispatchesWithOptions(over: Partial<RelayOptions>): Promise<numbe
     assert.equal(outcome.reason, 'budget', 'the run must end on the bound, not on some other condition')
   } finally {
     relay.stop()
-    rmSync(dir, { recursive: true, force: true })
   }
   return impl.received.length - 1
 }
 
-test('--rounds still sets the bound, now under its new name, on `conclave relay`', async () => {
+test('--rounds still sets the bound, now under its new name, on `conclave relay`', async (t) => {
   // Two values, not one. A single number is satisfied by a hard-coded default that happens to
   // match; only a count that MOVES with the flag proves the flag is what is being read.
-  const two = await dispatchesUnder('relay', 2)
-  const four = await dispatchesUnder('relay', 4)
+  const two = await dispatchesUnder(t, 'relay', 2)
+  const four = await dispatchesUnder(t, 'relay', 4)
   assert.equal(two, 2, '--rounds 2 must buy exactly two advisor turns')
   assert.equal(four, 4, '--rounds 4 must buy exactly four advisor turns')
   assert.notEqual(four, 6, 'a bound of 6 is the default, which means the flag was dropped on the floor')
 })
 
-test('--rounds still sets the bound, now under its new name, on `conclave session`', async () => {
+test('--rounds still sets the bound, now under its new name, on `conclave session`', async (t) => {
   // The console is the front-end this codebase has forgotten eight times; see
   // frontEndParity.test.ts. It reaches the same option by a different route --
   // `SessionOptions.rounds` -> `maxAdvisorTurns` -- so the rename could land on one and not
   // the other, and nothing else here would notice.
-  const two = await dispatchesUnder('session', 2)
-  const four = await dispatchesUnder('session', 4)
+  const two = await dispatchesUnder(t, 'session', 2)
+  const four = await dispatchesUnder(t, 'session', 4)
   assert.equal(two, 2, '--rounds 2 must buy exactly two advisor turns')
   assert.equal(four, 4, '--rounds 4 must buy exactly four advisor turns')
 })
 
 test('the pause a human reads counts advisor turns, not rounds', async (t) => {
-  const dir = repo()
+  const dir = repo(t)
   const advisor = tirelessAdvisor('advisor-1', 'codex')
   const impl = busyImplementer('impl-1', 'claude')
   // Slow turns, so `requestPause()` lands while a turn is in flight and is honoured at the
@@ -223,7 +222,6 @@ test('the pause a human reads counts advisor turns, not rounds', async (t) => {
   })
   t.after(() => {
     relay.stop()
-    rmSync(dir, { recursive: true, force: true })
   })
 
   const run = relay.start('Keep the work moving.')
@@ -261,16 +259,16 @@ test('boundOf resolves the two fields, and the alias loses to the new name', () 
   assert.equal(boundOf({ maxAdvisorTurns: 9, maxRounds: 2 }), 9, 'precedence is by field, not by which value is smaller')
 })
 
-test('the deprecated maxRounds alias still reaches the dispatcher', async () => {
+test('the deprecated maxRounds alias still reaches the dispatcher', async (t) => {
   // Behavioural, not a unit test of `boundOf`. The alias could resolve correctly in a helper
   // nothing calls; what the compatibility promise is worth is whether the LOOP honours it.
   // Two values again, for the same reason as the flag tests above.
-  assert.equal(await dispatchesWithOptions({ maxRounds: 2 }), 2, 'maxRounds 2 must still buy two advisor turns')
-  assert.equal(await dispatchesWithOptions({ maxRounds: 3 }), 3, 'maxRounds 3 must still buy three advisor turns')
+  assert.equal(await dispatchesWithOptions(t, { maxRounds: 2 }), 2, 'maxRounds 2 must still buy two advisor turns')
+  assert.equal(await dispatchesWithOptions(t, { maxRounds: 3 }), 3, 'maxRounds 3 must still buy three advisor turns')
 })
 
-test('maxAdvisorTurns wins over maxRounds in a real run', async () => {
-  const turns = await dispatchesWithOptions({ maxAdvisorTurns: 2, maxRounds: 5 })
+test('maxAdvisorTurns wins over maxRounds in a real run', async (t) => {
+  const turns = await dispatchesWithOptions(t, { maxAdvisorTurns: 2, maxRounds: 5 })
   assert.equal(turns, 2, 'the supported field decides the bound when both are supplied')
 })
 
@@ -304,8 +302,8 @@ test('neither front-end populates the deprecated alias', () => {
  * has to be able to see. One run for both readings, for the reason `ceilings.test.ts` gives:
  * two runs could report a banner from one process and a document from another.
  */
-async function budgetOutcomeAt(n: number): Promise<{ reason: string; detail: string; recorded: string }> {
-  const dir = repo()
+async function budgetOutcomeAt(t: TestContext, n: number): Promise<{ reason: string; detail: string; recorded: string }> {
+  const dir = repo(t)
   const relay = await Relay.start({
     registry: registryOf({ codex: [tirelessAdvisor('advisor-1', 'codex')], claude: [busyImplementer('impl-1', 'claude')] }),
     cwd: dir,
@@ -323,11 +321,10 @@ async function budgetOutcomeAt(n: number): Promise<{ reason: string; detail: str
     return { reason: outcome.reason, detail: outcome.detail ?? '', recorded: sessions[0]!.status.outcome?.detail ?? '' }
   } finally {
     relay.stop()
-    rmSync(dir, { recursive: true, force: true })
   }
 }
 
-test('an exhausted advisor budget says which ceiling it was and what it was set to', async () => {
+test('an exhausted advisor budget says which ceiling it was and what it was set to', async (t) => {
   // #119: the run ended `budget` at 8 advisor turns nobody had chosen, and `budget` is the same
   // word a run gets when it exhausts a ceiling the operator set deliberately -- so the report
   // read as normal operation. For `--operator agent` the cost is higher still: an agent sees
@@ -335,8 +332,8 @@ test('an exhausted advisor budget says which ceiling it was and what it was set 
   //
   // Two values, not one, for the reason the flag tests above use two: a detail that hard-coded
   // a number would satisfy a single case while saying nothing true.
-  const two = await budgetOutcomeAt(2)
-  const five = await budgetOutcomeAt(5)
+  const two = await budgetOutcomeAt(t, 2)
+  const five = await budgetOutcomeAt(t, 5)
 
   // The REASON is unchanged and must stay unchanged: every caller keys on it, `relay` exits on
   // it, and a resource ceiling has its own reason (`ceiling`) that this must not become.
@@ -366,11 +363,11 @@ test('an exhausted advisor budget says which ceiling it was and what it was set 
  * outstanding before the run may end, so a detail composed at `#end` would answer "nothing was
  * in flight" on every run that has ever existed -- which is the failure mode this pins.
  */
-test('an exhausted budget says whether work was still in flight when it ran out', async () => {
+test('an exhausted budget says whether work was still in flight when it ran out', async (t) => {
   // One seat, and the advisor is only asked once the report is back and processed -- so at the
   // boundary nothing is outstanding. The drained case is driven in concurrentDispatch.test.ts,
   // where two seats make "still working" a state a run can actually be in.
-  const two = await budgetOutcomeAt(2)
+  const two = await budgetOutcomeAt(t, 2)
 
   // `status --json` FIRST, and that ordering is deliberate. It is the surface an operator
   // actually polls, it is the one the returned outcome cannot speak for -- the detail is built
@@ -399,8 +396,8 @@ test('an exhausted budget says whether work was still in flight when it ran out'
  * reconstructed from the routing log, because the log records what was ROUTED and this is a
  * claim about the bytes the child was handed.
  */
-async function advisorPromptsAt(n: number, replies?: string[]): Promise<string[]> {
-  const dir = repo()
+async function advisorPromptsAt(t: TestContext, n: number, replies?: string[]): Promise<string[]> {
+  const dir = repo(t)
   const advisor = replies ? new FakeRotationSession('advisor-1', 'codex', replies) : tirelessAdvisor('advisor-1', 'codex')
   const relay = await Relay.start({
     registry: registryOf({ codex: [advisor], claude: [busyImplementer('impl-1', 'claude')] }),
@@ -414,7 +411,6 @@ async function advisorPromptsAt(n: number, replies?: string[]): Promise<string[]
     return [...advisor.received]
   } finally {
     relay.stop()
-    rmSync(dir, { recursive: true, force: true })
   }
 }
 
@@ -427,9 +423,9 @@ async function advisorPromptsAt(n: number, replies?: string[]): Promise<string[]
  * inferred. Two bounds, not one, for the reason every other test in this file uses two: a
  * sentence hard-coded for a single case would satisfy it while saying nothing true.
  */
-test('the opening prompt says in words which of the last two advisor turns this is', async () => {
-  const one = await advisorPromptsAt(1)
-  const two = await advisorPromptsAt(2)
+test('the opening prompt says in words which of the last two advisor turns this is', async (t) => {
+  const one = await advisorPromptsAt(t, 1)
+  const two = await advisorPromptsAt(t, 2)
 
   assert.match(one[0]!, /This is your last advisor turn\./, 'a run with one advisor turn must be told that turn is its last')
   assert.doesNotMatch(one[0]!, /2 advisor turns left/, 'and must not be offered a turn it does not have')
@@ -451,9 +447,9 @@ test('the opening prompt says in words which of the last two advisor turns this 
  * Three against six, because three is the first bound above the threshold and six is the
  * default -- if the two prompts are the same string, no bound below the threshold leaked.
  */
-test('above the threshold the advisor is told nothing at all, byte for byte', async () => {
-  const three = await advisorPromptsAt(3)
-  const six = await advisorPromptsAt(6)
+test('above the threshold the advisor is told nothing at all, byte for byte', async (t) => {
+  const three = await advisorPromptsAt(t, 3)
+  const six = await advisorPromptsAt(t, 6)
 
   assert.equal(three[0], six[0], 'a run three turns from its bound must be briefed exactly as one six turns from it')
   assert.doesNotMatch(three[0]!, /turns? left|last advisor turn/i, 'and no ceiling may be mentioned at all')
@@ -470,8 +466,8 @@ test('above the threshold the advisor is told nothing at all, byte for byte', as
  * is deliberate: this test is about the arithmetic and the wiring, so rewording the sentences
  * must not fail it. The test above owns the words.
  */
-test('the warning arrives on the turn before the last, counted as the turn the reply becomes', async () => {
-  const at3 = await advisorPromptsAt(3)
+test('the warning arrives on the turn before the last, counted as the turn the reply becomes', async (t) => {
+  const at3 = await advisorPromptsAt(t, 3)
   const twoLeft = advisorTurnsLeftNotice(2, 3)
   const lastTurn = advisorTurnsLeftNotice(3, 3)
   assert.notEqual(twoLeft, '', 'the fixture is only meaningful if turn 2 of 3 is inside the threshold')
@@ -491,8 +487,8 @@ test('the warning arrives on the turn before the last, counted as the turn the r
  * the advisor would be told it was on its last turn while it still had two, and would hand over
  * a turn early -- the exact failure the threshold exists to prevent, produced by the fix for it.
  */
-test("a re-ask inside an advisor turn carries that turn's count, not the next turn's", async () => {
-  const prompts = await advisorPromptsAt(2, ['NOTE: worth recording.', ...Array.from({ length: 8 }, (_, i) => `Do step ${i + 1}.`)])
+test("a re-ask inside an advisor turn carries that turn's count, not the next turn's", async (t) => {
+  const prompts = await advisorPromptsAt(t, 2, ['NOTE: worth recording.', ...Array.from({ length: 8 }, (_, i) => `Do step ${i + 1}.`)])
   const reask = prompts.find((p) => /Your note is recorded for the operator/.test(p))
   assert.ok(reask, 'the note-only reply must have been re-asked for an instruction')
 
@@ -517,8 +513,8 @@ test("a re-ask inside an advisor turn carries that turn's count, not the next tu
  * shows up as "you have 2 left" where "this is your last" belongs, which no absence test could
  * tell from a notice that simply failed to be attached.
  */
-async function promptsAcrossAPause(n: number, replies: string[]): Promise<{ prompts: string[]; pause: string }> {
-  const dir = repo()
+async function promptsAcrossAPause(t: TestContext, n: number, replies: string[]): Promise<{ prompts: string[]; pause: string }> {
+  const dir = repo(t)
   const advisor = new FakeRotationSession('advisor-1', 'codex', replies)
   const relay = await Relay.start({
     registry: registryOf({ codex: [advisor], claude: [busyImplementer('impl-1', 'claude')] }),
@@ -537,12 +533,11 @@ async function promptsAcrossAPause(n: number, replies: string[]): Promise<{ prom
     return { prompts: [...advisor.received], pause }
   } finally {
     await relay.stop()
-    rmSync(dir, { recursive: true, force: true })
   }
 }
 
-test('the re-ask after a turn that produced no instruction counts the turn its reply is spent on', async () => {
-  const { prompts, pause } = await promptsAcrossAPause(2, ['', ...Array.from({ length: 8 }, (_, i) => `Do step ${i + 1}.`)])
+test('the re-ask after a turn that produced no instruction counts the turn its reply is spent on', async (t) => {
+  const { prompts, pause } = await promptsAcrossAPause(t, 2, ['', ...Array.from({ length: 8 }, (_, i) => `Do step ${i + 1}.`)])
   assert.ok(pause !== '', 'the empty reply must have raised a pause for the operator')
   const reask = prompts.find((p) => /Your previous turn produced no instruction/.test(p))
   assert.ok(reask, `the resumed run must have asked again: ${JSON.stringify(prompts.map((p) => p.slice(0, 40)))}`)
@@ -554,8 +549,8 @@ test('the re-ask after a turn that produced no instruction counts the turn its r
   assert.ok(!reask.includes(advisorTurnsLeftNotice(1, 2)), 'and must not be offered the two-turn count it has already spent one of')
 })
 
-test('the re-ask after a resumed escalation counts the turn its reply is spent on', async () => {
-  const { prompts, pause } = await promptsAcrossAPause(2, ['ESCALATE: I need a human.', ...Array.from({ length: 8 }, (_, i) => `Do step ${i + 1}.`)])
+test('the re-ask after a resumed escalation counts the turn its reply is spent on', async (t) => {
+  const { prompts, pause } = await promptsAcrossAPause(t, 2, ['ESCALATE: I need a human.', ...Array.from({ length: 8 }, (_, i) => `Do step ${i + 1}.`)])
   assert.equal(pause, 'advisor_escalated', 'the escalation must be what stopped the run')
   const reask = prompts.find((p) => /The human has seen your escalation/.test(p))
   assert.ok(reask, `the resumed run must have asked again: ${JSON.stringify(prompts.map((p) => p.slice(0, 40)))}`)
@@ -564,11 +559,11 @@ test('the re-ask after a resumed escalation counts the turn its reply is spent o
   assert.ok(!reask.includes(advisorTurnsLeftNotice(1, 2)), 'and must not be offered a turn the escalation already spent')
 })
 
-test('the re-ask after DONE over an outstanding human instruction counts the turn its reply is spent on', async () => {
+test('the re-ask after DONE over an outstanding human instruction counts the turn its reply is spent on', async (t) => {
   // No pause on this path: the human outranks the advisor, so a DONE that would strand a human
   // message does not end the run -- the seat is asked, its answer is handed over, and the loop
   // goes round. The `continue` that does so is what makes the reply the next turn's.
-  const dir = repo()
+  const dir = repo(t)
   const advisor = new FakeRotationSession('advisor-1', 'codex', ['DONE', ...Array.from({ length: 8 }, (_, i) => `Do step ${i + 1}.`)])
   // A distinguishable answer to the human, because the advisor receives two reports on this run
   // and the one under test is the FIRST -- the seat answering the human before the loop goes
@@ -593,6 +588,5 @@ test('the re-ask after DONE over an outstanding human instruction counts the tur
     assert.ok(!handover.includes(advisorTurnsLeftNotice(1, 2)), 'and must not be offered the count of a turn DONE already spent')
   } finally {
     relay.stop()
-    rmSync(dir, { recursive: true, force: true })
   }
 })

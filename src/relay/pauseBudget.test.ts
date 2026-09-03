@@ -44,15 +44,16 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
+import type { TestContext } from 'node:test'
 import type { Verdict } from '../contract/outcome.ts'
 import type { AgentSession } from '../contract/session.ts'
 import { AgentRegistry } from '../registry/registry.ts'
 import { NO_DEADLINE_CLOCKS } from '../registry/types.ts'
 import { FakeRotationSession } from '../rotation/fakeSession.ts'
+import { tempDir } from '../testkit/tempDir.ts'
 import { runReport } from './report.ts'
 import { Relay, type RelayOptions } from './relay.ts'
 import { resolutionFor } from './resolution.ts'
@@ -84,8 +85,8 @@ function clockFrom(start = 1_700_000_000_000): { now: () => number; advance: (ms
   }
 }
 
-function repo(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'conclave-pause-budget-'))
+function repo(t: TestContext): string {
+  const dir = tempDir(t, 'conclave-pause-budget')
   execFileSync('git', ['init', '-q'], { cwd: dir })
   writeFileSync(join(dir, 'work.ts'), 'export const answer = 42\n')
   writeFileSync(join(dir, '.gitignore'), '.conclave/\n')
@@ -286,8 +287,7 @@ test('a healthy run interrupted five times is not ended by the budget it did not
   // top of each of the implementer's working turns, an hour at each pause, and nothing anywhere
   // else. That is what makes the arithmetic at the bottom an assertion rather than a sanity
   // check -- both figures are known exactly before the run starts.
-  const dir = repo()
-  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const dir = repo(t)
   const clock = clockFrom()
   const advisor = new FakeRotationSession('advisor', 'codex', [
     'Do it.',
@@ -374,8 +374,7 @@ test('an interrupted run does exactly the work the same run does uninterrupted',
   // resumed at every boundary, compared on what the implementer was actually SENT. A pause that
   // consumed an advisor turn or a turn would show up here as work the interrupted run never got
   // to -- which is the run in the issue, which ended holding uncommitted work.
-  const dir = repo()
-  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const dir = repo(t)
   const scripted = (): [FakeRotationSession, FakeRotationSession] => [
     new FakeRotationSession('advisor', 'codex', [
       'Do it.',
@@ -437,8 +436,7 @@ test('watchdog pauses on one continuous piece of work do not spend the duration 
   // ANSWERED question is suppressed -- but the seat here has no child pid to measure, so no
   // answer can be carried forward and every deadline is put to the human. That is the worst
   // case the ceiling has to survive, and it is a real adapter shape rather than a contrivance.
-  const dir = repo()
-  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const dir = repo(t)
   const clock = clockFrom()
   const advisor = new FakeRotationSession('advisor', 'codex', [
     'Do it.',
@@ -484,8 +482,7 @@ test('a run that never produces a report still burns the duration ceiling while 
   // clock advances only while a turn is in flight. That is what a wedged run actually costs: a
   // watchdog running out is a child running for the whole watchdog. So the ceiling still fires,
   // and it fires on the time the run spent RUNNING rather than on the time it spent waiting.
-  const dir = repo()
-  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const dir = repo(t)
   const clock = clockFrom()
   const advisor = new FakeRotationSession('advisor', 'codex', endlessly('Keep going'))
   const impl = new FakeRotationSession('impl', 'claude', endlessly('Still going'))
@@ -573,8 +570,7 @@ test('a run that never produces a report still ends when no clock moves at all',
   // injected clock is frozen, so active time is zero forever -- and the run must STILL end. It
   // does, on the advisor-turn budget, which every pass through the dispatcher spends and which
   // this change does not touch. A pause is free; going round the loop is not.
-  const dir = repo()
-  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const dir = repo(t)
   const frozen = clockFrom()
   const advisor = new FakeRotationSession('advisor', 'codex', endlessly('Keep going'))
   const impl = new FakeRotationSession('impl', 'claude', endlessly('Still going'))
@@ -612,8 +608,7 @@ test('a turn abandoned at its deadline is charged exactly what a completed turn 
   // makes it the most expensive turn a run can take, and a run wedged in a loop of them takes no
   // other kind. Exempting it is precisely the change that would convert a bounded failure into
   // an unbounded one, so `--max-turns` counts it like any other and ends the run.
-  const dir = repo()
-  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const dir = repo(t)
   const clock = clockFrom()
   const advisor = new FakeRotationSession('advisor', 'codex', endlessly('Keep going'))
   const impl = new FakeRotationSession('impl', 'claude', endlessly('Still going'))

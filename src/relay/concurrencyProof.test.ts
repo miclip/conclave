@@ -32,14 +32,15 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync, spawn } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
+import type { TestContext } from 'node:test'
 import { OpenCodeRunAdapter } from '../adapters/opencode.ts'
 import { OPENCODE_CAPABILITIES } from '../conformance/capabilities.ts'
 import { AgentRegistry } from '../registry/registry.ts'
 import type { CreateParticipantContext, ResolvedParticipant } from '../registry/types.ts'
+import { tempDir } from '../testkit/tempDir.ts'
 import { concurrentSeats } from './dispatch.ts'
 import { Relay } from './relay.ts'
 
@@ -47,8 +48,8 @@ const FIXTURE = join(import.meta.dirname, 'fixtures', 'opencodeFixture.mjs')
 const CLI = join(import.meta.dirname, '..', '..', 'bin', 'conclave.ts')
 
 /** A repository for the run. Two seats mean real worktrees, and those need a real checkout. */
-function tempRepo(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'conclave-proof-'))
+function tempRepo(t: TestContext): string {
+  const dir = tempDir(t, 'conclave-proof')
   execFileSync('git', ['init', '--quiet'], { cwd: dir })
   execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: dir })
   execFileSync('git', ['config', 'user.name', 'Test'], { cwd: dir })
@@ -57,16 +58,6 @@ function tempRepo(): string {
   execFileSync('git', ['add', '.'], { cwd: dir })
   execFileSync('git', ['commit', '-m', 'init', '--quiet'], { cwd: dir })
   return dir
-}
-
-/**
- * Where the children leave their evidence.
- *
- * Outside the repository, deliberately: inside it these files would be untracked work, and the
- * clean-base rule would refuse to start the run that is supposed to produce them.
- */
-function rendezvousDir(): string {
-  return mkdtempSync(join(tmpdir(), 'conclave-rendezvous-'))
 }
 
 /**
@@ -125,9 +116,12 @@ const SEATS = [
   { id: 'implementer-2', agent: 'opencode', role: 'implementer' },
 ] as const
 
-test('two seats are real, simultaneous child processes, and the seat table says so', async () => {
-  const repo = tempRepo()
-  const dir = rendezvousDir()
+test('two seats are real, simultaneous child processes, and the seat table says so', async (t) => {
+  const repo = tempRepo(t)
+  // Where the children leave their evidence, and OUTSIDE the repository deliberately:
+  // inside it these files would be untracked work, and the clean-base rule would refuse
+  // to start the run that is supposed to produce them.
+  const dir = tempDir(t, 'conclave-rendezvous')
   const previous = process.env.CONCLAVE_FIXTURE_DIR
   process.env.CONCLAVE_FIXTURE_DIR = dir
 
@@ -215,19 +209,20 @@ test('two seats are real, simultaneous child processes, and the seat table says 
     await relay.stop()
     if (previous === undefined) delete process.env.CONCLAVE_FIXTURE_DIR
     else process.env.CONCLAVE_FIXTURE_DIR = previous
-    rmSync(repo, { recursive: true, force: true })
-    rmSync(dir, { recursive: true, force: true })
   }
 })
 
-test('the real relay CLI constructs both seats and runs them as concurrent children', async () => {
+test('the real relay CLI constructs both seats and runs them as concurrent children', async (t) => {
   // Nothing here is injected. `conclave relay` is spawned as its own process, builds the
   // built-in registry, and resolves `opencode` off a PATH whose first entry is a directory
   // holding the fixture under that name. The only thing this test controls is the environment
   // the CLI inherits, which is what an operator controls too.
-  const repo = tempRepo()
-  const dir = rendezvousDir()
-  const binDir = mkdtempSync(join(tmpdir(), 'conclave-bin-'))
+  const repo = tempRepo(t)
+  // Where the children leave their evidence, and OUTSIDE the repository deliberately:
+  // inside it these files would be untracked work, and the clean-base rule would refuse
+  // to start the run that is supposed to produce them.
+  const dir = tempDir(t, 'conclave-rendezvous')
+  const binDir = tempDir(t, 'conclave-bin')
   mkdirSync(binDir, { recursive: true })
   // A launcher rather than a symlink, so `#!/usr/bin/env node` resolution and the fixture's
   // own path are both unambiguous whatever the platform does with links.
@@ -237,64 +232,58 @@ test('the real relay CLI constructs both seats and runs them as concurrent child
   // The rendezvous still has to succeed: they cannot finish without seeing each other.
   writeFileSync(join(dir, 'release'), 'go')
 
-  try {
-    const cli = spawn(
-      process.execPath,
-      [CLI, 'relay', 'Prove that two seats run at once.', '--advisor', 'opencode', '--implementers', 'opencode,opencode', '--rounds', '5', '--json'],
-      {
-        cwd: repo,
-        env: { ...process.env, PATH: `${binDir}:${process.env.PATH ?? ''}`, CONCLAVE_FIXTURE_DIR: dir },
-        stdio: ['ignore', 'pipe', 'pipe'],
-      },
-    )
-    let stdout = ''
-    let stderr = ''
-    cli.stdout.on('data', (c: Buffer) => (stdout += c.toString('utf8')))
-    cli.stderr.on('data', (c: Buffer) => (stderr += c.toString('utf8')))
-    const code = await new Promise<number | null>((r) => cli.once('close', r))
-    assert.equal(code, 0, `the CLI run must succeed:\n${stderr.slice(-2000)}`)
+  const cli = spawn(
+    process.execPath,
+    [CLI, 'relay', 'Prove that two seats run at once.', '--advisor', 'opencode', '--implementers', 'opencode,opencode', '--rounds', '5', '--json'],
+    {
+      cwd: repo,
+      env: { ...process.env, PATH: `${binDir}:${process.env.PATH ?? ''}`, CONCLAVE_FIXTURE_DIR: dir },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    },
+  )
+  let stdout = ''
+  let stderr = ''
+  cli.stdout.on('data', (c: Buffer) => (stdout += c.toString('utf8')))
+  cli.stderr.on('data', (c: Buffer) => (stderr += c.toString('utf8')))
+  const code = await new Promise<number | null>((r) => cli.once('close', r))
+  assert.equal(code, 0, `the CLI run must succeed:\n${stderr.slice(-2000)}`)
 
-    // The CLI's own report first, which is the operator-visible half: two implementer seats
-    // with the ids the front-end assigned, both having taken turns.
-    //
-    // Asserted BEFORE the rendezvous markers, and the order is the whole difference between a
-    // useful failure and a puzzle. A CLI that built one seat produces no marker for the second,
-    // so checking the markers first reports a missing file; checking the report first says
-    // which seat is missing, in a diff.
-    const report = JSON.parse(stdout) as {
-      outcome: { reason: string }
-      participants: { id: string; agent: string; rank: string; turns: unknown[] }[]
-    }
-    assert.equal(report.outcome.reason, 'done')
-    assert.deepEqual(
-      report.participants.map((p) => [p.id, p.agent, p.rank]),
-      [
-        ['advisor', 'opencode', 'advisor'],
-        ['implementer', 'opencode', 'implementer'],
-        ['implementer-2', 'opencode', 'implementer'],
-      ],
-      'the CLI must construct both implementer seats end to end',
-    )
-    for (const p of report.participants) {
-      assert.ok(p.turns.length > 0, `${p.id} must have taken a turn in the CLI run`)
-    }
-
-    // Then the children's account: two seats entered, and each waited for the other.
-    assert.equal(
-      overlapOf(dir, 'implementer'),
-      'observed',
-      'the CLI run\'s first seat must have seen the second enter before it was allowed to finish',
-    )
-    assert.equal(
-      overlapOf(dir, 'implementer-2'),
-      'observed',
-      'and the CLI run\'s second seat must have seen the first',
-    )
-  } finally {
-    rmSync(repo, { recursive: true, force: true })
-    rmSync(dir, { recursive: true, force: true })
-    rmSync(binDir, { recursive: true, force: true })
+  // The CLI's own report first, which is the operator-visible half: two implementer seats
+  // with the ids the front-end assigned, both having taken turns.
+  //
+  // Asserted BEFORE the rendezvous markers, and the order is the whole difference between a
+  // useful failure and a puzzle. A CLI that built one seat produces no marker for the second,
+  // so checking the markers first reports a missing file; checking the report first says
+  // which seat is missing, in a diff.
+  const report = JSON.parse(stdout) as {
+    outcome: { reason: string }
+    participants: { id: string; agent: string; rank: string; turns: unknown[] }[]
   }
+  assert.equal(report.outcome.reason, 'done')
+  assert.deepEqual(
+    report.participants.map((p) => [p.id, p.agent, p.rank]),
+    [
+      ['advisor', 'opencode', 'advisor'],
+      ['implementer', 'opencode', 'implementer'],
+      ['implementer-2', 'opencode', 'implementer'],
+    ],
+    'the CLI must construct both implementer seats end to end',
+  )
+  for (const p of report.participants) {
+    assert.ok(p.turns.length > 0, `${p.id} must have taken a turn in the CLI run`)
+  }
+
+  // Then the children's account: two seats entered, and each waited for the other.
+  assert.equal(
+    overlapOf(dir, 'implementer'),
+    'observed',
+    'the CLI run\'s first seat must have seen the second enter before it was allowed to finish',
+  )
+  assert.equal(
+    overlapOf(dir, 'implementer-2'),
+    'observed',
+    'and the CLI run\'s second seat must have seen the first',
+  )
 })
 
 test('the fixture refuses to run without its rendezvous directory', () => {

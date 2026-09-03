@@ -12,10 +12,11 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync, spawn, spawnSync } from 'node:child_process'
-import { chmodSync, mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { chmodSync, mkdirSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
+import type { TestContext } from 'node:test'
+import { tempDir } from './testkit/tempDir.ts'
 
 const REPO = realpathSync(join(import.meta.dirname, '..'))
 const SCRIPT = join(REPO, 'scripts', 'release.sh')
@@ -33,9 +34,9 @@ function run(args: string[], cwd: string = REPO): { code: number; out: string } 
  * dies at the fetch and every later refusal is unreachable -- which is how the tag test first
  * failed, reporting the dirty-tree refusal from the checkout the test was launched in.
  */
-function fakeRepo(version = '9.9.9'): string {
-  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'conclave-release-')))
-  const origin = realpathSync(mkdtempSync(join(tmpdir(), 'conclave-release-origin-')))
+function fakeRepo(t: TestContext, version = '9.9.9'): string {
+  const dir = tempDir(t, 'conclave-release')
+  const origin = tempDir(t, 'conclave-release-origin')
   execFileSync('git', ['init', '-q', '--bare', origin])
   const git = (...a: string[]) =>
     execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', ...a], { cwd: dir })
@@ -57,11 +58,11 @@ test('#182 a version is required, and an unknown flag is refused rather than ign
   assert.match(run(['0.9.99', '--bogus']).out, /unknown flag/)
 })
 
-test('#182 a tag that already exists is refused', () => {
+test('#182 a tag that already exists is refused', (t) => {
   // In a fixture, not in this checkout: the preconditions run in order, and a working tree
   // with anything uncommitted in it refuses first. Asserting this against the live repo tests
   // whether the author happened to be mid-edit.
-  const dir = fakeRepo('9.9.9')
+  const dir = fakeRepo(t, '9.9.9')
   execFileSync('git', ['tag', 'v9.9.10'], { cwd: dir })
   const r = run(['9.9.10', '--dry-run'], dir)
   assert.equal(r.code, 1, 'cutting a tag that exists must be refused')
@@ -71,8 +72,8 @@ test('#182 a tag that already exists is refused', () => {
   assert.doesNotMatch(run(['9.9.11', '--dry-run'], dir).out, /already exists/)
 })
 
-test('#182 a dirty tree and a branch that is not main are both refused', () => {
-  const dir = fakeRepo()
+test('#182 a dirty tree and a branch that is not main are both refused', (t) => {
+  const dir = fakeRepo(t)
   writeFileSync(join(dir, 'scratch.txt'), 'uncommitted\n')
   const dirty = run(['0.9.99', '--dry-run'], dir)
   assert.equal(dirty.code, 1)
@@ -86,7 +87,7 @@ test('#182 a dirty tree and a branch that is not main are both refused', () => {
   assert.match(branch.out, /not on main/)
 })
 
-test('#182 the install checkout is not updated while a process is running from it', async () => {
+test('#182 the install checkout is not updated while a process is running from it', async (t) => {
   // THE refusal, and the reason the script exists in this shape. The symlink points at SOURCE,
   // and Node imports lazily -- so a checkout under a live run swaps the modules that run has
   // not reached yet, producing a process that is half one version and half another.
@@ -96,7 +97,7 @@ test('#182 the install checkout is not updated while a process is running from i
   // passed, and went on passing with the script's guard deleted, because it never invoked it.
   // That is the defect this repo keeps finding -- a check verified by something that exercises
   // the path beside it.
-  const dir = fakeRepo('9.9.9')
+  const dir = fakeRepo(t, '9.9.9')
   mkdirSync(join(dir, 'bin'), { recursive: true })
   writeFileSync(join(dir, 'bin', 'conclave.ts'), '// fixture\n')
   // Executable, or `command -v` skips it and the script resolves the REAL install instead --
@@ -107,7 +108,7 @@ test('#182 the install checkout is not updated while a process is running from i
   execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'add', '.'], { cwd: dir })
   execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'bin'], { cwd: dir })
   execFileSync('git', ['tag', 'v9.9.9'], { cwd: dir })
-  const binDir = realpathSync(mkdtempSync(join(tmpdir(), 'conclave-release-bin-')))
+  const binDir = tempDir(t, 'conclave-release-bin')
   symlinkSync(join(dir, 'bin', 'conclave.ts'), join(binDir, 'conclave'))
   const env = { ...process.env, PATH: `${binDir}:${process.env.PATH ?? ''}` }
 
@@ -157,9 +158,9 @@ test('#182 a dry run executes nothing, and says what it would have done', () => 
  * `lockAt` writes the whole `package-lock.json`, so a caller decides exactly what differs
  * between the two — which is the thing under test.
  */
-function installFixture(lockA: string, lockB: string): { dir: string; env: NodeJS.ProcessEnv } {
-  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'conclave-deps-')))
-  const origin = realpathSync(mkdtempSync(join(tmpdir(), 'conclave-deps-origin-')))
+function installFixture(t: TestContext, lockA: string, lockB: string): { dir: string; env: NodeJS.ProcessEnv } {
+  const dir = tempDir(t, 'conclave-deps')
+  const origin = tempDir(t, 'conclave-deps-origin')
   execFileSync('git', ['init', '-q', '--bare', origin])
   const git = (...a: string[]) =>
     execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', ...a], { cwd: dir })
@@ -192,7 +193,7 @@ function installFixture(lockA: string, lockB: string): { dir: string; env: NodeJ
   // The install sits on the OLD tag, so moving to the new one has a diff to inspect.
   git('checkout', '-q', 'v9.9.9')
 
-  const binDir = realpathSync(mkdtempSync(join(tmpdir(), 'conclave-deps-bin-')))
+  const binDir = tempDir(t, 'conclave-deps-bin')
   symlinkSync(join(dir, 'bin', 'conclave.ts'), join(binDir, 'conclave'))
   return { dir, env: { ...process.env, PATH: `${binDir}:${process.env.PATH ?? ''}` } }
 }
@@ -200,7 +201,7 @@ function installFixture(lockA: string, lockB: string): { dir: string; env: NodeJ
 const lock = (version: string, extra = '') =>
   JSON.stringify({ name: 'x', version, packages: { '': { version, ...(extra ? { dependencies: { dep: extra } } : {}) } } }, null, 2)
 
-test('#182 a pure version bump is not a dependency move', () => {
+test('#182 a pure version bump is not a dependency move', (t) => {
   // `scripts/release.sh` reported "the release moved a dependency" while cutting v0.5.12 and ran
   // a needless `npm ci`. The rule counted changed lines and treated more than two as a move --
   // but package-lock.json carries the version TWICE, at the root and under `packages[""]`, so a
@@ -209,7 +210,7 @@ test('#182 a pure version bump is not a dependency move', () => {
   // A FIXTURE, not the repo's own tags. The first version of this test diffed `v0.5.11..v0.5.12`
   // and failed on all three CI runners with `fatal: bad revision` -- the checkout has no tags,
   // so it was asserting about the environment rather than the code.
-  const { dir, env } = installFixture(lock('9.9.9'), lock('9.9.10'))
+  const { dir, env } = installFixture(t, lock('9.9.9'), lock('9.9.10'))
   const r = spawnSync('sh', [SCRIPT, '--install-only'], { cwd: dir, env, encoding: 'utf8' })
   const out = `${r.stdout}${r.stderr}`
   assert.equal(r.status, 0, out)
@@ -217,10 +218,10 @@ test('#182 a pure version bump is not a dependency move', () => {
   assert.doesNotMatch(out, /moved a dependency/, 'a version bump alone must not trigger a reinstall')
 })
 
-test('#182 a dependency that really moved is still detected', () => {
+test('#182 a dependency that really moved is still detected', (t) => {
   // The other half, or the fix would be "never reinstall", which is worse than reinstalling
   // always: node_modules would silently disagree with the source it was installed from.
-  const { dir, env } = installFixture(lock('9.9.9', '^1.0.0'), lock('9.9.10', '^2.0.0'))
+  const { dir, env } = installFixture(t, lock('9.9.9', '^1.0.0'), lock('9.9.10', '^2.0.0'))
   const out = (() => {
     const r = spawnSync('sh', [SCRIPT, '--install-only'], { cwd: dir, env, encoding: 'utf8' })
     return `${r.stdout}${r.stderr}`

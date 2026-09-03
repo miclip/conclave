@@ -5,23 +5,24 @@
  */
 
 import { strict as assert } from 'node:assert'
-import { mkdtempSync, readFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { readFileSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
+import type { TestContext } from 'node:test'
 
 const REPO = fileURLToPath(new URL('../..', import.meta.url))
 const BUILD = 'test-build'
 import { FakeRotationSession } from '../rotation/fakeSession.ts'
+import { tempDir } from '../testkit/tempDir.ts'
 import { AgentRegistry } from '../registry/registry.ts'
 import type { DeadlineSupport } from '../registry/types.ts'
 import { Relay } from './relay.ts'
 import { runReport, REPORT_SCHEMA } from './report.ts'
 
-function repo(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'conclave-report-'))
+function repo(t: TestContext): string {
+  const dir = tempDir(t, 'conclave-report')
   execFileSync('git', ['init', '-q', '.'], { cwd: dir })
   return dir
 }
@@ -75,8 +76,8 @@ function registryOf(
   return r
 }
 
-async function reportOf(replies: string[] = ['DONE']) {
-  const dir = repo()
+async function reportOf(t: TestContext, replies: string[] = ['DONE']) {
+  const dir = repo(t)
   const relay = await Relay.start({
     registry: registryOf({
       codex: [new FakeRotationSession('advisor', 'codex', replies)],
@@ -95,13 +96,13 @@ async function reportOf(replies: string[] = ['DONE']) {
   return { report, relay, dir }
 }
 
-test('the report carries the supplied build string', async () => {
-  const { report } = await reportOf()
+test('the report carries the supplied build string', async (t) => {
+  const { report } = await reportOf(t)
   assert.equal(report.build, BUILD)
 })
 
-test('the report carries the same claims the prose lines make', async () => {
-  const { report, dir } = await reportOf()
+test('the report carries the same claims the prose lines make', async (t) => {
+  const { report, dir } = await reportOf(t)
 
   assert.equal(report.schema, REPORT_SCHEMA)
   assert.equal(report.goal, 'a goal')
@@ -122,8 +123,8 @@ test('the report carries the same claims the prose lines make', async () => {
  * The mixed pairing is the point. A run-wide number would have to describe both, and there
  * is no number that does.
  */
-async function mixedDeadlines(turnWatchdogMs?: number, silenceWatchdogMs?: number) {
-  const dir = repo()
+async function mixedDeadlines(t: TestContext, turnWatchdogMs?: number, silenceWatchdogMs?: number) {
+  const dir = repo(t)
   const relay = await Relay.start({
     registry: registryOf(
       {
@@ -146,11 +147,11 @@ async function mixedDeadlines(turnWatchdogMs?: number, silenceWatchdogMs?: numbe
   return report
 }
 
-test('each seat reports the clocks it will actually run, unasked', async () => {
+test('each seat reports the clocks it will actually run, unasked', async (t) => {
   // Nothing configured, so each seat falls to what its own adapter does. The implementer is
   // on NO clock in either direction, and that is the state a run-wide report described
   // worst: it would have claimed 45 minutes and 12 minutes for a seat that enforces neither.
-  const report = await mixedDeadlines()
+  const report = await mixedDeadlines(t)
   assert.deepEqual(report.deadlines, {
     configuredAbsoluteMs: null,
     // Nothing asked of either clock, spelled the same way for both. `null` rather than an
@@ -178,10 +179,10 @@ test('each seat reports the clocks it will actually run, unasked', async () => {
   })
 })
 
-test('--turn-timeout moves the absolute clock on both seats, and invents neither', async () => {
+test('--turn-timeout moves the absolute clock on both seats, and invents neither', async (t) => {
   // 90s asked for. Both seats support the absolute clock, so both are now enforced at 90s --
   // including the one that was running no deadline a moment ago.
-  const report = await mixedDeadlines(90_000)
+  const report = await mixedDeadlines(t, 90_000)
   assert.deepEqual(report.deadlines, {
     // What was ASKED for, kept beside what each seat did with it. The gap is the point: this
     // request reached the absolute clock on both seats and the silence clock on neither.
@@ -213,12 +214,12 @@ test('--turn-timeout moves the absolute clock on both seats, and invents neither
   })
 })
 
-test('--silence-timeout moves the silence clock on the seat that has one, and invents none', async () => {
+test('--silence-timeout moves the silence clock on the seat that has one, and invents none', async (t) => {
   // 300s asked of the SILENCE clock and nothing asked of the absolute one, which is the
   // pairing that proves the two are wired separately. The mirror of the test above it: there
   // an absolute request left every silence clock at its adapter's default, here a silence
   // request leaves every absolute clock at its adapter's default.
-  const report = await mixedDeadlines(undefined, 300_000)
+  const report = await mixedDeadlines(t, undefined, 300_000)
 
   assert.equal(report.deadlines.configuredSilenceMs, 300_000)
   // Untouched, and asserted rather than assumed: a `--silence-timeout` that also moved the
@@ -249,11 +250,11 @@ test('--silence-timeout moves the silence clock on the seat that has one, and in
   assert.deepEqual(implementer.absolute, { status: 'disabled' })
 })
 
-test('both clocks configured at once stay two independent budgets', async () => {
+test('both clocks configured at once stay two independent budgets', async (t) => {
   // Parity, and the case a single shared knob could never produce: different numbers on the
   // two clocks of one seat. If either flag were reaching the other's slot, one of these two
   // assertions would carry the other's number.
-  const report = await mixedDeadlines(90_000, 30_000)
+  const report = await mixedDeadlines(t, 90_000, 30_000)
 
   assert.equal(report.deadlines.configuredAbsoluteMs, 90_000)
   assert.equal(report.deadlines.configuredSilenceMs, 30_000)
@@ -270,7 +271,7 @@ test('both clocks configured at once stay two independent budgets', async () => 
   assert.deepEqual(implementer.silence, { status: 'unsupported' })
 })
 
-test('the report keeps the two clock POLICIES apart, because #36 fixed only one of them', async () => {
+test('the report keeps the two clock POLICIES apart, because #36 fixed only one of them', async (t) => {
   // Two clocks, two budgets, two different questions, and the JSON says so in two fields that
   // are never derived from each other:
   //
@@ -299,7 +300,7 @@ test('the report keeps the two clock POLICIES apart, because #36 fixed only one 
   //           provenance is on the watchdog update at the moment it fires; nothing carries it
   //           into the report, and no field here is a proxy for it. So these numbers narrow
   //           what a verdict could mean and never settle it.
-  const unasked = await mixedDeadlines()
+  const unasked = await mixedDeadlines(t)
   const pty = unasked.deadlines.participants.find((p) => p.id === 'advisor')!
 
   assert.deepEqual(pty.absolute, { status: 'enforced', ms: 2_700_000 })
@@ -322,7 +323,7 @@ test('the report keeps the two clock POLICIES apart, because #36 fixed only one 
   // And the configured knob addresses exactly one of the two policies. `configuredAbsoluteMs`
   // is named for the clock it reaches: it moves every supported absolute clock and leaves every
   // silence clock at whatever its adapter decided, so the field name and the effect agree.
-  const asked = await mixedDeadlines(90_000)
+  const asked = await mixedDeadlines(t, 90_000)
   assert.equal(asked.deadlines.configuredAbsoluteMs, 90_000)
   assert.deepEqual(
     asked.deadlines.participants.map((p) => p.absolute),
@@ -340,8 +341,8 @@ test('the report keeps the two clock POLICIES apart, because #36 fixed only one 
   )
 })
 
-test('rotation state is reported even when nothing happened', async () => {
-  const { report } = await reportOf()
+test('rotation state is reported even when nothing happened', async (t) => {
+  const { report } = await reportOf(t)
   // The whole point of rotationWatch: a null is only evidence if the instrument was live.
   // A field that vanished when it had nothing to say would put the reader back where they
   // started, unable to tell "saw nothing" from "this build does not report it".
@@ -399,19 +400,19 @@ const ACCEPTED = 'CHECK 1: exit 0\n\nRead work.ts and ran the check. It matches.
 /**
  * A repository with a commit in it.
  *
- * `repo()` above is enough for a run, and not for a ROTATION: the transaction captures the
+ * `repo(t)` above is enough for a run, and not for a ROTATION: the transaction captures the
  * repository around the handoff, and there is nothing to capture before the first commit.
  */
-function committedRepo(): string {
-  const dir = repo()
+function committedRepo(t: TestContext): string {
+  const dir = repo(t)
   execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'init'], {
     cwd: dir,
   })
   return dir
 }
 
-test('the report tells the operator populations apart, each in its own words (#75)', async () => {
-  const dir = committedRepo()
+test('the report tells the operator populations apart, each in its own words (#75)', async (t) => {
+  const dir = committedRepo(t)
   const advisor = new FakeRotationSession('advisor', 'codex', [
     'Do the first thing.',
     // One per rotation: `rotate()` spends an advisor turn asking for the handoff.
@@ -492,13 +493,13 @@ test('the report tells the operator populations apart, each in its own words (#7
   assert.deepEqual(wire.rotation.records, report.rotation.records)
 })
 
-test('a run that rotates unattended reports the third population, and nobody could have forged it (#75)', async () => {
+test('a run that rotates unattended reports the third population, and nobody could have forged it (#75)', async (t) => {
   // The automatic path, driven by the POLICY rather than declared by the caller. `rotateSeat`
   // takes no intent: an embedder that could pass `degradation_automatic` could write rows into
   // the population #10 reads as the proxy predicting degradation, and a forged row is
   // indistinguishable from evidence. So the only way to produce this value is to configure a run
   // that rotates without asking and let the detector do it -- which is what this does.
-  const dir = committedRepo()
+  const dir = committedRepo(t)
   const advisor = new FakeRotationSession('advisor', 'codex', [
     'Do the first thing.',
     HANDOFF,
@@ -538,14 +539,14 @@ test('a run that rotates unattended reports the third population, and nobody cou
   assert.deepEqual(wire.rotation.records, report.rotation.records)
 })
 
-test('an empty flags array is a claim, not a gap', async () => {
-  const { report } = await reportOf()
+test('an empty flags array is a claim, not a gap', async (t) => {
+  const { report } = await reportOf(t)
   assert.deepEqual(report.flags, [])
   assert.deepEqual(report.restricted, [])
 })
 
-test('a flagged caveat reaches the record', async () => {
-  const dir = repo()
+test('a flagged caveat reaches the record', async (t) => {
+  const dir = repo(t)
   const relay = await Relay.start({
     registry: registryOf({
       codex: [new FakeRotationSession('advisor', 'codex', ['DONE'])],
@@ -571,8 +572,8 @@ test('a flagged caveat reaches the record', async () => {
   assert.equal(report.outcome.reason, 'done')
 })
 
-test('per-turn verdicts carry their confidence and provenance, not just a state', async () => {
-  const { report } = await reportOf()
+test('per-turn verdicts carry their confidence and provenance, not just a state', async (t) => {
+  const { report } = await reportOf(t)
   const impl = report.participants.find((p) => p.id === 'implementer')!
   assert.ok(impl.turns.length > 0)
   const turn = impl.turns[0]!
@@ -583,8 +584,8 @@ test('per-turn verdicts carry their confidence and provenance, not just a state'
   assert.ok(Array.isArray(turn.tools))
 })
 
-test('the record is JSON-serialisable with no cycles or undefined-only keys', async () => {
-  const { report } = await reportOf()
+test('the record is JSON-serialisable with no cycles or undefined-only keys', async (t) => {
+  const { report } = await reportOf(t)
   const round = JSON.parse(JSON.stringify(report))
   assert.equal(round.schema, REPORT_SCHEMA)
   assert.equal(round.goal, report.goal)
@@ -663,8 +664,8 @@ test('under --json nothing but the report may reach stdout', () => {
   )
 })
 
-test('a resumed relay tells both seats they are continuing (#34)', async () => {
-  const dir = repo()
+test('a resumed relay tells both seats they are continuing (#34)', async (t) => {
+  const dir = repo(t)
   const lead = new FakeRotationSession('advisor', 'codex', ['DONE'])
   const impl = new FakeRotationSession('impl', 'claude', ['a report'])
   const relay = await Relay.start({
@@ -699,8 +700,8 @@ test('a resumed relay tells both seats they are continuing (#34)', async () => {
   }
 })
 
-test('a turn ceiling ends the run with its own reason (#28)', async () => {
-  const dir = repo()
+test('a turn ceiling ends the run with its own reason (#28)', async (t) => {
+  const dir = repo(t)
   const relay = await Relay.start({
     registry: registryOf({
       codex: [new FakeRotationSession('advisor', 'codex', ['keep going', 'keep going', 'keep going'])],
@@ -722,12 +723,12 @@ test('a turn ceiling ends the run with its own reason (#28)', async () => {
   assert.match(outcome.detail ?? '', /turn ceiling reached/)
 })
 
-test('the default briefing is byte-identical when the operator is human (#27)', async () => {
+test('the default briefing is byte-identical when the operator is human (#27)', async (t) => {
   // A live experiment runs against the unmodified briefing, and its pre-registration says not
   // to change it mid-study (spikes/experiments/04-complaint-as-signal.md). The agent-operator
   // guidance is APPENDED for one case rather than edited into LEAD_BRIEFING, so the default
   // path stays exactly what the experiment measured.
-  const dir = repo()
+  const dir = repo(t)
   const lead = new FakeRotationSession('advisor', 'codex', ['DONE'])
   const relay = await Relay.start({
     registry: registryOf({ codex: [lead], claude: [new FakeRotationSession('i', 'claude', ['r'])] }),
@@ -743,8 +744,8 @@ test('the default briefing is byte-identical when the operator is human (#27)', 
   assert.equal(relay.operator, 'human')
 })
 
-test('an agent operator is told what to escalate, and what not to', async () => {
-  const dir = repo()
+test('an agent operator is told what to escalate, and what not to', async (t) => {
+  const dir = repo(t)
   const lead = new FakeRotationSession('advisor', 'codex', ['DONE'])
   const relay = await Relay.start({
     registry: registryOf({ codex: [lead], claude: [new FakeRotationSession('i', 'claude', ['r'])] }),
@@ -771,14 +772,14 @@ test('an agent operator is told what to escalate, and what not to', async () => 
   await relay.stop()
 })
 
-test('an advisor that produces no instruction never relays an empty message (#35)', async () => {
+test('an advisor that produces no instruction never relays an empty message (#35)', async (t) => {
   // The minimum bar from the issue: there is no circumstance in which relaying nothing is
   // right. The implementer received a routing header with no body, asked for a resend, and
   // the run churned advisor turns toward its budget instead of failing with the real reason.
   //
   // The existing `turn_incomplete` guard covers the IMPLEMENTER only, which is why an
   // advisor whose turn errored went straight through it.
-  const dir = repo()
+  const dir = repo(t)
   const impl = new FakeRotationSession('impl', 'claude', ['a report'])
   const relay = await Relay.start({
     registry: registryOf({
@@ -805,12 +806,12 @@ test('an advisor that produces no instruction never relays an empty message (#35
   )
 })
 
-test('the implementer gets a guaranteed last word when the advisor says DONE (#37)', async () => {
+test('the implementer gets a guaranteed last word when the advisor says DONE (#37)', async (t) => {
   // A run used to end on the advisor's verdict alone. In the first live four-agent run the
   // implementer ended its report with a direct question -- "if you intended something else,
   // tell me what the expected behaviour should be" -- the advisor replied DONE, and the run
   // reported unqualified success with the question unanswered and unrecorded.
-  const dir = repo()
+  const dir = repo(t)
   const impl = new FakeRotationSession('impl', 'claude', [
     'Done, but I did not change anything because nothing was wrong.',
     'FLAG: the premise in the goal was false; add() already returned a + b.',
@@ -832,11 +833,11 @@ test('the implementer gets a guaranteed last word when the advisor says DONE (#3
   assert.match(report.flags[0]!.text, /premise in the goal was false/)
 })
 
-test('an unstructured closing answer is carried anyway (#38)', async () => {
+test('an unstructured closing answer is carried anyway (#38)', async (t) => {
   // The FLAG: convention was not used by the one real participant that had something to
   // flag -- it wrote prose. Discarding an answer for lacking a prefix would repeat exactly
   // the failure this exists to fix.
-  const dir = repo()
+  const dir = repo(t)
   const relay = await Relay.start({
     registry: registryOf({
       codex: [new FakeRotationSession('advisor', 'codex', ['DONE'])],
@@ -855,10 +856,10 @@ test('an unstructured closing answer is carried anyway (#38)', async () => {
   assert.match(report.flags[0]!.text, /never ran the conformance script/)
 })
 
-test('NONE means nothing outstanding, and adds no noise', async () => {
+test('NONE means nothing outstanding, and adds no noise', async (t) => {
   // The line must not appear on a clean run, or it trains the reader to skip the exact place
   // a real flag shows up.
-  const dir = repo()
+  const dir = repo(t)
   const relay = await Relay.start({
     registry: registryOf({
       codex: [new FakeRotationSession('advisor', 'codex', ['DONE'])],
@@ -877,12 +878,12 @@ test('NONE means nothing outstanding, and adds no noise', async () => {
   assert.deepEqual(relay.flagSummary(), [])
 })
 
-test('an advisor NOTE reaches the human without halting or reaching the implementer (#1)', async () => {
+test('an advisor NOTE reaches the human without halting or reaching the implementer (#1)', async (t) => {
   // The advisor had two options and neither was this: fold the finding into the next
   // instruction, polluting it with something the implementer does not need, or ESCALATE,
   // which stops the run to say it. A finding worth recording but not worth stopping for died
   // with the turn.
-  const dir = repo()
+  const dir = repo(t)
   const impl = new FakeRotationSession('impl', 'claude', ['did it', 'NONE'])
   const relay = await Relay.start({
     registry: registryOf({
@@ -925,11 +926,11 @@ test('a reply that is ONLY a note is not treated as an instruction', async () =>
   assert.equal(rest, '', 'the caller sees an empty instruction and handles it as one')
 })
 
-test('a note-only reply is asked again rather than ending the run (#1)', async () => {
+test('a note-only reply is asked again rather than ending the run (#1)', async (t) => {
   // Stripping a note can leave an empty instruction, which the #35 guard correctly refuses.
   // Halting there would end a run BECAUSE the advisor said something useful, so it is asked
   // once for the instruction that goes with the note.
-  const dir = repo()
+  const dir = repo(t)
   const impl = new FakeRotationSession('impl', 'claude', ['did it', 'NONE'])
   const relay = await Relay.start({
     registry: registryOf({
@@ -955,14 +956,14 @@ test('a note-only reply is asked again rather than ending the run (#1)', async (
   assert.match(impl.received.join('\n'), /Read calc\.py/, 'and the instruction still arrived')
 })
 
-test('a dead implementer does not turn a completed run into a transport failure (#5 review)', async () => {
+test('a dead implementer does not turn a completed run into a transport failure (#5 review)', async (t) => {
   // The closing question runs AFTER the advisor's DONE is recorded. If the implementer's
   // session is gone, `send` throws, `#loop`'s catch converts an already-completed run into
   // `transport_failed`, and the log contradicts itself -- `advisor reports the work complete`
   // is already in it.
   //
   // A closing question is worth one turn, never a verdict.
-  const dir = repo()
+  const dir = repo(t)
   const impl = new FakeRotationSession('impl', 'claude', ['did the work'])
   const relay = await Relay.start({
     registry: registryOf({

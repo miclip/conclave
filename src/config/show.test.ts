@@ -19,15 +19,14 @@ import { strict as assert } from 'node:assert'
 import { spawnSync } from 'node:child_process'
 import {
   mkdirSync,
-  mkdtempSync,
   readdirSync,
   readFileSync,
-  realpathSync,
   writeFileSync,
 } from 'node:fs'
-import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import test from 'node:test'
+import type { TestContext } from 'node:test'
+import { tempDir } from '../testkit/tempDir.ts'
 import {
   resolveConclaveRoot,
   resolveRepoRoot,
@@ -44,10 +43,10 @@ const CLI = join(REPO, 'bin', 'conclave.ts')
  * A plain project: a `package.json` and nothing else. No git, so root resolution takes
  * the ancestor-walk path rather than depending on a `git` that may or may not be present.
  */
-function project(config?: string): string {
-  // Real path, not the symlinked one: on macOS `tmpdir()` is /var/... while the resolved
-  // root — and a spawned child's cwd — report /private/var/...
-  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'conclave-show-')))
+function project(t: TestContext, config?: string): string {
+  // `tempDir` resolves the canonical path itself, which matters here: on macOS `tmpdir()`
+  // is /var/... while the resolved root — and a spawned child's cwd — report /private/var/...
+  const dir = tempDir(t, 'conclave-show')
   writeFileSync(join(dir, 'package.json'), '{}')
   if (config !== undefined) {
     mkdirSync(join(dir, '.conclave'), { recursive: true })
@@ -61,8 +60,8 @@ function project(config?: string): string {
  * Omitting a target's entry leaves that template absent, which is how a broken
  * installation is arranged without touching the real one.
  */
-function conclave(bodies: Partial<Record<string, string>> = {}): string {
-  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'conclave-root-')))
+function conclave(t: TestContext, bodies: Partial<Record<string, string>> = {}): string {
+  const dir = tempDir(t, 'conclave-root')
   for (const target of TARGETS) {
     const body = target.template in bodies ? bodies[target.template] : templateFor(target)
     if (body === undefined) continue
@@ -98,11 +97,11 @@ function statusOf(dir: string, conclaveRoot: string, agent: string) {
   return reg
 }
 
-test('the project root is found from a nested working directory, not taken as the cwd', () => {
+test('the project root is found from a nested working directory, not taken as the cwd', (t) => {
   // The case that matters: `config show` is run from wherever the operator happens to be
   // standing, which is usually somewhere down inside the tree. Reporting that directory
   // as the project would put every registration path in the wrong place.
-  const root = project()
+  const root = project(t)
   const nested = join(root, 'src', 'deep', 'inner')
   mkdirSync(nested, { recursive: true })
 
@@ -117,14 +116,14 @@ test('the project root is found from a nested working directory, not taken as th
   )
 })
 
-test('permissions are reported per agent, with the per-agent entry winning', () => {
-  const asymmetric = project('{"permissions":"bypass","agents":{"codex":{"permissions":"ask"}}}')
+test('permissions are reported per agent, with the per-agent entry winning', (t) => {
+  const asymmetric = project(t, '{"permissions":"bypass","agents":{"codex":{"permissions":"ask"}}}')
   assert.deepEqual(showConfig({ projectRoot: asymmetric }).permissions, {
     claude: 'bypass',
     codex: 'ask',
   })
 
-  const shared = project('{"permissions":"bypass"}')
+  const shared = project(t, '{"permissions":"bypass"}')
   assert.deepEqual(showConfig({ projectRoot: shared }).permissions, {
     claude: 'bypass',
     codex: 'bypass',
@@ -133,28 +132,28 @@ test('permissions are reported per agent, with the per-agent entry winning', () 
   // No config file at all: both agents ask, which is each CLI's own default. Every known
   // agent is present either way — a caller must never have to distinguish "asks" from
   // "was not mentioned".
-  assert.deepEqual(showConfig({ projectRoot: project() }).permissions, {
+  assert.deepEqual(showConfig({ projectRoot: project(t) }).permissions, {
     claude: 'ask',
     codex: 'ask',
   })
 })
 
-test('a malformed config throws rather than being shown as the default', () => {
+test('a malformed config throws rather than being shown as the default', (t) => {
   // Printing `ask` for a file that says `bypass` would make this command misleading about
   // the one thing it exists to report.
   assert.throws(
-    () => showConfig({ projectRoot: project('{"permissions":"bypasss"}') }),
+    () => showConfig({ projectRoot: project(t, '{"permissions":"bypasss"}') }),
     /permissions must be "ask" or "bypass"/,
   )
-  assert.throws(() => showConfig({ projectRoot: project('{ not json') }), /not valid JSON/)
+  assert.throws(() => showConfig({ projectRoot: project(t, '{ not json') }), /not valid JSON/)
 })
 
-test('every registration is listed, against the root that target actually uses', () => {
+test('every registration is listed, against the root that target actually uses', (t) => {
   // A linked worktree, forced rather than constructed: Codex reads project config from the
   // MAIN worktree, so a sidecar path under the linked one would be a file Codex never
   // opens — and the operator would see "hooks do not fire" with nothing pointing here.
-  const linked = project()
-  const main = project()
+  const linked = project(t)
+  const main = project(t)
   const report = showConfig({ projectRoot: linked, codexProjectRoot: main })
 
   assert.equal(report.registrations.length, TARGETS.length)
@@ -175,21 +174,21 @@ test('every registration is listed, against the root that target actually uses',
   assert.ok(prose.includes(main))
 })
 
-test('a registration that is not there is missing, not drifted', () => {
+test('a registration that is not there is missing, not drifted', (t) => {
   // The distinction an operator acts on: `drifted` means reinstall to update, `missing`
   // means the hooks are not registered at all and the session gets no signal whatsoever.
-  const reg = statusOf(project(), conclave(), 'claude')
+  const reg = statusOf(project(t), conclave(t), 'claude')
 
   assert.equal(reg.exists, false)
   assert.equal(reg.status, 'missing')
   assert.equal(reg.error, undefined, 'a fine template and an absent file is not an error')
-  assert.match(formatConfigShow(showConfig({ projectRoot: project(), conclaveRoot: conclave() })),
+  assert.match(formatConfigShow(showConfig({ projectRoot: project(t), conclaveRoot: conclave(t) })),
     /missing +Claude project hooks/)
 })
 
-test('bytes identical to the rendered template are current; anything else is drifted', () => {
-  const root = conclave()
-  const dir = project()
+test('bytes identical to the rendered template are current; anything else is drifted', (t) => {
+  const root = conclave(t)
+  const dir = project(t)
   const claude = TARGETS.find((t) => t.agent === 'claude')!
   const dest = join(dir, claude.output)
   mkdirSync(dirname(dest), { recursive: true })
@@ -205,31 +204,31 @@ test('bytes identical to the rendered template are current; anything else is dri
 
   // And rendering against a DIFFERENT Conclave is drift, not a match: the command path
   // inside points at a checkout that is not the one being reported.
-  writeFileSync(dest, rendered(claude, conclave()))
+  writeFileSync(dest, rendered(claude, conclave(t)))
   assert.equal(statusOf(dir, root, 'claude').status, 'drifted')
 })
 
-test('an unreadable destination is unknown rather than drifted', () => {
+test('an unreadable destination is unknown rather than drifted', (t) => {
   // A directory where the settings file should be. We have not seen bytes, so claiming
   // they differ would be an assertion the command cannot support.
-  const dir = project()
+  const dir = project(t)
   const claude = TARGETS.find((t) => t.agent === 'claude')!
   mkdirSync(join(dir, claude.output), { recursive: true })
 
-  const reg = statusOf(dir, conclave(), 'claude')
+  const reg = statusOf(dir, conclave(t), 'claude')
   assert.equal(reg.exists, true)
   assert.equal(reg.status, 'unknown')
   assert.ok(reg.error, 'the reason is carried, not dropped')
 })
 
-test('a broken template fails its own registration and nothing else', () => {
+test('a broken template fails its own registration and nothing else', (t) => {
   // The whole reason `show` does not call `installConfig`: that throws on the first
   // missing template, so a half-installed Conclave answers "which project am I in" with
   // a stack trace. Everything that does not depend on the broken template must survive.
   const claude = TARGETS.find((t) => t.agent === 'claude')!
   const codex = TARGETS.find((t) => t.agent === 'codex')!
-  const root = conclave({ [claude.template]: undefined })
-  const dir = project('{"permissions":"bypass"}')
+  const root = conclave(t, { [claude.template]: undefined })
+  const dir = project(t, '{"permissions":"bypass"}')
   const dest = join(dir, codex.output)
   mkdirSync(dirname(dest), { recursive: true })
   writeFileSync(dest, rendered(codex, root))
@@ -258,36 +257,36 @@ test('a broken template fails its own registration and nothing else', () => {
   assert.equal(JSON.parse(formatConfigShowJson(report)).registrations.length, TARGETS.length)
 })
 
-test('a malformed template is unknown when the file exists, with the reason kept', () => {
+test('a malformed template is unknown when the file exists, with the reason kept', (t) => {
   const claude = TARGETS.find((t) => t.agent === 'claude')!
-  const dir = project()
+  const dir = project(t)
   mkdirSync(join(dir, dirname(claude.output)), { recursive: true })
   writeFileSync(join(dir, claude.output), '{}')
 
   // Renders to something no CLI can parse. `installConfig` refuses to write this; `show`
   // must report that it cannot judge the file rather than inventing a verdict.
-  const notJson = statusOf(dir, conclave({ [claude.template]: `{"cmd": ${TEMPLATE_TOKEN}}` }), 'claude')
+  const notJson = statusOf(dir, conclave(t, { [claude.template]: `{"cmd": ${TEMPLATE_TOKEN}}` }), 'claude')
   assert.equal(notJson.status, 'unknown')
   assert.ok(notJson.error)
 
   // No token at all: it would render identically for every Conclave, so comparing against
   // it would say nothing about whether the hooks point back here.
-  const noToken = statusOf(dir, conclave({ [claude.template]: '{"cmd":"hook_post.py"}' }), 'claude')
+  const noToken = statusOf(dir, conclave(t, { [claude.template]: '{"cmd":"hook_post.py"}' }), 'claude')
   assert.equal(noToken.status, 'unknown')
   assert.match(noToken.error ?? '', /CONCLAVE_ROOT/)
 
   // Prose says which state it is in, and says explicitly that unknown is not a verdict.
   const prose = formatConfigShow(
-    showConfig({ projectRoot: dir, conclaveRoot: conclave({ [claude.template]: '{"cmd":"x"}' }) }),
+    showConfig({ projectRoot: dir, conclaveRoot: conclave(t, { [claude.template]: '{"cmd":"x"}' }) }),
   )
   assert.match(prose, /unknown +Claude project hooks/)
   assert.ok(prose.includes('`unknown` means the comparison could not be made'))
 })
 
-test('the JSON shape is exactly these fields', () => {
+test('the JSON shape is exactly these fields', (t) => {
   // Pinned: this is the consumer contract, and a field quietly appearing or vanishing is
   // the failure a machine-readable mode exists to prevent.
-  const report = JSON.parse(formatConfigShowJson(showConfig({ projectRoot: project() })))
+  const report = JSON.parse(formatConfigShowJson(showConfig({ projectRoot: project(t) })))
 
   assert.deepEqual(Object.keys(report).sort(), [
     'codexProjectRoot',
@@ -310,7 +309,7 @@ test('the JSON shape is exactly these fields', () => {
   const claude = TARGETS.find((t) => t.agent === 'claude')!
   const broken = JSON.parse(
     formatConfigShowJson(
-      showConfig({ projectRoot: project(), conclaveRoot: conclave({ [claude.template]: undefined }) }),
+      showConfig({ projectRoot: project(t), conclaveRoot: conclave(t, { [claude.template]: undefined }) }),
     ),
   )
   const entries = broken.registrations as { agent: string; error?: string }[]
@@ -318,12 +317,12 @@ test('the JSON shape is exactly these fields', () => {
   assert.equal(entries.find((r) => r.agent === 'codex')?.error, undefined)
 })
 
-test('nothing is created — not the registrations, not their parent directories', () => {
+test('nothing is created — not the registrations, not their parent directories', (t) => {
   // The trap this guards: a report of where files WOULD go, answered by putting them
   // there. `installConfig` creates parents on the way to writing; nothing here may — and
   // computing a status is exactly the step that would tempt something into it.
-  const dir = project('{"permissions":"bypass"}')
-  const root = conclave()
+  const dir = project(t, '{"permissions":"bypass"}')
+  const root = conclave(t)
   const before = listing(dir)
   const rootBefore = listing(root)
 
@@ -352,11 +351,11 @@ test('nothing is created — not the registrations, not their parent directories
   assert.equal(readFileSync(dest, 'utf8'), bytes)
 })
 
-test('the CLI routes `config show`, defaults to prose, and never writes', () => {
+test('the CLI routes `config show`, defaults to prose, and never writes', (t) => {
   // Spawned for real: flag routing, which renderer reaches stdout and the exit code are
   // precisely what the module tests cannot see. A `mkdir` anywhere in the command's call
   // graph would also be invisible above, and shows up here.
-  const dir = project('{"agents":{"claude":{"permissions":"bypass"}}}')
+  const dir = project(t, '{"agents":{"claude":{"permissions":"bypass"}}}')
   const before = listing(dir)
   const run = (...args: string[]) =>
     spawnSync(process.execPath, [CLI, 'config', 'show', ...args], { cwd: dir, encoding: 'utf8' })

@@ -1,6 +1,6 @@
-import { chmodSync, mkdtempSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { chmodSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { suiteTempDir } from '../testkit/tempDir.ts'
 
 /**
  * A stand-in for `claude` / `codex` on PATH, for tests that need a REAL adapter over a fake
@@ -256,7 +256,7 @@ post('SessionStart', { transcript_path: process.env.ORCH_FAKE_TRANSCRIPT })
 setInterval(function () {}, 1 << 30)
 `
 
-const RUN = mkdtempSync(join(tmpdir(), 'orch-fake-cli-'))
+const RUN = suiteTempDir('orch-fake-cli')
 const TRANSCRIPT = join(RUN, 'fake-transcript.jsonl')
 
 for (const name of ['claude', 'codex']) {
@@ -276,13 +276,16 @@ process.env['ORCH_FAKE_TRANSCRIPT'] = TRANSCRIPT
  * transcript file.
  *
  * Per PROCESS, not per test: each test file runs in its own process under `node --test`, so
- * shadowing the real CLIs cannot leak into another suite. Call it once at module scope.
+ * shadowing the real CLIs cannot leak into another suite. Call it once at module scope --
+ * which is now a requirement rather than a convention, because the directory is issued by
+ * `suiteTempDir` and its cleanup is a top-level `after` hook, which has to be registered
+ * while the file is being imported and not from inside a test that is already running.
  *
  * `transcript` starts empty and is the file the fake CLI announces in its `SessionStart`, so
  * the adapter tails it -- which is how a test gets to decide what the child's transcript says.
  */
 export function installFakeClis(): { dir: string; transcript: string } {
-  const dir = mkdtempSync(join(tmpdir(), 'orch-fake-cli-'))
+  const dir = suiteTempDir('orch-fake-cli')
   const transcript = join(dir, 'fake-transcript.jsonl')
 
   for (const name of ['claude', 'codex']) {

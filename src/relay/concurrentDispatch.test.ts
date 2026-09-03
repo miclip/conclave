@@ -22,13 +22,14 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
+import type { TestContext } from 'node:test'
 import { AgentRegistry } from '../registry/registry.ts'
 import { NO_DEADLINE_CLOCKS } from '../registry/types.ts'
 import { FakeRotationSession } from '../rotation/fakeSession.ts'
+import { tempDir } from '../testkit/tempDir.ts'
 import { listSessions, recordSession } from '../workspace/sessionRecord.ts'
 import { advisorTurnsLeftNotice, type Ceilings } from './guardrails.ts'
 import { Relay } from './relay.ts'
@@ -65,8 +66,8 @@ function registryOf(sessions: Record<string, FakeRotationSession>): AgentRegistr
 }
 
 /** A repository to run in: two seats mean real worktrees, and those need a real checkout. */
-function tempRepo(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'conclave-concurrent-'))
+function tempRepo(t: TestContext): string {
+  const dir = tempDir(t, 'conclave-concurrent')
   execFileSync('git', ['init', '--quiet'], { cwd: dir })
   execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: dir })
   execFileSync('git', ['config', 'user.name', 'Test'], { cwd: dir })
@@ -117,8 +118,8 @@ function placements(relay: Relay): [string, string | undefined][] {
   return relay.tasks().map((e) => [e.task.id, e.runtime.seat])
 }
 
-test('one reply puts two seats to work, and they are in flight at the same moment', async () => {
-  const repo = tempRepo()
+test('one reply puts two seats to work, and they are in flight at the same moment', async (t) => {
+  const repo = tempRepo(t)
   const { relay, alpha, beta } = await twoSeatRun(repo, [
     '@seat seat-alpha: Do the slow thing.\n@seat seat-beta: Do the quick thing.',
     'DONE',
@@ -174,12 +175,11 @@ test('one reply puts two seats to work, and they are in flight at the same momen
     ])
   } finally {
     await relay.stop()
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
-test('the first report to arrive reaches the advisor while its sibling is still working', async () => {
-  const repo = tempRepo()
+test('the first report to arrive reaches the advisor while its sibling is still working', async (t) => {
+  const repo = tempRepo(t)
   const { relay, lead, alpha } = await twoSeatRun(repo, [
     '@seat seat-alpha: Do the slow thing.\n@seat seat-beta: Do the quick thing.',
     'DONE',
@@ -224,7 +224,6 @@ test('the first report to arrive reaches the advisor while its sibling is still 
     )
   } finally {
     await relay.stop()
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
@@ -246,8 +245,8 @@ test('the first report to arrive reaches the advisor while its sibling is still 
  * The timings are the mechanism, so they are deliberate rather than incidental: `#exchange`
  * polls every 250ms, and each gap here is at least three times that.
  */
-test('two reports that arrive during one advisor turn are routed in arrival order', async () => {
-  const repo = tempRepo()
+test('two reports that arrive during one advisor turn are routed in arrival order', async (t) => {
+  const repo = tempRepo(t)
   const lead = new FakeRotationSession('lead-1', 'lead', [
     '@seat seat-alpha: Alpha work.\n@seat seat-beta: Beta work.\n@seat seat-gamma: Gamma work.',
     'DONE',
@@ -298,12 +297,11 @@ test('two reports that arrive during one advisor turn are routed in arrival orde
     )
   } finally {
     await relay.stop()
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
-test('a task whose seat is busy is overtaken rather than holding the queue', async () => {
-  const repo = tempRepo()
+test('a task whose seat is busy is overtaken rather than holding the queue', async (t) => {
+  const repo = tempRepo(t)
   const { relay, alpha, beta } = await twoSeatRun(repo, [
     '@seat seat-alpha: First alpha thing.\n@seat seat-alpha: Second alpha thing.\n@seat seat-beta: Beta thing.',
     'DONE',
@@ -348,12 +346,11 @@ test('a task whose seat is busy is overtaken rather than holding the queue', asy
     )
   } finally {
     await relay.stop()
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
-test('a seat-targeted task goes to that seat, and a role-targeted one to the longest-idle seat', async () => {
-  const repo = tempRepo()
+test('a seat-targeted task goes to that seat, and a role-targeted one to the longest-idle seat', async (t) => {
+  const repo = tempRepo(t)
   const { relay } = await twoSeatRun(repo, [
     '@seat seat-beta: Only beta can do this.',
     '@role implementer: Whoever is free.',
@@ -379,12 +376,11 @@ test('a seat-targeted task goes to that seat, and a role-targeted one to the lon
     )
   } finally {
     await relay.stop()
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
-test('a reply with one bad directive admits nothing at all, not even the good one', async () => {
-  const repo = tempRepo()
+test('a reply with one bad directive admits nothing at all, not even the good one', async (t) => {
+  const repo = tempRepo(t)
   // The first directive names a seat that exists and is perfectly well formed. A dispatcher
   // that admitted what parsed would run it — and the advisor, told only that its reply produced
   // no instruction, would have no idea that half of it had already been dispatched.
@@ -413,12 +409,11 @@ test('a reply with one bad directive admits nothing at all, not even the good on
     )
   } finally {
     await relay.stop()
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
-test('DONE while a seat is still working hands over the outstanding report instead of ending', async () => {
-  const repo = tempRepo()
+test('DONE while a seat is still working hands over the outstanding report instead of ending', async (t) => {
+  const repo = tempRepo(t)
   const { relay, alpha } = await twoSeatRun(repo, [
     '@seat seat-alpha: Do the slow thing.\n@seat seat-beta: Do the quick thing.',
     // Said while alpha is still mid-turn. Ending here would discard a turn already paid for,
@@ -447,15 +442,14 @@ test('DONE while a seat is still working hands over the outstanding report inste
     )
   } finally {
     await relay.stop()
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
-test('a default run admits one task per reply and never has two in flight', async () => {
+test('a default run admits one task per reply and never has two in flight', async (t) => {
   // D1's identity case, from the concurrency side. The same code path with one seat must
   // produce the serial run it always did: one task per advisor turn, dispatched, awaited,
   // reported, routed. Nothing here counts seats — the shape falls out of the seat table.
-  const repo = tempRepo()
+  const repo = tempRepo(t)
   const lead = new FakeRotationSession('lead-1', 'lead', ['Do the thing.', 'And the next thing.', 'DONE'])
   const impl = new FakeRotationSession('impl-1', 'impl', [...SEAT_REPLIES])
   const relay = await Relay.start({
@@ -490,7 +484,6 @@ test('a default run admits one task per reply and never has two in flight', asyn
     )
   } finally {
     await relay.stop()
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
@@ -503,8 +496,8 @@ test('a default run admits one task per reply and never has two in flight', asyn
  * check BEFORE the mutation was supposed to buy, defeated by doing it once per decision instead
  * of once per batch.
  */
-test('a reply that would cross the queue ceiling admits none of itself', async () => {
-  const repo = tempRepo()
+test('a reply that would cross the queue ceiling admits none of itself', async (t) => {
+  const repo = tempRepo(t)
   const { relay } = await twoSeatRun(
     repo,
     ['@seat seat-alpha: First.\n@seat seat-beta: Second.', 'DONE'],
@@ -523,13 +516,12 @@ test('a reply that would cross the queue ceiling admits none of itself', async (
     assert.deepEqual(relay.seats().map((s) => s.state), ['idle', 'idle'])
   } finally {
     await relay.stop()
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
-test('the same reply under a ceiling that fits admits all of itself', async () => {
+test('the same reply under a ceiling that fits admits all of itself', async (t) => {
   // The control. Without it the test above passes on a dispatcher that admits nothing ever.
-  const repo = tempRepo()
+  const repo = tempRepo(t)
   const { relay } = await twoSeatRun(
     repo,
     ['@seat seat-alpha: First.\n@seat seat-beta: Second.', 'DONE', 'DONE'],
@@ -547,7 +539,6 @@ test('the same reply under a ceiling that fits admits all of itself', async () =
     )
   } finally {
     await relay.stop()
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
@@ -591,8 +582,8 @@ for (const kase of [
     reason: 'escalated',
   },
 ] as const) {
-  test(`${kase.what} stops admission and drains the seat still working`, async () => {
-    const repo = tempRepo()
+  test(`${kase.what} stops admission and drains the seat still working`, async (t) => {
+    const repo = tempRepo(t)
     const { relay, alpha } = await twoSeatRun(repo, [...kase.replies], kase.turns, {
       ...(kase.ceilings ? { ceilings: { ...kase.ceilings } } : {}),
       seatReplies: { alpha: ['ack', 'ALPHA FINISHED', 'NONE', 'NONE'] },
@@ -619,7 +610,6 @@ for (const kase of [
       assert.deepEqual(lostTurnNotes(relay), [], 'nothing may be recorded as an unfinished turn')
     } finally {
       await relay.stop()
-      rmSync(repo, { recursive: true, force: true })
     }
   })
 }
@@ -637,8 +627,8 @@ for (const kase of [
  * loop drains to nothing outstanding BEFORE it may end, so the same question asked where the
  * outcome is finally built answers "nothing was in flight" on every run, this one included.
  */
-test('the advisor-turn budget says work was in flight when the seat it drained was still working', async () => {
-  const repo = tempRepo()
+test('the advisor-turn budget says work was in flight when the seat it drained was still working', async (t) => {
+  const repo = tempRepo(t)
   const { relay, alpha } = await twoSeatRun(repo, ['@seat seat-alpha: Slow work.\n@seat seat-beta: Quick work.', 'DONE', 'DONE'], 1, {
     seatReplies: { alpha: ['ack', 'ALPHA FINISHED', 'NONE', 'NONE'] },
   })
@@ -674,7 +664,6 @@ test('the advisor-turn budget says work was in flight when the seat it drained w
     assert.equal(outcome.detail, recorded, 'the returned outcome and the recorded status must carry one detail, not two')
   } finally {
     await relay.stop()
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
@@ -692,8 +681,8 @@ test('the advisor-turn budget says work was in flight when the seat it drained w
  * advisor turn 2 while alpha is mid-turn, the loop goes round once to drain, and the hand-back
  * lands on turn 4 of a bound of 4 -- the final turn, and the loudest of the two sentences.
  */
-test('a report drained after the run has decided to end carries no turns-left notice', async () => {
-  const repo = tempRepo()
+test('a report drained after the run has decided to end carries no turns-left notice', async (t) => {
+  const repo = tempRepo(t)
   const { relay, lead, alpha } = await twoSeatRun(repo, ['@seat seat-alpha: Slow work.\n@seat seat-beta: Quick work.', 'DONE', 'DONE'], 4, {
     ceilings: { maxTurns: 6 },
     seatReplies: { alpha: ['ack', 'ALPHA FINISHED', 'NONE', 'NONE'] },
@@ -714,7 +703,6 @@ test('a report drained after the run has decided to end carries no turns-left no
     )
   } finally {
     await relay.stop()
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
@@ -726,8 +714,8 @@ test('a report drained after the run has decided to end carries no turns-left no
  * what must not happen is the OTHER seat's turn being discarded on the way out. That seat is
  * answering a different instruction and knows nothing about the question that was asked.
  */
-test('a seat-scoped halt does not discard an unrelated seat that is still working', async () => {
-  const repo = tempRepo()
+test('a seat-scoped halt does not discard an unrelated seat that is still working', async (t) => {
+  const repo = tempRepo(t)
   const { relay, alpha } = await twoSeatRun(
     repo,
     ['@seat seat-alpha: Slow work.\n@seat seat-beta: Quick work.', 'DONE', 'DONE'],
@@ -760,6 +748,5 @@ test('a seat-scoped halt does not discard an unrelated seat that is still workin
     assert.deepEqual(lostTurnNotes(relay), [], 'and nothing may be recorded as an unfinished turn')
   } finally {
     await relay.stop()
-    rmSync(repo, { recursive: true, force: true })
   }
 })

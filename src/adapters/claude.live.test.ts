@@ -19,7 +19,6 @@ import { createHash } from 'node:crypto'
 import {
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   rmSync,
   symlinkSync,
@@ -30,6 +29,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 import { ClaudePtyHookAdapter } from './claude.ts'
 import type { AgentEvent, SessionSnapshot, TurnEndEvent } from '../contract/session.ts'
+import { tempDir } from '../testkit/tempDir.ts'
 
 const LIVE = process.env.ORCH_LIVE === '1'
 const CWD = process.cwd()
@@ -375,7 +375,7 @@ test('closing does not downgrade an already-completed turn', { skip }, async (t)
   assert.equal(snap.turns[0]?.confidence, 'proven')
 })
 
-test('a directory claude has never seen still boots, because the dialog gets answered', { skip }, async () => {
+test('a directory claude has never seen still boots, because the dialog gets answered', { skip }, async (t) => {
   // The condition #108 is about, reproduced the only way it can be: a directory Claude Code has
   // no trust record for. `claude -p` cannot see it -- headless mode never shows the dialog -- so
   // a temp directory and a real pty is the whole experiment. No turn is sent, so it costs no
@@ -405,7 +405,7 @@ test('a directory claude has never seen still boots, because the dialog gets ans
     existsSync(realConfig) ? createHash('sha256').update(readFileSync(realConfig)).digest('hex') : 'absent'
   const before = digest()
 
-  const home = mkdtempSync(join(tmpdir(), 'conclave-home-'))
+  const home = tempDir(t, 'conclave-home')
   // Enough to skip first-run onboarding, and nothing else. Seeding a copy of the operator's real
   // config would work and was rejected: it would put their account details in a temp file.
   writeFileSync(join(home, '.claude.json'), JSON.stringify({ hasCompletedOnboarding: true }))
@@ -415,7 +415,7 @@ test('a directory claude has never seen still boots, because the dialog gets ans
     symlinkSync(linuxCreds, join(home, '.claude', '.credentials.json'))
   }
 
-  const dir = mkdtempSync(join(tmpdir(), 'conclave-trust-'))
+  const dir = tempDir(t, 'conclave-trust')
   process.env.HOME = home
   let session: ClaudePtyHookAdapter | undefined
   try {

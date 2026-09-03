@@ -15,20 +15,22 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync, spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
+import type { TestContext } from 'node:test'
+import { tempDir } from '../testkit/tempDir.ts'
 import { hasDrift, installConfig, resolveRepoRoot, TARGETS } from './install.ts'
 
 const REPO = resolveRepoRoot(import.meta.dirname)
 const CLI = join(REPO, 'bin', 'conclave.ts')
 
 /** A checkout with the templates but no rendered registrations, so the first run drifts. */
-function fixtureRepo(): string {
-  // Real path, not the symlinked one: on macOS `tmpdir()` is /var/... while a spawned
-  // child's `process.cwd()` reports /private/var/..., and the report echoes the latter.
-  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'conclave-cli-')))
+function fixtureRepo(t: TestContext): string {
+  // `tempDir` resolves the canonical path itself, which matters here: on macOS `tmpdir()` is
+  // /var/... while a spawned child's `process.cwd()` reports /private/var/..., and the report
+  // echoes the latter.
+  const dir = tempDir(t, 'conclave-cli')
   writeFileSync(join(dir, 'package.json'), '{}')
   for (const t of TARGETS) {
     const dst = join(dir, t.template)
@@ -72,8 +74,8 @@ const SLUG = 'implementer'
  * a hand-made directory of the right shape would prove only that string matching works, and
  * the linked-worktree requirement is precisely what stops a look-alike exempting itself.
  */
-function seatFixture(): { root: string; seat: string } {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), 'conclave-seat-')))
+function seatFixture(t: TestContext): { root: string; seat: string } {
+  const root = tempDir(t, 'conclave-seat')
   git(root, 'init', '-q', '-b', 'main')
   git(root, 'config', 'user.email', 'fixture@example.invalid')
   git(root, 'config', 'user.name', 'fixture')
@@ -94,8 +96,8 @@ function seatFixture(): { root: string; seat: string } {
   return { root, seat }
 }
 
-test('--json prints the report as JSON and nothing else', () => {
-  const repo = fixtureRepo()
+test('--json prints the report as JSON and nothing else', (t) => {
+  const repo = fixtureRepo(t)
   const { status, stdout } = check(repo, '--json')
 
   // Parse the whole stream, not a substring: a stray log line alongside valid JSON is
@@ -119,8 +121,8 @@ test('--json prints the report as JSON and nothing else', () => {
   assert.equal(status, 1, 'drift must still exit non-zero under --json')
 })
 
-test('--json exits zero and reports no drift on a clean checkout', () => {
-  const repo = fixtureRepo()
+test('--json exits zero and reports no drift on a clean checkout', (t) => {
+  const repo = fixtureRepo(t)
   install(repo)
 
   const { status, stdout } = check(repo, '--json')
@@ -131,19 +133,19 @@ test('--json exits zero and reports no drift on a clean checkout', () => {
   assert.equal(status, 0)
 })
 
-test('the exit code is the same with and without --json', () => {
-  const drifted = fixtureRepo()
+test('the exit code is the same with and without --json', (t) => {
+  const drifted = fixtureRepo(t)
   assert.equal(check(drifted).status, 1)
   assert.equal(check(drifted, '--json').status, 1)
 
-  const clean = fixtureRepo()
+  const clean = fixtureRepo(t)
   install(clean)
   assert.equal(check(clean).status, 0)
   assert.equal(check(clean, '--json').status, 0)
 })
 
-test('prose remains the default output', () => {
-  const repo = fixtureRepo()
+test('prose remains the default output', (t) => {
+  const repo = fixtureRepo(t)
   const { status, stdout } = check(repo)
 
   assert.throws(() => JSON.parse(stdout), 'the default output must not have become JSON')
@@ -153,10 +155,10 @@ test('prose remains the default output', () => {
   assert.equal(status, 1)
 })
 
-test('--json does not rewrite the registrations it reports on', () => {
+test('--json does not rewrite the registrations it reports on', (t) => {
   // The check contract: reporting drift must not resolve it. Rewriting a Codex handler
   // re-hashes it and silently drops an existing trust decision.
-  const repo = fixtureRepo()
+  const repo = fixtureRepo(t)
   install(repo)
   const codexOut = join(repo, '.codex/hooks.json')
   const perturbed = readFileSync(codexOut, 'utf8').replace('"timeout": 10', '"timeout": 11')
@@ -168,12 +170,12 @@ test('--json does not rewrite the registrations it reports on', () => {
   assert.equal(readFileSync(codexOut, 'utf8'), perturbed, 'a check must not write')
 })
 
-test('the run root still exits red on drift, seat worktrees or no', async () => {
+test('the run root still exits red on drift, seat worktrees or no', async (t) => {
   // The signal that used to live in an ambient unit test (`src/config/install.test.ts`) and
   // now lives here: registrations that no longer match the templates must fail a check run
   // where the registrations actually are. Nothing about the seat exemption below may soften
   // that, so this asserts it against a root that HAS a seat worktree hanging off it.
-  const { root } = seatFixture()
+  const { root } = seatFixture(t)
   install(root)
   assert.equal(check(root).status, 0, 'a freshly installed run root is clean')
 
@@ -192,12 +194,12 @@ test('the run root still exits red on drift, seat worktrees or no', async () => 
   assert.match(readFileSync(sidecar, 'utf8'), /"timeout": 11/)
 })
 
-test('a seat worktree reports not_applicable and exits zero', async () => {
+test('a seat worktree reports not_applicable and exits zero', async (t) => {
   // A seat is a linked checkout, and registrations are generated and git-ignored, so git never
   // puts them there. Checking a seat therefore reports the RUN ROOT's registrations as missing
   // — for every seat, every run, with no change behind it. Seats run the suite at their own
   // HEAD, so a red answer here would arrive as a seat test failure nothing could fix.
-  const { root, seat } = seatFixture()
+  const { root, seat } = seatFixture(t)
   install(root)
 
   // The condition being exempted is real, not hypothetical: the seat has no Claude
@@ -233,11 +235,11 @@ test('a seat worktree reports not_applicable and exits zero', async () => {
   assert.ok(!/DRIFT/.test(prose.stdout), 'and never presents itself as a drift report')
 })
 
-test('a seat worktree is recognised by layout, not by the manifest', () => {
+test('a seat worktree is recognised by layout, not by the manifest', (t) => {
   // `createSeatWorktrees` writes the manifest only after every tree exists, and cleanup can
   // remove it while a tree is retained. If the exemption depended on the manifest, a check run
   // in either window would go red in a directory that is unambiguously a seat.
-  const { root, seat } = seatFixture()
+  const { root, seat } = seatFixture(t)
   install(root)
   assert.equal(JSON.parse(check(seat, '--json').stdout).status, 'not_applicable', 'no manifest yet')
 
@@ -269,11 +271,11 @@ test('a seat worktree is recognised by layout, not by the manifest', () => {
   assert.ok(check(seat).stdout.includes('implementer 2'), 'and the reader is told the same seat')
 })
 
-test('a directory merely shaped like a seat worktree is still checked', () => {
+test('a directory merely shaped like a seat worktree is still checked', (t) => {
   // The exemption is the dangerous direction: anything it swallows is a drift report nobody
   // sees. A path under `.conclave/worktrees/` that is NOT a linked checkout -- a leftover
   // directory, or a project someone laid out this way -- gets the ordinary answer.
-  const outer = realpathSync(mkdtempSync(join(tmpdir(), 'conclave-lookalike-')))
+  const outer = tempDir(t, 'conclave-lookalike')
   const impostor = join(outer, '.conclave', 'worktrees', RUN_ID, SLUG)
   mkdirSync(impostor, { recursive: true })
   writeFileSync(join(impostor, 'package.json'), '{}')
@@ -287,12 +289,12 @@ test('a directory merely shaped like a seat worktree is still checked', () => {
   assert.equal(JSON.parse(r.stdout).status, 'drift')
 })
 
-test('a `.git` FILE is not taken as proof: the exemption asks git, not the filesystem', () => {
+test('a `.git` FILE is not taken as proof: the exemption asks git, not the filesystem', (t) => {
   // The test above covers a directory with no `.git` at all. It is the weaker half: a `.git`
   // FILE was the whole of the linked-worktree evidence, and nothing read it. A file holding
   // arbitrary text passed, and the check exited zero without comparing anything -- so laying out
   // this shape was enough to switch a real project's drift reporting off.
-  const outer = realpathSync(mkdtempSync(join(tmpdir(), 'conclave-fakegit-')))
+  const outer = tempDir(t, 'conclave-fakegit')
   const impostor = join(outer, '.conclave', 'worktrees', RUN_ID, SLUG)
   mkdirSync(impostor, { recursive: true })
   writeFileSync(join(impostor, 'package.json'), '{}')
@@ -307,12 +309,12 @@ test('a `.git` FILE is not taken as proof: the exemption asks git, not the files
   assert.equal(JSON.parse(r.stdout).status, 'drift')
 })
 
-test("a real linked worktree of ANOTHER repository at that path is still checked", () => {
+test("a real linked worktree of ANOTHER repository at that path is still checked", (t) => {
   // The other false positive, and the one no amount of reading the `.git` file would catch: a
   // genuine linked worktree, genuinely pointing at a genuine repository -- just not this one. A
   // seat shares its repository with the run root by construction, so a checkout that does not is
   // not a seat however its path reads.
-  const outer = realpathSync(mkdtempSync(join(tmpdir(), 'conclave-foreign-')))
+  const outer = tempDir(t, 'conclave-foreign')
   const other = join(outer, 'other')
   mkdirSync(other, { recursive: true })
   git(other, 'init', '-q', '.')

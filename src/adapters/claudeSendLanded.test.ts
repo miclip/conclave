@@ -30,12 +30,30 @@
  */
 
 import { strict as assert } from 'node:assert'
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { chmodSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
+import type { TestContext } from 'node:test'
 import { ClaudePtyHookAdapter } from './claude.ts'
 import { COMPOSER_JS } from './fakeCli.ts'
+import { suiteTempDir, tempDir } from '../testkit/tempDir.ts'
+
+/**
+ * The run directories the adapters this file boots make for themselves, contained.
+ *
+ * `Claude.#boot` and `Codex.#boot` each `mkdtemp` a run directory under `os.tmpdir()` and
+ * never remove it. That is PRODUCTION behaviour and issue #203's business, not this file's --
+ * so rather than change it, the floor it lands on moves: `tmpdir()` re-reads `TMPDIR` on every
+ * call, so pointing it at a directory the testkit issued puts every run directory booted here
+ * inside something whose lifetime the helper already owns.
+ *
+ * Per FILE, and that is what makes it safe rather than a shared global: every test file runs
+ * in its own process under `node --test`, so this reaches no other suite, and the tests in
+ * this one stay isolated from each other exactly as before -- by `tempDir` handing each its
+ * own uniquely named child of this root.
+ */
+const ADAPTER_TMP_ROOT = suiteTempDir('adapter-run-root')
+process.env['TMPDIR'] = ADAPTER_TMP_ROOT
 
 /**
  * Stands in for `claude` on PATH: a child mid-turn, swallowing input, transcript still moving.
@@ -107,7 +125,7 @@ post('SessionStart', { transcript_path: transcript })
 setInterval(function () {}, 1 << 30)
 `
 
-const RUN = mkdtempSync(join(tmpdir(), 'orch-send-landed-'))
+const RUN = suiteTempDir('orch-send-landed')
 writeFileSync(join(RUN, 'claude'), FAKE_CLI)
 chmodSync(join(RUN, 'claude'), 0o755)
 
@@ -124,13 +142,16 @@ const MESSAGE = 'apply the change we agreed on'
  * `watchdogMs` is far above anything these tests wait for: a deadline firing mid-send would
  * end the turn under the assertions and prove something else entirely.
  */
-async function session(landAt: number): Promise<{
+async function session(
+  t: TestContext,
+  landAt: number,
+): Promise<{
   claude: ClaudePtyHookAdapter
   submitted: () => string[]
   turns: () => number
   injected: () => number
 }> {
-  const dir = mkdtempSync(join(tmpdir(), 'orch-send-landed-run-'))
+  const dir = tempDir(t, 'orch-send-landed-run')
   const transcript = join(dir, 'transcript.jsonl')
   const submitLog = join(dir, 'submits.log')
   writeFileSync(transcript, '')
@@ -175,9 +196,9 @@ const repairs = (claude: ClaudePtyHookAdapter): string[] =>
  * child recorded receiving. The first alone would prove only that this process wrote bytes,
  * which is the exact claim `send()` exists to stop trusting.
  */
-test('a swallowed send is repaired even while the transcript is advancing without it', { timeout: 120_000 }, async () => {
+test('a swallowed send is repaired even while the transcript is advancing without it', { timeout: 120_000 }, async (t) => {
   // Land on the second submit: the re-type, after the bare Enter has come back empty-handed.
-  const { claude, submitted, turns, injected } = await session(2)
+  const { claude, submitted, turns, injected } = await session(t, 2)
   try {
     const before = turns()
     const key = await claude.send(MESSAGE, { kind: 'orchestrator' })
@@ -211,8 +232,8 @@ test('a swallowed send is repaired even while the transcript is advancing withou
  * never accepted have different remedies, and the old message sent an operator to `--settle`
  * and `conclave config check` -- the two things demonstrably working.
  */
-test('a send that never becomes a prompt is reported as swallowed input, not as a hook failure', { timeout: 120_000 }, async () => {
-  const { claude, submitted, injected } = await session(0)
+test('a send that never becomes a prompt is reported as swallowed input, not as a hook failure', { timeout: 120_000 }, async (t) => {
+  const { claude, submitted, injected } = await session(t, 0)
   try {
     await assert.rejects(
       () => claude.send(MESSAGE, { kind: 'orchestrator' }),

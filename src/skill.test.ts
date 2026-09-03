@@ -15,10 +15,10 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync, spawnSync } from 'node:child_process'
-import { appendFileSync, existsSync, mkdtempSync, readFileSync, realpathSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { appendFileSync, existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
+import { tempDir } from './testkit/tempDir.ts'
 import { COMMANDS } from './repl/session.ts'
 
 const REPO = join(import.meta.dirname, '..')
@@ -154,11 +154,11 @@ function cli(args: string[], home: string): { code: number; out: string } {
   return { code: r.status ?? -1, out: `${r.stdout}${r.stderr}` }
 }
 
-test('#183 the skill is offered rather than installed for you', () => {
+test('#183 the skill is offered rather than installed for you', (t) => {
   // `install.sh` symlinks one binary and touches nothing else in $HOME. Writing into a user's
   // Claude configuration uninvited is a larger change to their environment than installing
   // conclave is, so the bare form only SAYS where it is.
-  const home = realpathSync(mkdtempSync(join(tmpdir(), 'conclave-skill-home-')))
+  const home = tempDir(t, 'conclave-skill-home')
   const bare = cli(['skill'], home)
   assert.equal(bare.code, 0)
   assert.match(bare.out, /skill install/, 'it must say how to install it')
@@ -169,8 +169,8 @@ test('#183 the skill is offered rather than installed for you', () => {
   )
 })
 
-test('#183 installing is idempotent, and never overwrites an edited copy unasked', () => {
-  const home = realpathSync(mkdtempSync(join(tmpdir(), 'conclave-skill-home-')))
+test('#183 installing is idempotent, and never overwrites an edited copy unasked', (t) => {
+  const home = tempDir(t, 'conclave-skill-home')
   const target = join(home, '.claude', 'skills', 'conclave', 'SKILL.md')
 
   assert.equal(cli(['skill', 'install'], home).code, 0)

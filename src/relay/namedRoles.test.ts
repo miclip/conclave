@@ -19,14 +19,13 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
 import test from 'node:test'
+import type { TestContext } from 'node:test'
 import { AgentRegistry } from '../registry/registry.ts'
 import type { RoleDefinition } from '../registry/roles.ts'
 import { NO_DEADLINE_CLOCKS } from '../registry/types.ts'
 import { FakeRotationSession } from '../rotation/fakeSession.ts'
+import { tempDir } from '../testkit/tempDir.ts'
 import { readSession, recordSession } from '../workspace/sessionRecord.ts'
 import { envelope } from './message.ts'
 import { Relay } from './relay.ts'
@@ -77,15 +76,15 @@ function registryOf(sessions: Record<string, FakeRotationSession>): AgentRegistr
   return r
 }
 
-function repo(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'conclave-roles-'))
+function repo(t: TestContext): string {
+  const dir = tempDir(t, 'conclave-roles')
   execFileSync('git', ['init', '-q', '.'], { cwd: dir })
   return dir
 }
 
 /** One advisor turn: the advisor instructs, the implementer reports, the advisor says DONE. */
-async function runWith(implementerRole: string) {
-  const dir = repo()
+async function runWith(t: TestContext, implementerRole: string) {
+  const dir = repo(t)
   const lead = new FakeRotationSession('lead-1', 'codex', ['build the thing', 'DONE'])
   const impl = new FakeRotationSession('impl-1', 'claude', ['a report'])
   const relay = await Relay.start({
@@ -154,62 +153,54 @@ test('envelope names a role that differs from the rank, on both ranks', () => {
   assert.match(lead, /^\[FROM THE ADVISOR \(lead, role: architect\) —/)
 })
 
-test('a non-default role reaches the participant, the routing header, the report and status --json', async () => {
-  const { relay, report, status, lead, impl, dir } = await runWith('api dev')
-  try {
-    // 1. run state: #join carries spec.role rather than dropping it.
-    const seat = relay.participants.find((p) => p.id === 'implementer')
-    assert.equal(seat?.role, 'api dev', 'the participant must carry the role its spec named')
-    assert.equal(seat?.rank, 'implementer', 'rank is authority and does not follow the role')
+test('a non-default role reaches the participant, the routing header, the report and status --json', async (t) => {
+  const { relay, report, status, lead, impl } = await runWith(t, 'api dev')
+  // 1. run state: #join carries spec.role rather than dropping it.
+  const seat = relay.participants.find((p) => p.id === 'implementer')
+  assert.equal(seat?.role, 'api dev', 'the participant must carry the role its spec named')
+  assert.equal(seat?.rank, 'implementer', 'rank is authority and does not follow the role')
 
-    // 2. the routing header the ADVISOR reads. The implementer's report is enveloped on its
-    // way back, which is the one place the advisor learns which seat answered.
-    // EVERY such header, not the first one found: the advisor is handed more than one
-    // enveloped report in a run, and matching only the first would let a later call site that
-    // forgot to pass the role pass this test.
-    const inbound = lead.received.filter((m) => m.includes('FROM THE IMPLEMENTER'))
-    assert.ok(inbound.length > 0, 'the advisor must receive an enveloped implementer report')
-    for (const m of inbound) assert.match(m, /\[FROM THE IMPLEMENTER \(implementer, role: api dev\) —/)
-    // And the implementer still reads the advisor as an advisor: the advisor's role is a
-    // built-in that matches its rank, so its header is the unchanged one.
-    const outbound = impl.received.find((m) => m.includes('FROM THE ADVISOR'))
-    assert.ok(outbound?.includes('[FROM THE ADVISOR (advisor) —'), 'the advisor header must be unchanged')
+  // 2. the routing header the ADVISOR reads. The implementer's report is enveloped on its
+  // way back, which is the one place the advisor learns which seat answered.
+  // EVERY such header, not the first one found: the advisor is handed more than one
+  // enveloped report in a run, and matching only the first would let a later call site that
+  // forgot to pass the role pass this test.
+  const inbound = lead.received.filter((m) => m.includes('FROM THE IMPLEMENTER'))
+  assert.ok(inbound.length > 0, 'the advisor must receive an enveloped implementer report')
+  for (const m of inbound) assert.match(m, /\[FROM THE IMPLEMENTER \(implementer, role: api dev\) —/)
+  // And the implementer still reads the advisor as an advisor: the advisor's role is a
+  // built-in that matches its rank, so its header is the unchanged one.
+  const outbound = impl.received.find((m) => m.includes('FROM THE ADVISOR'))
+  assert.ok(outbound?.includes('[FROM THE ADVISOR (advisor) —'), 'the advisor header must be unchanged')
 
-    // 3. the join note, the line naming the seat at startup.
-    const joined = relay.log.find((m) => m.kind === 'note' && m.text.startsWith('implementer joined'))
-    assert.equal(joined?.text, 'implementer joined as implementer in role api dev (claude)')
+  // 3. the join note, the line naming the seat at startup.
+  const joined = relay.log.find((m) => m.kind === 'note' && m.text.startsWith('implementer joined'))
+  assert.equal(joined?.text, 'implementer joined as implementer in role api dev (claude)')
 
-    // 4. the run report.
-    const reported = report.participants.find((p) => p.id === 'implementer')
-    assert.equal(reported?.role, 'api dev')
-    assert.equal(reported?.rank, 'implementer')
+  // 4. the run report.
+  const reported = report.participants.find((p) => p.id === 'implementer')
+  assert.equal(reported?.role, 'api dev')
+  assert.equal(reported?.rank, 'implementer')
 
-    // 5. status --json, read back off disk rather than from the recorder's own memory.
-    const live = status?.participants.find((p) => p.id === 'implementer')
-    assert.equal(live?.role, 'api dev')
-    assert.equal(status?.participants.find((p) => p.id === 'advisor')?.role, 'advisor')
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
-  }
+  // 5. status --json, read back off disk rather than from the recorder's own memory.
+  const live = status?.participants.find((p) => p.id === 'implementer')
+  assert.equal(live?.role, 'api dev')
+  assert.equal(status?.participants.find((p) => p.id === 'advisor')?.role, 'advisor')
 })
 
-test('the default run reports role implementer and its routing text is unchanged', async () => {
-  const { relay, report, status, lead, dir } = await runWith('implementer')
-  try {
-    assert.equal(relay.participants.find((p) => p.id === 'implementer')?.role, 'implementer')
-    assert.equal(report.participants.find((p) => p.id === 'implementer')?.role, 'implementer')
-    assert.equal(status?.participants.find((p) => p.id === 'implementer')?.role, 'implementer')
+test('the default run reports role implementer and its routing text is unchanged', async (t) => {
+  const { relay, report, status, lead } = await runWith(t, 'implementer')
+  assert.equal(relay.participants.find((p) => p.id === 'implementer')?.role, 'implementer')
+  assert.equal(report.participants.find((p) => p.id === 'implementer')?.role, 'implementer')
+  assert.equal(status?.participants.find((p) => p.id === 'implementer')?.role, 'implementer')
 
-    // Nothing the operator or the advisor reads says the word `role`. This is the half of
-    // the change that must be invisible.
-    const joined = relay.log.find((m) => m.kind === 'note' && m.text.startsWith('implementer joined'))
-    assert.equal(joined?.text, 'implementer joined as implementer (claude)')
-    for (const m of relay.log) {
-      assert.ok(!m.text.includes('role: '), `no routed text at N=1 may name a role: ${m.text}`)
-    }
-    const inbound = lead.received.find((m) => m.includes('FROM THE IMPLEMENTER'))
-    assert.ok(inbound?.includes('[FROM THE IMPLEMENTER (implementer) —'), 'the N=1 header must be the old one')
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
+  // Nothing the operator or the advisor reads says the word `role`. This is the half of
+  // the change that must be invisible.
+  const joined = relay.log.find((m) => m.kind === 'note' && m.text.startsWith('implementer joined'))
+  assert.equal(joined?.text, 'implementer joined as implementer (claude)')
+  for (const m of relay.log) {
+    assert.ok(!m.text.includes('role: '), `no routed text at N=1 may name a role: ${m.text}`)
   }
+  const inbound = lead.received.find((m) => m.includes('FROM THE IMPLEMENTER'))
+  assert.ok(inbound?.includes('[FROM THE IMPLEMENTER (implementer) —'), 'the N=1 header must be the old one')
 })

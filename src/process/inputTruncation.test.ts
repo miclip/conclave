@@ -54,10 +54,10 @@
  */
 
 import { strict as assert } from 'node:assert'
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
+import { suiteTempDir } from '../testkit/tempDir.ts'
 import { envelope } from '../relay/message.ts'
 import { chunkForPty, InputQueue } from './input.ts'
 import { PtyProcess } from './pty.ts'
@@ -188,7 +188,7 @@ else start()
 setTimeout(() => process.exit(0), 60000)
 `
 
-const dir = mkdtempSync(join(tmpdir(), 'conclave-174-'))
+const dir = suiteTempDir('conclave-174')
 const recorderPath = join(dir, 'recorder.mjs')
 const composerPath = join(dir, 'composer.mjs')
 writeFileSync(recorderPath, RECORDER)

@@ -18,13 +18,14 @@
  */
 
 import { strict as assert } from 'node:assert'
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
+import type { TestContext } from 'node:test'
 
 import { readProjectConfig, ROLE_DESCRIPTION_MAX } from '../config/project.ts'
 import { BUILTIN_ROLES, rolesWithDefined } from '../registry/roles.ts'
+import { tempDir } from '../testkit/tempDir.ts'
 import { implementerSeatPlan, roleBriefingForAdvisor, roleBriefingForSeat } from './relay.ts'
 
 const AGENTS = ['claude', 'codex', 'opencode', 'kimi']
@@ -44,16 +45,16 @@ const plan = (implementers: string, over: Record<string, unknown> = {}) =>
   })
 
 /** A project whose config is exactly `config`. Returns the root to read from. */
-function projectWith(config: unknown): string {
-  const root = mkdtempSync(join(tmpdir(), 'conclave-roles-'))
+function projectWith(t: TestContext, config: unknown): string {
+  const root = tempDir(t, 'conclave-roles')
   mkdirSync(join(root, '.conclave'), { recursive: true })
   writeFileSync(join(root, '.conclave', 'config.json'), JSON.stringify(config))
   return root
 }
 
-const refusalFrom = (config: unknown): string => {
+const refusalFrom = (t: TestContext, config: unknown): string => {
   try {
-    readProjectConfig(projectWith(config))
+    readProjectConfig(projectWith(t, config))
   } catch (e) {
     return (e as Error).message
   }
@@ -108,27 +109,27 @@ test('a run that defines no roles is refused exactly as it was before roles exis
   assert.deepEqual(p.kind === 'listed' ? p.seats : [], [{ agent: 'frontnd', args: [] }])
 })
 
-test('a role named after an agent is refused at config read, not resolved by precedence', () => {
-  const why = refusalFrom({ roles: { claude: { description: 'anything' } } })
+test('a role named after an agent is refused at config read, not resolved by precedence', (t) => {
+  const why = refusalFrom(t, { roles: { claude: { description: 'anything' } } })
   assert.match(why, /role 'claude' has the same name as an agent/)
   assert.match(why, /would mean two things/)
 })
 
-test('a role with no description is refused, because the description IS the surface', () => {
-  assert.match(refusalFrom({ roles: { frontend: {} } }), /description is required/)
-  assert.match(refusalFrom({ roles: { frontend: { description: '  ' } } }), /description is required/)
+test('a role with no description is refused, because the description IS the surface', (t) => {
+  assert.match(refusalFrom(t, { roles: { frontend: {} } }), /description is required/)
+  assert.match(refusalFrom(t, { roles: { frontend: { description: '  ' } } }), /description is required/)
 })
 
-test('a description longer than the bound is refused at read, not trimmed at use', () => {
-  const why = refusalFrom({ roles: { frontend: { description: 'x'.repeat(ROLE_DESCRIPTION_MAX + 1) } } })
+test('a description longer than the bound is refused at read, not trimmed at use', (t) => {
+  const why = refusalFrom(t, { roles: { frontend: { description: 'x'.repeat(ROLE_DESCRIPTION_MAX + 1) } } })
   assert.match(why, /the limit is 400/)
   // Accepted exactly at the bound: an off-by-one here refuses a config that is within it.
-  const ok = readProjectConfig(projectWith({ roles: { frontend: { description: 'x'.repeat(ROLE_DESCRIPTION_MAX) } } }))
+  const ok = readProjectConfig(projectWith(t, { roles: { frontend: { description: 'x'.repeat(ROLE_DESCRIPTION_MAX) } } }))
   assert.equal(ok.roles?.['frontend']?.description.length, ROLE_DESCRIPTION_MAX)
 })
 
-test("a role's default agent must be a real agent", () => {
-  assert.match(refusalFrom({ roles: { frontend: { description: 'ui', agent: 'clyde' } } }), /is not an agent/)
+test("a role's default agent must be a real agent", (t) => {
+  assert.match(refusalFrom(t, { roles: { frontend: { description: 'ui', agent: 'clyde' } } }), /is not an agent/)
 })
 
 test('defined roles merge over the built-ins, and cannot redefine one', () => {
@@ -145,10 +146,10 @@ test('defined roles merge over the built-ins, and cannot redefine one', () => {
   assert.equal(hijack['advisor']?.contextPolicy, 'thin', 'and it keeps its whole definition')
 })
 
-test('a role named after a BUILT-IN role is refused, rather than silently ignored', () => {
+test('a role named after a BUILT-IN role is refused, rather than silently ignored', (t) => {
   // Silently dropping it is the failure this replaces: the operator writes a definition, the
   // run behaves as though they had not, and nothing anywhere says why.
-  const why = refusalFrom({ roles: { advisor: { description: 'my own advisor' } } })
+  const why = refusalFrom(t, { roles: { advisor: { description: 'my own advisor' } } })
   assert.match(why, /'advisor' is a built-in role and cannot be redefined/)
   assert.match(why, /would change code that never reads this file/)
 })

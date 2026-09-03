@@ -27,11 +27,12 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
+import type { TestContext } from 'node:test'
 import { AsyncQueue } from '../adapters/asyncQueue.ts'
+import { tempDir } from '../testkit/tempDir.ts'
 import type { ChildLiveness } from '../outcomes/liveness.ts'
 import type {
   AgentEvent,
@@ -292,8 +293,8 @@ function registryWith(sessions: Record<string, TurnSession>): AgentRegistry {
   return r
 }
 
-function tempRepo(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'conclave-precondition-'))
+function tempRepo(t: TestContext): string {
+  const dir = tempDir(t, 'conclave-precondition')
   execFileSync('git', ['init', '--quiet'], { cwd: dir })
   execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: dir })
   execFileSync('git', ['config', 'user.name', 'Test'], { cwd: dir })
@@ -357,13 +358,13 @@ function preconditionNotes(relay: Relay): string[] {
   return relay.log.filter((m) => m.kind === 'note' && /mid-turn/.test(m.text)).map((m) => m.text)
 }
 
-test('a transcript still catching up after turn_end does not hold up the next send', async () => {
+test('a transcript still catching up after turn_end does not hold up the next send', async (t) => {
   // The near-miss that decided the design. A turn ENDS, the hook says so, and the transcript
   // takes another minute to agree — that is a flush race, and the settle loop already waits it
   // out. A precondition keyed on `snapshot().turns.at(-1).state` would read it as a live child
   // and refuse a send that was never in danger: a guard firing on the wrong event, while looking
   // exactly like a guard that works.
-  const repo = tempRepo()
+  const repo = tempRepo(t)
   const impl = new TurnSession('implementer', 'impl-1', [...IMPL_REPLIES])
   impl.transcriptLagMs = 60_000
   const advisor = new TurnSession('advisor', 'advisor-1', [...ADVISOR_REPLIES])
@@ -377,14 +378,13 @@ test('a transcript still catching up after turn_end does not hold up the next se
     assert.equal(impl.sentWhileBusy, 0)
   } finally {
     await relay.stop()
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
-test('a peer send waits for a live turn instead of ending the run', async () => {
+test('a peer send waits for a live turn instead of ending the run', async (t) => {
   // A turn that is genuinely open — `turn_start` with no `turn_end` — and stays that way for
   // longer than any poll interval, so a relay that got lucky on timing cannot pass.
-  const repo = tempRepo()
+  const repo = tempRepo(t)
   const impl = new TurnSession('implementer', 'impl-1', [...IMPL_REPLIES])
   // The work turn stays open; a stale end for the BRIEFING turn releases the relay's own wait,
   // which is how it comes to be holding the next instruction while the child is still working.
@@ -412,16 +412,15 @@ test('a peer send waits for a live turn instead of ending the run', async () => 
     )
   } finally {
     await relay.stop()
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
-test('a child mid-turn is refused however idle its CPU reads, and the transport is not blamed', async () => {
+test('a child mid-turn is refused however idle its CPU reads, and the transport is not blamed', async (t) => {
   // The reporter's own test, at the relay. A child blocked in `sleep` inside a Bash tool call is
   // mid-turn and samples at 3.2%; the CPU instrument says go, and the send is fatal. The same
   // path that refuses a busy child must refuse this one — which holds only because CPU is not
   // what either decision is made on.
-  const repo = tempRepo()
+  const repo = tempRepo(t)
   const impl = new TurnSession('implementer', 'impl-1', [...IMPL_REPLIES])
   impl.childPid = 4242
   // Open from the work turn on, and never closed. The briefing completes normally, so the run
@@ -451,15 +450,14 @@ test('a child mid-turn is refused however idle its CPU reads, and the transport 
     assert.match(outcome.detail ?? '', /reads not_computing, which decided nothing here/)
   } finally {
     await relay.stop()
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
-test('a high CPU reading between turns is sent to immediately', async () => {
+test('a high CPU reading between turns is sent to immediately', async (t) => {
   // The obstructive tail, at the relay. A finished child that twitched once is idle for every
   // purpose this code has, and a run that waited on it would be paying for a measurement of the
   // wrong thing. Nothing is open here, so nothing is waited for and nothing is even sampled.
-  const repo = tempRepo()
+  const repo = tempRepo(t)
   const impl = new TurnSession('implementer', 'impl-1', [...IMPL_REPLIES])
   impl.childPid = 4242
   const advisor = new TurnSession('advisor', 'advisor-1', [...ADVISOR_REPLIES])
@@ -478,15 +476,14 @@ test('a high CPU reading between turns is sent to immediately', async () => {
     assert.equal(sampled, 0, 'with no turn open there is nothing to describe, so nothing is sampled')
   } finally {
     await relay.stop()
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
-test('the busy target is cancelled and closed rather than left running', async () => {
+test('the busy target is cancelled and closed rather than left running', async (t) => {
   // The half of #117 that outlives the run. The child was never killed: in the run the issue was
   // filed from it went on to produce 764 lines across six files, in a tree whose run record said
   // the transport had failed and nothing more.
-  const repo = tempRepo()
+  const repo = tempRepo(t)
   const impl = new TurnSession('implementer', 'impl-1', [...IMPL_REPLIES])
   impl.holdFrom = 1
   impl.onSend = (_message, index) => {
@@ -509,18 +506,17 @@ test('the busy target is cancelled and closed rather than left running', async (
     assert.equal(advisor.closedAs, undefined)
   } finally {
     await relay.stop()
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
-test('the precondition is read on the target, not carried over from the previous exchange', async () => {
+test('the precondition is read on the target, not carried over from the previous exchange', async (t) => {
   // `#runLoop`'s dispatcher resolves a task to a seat and `launch` looks that participant up, so
   // the exchange before any given send routinely belongs to somebody else. Here the implementer
   // holds a turn open from the work turn on, and the sends that follow go to the ADVISOR, which
   // is idle. Anything carried across that boundary — the settle loop's `unsettled` flag, a
   // remembered "somebody was busy" — would stall the advisor and end the run on a participant
   // that was never busy.
-  const repo = tempRepo()
+  const repo = tempRepo(t)
   const impl = new TurnSession('implementer', 'impl-1', [...IMPL_REPLIES])
   impl.holdFrom = 1
   impl.onSend = (_message, index) => {
@@ -548,11 +544,10 @@ test('the precondition is read on the target, not carried over from the previous
     assert.equal((outcome.detail ?? '').startsWith('implementer '), true, 'the run ends on the seat that was busy')
   } finally {
     await relay.stop()
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
-test('a turn the watchdog timed out is still a live turn, so the next dispatch never sends', async () => {
+test('a turn the watchdog timed out is still a live turn, so the next dispatch never sends', async (t) => {
   // The relay half of the rule the adapters enforce internally. A watchdog verdict settles this
   // run's opinion of a turn; it observes nothing about the child, and the child it is most often
   // minted for is one that went quiet mid-work. `activeTurn` used to close the turn on it, so
@@ -566,7 +561,7 @@ test('a turn the watchdog timed out is still a live turn, so the next dispatch n
   // precondition, cancel the child, close the session, end `peer_busy`. Not `transport_failed`:
   // nothing is wrong with the transport, and that ending is what sent four operators to look at
   // their CLI and their provider for a child that was simply still working.
-  const repo = tempRepo()
+  const repo = tempRepo(t)
   const impl = new TurnSession('implementer', 'impl-1', [...IMPL_REPLIES])
   impl.childPid = 4242
   // The work turn opens and never ends. Its watchdog fires 50ms in -- the whole event stream a
@@ -613,6 +608,5 @@ test('a turn the watchdog timed out is still a live turn, so the next dispatch n
     )
   } finally {
     await relay.stop()
-    rmSync(repo, { recursive: true, force: true })
   }
 })

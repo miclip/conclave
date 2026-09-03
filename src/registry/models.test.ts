@@ -23,11 +23,12 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { PassThrough, Writable } from 'node:stream'
 import test from 'node:test'
+import type { TestContext } from 'node:test'
+import { tempDir } from '../testkit/tempDir.ts'
 import { main } from '../../bin/conclave.ts'
 import { FakeRotationSession } from '../rotation/fakeSession.ts'
 import { CLAUDE_AGENT, CODEX_AGENT, KIMI_AGENT, OPENCODE_AGENT } from './builtin.ts'
@@ -249,40 +250,36 @@ test('a declaration-free agent is undeclared rather than unsupported, and an arg
   assert.equal(asked, 0, 'the default run must not pay a subprocess for a question it did not ask')
 })
 
-test('one subprocess per command, however many seats name that agent', async () => {
+test('one subprocess per command, however many seats name that agent', async (t) => {
   forgetModelEnumerations()
   // The subprocess writes a file each time it runs, so the count is observed rather than
   // inferred from a stub that was never the thing running.
-  const dir = mkdtempSync(join(tmpdir(), 'conclave-models-'))
+  const dir = tempDir(t, 'conclave-models')
   const tally = join(dir, 'runs')
-  try {
-    const agent = agentWith('counted', {
-      grade: 'enumerated',
-      ask: {
-        command: process.execPath,
-        args: [
-          '-e',
-          `require('fs').appendFileSync(${JSON.stringify(tally)}, 'x'); process.stdout.write(${JSON.stringify(OPENCODE_LIST)})`,
-        ],
-        parse: opencodeModels,
-      },
-      noun: 'model',
-      nounPlural: 'models',
-    })
-    const seats = ['implementer', 'implementer-2', 'implementer-3'].map((participant) => ({
-      participant,
-      agent,
-      model: 'opencode/gpt-5.2',
-    }))
-    // Concurrently, which is the case a result cache would get wrong and a promise cache gets
-    // right: three seats asking before the first answer arrives.
-    await Promise.all(seats.map((s) => checkModelSelection(s)))
-    assert.equal(readCount(tally), 1, 'the enumeration is asked once and shared')
-    await refuseUnknownModels(seats)
-    assert.equal(readCount(tally), 1, 'and it stays asked once for the life of the process')
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
-  }
+  const agent = agentWith('counted', {
+    grade: 'enumerated',
+    ask: {
+      command: process.execPath,
+      args: [
+        '-e',
+        `require('fs').appendFileSync(${JSON.stringify(tally)}, 'x'); process.stdout.write(${JSON.stringify(OPENCODE_LIST)})`,
+      ],
+      parse: opencodeModels,
+    },
+    noun: 'model',
+    nounPlural: 'models',
+  })
+  const seats = ['implementer', 'implementer-2', 'implementer-3'].map((participant) => ({
+    participant,
+    agent,
+    model: 'opencode/gpt-5.2',
+  }))
+  // Concurrently, which is the case a result cache would get wrong and a promise cache gets
+  // right: three seats asking before the first answer arrives.
+  await Promise.all(seats.map((s) => checkModelSelection(s)))
+  assert.equal(readCount(tally), 1, 'the enumeration is asked once and shared')
+  await refuseUnknownModels(seats)
+  assert.equal(readCount(tally), 1, 'and it stays asked once for the life of the process')
 })
 
 /** How many times the enumerating subprocess actually ran. One byte appended per run. */
@@ -379,8 +376,8 @@ test('the built-in agents declare the grade their CLI can actually support', () 
 /* ------------------------------------------------------------------ front-ends ---------- */
 
 /** A repository for a front-end to run in. Both refuse to start outside one. */
-function tempRepo(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'conclave-modelcli-'))
+function tempRepo(t: TestContext): string {
+  const dir = tempDir(t, 'conclave-modelcli')
   execFileSync('git', ['init', '--quiet'], { cwd: dir })
   execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: dir })
   execFileSync('git', ['config', 'user.name', 'Test'], { cwd: dir })
@@ -420,8 +417,12 @@ function registryOf(created: string[]): AgentRegistry {
   return registry
 }
 
-async function runFrontEnd(front: 'relay' | 'session', flags: string[]): Promise<{ created: string[]; error: Error | undefined }> {
-  const repo = tempRepo()
+async function runFrontEnd(
+  t: TestContext,
+  front: 'relay' | 'session',
+  flags: string[],
+): Promise<{ created: string[]; error: Error | undefined }> {
+  const repo = tempRepo(t)
   const before = process.cwd()
   const created: string[] = []
   const [log, error] = [console.log, console.error]
@@ -448,7 +449,6 @@ async function runFrontEnd(front: 'relay' | 'session', flags: string[]): Promise
     console.log = log
     console.error = error
     process.chdir(before)
-    rmSync(repo, { recursive: true, force: true })
   }
 }
 
@@ -484,12 +484,12 @@ test('createParticipant refuses too, so a caller that never goes through Relay.s
   assert.equal(created, 1)
 })
 
-test('a seat whose model could not be verified says so in the run log, and a verified one does not', async () => {
+test('a seat whose model could not be verified says so in the run log, and a verified one does not', async (t) => {
   forgetModelEnumerations()
   // The issue asks for this by name: "an agent whose models cannot be enumerated says so rather
   // than guessing". A negative result nobody can see is a check an operator will believe covered
   // them, so it is recorded where the run is recorded rather than only returned to the caller.
-  const repo = tempRepo()
+  const repo = tempRepo(t)
   const registry = new AgentRegistry()
   registry.register({
     ...agentWith('fake-lead', enumerated(OPENCODE_LIST, 'note-lead')),
@@ -508,40 +508,36 @@ test('a seat whose model could not be verified says so in the run log, and a ver
       return new FakeRotationSession('fake-ungradeable', 'seat-session', [])
     },
   })
+  const relay = await Relay.start({
+    registry,
+    cwd: repo,
+    lead: { id: 'advisor', agent: 'fake-lead', role: 'advisor', args: ['-m', 'opencode/gpt-5.2'] },
+    implementer: { id: 'implementer', agent: 'fake-ungradeable', role: 'implementer', args: ['-m', 'whatever-1'] },
+    maxAdvisorTurns: 1,
+  })
   try {
-    const relay = await Relay.start({
-      registry,
-      cwd: repo,
-      lead: { id: 'advisor', agent: 'fake-lead', role: 'advisor', args: ['-m', 'opencode/gpt-5.2'] },
-      implementer: { id: 'implementer', agent: 'fake-ungradeable', role: 'implementer', args: ['-m', 'whatever-1'] },
-      maxAdvisorTurns: 1,
-    })
-    try {
-      const notes = relay.log.filter((m) => m.kind === 'note').map((m) => m.text)
-      const said = notes.find((t) => t.includes('NOT verified'))
-      assert.ok(said, `an ungradeable seat must say so: ${JSON.stringify(notes)}`)
-      assert.match(said!, /^implementer model 'whatever-1'/)
-      assert.match(said!, /needs a terminal/, 'and say why, rather than just that it did not happen')
-      assert.equal(
-        notes.filter((t) => t.includes('NOT verified')).length,
-        1,
-        'the advisor named a model its CLI does list, so it is silent -- a note per seat is a note nobody reads',
-      )
-    } finally {
-      await relay.stop()
-    }
+    const notes = relay.log.filter((m) => m.kind === 'note').map((m) => m.text)
+    const said = notes.find((n) => n.includes('NOT verified'))
+    assert.ok(said, `an ungradeable seat must say so: ${JSON.stringify(notes)}`)
+    assert.match(said!, /^implementer model 'whatever-1'/)
+    assert.match(said!, /needs a terminal/, 'and say why, rather than just that it did not happen')
+    assert.equal(
+      notes.filter((n) => n.includes('NOT verified')).length,
+      1,
+      'the advisor named a model its CLI does list, so it is silent -- a note per seat is a note nobody reads',
+    )
   } finally {
-    rmSync(repo, { recursive: true, force: true })
+    await relay.stop()
   }
 })
 
 for (const front of ['relay', 'session'] as const) {
-  test(`${front} refuses a per-seat model the child does not have, before any child is constructed`, async () => {
+  test(`${front} refuses a per-seat model the child does not have, before any child is constructed`, async (t) => {
     forgetModelEnumerations()
     // The invocation from the issue, in this suite's agent ids: two seats, each with its own
     // model, one of them wrong. The wrong one is the SECOND seat, so a check that ran inside
     // participant construction would already have built the first child by the time it fired.
-    const { created, error } = await runFrontEnd(front, [
+    const { created, error } = await runFrontEnd(t, front, [
       '--advisor',
       'fake-lead',
       '--implementers',
@@ -554,11 +550,11 @@ for (const front of ['relay', 'session'] as const) {
     assert.deepEqual(created, [], 'no child is constructed for any seat, including the valid one')
   })
 
-  test(`${front} starts a run whose seats all name models their children have`, async () => {
+  test(`${front} starts a run whose seats all name models their children have`, async (t) => {
     forgetModelEnumerations()
     // The control case, and the reason the test above proves anything: the same wiring with two
     // real model names launches both seats. Without this, "refuses everything" would pass.
-    const { created, error } = await runFrontEnd(front, [
+    const { created, error } = await runFrontEnd(t, front, [
       '--advisor',
       'fake-lead',
       '--implementers',

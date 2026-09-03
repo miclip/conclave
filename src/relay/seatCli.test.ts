@@ -23,16 +23,17 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { PassThrough, Writable } from 'node:stream'
 import test from 'node:test'
+import type { TestContext } from 'node:test'
 import { main } from '../../bin/conclave.ts'
 import { AgentRegistry } from '../registry/registry.ts'
 import type { CreateParticipantContext, ResolvedParticipant } from '../registry/types.ts'
 import { NO_DEADLINE_CLOCKS } from '../registry/types.ts'
 import { FakeRotationSession } from '../rotation/fakeSession.ts'
+import { tempDir } from '../testkit/tempDir.ts'
 
 /** What the front-end asked the registry to build, and where. */
 interface CreateRecord {
@@ -87,8 +88,8 @@ function registryOf(
 }
 
 /** A repository for a front-end to run in. Both refuse to start outside one. */
-function tempRepo(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'conclave-seatcli-'))
+function tempRepo(t: TestContext): string {
+  const dir = tempDir(t, 'conclave-seatcli')
   execFileSync('git', ['init', '--quiet'], { cwd: dir })
   execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: dir })
   execFileSync('git', ['config', 'user.name', 'Test'], { cwd: dir })
@@ -110,16 +111,16 @@ function sink(): NodeJS.WritableStream {
 /**
  * One front-end invocation, in a fresh repository, with its prose swallowed.
  *
- * The cwd comes back resolved rather than assumed: on macOS the temporary directory is reached
- * through a symlink, so `process.cwd()` after the chdir is the real path and not the string
- * `mkdtemp` returned -- and it is also the sharper comparison, being the directory an
- * operator's shell would have handed the command.
+ * The cwd comes back resolved rather than assumed: `tempRepo` already hands back a canonical
+ * path, but `process.cwd()` after the chdir is still the sharper comparison, being the
+ * directory an operator's shell would actually have handed the command.
  */
 async function runCli(
+  t: TestContext,
   argv: string[],
   queues: Record<string, FakeRotationSession[]>,
 ): Promise<{ code: number; creates: CreateRecord[]; cwd: string }> {
-  const repo = tempRepo()
+  const repo = tempRepo(t)
   const before = process.cwd()
   const creates: CreateRecord[] = []
   const registry = registryOf(queues, creates)
@@ -142,7 +143,6 @@ async function runCli(
     console.log = log
     console.error = error
     process.chdir(before)
-    rmSync(repo, { recursive: true, force: true })
   }
 }
 
@@ -157,8 +157,9 @@ const FRONT_ENDS = [
 ] as const
 
 for (const front of FRONT_ENDS) {
-  test(`${front.name} --implementers builds one seat per named agent, each in its own tree`, async () => {
+  test(`${front.name} --implementers builds one seat per named agent, each in its own tree`, async (t) => {
     const { code, creates, cwd } = await runCli(
+      t,
       front.argv(['--advisor', 'fake-lead', '--implementers', 'fake-a,fake-b', '--rounds', '3']),
       {
         'fake-lead': [new FakeRotationSession('lead-1', 'fake-lead', advisorReplies)],
@@ -192,11 +193,12 @@ for (const front of FRONT_ENDS) {
     )
   })
 
-  test(`${front.name} --implementers with one entry is the default run, and takes no worktree`, async () => {
+  test(`${front.name} --implementers with one entry is the default run, and takes no worktree`, async (t) => {
     // D1's identity case reached through the NEW flag. The plural option is passed to
     // `Relay.start` here -- the operator asked for it plurally -- so this is the claim that a
     // one-element list is genuinely the same run and not an approximation of it.
     const { code, creates, cwd } = await runCli(
+      t,
       front.argv(['--advisor', 'fake-lead', '--implementers', 'fake-a', '--rounds', '3']),
       {
         'fake-lead': [new FakeRotationSession('lead-1', 'fake-lead', advisorReplies)],
@@ -214,7 +216,7 @@ for (const front of FRONT_ENDS) {
     )
   })
 
-  test(`${front.name} --implementers with the same agent twice builds two children`, async () => {
+  test(`${front.name} --implementers with the same agent twice builds two children`, async (t) => {
     // The realistic invocation -- `--implementers claude,claude` -- and the one where a seat
     // table keyed by AGENT rather than by seat would collapse to a single participant. The
     // queue in `registryOf` is what proves two children were asked for: a second `create` for
@@ -222,6 +224,7 @@ for (const front of FRONT_ENDS) {
     const first = new FakeRotationSession('same-1', 'fake-a', seatReplies)
     const second = new FakeRotationSession('same-2', 'fake-a', seatReplies)
     const { code, creates } = await runCli(
+      t,
       front.argv(['--advisor', 'fake-lead', '--implementers', 'fake-a,fake-a', '--rounds', '3']),
       {
         'fake-lead': [new FakeRotationSession('lead-1', 'fake-lead', advisorReplies)],
@@ -240,10 +243,11 @@ for (const front of FRONT_ENDS) {
     assert.ok(second.received.length > 0, 'the second seat must have been sent its briefing')
   })
 
-  test(`${front.name} refuses --implementer and --implementers naming different lead agents`, async () => {
+  test(`${front.name} refuses --implementer and --implementers naming different lead agents`, async (t) => {
     // There is no third seat to put the loser in: the first entry of the list IS the seat
     // `--implementer` names. Picking one silently would ignore a flag the operator typed.
     const { code, creates } = await runCli(
+      t,
       front.argv([
         '--advisor',
         'fake-lead',
@@ -264,10 +268,11 @@ for (const front of FRONT_ENDS) {
     assert.deepEqual(creates, [], 'and refused before anything was launched')
   })
 
-  test(`${front.name} refuses a seat list with an empty entry`, async () => {
+  test(`${front.name} refuses a seat list with an empty entry`, async (t) => {
     // `--implementers "fake-a,"` is a shell that ate an argument. Dropping the empty entry
     // silently starts a run with fewer seats than the operator typed.
     const { code, creates } = await runCli(
+      t,
       front.argv(['--advisor', 'fake-lead', '--implementers', 'fake-a,', '--rounds', '3']),
       {
         'fake-lead': [new FakeRotationSession('lead-1', 'fake-lead', advisorReplies)],
@@ -278,11 +283,12 @@ for (const front of FRONT_ENDS) {
     assert.deepEqual(creates, [], 'and refused before anything was launched')
   })
 
-  test(`${front.name} without --implementers names one seat and passes no list`, async () => {
+  test(`${front.name} without --implementers names one seat and passes no list`, async (t) => {
     // The control. `--implementer` alone is what it has always been, and this file would be
     // worth little without it: every assertion above is about a flag that must be inert when
     // nobody types it.
     const { code, creates, cwd } = await runCli(
+      t,
       front.argv(['--advisor', 'fake-lead', '--implementer', 'fake-a', '--rounds', '3']),
       {
         'fake-lead': [new FakeRotationSession('lead-1', 'fake-lead', advisorReplies)],

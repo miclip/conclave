@@ -29,13 +29,14 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
+import type { TestContext } from 'node:test'
 import { AgentRegistry } from '../registry/registry.ts'
 import { NO_DEADLINE_CLOCKS } from '../registry/types.ts'
 import { FakeRotationSession } from '../rotation/fakeSession.ts'
+import { tempDir } from '../testkit/tempDir.ts'
 import { Relay } from './relay.ts'
 import type { RelayMessage } from './message.ts'
 
@@ -74,8 +75,8 @@ function registryOf(sessions: Record<string, FakeRotationSession[]>): AgentRegis
 }
 
 /** A repository to run in: two seats mean real worktrees, and those need a real checkout. */
-function tempRepo(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'conclave-coordination-'))
+function tempRepo(t: TestContext): string {
+  const dir = tempDir(t, 'conclave-coordination')
   execFileSync('git', ['init', '--quiet'], { cwd: dir })
   execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: dir })
   execFileSync('git', ['config', 'user.name', 'Test'], { cwd: dir })
@@ -124,8 +125,8 @@ async function twoSeatRun(
   return { relay, alpha, beta }
 }
 
-test('one reply naming two seats tells EACH of them what the other holds, verbatim', async () => {
-  const repo = tempRepo()
+test('one reply naming two seats tells EACH of them what the other holds, verbatim', async (t) => {
+  const repo = tempRepo(t)
   const { relay, alpha } = await twoSeatRun(repo, [
     '@seat seat-alpha: Extract withdrawnSeatAtPause(pause) and key the bypass on the pause record.\n' +
       '@seat seat-beta: Add the compaction guard inline in the console, keyed on the seat own events.',
@@ -181,12 +182,11 @@ test('one reply naming two seats tells EACH of them what the other holds, verbat
     assert.ok(dispatched.indexOf('[ORCHESTRATOR') < dispatched.indexOf('[FROM THE ADVISOR'))
   } finally {
     await relay.stop()
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
-test('a single-seat run is told nothing, and its log gains no record', async () => {
-  const repo = tempRepo()
+test('a single-seat run is told nothing, and its log gains no record', async (t) => {
+  const repo = tempRepo(t)
   const lead = new FakeRotationSession('lead-1', 'lead', ['Write the answer.', 'DONE'])
   const impl = new FakeRotationSession('impl-1', 'alpha', ['ack', 'Wrote it.'])
   const relay = await Relay.start({
@@ -211,12 +211,11 @@ test('a single-seat run is told nothing, and its log gains no record', async () 
     )
   } finally {
     await relay.stop()
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
-test('a reviewer is not a seat that can collide, so a run with one implementer stays silent', async () => {
-  const repo = tempRepo()
+test('a reviewer is not a seat that can collide, so a run with one implementer stays silent', async (t) => {
+  const repo = tempRepo(t)
   const lead = new FakeRotationSession('lead-1', 'lead', ['Write the answer.', 'DONE'])
   const impl = new FakeRotationSession('impl-1', 'alpha', ['ack', 'Wrote it.'])
   const reviewer = new FakeRotationSession('rev-1', 'alpha', ['ack', 'ACCEPT', 'ACCEPT'])
@@ -241,12 +240,11 @@ test('a reviewer is not a seat that can collide, so a run with one implementer s
     assert.equal(noticesTo(relay, 'reviewer').length, 0)
   } finally {
     await relay.stop()
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
-test('the reviewer in a MULTI-seat run is dispatched through the same path and still told nothing', async () => {
-  const repo = tempRepo()
+test('the reviewer in a MULTI-seat run is dispatched through the same path and still told nothing', async (t) => {
+  const repo = tempRepo(t)
   const lead = new FakeRotationSession('lead-1', 'lead', ['@seat seat-alpha: Write the answer.', 'DONE', 'DONE', 'DONE'])
   const alpha = new FakeRotationSession('alpha-1', 'alpha', [...SEAT_REPLIES])
   const beta = new FakeRotationSession('beta-1', 'beta', [...SEAT_REPLIES])
@@ -279,12 +277,11 @@ test('the reviewer in a MULTI-seat run is dispatched through the same path and s
     assert.equal(noticesTo(relay, 'seat-alpha').length, 1)
   } finally {
     await relay.stop()
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
-test('the same seat, dispatched twice, is told what the other seat holds AT THAT MOMENT', async () => {
-  const repo = tempRepo()
+test('the same seat, dispatched twice, is told what the other seat holds AT THAT MOMENT', async (t) => {
+  const repo = tempRepo(t)
   // Beta is slow on its own turn, so it is still holding BETA ONE when alpha is dispatched the
   // second time -- otherwise "what beta holds" would be the same answer both times by accident.
   const { relay } = await twoSeatRun(
@@ -321,6 +318,5 @@ test('the same seat, dispatched twice, is told what the other seat holds AT THAT
     assert.match(toBeta[0]!.text, /=== seat-alpha ===\nALPHA TWO\./)
   } finally {
     await relay.stop()
-    rmSync(repo, { recursive: true, force: true })
   }
 })

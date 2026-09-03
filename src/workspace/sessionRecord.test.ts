@@ -5,10 +5,10 @@
  */
 
 import { strict as assert } from 'node:assert'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
+import { tempDir } from '../testkit/tempDir.ts'
 import type { Confidence, Provenance } from '../contract/outcome.ts'
 import type { RunCeilings } from '../relay/guardrails.ts'
 import { RelayEventStream } from '../relay/observe.ts'
@@ -33,10 +33,6 @@ import {
   type SessionStatus,
 } from './sessionRecord.ts'
 import { formatSession, formatSessionJson } from './sessionView.ts'
-
-function dir(): string {
-  return mkdtempSync(join(tmpdir(), 'conclave-record-'))
-}
 
 /** A turn as a scripted snapshot reports it. Graded, because the record's whole claim is. */
 type FakeTurn = {
@@ -239,8 +235,8 @@ async function whileWatchingStderr(fn: () => void | Promise<void>): Promise<stri
   return held.said
 }
 
-test('a status is written at construction, before anything has happened', () => {
-  const root = dir()
+test('a status is written at construction, before anything has happened', (t) => {
+  const root = tempDir(t, 'conclave-record')
   const rec = new SessionRecorder(root, {
     id: 'x',
     pid: process.pid,
@@ -263,8 +259,8 @@ test('a status is written at construction, before anything has happened', () => 
   assert.equal(read?.status.schema, 1)
 })
 
-test('liveness is reconciled against the pid, never read from the file', () => {
-  const root = dir()
+test('liveness is reconciled against the pid, never read from the file', (t) => {
+  const root = tempDir(t, 'conclave-record')
   new SessionRecorder(root, {
     id: 'mine',
     pid: process.pid,
@@ -293,8 +289,8 @@ test('liveness is reconciled against the pid, never read from the file', () => {
   assert.equal(dead?.abandoned, true, 'claimed to be going, nobody home')
 })
 
-test('a session is resolved by prefix, and an ambiguous one is refused', () => {
-  const root = dir()
+test('a session is resolved by prefix, and an ambiguous one is refused', (t) => {
+  const root = tempDir(t, 'conclave-record')
   const mk = (id: string, startedAt: number) =>
     new SessionRecorder(root, {
       id,
@@ -330,8 +326,8 @@ test('a session is resolved by prefix, and an ambiguous one is refused', () => {
   assert.ok('error' in missing && /no session "nope"/.test(missing.error))
 })
 
-test('the event stream is written to disk, terminal event included', async () => {
-  const root = dir()
+test('the event stream is written to disk, terminal event included', async (t) => {
+  const root = tempDir(t, 'conclave-record')
   const relay = fakeRelay()
   const recording = recordSession(relay, {
     repoRoot: root,
@@ -354,8 +350,8 @@ test('the event stream is written to disk, terminal event included', async () =>
   assert.deepEqual(types, ['activity', 'run_end'])
 })
 
-test('an outcome survives a later state change; a pause does not', async () => {
-  const root = dir()
+test('an outcome survives a later state change; a pause does not', async (t) => {
+  const root = tempDir(t, 'conclave-record')
   const relay = fakeRelay()
   const recording = recordSession(relay, {
     repoRoot: root,
@@ -394,8 +390,8 @@ test('an outcome survives a later state change; a pause does not', async () => {
   await recording.close()
 })
 
-test('a seat stopped at a permission prompt says so in the status file', async () => {
-  const root = dir()
+test('a seat stopped at a permission prompt says so in the status file', async (t) => {
+  const root = tempDir(t, 'conclave-record')
   const relay = fakeRelay()
   const recording = recordSession(relay, {
     repoRoot: root,
@@ -440,8 +436,8 @@ test('a seat stopped at a permission prompt says so in the status file', async (
  * pause gate offers `rotate` only for seats in that set -- so a rank-based projection would
  * report this seat as armed under a policy that can never be applied to it.
  */
-test('each implementer seat reports whether rotation is armed, and tells an unarmed run from an unrotatable seat', async () => {
-  const root = dir()
+test('each implementer seat reports whether rotation is armed, and tells an unarmed run from an unrotatable seat', async (t) => {
+  const root = tempDir(t, 'conclave-record')
   // One run carries two of the three states, which is the point of resolving per seat: the run
   // is armed and one seat of it is not, and no run-wide answer is true of both.
   const armedRun = fakeRelay({
@@ -554,8 +550,8 @@ test('each implementer seat reports whether rotation is armed, and tells an unar
  * `snapshot()`, and until now it left the process only in the run report — which the console
  * front-end never writes.
  */
-test('a turn reaches the status file with its grade, not just its state', async () => {
-  const root = dir()
+test('a turn reaches the status file with its grade, not just its state', async (t) => {
+  const root = tempDir(t, 'conclave-record')
   const relay = fakeRelay()
   const recording = recordSession(relay, {
     repoRoot: root,
@@ -587,8 +583,8 @@ test('a turn reaches the status file with its grade, not just its state', async 
   await recording.close()
 })
 
-test('a turn ending refreshes the record without waiting for a lifecycle change', async () => {
-  const root = dir()
+test('a turn ending refreshes the record without waiting for a lifecycle change', async (t) => {
+  const root = tempDir(t, 'conclave-record')
   const relay = fakeRelay()
   const recording = recordSession(relay, {
     repoRoot: root,
@@ -625,8 +621,8 @@ test('a turn ending refreshes the record without waiting for a lifecycle change'
  * overwrite newer turns with older ones — and a reader polling the file would watch a run
  * lose a turn it had already reported.
  */
-test('a slow snapshot cannot overwrite the turns a newer one already wrote', async () => {
-  const root = dir()
+test('a slow snapshot cannot overwrite the turns a newer one already wrote', async (t) => {
+  const root = tempDir(t, 'conclave-record')
   const relay = fakeRelay()
   const recording = recordSession(relay, {
     repoRoot: root,
@@ -661,8 +657,8 @@ test('a slow snapshot cannot overwrite the turns a newer one already wrote', asy
  * before they close the recorder. A recorder that detached without re-reading would leave
  * the final verdicts out of the only file that outlives the process.
  */
-test('close() takes a last snapshot, so graded turns survive the ended state', async () => {
-  const root = dir()
+test('close() takes a last snapshot, so graded turns survive the ended state', async (t) => {
+  const root = tempDir(t, 'conclave-record')
   const relay = fakeRelay()
   const recording = recordSession(relay, {
     repoRoot: root,
@@ -691,8 +687,8 @@ test('close() takes a last snapshot, so graded turns survive the ended state', a
   assert.equal(status?.participants[1]?.turns[1]?.confidence, 'proven')
 })
 
-test('a snapshot that fails keeps the turns already recorded, rather than blanking them', async () => {
-  const root = dir()
+test('a snapshot that fails keeps the turns already recorded, rather than blanking them', async (t) => {
+  const root = tempDir(t, 'conclave-record')
   const relay = fakeRelay()
   const recording = recordSession(relay, {
     repoRoot: root,
@@ -760,8 +756,8 @@ function stale(
  * looking for precisely because nobody was home; age alone would delete a session that is
  * running right now and has simply not changed state in a while.
  */
-test('pruning removes only records that ended, died, and are past the cutoff', () => {
-  const root = dir()
+test('pruning removes only records that ended, died, and are past the cutoff', (t) => {
+  const root = tempDir(t, 'conclave-record')
   const cutoff = 1_000_000
   const old = stale(root, 'ended-old', { state: 'ended', pid: DEAD_PID, updatedAt: cutoff - 1 })
   const recent = stale(root, 'ended-recent', { state: 'ended', pid: DEAD_PID, updatedAt: cutoff })
@@ -788,8 +784,8 @@ test('pruning removes only records that ended, died, and are past the cutoff', (
   assert.deepEqual(listSessions(root).length, 4)
 })
 
-test('the candidates can be read without deleting anything, and match what a prune then removes', () => {
-  const root = dir()
+test('the candidates can be read without deleting anything, and match what a prune then removes', (t) => {
+  const root = tempDir(t, 'conclave-record')
   const cutoff = 1_000_000
   stale(root, 'old-a', { state: 'ended', pid: DEAD_PID, updatedAt: 10 })
   stale(root, 'old-b', { state: 'ended', pid: DEAD_PID, updatedAt: 20 })
@@ -809,8 +805,8 @@ test('the candidates can be read without deleting anything, and match what a pru
   assert.deepEqual(listSessions(root).map((s) => s.status.id), ['keep'])
 })
 
-test('a directory with no readable status is left alone, however old the rest are', () => {
-  const root = dir()
+test('a directory with no readable status is left alone, however old the rest are', (t) => {
+  const root = tempDir(t, 'conclave-record')
   stale(root, 'ended-old', { state: 'ended', pid: DEAD_PID, updatedAt: 1 })
   // Started and never described itself, which the CLI already treats as its own condition.
   // `readSession` cannot tell that from a run still launching, and a prune that guessed
@@ -827,8 +823,8 @@ test('a directory with no readable status is left alone, however old the rest ar
   assert.equal(existsSync(corrupt), true)
 })
 
-test('pruning a project with no sessions directory is not an error', () => {
-  const result = pruneSessions(dir(), Date.now())
+test('pruning a project with no sessions directory is not an error', (t) => {
+  const result = pruneSessions(tempDir(t, 'conclave-record'), Date.now())
   assert.deepEqual(result, { candidates: [], removed: [], skipped: [], failed: [] })
 })
 
@@ -840,8 +836,8 @@ test('pruning a project with no sessions directory is not an error', () => {
  * the past in the future tense -- and a process that died partway would have shown the
  * operator nothing at all about the records that did go.
  */
-test('every candidate is announced while all of them are still on disk', () => {
-  const root = dir()
+test('every candidate is announced while all of them are still on disk', (t) => {
+  const root = tempDir(t, 'conclave-record')
   for (const id of ['a', 'b', 'c']) {
     stale(root, id, { state: 'ended', pid: DEAD_PID, updatedAt: 1 })
   }
@@ -870,8 +866,8 @@ test('every candidate is announced while all of them are still on disk', () => {
  * inside it. The directory about to be deleted is that process's only durable account of
  * itself.
  */
-test('a session that is alive again by the time its turn comes is spared', () => {
-  const root = dir()
+test('a session that is alive again by the time its turn comes is spared', (t) => {
+  const root = tempDir(t, 'conclave-record')
   stale(root, 'goes', { state: 'ended', pid: DEAD_PID, updatedAt: 1 })
   stale(root, 'revived', { state: 'ended', pid: DEAD_PID, updatedAt: 1 })
 
@@ -893,8 +889,8 @@ test('a session that is alive again by the time its turn comes is spared', () =>
   assert.equal(existsSync(sessionDir(root, 'goes')), false)
 })
 
-test('a record that vanishes between the scan and its removal is reported, not invented', () => {
-  const root = dir()
+test('a record that vanishes between the scan and its removal is reported, not invented', (t) => {
+  const root = tempDir(t, 'conclave-record')
   stale(root, 'vanishes', { state: 'ended', pid: DEAD_PID, updatedAt: 1 })
   const result = pruneSessions(root, 2, {
     announce: () => rmSync(sessionDir(root, 'vanishes'), { recursive: true, force: true }),
@@ -909,8 +905,8 @@ test('a record that vanishes between the scan and its removal is reported, not i
  * the record on disk. They agree in everything conclave writes, and a function whose job is
  * recursive deletion must not be the place that assumes it.
  */
-test('a record whose file claims a different id still deletes its own directory', () => {
-  const root = dir()
+test('a record whose file claims a different id still deletes its own directory', (t) => {
+  const root = tempDir(t, 'conclave-record')
   const held = sessionDir(root, 'on-disk')
   stale(root, 'on-disk', { state: 'ended', pid: DEAD_PID, updatedAt: 1 })
   const p = join(held, 'status.json')
@@ -940,8 +936,8 @@ test('an id is chronological and survives two sessions in the same second', () =
  * document carries every limit including the unset ones, and a stand-in that cannot answer
  * gets no block rather than a block claiming the run is unbounded.
  */
-test('the status record carries every ceiling, with null for the ones nobody set', async () => {
-  const root = dir()
+test('the status record carries every ceiling, with null for the ones nobody set', async (t) => {
+  const root = tempDir(t, 'conclave-record')
   const relay = fakeRelay({
     ceilings: { advisorTurns: 8, maxTurns: 40, maxDurationMs: null, maxQueueDepth: null, maxConcurrentSeats: null },
   })
@@ -1017,7 +1013,7 @@ test('a status write that failed once does not stop the writer for good, and the
   const stderr = captureStderr()
   t.after(stderr.restore)
 
-  const root = dir()
+  const root = tempDir(t, 'conclave-record')
   const relay = fakeRelay()
   const recording = recordSession(relay, {
     repoRoot: root,
@@ -1130,8 +1126,8 @@ test('a status write that failed once does not stop the writer for good, and the
  * first -- and the pairing must hold, because a recovery line for an outage nobody was told
  * about announces the end of something the reader never knew had started.
  */
-test('a volume that flickers gets one warning and one recovery, not one per failed write (#126)', async () => {
-  const root = dir()
+test('a volume that flickers gets one warning and one recovery, not one per failed write (#126)', async (t) => {
+  const root = tempDir(t, 'conclave-record')
   const rec = new SessionRecorder(root, {
     id: 'flap',
     pid: process.pid,
@@ -1194,7 +1190,7 @@ test('the warning budget is a window, so a failure that outlasts it is announced
   // so that 0 can be a real instant, and starting here is what would catch a regression to a
   // falsy sentinel.
   t.mock.timers.enable({ apis: ['Date'], now: 1_700_000_000_000 })
-  const root = dir()
+  const root = tempDir(t, 'conclave-record')
   const rec = new SessionRecorder(root, {
     id: 'window',
     pid: process.pid,
@@ -1283,8 +1279,8 @@ test('the warning budget is a window, so a failure that outlasts it is announced
  * does. Today the second half of that is not true: one failed append and nothing is ever
  * written to `events.ndjson` again.
  */
-test('an events append that failed once does not stop the stream for good (#126)', async () => {
-  const root = dir()
+test('an events append that failed once does not stop the stream for good (#126)', async (t) => {
+  const root = tempDir(t, 'conclave-record')
   const relay = fakeRelay()
   const recording = recordSession(relay, {
     repoRoot: root,
@@ -1345,8 +1341,8 @@ test('an events append that failed once does not stop the stream for good (#126)
  * something to warn about and is APPENDED when it does -- an always-present `stale: false`
  * would change what every existing consumer reads, and an inserted key would move the rest.
  */
-test('status --json says a live record has stopped moving, and leaves a fresh one untouched (#126)', async () => {
-  const root = dir()
+test('status --json says a live record has stopped moving, and leaves a fresh one untouched (#126)', async (t) => {
+  const root = tempDir(t, 'conclave-record')
   const relay = fakeRelay()
   const recording = recordSession(relay, {
     repoRoot: root,
@@ -1442,8 +1438,8 @@ test('status --json says a live record has stopped moving, and leaves a fresh on
  * `abandoned` already covers, would be trained out of a reader within a day -- and the reader
  * being trained is an agent operator polling on a loop.
  */
-test('an ended run and an abandoned one are old on purpose, and get no staleness warning (#126)', () => {
-  const root = dir()
+test('an ended run and an abandoned one are old on purpose, and get no staleness warning (#126)', (t) => {
+  const root = tempDir(t, 'conclave-record')
   const long = Date.now() - 73 * 60_000
   // Finished, and its process still exiting: old because it stopped writing on purpose.
   stale(root, 'finished', { state: 'ended', pid: process.pid, updatedAt: long })
@@ -1477,14 +1473,14 @@ test('an ended run and an abandoned one are old on purpose, and get no staleness
   )
 })
 
-test('a stand-in that cannot answer gets no targeting block, even on a run that would have had one', async () => {
+test('a stand-in that cannot answer gets no targeting block, even on a run that would have had one', async (t) => {
   // The structural half of the contract, and TWO seats deliberately: a one-seat run emits no
   // `targeting` key either way (#79 keeps it off the default document entirely), so a stand-in
   // with one seat would pass this test without exercising anything. With two, the key WOULD be
   // written if the relay answered -- so what is pinned is that a stand-in predating #79 still
   // satisfies `RecordableRelay` and still gets the document it got before, rather than a
   // recorder inventing a block reporting that its advisor addressed nobody.
-  const root = dir()
+  const root = tempDir(t, 'conclave-record')
   const relay = fakeRelay({ seats: ['implementer-2'] })
   const rec = recordSession(relay, {
     repoRoot: root,
@@ -1505,12 +1501,12 @@ test('a stand-in that cannot answer gets no targeting block, even on a run that 
   await rec.close()
 })
 
-test('a stand-in that cannot answer gets no ceilings block, rather than one claiming no limits', async () => {
+test('a stand-in that cannot answer gets no ceilings block, rather than one claiming no limits', async (t) => {
   // The structural half of the contract, and the same rule `rotationOf` follows: absent means
   // "this relay was never asked", which is not the same fact as `null` meaning "no limit". A
   // recorder that defaulted here would write a document asserting a run is unbounded on the
   // evidence of a stand-in that has no opinion.
-  const root = dir()
+  const root = tempDir(t, 'conclave-record')
   const relay = fakeRelay()
   const rec = recordSession(relay, {
     repoRoot: root,
@@ -1534,7 +1530,7 @@ test('a stand-in that cannot answer gets no ceilings block, rather than one clai
 /** Let the recorder's follow loop run. It is asynchronous; a synchronous test outruns it. */
 const tick = () => new Promise((r) => setTimeout(r, 20))
 
-test('#189 a second run reaches the record, and so does anything said between them', async () => {
+test('#189 a second run reaches the record, and so does anything said between them', async (t) => {
   // The record is per SESSION; a subscription is per RUN. Those were the same thing until a
   // console could start a second run on the same relay -- which is what happens when you type
   // another goal. `#end` closed the stream, the follow loop returned, and everything after it
@@ -1543,7 +1539,7 @@ test('#189 a second run reaches the record, and so does anything said between th
   //
   // Measured against a real pty before the fix: run 2 ran, the console drew all of it, and
   // `events.ndjson` stayed at the 8 messages of run 1.
-  const root = dir()
+  const root = tempDir(t, 'conclave-record')
   const relay = fakeRelay({ multiRun: true })
   const recording = recordSession(relay, {
     repoRoot: root,
@@ -1596,13 +1592,13 @@ test('#189 a second run reaches the record, and so does anything said between th
   )
 })
 
-test('#189 late child activity still never reaches the record', async () => {
+test('#189 late child activity still never reaches the record', async (t) => {
   // The other half, and the reason this could not simply leave the stream open. A child does
   // not stop emitting because the relay decided the run was over, and those events must not
   // land in the record of the run they came after -- `relay.test.ts` holds the same rule for
   // subscribers. A MESSAGE is the relay's own account of the session and is kept; ACTIVITY is
   // a child talking about a turn that has ended and is not.
-  const root = dir()
+  const root = tempDir(t, 'conclave-record')
   const relay = fakeRelay()
   const recording = recordSession(relay, {
     repoRoot: root,

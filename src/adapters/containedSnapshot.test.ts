@@ -26,15 +26,33 @@
  */
 
 import { strict as assert } from 'node:assert'
-import { appendFileSync, mkdtempSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { appendFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
+import type { TestContext } from 'node:test'
 import type { AgentSession, SessionSnapshot } from '../contract/session.ts'
 import { wedgeOneTailPoll, type TailWedge } from '../transcript/tailWedge.ts'
 import { ClaudePtyHookAdapter } from './claude.ts'
 import { CodexPtyHookAdapter } from './codex.ts'
 import { installFakeClis } from './fakeCli.ts'
+import { suiteTempDir, tempDir } from '../testkit/tempDir.ts'
+
+/**
+ * The run directories the adapters this file boots make for themselves, contained.
+ *
+ * `Claude.#boot` and `Codex.#boot` each `mkdtemp` a run directory under `os.tmpdir()` and
+ * never remove it. That is PRODUCTION behaviour and issue #203's business, not this file's --
+ * so rather than change it, the floor it lands on moves: `tmpdir()` re-reads `TMPDIR` on every
+ * call, so pointing it at a directory the testkit issued puts every run directory booted here
+ * inside something whose lifetime the helper already owns.
+ *
+ * Per FILE, and that is what makes it safe rather than a shared global: every test file runs
+ * in its own process under `node --test`, so this reaches no other suite, and the tests in
+ * this one stay isolated from each other exactly as before -- by `tempDir` handing each its
+ * own uniquely named child of this root.
+ */
+const ADAPTER_TMP_ROOT = suiteTempDir('adapter-run-root')
+process.env['TMPDIR'] = ADAPTER_TMP_ROOT
 
 const { dir: RUN } = installFakeClis()
 
@@ -70,8 +88,8 @@ const PATIENCE_MS = LEASE_MS * 50
 /** The tail runs on a 400ms interval, so this is several chances to be caught. */
 const CATCH_MS = 3_000
 
-function scratch(prefix: string, name: string): string {
-  return join(mkdtempSync(join(tmpdir(), prefix)), name)
+function scratch(t: TestContext, prefix: string, name: string): string {
+  return join(tempDir(t, prefix), name)
 }
 
 /** Arm the wedge on EVERY poll, and wait until the tail has actually walked into it. */
@@ -133,8 +151,8 @@ async function claudeSessionOver(transcript: string): Promise<AgentSession> {
   }
 }
 
-test('claude: snapshot() answers from the last good read instead of rejecting', async () => {
-  const transcript = scratch('orch-contained-', 'session.jsonl')
+test('claude: snapshot() answers from the last good read instead of rejecting', async (t) => {
+  const transcript = scratch(t, 'orch-contained', 'session.jsonl')
   writeFileSync(transcript, [userRecord('first prompt'), doneRecord('first answer')].join('\n') + '\n')
 
   const wedge = wedgeOneTailPoll()
@@ -214,8 +232,8 @@ async function codexSessionOver(transcript: string): Promise<AgentSession> {
   }
 }
 
-test('codex: snapshot() answers from the last good read instead of rejecting', async () => {
-  const path = scratch('orch-contained-codex-', 'rollout.jsonl')
+test('codex: snapshot() answers from the last good read instead of rejecting', async (t) => {
+  const path = scratch(t, 'orch-contained-codex', 'rollout.jsonl')
   writeFileSync(
     path,
     [started('fake-turn-1'), prompted('first prompt'), finished('fake-turn-1', 'first answer')].join('\n') + '\n',

@@ -62,10 +62,10 @@
  */
 
 import { strict as assert } from 'node:assert'
-import { mkdtempSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
+import type { TestContext } from 'node:test'
 import type { AgentSession, SessionSnapshot } from '../contract/session.ts'
 import {
   READ_LEASE_MS,
@@ -75,6 +75,24 @@ import {
 } from '../transcript/reconcile.ts'
 import { CANCEL_EVIDENCE_BUDGET_MS, CANCEL_EVIDENCE_POLL_MS, CodexPtyHookAdapter } from './codex.ts'
 import { installFakeClis } from './fakeCli.ts'
+import { suiteTempDir, tempDir } from '../testkit/tempDir.ts'
+
+/**
+ * The run directories the adapters this file boots make for themselves, contained.
+ *
+ * `Claude.#boot` and `Codex.#boot` each `mkdtemp` a run directory under `os.tmpdir()` and
+ * never remove it. That is PRODUCTION behaviour and issue #203's business, not this file's --
+ * so rather than change it, the floor it lands on moves: `tmpdir()` re-reads `TMPDIR` on every
+ * call, so pointing it at a directory the testkit issued puts every run directory booted here
+ * inside something whose lifetime the helper already owns.
+ *
+ * Per FILE, and that is what makes it safe rather than a shared global: every test file runs
+ * in its own process under `node --test`, so this reaches no other suite, and the tests in
+ * this one stay isolated from each other exactly as before -- by `tempDir` handing each its
+ * own uniquely named child of this root.
+ */
+const ADAPTER_TMP_ROOT = suiteTempDir('adapter-run-root')
+process.env['TMPDIR'] = ADAPTER_TMP_ROOT
 
 const { dir: RUN } = installFakeClis()
 
@@ -191,8 +209,10 @@ function leaseConsumingReads(slow: () => boolean, leaseMs: number = LEASE_MS): {
  * being `assumed`, so a transcript that proves the cancellation would end it on its first
  * iteration and neither bound would ever be reached.
  */
-async function sessionOverUnprovableTurn(): Promise<{ session: AgentSession; path: string }> {
-  const path = join(mkdtempSync(join(tmpdir(), 'orch-cancel-latency-')), 'rollout.jsonl')
+async function sessionOverUnprovableTurn(
+  t: TestContext,
+): Promise<{ session: AgentSession; path: string }> {
+  const path = join(tempDir(t, 'orch-cancel-latency'), 'rollout.jsonl')
   writeFileSync(path, [started('fake-turn-1'), prompted('keep going')].join('\n') + '\n')
 
   const previous = process.env['ORCH_FAKE_TRANSCRIPT']
@@ -218,7 +238,7 @@ async function sessionOverUnprovableTurn(): Promise<{ session: AgentSession; pat
   }
 }
 
-test('one cancellation can spend two full read leases, and no more than two', async () => {
+test('one cancellation can spend two full read leases, and no more than two', async (t) => {
   // Every read costs a lease. Check at 0 passes, sleep, read to ~10.75s; check at ~10.75s still
   // passes -- that is the whole point, the budget has not been spent, only most of it has gone
   // to a single read -- sleep, read to ~21.5s; check at ~21.5s fails. Two reads, and a third is
@@ -228,7 +248,7 @@ test('one cancellation can spend two full read leases, and no more than two', as
   // while a poll interval plus a lease exceeds half the budget, and that is a ratio -- untouched
   // by scaling all three together, and destroyed by scaling any one of them alone. See the
   // header.
-  const { session } = await sessionOverUnprovableTurn()
+  const { session } = await sessionOverUnprovableTurn(t)
   const reads = leaseConsumingReads(() => true)
   try {
     await session.send('keep going', { kind: 'orchestrator' })
@@ -256,7 +276,7 @@ test('one cancellation can spend two full read leases, and no more than two', as
   }
 })
 
-test('a cancellation runs past its budget by a poll interval and a lease, and no further', async () => {
+test('a cancellation runs past its budget by a poll interval and a lease, and no further', async (t) => {
   // The other end. Reads are real and fast until the budget is nearly spent, so the loop turns
   // over every ~750ms and arrives at its LAST check with the budget almost gone. That check
   // passes, the sleep runs in full, and the read that follows costs a whole lease -- which is
@@ -265,7 +285,7 @@ test('a cancellation runs past its budget by a poll interval and a lease, and no
   // Every bound below is computed from the injected trio. What this end of the control flow
   // depends on is that ONE read costs a whole lease after the last check passes, which is true
   // at any scale.
-  const { session } = await sessionOverUnprovableTurn()
+  const { session } = await sessionOverUnprovableTurn(t)
   let slowFrom = Number.POSITIVE_INFINITY
   const reads = leaseConsumingReads(() => Date.now() >= slowFrom)
   try {

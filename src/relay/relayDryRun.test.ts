@@ -34,27 +34,26 @@ import { execFileSync } from 'node:child_process'
 import {
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   readdirSync,
-  rmSync,
   writeFileSync,
 } from 'node:fs'
-import { tmpdir } from 'node:os'
 import { join, relative } from 'node:path'
 import { PassThrough, Writable } from 'node:stream'
 import test from 'node:test'
+import type { TestContext } from 'node:test'
 import { main } from '../../bin/conclave.ts'
 import { installConfig } from '../config/install.ts'
 import { CONFIG_RELATIVE } from '../config/project.ts'
 import { AgentRegistry } from '../registry/registry.ts'
 import { NO_DEADLINE_CLOCKS } from '../registry/types.ts'
 import { FakeRotationSession } from '../rotation/fakeSession.ts'
+import { tempDir } from '../testkit/tempDir.ts'
 
 const CLI = join(import.meta.dirname, '..', '..', 'bin', 'conclave.ts')
 
-function repo(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'conclave-relay-dryrun-'))
+function repo(t: TestContext): string {
+  const dir = tempDir(t, 'conclave-relay-dryrun')
   execFileSync('git', ['init', '-q'], { cwd: dir })
   writeFileSync(join(dir, '.gitignore'), '.conclave/\n')
   writeFileSync(join(dir, 'work.ts'), 'export const a = 1\n')
@@ -72,8 +71,8 @@ function repo(): string {
  * stays empty and a real file that keeps its bytes are different assertions, and the trust
  * probe APPENDS -- it would leave the existing content in place and add to it.
  */
-function fakeHome(): string {
-  const home = mkdtempSync(join(tmpdir(), 'conclave-relay-home-'))
+function fakeHome(t: TestContext): string {
+  const home = tempDir(t, 'conclave-relay-home')
   mkdirSync(join(home, '.codex'), { recursive: true })
   writeFileSync(
     join(home, '.codex', 'config.toml'),
@@ -212,10 +211,10 @@ async function runRelay(
   }
 }
 
-test('a relay dry run describes the run and leaves the project byte for byte as it found it', { timeout: 60_000 }, async () => {
-  const dir = repo()
-  const home = fakeHome()
-  try {
+test('a relay dry run describes the run and leaves the project byte for byte as it found it', { timeout: 60_000 }, async (t) => {
+  const dir = repo(t)
+  const home = fakeHome(t)
+  {
     const before = snapshot(dir)
     const homeBefore = snapshot(home)
     const { code, said, created } = await runRelay(dir, home, [
@@ -271,13 +270,10 @@ test('a relay dry run describes the run and leaves the project byte for byte as 
         'project and was never what the operator pointed at.',
     )
     assert.deepEqual(created, [], 'a dry run created a participant')
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
-    rmSync(home, { recursive: true, force: true })
   }
 })
 
-test('the writes a relay dry run skips are ones the project would really have received', { timeout: 60_000 }, async () => {
+test('the writes a relay dry run skips are ones the project would really have received', { timeout: 60_000 }, async (t) => {
   // The control, and the reason the test above is not asserting that files nobody writes were
   // not written. The SAME invocation without `--dry-run` is run to the first seat and stopped
   // there by a registry that throws out of `create` -- which is past the permission-mode write,
@@ -288,9 +284,9 @@ test('the writes a relay dry run skips are ones the project would really have re
   // proved the trust probe runs would have to run it, which is the one thing this file must not
   // do. The Codex sidecar is covered by the direct `installConfig` call at the end instead, and
   // the probe's POSITION is covered by the source-order test below.
-  const dir = repo()
-  const home = fakeHome()
-  try {
+  const dir = repo(t)
+  const home = fakeHome(t)
+  {
     // `Relay.start` propagates whatever stopped it -- the control's own error out of `create`,
     // or the executable preflight if `claude` is not installed on this machine. Either ending
     // is past every write asserted below, which is all this control is for.
@@ -330,23 +326,16 @@ test('the writes a relay dry run skips are ones the project would really have re
     // The one write the CLI control cannot reach without spawning Codex, proved where it is
     // made instead: `installConfig` is what the relay block calls, and a run whose seats include
     // Codex is handed `['codex']`.
-    const sidecarProject = repo()
-    try {
-      await installConfig({ projectRoot: sidecarProject, agents: ['codex'], diagnose: false })
-      assert.ok(
-        existsSync(join(sidecarProject, '.codex', 'hooks.json')),
-        'if this file is absent, the dry-run assertion about the Codex sidecar is asserting nothing',
-      )
-    } finally {
-      rmSync(sidecarProject, { recursive: true, force: true })
-    }
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
-    rmSync(home, { recursive: true, force: true })
+    const sidecarProject = repo(t)
+    await installConfig({ projectRoot: sidecarProject, agents: ['codex'], diagnose: false })
+    assert.ok(
+      existsSync(join(sidecarProject, '.codex', 'hooks.json')),
+      'if this file is absent, the dry-run assertion about the Codex sidecar is asserting nothing',
+    )
   }
 })
 
-test('a relay dry run with --bypass plans as the run would and writes no permission mode', { timeout: 60_000 }, async () => {
+test('a relay dry run with --bypass plans as the run would and writes no permission mode', { timeout: 60_000 }, async (t) => {
   // Relay accepts the pair where the console refuses it, and this is why: `withBypass` overlays
   // the requested mode IN MEMORY, so the plan is composed exactly as the run would compose it
   // while nothing is persisted. The console reads its config inside `runSession` and has no
@@ -355,9 +344,9 @@ test('a relay dry run with --bypass plans as the run would and writes no permiss
   // Both halves are asserted, because either alone is satisfiable by the wrong fix: a plan
   // without the permissive flags describes a run that is not the one that would happen, and a
   // written config is a consequential setting left behind by an invocation that started nothing.
-  const dir = repo()
-  const home = fakeHome()
-  try {
+  const dir = repo(t)
+  const home = fakeHome(t)
+  {
     const { code, said } = await runRelay(dir, home, [
       'relay',
       'a goal',
@@ -376,13 +365,10 @@ test('a relay dry run with --bypass plans as the run would and writes no permiss
       !existsSync(join(dir, CONFIG_RELATIVE)),
       'a dry run wrote a permission mode into the project — for this run AND every future one',
     )
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
-    rmSync(home, { recursive: true, force: true })
   }
 })
 
-test('a relay dry run resolves every seat rather than describing what was typed', { timeout: 60_000 }, async () => {
+test('a relay dry run resolves every seat rather than describing what was typed', { timeout: 60_000 }, async (t) => {
   // THE ASYMMETRY, settled. `session --dry-run --advisor nope` refused and `relay --dry-run
   // --advisor nope` printed a plan naming `nope`, because the console's resolution moved above
   // its lock in #130 and relay's still sat inside `Relay.start`, below the short-circuit.
@@ -400,9 +386,9 @@ test('a relay dry run resolves every seat rather than describing what was typed'
     ['relay', 'a goal', '--implementers', 'claude,nope', '--dry-run'],
     ['relay', 'a goal', '--reviewer', 'nope', '--dry-run'],
   ]) {
-    const dir = repo()
-    const home = fakeHome()
-    try {
+    const dir = repo(t)
+    const home = fakeHome(t)
+    {
       const before = snapshot(dir)
       const homeBefore = snapshot(home)
       await assert.rejects(
@@ -415,9 +401,6 @@ test('a relay dry run resolves every seat rather than describing what was typed'
       // and the trust probed.
       assert.deepEqual(snapshot(dir), before, `${argv.join(' ')} wrote something before refusing`)
       assert.deepEqual(snapshot(home), homeBefore, `${argv.join(' ')} touched the operator's home`)
-    } finally {
-      rmSync(dir, { recursive: true, force: true })
-      rmSync(home, { recursive: true, force: true })
     }
   }
 })

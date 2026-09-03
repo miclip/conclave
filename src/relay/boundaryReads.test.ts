@@ -30,10 +30,11 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync } from 'node:child_process'
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { chmodSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
+import type { TestContext } from 'node:test'
+import { suiteTempDir, tempDir } from '../testkit/tempDir.ts'
 import { createSeatWorktrees, type SeatWorktree, type WorktreeManifest } from '../workspace/worktrees.ts'
 import { integrateSeat } from './integrate.ts'
 
@@ -62,7 +63,7 @@ fi
 exec "$ORCH_REAL_GIT" "$@"
 `
 
-const SHIM_DIR = mkdtempSync(join(tmpdir(), 'conclave-git-shim-'))
+const SHIM_DIR = suiteTempDir('conclave-git-shim')
 writeFileSync(join(SHIM_DIR, 'git'), GIT_SHIM, { mode: 0o755 })
 chmodSync(join(SHIM_DIR, 'git'), 0o755)
 
@@ -97,8 +98,8 @@ function realGit(cwd: string, ...args: string[]): string {
   return execFileSync(REAL_GIT, args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
 }
 
-function withSeat(work: (repo: string, manifest: WorktreeManifest, seat: SeatWorktree) => void): void {
-  const repo = mkdtempSync(join(tmpdir(), 'conclave-reads-'))
+function withSeat(t: TestContext, work: (repo: string, manifest: WorktreeManifest, seat: SeatWorktree) => void): void {
+  const repo = tempDir(t, 'conclave-reads')
   try {
     realGit(repo, 'init', '--quiet')
     realGit(repo, 'config', 'user.email', 'test@example.com')
@@ -112,7 +113,6 @@ function withSeat(work: (repo: string, manifest: WorktreeManifest, seat: SeatWor
     work(repo, manifest, manifest.seats[0]!)
   } finally {
     race(undefined, 0)
-    rmSync(repo, { recursive: true, force: true })
   }
 }
 
@@ -126,8 +126,8 @@ const META = { taskId: 't1', seq: 1, advisorTurn: 1 }
  * answer was derived from a state no decision was taken on, which is the whole failure this
  * file is about; it does not matter which of the two pairs came back.
  */
-test('a boundary asks the tree exactly one question per decision', () => {
-  withSeat((_repo, manifest, seat) => {
+test('a boundary asks the tree exactly one question per decision', (t) => {
+  withSeat(t, (_repo, manifest, seat) => {
     writeFileSync(join(seat.worktreePath, 'shared.txt'), 'seat work\n')
     startCounting()
     const result = integrateSeat(manifest, seat, META)
@@ -147,8 +147,8 @@ test('a boundary asks the tree exactly one question per decision', () => {
  *
  * `nothing_to_merge` reports its observation to an operator, so there had better be only one.
  */
-test('a boundary with nothing to commit reads the tree once before it decides', () => {
-  withSeat((_repo, manifest, seat) => {
+test('a boundary with nothing to commit reads the tree once before it decides', (t) => {
+  withSeat(t, (_repo, manifest, seat) => {
     startCounting()
     const result = integrateSeat(manifest, seat, META)
     assert.equal(result.status, 'nothing_to_merge')
@@ -171,8 +171,8 @@ test('a boundary with nothing to commit reads the tree once before it decides', 
  * So the assertion is not about the error. It is that no result is built on a reading the
  * result contradicts.
  */
-test('a tree that empties between the two reads cannot produce a false no-op', () => {
-  withSeat((_repo, manifest, seat) => {
+test('a tree that empties between the two reads cannot produce a false no-op', (t) => {
+  withSeat(t, (_repo, manifest, seat) => {
     const vanishing = join(seat.worktreePath, 'vanishing.txt')
     writeFileSync(vanishing, 'here when the boundary looked\n')
     startCounting()
@@ -206,8 +206,8 @@ test('a tree that empties between the two reads cannot produce a false no-op', (
  * so it names the file. Written from a second reading it would say the tree was dirty and then
  * that nothing in it was uncommitted, in one sentence, about one tree.
  */
-test('the post-commit note is written from the reading its decision was taken on', () => {
-  withSeat((repo, manifest, seat) => {
+test('the post-commit note is written from the reading its decision was taken on', (t) => {
+  withSeat(t, (repo, manifest, seat) => {
     writeFileSync(join(seat.worktreePath, 'shared.txt'), 'seat work\n')
     // `post-commit` survives `commit --no-verify`, so this lands in the window between the
     // boundary's snapshot and its post-merge read -- exactly where a live child would.

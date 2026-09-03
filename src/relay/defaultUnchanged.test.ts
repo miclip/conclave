@@ -14,17 +14,18 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { PassThrough, Writable } from 'node:stream'
 import test from 'node:test'
+import type { TestContext } from 'node:test'
 import { AsyncQueue } from '../adapters/asyncQueue.ts'
 import { FLAG_SURFACE, main } from '../../bin/conclave.ts'
 import { flagReader } from '../config/cliFlags.ts'
 import { newSessionId, recordSession } from '../workspace/sessionRecord.ts'
 import type { Verdict } from '../contract/outcome.ts'
 import { FakeRotationSession } from '../rotation/fakeSession.ts'
+import { tempDir } from '../testkit/tempDir.ts'
 import type { PauseReason, RunHandle, RunPause } from './run.ts'
 import type { AgentEvent, AgentSession, CloseMode, SessionSnapshot, SessionState, TurnKey } from '../contract/session.ts'
 import { guaranteesFor, turnKey } from '../contract/session.ts'
@@ -195,8 +196,8 @@ function commandBlock(name: string, endsBefore: string): string {
 }
 
 /** A repository for a front-end to run in. Both refuse to start outside one. */
-function tempRepo(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'conclave-default-'))
+function tempRepo(t: TestContext): string {
+  const dir = tempDir(t, 'conclave-default')
   execFileSync('git', ['init', '--quiet'], { cwd: dir })
   execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: dir })
   execFileSync('git', ['config', 'user.name', 'Test'], { cwd: dir })
@@ -1788,10 +1789,10 @@ test('DECLARED contains exactly the routing, pause-resolution, attribution, ceil
  * Only the registry (and the console's streams) is replaced; the argv parsing, the flag
  * helper and the option object are the production ones.
  */
-async function createsFromBothClis(extra: string[]): Promise<Record<'relay' | 'session', CreateRecord[]>> {
+async function createsFromBothClis(t: TestContext, extra: string[]): Promise<Record<'relay' | 'session', CreateRecord[]>> {
   const out = { relay: [] as CreateRecord[], session: [] as CreateRecord[] }
   for (const front of ['relay', 'session'] as const) {
-    const repo = tempRepo()
+    const repo = tempRepo(t)
     const before = process.cwd()
     const creates: CreateRecord[] = []
     const registry = defaultRegistry(
@@ -1812,20 +1813,19 @@ async function createsFromBothClis(extra: string[]): Promise<Record<'relay' | 's
       assert.equal(code, 0, `a ${front} run must succeed`)
     } finally {
       process.chdir(before)
-      rmSync(repo, { recursive: true, force: true })
     }
     out[front] = creates
   }
   return out
 }
 
-test('--silence-timeout reaches every seat that is constructed, on both front-ends', async () => {
+test('--silence-timeout reaches every seat that is constructed, on both front-ends', async (t) => {
   // The anti-`--turn-timeout` test, and the reason it observes the CONSTRUCTION rather than
   // the report: the report is resolved from the same option the context is built from, so it
   // would say `enforced: 300000` for a seat that was handed nothing. The flag it is named
   // after was parsed into a console option that did not exist and did nothing for its whole
   // life, with the parity guard agreeing because that guard compares which flags EXIST.
-  const creates = await createsFromBothClis(['--silence-timeout', '300'])
+  const creates = await createsFromBothClis(t, ['--silence-timeout', '300'])
 
   for (const front of ['relay', 'session'] as const) {
     assert.ok(creates[front].length > 0, `the ${front} CLI must construct seats`)
@@ -1844,11 +1844,11 @@ test('--silence-timeout reaches every seat that is constructed, on both front-en
   }
 })
 
-test('the two turn clocks are configured independently, at the seat, on both front-ends', async () => {
+test('the two turn clocks are configured independently, at the seat, on both front-ends', async (t) => {
   // Different numbers on the two flags in one invocation. If either were reaching the other's
   // slot, one of these assertions would carry the other's value -- which no single-flag test
   // can detect, because one flag setting both looks correct from either side alone.
-  const creates = await createsFromBothClis(['--silence-timeout', '30', '--turn-timeout', '90'])
+  const creates = await createsFromBothClis(t, ['--silence-timeout', '30', '--turn-timeout', '90'])
 
   for (const front of ['relay', 'session'] as const) {
     for (const c of creates[front]) {
@@ -1858,13 +1858,13 @@ test('the two turn clocks are configured independently, at the seat, on both fro
   }
 })
 
-test('a run that passes neither flag constructs its seats exactly as it did before either existed', async () => {
+test('a run that passes neither flag constructs its seats exactly as it did before either existed', async (t) => {
   // D1's requirement, observed rather than argued. `undefined` is what makes the adapter keep
   // its OWN default -- DEFAULT_IDLE_MS, twelve minutes, on the two pty adapters -- so a
   // context arriving with a number here would mean the default run had silently acquired a
   // budget from the front-end instead. That is a change to the default run whichever number
   // it is, including one that happens to equal the constant today.
-  const creates = await createsFromBothClis([])
+  const creates = await createsFromBothClis(t, [])
 
   for (const front of ['relay', 'session'] as const) {
     assert.ok(creates[front].length > 0, `the ${front} CLI must construct seats`)
@@ -1888,8 +1888,8 @@ test('a run that passes neither flag constructs its seats exactly as it did befo
  * Nothing else about the default invocation is stubbed: no seat ids, no cwd, no rounds
  * beyond the default flag parsing.
  */
-async function seatIdsFromRelayCli(): Promise<string[]> {
-  const repo = tempRepo()
+async function seatIdsFromRelayCli(t: TestContext): Promise<string[]> {
+  const repo = tempRepo(t)
   const before = process.cwd()
   const creates: CreateRecord[] = []
   const registry = defaultRegistry(
@@ -1911,7 +1911,6 @@ async function seatIdsFromRelayCli(): Promise<string[]> {
     assert.equal(code, 0, 'a default relay run must succeed')
   } finally {
     process.chdir(before)
-    rmSync(repo, { recursive: true, force: true })
   }
   return creates.map((c) => c.id)
 }
@@ -1929,8 +1928,8 @@ async function seatIdsFromRelayCli(): Promise<string[]> {
  * the caller supplied here -- the session block reads `process.cwd()` itself, so what comes
  * back is the CLI's own answer.
  */
-async function seatsFromSessionCli(): Promise<{ creates: CreateRecord[]; cwd: string }> {
-  const repo = tempRepo()
+async function seatsFromSessionCli(t: TestContext): Promise<{ creates: CreateRecord[]; cwd: string }> {
+  const repo = tempRepo(t)
   const before = process.cwd()
   const creates: CreateRecord[] = []
   const registry = defaultRegistry(
@@ -1958,7 +1957,6 @@ async function seatsFromSessionCli(): Promise<{ creates: CreateRecord[]; cwd: st
     assert.equal(code, 0, 'a default console run must succeed')
   } finally {
     process.chdir(before)
-    rmSync(repo, { recursive: true, force: true })
   }
   return { creates, cwd }
 }
@@ -1976,8 +1974,8 @@ async function seatsFromSessionCli(): Promise<{ creates: CreateRecord[]; cwd: st
  * that: a field can be declared and never populated, populated and never declared, or
  * declared in a type the writer does not use.
  */
-async function defaultRunDocuments(): Promise<{ report: unknown; status: unknown }> {
-  const repo = tempRepo()
+async function defaultRunDocuments(t: TestContext): Promise<{ report: unknown; status: unknown }> {
+  const repo = tempRepo(t)
   const before = process.cwd()
   const registry = defaultRegistry(
     {
@@ -1999,7 +1997,6 @@ async function defaultRunDocuments(): Promise<{ report: unknown; status: unknown
     return { report: JSON.parse(report), status: JSON.parse(status) }
   } finally {
     process.chdir(before)
-    rmSync(repo, { recursive: true, force: true })
   }
 }
 
@@ -2318,8 +2315,8 @@ async function provoke(
  * is a guard people learn to rerun. The object being pinned is identical either way: the
  * console records the pause its handle gives it, and so does this.
  */
-async function pausedStatusDocument(reason: PauseReason): Promise<unknown> {
-  const repo = tempRepo()
+async function pausedStatusDocument(t: TestContext, reason: PauseReason): Promise<unknown> {
+  const repo = tempRepo(t)
   const before = process.cwd()
   const { relay, pause } = await provoke(repo, reason)
   const recording = recordSession(relay, {
@@ -2342,7 +2339,6 @@ async function pausedStatusDocument(reason: PauseReason): Promise<unknown> {
     process.chdir(before)
     await recording.close()
     await relay.stop()
-    rmSync(repo, { recursive: true, force: true })
   }
 }
 
@@ -2364,10 +2360,10 @@ async function pausedStatusDocument(reason: PauseReason): Promise<unknown> {
  * Both halves, because either alone is worth little. The absence at N=1 is the D1 claim; the
  * presence at N>1 is what stops the claim being satisfied by deleting the feature.
  */
-test('the multi-seat briefing reaches a two-seat advisor and no part of it reaches a default one', async () => {
+test('the multi-seat briefing reaches a two-seat advisor and no part of it reaches a default one', async (t) => {
   const MARKERS = [/MORE THAN ONE IMPLEMENTER SEAT/, /@seat <seat-id>:/, /@role <role>:/, /dispatched CONCURRENTLY/]
 
-  const repo = tempRepo()
+  const repo = tempRepo(t)
   const one = new FakeRotationSession('lead-1', 'codex', ['DONE'])
   const solo = await Relay.start({
     registry: registryOf(one, new FakeRotationSession('impl-1', 'claude', [])),
@@ -2389,13 +2385,12 @@ test('the multi-seat briefing reaches a two-seat advisor and no part of it reach
     }
   } finally {
     await solo.stop()
-    rmSync(repo, { recursive: true, force: true })
   }
 
   // The other half. A two-seat run is where the syntax is the only way to say who work is for,
   // so its advisor must be told -- and this is the assertion that would fail if the N=1 claim
   // above were satisfied by removing the briefing altogether.
-  const twoSeatRepo = tempRepo()
+  const twoSeatRepo = tempRepo(t)
   const pair = new FakeRotationSession('lead-2', 'codex', ['DONE'])
   const registry = new AgentRegistry()
   const queue = [new FakeRotationSession('a-1', 'claude', []), new FakeRotationSession('b-1', 'claude', [])]
@@ -2446,11 +2441,10 @@ test('the multi-seat briefing reaches a two-seat advisor and no part of it reach
     }
   } finally {
     await many.stop()
-    rmSync(twoSeatRepo, { recursive: true, force: true })
   }
 })
 
-test('default relay and session runs construct exactly the two participant ids', async () => {
+test('default relay and session runs construct exactly the two participant ids', async (t) => {
   // The lead is 'advisor' and the implementer is 'implementer', on both front-ends, and a
   // default run has exactly those two seats and no third. bin/conclave.ts sets the relay
   // pair; src/repl/session.ts sets the console's.
@@ -2458,12 +2452,12 @@ test('default relay and session runs construct exactly the two participant ids',
   // Sorted rather than ordered: which seat is constructed first is Relay.start's business,
   // and pinning it here would make this guard fail on a change it does not speak to.
   assert.deepEqual(
-    (await seatIdsFromRelayCli()).sort(),
+    (await seatIdsFromRelayCli(t)).sort(),
     ['advisor', 'implementer'],
     'the relay CLI must construct exactly the advisor and implementer seats',
   )
   assert.deepEqual(
-    (await seatsFromSessionCli()).creates.map((c) => c.id).sort(),
+    (await seatsFromSessionCli(t)).creates.map((c) => c.id).sort(),
     ['advisor', 'implementer'],
     'the session CLI must construct exactly the advisor and implementer seats',
   )
@@ -2479,8 +2473,8 @@ test('default relay and session runs construct exactly the two participant ids',
  * called `fake-lead` -- but it is one worth naming, because the symptom is a test that fails
  * for a reason that has nothing to do with what it was written to check.
  */
-test('main(session) uses the injected registry rather than the built-in one', async () => {
-  const { creates } = await seatsFromSessionCli()
+test('main(session) uses the injected registry rather than the built-in one', async (t) => {
+  const { creates } = await seatsFromSessionCli(t)
   assert.ok(
     creates.length > 0,
     'the injected registry must be the one the session CLI creates participants through',
@@ -2492,7 +2486,7 @@ test('main(session) uses the injected registry rather than the built-in one', as
   )
 })
 
-test('default run works in the run cwd and creates no worktree', async () => {
+test('default run works in the run cwd and creates no worktree', async (t) => {
   const relay = commandBlock('relay', "if (command === 'session')")
 
   // The console side is OBSERVED, not read. Two regexes used to stand here -- one matching
@@ -2506,7 +2500,7 @@ test('default run works in the run cwd and creates no worktree', async () => {
   // registry where it was told to create each participant covers the whole chain those two
   // regexes described in pieces: process.cwd() -> SessionOptions.cwd -> Relay.start ->
   // AgentRegistry#createParticipant.
-  const fromCli = await seatsFromSessionCli()
+  const fromCli = await seatsFromSessionCli(t)
   assert.ok(fromCli.creates.length > 0, 'the session CLI must create participants')
   for (const c of fromCli.creates) {
     assert.equal(c.cwd, fromCli.cwd, `the session CLI must create ${c.id} in the run cwd`)
@@ -2566,47 +2560,43 @@ test('default run works in the run cwd and creates no worktree', async () => {
   // the worktree list for its subagent-use report: src/relay/subagents.ts:113 defines
   // worktreePaths, and src/relay/relay.ts:3397-3398, :3995 and :6564 read it.
   // Prove it by exercising the run in a real temporary repository.
-  const repo = mkdtempSync(join(tmpdir(), 'conclave-default-'))
-  try {
-    execFileSync('git', ['init', '--quiet'], { cwd: repo })
-    execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: repo })
-    execFileSync('git', ['config', 'user.name', 'Test'], { cwd: repo })
-    writeFileSync(join(repo, 'README.md'), '# hello')
-    execFileSync('git', ['add', 'README.md'], { cwd: repo })
-    execFileSync('git', ['commit', '-m', 'init', '--quiet'], { cwd: repo })
+  const repo = tempDir(t, 'conclave-default')
+  execFileSync('git', ['init', '--quiet'], { cwd: repo })
+  execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: repo })
+  execFileSync('git', ['config', 'user.name', 'Test'], { cwd: repo })
+  writeFileSync(join(repo, 'README.md'), '# hello')
+  execFileSync('git', ['add', 'README.md'], { cwd: repo })
+  execFileSync('git', ['commit', '-m', 'init', '--quiet'], { cwd: repo })
 
-    const initial = worktreePaths(repo)
-    const lead = new DefaultRunFakeSession('fake-lead', 'lead-1', ['DONE'])
-    const impl = new DefaultRunFakeSession('fake-impl', 'impl-1', [])
-    const during: string[][] = []
-    lead.onSend = () => during.push(worktreePaths(repo))
-    impl.onSend = () => during.push(worktreePaths(repo))
+  const initial = worktreePaths(repo)
+  const lead = new DefaultRunFakeSession('fake-lead', 'lead-1', ['DONE'])
+  const impl = new DefaultRunFakeSession('fake-impl', 'impl-1', [])
+  const during: string[][] = []
+  lead.onSend = () => during.push(worktreePaths(repo))
+  impl.onSend = () => during.push(worktreePaths(repo))
 
-    const creates: CreateRecord[] = []
-    const relayInstance = await Relay.start({
-      registry: defaultRegistry({ 'fake-lead': lead, 'fake-impl': impl }, creates),
-      cwd: repo,
-      lead: { id: 'advisor', agent: 'fake-lead', role: 'advisor' },
-      implementer: { id: 'implementer', agent: 'fake-impl', role: 'implementer' },
-      maxRounds: 3,
-    })
-    const afterStart = worktreePaths(repo)
-    await relayInstance.run('a default goal')
-    assert.ok(lead.received.length >= 1, 'advisor must be sent the briefing/goal')
-    assert.ok(impl.received.length >= 1, 'implementer must be sent the briefing')
-    const afterRun = worktreePaths(repo)
+  const creates: CreateRecord[] = []
+  const relayInstance = await Relay.start({
+    registry: defaultRegistry({ 'fake-lead': lead, 'fake-impl': impl }, creates),
+    cwd: repo,
+    lead: { id: 'advisor', agent: 'fake-lead', role: 'advisor' },
+    implementer: { id: 'implementer', agent: 'fake-impl', role: 'implementer' },
+    maxRounds: 3,
+  })
+  const afterStart = worktreePaths(repo)
+  await relayInstance.run('a default goal')
+  assert.ok(lead.received.length >= 1, 'advisor must be sent the briefing/goal')
+  assert.ok(impl.received.length >= 1, 'implementer must be sent the briefing')
+  const afterRun = worktreePaths(repo)
 
-    const implCreate = creates.find((c) => c.id === 'implementer')
-    assert.ok(implCreate, 'implementer must have been created through the registry')
-    assert.equal(implCreate.cwd, repo, 'implementer must be created in the run cwd')
+  const implCreate = creates.find((c) => c.id === 'implementer')
+  assert.ok(implCreate, 'implementer must have been created through the registry')
+  assert.equal(implCreate.cwd, repo, 'implementer must be created in the run cwd')
 
-    assert.deepEqual(afterStart, initial, 'worktree list must be unchanged after Relay.start')
-    assert.deepEqual(afterRun, initial, 'worktree list must be unchanged after run')
-    for (const sample of during) {
-      assert.deepEqual(sample, initial, 'worktree list must be unchanged during every turn')
-    }
-  } finally {
-    rmSync(repo, { recursive: true, force: true })
+  assert.deepEqual(afterStart, initial, 'worktree list must be unchanged after Relay.start')
+  assert.deepEqual(afterRun, initial, 'worktree list must be unchanged after run')
+  for (const sample of during) {
+    assert.deepEqual(sample, initial, 'worktree list must be unchanged during every turn')
   }
 })
 
@@ -2714,8 +2704,8 @@ test('both flag helpers fall back when the flag is absent, and each block reads 
 
 /** One default run, both documents, shared by the two shape guards below. */
 let documents: Promise<{ report: unknown; status: unknown }> | undefined
-const runDocuments = (): Promise<{ report: unknown; status: unknown }> =>
-  (documents ??= defaultRunDocuments())
+const runDocuments = (t: TestContext): Promise<{ report: unknown; status: unknown }> =>
+  (documents ??= defaultRunDocuments(t))
 
 /**
  * The wire contract for the final run record, as emitted rather than as declared.
@@ -2739,8 +2729,8 @@ const runDocuments = (): Promise<{ report: unknown; status: unknown }> =>
  * rank is the `if (seats.length === 1)` branch D1 rules out, and a reader then cannot tell
  * "no role" from "this build does not report roles".
  */
-test('the default relay --json report emits exactly these keys at every depth', async () => {
-  const { report } = await runDocuments()
+test('the default relay --json report emits exactly these keys at every depth', async (t) => {
+  const { report } = await runDocuments(t)
   assert.deepEqual(
     shapeOf(report),
     {
@@ -2817,8 +2807,8 @@ test('the default relay --json report emits exactly these keys at every depth', 
  * Which also means this document says NOTHING about the keys under `pause`. The name says
  * `ended` for that reason; the paused document is pinned separately below.
  */
-test('an ended conclave status --json emits exactly these keys at every depth', async () => {
-  const { status } = await runDocuments()
+test('an ended conclave status --json emits exactly these keys at every depth', async (t) => {
+  const { status } = await runDocuments(t)
   assert.deepEqual(
     shapeOf(status),
     {
@@ -3055,9 +3045,9 @@ for (const reason of Object.keys(PAUSED_SUBTREE) as PauseReason[]) {
   // `rotation_candidate` is the one condition a bare default invocation cannot reach: the
   // degradation is only assessed when `--checks` configures rotation. `provoke` arms it for
   // that variant alone, and the name says which condition each test speaks for.
-  test(`a status document paused on ${reason} emits exactly these keys at every depth`, async () => {
+  test(`a status document paused on ${reason} emits exactly these keys at every depth`, async (t) => {
     assert.deepEqual(
-      shapeOf(await pausedStatusDocument(reason)),
+      shapeOf(await pausedStatusDocument(t, reason)),
       { ...PAUSED_COMMON, ...PAUSED_SUBTREE[reason] },
       `the ${reason} status document must not gain or lose a key at any depth without a decision`,
     )

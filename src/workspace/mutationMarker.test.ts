@@ -6,25 +6,26 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
+import type { TestContext } from 'node:test'
+import { tempDir } from '../testkit/tempDir.ts'
 import { mutationWarning, preflightRefusals, preflightWarnings } from '../relay/guardrails.ts'
 import { begin, end, mutationsDir, outstanding, restore } from './mutationMarker.ts'
 
 /** A repository with one file in it, which is all any of these need. */
-function repo(content = 'original\n'): string {
-  const dir = mkdtempSync(join(tmpdir(), 'conclave-mut-'))
+function repo(t: TestContext, content = 'original\n'): string {
+  const dir = tempDir(t, 'conclave-mut')
   execFileSync('git', ['init', '-q', '.'], { cwd: dir })
   writeFileSync(join(dir, 'f.ts'), content)
   return dir
 }
 
-test('a file broken and not put back is reported as exactly that', () => {
+test('a file broken and not put back is reported as exactly that', (t) => {
   // #180 died holding a mutation, and the tree it left had a fix REVERTED in it -- a diff
   // indistinguishable from work in progress. This is the report that tells them apart.
-  const dir = repo()
+  const dir = repo(t)
   begin(dir, 'f.ts', { note: 'the #180 shape' })
   writeFileSync(join(dir, 'f.ts'), 'reverted fix\n')
 
@@ -36,10 +37,10 @@ test('a file broken and not put back is reported as exactly that', () => {
   assert.equal(all[0]!.marker.note, 'the #180 shape')
 })
 
-test('a marker that outlived its restore is stale, not a defect', () => {
+test('a marker that outlived its restore is stale, not a defect', (t) => {
   // The distinction the whole report turns on. Treating these the same would cry wolf on every
   // tidy tree, and a guard that cries wolf is deleted by the first person it inconveniences.
-  const dir = repo()
+  const dir = repo(t)
   begin(dir, 'f.ts')
   writeFileSync(join(dir, 'f.ts'), 'mutated\n')
   writeFileSync(join(dir, 'f.ts'), 'original\n')
@@ -49,10 +50,10 @@ test('a marker that outlived its restore is stale, not a defect', () => {
   assert.equal(all[0]!.dirty, false, 'but the file is not')
 })
 
-test('end refuses to clear a marker while the file is still broken, and says both hashes', () => {
+test('end refuses to clear a marker while the file is still broken, and says both hashes', (t) => {
   // A restore the caller believed in and got wrong is exactly the state this exists to catch.
   // Clearing the marker there would delete the evidence of the thing being reported.
-  const dir = repo()
+  const dir = repo(t)
   begin(dir, 'f.ts')
   writeFileSync(join(dir, 'f.ts'), 'still mutated\n')
 
@@ -62,8 +63,8 @@ test('end refuses to clear a marker while the file is still broken, and says bot
   assert.equal(outstanding(dir).length, 1, 'and the marker is KEPT')
 })
 
-test('end clears the marker and the stored copy once the file really is back', () => {
-  const dir = repo()
+test('end clears the marker and the stored copy once the file really is back', (t) => {
+  const dir = repo(t)
   begin(dir, 'f.ts')
   writeFileSync(join(dir, 'f.ts'), 'mutated\n')
   writeFileSync(join(dir, 'f.ts'), 'original\n')
@@ -75,10 +76,10 @@ test('end clears the marker and the stored copy once the file really is back', (
   assert.equal(readFileSync(join(dir, 'f.ts'), 'utf8'), 'original\n')
 })
 
-test('restore puts the original back byte for byte, from the copy rather than a guess', () => {
+test('restore puts the original back byte for byte, from the copy rather than a guess', (t) => {
   // A hash proves a restore was correct; it cannot perform one. The copy is what makes the
   // report actionable instead of a puzzle.
-  const dir = repo('exact\ncontents\twith  spacing\n')
+  const dir = repo(t, 'exact\ncontents\twith  spacing\n')
   begin(dir, 'f.ts')
   writeFileSync(join(dir, 'f.ts'), 'destroyed\n')
 
@@ -87,15 +88,15 @@ test('restore puts the original back byte for byte, from the copy rather than a 
   assert.deepEqual(outstanding(dir), [], 'restoring closes the marker')
 })
 
-test('restoring something with no marker says so rather than pretending it worked', () => {
-  const dir = repo()
+test('restoring something with no marker says so rather than pretending it worked', (t) => {
+  const dir = repo(t)
   assert.equal(restore(dir, 'f.ts'), false)
 })
 
-test('a corrupt marker is skipped, because a guard must not become the outage', () => {
+test('a corrupt marker is skipped, because a guard must not become the outage', (t) => {
   // `outstanding` is called from a preflight. A bad file in the bookkeeping directory that
   // could stop a run from starting would be a bigger hazard than the one it guards against.
-  const dir = repo()
+  const dir = repo(t)
   begin(dir, 'f.ts')
   writeFileSync(join(dir, 'f.ts'), 'mutated\n')
   writeFileSync(join(mutationsDir(dir), 'garbage.json'), '{not json')
@@ -105,10 +106,10 @@ test('a corrupt marker is skipped, because a guard must not become the outage', 
   assert.equal(all[0]!.dirty, true)
 })
 
-test('a tree holding a mutation is warned about before a run starts, and not refused', () => {
+test('a tree holding a mutation is warned about before a run starts, and not refused', (t) => {
   // Reported, never obeyed -- the lesson `sessionLock.read` states about a stale lock. A
   // marker that blocked work would be deleted by the first person it inconvenienced.
-  const dir = repo()
+  const dir = repo(t)
   begin(dir, 'f.ts', { note: 'why it was broken' })
   writeFileSync(join(dir, 'f.ts'), 'mutated\n')
 
@@ -127,17 +128,17 @@ test('a tree holding a mutation is warned about before a run starts, and not ref
   assert.match(warnings[0]!.reason, /f\.ts/)
 })
 
-test('a clean tree, and a merely stale marker, say nothing before a run', () => {
-  const clean = repo()
+test('a clean tree, and a merely stale marker, say nothing before a run', (t) => {
+  const clean = repo(t)
   assert.equal(mutationWarning(clean), undefined, 'no markers at all')
 
-  const stale = repo()
+  const stale = repo(t)
   begin(stale, 'f.ts')
   assert.equal(mutationWarning(stale), undefined, 'a marker whose file matches is not a defect')
 })
 
-test('a bookkeeping directory that cannot be read is silent rather than fatal', () => {
-  const dir = repo()
+test('a bookkeeping directory that cannot be read is silent rather than fatal', (t) => {
+  const dir = repo(t)
   begin(dir, 'f.ts')
   writeFileSync(join(dir, 'f.ts'), 'mutated\n')
   rmSync(mutationsDir(dir), { recursive: true, force: true })

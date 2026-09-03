@@ -6,14 +6,15 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
+import type { TestContext } from 'node:test'
+import { tempDir } from '../testkit/tempDir.ts'
 import { blocking, capture, compare, runCheck } from './record.ts'
 
-function repo(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'conclave-record-'))
+function repo(t: TestContext): string {
+  const dir = tempDir(t, 'conclave-record')
   execFileSync('git', ['init', '-q'], { cwd: dir })
   writeFileSync(join(dir, 'work.ts'), 'export const answer = 42\n')
   execFileSync('git', ['add', '.'], { cwd: dir })
@@ -23,8 +24,8 @@ function repo(): string {
 
 const OPTS = (root: string) => ({ root, files: ['work.ts'], checks: ['exit 0'], checkTimeoutMs: 30_000 })
 
-test('a capture records HEAD, the named files and the check results', () => {
-  const dir = repo()
+test('a capture records HEAD, the named files and the check results', (t) => {
+  const dir = repo(t)
   const r = capture(OPTS(dir))
   assert.equal(r.head?.length, 40)
   assert.equal(r.files.length, 1)
@@ -32,22 +33,22 @@ test('a capture records HEAD, the named files and the check results', () => {
   assert.equal(r.checks[0]!.exitCode, 0)
 })
 
-test('an absent file is recorded as absent rather than skipped', () => {
+test('an absent file is recorded as absent rather than skipped', (t) => {
   // The distinction matters at compare time: a file appearing between handoff and
   // acceptance is a divergence, and it can only be seen if absence was recorded.
-  const dir = repo()
+  const dir = repo(t)
   const r = capture({ ...OPTS(dir), files: ['nope.ts'] })
   assert.deepEqual(r.files, [{ path: 'nope.ts', digest: null }])
 })
 
-test('a record compared against itself diverges in nothing', () => {
-  const dir = repo()
+test('a record compared against itself diverges in nothing', (t) => {
+  const dir = repo(t)
   const r = capture(OPTS(dir))
   assert.deepEqual(compare(r, r), [])
 })
 
-test('a moved HEAD blocks the transfer', () => {
-  const dir = repo()
+test('a moved HEAD blocks the transfer', (t) => {
+  const dir = repo(t)
   const before = capture(OPTS(dir))
   writeFileSync(join(dir, 'work.ts'), 'export const answer = 43\n')
   execFileSync('git', ['add', '.'], { cwd: dir })
@@ -58,8 +59,8 @@ test('a moved HEAD blocks the transfer', () => {
   assert.ok(ds.some((d) => d.kind === 'file_changed' && d.severity === 'blocking'))
 })
 
-test('a changed file named by the handoff blocks the transfer', () => {
-  const dir = repo()
+test('a changed file named by the handoff blocks the transfer', (t) => {
+  const dir = repo(t)
   const before = capture(OPTS(dir))
   writeFileSync(join(dir, 'work.ts'), 'export const answer = 0\n')
 
@@ -70,8 +71,8 @@ test('a changed file named by the handoff blocks the transfer', () => {
   assert.ok(changed.detail.includes('work.ts'))
 })
 
-test('a file appearing or vanishing is distinguished from one merely edited', () => {
-  const dir = repo()
+test('a file appearing or vanishing is distinguished from one merely edited', (t) => {
+  const dir = repo(t)
   const before = capture({ ...OPTS(dir), files: ['later.ts'] })
   writeFileSync(join(dir, 'later.ts'), 'export const x = 1\n')
 
@@ -79,10 +80,10 @@ test('a file appearing or vanishing is distinguished from one merely edited', ()
   assert.equal(ds.find((d) => d.kind === 'file_appeared')?.severity, 'blocking')
 })
 
-test('an unrelated dirty path is advisory, because the human shares this tree', () => {
+test('an unrelated dirty path is advisory, because the human shares this tree', (t) => {
   // Blocking here would make rotation depend on the operator sitting still, which is not
   // a property the design is willing to require.
-  const dir = repo()
+  const dir = repo(t)
   const before = capture(OPTS(dir))
   writeFileSync(join(dir, 'operator-notes.md'), 'thinking out loud\n')
 
@@ -93,8 +94,8 @@ test('an unrelated dirty path is advisory, because the human shares this tree', 
   assert.ok(tree.detail.includes('operator-notes.md'))
 })
 
-test('a check whose exit code changed blocks; output alone is advisory', () => {
-  const dir = repo()
+test('a check whose exit code changed blocks; output alone is advisory', (t) => {
+  const dir = repo(t)
   const before = capture({ ...OPTS(dir), checks: ['exit 0'] })
 
   // Same command string, different result. Simulated by rewriting the recorded exit code,
@@ -109,25 +110,25 @@ test('a check whose exit code changed blocks; output alone is advisory', () => {
   assert.equal(soft.find((d) => d.kind === 'check_output_changed')?.severity, 'advisory')
 })
 
-test('a recorded check that was not re-run blocks rather than passing by omission', () => {
-  const dir = repo()
+test('a recorded check that was not re-run blocks rather than passing by omission', (t) => {
+  const dir = repo(t)
   const before = capture({ ...OPTS(dir), checks: ['exit 0'] })
   const observed = { ...before, checks: [] }
   const ds = compare(before, observed)
   assert.equal(ds.find((d) => d.kind === 'check_missing')?.severity, 'blocking')
 })
 
-test('output digests ignore durations, so a slower run is not a divergence', () => {
-  const dir = repo()
+test('output digests ignore durations, so a slower run is not a divergence', (t) => {
+  const dir = repo(t)
   const fast = runCheck(dir, 'echo "ok in 12ms"', 30_000)
   const slow = runCheck(dir, 'echo "ok in 4823ms"', 30_000)
   assert.equal(fast.outputDigest, slow.outputDigest)
 })
 
-test('a command that cannot run has no exit code, rather than a plausible one', () => {
+test('a command that cannot run has no exit code, rather than a plausible one', (t) => {
   // Recording 0 or 1 for an unrunnable check would let it compare equal to a pass or a
   // fail, which is the one thing a verification record must never do.
-  const dir = repo()
+  const dir = repo(t)
   const r = runCheck(dir, 'sleep 5', 150)
   assert.equal(r.exitCode, null)
 })

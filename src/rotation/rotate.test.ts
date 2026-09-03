@@ -10,18 +10,19 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
+import type { TestContext } from 'node:test'
+import { tempDir } from '../testkit/tempDir.ts'
 import type { RelayMessage } from '../relay/message.ts'
 import { fakeExchange, FakeRotationSession } from './fakeSession.ts'
 import { UNKNOWN_GENERATION } from './handoff.ts'
 import { rotate, type RotationDeps } from './rotate.ts'
 import { checkCommand, checkRelevance } from './record.ts'
 
-function repo(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'conclave-rotate-'))
+function repo(t: TestContext): string {
+  const dir = tempDir(t, 'conclave-rotate')
   execFileSync('git', ['init', '-q'], { cwd: dir })
   writeFileSync(join(dir, 'work.ts'), 'export const answer = 42\n')
   execFileSync('git', ['add', '.'], { cwd: dir })
@@ -64,8 +65,8 @@ function deps(root: string, replacement: FakeRotationSession, over: Partial<Rota
   }
 }
 
-test('a successful rotation terminates the old session and keeps the new one', async () => {
-  const dir = repo()
+test('a successful rotation terminates the old session and keeps the new one', async (t) => {
+  const dir = repo(t)
   const old = new FakeRotationSession('old', 'claude')
   const advisor = new FakeRotationSession('advisor', 'codex', [HANDOFF])
   const fresh = new FakeRotationSession('fresh', 'claude', [HONEST])
@@ -81,8 +82,8 @@ test('a successful rotation terminates the old session and keeps the new one', a
   assert.deepEqual(old.transitions, ['quiesced', 'rotating', 'terminated'])
 })
 
-test('the handoff carries the advisor’s narrative and the orchestrator’s record', async () => {
-  const dir = repo()
+test('the handoff carries the advisor’s narrative and the orchestrator’s record', async (t) => {
+  const dir = repo(t)
   const old = new FakeRotationSession('old', 'claude')
   old.compactionGeneration = 2
   const r = await rotate({
@@ -103,7 +104,7 @@ test('the handoff carries the advisor’s narrative and the orchestrator’s rec
   assert.equal(r.handoff.compactionGeneration, 2, 'the degradation signal travels with the handoff')
 })
 
-test('a snapshot that could not be re-read records the generation as unknown, and still rotates', async () => {
+test('a snapshot that could not be re-read records the generation as unknown, and still rotates', async (t) => {
   /**
    * The handoff is the one document nobody re-derives.
    *
@@ -123,7 +124,7 @@ test('a snapshot that could not be re-read records the generation as unknown, an
    * point and on other grounds, and refusing here would leave a frozen session that only this
    * function knows is frozen.
    */
-  const dir = repo()
+  const dir = repo(t)
   const old = new FakeRotationSession('old', 'claude')
   old.compactionGeneration = 2
   old.containedFallback = true
@@ -154,10 +155,10 @@ test('a snapshot that could not be re-read records the generation as unknown, an
   assert.equal(r.handoff.record.files[0]!.path, 'work.ts')
 })
 
-test('an unparseable handoff rolls back before any replacement is started', async () => {
+test('an unparseable handoff rolls back before any replacement is started', async (t) => {
   // The parse happens before the start precisely so this case costs nothing: no session
   // has been created and none has been destroyed.
-  const dir = repo()
+  const dir = repo(t)
   const old = new FakeRotationSession('old', 'claude')
   const fresh = new FakeRotationSession('fresh', 'claude', [HONEST])
   let started = false
@@ -183,8 +184,8 @@ test('an unparseable handoff rolls back before any replacement is started', asyn
   assert.deepEqual(old.transitions, ['quiesced', 'running'])
 })
 
-test('a replacement that cannot start leaves the original working', async () => {
-  const dir = repo()
+test('a replacement that cannot start leaves the original working', async (t) => {
+  const dir = repo(t)
   const old = new FakeRotationSession('old', 'claude')
   const r = await rotate({
     old,
@@ -223,11 +224,11 @@ test('a replacement that cannot start leaves the original working', async () => 
  * than answering. `capture()` shells out to `git` and to the project's own checks.
  */
 
-test('a snapshot that cannot be taken rolls back rather than leaving the original quiesced', async () => {
+test('a snapshot that cannot be taken rolls back rather than leaving the original quiesced', async (t) => {
   // The transcript read the view abandoned, arriving at the one caller with the most to lose.
   // `rotate()` takes this snapshot AFTER the freeze, to carry the compaction generation into
   // the handoff, and before this it went straight out of the function.
-  const dir = repo()
+  const dir = repo(t)
   const old = new FakeRotationSession('old', 'claude')
   old.snapshot = async () => {
     throw new Error('transcript read abandoned after 10000ms without answering')
@@ -255,11 +256,11 @@ test('a snapshot that cannot be taken rolls back rather than leaving the origina
   assert.deepEqual(old.transitions, ['quiesced', 'running'])
 })
 
-test('an advisor whose transport dies mid-handoff rolls back', async () => {
+test('an advisor whose transport dies mid-handoff rolls back', async (t) => {
   // The widest part of the window: the first thing after the freeze, and a whole model turn
   // long. `handoff_incomplete` covers an advisor that ANSWERED badly; this is one that did not
   // answer at all, which is a different fault and used to be no result at all.
-  const dir = repo()
+  const dir = repo(t)
   const old = new FakeRotationSession('old', 'claude')
 
   const r = await rotate({
@@ -281,14 +282,14 @@ test('an advisor whose transport dies mid-handoff rolls back', async () => {
   assert.deepEqual(old.transitions, ['quiesced', 'running'])
 })
 
-test('the guarded window reaches all the way to the replacement’s start', async () => {
+test('the guarded window reaches all the way to the replacement’s start', async (t) => {
   // The far edge of it. `afterCapture` is the last thing that happens before
   // `startReplacement()`, and it is strictly after `capture()` inside the same block -- so a
   // throw here rolling back is also the answer for the capture, which shells out to `git` and
   // to the project's checks and can fail for reasons that have nothing to do with either
   // session. There is no cheap portable way to make `capture()` itself throw: it tolerates a
   // missing repository and a missing file by recording them as absent, which is deliberate.
-  const dir = repo()
+  const dir = repo(t)
   const old = new FakeRotationSession('old', 'claude')
   let started = false
 
@@ -318,7 +319,7 @@ test('the guarded window reaches all the way to the replacement’s start', asyn
   assert.deepEqual(old.transitions, ['quiesced', 'running'])
 })
 
-test('the guarded window reaches back to the line that merely SAYS the session was frozen', async () => {
+test('the guarded window reaches back to the line that merely SAYS the session was frozen', async (t) => {
   /**
    * The near edge of it, and the narrowest gap in the whole transaction: one statement.
    *
@@ -332,7 +333,7 @@ test('the guarded window reaches back to the line that merely SAYS the session w
    * Only this message throws. The later notes must still be delivered normally, or the test
    * would pass for the wrong reason.
    */
-  const dir = repo()
+  const dir = repo(t)
   const old = new FakeRotationSession('old', 'claude')
   let started = false
   const delivered: string[] = []
@@ -367,7 +368,7 @@ test('the guarded window reaches back to the line that merely SAYS the session w
   assert.deepEqual(delivered, [], 'and the run got no further: no handoff was recorded either')
 })
 
-test('a rotation that cannot BEGIN puts both sessions back', async () => {
+test('a rotation that cannot BEGIN puts both sessions back', async (t) => {
   /**
    * The only failure with two live sessions in it.
    *
@@ -382,7 +383,7 @@ test('a rotation that cannot BEGIN puts both sessions back', async () => {
    * unhealthy session is the original, and that is what a caller deciding whether to try again
    * needs to be told.
    */
-  const dir = repo()
+  const dir = repo(t)
   const old = new FakeRotationSession('old', 'claude')
   old.beginRotationThrows = 'the pty is gone'
   let replacement: FakeRotationSession | undefined
@@ -418,8 +419,8 @@ test('a rotation that cannot BEGIN puts both sessions back', async () => {
   assert.ok(r.handoff)
 })
 
-test('a repository that diverged during the transfer rolls back and abandons the replacement', async () => {
-  const dir = repo()
+test('a repository that diverged during the transfer rolls back and abandons the replacement', async (t) => {
+  const dir = repo(t)
   const old = new FakeRotationSession('old', 'claude')
   const fresh = new FakeRotationSession('fresh', 'claude', [HONEST])
 
@@ -447,10 +448,10 @@ test('a repository that diverged during the transfer rolls back and abandons the
   assert.equal(fresh.closedAs, 'abandoned')
 })
 
-test('a replacement claiming a result the arbiter did not observe is refused', async () => {
+test('a replacement claiming a result the arbiter did not observe is refused', async (t) => {
   // The failure this catches is not a replacement that reports a mismatch — that is a
   // working transfer. It is one that reports agreement it never observed.
-  const dir = repo()
+  const dir = repo(t)
   const old = new FakeRotationSession('old', 'claude')
   const fresh = new FakeRotationSession('fresh', 'claude', ['CHECK 1: exit 0\n\nAll good.'])
 
@@ -470,8 +471,8 @@ test('a replacement claiming a result the arbiter did not observe is refused', a
   assert.equal(fresh.closedAs, 'abandoned')
 })
 
-test('silence about the checks is a failed transfer, not an implied pass', async () => {
-  const dir = repo()
+test('silence about the checks is a failed transfer, not an implied pass', async (t) => {
+  const dir = repo(t)
   const old = new FakeRotationSession('old', 'claude')
   const fresh = new FakeRotationSession('fresh', 'claude', ['Looks fine to me, I have the context.'])
 
@@ -488,12 +489,12 @@ test('silence about the checks is a failed transfer, not an implied pass', async
   assert.ok(r.detail.includes('no reported exit code'))
 })
 
-test('a check failing identically before and after is a reproduced state, not a divergence', async () => {
+test('a check failing identically before and after is a reproduced state, not a divergence', async (t) => {
   // Rotation verifies continuity, not health. Refusing to rotate out of a red tree would
   // strand exactly the session that most needs replacing -- so a check that exits the same
   // way on both sides is a successful transfer, and the failure is carried forward
   // explicitly rather than being either ignored or treated as a blocker.
-  const dir = repo()
+  const dir = repo(t)
   const old = new FakeRotationSession('old', 'claude')
   const fresh = new FakeRotationSession('fresh', 'claude', [
     'CHECK 1: exit 3\n\nThe suite is red, and the handoff calls it green. Flagging that.',
@@ -519,7 +520,7 @@ test('a check failing identically before and after is a reproduced state, not a 
   assert.ok(r.handoff.narrative.evidence.includes('suite green'))
 })
 
-test('a note that throws AFTER the commit cannot undo a rotation that already happened', async () => {
+test('a note that throws AFTER the commit cannot undo a rotation that already happened', async (t) => {
   /**
    * The last window in the transaction, and the only one where rolling back is incoherent.
    *
@@ -539,7 +540,7 @@ test('a note that throws AFTER the commit cannot undo a rotation that already ha
    * later, and the carried-failure line after it proves one broken write does not silence the
    * rest of the report.
    */
-  const dir = repo()
+  const dir = repo(t)
   const old = new FakeRotationSession('old', 'claude')
   // A check that fails identically on both sides, so there is a carried-failure note to deliver
   // after the one that throws. Without it nothing follows the completion line and "the rest of
@@ -588,7 +589,7 @@ test('a note that throws AFTER the commit cannot undo a rotation that already ha
   )
 })
 
-test('a close that fails with the original already terminated does not escape as an exception', async () => {
+test('a close that fails with the original already terminated does not escape as an exception', async (t) => {
   /**
    * The INTERFACE edge, not an adapter reproduction. See the test below for what the adapters do.
    *
@@ -619,7 +620,7 @@ test('a close that fails with the original already terminated does not escape as
    * before it can reject after doing its work, so the disposal is unknown from either state
    * (see #146), and a caller told `rotated` has nowhere to read that from.
    */
-  const dir = repo()
+  const dir = repo(t)
   const old = new FakeRotationSession('old', 'claude')
   old.closeThrows = 'terminate: pty refused to die'
   const fresh = new FakeRotationSession('fresh', 'claude', [HONEST])
@@ -657,7 +658,7 @@ test('a close that fails with the original already terminated does not escape as
   assert.equal(fresh.closedAs, undefined, 'and was not abandoned by a rollback of a rotation that happened')
 })
 
-test('a close that fails with the transport already gone does not report the original restored', async () => {
+test('a close that fails with the transport already gone does not report the original restored', async (t) => {
   /**
    * The same failure with the adapters' own ordering, which is the one that lies rather than throws.
    *
@@ -684,7 +685,7 @@ test('a close that fails with the transport already gone does not report the ori
    * adapter never recorded: the state IS the evidence this outcome carries, and writing the
    * value the teardown failed to reach would destroy the one signal saying how far it got.
    */
-  const dir = repo()
+  const dir = repo(t)
   const old = new FakeRotationSession('old', 'claude')
   old.closeThrowsBeforeTerminated = 'receiver.stop: the socket is already gone'
   const fresh = new FakeRotationSession('fresh', 'claude', [HONEST])
@@ -723,7 +724,7 @@ test('a close that fails with the transport already gone does not report the ori
   assert.equal(fresh.closedAs, undefined)
 })
 
-test('a close that rejects with something that is not an Error is still a cleanup failure', async () => {
+test('a close that rejects with something that is not an Error is still a cleanup failure', async (t) => {
   /**
    * The one place in this file where `(err as Error).message` was not merely untidy.
    *
@@ -743,7 +744,7 @@ test('a close that rejects with something that is not an Error is still a cleanu
     ['a thrown string', 'EPIPE', 'EPIPE'],
     ['a thrown undefined', undefined, 'undefined'],
   ] as const) {
-    const dir = repo()
+    const dir = repo(t)
     const old = new FakeRotationSession('old', 'claude')
     old.closeRejectsWith = { value }
     const fresh = new FakeRotationSession('fresh', 'claude', [HONEST])
@@ -765,8 +766,8 @@ test('a close that rejects with something that is not an Error is still a cleanu
   }
 })
 
-test('an exchange that throws mid-acceptance does not strand the original in `rotating`', async () => {
-  const dir = repo()
+test('an exchange that throws mid-acceptance does not strand the original in `rotating`', async (t) => {
+  const dir = repo(t)
   const old = new FakeRotationSession('old', 'claude')
   const fresh = new FakeRotationSession('fresh', 'claude', [HONEST])
 
@@ -793,11 +794,11 @@ test('an exchange that throws mid-acceptance does not strand the original in `ro
   assert.match(r.detail, /NO replacement can pass/)
 })
 
-test('a replacement that answers with nothing at all is unobservable, not unable to reproduce', async () => {
+test('a replacement that answers with nothing at all is unobservable, not unable to reproduce', async (t) => {
   // The other half of the same distinction, and the one a live run actually produced: the
   // exchange RETURNS, and there is nothing in it. A transcript that yields no prose after a
   // completed turn is what a wedged transport looks like from inside the transaction.
-  const dir = repo()
+  const dir = repo(t)
   const old = new FakeRotationSession('old', 'claude')
   const mute = new FakeRotationSession('mute', 'claude') // no scripted replies: every turn is empty
 
@@ -819,11 +820,11 @@ test('a replacement that answers with nothing at all is unobservable, not unable
   assert.equal(mute.closedAs, 'abandoned')
 })
 
-test('a replacement that answers wrongly is still `replacement_could_not_reproduce`', async () => {
+test('a replacement that answers wrongly is still `replacement_could_not_reproduce`', async (t) => {
   // The distinction only means something if the other side of it survives. A replacement that
   // SPOKE and got the exit code wrong is a bad draw, and retrying it may well help -- which is
   // the advice the unobservable reason must not be allowed to swallow.
-  const dir = repo()
+  const dir = repo(t)
   const old = new FakeRotationSession('old', 'claude')
   const wrong = new FakeRotationSession('wrong', 'claude', ['CHECK 1: exit 1\n\nI ran it and it failed.'])
 
@@ -840,10 +841,10 @@ test('a replacement that answers wrongly is still `replacement_could_not_reprodu
   assert.equal(r.evidence, undefined, 'transport evidence belongs only to the claim that rests on it')
 })
 
-test('human constraints are replayed separately, at human rank, before the handoff', async () => {
+test('human constraints are replayed separately, at human rank, before the handoff', async (t) => {
   // Folded into the advisor's prose they would arrive as a suggestion from a peer. The
   // envelope is the only thing that tells the recipient who is talking.
-  const dir = repo()
+  const dir = repo(t)
   const constraint: RelayMessage = {
     seq: 4,
     at: 0,
@@ -871,8 +872,8 @@ test('human constraints are replayed separately, at human rank, before the hando
   assert.ok(fresh.received[1]!.includes('## BRIEF'), 'the handoff arrives after the constraints')
 })
 
-test('rotating a session that is not running is a programming error, not a rollback', async () => {
-  const dir = repo()
+test('rotating a session that is not running is a programming error, not a rollback', async (t) => {
+  const dir = repo(t)
   const old = new FakeRotationSession('old', 'claude')
   await old.quiesce()
   await assert.rejects(
@@ -891,14 +892,14 @@ test('a rotation cannot begin against a session that is still accepting work', a
   await assert.rejects(() => s.beginRotation(), /quiesce the session first/)
 })
 
-test('an informational check that does not reproduce does not roll the rotation back (#9)', async () => {
+test('an informational check that does not reproduce does not roll the rotation back (#9)', async (t) => {
   // A check can reproduce faithfully and still say nothing about the transferred artifact.
   // Refusing a transfer on one of those strands the session that most needed replacing, for
   // a reason unconnected to the work.
   //
   // Relevance is declared HERE, by the orchestrator, in the deps the caller supplies. A
   // replacement classifying its own checks would be grading its own transfer.
-  const dir = repo()
+  const dir = repo(t)
   const old = new FakeRotationSession('old', 'claude')
   const fresh = new FakeRotationSession(
     'fresh',
@@ -926,10 +927,10 @@ test('an informational check that does not reproduce does not roll the rotation 
   assert.equal(old.closedAs, 'graceful', 'the old session was actually given up')
 })
 
-test('the same disagreement on a required check still rolls back', async () => {
+test('the same disagreement on a required check still rolls back', async (t) => {
   // The control. Without it the test above only proves that something did not happen, which
   // is equally consistent with the comparison having stopped working altogether.
-  const dir = repo()
+  const dir = repo(t)
   const old = new FakeRotationSession('old', 'claude')
   const fresh = new FakeRotationSession('fresh', 'claude', [
     'CHECK 1: exit 0\nCHECK 2: exit 0\n\nRan both; the artifact matches the handoff.',

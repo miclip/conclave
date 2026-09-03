@@ -12,13 +12,14 @@
  */
 
 import { strict as assert } from 'node:assert'
-import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { chmodSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
+import type { TestContext } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import type { AgentEvent, TurnEndEvent } from '../contract/session.ts'
 import { KimiPrintAdapter, parseRecord, sessionIdFrom, textOf } from './kimi.ts'
+import { tempDir } from '../testkit/tempDir.ts'
 
 const REPO = fileURLToPath(new URL('../..', import.meta.url))
 const FIXTURE = join(REPO, 'spikes/kimi/fixtures/edit-turn.ndjson')
@@ -59,8 +60,8 @@ async function heardWhatWasWritten(wrote: string): Promise<void> {
 }
 const STDERR = join(REPO, 'spikes/kimi/fixtures/edit-turn.stderr.txt')
 
-function stub(stdout: string, stderr = '', code = 0): { command: string; argvLog: string } {
-  const dir = mkdtempSync(join(tmpdir(), 'kimi-stub-'))
+function stub(t: TestContext, stdout: string, stderr = '', code = 0): { command: string; argvLog: string } {
+  const dir = tempDir(t, 'kimi-stub')
   const argvLog = join(dir, 'argv.log')
   const out = join(dir, 'out.ndjson')
   const err = join(dir, 'err.txt')
@@ -87,9 +88,9 @@ async function nextTurn(session: KimiPrintAdapter): Promise<AgentEvent[]> {
 
 const both = () => ({ out: readFileSync(FIXTURE, 'utf8'), err: readFileSync(STDERR, 'utf8') })
 
-test('a recorded turn completes, but the confidence says it was inferred', async () => {
+test('a recorded turn completes, but the confidence says it was inferred', async (t) => {
   const { out, err } = both()
-  const { command } = stub(out, err)
+  const { command } = stub(t, out, err)
   const s = await KimiPrintAdapter.start({ cwd: REPO, role: 'implementer', command })
   await s.send('Edit calc.py so add() returns a + b.', { kind: 'orchestrator' })
   const end = (await nextTurn(s)).find((e) => e.type === 'turn_end') as TurnEndEvent
@@ -107,9 +108,9 @@ test('a recorded turn completes, but the confidence says it was inferred', async
   await s.close()
 })
 
-test('tool calls are recorded from the assistant message, not the tool result', async () => {
+test('tool calls are recorded from the assistant message, not the tool result', async (t) => {
   const { out, err } = both()
-  const { command } = stub(out, err)
+  const { command } = stub(t, out, err)
   const s = await KimiPrintAdapter.start({ cwd: REPO, role: 'implementer', command })
   await s.send('go', { kind: 'orchestrator' })
   await nextTurn(s)
@@ -125,9 +126,9 @@ test('tool calls are recorded from the assistant message, not the tool result', 
   await s.close()
 })
 
-test('reasoning is not mistaken for the report', async () => {
+test('reasoning is not mistaken for the report', async (t) => {
   const { out, err } = both()
-  const { command } = stub(out, err)
+  const { command } = stub(t, out, err)
   const s = await KimiPrintAdapter.start({ cwd: REPO, role: 'implementer', command })
   await s.send('go', { kind: 'orchestrator' })
   await nextTurn(s)
@@ -141,9 +142,9 @@ test('reasoning is not mistaken for the report', async () => {
   await s.close()
 })
 
-test('the session id comes from stderr, and is used to resume', async () => {
+test('the session id comes from stderr, and is used to resume', async (t) => {
   const { out, err } = both()
-  const { command, argvLog } = stub(out, err)
+  const { command, argvLog } = stub(t, out, err)
   const s = await KimiPrintAdapter.start({ cwd: REPO, role: 'implementer', command })
 
   await s.send('first', { kind: 'orchestrator' })
@@ -162,9 +163,9 @@ test('the session id comes from stderr, and is used to resume', async () => {
   await s.close()
 })
 
-test('a prompt is passed as a flag value, so a leading dash is safe', async () => {
+test('a prompt is passed as a flag value, so a leading dash is safe', async (t) => {
   const { out, err } = both()
-  const { command, argvLog } = stub(out, err)
+  const { command, argvLog } = stub(t, out, err)
   const s = await KimiPrintAdapter.start({ cwd: REPO, role: 'implementer', command })
   await s.send('--help me understand this repository', { kind: 'orchestrator' })
   await nextTurn(s)
@@ -172,9 +173,9 @@ test('a prompt is passed as a flag value, so a leading dash is safe', async () =
   await s.close()
 })
 
-test('--afk is always passed, or an unattended turn can stop on a question', async () => {
+test('--afk is always passed, or an unattended turn can stop on a question', async (t) => {
   const { out, err } = both()
-  const { command, argvLog } = stub(out, err)
+  const { command, argvLog } = stub(t, out, err)
   const s = await KimiPrintAdapter.start({ cwd: REPO, role: 'implementer', command })
   await s.send('go', { kind: 'orchestrator' })
   await nextTurn(s)
@@ -184,11 +185,11 @@ test('--afk is always passed, or an unattended turn can stop on a question', asy
   await s.close()
 })
 
-test('a turn whose last message still had tool calls is not a completion', async () => {
+test('a turn whose last message still had tool calls is not a completion', async (t) => {
   // Truncated mid-flight: the model was still working when the stream stopped. Exit 0 alone
   // must not be read as success -- the same error the OpenCode adapter refuses to make.
   const truncated = readFileSync(FIXTURE, 'utf8').split('\n').slice(0, 2).join('\n')
-  const { command } = stub(truncated, '', 0)
+  const { command } = stub(t, truncated, '', 0)
   const s = await KimiPrintAdapter.start({ cwd: REPO, role: 'implementer', command })
   await s.send('go', { kind: 'orchestrator' })
   const end = (await nextTurn(s)).find((e) => e.type === 'turn_end') as TurnEndEvent
@@ -198,9 +199,9 @@ test('a turn whose last message still had tool calls is not a completion', async
   await s.close()
 })
 
-test('permission decisions are refused rather than silently accepted', async () => {
+test('permission decisions are refused rather than silently accepted', async (t) => {
   const { out, err } = both()
-  const { command } = stub(out, err)
+  const { command } = stub(t, out, err)
   const s = await KimiPrintAdapter.start({ cwd: REPO, role: 'implementer', command })
   await assert.rejects(() => s.decidePermission('allow'), /auto-approves/)
   await s.close()
@@ -240,8 +241,8 @@ test('a binary that is not on PATH is a verdict, not a crash', async () => {
  * out the adapter's post-exit grace for nothing. Measured: with the plain `sleep`, six copies of
  * this file under load had all reported and still would not exit.
  */
-function hangingStub(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'kimi-hang-'))
+function hangingStub(t: TestContext): string {
+  const dir = tempDir(t, 'kimi-hang')
   const command = join(dir, 'kimi-hang')
   writeFileSync(command, '#!/bin/sh\nexec sleep 30\n')
   chmodSync(command, 0o755)
@@ -255,8 +256,8 @@ function hangingStub(): string {
  * disk, no bytes into the adapter, no record -- so a test can wait on it without changing what
  * the child is heard to have said.
  */
-function hangingStubOnStderr(err: string): { command: string; wrote: string } {
-  const dir = mkdtempSync(join(tmpdir(), 'kimi-hang-err-'))
+function hangingStubOnStderr(t: TestContext, err: string): { command: string; wrote: string } {
+  const dir = tempDir(t, 'kimi-hang-err')
   const errPath = join(dir, 'err.txt')
   writeFileSync(errPath, err)
   const wrote = join(dir, 'wrote')
@@ -285,7 +286,7 @@ test('stderr is output too: a child that printed an error and hung is not blamed
   // next, and the next test that waits on a real deadline never wakes. Measured -- that is
   // exactly what a failing negative control did here, hanging the file until it was killed.
   t.after(() => t.mock.timers.reset())
-  const stub = hangingStubOnStderr('error: no such model on this provider\n')
+  const stub = hangingStubOnStderr(t, 'error: no such model on this provider\n')
   const session = await KimiPrintAdapter.start({
     cwd: REPO,
     role: 'implementer',
@@ -319,8 +320,8 @@ test('stderr is output too: a child that printed an error and hung is not blamed
 })
 
 /** Emits `body` and then never exits, so only the watchdog can end the turn. Marker as above. */
-function hangingStubEmitting(body: string): { command: string; wrote: string } {
-  const dir = mkdtempSync(join(tmpdir(), 'kimi-hang-say-'))
+function hangingStubEmitting(t: TestContext, body: string): { command: string; wrote: string } {
+  const dir = tempDir(t, 'kimi-hang-say')
   const out = join(dir, 'out.ndjson')
   writeFileSync(out, body)
   const wrote = join(dir, 'wrote')
@@ -352,7 +353,7 @@ test('a record carrying no content still suppresses the launch diagnosis (#82)',
     ['a tool result', '{"role":"tool","tool_call_id":"call_1","content":"ok"}\n'],
     ['an assistant message with nothing in it', '{"role":"assistant","content":[]}\n'],
   ] as const) {
-    const stub = hangingStubEmitting(body)
+    const stub = hangingStubEmitting(t, body)
     const session = await KimiPrintAdapter.start({
       cwd: REPO,
       role: 'implementer',
@@ -387,14 +388,14 @@ test('a record carrying no content still suppresses the launch diagnosis (#82)',
   }
 })
 
-test('a first run that produced no messages at all points at the launch (#82)', async () => {
+test('a first run that produced no messages at all points at the launch (#82)', async (t) => {
   // Kimi normally takes its model from the generated config file rather than the argv, so the
   // usual reading of this is "the argv named no model" -- which is still the sentence that sends
   // an operator to the launch instead of leaving `timed_out` standing on its own.
   const session = await KimiPrintAdapter.start({
     cwd: REPO,
     role: 'implementer',
-    command: hangingStub(),
+    command: hangingStub(t),
     watchdogMs: 300,
   })
   await session.send('go', { kind: 'orchestrator' })
@@ -407,7 +408,7 @@ test('a first run that produced no messages at all points at the launch (#82)', 
   await session.close()
 })
 
-test('#48 the declared absence of a silence clock is OBSERVED, not read off the source', async () => {
+test('#48 the declared absence of a silence clock is OBSERVED, not read off the source', async (t) => {
   // The same claim as OpenCode's, and the same reason it matters: a seat with no silence clock
   // goes quiet forever and produces no verdict, so a reader trusting `supported: false` wrongly
   // waits for a timeout that arrives and is attributed to nothing.
@@ -416,7 +417,7 @@ test('#48 the declared absence of a silence clock is OBSERVED, not read off the 
   // and faster thing: with an absolute bound set, the only deadline that fires is that one, at
   // that bound, in its own words. A silence clock would be a second timer, firing earlier, with
   // a different detail.
-  const command = hangingStub()
+  const command = hangingStub(t)
   const s = await KimiPrintAdapter.start({ cwd: REPO, role: 'implementer', command, watchdogMs: 700 })
   try {
     const seen: AgentEvent[] = []

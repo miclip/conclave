@@ -20,15 +20,16 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
+import type { TestContext } from 'node:test'
 import { AgentRegistry } from '../registry/registry.ts'
 import { rolesWithDefined, type RoleDefinition } from '../registry/roles.ts'
 import { NO_DEADLINE_CLOCKS } from '../registry/types.ts'
 import type { CreateParticipantContext, ResolvedParticipant } from '../registry/types.ts'
 import { FakeRotationSession } from '../rotation/fakeSession.ts'
+import { tempDir } from '../testkit/tempDir.ts'
 import { lockPath } from '../workspace/sessionLock.ts'
 import { implementerSeats, Relay } from './relay.ts'
 import { runReport } from './report.ts'
@@ -147,8 +148,8 @@ Carry on.`
 const ACCEPTED = 'CHECK 1: exit 0\n\nRead the files and ran the check. It matches.'
 
 /** A repository to run in: the lock samples `git status`, and the relay lists worktrees. */
-function tempRepo(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'conclave-seats-'))
+function tempRepo(t: TestContext): string {
+  const dir = tempDir(t, 'conclave-seats')
   execFileSync('git', ['init', '--quiet'], { cwd: dir })
   execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: dir })
   execFileSync('git', ['config', 'user.name', 'Test'], { cwd: dir })
@@ -194,184 +195,171 @@ test('implementerSeats is the singular option when the plural one is absent, and
   )
 })
 
-test('naming the one implementer plurally builds the identical relay', async () => {
-  const singularRepo = tempRepo()
-  const pluralRepo = tempRepo()
+test('naming the one implementer plurally builds the identical relay', async (t) => {
+  const singularRepo = tempRepo(t)
+  const pluralRepo = tempRepo(t)
   const spec = { id: 'implementer', agent: 'impl', role: 'implementer' } as const
   const lead = { id: 'advisor', agent: 'lead', role: 'advisor' } as const
-  try {
-    const build = async (repo: string, plural: boolean): Promise<Relay> =>
-      Relay.start({
-        registry: registryOf({
-          lead: new FakeRotationSession('lead-1', 'lead', ['DONE']),
-          impl: new FakeRotationSession('impl-1', 'impl', []),
-        }),
-        cwd: repo,
-        lead,
-        implementer: spec,
-        ...(plural ? { implementers: [spec] } : {}),
-      })
+  const build = async (repo: string, plural: boolean): Promise<Relay> =>
+    Relay.start({
+      registry: registryOf({
+        lead: new FakeRotationSession('lead-1', 'lead', ['DONE']),
+        impl: new FakeRotationSession('impl-1', 'impl', []),
+      }),
+      cwd: repo,
+      lead,
+      implementer: spec,
+      ...(plural ? { implementers: [spec] } : {}),
+    })
 
-    const singular = await build(singularRepo, false)
-    const plural = await build(pluralRepo, true)
-    try {
-      const shape = (r: Relay) => r.participants.map((p) => ({ id: p.id, agent: p.agent, rank: p.rank, role: p.role }))
-      assert.deepEqual(
-        shape(plural),
-        shape(singular),
-        'the same seat named plurally must produce the same participants, in the same order',
-      )
-      assert.deepEqual(
-        joinNotes(plural.log),
-        joinNotes(singular.log),
-        'the join notes an operator reads at startup must be unchanged',
-      )
-      assert.deepEqual(
-        lockedParticipants(pluralRepo),
-        lockedParticipants(singularRepo),
-        'the session lock must name the same participants either way',
-      )
-      assert.deepEqual(
-        shape(singular).map((p) => p.id),
-        ['advisor', 'implementer'],
-        'a default run still has exactly the two seats it has always had',
-      )
-    } finally {
-      await singular.stop()
-      await plural.stop()
-    }
+  const singular = await build(singularRepo, false)
+  const plural = await build(pluralRepo, true)
+  try {
+    const shape = (r: Relay) => r.participants.map((p) => ({ id: p.id, agent: p.agent, rank: p.rank, role: p.role }))
+    assert.deepEqual(
+      shape(plural),
+      shape(singular),
+      'the same seat named plurally must produce the same participants, in the same order',
+    )
+    assert.deepEqual(
+      joinNotes(plural.log),
+      joinNotes(singular.log),
+      'the join notes an operator reads at startup must be unchanged',
+    )
+    assert.deepEqual(
+      lockedParticipants(pluralRepo),
+      lockedParticipants(singularRepo),
+      'the session lock must name the same participants either way',
+    )
+    assert.deepEqual(
+      shape(singular).map((p) => p.id),
+      ['advisor', 'implementer'],
+      'a default run still has exactly the two seats it has always had',
+    )
   } finally {
-    rmSync(singularRepo, { recursive: true, force: true })
-    rmSync(pluralRepo, { recursive: true, force: true })
+    await singular.stop()
+    await plural.stop()
   }
 })
 
-test('two implementer seats are both joined, both briefed, both locked and both reported', async () => {
-  const repo = tempRepo()
+test('two implementer seats are both joined, both briefed, both locked and both reported', async (t) => {
+  const repo = tempRepo(t)
   const lead = new FakeRotationSession('lead-1', 'lead', ['Do the thing.', 'DONE'])
   // `alpha` sorts first, so `seatFor` breaks the idle-time tie in its favour and the work
   // lands there. Which seat gets the task is not what this test is about -- that both exist,
   // were told what they are, and are in the record is.
   const alpha = new FakeRotationSession('alpha-1', 'alpha', ['ack', 'Did it.', 'NONE'])
   const beta = new FakeRotationSession('beta-1', 'beta', ['ack', 'NONE'])
+  const relay = await Relay.start({
+    registry: registryOf({ lead, alpha, beta }),
+    cwd: repo,
+    lead: { id: 'advisor', agent: 'lead', role: 'advisor' },
+    implementer: { id: 'seat-alpha', agent: 'alpha', role: 'implementer' },
+    implementers: [
+      { id: 'seat-alpha', agent: 'alpha', role: 'implementer' },
+      { id: 'seat-beta', agent: 'beta', role: 'implementer' },
+    ],
+    maxAdvisorTurns: 3,
+  })
   try {
-    const relay = await Relay.start({
-      registry: registryOf({ lead, alpha, beta }),
-      cwd: repo,
-      lead: { id: 'advisor', agent: 'lead', role: 'advisor' },
-      implementer: { id: 'seat-alpha', agent: 'alpha', role: 'implementer' },
-      implementers: [
-        { id: 'seat-alpha', agent: 'alpha', role: 'implementer' },
-        { id: 'seat-beta', agent: 'beta', role: 'implementer' },
+    assert.deepEqual(
+      relay.participants.map((p) => p.id),
+      ['advisor', 'seat-alpha', 'seat-beta'],
+      'both implementer seats must be joined, after the lead and in configured order',
+    )
+    assert.deepEqual(
+      relay.participants.map((p) => p.rank),
+      ['advisor', 'implementer', 'implementer'],
+      'both seats must be joined at implementer rank',
+    )
+    assert.deepEqual(
+      joinNotes(relay.log),
+      [
+        'advisor joined as advisor (lead)',
+        'seat-alpha joined as implementer (alpha)',
+        'seat-beta joined as implementer (beta)',
       ],
-      maxAdvisorTurns: 3,
+      'the routing log must account for every seat that was started',
+    )
+    assert.deepEqual(
+      lockedParticipants(repo),
+      [
+        { id: 'advisor', agent: 'lead' },
+        { id: 'seat-alpha', agent: 'alpha' },
+        { id: 'seat-beta', agent: 'beta' },
+      ],
+      'a seat missing from the lock is a writer the workspace guard cannot attribute a change to',
+    )
+
+    const outcome = await relay.run('Keep the work moving.')
+    assert.equal(outcome.reason, 'done', 'the two-seat run must reach its end')
+
+    // The briefing, per seat. A seat that was never briefed does not know it is in a relay,
+    // and nothing about the run would say so.
+    assert.match(alpha.received[0] ?? '', BRIEFED, 'the first seat must be briefed')
+    assert.match(beta.received[0] ?? '', BRIEFED, 'the second seat must be briefed too')
+
+    // The record an operator actually reads, built by the production assembler rather than
+    // from the participant list directly.
+    const report = await runReport(relay, {
+      goal: 'Keep the work moving.',
+      outcome,
+      startedAt: Date.now(),
+      build: 'test',
     })
-    try {
-      assert.deepEqual(
-        relay.participants.map((p) => p.id),
-        ['advisor', 'seat-alpha', 'seat-beta'],
-        'both implementer seats must be joined, after the lead and in configured order',
-      )
-      assert.deepEqual(
-        relay.participants.map((p) => p.rank),
-        ['advisor', 'implementer', 'implementer'],
-        'both seats must be joined at implementer rank',
-      )
-      assert.deepEqual(
-        joinNotes(relay.log),
-        [
-          'advisor joined as advisor (lead)',
-          'seat-alpha joined as implementer (alpha)',
-          'seat-beta joined as implementer (beta)',
-        ],
-        'the routing log must account for every seat that was started',
-      )
-      assert.deepEqual(
-        lockedParticipants(repo),
-        [
-          { id: 'advisor', agent: 'lead' },
-          { id: 'seat-alpha', agent: 'alpha' },
-          { id: 'seat-beta', agent: 'beta' },
-        ],
-        'a seat missing from the lock is a writer the workspace guard cannot attribute a change to',
-      )
-
-      const outcome = await relay.run('Keep the work moving.')
-      assert.equal(outcome.reason, 'done', 'the two-seat run must reach its end')
-
-      // The briefing, per seat. A seat that was never briefed does not know it is in a relay,
-      // and nothing about the run would say so.
-      assert.match(alpha.received[0] ?? '', BRIEFED, 'the first seat must be briefed')
-      assert.match(beta.received[0] ?? '', BRIEFED, 'the second seat must be briefed too')
-
-      // The record an operator actually reads, built by the production assembler rather than
-      // from the participant list directly.
-      const report = await runReport(relay, {
-        goal: 'Keep the work moving.',
-        outcome,
-        startedAt: Date.now(),
-        build: 'test',
-      })
-      assert.deepEqual(
-        report.participants.map((p) => p.id).sort(),
-        ['advisor', 'seat-alpha', 'seat-beta'],
-        'the run report must carry every seat',
-      )
-      assert.deepEqual(
-        report.deadlines.participants.map((p) => p.id).sort(),
-        ['advisor', 'seat-alpha', 'seat-beta'],
-        'every seat must be measured against declared deadlines',
-      )
-    } finally {
-      await relay.stop()
-    }
+    assert.deepEqual(
+      report.participants.map((p) => p.id).sort(),
+      ['advisor', 'seat-alpha', 'seat-beta'],
+      'the run report must carry every seat',
+    )
+    assert.deepEqual(
+      report.deadlines.participants.map((p) => p.id).sort(),
+      ['advisor', 'seat-alpha', 'seat-beta'],
+      'every seat must be measured against declared deadlines',
+    )
   } finally {
-    rmSync(repo, { recursive: true, force: true })
+    await relay.stop()
   }
 })
 
-test('both seats get the closing question, so neither loses its last word', async () => {
-  const repo = tempRepo()
+test('both seats get the closing question, so neither loses its last word', async (t) => {
+  const repo = tempRepo(t)
   const lead = new FakeRotationSession('lead-1', 'lead', ['Do the thing.', 'DONE'])
   const alpha = new FakeRotationSession('alpha-1', 'alpha', ['ack', 'Did it.', 'NONE'])
   const beta = new FakeRotationSession('beta-1', 'beta', ['ack', 'FLAG: I was never given anything to do.'])
+  const relay = await Relay.start({
+    registry: registryOf({ lead, alpha, beta }),
+    cwd: repo,
+    lead: { id: 'advisor', agent: 'lead', role: 'advisor' },
+    implementer: { id: 'seat-alpha', agent: 'alpha', role: 'implementer' },
+    implementers: [
+      { id: 'seat-alpha', agent: 'alpha', role: 'implementer' },
+      { id: 'seat-beta', agent: 'beta', role: 'implementer' },
+    ],
+    maxAdvisorTurns: 3,
+  })
   try {
-    const relay = await Relay.start({
-      registry: registryOf({ lead, alpha, beta }),
-      cwd: repo,
-      lead: { id: 'advisor', agent: 'lead', role: 'advisor' },
-      implementer: { id: 'seat-alpha', agent: 'alpha', role: 'implementer' },
-      implementers: [
-        { id: 'seat-alpha', agent: 'alpha', role: 'implementer' },
-        { id: 'seat-beta', agent: 'beta', role: 'implementer' },
-      ],
-      maxAdvisorTurns: 3,
-    })
-    try {
-      await relay.run('Keep the work moving.')
-      // The idle seat's flag is the sharp end of this: it is reachable only by asking a seat
-      // that was never dispatched to, which a single-seat closing question cannot do.
-      assert.deepEqual(
-        relay.flags.map((f) => f.participant),
-        ['seat-beta'],
-        'a seat that raised a flag at the close must be in the run summary',
-      )
-      const closing = relay.log.filter((m) => m.kind === 'note' && m.text.startsWith('closing statement:'))
-      assert.deepEqual(
-        closing.map((m) => m.from).sort(),
-        ['seat-alpha', 'seat-beta'],
-        'every seat that worked must be asked for its last word',
-      )
-    } finally {
-      await relay.stop()
-    }
+    await relay.run('Keep the work moving.')
+    // The idle seat's flag is the sharp end of this: it is reachable only by asking a seat
+    // that was never dispatched to, which a single-seat closing question cannot do.
+    assert.deepEqual(
+      relay.flags.map((f) => f.participant),
+      ['seat-beta'],
+      'a seat that raised a flag at the close must be in the run summary',
+    )
+    const closing = relay.log.filter((m) => m.kind === 'note' && m.text.startsWith('closing statement:'))
+    assert.deepEqual(
+      closing.map((m) => m.from).sort(),
+      ['seat-alpha', 'seat-beta'],
+      'every seat that worked must be asked for its last word',
+    )
   } finally {
-    rmSync(repo, { recursive: true, force: true })
+    await relay.stop()
   }
 })
 
-test('a seat list that cannot be resolved to seats is refused at start rather than half-built', async () => {
-  const repo = tempRepo()
+test('a seat list that cannot be resolved to seats is refused at start rather than half-built', async (t) => {
+  const repo = tempRepo(t)
   const registry = registryOf({
     lead: new FakeRotationSession('lead-1', 'lead', []),
     impl: new FakeRotationSession('impl-1', 'impl', []),
@@ -382,7 +370,7 @@ test('a seat list that cannot be resolved to seats is refused at start rather th
     lead: { id: 'advisor', agent: 'lead', role: 'implementer' as const },
     implementer: { id: 'implementer', agent: 'impl', role: 'implementer' as const },
   }
-  try {
+  {
     await assert.rejects(
       () => Relay.start({ ...base, lead: { ...base.lead, role: 'advisor' }, implementers: [] }),
       /at least one implementer seat/,
@@ -422,47 +410,41 @@ test('a seat list that cannot be resolved to seats is refused at start rather th
       /duplicate participant id 'implementer'/,
       'a seat id colliding with the lead must be refused as well',
     )
-  } finally {
-    rmSync(repo, { recursive: true, force: true })
   }
 })
 
-test('rotateImplementer refuses to pick a seat when the run has more than one', async () => {
-  const repo = tempRepo()
+test('rotateImplementer refuses to pick a seat when the run has more than one', async (t) => {
+  const repo = tempRepo(t)
   const lead = new FakeRotationSession('lead-1', 'lead', [])
   const alpha = new FakeRotationSession('alpha-1', 'alpha', [])
   const beta = new FakeRotationSession('beta-1', 'beta', [])
+  const relay = await Relay.start({
+    registry: registryOf({ lead, alpha, beta }),
+    cwd: repo,
+    lead: { id: 'advisor', agent: 'lead', role: 'advisor' },
+    implementer: { id: 'seat-alpha', agent: 'alpha', role: 'implementer' },
+    implementers: [
+      { id: 'seat-alpha', agent: 'alpha', role: 'implementer' },
+      { id: 'seat-beta', agent: 'beta', role: 'implementer' },
+    ],
+    // Armed, so the refusal below is about the seat count and not about a missing config.
+    rotation: { checks: ['exit 0'] },
+  })
   try {
-    const relay = await Relay.start({
-      registry: registryOf({ lead, alpha, beta }),
-      cwd: repo,
-      lead: { id: 'advisor', agent: 'lead', role: 'advisor' },
-      implementer: { id: 'seat-alpha', agent: 'alpha', role: 'implementer' },
-      implementers: [
-        { id: 'seat-alpha', agent: 'alpha', role: 'implementer' },
-        { id: 'seat-beta', agent: 'beta', role: 'implementer' },
-      ],
-      // Armed, so the refusal below is about the seat count and not about a missing config.
-      rotation: { checks: ['exit 0'] },
-    })
-    try {
-      await assert.rejects(
-        () => relay.rotateImplementer('it went quiet'),
-        /names no seat, and this run has 2 \(seat-alpha, seat-beta\)/,
-        'rotating "the implementer" when there are two would retire a session nobody asked about',
-      )
-      // Nothing was started or retired by the refusal.
-      assert.equal(alpha.state, 'running', 'the refusal must not have touched the first seat')
-      assert.equal(beta.state, 'running', 'the refusal must not have touched the second seat')
-    } finally {
-      await relay.stop()
-    }
+    await assert.rejects(
+      () => relay.rotateImplementer('it went quiet'),
+      /names no seat, and this run has 2 \(seat-alpha, seat-beta\)/,
+      'rotating "the implementer" when there are two would retire a session nobody asked about',
+    )
+    // Nothing was started or retired by the refusal.
+    assert.equal(alpha.state, 'running', 'the refusal must not have touched the first seat')
+    assert.equal(beta.state, 'running', 'the refusal must not have touched the second seat')
   } finally {
-    rmSync(repo, { recursive: true, force: true })
+    await relay.stop()
   }
 })
 
-test('a degraded seat in a multi-seat run is REPLACED, and its sibling is not disturbed (#78)', async () => {
+test('a degraded seat in a multi-seat run is REPLACED, and its sibling is not disturbed (#78)', async (t) => {
   // Three behaviours in one run, because they are one behaviour seen from three sides.
   //
   // This test has been rewritten twice, and both earlier versions are worth knowing about. The
@@ -477,7 +459,7 @@ test('a degraded seat in a multi-seat run is REPLACED, and its sibling is not di
   // leaves the other seats alone -- so what is asserted here is the rotation happening AND the
   // sibling being untouched by it. The other seat is the whole point: a rotation is not a
   // run-wide event.
-  const repo = tempRepo()
+  const repo = tempRepo(t)
   const lead = new FakeRotationSession('lead-1', 'lead', [
     '@seat seat-alpha: Do the thing.',
     // The handoff turn. The advisor writes the narrative when the transaction asks for it, and
@@ -491,79 +473,75 @@ test('a degraded seat in a multi-seat run is REPLACED, and its sibling is not di
   const alphaNext = new FakeRotationSession('alpha-2', 'alpha', [ACCEPTED, 'NONE', 'NONE'])
   const beta = new FakeRotationSession('beta-1', 'beta', ['ack', 'NONE', 'NONE'])
   const creates: { id: string; cwd: string; nth: number }[] = []
+  const relay = await Relay.start({
+    registry: registryOfQueues({ lead: [lead], alpha: [alpha, alphaNext], beta: [beta] }, creates),
+    cwd: repo,
+    lead: { id: 'advisor', agent: 'lead', role: 'advisor' },
+    implementer: { id: 'seat-alpha', agent: 'alpha', role: 'implementer' },
+    implementers: [
+      { id: 'seat-alpha', agent: 'alpha', role: 'implementer' },
+      { id: 'seat-beta', agent: 'beta', role: 'implementer' },
+    ],
+    maxAdvisorTurns: 4,
+    // Set to ACT, which is the only configuration that reaches the rotation call at all: the
+    // default records a candidate and returns before it.
+    rotation: { checks: ['exit 0'], checkTimeoutMs: 30_000, onDegradation: 'automatic' },
+  })
   try {
-    const relay = await Relay.start({
-      registry: registryOfQueues({ lead: [lead], alpha: [alpha, alphaNext], beta: [beta] }, creates),
-      cwd: repo,
-      lead: { id: 'advisor', agent: 'lead', role: 'advisor' },
-      implementer: { id: 'seat-alpha', agent: 'alpha', role: 'implementer' },
-      implementers: [
-        { id: 'seat-alpha', agent: 'alpha', role: 'implementer' },
-        { id: 'seat-beta', agent: 'beta', role: 'implementer' },
-      ],
-      maxAdvisorTurns: 4,
-      // Set to ACT, which is the only configuration that reaches the rotation call at all: the
-      // default records a candidate and returns before it.
-      rotation: { checks: ['exit 0'], checkTimeoutMs: 30_000, onDegradation: 'automatic' },
-    })
-    try {
-      // Turn 0 is the briefing, so turn 1 is the first turn that does work. Compaction alone
-      // is degradation -- a session may compact without saying so.
-      alpha.compactOnTurn = 1
-      const outcome = await relay.run('Keep the work moving.')
+    // Turn 0 is the briefing, so turn 1 is the first turn that does work. Compaction alone
+    // is degradation -- a session may compact without saying so.
+    alpha.compactOnTurn = 1
+    const outcome = await relay.run('Keep the work moving.')
 
-      assert.notEqual(
-        outcome.reason,
-        'transport_failed',
-        'a policy gap reported as a transport fault sends the operator to the wrong place entirely',
-      )
-      assert.notEqual(outcome.reason, 'escalated', 'a seat that CAN be replaced does not need a human')
+    assert.notEqual(
+      outcome.reason,
+      'transport_failed',
+      'a policy gap reported as a transport fault sends the operator to the wrong place entirely',
+    )
+    assert.notEqual(outcome.reason, 'escalated', 'a seat that CAN be replaced does not need a human')
 
-      // The transfer happened, to the seat that degraded and to no other.
-      assert.equal(relay.rotationWatch.rotations, 1, 'the degraded seat was replaced')
-      assert.equal(alpha.state, 'terminated', 'the degraded session is retired once the replacement proved itself')
-      assert.equal(
-        relay.participants.find((p) => p.id === 'seat-alpha')!.session,
-        alphaNext,
-        'and the seat is now running the replacement, under the same id',
-      )
-      assert.ok(relay.log.some((m) => /^rotating seat-alpha/.test(m.text)))
+    // The transfer happened, to the seat that degraded and to no other.
+    assert.equal(relay.rotationWatch.rotations, 1, 'the degraded seat was replaced')
+    assert.equal(alpha.state, 'terminated', 'the degraded session is retired once the replacement proved itself')
+    assert.equal(
+      relay.participants.find((p) => p.id === 'seat-alpha')!.session,
+      alphaNext,
+      'and the seat is now running the replacement, under the same id',
+    )
+    assert.ok(relay.log.some((m) => /^rotating seat-alpha/.test(m.text)))
 
-      // THE SIBLING. Not quiesced, not retired, not replaced, and never spoken to about any of
-      // it: a rotation that touched the other seats would be a run-wide event wearing a seat's
-      // name, and the seat it disturbed would have lost a session for somebody else's problem.
-      assert.equal(beta.state, 'running', 'the other seat keeps its session')
-      assert.equal(relay.participants.find((p) => p.id === 'seat-beta')!.session, beta)
-      assert.deepEqual(beta.transitions, [], 'and was not put through any of the transaction’s states')
-      assert.ok(
-        !beta.received.some((m) => /handoff|CHECK 1/i.test(m)),
-        'nor was it asked to take part in another seat’s transfer',
-      )
+    // THE SIBLING. Not quiesced, not retired, not replaced, and never spoken to about any of
+    // it: a rotation that touched the other seats would be a run-wide event wearing a seat's
+    // name, and the seat it disturbed would have lost a session for somebody else's problem.
+    assert.equal(beta.state, 'running', 'the other seat keeps its session')
+    assert.equal(relay.participants.find((p) => p.id === 'seat-beta')!.session, beta)
+    assert.deepEqual(beta.transitions, [], 'and was not put through any of the transaction’s states')
+    assert.ok(
+      !beta.received.some((m) => /handoff|CHECK 1/i.test(m)),
+      'nor was it asked to take part in another seat’s transfer',
+    )
 
-      // The replacement was verified in seat-alpha's OWN tree, which is the other half of
-      // "seat-local": a transfer measured in the integration checkout would be measuring work
-      // this seat never did.
-      const tree = relay.worktrees!.seats.find((s) => s.seatId === 'seat-alpha')!.worktreePath
-      assert.ok(
-        relay.log.some((m) => m.text.includes('handoff recorded')),
-        'the record was captured',
-      )
-      assert.equal(
-        creates.find((c) => c.id === 'seat-alpha' && c.nth === 2)?.cwd,
-        tree,
-        'the replacement must be started in the tree of the seat it replaces',
-      )
-      // The detector still ran and still saw it. Acting is not a substitute for looking.
-      assert.ok(relay.rotationWatch.degradationsSeen >= 1, 'the degradation was seen and counted')
-    } finally {
-      await relay.stop()
-    }
+    // The replacement was verified in seat-alpha's OWN tree, which is the other half of
+    // "seat-local": a transfer measured in the integration checkout would be measuring work
+    // this seat never did.
+    const tree = relay.worktrees!.seats.find((s) => s.seatId === 'seat-alpha')!.worktreePath
+    assert.ok(
+      relay.log.some((m) => m.text.includes('handoff recorded')),
+      'the record was captured',
+    )
+    assert.equal(
+      creates.find((c) => c.id === 'seat-alpha' && c.nth === 2)?.cwd,
+      tree,
+      'the replacement must be started in the tree of the seat it replaces',
+    )
+    // The detector still ran and still saw it. Acting is not a substitute for looking.
+    assert.ok(relay.rotationWatch.degradationsSeen >= 1, 'the degradation was seen and counted')
   } finally {
-    rmSync(repo, { recursive: true, force: true })
+    await relay.stop()
   }
 })
 
-test('#89 a seat in a defined role is an implementer by RANK, and is briefed as one', async () => {
+test('#89 a seat in a defined role is an implementer by RANK, and is briefed as one', async (t) => {
   // The riskiest line in #89. `#implementers()` used to ask `role === 'implementer'`, which
   // answered correctly only while every writing seat had that exact role. A seat in role
   // `frontend` is rank `implementer`, and a role test drops it silently -- out of the seat
@@ -572,67 +550,63 @@ test('#89 a seat in a defined role is an implementer by RANK, and is briefed as 
   // Two seats, one of them in a defined role. If the role test came back the count falls to
   // one, `targetingWatch.applicable` goes false, and the multi-seat briefing disappears --
   // which is what this asserts, because it is an effect an operator would actually feel.
-  const repo = tempRepo()
+  const repo = tempRepo(t)
   const lead = new FakeRotationSession('lead-1', 'lead', ['Do the thing.', 'DONE'])
   const alpha = new FakeRotationSession('alpha-1', 'alpha', ['ack', 'Did it.', 'NONE'])
   const beta = new FakeRotationSession('beta-1', 'beta', ['ack', 'NONE'])
+  const relay = await Relay.start({
+    // The registry must KNOW the role, which is how the CLI wires it: `defaultRegistry` is
+    // given `rolesWithDefined(config.roles)`. Without that a named seat fails at join with
+    // `unknown role`, which is the correct refusal and not the thing under test here.
+    registry: registryOf({ lead, alpha, beta }, rolesWithDefined({ frontend: { description: 'ui' } })),
+    cwd: repo,
+    lead: { id: 'advisor', agent: 'lead', role: 'advisor' },
+    implementer: { id: 'seat-alpha', agent: 'alpha', role: 'implementer' },
+    implementers: [
+      { id: 'seat-alpha', agent: 'alpha', role: 'implementer' },
+      { id: 'seat-beta', agent: 'beta', role: 'frontend' },
+    ],
+    roleDescriptions: { frontend: 'front-end UI work; never migrations' },
+    maxAdvisorTurns: 3,
+  })
   try {
-    const relay = await Relay.start({
-      // The registry must KNOW the role, which is how the CLI wires it: `defaultRegistry` is
-      // given `rolesWithDefined(config.roles)`. Without that a named seat fails at join with
-      // `unknown role`, which is the correct refusal and not the thing under test here.
-      registry: registryOf({ lead, alpha, beta }, rolesWithDefined({ frontend: { description: 'ui' } })),
-      cwd: repo,
-      lead: { id: 'advisor', agent: 'lead', role: 'advisor' },
-      implementer: { id: 'seat-alpha', agent: 'alpha', role: 'implementer' },
-      implementers: [
-        { id: 'seat-alpha', agent: 'alpha', role: 'implementer' },
-        { id: 'seat-beta', agent: 'beta', role: 'frontend' },
-      ],
-      roleDescriptions: { frontend: 'front-end UI work; never migrations' },
-      maxAdvisorTurns: 3,
-    })
-    try {
-      // The briefings are composed when the relay RUNS, not when it starts.
-      await relay.run('Keep the work moving.')
-      // Rank is what it IS; role is what it is FOR. `#join` has always announced the two
-      // separately -- this is that distinction reaching a seat an operator named.
-      assert.deepEqual(relay.participants.map((p) => p.rank), ['advisor', 'implementer', 'implementer'])
-      assert.deepEqual(relay.participants.map((p) => p.role), ['advisor', 'implementer', 'frontend'])
-      assert.ok(
-        joinNotes(relay.log).includes('seat-beta joined as implementer in role frontend (beta)'),
-        `the role must be named where it differs from the rank: ${JSON.stringify(joinNotes(relay.log))}`,
-      )
+    // The briefings are composed when the relay RUNS, not when it starts.
+    await relay.run('Keep the work moving.')
+    // Rank is what it IS; role is what it is FOR. `#join` has always announced the two
+    // separately -- this is that distinction reaching a seat an operator named.
+    assert.deepEqual(relay.participants.map((p) => p.rank), ['advisor', 'implementer', 'implementer'])
+    assert.deepEqual(relay.participants.map((p) => p.role), ['advisor', 'implementer', 'frontend'])
+    assert.ok(
+      joinNotes(relay.log).includes('seat-beta joined as implementer in role frontend (beta)'),
+      `the role must be named where it differs from the rank: ${JSON.stringify(joinNotes(relay.log))}`,
+    )
 
-      // The briefings go to the SESSIONS; the routing log carries the goal and the notes.
-      // `received` is what each child was actually sent, which is the only place the composed
-      // prose exists.
-      const toAdvisor = lead.received.join('\n')
-      assert.match(
-        toAdvisor,
-        /THIS RUN'S SEATS HAVE NAMED ROLES/,
-        `the advisor must be told what the named seat is for: ${toAdvisor.slice(0, 300)}`,
-      )
-      assert.match(toAdvisor, /seat-beta \(frontend\) — front-end UI work/)
-      // The seat COUNT, which is what a role test would quietly get wrong: the multi-seat
-      // notice is composed from `#implementers()`, so if the role-named seat stopped counting
-      // this reads 1, or does not appear at all.
-      const notices = relay.log.filter((m) => m.kind === 'note' && m.text.includes('IMPLEMENTER SEATS'))
-      assert.ok(
-        notices.some((m) => m.text.includes('THIS RUN HAS 2 IMPLEMENTER SEATS')),
-        `a seat in a named role must still be counted as an implementer: ${JSON.stringify(notices.map((m) => m.text.slice(0, 60)))}`,
-      )
+    // The briefings go to the SESSIONS; the routing log carries the goal and the notes.
+    // `received` is what each child was actually sent, which is the only place the composed
+    // prose exists.
+    const toAdvisor = lead.received.join('\n')
+    assert.match(
+      toAdvisor,
+      /THIS RUN'S SEATS HAVE NAMED ROLES/,
+      `the advisor must be told what the named seat is for: ${toAdvisor.slice(0, 300)}`,
+    )
+    assert.match(toAdvisor, /seat-beta \(frontend\) — front-end UI work/)
+    // The seat COUNT, which is what a role test would quietly get wrong: the multi-seat
+    // notice is composed from `#implementers()`, so if the role-named seat stopped counting
+    // this reads 1, or does not appear at all.
+    const notices = relay.log.filter((m) => m.kind === 'note' && m.text.includes('IMPLEMENTER SEATS'))
+    assert.ok(
+      notices.some((m) => m.text.includes('THIS RUN HAS 2 IMPLEMENTER SEATS')),
+      `a seat in a named role must still be counted as an implementer: ${JSON.stringify(notices.map((m) => m.text.slice(0, 60)))}`,
+    )
 
-      // And the seat itself was opened by the loop over `#implementers()`, and told its job.
-      const toBeta = beta.received.join('\n')
-      assert.match(toBeta, /YOUR SEAT HAS A NAMED ROLE: frontend/)
-      assert.match(toBeta, /never migrations/)
-      // An ordinary seat is told nothing extra, so the default run is unchanged.
-      assert.doesNotMatch(alpha.received.join('\n'), /YOUR SEAT HAS A NAMED ROLE/)
-    } finally {
-      await relay.stop()
-    }
+    // And the seat itself was opened by the loop over `#implementers()`, and told its job.
+    const toBeta = beta.received.join('\n')
+    assert.match(toBeta, /YOUR SEAT HAS A NAMED ROLE: frontend/)
+    assert.match(toBeta, /never migrations/)
+    // An ordinary seat is told nothing extra, so the default run is unchanged.
+    assert.doesNotMatch(alpha.received.join('\n'), /YOUR SEAT HAS A NAMED ROLE/)
   } finally {
-    rmSync(repo, { recursive: true, force: true })
+    await relay.stop()
   }
 })

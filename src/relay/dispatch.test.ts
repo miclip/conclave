@@ -21,14 +21,15 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
+import type { TestContext } from 'node:test'
 import type { AgentSession, TurnKey } from '../contract/session.ts'
 import { AgentRegistry } from '../registry/registry.ts'
 import { NO_DEADLINE_CLOCKS } from '../registry/types.ts'
 import { FakeRotationSession } from '../rotation/fakeSession.ts'
+import { tempDir } from '../testkit/tempDir.ts'
 import {
   canTake,
   cancelledByFailedDependencies,
@@ -49,8 +50,8 @@ import {
 } from './dispatch.ts'
 import { InvariantViolatedError, Relay, type RelayOptions } from './relay.ts'
 
-function repo(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'conclave-dispatch-'))
+function repo(t: TestContext): string {
+  const dir = tempDir(t, 'conclave-dispatch')
   execFileSync('git', ['init', '-q'], { cwd: dir })
   writeFileSync(join(dir, 'work.ts'), 'export const answer = 42\n')
   writeFileSync(join(dir, '.gitignore'), '.conclave/\n')
@@ -148,7 +149,7 @@ test('#74 an invariant the orchestrator broke is not reported as a transport fai
   // invariant on purpose to watch the guard fire, and the guard is not what would be tested
   // then. What is tested here is the mapping: this error class, out of the loop, must not land
   // in the transport bucket.
-  const dir = repo()
+  const dir = repo(t)
   const advisor = new FakeRotationSession('advisor-1', 'codex', ['Do the thing.', 'DONE'])
   const impl = new FakeRotationSession('impl-1', 'claude', ['ack', 'Did it.', 'NONE'])
   impl.onSend = () => {
@@ -239,7 +240,7 @@ function task(over: Partial<Task> = {}): Task {
 }
 
 test('the N=1 schedule is advisor, implementer, advisor, implementer, and a closing question', async (t) => {
-  const dir = repo()
+  const dir = repo(t)
   const trace: string[] = []
   const advisor = new TracedSession('advisor', trace, 'advisor-1', 'codex', [
     'Do the first thing.',
@@ -287,7 +288,7 @@ test('the N=1 schedule is advisor, implementer, advisor, implementer, and a clos
 })
 
 test('admission order is the order the routing log recorded the instructions in', async (t) => {
-  const dir = repo()
+  const dir = repo(t)
   const advisor = new FakeRotationSession('advisor-1', 'codex', [
     'Do the first thing.',
     'Do the second thing.',
@@ -329,7 +330,7 @@ test('admission order is the order the routing log recorded the instructions in'
 })
 
 test('every task runs the full transition sequence, in order, and ends routed and integrated', async (t) => {
-  const dir = repo()
+  const dir = repo(t)
   const advisor = new FakeRotationSession('advisor-1', 'codex', ['Do the thing.', 'DONE'])
   const impl = new FakeRotationSession('impl-1', 'claude', ['ack', 'Did it.', 'NONE'])
   const relay = await relayOf(dir, advisor, impl)
@@ -360,7 +361,7 @@ test('every task runs the full transition sequence, in order, and ends routed an
 })
 
 test('the recorded turn_end is the one the verdict was read from, not the withdrawn one', async (t) => {
-  const dir = repo()
+  const dir = repo(t)
   const advisor = new FakeRotationSession('advisor-1', 'codex', ['Do the thing.', 'DONE'])
   const impl = new FakeRotationSession('impl-1', 'claude', ['ack', 'Did it.', 'NONE'])
   // Turn 1 is the first that does work; turn 0 is the briefing. It ends `timed_out` and a late
@@ -399,7 +400,7 @@ test('the recorded turn_end is the one the verdict was read from, not the withdr
 })
 
 test('no task is dispatched until the previous one has a graded verdict', async (t) => {
-  const dir = repo()
+  const dir = repo(t)
   const advisor = new FakeRotationSession('advisor-1', 'codex', [
     'Do the first thing.',
     'Do the second thing.',
@@ -433,7 +434,7 @@ test('no task is dispatched until the previous one has a graded verdict', async 
 })
 
 test('a seat whose report is in but whose verdict is not graded refuses a dispatch', async (t) => {
-  const dir = repo()
+  const dir = repo(t)
   const advisor = new FakeRotationSession('advisor-1', 'codex', ['Do the thing.', 'DONE'])
   const impl = new FakeRotationSession('impl-1', 'claude', [
     'ack',
@@ -542,7 +543,7 @@ test('an advisor reply naming a target the run does not have fails closed', () =
 })
 
 test('a reply the dispatcher cannot admit takes the empty-instruction path, in those words', async (t) => {
-  const dir = repo()
+  const dir = repo(t)
   // An exhausted script yields '', which is the reachable parse failure: no reply the advisor
   // can currently write carries a target, so `unknown_target` cannot be provoked through a run
   // until target syntax exists. What CAN be pinned is that the operator-visible path has no
@@ -682,7 +683,7 @@ test('integration and routing are independent facts, recorded in either order', 
 })
 
 test('the queue and the seat table handed out share nothing with the originals', async (t) => {
-  const dir = repo()
+  const dir = repo(t)
   const advisor = new FakeRotationSession('advisor-1', 'codex', ['Do the thing.', 'DONE'])
   const impl = new FakeRotationSession('impl-1', 'claude', ['ack', 'Did it.', 'NONE'])
   const relay = await relayOf(dir, advisor, impl)
@@ -911,7 +912,7 @@ test('the sweep is wired into the dispatch boundary and cancels nothing in a rea
   // condemn. Asserted anyway, because "runs at the dispatch boundary and is inert" is the
   // claim being made -- a sweep that cancelled work in an ordinary run would be the worst
   // possible regression and nothing else in the suite is watching for it.
-  const dir = repo()
+  const dir = repo(t)
   const advisor = new FakeRotationSession('advisor-1', 'codex', ['Do the thing.', 'And again.', 'DONE'])
   const impl = new FakeRotationSession('impl-1', 'claude', ['ack', 'Did it.', 'ack', 'Did that too.', 'NONE'])
   const relay = await relayOf(dir, advisor, impl, { maxAdvisorTurns: 5 })

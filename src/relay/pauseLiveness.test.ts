@@ -21,16 +21,17 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
+import type { TestContext } from 'node:test'
 import type { Verdict } from '../contract/outcome.ts'
 import type { AgentSession } from '../contract/session.ts'
 import type { ChildLiveness } from '../outcomes/liveness.ts'
 import { AgentRegistry } from '../registry/registry.ts'
 import { NO_DEADLINE_CLOCKS } from '../registry/types.ts'
 import { FakeRotationSession } from '../rotation/fakeSession.ts'
+import { tempDir } from '../testkit/tempDir.ts'
 import { newSessionId, recordSession, sessionDir } from '../workspace/sessionRecord.ts'
 import { Relay, type RelayOptions } from './relay.ts'
 import type { RunPause } from './run.ts'
@@ -72,8 +73,8 @@ const QUIET: ChildLiveness = {
   measuredAt: 0,
 }
 
-function repo(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'conclave-pause-liveness-'))
+function repo(t: TestContext): string {
+  const dir = tempDir(t, 'conclave-pause-liveness')
   execFileSync('git', ['init', '-q'], { cwd: dir })
   writeFileSync(join(dir, 'work.ts'), 'export const answer = 42\n')
   writeFileSync(join(dir, '.gitignore'), '.conclave/\n')
@@ -155,7 +156,7 @@ function livenessLine(p: RunPause | undefined): string | undefined {
 }
 
 test('the evidence a paused run publishes changes when the child does', async (t) => {
-  const dir = repo()
+  const dir = repo(t)
   const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it, slowly.'])
   impl.endTurn = { index: 1, verdict: TIMED_OUT }
   impl.childPid = CHILD_PID
@@ -170,7 +171,6 @@ test('the evidence a paused run publishes changes when the child does', async (t
     // is visible.
     livenessRefreshLimit: 3,
   })
-  t.after(() => relay.stop())
 
   const id = newSessionId(Date.now(), process.pid)
   const recording = recordSession(relay, {
@@ -181,88 +181,96 @@ test('the evidence a paused run publishes changes when the child does', async (t
     startedAt: Date.now(),
     build: 'test',
   })
-  t.after(() => recording.close())
+  try {
+    const run = relay.start('Keep the work moving.')
+    const pause = await run.untilPause()
+    assert.ok(pause)
+    assert.equal(pause.reason, 'turn_incomplete')
+    // What the console does at a pause, and the only reason the pause is in the file at all.
+    recording.set('paused', { pause })
 
-  const run = relay.start('Keep the work moving.')
-  const pause = await run.untilPause()
-  assert.ok(pause)
-  assert.equal(pause.reason, 'turn_incomplete')
-  // What the console does at a pause, and the only reason the pause is in the file at all.
-  recording.set('paused', { pause })
+    // The reading the pause was raised on: the issue's own numbers, and its own wrong advice.
+    const first = recordedPause(dir, id)
+    const firstLine = livenessLine(first)
+    assert.ok(firstLine, `no liveness line in ${JSON.stringify(first?.evidence)}`)
+    assert.match(firstLine, /is still working \(cpu 3\.3%, 5\.1%, 3\.5%\)/)
+    assert.match(firstLine, /Continuing sends into a live turn/)
+    // Timestamped from the first line onwards, which is half of the fix on its own: a reader can
+    // discount an old measurement and cannot discount one that looks current.
+    assert.match(firstLine, /Measured \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ/)
+    assert.match(firstLine, /re-measured while the pause lasts/)
+    assert.equal(first?.liveness?.participant, 'implementer')
+    assert.equal(first?.liveness?.reading, 'working')
+    assert.equal(first?.liveness?.refreshes, 0)
+    assert.equal(first?.liveness?.final, undefined)
+    assert.deepEqual(first?.liveness?.sample.samples, [3.3, 5.1, 3.5])
+    assert.equal(first.evidence[first.liveness!.index], firstLine, 'index names its own line')
 
-  // The reading the pause was raised on: the issue's own numbers, and its own wrong advice.
-  const first = recordedPause(dir, id)
-  const firstLine = livenessLine(first)
-  assert.ok(firstLine, `no liveness line in ${JSON.stringify(first?.evidence)}`)
-  assert.match(firstLine, /is still working \(cpu 3\.3%, 5\.1%, 3\.5%\)/)
-  assert.match(firstLine, /Continuing sends into a live turn/)
-  // Timestamped from the first line onwards, which is half of the fix on its own: a reader can
-  // discount an old measurement and cannot discount one that looks current.
-  assert.match(firstLine, /Measured \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ/)
-  assert.match(firstLine, /re-measured while the pause lasts/)
-  assert.equal(first?.liveness?.participant, 'implementer')
-  assert.equal(first?.liveness?.reading, 'working')
-  assert.equal(first?.liveness?.refreshes, 0)
-  assert.equal(first?.liveness?.final, undefined)
-  assert.deepEqual(first?.liveness?.sample.samples, [3.3, 5.1, 3.5])
-  assert.equal(first.evidence[first.liveness!.index], firstLine, 'index names its own line')
+    // THE ASSERTION THIS FILE EXISTS FOR. The child went quiet; the published evidence follows.
+    const second = await until('the recorded evidence to be re-measured', () => {
+      const p = recordedPause(dir, id)
+      return p?.liveness && p.liveness.refreshes > 0 ? p : undefined
+    })
+    const secondLine = livenessLine(second)!
+    assert.match(secondLine, /is alive but not computing \(cpu 0\.2%, 0\.7%, 0\.2%\)/)
+    assert.doesNotMatch(secondLine, /is still working/, 'the replayed claim is gone')
+    assert.doesNotMatch(secondLine, /Continuing sends into a live turn/)
+    assert.match(secondLine, /re-measured \d+ time\(s\) since the pause was raised/)
+    assert.equal(second.liveness!.reading, 'not_computing')
+    assert.ok(
+      second.liveness!.sample.measuredAt > first.liveness!.sample.measuredAt,
+      'the measurement is newer than the one it replaced',
+    )
+    assert.equal(second.liveness!.firstAt, first.liveness!.sample.measuredAt, 'the original reading is still dated')
+    assert.notEqual(secondLine, firstLine)
 
-  // THE ASSERTION THIS FILE EXISTS FOR. The child went quiet; the published evidence follows.
-  const second = await until('the recorded evidence to be re-measured', () => {
-    const p = recordedPause(dir, id)
-    return p?.liveness && p.liveness.refreshes > 0 ? p : undefined
-  })
-  const secondLine = livenessLine(second)!
-  assert.match(secondLine, /is alive but not computing \(cpu 0\.2%, 0\.7%, 0\.2%\)/)
-  assert.doesNotMatch(secondLine, /is still working/, 'the replayed claim is gone')
-  assert.doesNotMatch(secondLine, /Continuing sends into a live turn/)
-  assert.match(secondLine, /re-measured \d+ time\(s\) since the pause was raised/)
-  assert.equal(second.liveness!.reading, 'not_computing')
-  assert.ok(
-    second.liveness!.sample.measuredAt > first.liveness!.sample.measuredAt,
-    'the measurement is newer than the one it replaced',
-  )
-  assert.equal(second.liveness!.firstAt, first.liveness!.sample.measuredAt, 'the original reading is still dated')
-  assert.notEqual(secondLine, firstLine)
+    // The bound, and the fact that reaching it is SAID. A refresher that fell silent here would
+    // leave a number that looks live and is not -- #101 again, with newer digits in it.
+    const last = await until('re-measuring to reach its bound', () => {
+      const p = recordedPause(dir, id)
+      return p?.liveness?.final ? p : undefined
+    })
+    assert.equal(last.liveness!.refreshes, 3)
+    assert.match(livenessLine(last)!, /re-measuring has reached its limit of 3/)
+    assert.match(livenessLine(last)!, /no longer updates and only ages from here/)
 
-  // The bound, and the fact that reaching it is SAID. A refresher that fell silent here would
-  // leave a number that looks live and is not -- #101 again, with newer digits in it.
-  const last = await until('re-measuring to reach its bound', () => {
-    const p = recordedPause(dir, id)
-    return p?.liveness?.final ? p : undefined
-  })
-  assert.equal(last.liveness!.refreshes, 3)
-  assert.match(livenessLine(last)!, /re-measuring has reached its limit of 3/)
-  assert.match(livenessLine(last)!, /no longer updates and only ages from here/)
+    // `wait` travels with the line that justifies it. It was offered on the working reading and
+    // is withdrawn once the child has gone quiet, because waiting is only the right answer while
+    // there is something to wait for -- the coupling `reportsChildOnCpu` exists to hold, now that
+    // the evidence it reads can move underneath it (#83).
+    assert.ok(first.options.includes('wait'), 'a working child is worth waiting for')
+    assert.ok(!last.options.includes('wait'), 'a quiet one is not')
+    assert.deepEqual(
+      last.options.filter((o) => o !== 'wait'),
+      first.options.filter((o) => o !== 'wait'),
+      'and nothing else about the menu moves: a CPU sample says nothing about the other options',
+    )
 
-  // `wait` travels with the line that justifies it. It was offered on the working reading and
-  // is withdrawn once the child has gone quiet, because waiting is only the right answer while
-  // there is something to wait for -- the coupling `reportsChildOnCpu` exists to hold, now that
-  // the evidence it reads can move underneath it (#83).
-  assert.ok(first.options.includes('wait'), 'a working child is worth waiting for')
-  assert.ok(!last.options.includes('wait'), 'a quiet one is not')
-  assert.deepEqual(
-    last.options.filter((o) => o !== 'wait'),
-    first.options.filter((o) => o !== 'wait'),
-    'and nothing else about the menu moves: a CPU sample says nothing about the other options',
-  )
+    // Nothing about a refresh DECIDES anything. The run is still paused, on the same pause object,
+    // and no refreshed reading resumed it. Continuing is the console's `/continue`, which reads the
+    // child's own turn at the moment of the decision and refuses only while one is open (#117) --
+    // it does not read any of this, and it has not refused on CPU since. (It did when this comment
+    // was written, and that is the sentence #124 was reported against.) See src/repl/session.test.ts.
+    assert.equal(run.state, 'paused')
+    assert.equal(run.pause, pause, 'refreshing amends the pause, it does not raise another')
 
-  // Nothing about a refresh DECIDES anything. The run is still paused, on the same pause object,
-  // and no refreshed reading resumed it. Continuing is the console's `/continue`, which reads the
-  // child's own turn at the moment of the decision and refuses only while one is open (#117) --
-  // it does not read any of this, and it has not refused on CPU since. (It did when this comment
-  // was written, and that is the sentence #124 was reported against.) See src/repl/session.test.ts.
-  assert.equal(run.state, 'paused')
-  assert.equal(run.pause, pause, 'refreshing amends the pause, it does not raise another')
-
-  await run.abort()
+    await run.abort()
+  } finally {
+    // Both awaited HERE rather than from `t.after`. `stop()` and the recorder's final refresh
+    // both WRITE into `dir`, `repo(t)` registered that directory's cleanup before either of
+    // them existed, and node:test runs `after` hooks in registration order -- so a `t.after`
+    // teardown fires after the directory is gone and writes into a path that no longer exists.
+    // Production order is preserved: the relay stops, then the recorder closes.
+    await relay.stop()
+    await recording.close()
+  }
 })
 
 test('a pause on a seat with no child pid carries no liveness block at all', async (t) => {
   // The other half of "best effort". An adapter that exposes no child leaves the pause reading
   // exactly as it did before, rather than gaining an empty block a reader would have to
   // interpret -- and nothing schedules a refresher for a measurement that was never taken.
-  const dir = repo()
+  const dir = repo(t)
   const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it, slowly.'])
   impl.endTurn = { index: 1, verdict: TIMED_OUT }
   let sampled = 0
@@ -292,7 +300,7 @@ test('a sampling failure keeps the last reading rather than blanking the line', 
   // A `ps` that throws mid-pause must not cost the operator the line they are deciding on. The
   // count still advances to the bound, so the evidence ends up saying it has stopped updating --
   // which is the honest report of a refresher that ran and learnt nothing.
-  const dir = repo()
+  const dir = repo(t)
   const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it, slowly.'])
   impl.endTurn = { index: 1, verdict: TIMED_OUT }
   impl.childPid = CHILD_PID
@@ -347,7 +355,7 @@ test('a run torn down at a pause stops re-measuring, rather than sampling a clos
   // immediately, and the released `#halt` then unwinds through the `finally`. The assertion below
   // is rewritten to the new premise rather than dropped, because a teardown that silently stopped
   // ending the run is exactly what this test is positioned to catch.
-  const dir = repo()
+  const dir = repo(t)
   const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it, slowly.'])
   impl.endTurn = { index: 1, verdict: TIMED_OUT }
   impl.childPid = CHILD_PID
@@ -378,7 +386,7 @@ test('a run torn down at a pause stops re-measuring, rather than sampling a clos
 test('a limit of zero means no refresher at all, not one measurement', async (t) => {
   // The bound is tested AFTER a reading is taken, so a zero that reached the timer would sample
   // once and then announce it had reached a limit of none.
-  const dir = repo()
+  const dir = repo(t)
   const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it, slowly.'])
   impl.endTurn = { index: 1, verdict: TIMED_OUT }
   impl.childPid = CHILD_PID

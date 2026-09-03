@@ -37,15 +37,33 @@
  */
 
 import { strict as assert } from 'node:assert'
-import { appendFileSync, mkdtempSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { appendFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
+import type { TestContext } from 'node:test'
 import type { AgentEvent, AgentSession, RevisionEvent, TurnEndEvent } from '../contract/session.ts'
 import { wedgeOneTailPoll, type TailWedge } from '../transcript/tailWedge.ts'
 import { ClaudePtyHookAdapter } from './claude.ts'
 import { CANCEL_EVIDENCE_BUDGET_MS, CodexPtyHookAdapter } from './codex.ts'
 import { installFakeClis } from './fakeCli.ts'
+import { suiteTempDir, tempDir } from '../testkit/tempDir.ts'
+
+/**
+ * The run directories the adapters this file boots make for themselves, contained.
+ *
+ * `Claude.#boot` and `Codex.#boot` each `mkdtemp` a run directory under `os.tmpdir()` and
+ * never remove it. That is PRODUCTION behaviour and issue #203's business, not this file's --
+ * so rather than change it, the floor it lands on moves: `tmpdir()` re-reads `TMPDIR` on every
+ * call, so pointing it at a directory the testkit issued puts every run directory booted here
+ * inside something whose lifetime the helper already owns.
+ *
+ * Per FILE, and that is what makes it safe rather than a shared global: every test file runs
+ * in its own process under `node --test`, so this reaches no other suite, and the tests in
+ * this one stay isolated from each other exactly as before -- by `tempDir` handing each its
+ * own uniquely named child of this root.
+ */
+const ADAPTER_TMP_ROOT = suiteTempDir('adapter-run-root')
+process.env['TMPDIR'] = ADAPTER_TMP_ROOT
 
 const { dir: RUN } = installFakeClis()
 
@@ -68,8 +86,8 @@ const userRecord = (content: string): string =>
 const workingRecord = (text: string): string =>
   JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text }] } })
 
-function scratch(name: string): string {
-  return join(mkdtempSync(join(tmpdir(), 'orch-wedge-')), name)
+function scratch(t: TestContext, name: string): string {
+  return join(tempDir(t, 'orch-wedge'), name)
 }
 
 async function sessionOver(transcript: string): Promise<AgentSession> {
@@ -90,8 +108,8 @@ async function sessionOver(transcript: string): Promise<AgentSession> {
   }
 }
 
-test('claude: close() completes while a transcript read is wedged inside the view queue', async () => {
-  const transcript = scratch('wedged.jsonl')
+test('claude: close() completes while a transcript read is wedged inside the view queue', async (t) => {
+  const transcript = scratch(t, 'wedged.jsonl')
   writeFileSync(transcript, [userRecord('hang please'), workingRecord('still working on it')].join('\n') + '\n')
 
   const wedge = wedgeOneTailPoll()
@@ -226,7 +244,7 @@ async function heldBy(wedge: TailWedge): Promise<void> {
  */
 const STOP_AFTER_MS = 4_000
 
-test('codex: a deadline retry is answered at its own bound and reads nothing while the wedge holds', async () => {
+test('codex: a deadline retry is answered at its own bound and reads nothing while the wedge holds', async (t) => {
   // The blocker, and the shape of the answer to it that is actually available.
   //
   // `BoundedSingleFlight` gives up its slot at `DEADLINE_TRANSCRIPT_MS` so that the NEXT
@@ -242,7 +260,7 @@ test('codex: a deadline retry is answered at its own bound and reads nothing whi
   // does not seize up -- every deadline comes back, every turn ends, and the seat stays usable.
   // What is lost while the file cannot be read is transcript EVIDENCE, and the turn then ends on
   // whatever else the adapter has: here, the child's own `Stop`.
-  const path = join(mkdtempSync(join(tmpdir(), 'orch-wedge-codex-')), 'rollout.jsonl')
+  const path = join(tempDir(t, 'orch-wedge-codex'), 'rollout.jsonl')
   writeFileSync(path, [started(TURN_ONE), prompted('hang please')].join('\n') + '\n')
 
   const wedge = wedgeOneTailPoll()
@@ -335,7 +353,7 @@ test('codex: a deadline retry is answered at its own bound and reads nothing whi
   }
 })
 
-test('codex: cancel() returns at once while a transcript read is wedged, and reads nothing', async () => {
+test('codex: cancel() returns at once while a transcript read is wedged, and reads nothing', async (t) => {
   // `cancel()` types ESC and then waits for the child to write `turn_aborted`, polling the
   // transcript on a budget. The wait has no bound of its own, so a read that is not answering
   // does not slow it down -- it stops it: the first reconcile never returned, the budget was
@@ -349,7 +367,7 @@ test('codex: cancel() returns at once while a transcript read is wedged, and rea
   //
   // Both halves are asserted here, because either one alone is satisfiable by something worse:
   // a fast cancel that opened a second descriptor, or a single-read cancel that took the budget.
-  const path = join(mkdtempSync(join(tmpdir(), 'orch-wedge-cancel-')), 'rollout.jsonl')
+  const path = join(tempDir(t, 'orch-wedge-cancel'), 'rollout.jsonl')
   writeFileSync(
     path,
     [started(TURN_ONE), prompted('hang please'), aborted(TURN_ONE)].join('\n') + '\n',

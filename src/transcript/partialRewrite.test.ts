@@ -43,11 +43,12 @@
  *   node --test src/transcript/partialRewrite.test.ts
  */
 
-import { test, after } from 'node:test'
+import test from 'node:test'
+import type { TestContext } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, writeFile, rm } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
+import { tempDirAsync } from '../testkit/tempDir.ts'
 import { RewriteAwareTail, parseJsonLine } from './tail.ts'
 
 /** Nine bytes plus a newline, so every record occupies exactly ten. */
@@ -74,9 +75,8 @@ interface Poll {
 const applyPoll = (projection: string[], poll: Poll): string[] =>
   poll.rewritten ? ids(poll.all ?? []) : [...projection, ...ids(poll.appended)]
 
-async function scratch(): Promise<string> {
-  const dir = await mkdtemp(join(tmpdir(), 'conclave-168-'))
-  after(() => rm(dir, { recursive: true, force: true }))
+async function scratch(t: TestContext): Promise<string> {
+  const dir = await tempDirAsync(t, 'conclave-168')
   return join(dir, 'transcript.jsonl')
 }
 
@@ -131,8 +131,8 @@ async function threePolls(path: string) {
  * everything. Neither is an append, and the caller is entitled to know the difference: `all`
  * means throw away what you had. So the poll RECORDS are pinned, not just their sum.
  */
-test('the completed record arrives as a plain append, exactly once', async () => {
-  const path = await scratch()
+test('the completed record arrives as a plain append, exactly once', async (t) => {
+  const path = await scratch(t)
   const { p3, tail } = await threePolls(path)
 
   assert.equal(p3.rewritten, false, 'finishing a record is not a rewrite of the file')
@@ -158,8 +158,8 @@ test('the completed record arrives as a plain append, exactly once', async () =>
  * exactly the difference between a poll that lagged by one and a poll that banked a digest it
  * can never fail.
  */
-test('a record still being written when the file is rewritten is delivered once it is complete', async () => {
-  const path = await scratch()
+test('a record still being written when the file is rewritten is delivered once it is complete', async (t) => {
+  const path = await scratch(t)
   const { p2, p3, projection, tail, consumedAfterRewrite } = await threePolls(path)
 
   const settled = applyPoll(projection, await tail.poll())
@@ -188,8 +188,8 @@ test('a record still being written when the file is rewritten is delivered once 
  * follows: a digest taken over bytes the offset does not cover would make the next prefix check
  * compare the wrong range, and the first test is what fails when it does.
  */
-test('a rewrite banks only the bytes it actually consumed', async () => {
-  const path = await scratch()
+test('a rewrite banks only the bytes it actually consumed', async (t) => {
+  const path = await scratch(t)
   const { consumedAfterRewrite } = await threePolls(path)
 
   assert.equal(
@@ -220,8 +220,8 @@ test('a rewrite banks only the bytes it actually consumed', async () => {
 const NAKED = '{"r":"z"' // 8 bytes, no newline: the whole file is one unfinished record
 const WHOLE = rec('z')
 
-test('a rewrite with no complete line consumes nothing and reports the rewrite', async () => {
-  const path = await scratch()
+test('a rewrite with no complete line consumes nothing and reports the rewrite', async (t) => {
+  const path = await scratch(t)
   await writeFile(path, BEFORE)
   const tail = new RewriteAwareTail(path, parseJsonLine)
 
@@ -252,8 +252,8 @@ test('a rewrite with no complete line consumes nothing and reports the rewrite',
  * decided its own untouched offset no longer matched -- which would be incoherent, and would
  * void a projection that has nothing in it to void.
  */
-test('a record that was alone and unfinished is delivered whole by the next poll', async () => {
-  const path = await scratch()
+test('a record that was alone and unfinished is delivered whole by the next poll', async (t) => {
+  const path = await scratch(t)
   await writeFile(path, BEFORE)
   const tail = new RewriteAwareTail(path, parseJsonLine)
   await tail.poll()
@@ -290,8 +290,8 @@ test('a record that was alone and unfinished is delivered whole by the next poll
 const MULTI = rec('p') + rec('q') + PARTIAL // two complete records and a third in flight
 const MULTI_DONE = rec('p') + rec('q') + rec('y')
 
-test('a rewrite with several complete records keeps all of them, and stops at the last', async () => {
-  const path = await scratch()
+test('a rewrite with several complete records keeps all of them, and stops at the last', async (t) => {
+  const path = await scratch(t)
   await writeFile(path, BEFORE)
   const tail = new RewriteAwareTail(path, parseJsonLine)
   await tail.poll()

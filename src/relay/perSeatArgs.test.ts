@@ -32,16 +32,17 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { PassThrough, Writable } from 'node:stream'
 import test from 'node:test'
+import type { TestContext } from 'node:test'
 import { main } from '../../bin/conclave.ts'
 import { effectiveLaunchArgs } from '../registry/launch.ts'
 import { AgentRegistry } from '../registry/registry.ts'
 import { NO_DEADLINE_CLOCKS } from '../registry/types.ts'
 import { FakeRotationSession } from '../rotation/fakeSession.ts'
+import { tempDir } from '../testkit/tempDir.ts'
 
 /**
  * A registry whose agents hand out a QUEUE of sessions, recording the argv each seat got.
@@ -89,8 +90,8 @@ function registryOf(
 }
 
 /** A repository for a front-end to run in. Both refuse to start outside one. */
-function tempRepo(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'conclave-seatargs-'))
+function tempRepo(t: TestContext): string {
+  const dir = tempDir(t, 'conclave-seatargs')
   execFileSync('git', ['init', '--quiet'], { cwd: dir })
   execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: dir })
   execFileSync('git', ['config', 'user.name', 'Test'], { cwd: dir })
@@ -110,11 +111,12 @@ const FRONT_ENDS = ['relay', 'session'] as const
 
 /** One front-end invocation in a fresh repository, and the argv each seat was launched with. */
 async function launchesFrom(
+  t: TestContext,
   front: (typeof FRONT_ENDS)[number],
   flags: string[],
   queues: Record<string, FakeRotationSession[]>,
 ): Promise<{ code: number; handed: Record<string, string[]> }> {
-  const repo = tempRepo()
+  const repo = tempRepo(t)
   const before = process.cwd()
   const handed: Record<string, string[]> = {}
   const [log, error] = [console.log, console.error]
@@ -138,18 +140,18 @@ async function launchesFrom(
     console.log = log
     console.error = error
     process.chdir(before)
-    rmSync(repo, { recursive: true, force: true })
   }
 }
 
 for (const front of FRONT_ENDS) {
-  test(`${front} gives each seat the launch args typed for that seat and no other`, async () => {
+  test(`${front} gives each seat the launch args typed for that seat and no other`, async (t) => {
     // Two seats, two agents, two models -- and a run-wide `--implementer-args` alongside them,
     // because the interesting question is not whether per-seat arguments arrive but whether the
     // two kinds compose. The shared one is meant to reach BOTH seats; the per-seat ones are
     // meant to reach exactly one each. A wiring that let either kind win outright would be
     // wrong in a different direction, and only having both in the same invocation shows it.
     const { code, handed } = await launchesFrom(
+      t,
       front,
       [
         '--advisor',
@@ -199,7 +201,7 @@ for (const front of FRONT_ENDS) {
     assert.deepEqual(handed['advisor'], [], 'the advisor must be launched with none of it')
   })
 
-  test(`${front} keeps per-seat args per SEAT when both seats are filled by one agent`, async () => {
+  test(`${front} keeps per-seat args per SEAT when both seats are filled by one agent`, async (t) => {
     // The case that separates "per seat" from "per agent", and the realistic invocation for it:
     // one CLI, two models, two seats. Launch arguments have always been keyed by agent --
     // `.conclave/config.json` keys them that way and `implArgsFor` still does -- so a per-seat
@@ -207,6 +209,7 @@ for (const front of FRONT_ENDS) {
     // last, and every assertion in the test above would still pass, because that one uses two
     // different agents.
     const { code, handed } = await launchesFrom(
+      t,
       front,
       [
         '--advisor',
@@ -229,12 +232,13 @@ for (const front of FRONT_ENDS) {
     assert.deepEqual(handed['implementer-2'], ['--model', 'alpha-2'])
   })
 
-  test(`${front} without per-seat args launches the seat exactly as it always did`, async () => {
+  test(`${front} without per-seat args launches the seat exactly as it always did`, async (t) => {
     // The control, and the D1 claim: a run that names no per-seat argument must compose the
     // argv it composed before the syntax existed -- the project config for the agent, then
     // `--implementer-args`, and nothing else. Every test above is about a spelling that must be
     // inert when nobody types it.
     const { code, handed } = await launchesFrom(
+      t,
       front,
       ['--advisor', 'fake-lead', '--implementer', 'fake-a', '--implementer-args', '--shared shared-1', '--rounds', '3'],
       {
@@ -248,7 +252,7 @@ for (const front of FRONT_ENDS) {
   })
 }
 
-test('both front-ends launch the same seats with the same argv from the same invocation', async () => {
+test('both front-ends launch the same seats with the same argv from the same invocation', async (t) => {
   // Parity, at the only point that settles it. The two blocks build their seat requests
   // separately -- relay hands `implementerSpecsFor` the list itself, the console passes it
   // through `SessionOptions` and lets `runSession` build the specs -- so this is the wire on
@@ -266,8 +270,8 @@ test('both front-ends launch the same seats with the same argv from the same inv
     'fake-a': [new FakeRotationSession('a-1', 'fake-a', seatReplies)],
     'fake-b': [new FakeRotationSession('b-1', 'fake-b', seatReplies)],
   })
-  const relay = await launchesFrom('relay', flags, queues())
-  const session = await launchesFrom('session', flags, queues())
+  const relay = await launchesFrom(t, 'relay', flags, queues())
+  const session = await launchesFrom(t, 'session', flags, queues())
   assert.deepEqual(
     relay.handed,
     session.handed,

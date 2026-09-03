@@ -7,10 +7,11 @@
  */
 
 import { strict as assert } from 'node:assert'
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
+import type { TestContext } from 'node:test'
+import { tempDir } from '../testkit/tempDir.ts'
 import { DENIABLE_CAPABILITIES } from '../registry/operatorDenied.ts'
 import {
   BYPASS_ARGS,
@@ -23,8 +24,8 @@ import {
   setPermissionMode,
 } from './project.ts'
 
-function projectWith(config: string | undefined): string {
-  const dir = mkdtempSync(join(tmpdir(), 'conclave-proj-'))
+function projectWith(t: TestContext, config: string | undefined): string {
+  const dir = tempDir(t, 'conclave-proj')
   if (config !== undefined) {
     mkdirSync(join(dir, '.conclave'), { recursive: true })
     writeFileSync(join(dir, CONFIG_RELATIVE), config)
@@ -32,58 +33,58 @@ function projectWith(config: string | undefined): string {
   return dir
 }
 
-test('a project with no config asks, which is each CLI\'s own default', () => {
-  const config = readProjectConfig(projectWith(undefined))
+test('a project with no config asks, which is each CLI\'s own default', (t) => {
+  const config = readProjectConfig(projectWith(t, undefined))
   assert.deepEqual(config, {})
   assert.equal(permissionModeFor(config, 'claude'), 'ask')
   assert.deepEqual(launchArgsFor(config, 'codex'), [], 'and no flags are invented')
 })
 
-test('one setting covers both agents', () => {
-  const config = readProjectConfig(projectWith('{"permissions":"bypass"}'))
+test('one setting covers both agents', (t) => {
+  const config = readProjectConfig(projectWith(t, '{"permissions":"bypass"}'))
   assert.deepEqual(launchArgsFor(config, 'claude'), ['--dangerously-skip-permissions'])
   assert.deepEqual(launchArgsFor(config, 'codex'), ['--dangerously-bypass-approvals-and-sandbox'])
 })
 
-test('a per-agent entry overrides the shared one, in both directions', () => {
+test('a per-agent entry overrides the shared one, in both directions', (t) => {
   // The asymmetric case is the point: an implementer that may act freely inside a
   // repository, and an advisor that still asks before it runs anything.
   const config = readProjectConfig(
-    projectWith('{"permissions":"bypass","agents":{"codex":{"permissions":"ask"}}}'),
+    projectWith(t, '{"permissions":"bypass","agents":{"codex":{"permissions":"ask"}}}'),
   )
   assert.equal(permissionModeFor(config, 'claude'), 'bypass')
   assert.equal(permissionModeFor(config, 'codex'), 'ask')
   assert.deepEqual(launchArgsFor(config, 'codex'), [])
 
-  const opposite = readProjectConfig(projectWith('{"agents":{"codex":{"permissions":"bypass"}}}'))
+  const opposite = readProjectConfig(projectWith(t, '{"agents":{"codex":{"permissions":"bypass"}}}'))
   assert.equal(permissionModeFor(opposite, 'claude'), 'ask')
   assert.deepEqual(launchArgsFor(opposite, 'codex'), BYPASS_ARGS.codex)
 })
 
-test('a malformed config fails loudly rather than quietly meaning "ask"', () => {
+test('a malformed config fails loudly rather than quietly meaning "ask"', (t) => {
   // The failure this prevents is a silent one: a typo reinstates permission prompts, and
   // the operator meets it as a session that stops on every command with nothing saying
   // their configuration was ignored.
-  assert.throws(() => readProjectConfig(projectWith('{ not json')), /not valid JSON/)
-  assert.throws(() => readProjectConfig(projectWith('["bypass"]')), /must contain a JSON object/)
+  assert.throws(() => readProjectConfig(projectWith(t, '{ not json')), /not valid JSON/)
+  assert.throws(() => readProjectConfig(projectWith(t, '["bypass"]')), /must contain a JSON object/)
   assert.throws(
-    () => readProjectConfig(projectWith('{"permissions":"bypasss"}')),
+    () => readProjectConfig(projectWith(t, '{"permissions":"bypasss"}')),
     /permissions must be "ask" or "bypass"/,
   )
   assert.throws(
-    () => readProjectConfig(projectWith('{"agents":{"codex":{"permissions":true}}}')),
+    () => readProjectConfig(projectWith(t, '{"agents":{"codex":{"permissions":true}}}')),
     /agents\.codex\.permissions must be "ask" or "bypass"/,
   )
   assert.throws(
-    () => readProjectConfig(projectWith('{"agents":{"gemini":{"permissions":"bypass"}}}')),
+    () => readProjectConfig(projectWith(t, '{"agents":{"gemini":{"permissions":"bypass"}}}')),
     /unknown agent 'gemini'/,
   )
 })
 
-test('an agent with no known bypass flag gets none rather than a guess', () => {
+test('an agent with no known bypass flag gets none rather than a guess', (t) => {
   // The registry is open — a role can be filled by a CLI this file has never heard of.
   // Inventing a flag for it would at best be ignored and at worst mean something else.
-  const config = readProjectConfig(projectWith('{"permissions":"bypass"}'))
+  const config = readProjectConfig(projectWith(t, '{"permissions":"bypass"}'))
   assert.equal(permissionModeFor(config, 'some-other-cli'), 'bypass')
   assert.deepEqual(launchArgsFor(config, 'some-other-cli'), [])
 })
@@ -113,12 +114,12 @@ test('the flags are the ones the CLIs document, and none is undocumented', () =>
   assert.deepEqual(Object.keys(BYPASS_NOTES).sort(), Object.keys(BYPASS_ARGS).sort())
 })
 
-test('--bypass writes the mode and preserves everything else', () => {
+test('--bypass writes the mode and preserves everything else', (t) => {
   // Written rather than held for one run: an operator asking for this means "stop asking me
   // in this project", not "just this once". A flag that applied only to the current
   // invocation would be retyped every time and end up in a shell alias -- the same
   // persistence with none of the visibility.
-  const root = projectWith('{"agents":{"codex":{"permissions":"ask"}}}')
+  const root = projectWith(t, '{"agents":{"codex":{"permissions":"ask"}}}')
 
   const { previous } = setPermissionMode(root, 'bypass')
   assert.equal(previous, undefined, 'nothing was set before')
@@ -130,8 +131,8 @@ test('--bypass writes the mode and preserves everything else', () => {
   assert.equal(after.agents!.codex!.permissions, 'ask')
 })
 
-test('a per-agent bypass does not disturb the project-wide setting', () => {
-  const root = projectWith('{"permissions":"ask"}')
+test('a per-agent bypass does not disturb the project-wide setting', (t) => {
+  const root = projectWith(t, '{"permissions":"ask"}')
   setPermissionMode(root, 'bypass', 'claude')
 
   const after = readProjectConfig(root)
@@ -142,15 +143,15 @@ test('a per-agent bypass does not disturb the project-wide setting', () => {
   assert.equal(permissionModeFor(after, 'codex'), 'ask')
 })
 
-test('writing over a malformed file reports it rather than replacing it', () => {
+test('writing over a malformed file reports it rather than replacing it', (t) => {
   // A file that is already broken must be surfaced, not silently overwritten -- the operator
   // has something in there they meant, and a typo is not permission to discard it.
-  const root = projectWith('{ not json')
+  const root = projectWith(t, '{ not json')
   assert.throws(() => setPermissionMode(root, 'bypass'), /not valid JSON/)
 })
 
-test('the config directory is created when it does not exist yet', () => {
-  const root = mkdtempSync(join(tmpdir(), 'conclave-bypass-'))
+test('the config directory is created when it does not exist yet', (t) => {
+  const root = tempDir(t, 'conclave-bypass')
   setPermissionMode(root, 'bypass')
   assert.equal(readProjectConfig(root).permissions, 'bypass')
 })
@@ -162,50 +163,50 @@ test('the config directory is created when it does not exist yet', () => {
  * an adapter declares but never widen it. See `src/registry/operatorDenied.ts` for the argument.
  */
 
-test('a project that denies nothing denies nothing, and says so as absence', () => {
+test('a project that denies nothing denies nothing, and says so as absence', (t) => {
   // `undefined` rather than a pair of empty arrays, because the front-ends spread this key in
   // only when it is present: a project with no maps hands `Relay.start` exactly the options it
   // handed before #203. An empty-array denial would behave the same and not BE the same.
-  assert.equal(denialsFrom(readProjectConfig(projectWith(undefined))), undefined, 'no file at all')
-  assert.equal(denialsFrom(readProjectConfig(projectWith('{}'))), undefined, 'a file with no maps')
+  assert.equal(denialsFrom(readProjectConfig(projectWith(t, undefined))), undefined, 'no file at all')
+  assert.equal(denialsFrom(readProjectConfig(projectWith(t, '{}'))), undefined, 'a file with no maps')
   assert.equal(
-    denialsFrom(readProjectConfig(projectWith('{"capabilities":{},"commands":{}}'))),
+    denialsFrom(readProjectConfig(projectWith(t, '{"capabilities":{},"commands":{}}'))),
     undefined,
     'empty maps deny nothing, so they are the same as no maps',
   )
-  const denied = denialsFrom(readProjectConfig(projectWith('{"capabilities":{"subagents":false},"commands":{"/compact":false}}')))
+  const denied = denialsFrom(readProjectConfig(projectWith(t, '{"capabilities":{"subagents":false},"commands":{"/compact":false}}')))
   assert.deepEqual(denied, { capabilities: ['subagents'], commands: ['/compact'] }, 'and a real denial is carried')
 })
 
-test('a map that names something nothing declares is refused at read', () => {
+test('a map that names something nothing declares is refused at read', (t) => {
   // At startup, for the reason roles are: a run that begins with a denial nobody can honour is
   // a run whose operator believes a capability is withheld and it is not.
   assert.throws(
-    () => readProjectConfig(projectWith('{"capabilities":{"subagants":false}}')),
+    () => readProjectConfig(projectWith(t, '{"capabilities":{"subagants":false}}')),
     /capabilities\.subagants is not a capability anything declares/,
     'a misspelled capability names itself in the error',
   )
   assert.throws(
-    () => readProjectConfig(projectWith('{"commands":{"/compcat":false}}')),
+    () => readProjectConfig(projectWith(t, '{"commands":{"/compcat":false}}')),
     /commands\.\/compcat is not a command anything declares/,
     'and so does a misspelled command',
   )
 })
 
-test('a map that is not a map of names is refused at read', () => {
+test('a map that is not a map of names is refused at read', (t) => {
   assert.throws(
-    () => readProjectConfig(projectWith('{"capabilities":["subagents"]}')),
+    () => readProjectConfig(projectWith(t, '{"capabilities":["subagents"]}')),
     /capabilities must be an object mapping capability names to false/,
   )
 })
 
-test('turning anything ON is refused, and a refused command is told why it is refused', () => {
+test('turning anything ON is refused, and a refused command is told why it is refused', (t) => {
   // The non-negotiable half. A capability is declared because someone read it off the installed
   // CLI; a command is allowed because someone argued it cannot break the run. Neither is a
   // preference this file may overrule, and an ACCEPTED-AND-IGNORED true would be worse than a
   // rejected one -- the operator would believe it took effect.
   assert.throws(
-    () => readProjectConfig(projectWith('{"capabilities":{"subagents":true}}')),
+    () => readProjectConfig(projectWith(t, '{"capabilities":{"subagents":true}}')),
     /may only NARROW what an adapter declares, never widen it/,
     'the rule is stated, not just the failure',
   )
@@ -213,22 +214,22 @@ test('turning anything ON is refused, and a refused command is told why it is re
   // `/clear` discards continuity and Codex's `/new` breaks the parser; an operator who tried to
   // re-enable either is asking a question this answers.
   assert.throws(
-    () => readProjectConfig(projectWith('{"commands":{"/clear":true}}')),
+    () => readProjectConfig(projectWith(t, '{"commands":{"/clear":true}}')),
     /Discards continuity/,
     '/clear carries the continuity reason from the policy',
   )
   assert.throws(
-    () => readProjectConfig(projectWith('{"commands":{"/new":true}}')),
+    () => readProjectConfig(projectWith(t, '{"commands":{"/new":true}}')),
     /latches the transcript path/,
     '/new carries the parser reason from the policy',
   )
 })
 
-test('a value that is neither true nor false is refused as not-false', () => {
+test('a value that is neither true nor false is refused as not-false', (t) => {
   // Distinct from the widening refusal on purpose: `"no"` is a typo and `true` is a belief
   // about what this file can do, and the two want different sentences.
   assert.throws(
-    () => readProjectConfig(projectWith('{"commands":{"/compact":"no"}}')),
+    () => readProjectConfig(projectWith(t, '{"commands":{"/compact":"no"}}')),
     /must be false, not "no"/,
   )
 })

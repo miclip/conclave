@@ -16,14 +16,15 @@
  */
 
 import { strict as assert } from 'node:assert'
-import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
  import { spawnSync } from 'node:child_process'
-import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
+import type { TestContext } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import type { AgentEvent, TurnEndEvent } from '../contract/session.ts'
 import { OpenCodeRunAdapter, parseRecord } from './opencode.ts'
+import { tempDir } from '../testkit/tempDir.ts'
 
 const REPO = fileURLToPath(new URL('../..', import.meta.url))
 const FIXTURE = join(REPO, 'spikes/opencode/fixtures/edit-turn.ndjson')
@@ -46,8 +47,8 @@ const realSetTimeout = globalThis.setTimeout
  * gives every turn a fresh context while looking, from outside, exactly like a working
  * session.
  */
-function stub(body: string, code = 0): { command: string; argvLog: string } {
-  const dir = mkdtempSync(join(tmpdir(), 'oc-stub-'))
+function stub(t: TestContext, body: string, code = 0): { command: string; argvLog: string } {
+  const dir = tempDir(t, 'oc-stub')
   const argvLog = join(dir, 'argv.log')
   const payload = join(dir, 'payload.ndjson')
   writeFileSync(payload, body)
@@ -76,8 +77,8 @@ async function nextTurn(session: OpenCodeRunAdapter): Promise<AgentEvent[]> {
   return seen
 }
 
-test('a recorded turn produces an observed completion, not an inferred one', async () => {
-  const { command } = stub(readFileSync(FIXTURE, 'utf8'))
+test('a recorded turn produces an observed completion, not an inferred one', async (t) => {
+  const { command } = stub(t, readFileSync(FIXTURE, 'utf8'))
   const session = await OpenCodeRunAdapter.start({ cwd: REPO, role: 'implementer', command })
 
   await session.send('Edit calc.py so add() returns a + b.', { kind: 'orchestrator' })
@@ -94,8 +95,8 @@ test('a recorded turn produces an observed completion, not an inferred one', asy
   await session.close()
 })
 
-test('tool calls are recorded once each, when they settle', async () => {
-  const { command } = stub(readFileSync(FIXTURE, 'utf8'))
+test('tool calls are recorded once each, when they settle', async (t) => {
+  const { command } = stub(t, readFileSync(FIXTURE, 'utf8'))
   const session = await OpenCodeRunAdapter.start({ cwd: REPO, role: 'implementer', command })
   await session.send('go', { kind: 'orchestrator' })
   await nextTurn(session)
@@ -115,8 +116,8 @@ test('tool calls are recorded once each, when they settle', async () => {
   await session.close()
 })
 
-test('narration and the closing report are separated at the source', async () => {
-  const { command } = stub(readFileSync(FIXTURE, 'utf8'))
+test('narration and the closing report are separated at the source', async (t) => {
+  const { command } = stub(t, readFileSync(FIXTURE, 'utf8'))
   const session = await OpenCodeRunAdapter.start({ cwd: REPO, role: 'implementer', command })
   await session.send('go', { kind: 'orchestrator' })
   await nextTurn(session)
@@ -131,9 +132,9 @@ test('narration and the closing report are separated at the source', async () =>
   await session.close()
 })
 
-test('the session id is learned, then used to resume', async () => {
+test('the session id is learned, then used to resume', async (t) => {
   const body = readFileSync(FIXTURE, 'utf8')
-  const { command, argvLog } = stub(body)
+  const { command, argvLog } = stub(t, body)
   const session = await OpenCodeRunAdapter.start({ cwd: REPO, role: 'implementer', command })
 
   await session.send('first', { kind: 'orchestrator' })
@@ -153,11 +154,11 @@ test('the session id is learned, then used to resume', async () => {
   await session.close()
 })
 
-test('a prompt that looks like a flag is not parsed as one', async () => {
+test('a prompt that looks like a flag is not parsed as one', async (t) => {
   // `message..` is variadic and positional. The relay CLI already had to learn this the
   // expensive way -- `relay --help` once started two billed sessions -- and the same shape
   // of bug is reachable here through any prompt beginning with a dash.
-  const { command, argvLog } = stub(readFileSync(FIXTURE, 'utf8'))
+  const { command, argvLog } = stub(t, readFileSync(FIXTURE, 'utf8'))
   const session = await OpenCodeRunAdapter.start({ cwd: REPO, role: 'implementer', command })
   await session.send('--help me understand this repository', { kind: 'orchestrator' })
   await nextTurn(session)
@@ -167,7 +168,7 @@ test('a prompt that looks like a flag is not parsed as one', async () => {
   await session.close()
 })
 
-test('exit 0 without a stop record is NOT a completion', async () => {
+test('exit 0 without a stop record is NOT a completion', async (t) => {
   // Established live: a run can exit 0 having silently failed an auxiliary paid model call.
   // Treating exit status as evidence of a finished turn is precisely the error the
   // announced stop signal exists to avoid.
@@ -178,7 +179,7 @@ test('exit 0 without a stop record is NOT a completion', async () => {
     .split('\n')
     .filter((l) => parseRecord(l)?.part?.reason !== 'stop')
     .join('\n')
-  const { command } = stub(truncated, 0)
+  const { command } = stub(t, truncated, 0)
   const session = await OpenCodeRunAdapter.start({ cwd: REPO, role: 'implementer', command })
   await session.send('go', { kind: 'orchestrator' })
   const events = await nextTurn(session)
@@ -230,8 +231,8 @@ test('a stream that ends on a tool call leaves no report, and says so rather tha
   )
 
   /** Replay the fixture truncated after line `cut`, and return everything up to `turn_end`. */
-  const truncatedAt = async (cut: number): Promise<AgentEvent[]> => {
-    const { command } = stub(lines.slice(0, cut + 1).join('\n'), 0)
+  const truncatedAt = async (it: TestContext, cut: number): Promise<AgentEvent[]> => {
+    const { command } = stub(it, lines.slice(0, cut + 1).join('\n'), 0)
     const session = await OpenCodeRunAdapter.start({ cwd: REPO, role: 'advisor', command })
     await session.send('go', { kind: 'orchestrator' })
     const events = await nextTurn(session)
@@ -266,8 +267,8 @@ test('a stream that ends on a tool call leaves no report, and says so rather tha
     )
   }
 
-  await t.test('cut after the tool: nothing accounts for the ending', async () => {
-    const events = await truncatedAt(lastTool)
+  await t.test('cut after the tool: nothing accounts for the ending', async (it) => {
+    const events = await truncatedAt(it, lastTool)
     const end = events.find((e) => e.type === 'turn_end') as TurnEndEvent
 
     assert.equal(end.verdict.outcome, 'unknown_abnormal_end')
@@ -287,8 +288,8 @@ test('a stream that ends on a tool call leaves no report, and says so rather tha
     assertHeardButSilent(events, end)
   })
 
-  await t.test('cut one record later: the child said a step was coming, then exited', async () => {
-    const events = await truncatedAt(lastTool + 1)
+  await t.test('cut one record later: the child said a step was coming, then exited', async (it) => {
+    const events = await truncatedAt(it, lastTool + 1)
     const end = events.find((e) => e.type === 'turn_end') as TurnEndEvent
 
     assert.equal(end.verdict.outcome, 'process_exited')
@@ -318,13 +319,13 @@ test('a stream that ends on a tool call leaves no report, and says so rather tha
     assertHeardButSilent(events, end)
   })
 
-  await t.test('cut after the promised step arrives: the ending is unplaced again', async () => {
+  await t.test('cut after the promised step arrives: the ending is unplaced again', async (it) => {
     // The guard on the clear. `stepOwed` latched for the rest of the turn would still pass the
     // subcase above while making this verdict say `exit code 0 before the announced next step`
     // about a run whose announced next step is right there in the stream. An operator reading
     // that would be reading a false statement, which is worse than the honest `assumed` -- so
     // the evidence going BACKWARDS one record later is the correct behaviour, not a gap.
-    const events = await truncatedAt(lastTool + 2)
+    const events = await truncatedAt(it, lastTool + 2)
     const end = events.find((e) => e.type === 'turn_end') as TurnEndEvent
 
     assert.equal(end.verdict.outcome, 'unknown_abnormal_end')
@@ -347,8 +348,8 @@ test('a stream that ends on a tool call leaves no report, and says so rather tha
   })
 })
 
-test('per-step token accounting survives to the caller', async () => {
-  const { command } = stub(readFileSync(FIXTURE, 'utf8'))
+test('per-step token accounting survives to the caller', async (t) => {
+  const { command } = stub(t, readFileSync(FIXTURE, 'utf8'))
   const session = await OpenCodeRunAdapter.start({ cwd: REPO, role: 'implementer', command })
   const key = await session.send('go', { kind: 'orchestrator' })
   await nextTurn(session)
@@ -364,8 +365,8 @@ test('per-step token accounting survives to the caller', async () => {
   await session.close()
 })
 
-test('permission decisions are refused rather than silently accepted', async () => {
-  const { command } = stub(readFileSync(FIXTURE, 'utf8'))
+test('permission decisions are refused rather than silently accepted', async (t) => {
+  const { command } = stub(t, readFileSync(FIXTURE, 'utf8'))
   const session = await OpenCodeRunAdapter.start({ cwd: REPO, role: 'implementer', command })
   // `run` has no dialog. Resolving quietly would let the relay believe it had decided
   // something that was never asked, and then wait for a turn that already decided itself.
@@ -373,8 +374,8 @@ test('permission decisions are refused rather than silently accepted', async () 
   await session.close()
 })
 
-test('a quiesced session cannot be given work', async () => {
-  const { command } = stub(readFileSync(FIXTURE, 'utf8'))
+test('a quiesced session cannot be given work', async (t) => {
+  const { command } = stub(t, readFileSync(FIXTURE, 'utf8'))
   const session = await OpenCodeRunAdapter.start({ cwd: REPO, role: 'implementer', command })
 
   await session.quiesce()
@@ -420,7 +421,7 @@ test('a binary that is not on PATH is a verdict, not a crash', async () => {
 })
 
 
-test('a cancelled turn settles even when a grandchild holds the stream open', async () => {
+test('a cancelled turn settles even when a grandchild holds the stream open', async (t) => {
   // A killed child does not guarantee its stream ends. Its own children inherit stdout, so an
   // orphaned grandchild -- a bash tool, anything the CLI spawned -- keeps the pipe open after
   // the parent is gone. Measured directly: SIGTERM produced `exit` immediately and `close`
@@ -429,7 +430,7 @@ test('a cancelled turn settles even when a grandchild holds the stream open', as
   // That is not a stub artefact. These agents spawn bash tools constantly, and `#exchange`
   // waits without a timeout by design, trusting the adapter to settle -- so a cancel that
   // never settles hangs the run with no ceiling to stop it.
-  const dir = mkdtempSync(join(tmpdir(), 'orphan-'))
+  const dir = tempDir(t, 'orphan')
   const command = join(dir, 'stub')
   // `sh` dies on SIGTERM; the sleep it started does not, and it holds stdout.
   writeFileSync(command, '#!/bin/sh\nsleep 30\nexit 0\n')
@@ -454,7 +455,7 @@ test('a cancelled turn settles even when a grandchild holds the stream open', as
   await session.close()
 })
 
-test("close('graceful') lets an in-flight turn settle before the stream closes", async () => {
+test("close('graceful') lets an in-flight turn settle before the stream closes", async (t) => {
   // The contract for `graceful` is "we are finished with it; reconcile, THEN SIGTERM and
   // wait". The waiting half was missing: the child was killed and the event queue closed in
   // the same breath, so a turn still in flight settled into a CLOSED stream and its verdict
@@ -464,7 +465,7 @@ test("close('graceful') lets an in-flight turn settle before the stream closes",
   // consumer following events() never learned how the LAST turn ended, which is the one it
   // most needs. Found by trying to capture `process_exited` from a live session and getting
   // nothing on the stream.
-  const dir = mkdtempSync(join(tmpdir(), 'graceful-'))
+  const dir = tempDir(t, 'graceful')
   const command = join(dir, 'stub')
   writeFileSync(command, '#!/bin/sh\nsleep 30\nexit 0\n')
   chmodSync(command, 0o755)
@@ -488,7 +489,7 @@ test("close('graceful') lets an in-flight turn settle before the stream closes",
   assert.equal((await session.snapshot()).turns.at(-1)!.state, 'process_exited')
 })
 
-test('a provider failure the child announced reaches the verdict', async () => {
+test('a provider failure the child announced reaches the verdict', async (t) => {
   // OpenCode announces a failed provider call as a record of its own and then exits
   // non-zero. The parser ignored that record, so the run was graded
   // `unknown_abnormal_end (assumed)` from the exit code alone -- true, and no help at all:
@@ -502,7 +503,7 @@ test('a provider failure the child announced reaches the verdict', async () => {
   // A cascade, because one failing call usually produces several and the last is vaguer
   // than the first.
   const second = JSON.stringify({ type: 'error', error: { name: 'AbortError', data: { message: 'aborted' } } })
-  const { command } = stub(`${error}\n${second}\n`, 1)
+  const { command } = stub(t, `${error}\n${second}\n`, 1)
 
   const session = await OpenCodeRunAdapter.start({ cwd: REPO, role: 'implementer', command })
   await session.send('go', { kind: 'orchestrator' })
@@ -541,8 +542,8 @@ test('a provider failure the child announced reaches the verdict', async () => {
  * adapter's grace path is unchanged and still covered by a real child; this stub simply stops
  * making every hang test pay 250ms to prove something it is not about.
  */
-function hangingStub(body: string, err = ''): { command: string; wrote: string } {
-  const dir = mkdtempSync(join(tmpdir(), 'oc-hang-'))
+function hangingStub(t: TestContext, body: string, err = ''): { command: string; wrote: string } {
+  const dir = tempDir(t, 'oc-hang')
   const payload = join(dir, 'payload.ndjson')
   const errPath = join(dir, 'err.txt')
   writeFileSync(payload, body)
@@ -595,7 +596,7 @@ async function heardWhatWasWritten(wrote: string, realSleep: (ms: number) => Pro
 const launchCaveat = (end: TurnEndEvent): string | undefined =>
   end.verdict.provenance.find((p) => p.source === 'orchestrator' && /first run/.test(p.detail))?.detail
 
-test('a first run that produced no records at all names the model it was launched with', async () => {
+test('a first run that produced no records at all names the model it was launched with', async (t) => {
   // #82's second half on a run-per-turn adapter. This one builds its `timed_out` by hand rather
   // than through `classify`, so the diagnosis had to be added here too -- and a rule that exists
   // in one of the two shapes of timeout verdict is a rule an operator cannot rely on.
@@ -604,7 +605,7 @@ test('a first run that produced no records at all names the model it was launche
     role: 'implementer',
     // No barrier and no mocked clock: this stub writes nothing, so there is no precondition
     // to establish -- the assertion IS that nothing was heard.
-    command: hangingStub('').command,
+    command: hangingStub(t, '').command,
     args: ['-m', 'opencode/not-a-model'],
     watchdogMs: 300,
   })
@@ -641,7 +642,7 @@ test('a record the child sent but this adapter records no CONTENT for still supp
     ['an announced error', '{"type":"error","error":{"name":"ProviderError","data":{"message":"upstream 502"}}}\n'],
     ['a record type this adapter does not know', '{"type":"some_future_record","part":{}}\n'],
   ] as const) {
-    const stub = hangingStub(body)
+    const stub = hangingStub(t, body)
     const session = await OpenCodeRunAdapter.start({
       cwd: REPO,
       role: 'implementer',
@@ -686,7 +687,7 @@ test('stderr is output too: a child that printed an error and hung is not blamed
   // next, and the next test that waits on a real deadline never wakes. Measured -- that is
   // exactly what a failing negative control did here, hanging the file until it was killed.
   t.after(() => t.mock.timers.reset())
-  const stub = hangingStub('', 'error: provider returned 502 for opencode/not-a-model\n')
+  const stub = hangingStub(t, '', 'error: provider returned 502 for opencode/not-a-model\n')
   const session = await OpenCodeRunAdapter.start({
     cwd: REPO,
     role: 'implementer',
@@ -735,7 +736,7 @@ test('a run that produced records and then stalled is not blamed on its model', 
   const session = await OpenCodeRunAdapter.start({
     cwd: REPO,
     role: 'implementer',
-    command: hangingStub(readFileSync(FIXTURE, 'utf8').split('\n').slice(0, 3).join('\n') + '\n').command,
+    command: hangingStub(t, readFileSync(FIXTURE, 'utf8').split('\n').slice(0, 3).join('\n') + '\n').command,
     args: ['-m', 'opencode/not-a-model'],
     watchdogMs: 600,
   })
@@ -776,8 +777,8 @@ test('a run that produced records and then stalled is not blamed on its model', 
  * `sleep` dies on SIGTERM and never gets there, so the cap and everything past it -- the
  * escalation, and the event that says a verdict was lost -- had no test at all (#146).
  */
-function deafStub(body: string): { command: string; wrote: string } {
-  const dir = mkdtempSync(join(tmpdir(), 'oc-deaf-'))
+function deafStub(t: TestContext, body: string): { command: string; wrote: string } {
+  const dir = tempDir(t, 'oc-deaf')
   const payload = join(dir, 'payload.ndjson')
   writeFileSync(payload, body)
   const wrote = join(dir, 'wrote')
@@ -791,13 +792,13 @@ function deafStub(body: string): { command: string; wrote: string } {
   return { command, wrote }
 }
 
-test('#146 a graceful close that gives up says so, and escalates', async () => {
+test('#146 a graceful close that gives up says so, and escalates', async (t) => {
   // Three defects in one path, and none of them had a test. On expiry the stream closed over a
   // live turn with no `turn_end` and no `error`, so a consumer following events() could not tell
   // a missing verdict from a pending one; and the child was left running after `close()`
   // returned with the session reporting `terminated`.
   const started = readFileSync(FIXTURE, 'utf8').split('\n').slice(0, 2).join('\n')
-  const { command, wrote } = deafStub(`${started}\n`)
+  const { command, wrote } = deafStub(t, `${started}\n`)
   const session = await OpenCodeRunAdapter.start({ cwd: REPO, role: 'implementer', command })
 
   const seen: AgentEvent[] = []
@@ -836,8 +837,8 @@ test('#146 a graceful close that gives up says so, and escalates', async () => {
  * either timer is created -- so a "fast close" test exercises no timer at all, which is what the
  * first version of the test below did and why removing `clearTimeout` did not fail it.
  */
-function slowFinishStub(head: string, tail: string): { command: string; wrote: string } {
-  const dir = mkdtempSync(join(tmpdir(), 'oc-slow-'))
+function slowFinishStub(t: TestContext, head: string, tail: string): { command: string; wrote: string } {
+  const dir = tempDir(t, 'oc-slow')
   const headPath = join(dir, 'head.ndjson')
   const tailPath = join(dir, 'tail.ndjson')
   writeFileSync(headPath, head)
@@ -853,7 +854,7 @@ function slowFinishStub(head: string, tail: string): { command: string; wrote: s
   return { command, wrote }
 }
 
-test('#146 a graceful close whose turn finishes does not hold the loop for the rest of the cap', async () => {
+test('#146 a graceful close whose turn finishes does not hold the loop for the rest of the cap', async (t) => {
   // The `clearTimeout(cap)` the poll branch never did. Both timers are deliberately ref'd, so a
   // turn that completes 400ms into a three-second cap left 2.6 seconds of pending timer holding
   // the event loop open -- after the close had already returned.
@@ -861,7 +862,7 @@ test('#146 a graceful close whose turn finishes does not hold the loop for the r
   // Measured in a child process, because that is where the symptom is: in-process the leak
   // delays nothing observable. What it delays is the process being ABLE TO EXIT.
   const records = readFileSync(FIXTURE, 'utf8').split('\n').filter(Boolean)
-  const { command } = slowFinishStub(`${records.slice(0, 2).join('\n')}\n`, `${records.slice(2).join('\n')}\n`)
+  const { command } = slowFinishStub(t, `${records.slice(0, 2).join('\n')}\n`, `${records.slice(2).join('\n')}\n`)
   const script = `
     import { OpenCodeRunAdapter } from ${JSON.stringify(join(REPO, 'src/adapters/opencode.ts'))}
     const s = await OpenCodeRunAdapter.start({ cwd: ${JSON.stringify(REPO)}, role: 'implementer', command: ${JSON.stringify(command)} })
@@ -870,7 +871,7 @@ test('#146 a graceful close whose turn finishes does not hold the loop for the r
     await new Promise((r) => setTimeout(r, 150))   // close while the turn is still open
     await s.close('graceful')
   `
-  const file = join(mkdtempSync(join(tmpdir(), 'oc-timer-')), 'probe.mjs')
+  const file = join(tempDir(t, 'oc-timer'), 'probe.mjs')
   writeFileSync(file, script)
 
   const began = Date.now()
@@ -884,7 +885,7 @@ test('#146 a graceful close whose turn finishes does not hold the loop for the r
   assert.ok(took < 2_000, `a completed turn must not hold the loop for the rest of the cap; exited after ${took}ms`)
 })
 
-test('#52 a hookless adapter never claims a hook, and the claim is checked against the real adapter', async () => {
+test('#52 a hookless adapter never claims a hook, and the claim is checked against the real adapter', async (t) => {
   // `provenance` says WHY a verdict is believed, and it is what an auditor reads when deciding
   // how much a `completed (proven)` is worth. OpenCode's headline property is that its terminal
   // signal is announced by the child on a documented output mode -- no hook registration, no
@@ -893,7 +894,7 @@ test('#52 a hookless adapter never claims a hook, and the claim is checked again
   //
   // Driven through a real turn rather than asserted about the source text, so a future path that
   // records provenance somewhere new is covered by construction.
-  const { command } = stub(readFileSync(FIXTURE, 'utf8'))
+  const { command } = stub(t, readFileSync(FIXTURE, 'utf8'))
   const session = await OpenCodeRunAdapter.start({ cwd: REPO, role: 'implementer', command })
   await session.send('Edit calc.py so add() returns a + b.', { kind: 'orchestrator' })
   const events = await nextTurn(session)
@@ -910,7 +911,7 @@ test('#52 a hookless adapter never claims a hook, and the claim is checked again
   assert.ok(sources.includes('announced'), 'and it says what it actually is')
 })
 
-test('#48 the declared absence of a silence clock is OBSERVED, not read off the source', async () => {
+test('#48 the declared absence of a silence clock is OBSERVED, not read off the source', async (t) => {
   // `RUN_PER_TURN_DEADLINES` declares `silence: { supported: false }` for this adapter, and that
   // claim was argued from the code rather than exercised — the one set of assertions in this
   // project exempt from the grading `conformance/capabilities.ts` applies to everything else.
@@ -924,7 +925,7 @@ test('#48 the declared absence of a silence clock is OBSERVED, not read off the 
   // "no silence timeout in twelve minutes" but the stronger and faster claim: with an absolute
   // bound set, the ONLY deadline that fires is that one, at that bound, in its own words. A
   // silence clock would be a second timer with a different detail and an earlier deadline.
-  const { command } = hangingStub('')
+  const { command } = hangingStub(t, '')
   const session = await OpenCodeRunAdapter.start({
     cwd: REPO,
     role: 'implementer',
