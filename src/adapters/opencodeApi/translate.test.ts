@@ -13,7 +13,7 @@
 import { strict as assert } from 'node:assert'
 import test from 'node:test'
 import type { ServerEvent } from './sse.ts'
-import { isTransportLiveness, isTurnBoundary, sessionOf, textDelta, translate } from './translate.ts'
+import { isTransportLiveness, isTurnBoundary, sessionError, sessionOf, textDelta, translate } from './translate.ts'
 
 const ctx = (over: Partial<Parameters<typeof translate>[1]> = {}) => ({
   sessionId: 'ses_ours',
@@ -98,5 +98,41 @@ test('an event whose names were never observed firing is not mapped', () => {
   for (const t of ['session.execution.succeeded', 'session.reasoning.delta', 'session.tool.progress']) {
     assert.equal(translate({ type: t, properties: { sessionID: 'ses_ours' } }, ctx()), undefined)
     assert.equal(isTurnBoundary({ type: t }), false, `${t} must not be treated as a boundary on the strength of its name`)
+  }
+})
+
+test('#224 a session.error is read as the failure it is, in the server’s own words', () => {
+  // The exact payload captured from opencode 1.18.27 when the account has the model disabled.
+  // Written from the recording rather than from the schema, because the schema is what made the
+  // first version of this file confident about events it had never seen.
+  const captured = {
+    id: 'evt_1',
+    type: 'session.error',
+    properties: {
+      sessionID: 'ses_x',
+      error: { name: 'APIError', data: { message: 'Model is disabled', statusCode: 401, isRetryable: false } },
+    },
+  }
+  assert.equal(sessionError(captured), 'APIError: Model is disabled (401)')
+})
+
+test('#224 an error missing the fields the one capture had still says something true', () => {
+  // Only one error has been seen. Every other failure shape is a guess, so the requirement is
+  // that an unfamiliar one degrades to something unhelpful rather than to silence -- silence is
+  // what made the turn read as completed in the first place.
+  for (const props of [
+    { sessionID: 'ses_x', error: { name: 'APIError', data: {} } },
+    { sessionID: 'ses_x', error: {} },
+    { sessionID: 'ses_x' },
+    {},
+  ]) {
+    const out = sessionError({ id: 'e', type: 'session.error', properties: props })
+    assert.ok(out !== undefined && out.length > 0, `still reports something: ${JSON.stringify(props)}`)
+  }
+})
+
+test('#224 nothing but a session.error is read as one', () => {
+  for (const type of ['session.idle', 'message.part.delta', 'server.heartbeat', 'session.status']) {
+    assert.equal(sessionError({ id: 'e', type, properties: { sessionID: 'ses_x' } }), undefined, type)
   }
 })

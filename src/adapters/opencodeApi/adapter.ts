@@ -35,7 +35,7 @@ import { TurnVerdictTracker } from '../../outcomes/tracker.ts'
 import { AsyncQueue } from '../asyncQueue.ts'
 import { OpenCodeClient, OpenCodeApiError } from './client.ts'
 import { startOpenCodeServer, type StartedServer } from './server.ts'
-import { isTurnBoundary, sessionOf, translate } from './translate.ts'
+import { isTurnBoundary, sessionError, sessionOf, translate } from './translate.ts'
 
 interface TurnState {
   key: TurnKey
@@ -52,6 +52,17 @@ interface TurnState {
   cancelled: boolean
   /** Whether the child produced anything at all, which is what separates quiet from silent. */
   spoke: boolean
+  /**
+   * What the server said went wrong, if it said anything (#224).
+   *
+   * Held on the turn rather than ending it on the spot. `session.error` is followed by
+   * `session.idle`, so the ordinary boundary still closes the turn; what this changes is the
+   * verdict that boundary produces. Ending on the error itself was the alternative and is
+   * rejected on evidence: only one error has ever been captured, and if a server can report a
+   * failure it then recovers from, ending here would truncate a working turn on the strength of
+   * a guess. If no idle follows, the silence clock reaches it, which is what that clock is for.
+   */
+  failure?: string | undefined
   /** Streamed text not yet emitted as a message (#219). */
   pending?: string | undefined
   flushTimer?: ReturnType<typeof setTimeout> | undefined
@@ -257,6 +268,26 @@ export class OpenCodeApiAdapter implements AgentSession {
         // Another seat going idle would have ended this seat's turn, silently: the turn would
         // simply finish early and the seat would look fast. A test written for exactly that
         // caught it.
+        // RECORDED BEFORE THE BOUNDARY IS CHECKED, because the two arrive together and in this
+        // order. A failure noticed after `#endTurn` had already graded the turn would be a note
+        // attached to a verdict that has stopped being true.
+        const failure = sessionError(e)
+        if (failure !== undefined && sessionOf(e) === this.sessionId) {
+          // The operator hears it as well as the verdict. A run whose seat is misconfigured --
+          // a disabled model, an expired key -- is a run someone can fix while it is happening,
+          // but only if the reason reaches them rather than only the run report.
+          this.#emit({
+            type: 'error',
+            message: failure,
+            // NOT FATAL. The stream is healthy and the seat can take another prompt; it is this
+            // TURN that failed. Marking it fatal would retire a session over one bad model name.
+            fatal: false,
+            seq: ++this.#seq,
+            at: Date.now(),
+            provisional: false,
+          })
+          if (open) open.failure = failure
+        }
         if (isTurnBoundary(e) && open && sessionOf(e) === this.sessionId) {
           // FLUSHED BEFORE THE ENDING, or a turn's last words arrive after its own `turn_end`
           // and a reader sees the verdict before the sentence it was reached on.
@@ -344,7 +375,15 @@ export class OpenCodeApiAdapter implements AgentSession {
     // Every path out of a turn passes through here, which is why the disarm belongs here rather
     // than beside each caller: a clock left armed on a settled turn fires a second verdict for it.
     this.#watchdog.disarm(String(turn.key))
-    const outcome = forced ?? (turn.cancelled ? 'cancelled' : 'completed')
+    // A REPORTED FAILURE OUTRANKS THE BOUNDARY (#224). `session.idle` says the session stopped
+    // working, which is true of a turn that failed as much as of one that succeeded, and reading
+    // it as `completed` put `proven` -- the strongest grade the ladder has -- on a 401.
+    //
+    // `unknown_abnormal_end` rather than a failure outcome of its own, because the union has
+    // none and inventing one here would put a value in run reports that nothing else grades.
+    // Its definition is "there is evidence the turn ended, but not why"; the why is not lost, it
+    // is in the provenance, where the server's own words are quoted rather than summarised.
+    const outcome = forced ?? (turn.cancelled ? 'cancelled' : turn.failure ? 'unknown_abnormal_end' : 'completed')
     this.#emit({
       type: 'turn_end',
       turnKey: turn.key,
@@ -357,11 +396,16 @@ export class OpenCodeApiAdapter implements AgentSession {
       // finished after we stopped listening.
       verdict: {
         outcome,
+        // PROVEN for a reported failure too, and that is not a contradiction: confidence is how
+        // sure we are of the OUTCOME, and a server that names its own error is the most direct
+        // evidence available that the turn did not do the work.
         confidence: forced ? 'uncertain' : 'proven',
         provenance: [
           forced
             ? { source: 'transport', detail: 'the event stream ended while this turn was open' }
-            : { source: 'hook', detail: 'session.idle' },
+            : turn.failure
+              ? { source: 'hook', detail: `session.error: ${turn.failure}` }
+              : { source: 'hook', detail: 'session.idle' },
         ],
       },
       synthesized: forced !== undefined,
