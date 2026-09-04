@@ -52,8 +52,20 @@ interface TurnState {
   cancelled: boolean
   /** Whether the child produced anything at all, which is what separates quiet from silent. */
   spoke: boolean
+  /** Streamed text not yet emitted as a message (#219). */
+  pending?: string | undefined
+  flushTimer?: ReturnType<typeof setTimeout> | undefined
   ended: boolean
 }
+
+/**
+ * How long streamed text is held before it is emitted as one message (#219).
+ *
+ * Short enough that a watching human sees progress rather than a stall, and long enough that a
+ * token-at-a-time stream becomes sentences. At 250ms the run that found this would have produced
+ * a few hundred messages instead of 46,289.
+ */
+const FLUSH_MS = 250
 
 export interface OpenCodeApiAdapterOptions {
   cwd: string
@@ -197,13 +209,15 @@ export class OpenCodeApiAdapter implements AgentSession {
         if (mapped) {
           if (open) {
             open.spoke = true
-            // A SIGN OF LIFE, so the silence deadline moves out. The deltas that make this seat
-            // noisy (#219) are the same thing that lets it have a silence clock at all -- which
-            // is why coalescing them must keep touching, not just emit less.
+            // A SIGN OF LIFE ON EVERY DELTA, even though only some of them are emitted below.
+            // Liveness and narration are different questions: the silence clock wants to know
+            // that SOMETHING arrived, and a reader wants sentences. Coalescing the second must
+            // not coarsen the first, or the seat would look quiet between flushes (#219, #220).
             open.lastActivityAt = Date.now()
             this.#watchdog.touch(String(open.key))
           }
-          this.#events.push(mapped)
+          if (mapped.type === 'message' && open) this.#buffer(open, mapped.text)
+          else this.#events.push(mapped)
         }
         // THE SESSION IS CHECKED HERE TOO, and it was not at first. `translate` filters by
         // session, so a stranger's output could never become our event -- but the boundary check
@@ -211,7 +225,12 @@ export class OpenCodeApiAdapter implements AgentSession {
         // Another seat going idle would have ended this seat's turn, silently: the turn would
         // simply finish early and the seat would look fast. A test written for exactly that
         // caught it.
-        if (isTurnBoundary(e) && open && sessionOf(e) === this.sessionId) this.#endTurn(open)
+        if (isTurnBoundary(e) && open && sessionOf(e) === this.sessionId) {
+          // FLUSHED BEFORE THE ENDING, or a turn's last words arrive after its own `turn_end`
+          // and a reader sees the verdict before the sentence it was reached on.
+          this.#flush(open)
+          this.#endTurn(open)
+        }
       }
     } catch (e) {
       if (this.#closed) return
@@ -238,6 +257,53 @@ export class OpenCodeApiAdapter implements AgentSession {
 
   #emit(e: AgentEvent): void {
     this.#events.push(e)
+  }
+
+  /**
+   * Hold streamed text until it is worth reading, then emit it as one message (#219).
+   *
+   * The first run to use this adapter produced 90,107 characters of prose as 7,402 events -- a
+   * median of TEN characters each -- because every `message.part.delta` became an `AgentEvent`.
+   * A whole pty run is 81 events. The console rendered it a fragment at a time: "sue. L / et / me
+   * re-run cleanly.The" -- narration exists to be read, and that cannot be.
+   *
+   * Three consumers eat these -- the relay's narration, the console's activity stream, and
+   * `events.ndjson` -- so coalescing in any one of them would leave the other two broken. It
+   * belongs at the source.
+   *
+   * FLUSHED ON A TIMER rather than on a part boundary, because a part can be a whole answer: a
+   * seat that streams one long reply would otherwise produce nothing until it finished, and a
+   * human watching would see silence where the pty adapters show progress. The interval is short
+   * against how a person reads and enormous against how fast tokens arrive.
+   */
+  #buffer(turn: TurnState, text: string): void {
+    turn.pending = (turn.pending ?? '') + text
+    if (turn.flushTimer) return
+    const timer = setTimeout(() => {
+      turn.flushTimer = undefined
+      this.#flush(turn)
+    }, FLUSH_MS)
+    timer.unref?.()
+    turn.flushTimer = timer
+  }
+
+  #flush(turn: TurnState): void {
+    if (turn.flushTimer) {
+      clearTimeout(turn.flushTimer)
+      turn.flushTimer = undefined
+    }
+    const text = turn.pending
+    turn.pending = undefined
+    if (!text) return
+    this.#emit({
+      type: 'message',
+      role: 'assistant',
+      text,
+      turnKey: turn.key,
+      seq: ++this.#seq,
+      at: Date.now(),
+      provisional: false,
+    })
   }
 
   #endTurn(turn: TurnState, forced?: 'transport_lost'): void {

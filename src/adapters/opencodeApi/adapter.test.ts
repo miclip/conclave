@@ -94,6 +94,8 @@ async function seat(): Promise<{ adapter: OpenCodeApiAdapter; fake: ReturnType<t
 }
 
 const settle = (ms = 60): Promise<void> => new Promise((r) => setTimeout(r, ms))
+/** Longer than the adapter's coalescing interval, so a flushed message has landed (#219). */
+const FLUSH_SETTLE_MS = 400
 
 test('a turn ends when the server says the session is idle, not when a process exits', async () => {
   // The property the run-per-turn adapter cannot have. `session.idle` is the server stating that
@@ -125,7 +127,9 @@ test('streamed text is child output while the turn is still open', async () => {
   try {
     await adapter.send('write something', { kind: 'orchestrator' })
     fake.push({ type: 'message.part.delta', properties: { sessionID: 'ses_fake', text: 'partial' } })
-    await settle()
+    // PAST THE FLUSH INTERVAL. Deltas are coalesced (#219) -- a token at a time is not narration
+    // a human can read -- so text appears one flush later rather than one event later.
+    await settle(FLUSH_SETTLE_MS)
     const msg = seen.find((e) => e.type === 'message')
     assert.equal(msg && 'text' in msg ? msg.text : undefined, 'partial')
     assert.ok(!seen.some((e) => e.type === 'turn_end'), 'output is not an ending')
