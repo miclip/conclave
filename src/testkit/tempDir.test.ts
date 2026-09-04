@@ -228,3 +228,25 @@ test('the temp root is pinned at creation, so a test may move TMPDIR', async (t)
 
   assert.equal(existsSync(taken), false, `${taken} should be gone despite TMPDIR having moved`)
 })
+
+/**
+ * NOT TESTED HERE, and the gap is deliberate rather than an omission (#222).
+ *
+ * The failure is a race between the recursive walk and a child process still writing, and it
+ * cannot be staged from inside the suite: `node:test` runs `after` hooks LIFO, so any hook that
+ * stops the child runs BEFORE the cleanup registered by `tempDir`, and the race never happens.
+ * A first attempt at this test passed with `maxRetries` mutated to 0 -- it proved nothing, which
+ * is the one outcome worse than having no test.
+ *
+ * What the fix rests on instead: Node documents `rmSync` retrying exactly EBUSY, EMFILE, ENFILE,
+ * ENOTEMPTY and EPERM under `recursive`, and the CI failure in #222 is the observation. The test
+ * below pins the part that IS reachable -- that the options do not break ordinary cleanup.
+ */
+
+test('#222 a populated directory is still removed, retries and all', (t) => {
+  const dir = tempDir(t, 'populated')
+  mkdirSync(join(dir, 'nested', 'deeper'), { recursive: true })
+  writeFileSync(join(dir, 'nested', 'deeper', 'file.txt'), 'content')
+  // Cleanup runs in t.after; a throw there fails this test, so passing IS the assertion.
+  assert.ok(existsSync(join(dir, 'nested', 'deeper', 'file.txt')))
+})

@@ -116,3 +116,28 @@ test('#221 a --model with no value after it is undeliverable like anything else'
   assert.deepEqual(opts['ignoredArgs'], ['--model'])
   assert.equal(opts['model'], undefined)
 })
+
+test('#223 a seat configured to ASK is told plainly that it will not', async () => {
+  // The dangerous case, and the DEFAULT one: `permissionModeFor` falls back to 'ask', so an
+  // operator who configured nothing believes the seat will stop and ask. It will not -- the API
+  // seat has not been observed prompting, and `decidePermission` throws if it ever did.
+  const opts = await optionsFor([])
+  const notices = ((opts['extraNotices'] ?? []) as string[]).join('\n')
+  assert.match(notices, /configured to ASK for permission and it will not/)
+  assert.match(notices, /#223/)
+})
+
+test('#223 a bypassed seat is told the flag never arrived, even though the effect matches', async () => {
+  // `--auto` is opencode's bypass flag, and BYPASS_NOTES records that it is the one of the three
+  // whose name does not announce what it does. The outcome happens to match the intent; saying
+  // so is what stops the next reader concluding the flag works.
+  const opts = await optionsFor(['--auto'])
+  const notices = ((opts['extraNotices'] ?? []) as string[]).join('\n')
+  assert.match(notices, /not deliverable to this seat and is not needed/)
+  assert.equal(opts['ignoredArgs'], undefined, 'and it is not ALSO listed as a generic dropped arg')
+})
+
+test('#223 the bypass flag is accounted for once, beside genuinely dropped args', async () => {
+  const opts = await optionsFor(['--auto', '--some-flag'])
+  assert.deepEqual(opts['ignoredArgs'], ['--some-flag'], 'only the ones nothing else explains')
+})

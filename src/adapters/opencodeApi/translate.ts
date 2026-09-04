@@ -66,6 +66,38 @@ export function isTransportLiveness(e: ServerEvent): boolean {
 }
 
 /**
+ * Whether this event is a seat that is still WORKING, as opposed to one worth showing a reader.
+ *
+ * Two questions that were being answered by one predicate (#226). `translate` returns an event
+ * only for `message.part.delta`, and the silence clock was refreshed only where it returned one
+ * -- so a turn whose work is tool calls refreshed nothing. Captured on a tool-using turn: ten
+ * `message.part.updated`, one `message.part.delta`. A seat spending twelve minutes inside a
+ * single long tool call -- `npm test` on this repo is exactly that, and it is what runs are told
+ * to use -- had no way to say it was alive, and `DEFAULT_IDLE_MS` would reach it.
+ *
+ * "Is this seat alive" is true of a tool call; "is this worth rendering" is not. Narration stays
+ * as narrow as it was, because #219 is the bill for it being wider.
+ *
+ * DELIBERATELY NOT the whole session-scoped set. `session.idle` is an ending rather than work,
+ * and the server-scoped events are the transport talking rather than the seat -- a heartbeat
+ * keeping a wedged seat's clock alive is the exact failure the silence clock exists to catch.
+ */
+const SEAT_LIVENESS = new Set([
+  // A part arriving: text, reasoning, or a tool call and its result. The one that matters.
+  'message.part.updated',
+  // A message beginning or being revised.
+  'message.updated',
+  // The server's own account of the session working, carrying `{status: {type: 'busy'}}`.
+  'session.status',
+  // The seat changed files, which is work by any reading.
+  'session.diff',
+])
+
+export function isSeatLiveness(e: ServerEvent): boolean {
+  return SEAT_LIVENESS.has(e.type)
+}
+
+/**
  * Whether this event means the seat finished the turn it was given.
  *
  * `session.idle` is the one observed terminal signal: it arrived once, last, after the deltas.

@@ -21,6 +21,7 @@ import {
 } from '../conformance/capabilities.ts'
 import { assertCodexHooksExecutable, CONCLAVE_HOOK_MATCH } from '../deployment/codexHookTrust.ts'
 import { DEFAULT_IDLE_MS, DEFAULT_WATCHDOG_MS } from '../outcomes/watchdog.ts'
+import { BYPASS_ARGS } from '../config/project.ts'
 import { argsWithoutModel, effectiveLaunchArgs, modelFromArgs } from './launch.ts'
 import {
   claudeAliasOf,
@@ -313,13 +314,34 @@ export const OPENCODE_AGENT: AgentDefinition = {
     const args = effectiveLaunchArgs(resolved, ctx)
     const model = modelFromArgs(args)
     const ignored = model === null ? [...args] : argsWithoutModel(args)
+    // THE PERMISSION POSTURE IS SAID OUT LOUD, because this transport cannot honour either
+    // setting and the banner states one anyway (#223). `--auto` is not an incidental flag: it is
+    // opencode's bypass, and `BYPASS_NOTES` records that it is the one of the three whose name
+    // does not announce what it does. Reporting it through the generic "cannot be delivered"
+    // notice read as a configuration detail rather than as a permission guarantee not being kept.
+    //
+    // Its PRESENCE is the mode. `launchArgsFor` adds it only under `bypass`, and the front-end
+    // has already composed that into the spec by the time this runs, so no config is needed here
+    // to know which of the two an operator asked for.
+    const bypassArgs = BYPASS_ARGS['opencode'] ?? []
+    const bypassAsked = bypassArgs.some((a) => ignored.includes(a))
+    const permission = bypassAsked
+      ? `opencode: ${JSON.stringify(bypassArgs)} is not deliverable to this seat and is not needed. ` +
+        `Driven over the HTTP API, it has not been observed asking for permission -- it acts. ` +
+        `The configured bypass and the actual behaviour agree, but not because the flag arrived. See #223.`
+      : `opencode: this seat is configured to ASK for permission and it will not. Driven over the ` +
+        `HTTP API it has not been observed prompting -- it acts -- and if it did prompt, nothing ` +
+        `could answer: permission replies are unwired. Treat it as a bypassed seat. See #223.`
+    // The bypass flag is accounted for HERE, so it is not also listed as a generic dropped arg.
+    const otherIgnored = ignored.filter((a) => !bypassArgs.includes(a))
     return OpenCodeApiAdapter.start({
       cwd: ctx.cwd,
       command: resolved.agent.launch.command,
       role: resolved.role.id,
       ...(ctx.watchdogMs === undefined ? {} : { watchdogMs: ctx.watchdogMs }),
       ...(model === null ? {} : { model }),
-      ...(ignored.length === 0 ? {} : { ignoredArgs: ignored }),
+      ...(otherIgnored.length === 0 ? {} : { ignoredArgs: otherIgnored }),
+      extraNotices: [permission],
     })
   },
 }

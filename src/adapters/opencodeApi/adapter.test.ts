@@ -399,3 +399,101 @@ test('#224 a turn nothing went wrong in is still completed and proven', async ()
     await stop()
   }
 })
+
+test('#226 a turn working inside a tool is not killed by the silence clock', async () => {
+  // THE DEFECT, as the clock sees it. `translate` returns an event only for
+  // `message.part.delta`, and the silence clock was refreshed only where it returned one -- so a
+  // turn spent inside a long tool call refreshed nothing. Captured on a real tool-using turn:
+  // ten `message.part.updated`, one delta. `npm test` on this repo is minutes, and it is what
+  // runs are told to check with.
+  //
+  // Asserted through the CLOCK rather than through a field, because the field is not the
+  // promise: what a seat needs is not to be killed while it is working.
+  const { adapter, fake, seen, stop } = await seat({ idleMs: 300, watchdogMs: 60_000 })
+  try {
+    await adapter.send('run the checks', { kind: 'orchestrator' })
+    // Four tool parts across well over one idle period. Nothing a reader would want to see.
+    for (let i = 0; i < 4; i++) {
+      fake.push({
+        type: 'message.part.updated',
+        properties: { sessionID: 'ses_fake', part: { type: 'tool', tool: 'bash', state: { status: 'running' } } },
+      })
+      await settle(150)
+    }
+    assert.ok(!seen.some((e) => e.type === 'turn_end'), 'a working turn survives its own quiet')
+    assert.ok(!seen.some((e) => e.type === 'message'), 'and none of it was rendered (#219)')
+  } finally {
+    await stop()
+  }
+})
+
+test('#226 a turn that is genuinely silent is still killed', async () => {
+  // The other half, and the one that makes the test above mean something: widening liveness must
+  // not retire the clock. Same timings, no events at all.
+  const { adapter, seen, stop } = await seat({ idleMs: 300, watchdogMs: 60_000 })
+  try {
+    await adapter.send('a prompt this seat will never answer', { kind: 'orchestrator' })
+    await settle(900)
+    assert.ok(seen.some((e) => e.type === 'turn_end'), 'silence still reaches a verdict')
+  } finally {
+    await stop()
+  }
+})
+
+test('#226 a heartbeat does not keep a wedged seat alive, because it names no session', async () => {
+  // A transport that keeps talking while the seat is stuck is exactly what the silence clock
+  // exists to catch.
+  //
+  // WHAT ACTUALLY GUARDS THIS is the session filter, not the liveness set, and the distinction
+  // is worth writing down because a mutation found it: adding `server.heartbeat` to the set left
+  // this test green. Server-scoped events name no session, `sessionOf` returns undefined, and
+  // the `=== this.sessionId` check excludes them however the set is spelled. The set is the
+  // second line here, not the first.
+  const { adapter, fake, seen, stop } = await seat({ idleMs: 300, watchdogMs: 60_000 })
+  try {
+    await adapter.send('go', { kind: 'orchestrator' })
+    for (let i = 0; i < 4; i++) {
+      fake.push({ type: 'server.heartbeat', properties: {} })
+      fake.push({ type: 'plugin.added', properties: { id: 'anthropic' } })
+      await settle(150)
+    }
+    assert.ok(seen.some((e) => e.type === 'turn_end'), 'housekeeping is not the seat working')
+  } finally {
+    await stop()
+  }
+})
+
+test('#226 a session-scoped event that is not work does not refresh the clock either', async () => {
+  // THIS is what pins the liveness set. `session.updated` carries our own sessionID, so it
+  // passes the session filter and only membership decides -- which is what makes a mutation
+  // that widens the set fail here rather than nowhere.
+  const { adapter, fake, seen, stop } = await seat({ idleMs: 300, watchdogMs: 60_000 })
+  try {
+    await adapter.send('go', { kind: 'orchestrator' })
+    for (let i = 0; i < 4; i++) {
+      fake.push({ type: 'session.updated', properties: { sessionID: 'ses_fake', info: { id: 'ses_fake' } } })
+      await settle(150)
+    }
+    assert.ok(seen.some((e) => e.type === 'turn_end'), 'metadata changing is not the seat working')
+  } finally {
+    await stop()
+  }
+})
+
+test('#226 another seat’s tool work does not keep this seat alive', async () => {
+  // One server, many sessions, one stream -- the same filter every other rule here needs.
+  const { adapter, fake, seen, stop } = await seat({ idleMs: 300, watchdogMs: 60_000 })
+  try {
+    await adapter.send('mine', { kind: 'orchestrator' })
+    for (let i = 0; i < 4; i++) {
+      fake.push({
+        type: 'message.part.updated',
+        properties: { sessionID: 'ses_someone_else', part: { type: 'tool' } },
+      })
+      await settle(150)
+    }
+    assert.ok(seen.some((e) => e.type === 'turn_end'), 'not ours, not our liveness')
+  } finally {
+    await stop()
+  }
+})

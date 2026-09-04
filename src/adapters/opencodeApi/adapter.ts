@@ -35,7 +35,7 @@ import { TurnVerdictTracker } from '../../outcomes/tracker.ts'
 import { AsyncQueue } from '../asyncQueue.ts'
 import { OpenCodeClient, OpenCodeApiError } from './client.ts'
 import { startOpenCodeServer, type StartedServer } from './server.ts'
-import { isTurnBoundary, sessionError, sessionOf, translate } from './translate.ts'
+import { isSeatLiveness, isTurnBoundary, sessionError, sessionOf, translate } from './translate.ts'
 
 interface TurnState {
   key: TurnKey
@@ -110,6 +110,14 @@ export interface OpenCodeApiAdapterOptions {
    */
   ignoredArgs?: readonly string[] | undefined
   /**
+   * Notices the registry composed, which this adapter could not have written itself (#223).
+   *
+   * The permission posture is the case it exists for: what a seat's configured mode WAS is
+   * known where the launch args are resolved, and whether this transport can honour it is known
+   * here. Neither half is a notice on its own.
+   */
+  extraNotices?: readonly string[] | undefined
+  /**
    * Injected so the adapter can be driven against a stand-in server.
    *
    * Not a testing back door bolted on: the alternative is tests that spawn a real OpenCode, which
@@ -161,6 +169,7 @@ export class OpenCodeApiAdapter implements AgentSession {
     idleMs?: number,
     model?: string,
     ignoredArgs?: readonly string[],
+    extraNotices?: readonly string[],
   ) {
     this.#server = server
     this.#client = client
@@ -176,14 +185,17 @@ export class OpenCodeApiAdapter implements AgentSession {
     this.#model = model
     // SAID AT STARTUP, where a notice is read, rather than left for someone to discover from a
     // seat behaving as though it had been configured differently.
-    this.startupNotices =
-      ignoredArgs && ignoredArgs.length > 0
+    const notices = [
+      ...(ignoredArgs && ignoredArgs.length > 0
         ? [
             `opencode: ${JSON.stringify([...ignoredArgs])} cannot be delivered to this seat. ` +
               `Its child is a server rather than a turn, so it takes no per-turn argv; only the ` +
               `model is carried, and it goes with each prompt. See #221.`,
           ]
-        : undefined
+        : []),
+      ...(extraNotices ?? []),
+    ]
+    this.startupNotices = notices.length > 0 ? notices : undefined
     this.#watchdog = new TurnWatchdog<TurnState>(
       watchdogMs ?? DEFAULT_WATCHDOG_MS,
       (turn, update) => {
@@ -221,7 +233,16 @@ export class OpenCodeApiAdapter implements AgentSession {
       await server.stop()
       throw e
     }
-    return new OpenCodeApiAdapter(server, client, sessionId, opts.watchdogMs, opts.idleMs, opts.model, opts.ignoredArgs)
+    return new OpenCodeApiAdapter(
+      server,
+      client,
+      sessionId,
+      opts.watchdogMs,
+      opts.idleMs,
+      opts.model,
+      opts.ignoredArgs,
+      opts.extraNotices,
+    )
   }
 
   get state(): SessionState {
@@ -268,6 +289,14 @@ export class OpenCodeApiAdapter implements AgentSession {
         // Another seat going idle would have ended this seat's turn, silently: the turn would
         // simply finish early and the seat would look fast. A test written for exactly that
         // caught it.
+        // A SEAT AT WORK IS ALIVE EVEN WHEN IT IS SAYING NOTHING (#226). Narration is what
+        // `translate` returns; liveness is a wider set, and conflating them let a turn spent
+        // inside one long tool call look silent to a clock whose whole job is telling those
+        // apart. Touched without emitting: nothing here is worth putting in front of a reader.
+        if (open && isSeatLiveness(e) && sessionOf(e) === this.sessionId) {
+          open.lastActivityAt = Date.now()
+          this.#watchdog.touch(String(open.key))
+        }
         // RECORDED BEFORE THE BOUNDARY IS CHECKED, because the two arrive together and in this
         // order. A failure noticed after `#endTurn` had already graded the turn would be a note
         // attached to a verdict that has stopped being true.

@@ -62,6 +62,16 @@ export function canonicalTempTarget(dir: string, root: string): string {
 }
 
 /**
+ * How hard cleanup tries before a failure is real (#222).
+ *
+ * Five linear-backoff retries is roughly a second in total, which is far longer than a process
+ * takes to finish flushing and far shorter than anyone waits for a suite. The number is not
+ * load-bearing: what matters is that the first ENOTEMPTY is not the answer.
+ */
+const CLEANUP_RETRIES = 5
+const CLEANUP_RETRY_MS = 20
+
+/**
  * Remove a directory this module issued. Private, and both arguments come from the closure
  * built at creation, so there is no call site that can point it somewhere else.
  *
@@ -87,7 +97,35 @@ function cleanup(issued: string, root: string): void {
     return
   }
 
-  rmSync(canonicalTempTarget(issued, root), { recursive: true, force: true })
+  const target = canonicalTempTarget(issued, root)
+  try {
+    rmSync(target, {
+      recursive: true,
+      force: true,
+      // RETRIED, because `force` does not cover this and cannot (#222). It suppresses ENOENT;
+      // ENOTEMPTY means the directory gained an entry BETWEEN the walk that listed it and the
+      // rmdir that removed it, which is a child still writing on its way out. Node retries
+      // exactly this set -- EBUSY, EMFILE, ENFILE, ENOTEMPTY, EPERM -- with a linear backoff,
+      // so the standard mechanism is the whole fix and a hand-rolled loop would only be a
+      // second thing to get wrong.
+      maxRetries: CLEANUP_RETRIES,
+      retryDelay: CLEANUP_RETRY_MS,
+    })
+  } catch (err) {
+    // NAMED AS CLEANUP. Thrown bare from inside `t.after`, an ENOTEMPTY is attributed to the
+    // test that owned the directory: on CI it read as "a one-seat console reserves the four rows
+    // it always did" failing, which is a claim about the product and sent a reader to console
+    // code that had nothing to do with it. The rethrow keeps the failure -- a cleanup pointed at
+    // the wrong place must still be a red suite -- and only says whose failure it is.
+    const e = err as NodeJS.ErrnoException
+    throw new Error(
+      `temp-dir cleanup failed for ${target} (${e.code ?? 'unknown'}) after ${CLEANUP_RETRIES} retries. ` +
+        `This is the SUITE's scratch directory, not the code under test: a child of this test was ` +
+        `probably still writing as it exited. The assertions in the test itself passed or failed ` +
+        `before this ran.`,
+      { cause: err },
+    )
+  }
 }
 
 /**
