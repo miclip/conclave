@@ -315,3 +315,87 @@ test('#221 the seat\u2019s model travels with every prompt, not only the first',
     await stop()
   }
 })
+
+test('#224 a turn the server said failed is not graded completed', async () => {
+  // THE DEFECT, in the order the wire produced it: an error, then the ordinary idle. Reading
+  // only the boundary put `completed` / `proven` -- the strongest grade there is -- on a 401,
+  // and the operator saw an empty report and nothing else.
+  const { adapter, fake, seen, stop } = await seat()
+  try {
+    await adapter.send('use a model this account cannot have', { kind: 'orchestrator' })
+    fake.push({
+      type: 'session.error',
+      properties: {
+        sessionID: 'ses_fake',
+        error: { name: 'APIError', data: { message: 'Model is disabled', statusCode: 401 } },
+      },
+    })
+    fake.push({ type: 'session.idle', properties: { sessionID: 'ses_fake' } })
+    await settle()
+
+    const end = seen.find((e) => e.type === 'turn_end') as TurnEndEvent | undefined
+    assert.ok(end, 'the turn still ends -- the boundary is what closes it')
+    assert.equal(end.verdict.outcome, 'unknown_abnormal_end')
+    assert.match(
+      JSON.stringify(end.verdict.provenance),
+      /Model is disabled/,
+      `the server's own words survive into the verdict: ${JSON.stringify(end.verdict)}`,
+    )
+  } finally {
+    await stop()
+  }
+})
+
+test('#224 the operator hears the failure while the run is still going, not only in the report', async () => {
+  // A disabled model or an expired key is fixable DURING a run, but only by someone who is told.
+  // Not fatal: the stream is healthy and the seat can take another prompt.
+  const { adapter, fake, seen, stop } = await seat()
+  try {
+    await adapter.send('anything', { kind: 'orchestrator' })
+    fake.push({
+      type: 'session.error',
+      properties: { sessionID: 'ses_fake', error: { name: 'APIError', data: { message: 'Model is disabled', statusCode: 401 } } },
+    })
+    await settle()
+    const err = seen.find((e) => e.type === 'error')
+    assert.ok(err, `an error event reaches the run: ${JSON.stringify(seen.map((e) => e.type))}`)
+    assert.equal('fatal' in err ? err.fatal : undefined, false, 'one bad turn does not retire the session')
+  } finally {
+    await stop()
+  }
+})
+
+test('#224 a stranger’s failure does not condemn this seat’s turn', async () => {
+  // One server, many sessions, one stream. The boundary check already filters by session and
+  // this has to as well, or a second seat's bad model name grades our good turn as failed.
+  const { adapter, fake, seen, stop } = await seat()
+  try {
+    await adapter.send('mine', { kind: 'orchestrator' })
+    fake.push({
+      type: 'session.error',
+      properties: { sessionID: 'ses_someone_else', error: { name: 'APIError', data: { message: 'not ours', statusCode: 401 } } },
+    })
+    fake.push({ type: 'session.idle', properties: { sessionID: 'ses_fake' } })
+    await settle()
+    const end = seen.find((e) => e.type === 'turn_end') as TurnEndEvent | undefined
+    assert.equal(end?.verdict.outcome, 'completed', 'our turn is judged on our own session’s events')
+  } finally {
+    await stop()
+  }
+})
+
+test('#224 a turn nothing went wrong in is still completed and proven', async () => {
+  // The change must not make every quiet turn suspicious. `session.idle` with no error before it
+  // is the ordinary ending and keeps the grade it had.
+  const { adapter, fake, seen, stop } = await seat()
+  try {
+    await adapter.send('fine', { kind: 'orchestrator' })
+    fake.push({ type: 'session.idle', properties: { sessionID: 'ses_fake' } })
+    await settle()
+    const end = seen.find((e) => e.type === 'turn_end') as TurnEndEvent | undefined
+    assert.equal(end?.verdict.outcome, 'completed')
+    assert.equal(end?.verdict.confidence, 'proven')
+  } finally {
+    await stop()
+  }
+})

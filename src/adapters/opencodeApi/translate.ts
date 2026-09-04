@@ -12,6 +12,10 @@
  * `message.part.delta`, `session.status`, `session.diff`, `plugin.added`, `catalog.updated`,
  * `reference.updated`, `integration.updated`, `server.heartbeat`, `session.idle`.
  *
+ * `session.error` was added later, from a SECOND capture: a turn asking for a disabled model
+ * (#224). It fired where the first recording had no reason to, which is the argument for this
+ * comment being a log of what has been seen rather than a claim about what exists.
+ *
  * Names appear in the bundle that did NOT fire for that turn -- `session.execution.*`,
  * `session.reasoning.*`, `session.tool.*` -- because it used no tools and produced no reasoning
  * parts. They are deliberately NOT mapped here. Reading a name as a behaviour is the mistake
@@ -70,6 +74,38 @@ export function isTransportLiveness(e: ServerEvent): boolean {
  */
 export function isTurnBoundary(e: ServerEvent): boolean {
   return e.type === 'session.idle'
+}
+
+/**
+ * The failure this event reports, as a line worth putting in a verdict -- or `undefined`.
+ *
+ * `session.error` is emitted when the turn could not be done, and the server follows it with
+ * `session.idle` like any other ending. That ordering is the whole hazard (#224): an adapter
+ * that reads only the boundary sees a session go idle having produced nothing and calls the turn
+ * `completed`, with `proven` confidence, on a 401.
+ *
+ * Observed payload, opencode 1.18.27, asking for a model the account has disabled:
+ *
+ *     session.error {"error":{"name":"APIError","data":{"message":"Model is disabled",
+ *                    "statusCode":401,"isRetryable":false}}}
+ *     session.idle
+ *
+ * The shape is read defensively because only that one error has been seen: any of the three
+ * fields may be missing on a failure of a different kind, and a translator that threw or
+ * returned nothing when a field was absent would restore the silence this exists to end. The
+ * fallback is the event's own JSON -- unhelpful to read, but never a lie about what happened.
+ */
+export function sessionError(e: ServerEvent): string | undefined {
+  if (e.type !== 'session.error') return undefined
+  const err = (e.properties ?? {})['error']
+  if (typeof err !== 'object' || err === null) return `session.error: ${JSON.stringify(e.properties ?? {})}`
+  const rec = err as Record<string, unknown>
+  const data = typeof rec['data'] === 'object' && rec['data'] !== null ? (rec['data'] as Record<string, unknown>) : {}
+  const name = typeof rec['name'] === 'string' ? rec['name'] : 'error'
+  const message = typeof data['message'] === 'string' ? data['message'] : undefined
+  const status = typeof data['statusCode'] === 'number' ? data['statusCode'] : undefined
+  if (message === undefined) return `session.error: ${name}: ${JSON.stringify(err)}`
+  return status === undefined ? `${name}: ${message}` : `${name}: ${message} (${status})`
 }
 
 /**

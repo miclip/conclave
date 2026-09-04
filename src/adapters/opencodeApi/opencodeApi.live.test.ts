@@ -17,7 +17,7 @@ import { execFileSync } from 'node:child_process'
 import test from 'node:test'
 import type { AgentEvent, TurnEndEvent } from '../../contract/session.ts'
 import { defaultRegistry } from '../../registry/builtin.ts'
-import type { OpenCodeApiAdapter } from './adapter.ts'
+import { OpenCodeApiAdapter } from './adapter.ts'
 
 const CWD = process.cwd()
 const skip =
@@ -81,6 +81,47 @@ test('#221 a model set in launch args is accepted by the real server', { skip },
     .map((e) => e.text)
     .join(' ')
   assert.match(text, /42/, `the model answered, so it really ran: ${text.slice(0, 400)}`)
+
+  await adapter.close('graceful')
+  await reading
+})
+
+test('#224 a model the server will not serve ends the turn as a failure, not a completion', { skip }, async (t) => {
+  // The regression that cost a run. The server answers a model it cannot serve with
+  // `session.error` followed by `session.idle`, and reading only the boundary graded a 401 as
+  // `completed` with `proven` confidence.
+  //
+  // A DELIBERATELY NONEXISTENT model rather than one this account has disabled: the captured
+  // case was "Model is disabled", which is a fact about one billing account and would make this
+  // test pass or fail for reasons that have nothing to do with the code. What matters is that a
+  // server-reported failure reaches the verdict, not which failure it was.
+  const adapter = await OpenCodeApiAdapter.start({
+    cwd: CWD,
+    role: 'implementer',
+    model: 'nosuchprovider/nosuchmodel',
+  })
+  t.after(async () => {
+    await adapter.close('graceful')
+  })
+
+  const seen: AgentEvent[] = []
+  const reading = (async () => {
+    for await (const e of adapter.events()) seen.push(e)
+  })()
+
+  await adapter.send('Reply with the single word ACK.', { kind: 'orchestrator' })
+  const deadline = Date.now() + 60_000
+  while (Date.now() < deadline && !seen.some((e) => e.type === 'turn_end')) {
+    await new Promise((r) => setTimeout(r, 300))
+  }
+
+  const end = seen.find((e) => e.type === 'turn_end') as TurnEndEvent | undefined
+  assert.ok(end, `the turn ended; saw ${JSON.stringify(seen.map((e) => e.type))}`)
+  assert.notEqual(end.verdict.outcome, 'completed', `a turn that did nothing is not a completion: ${JSON.stringify(end.verdict)}`)
+  assert.ok(
+    seen.some((e) => e.type === 'error'),
+    'and the operator is told while the run is still going',
+  )
 
   await adapter.close('graceful')
   await reading
