@@ -11,6 +11,7 @@ import type { AgentSession } from '../contract/session.ts'
 import type { RoleDefinition, RoleId } from './roles.ts'
 import { ClaudePtyHookAdapter } from '../adapters/claude.ts'
 import { CodexPtyHookAdapter } from '../adapters/codex.ts'
+import { OpenCodeApiAdapter } from '../adapters/opencodeApi/adapter.ts'
 import { OpenCodeRunAdapter } from '../adapters/opencode.ts'
 import { KimiPrintAdapter } from '../adapters/kimi.ts'
 import {
@@ -18,6 +19,7 @@ import {
   CODEX_CAPABILITIES,
   KIMI_CAPABILITIES,
   OPENCODE_CAPABILITIES,
+  OPENCODE_API_CAPABILITIES,
 } from '../conformance/capabilities.ts'
 import { assertCodexHooksExecutable, CONCLAVE_HOOK_MATCH } from '../deployment/codexHookTrust.ts'
 import { DEFAULT_IDLE_MS, DEFAULT_WATCHDOG_MS } from '../outcomes/watchdog.ts'
@@ -32,6 +34,7 @@ import {
 import {
   CLAUDE_COMMAND_POLICY,
   CODEX_COMMAND_POLICY,
+  OPENCODE_API_COMMAND_POLICY,
   NO_COMPOSER_COMMAND_POLICY,
 } from './commandPolicy.ts'
 import {
@@ -79,6 +82,22 @@ const PTY_HOOK_DEADLINES: DeadlineSupport = {
  * against. `unsupported` rather than a default nobody enforces: a turn that goes quiet on
  * these seats produces no verdict at all, and that is what a reader needs told.
  */
+/**
+ * The OpenCode seat driven through its API (#217).
+ *
+ * SILENCE IS SUPPORTED HERE, and that is the difference from `RUN_PER_TURN_DEADLINES` above.
+ * That profile declares it `unsupported` because nothing tracks activity WITHIN a turn: the JSON
+ * arrives when the process exits, so there is no signal a silence clock could be measured
+ * against. This transport streams `message.part.delta` continuously, so there is.
+ *
+ * The absolute clock is the run's, as everywhere else. Nothing about this transport bounds a
+ * turn on its own; what it changes is that a quiet turn can now be told from a stopped one.
+ */
+const OPENCODE_API_DEADLINES: DeadlineSupport = {
+  absolute: { supported: true, defaultMs: DEFAULT_WATCHDOG_MS },
+  silence: { supported: true, defaultMs: DEFAULT_IDLE_MS },
+}
+
 const RUN_PER_TURN_DEADLINES: DeadlineSupport = {
   absolute: { supported: true },
   silence: { supported: false },
@@ -298,6 +317,46 @@ export const OPENCODE_AGENT: AgentDefinition = {
 }
 
 /**
+ * The same agent, driven through its HTTP API (#217).
+ *
+ * A SEPARATE ENTRY rather than a flag on the one above, and the reason is that almost every
+ * field would have to become conditional: the deadline profile differs (this seat has a silence
+ * clock and that one cannot), the command policy differs (this one has commands and that one has
+ * no composer to type into), and the capability grades differ because they are claims about a
+ * transport. One entry answering both ways would be true of neither, and
+ * `commandPolicy.test.ts` already pins that the adapters declaring a command list are exactly
+ * the ones that can deliver one.
+ *
+ * The run-per-turn entry stays, and stays the default. It needs no server, which is the right
+ * shape for driving a CLI without one -- and this entry costs a resident process for the length
+ * of a run.
+ */
+export const OPENCODE_API_AGENT: AgentDefinition = {
+  id: 'opencode-api',
+  displayName: 'OpenCode (API)',
+  capabilities: OPENCODE_API_CAPABILITIES,
+  deadlines: OPENCODE_API_DEADLINES,
+  models: OPENCODE_MODELS,
+  // The agent's own capabilities, unchanged: what OpenCode can be TOLD to do is a fact about
+  // OpenCode, and does not move because conclave reached it over HTTP instead of argv.
+  instructionCapabilities: OPENCODE_INSTRUCTION_CAPABILITIES,
+  commandPolicy: OPENCODE_API_COMMAND_POLICY,
+  launch: {
+    command: 'opencode',
+    baseArgs: [],
+    executable: { install: 'npm install -g opencode-ai', installFrom: INSTALL_HINT_SOURCE },
+  },
+  async create(resolved: ResolvedParticipant, ctx: CreateParticipantContext): Promise<AgentSession> {
+    return OpenCodeApiAdapter.start({
+      cwd: ctx.cwd,
+      command: resolved.agent.launch.command,
+      role: resolved.role.id,
+      ...(ctx.watchdogMs === undefined ? {} : { watchdogMs: ctx.watchdogMs }),
+    })
+  },
+}
+
+/**
  * Kimi CLI, via `--print --output-format stream-json`.
  *
  * Like OpenCode: nothing to install, register or trust. Unlike OpenCode, its headless mode
@@ -353,5 +412,13 @@ export const KIMI_AGENT: AgentDefinition = {
 }
 
 export function defaultRegistry(roles?: Record<RoleId, RoleDefinition>): AgentRegistry {
-  return new AgentRegistry(roles).register(CLAUDE_AGENT).register(CODEX_AGENT).register(OPENCODE_AGENT).register(KIMI_AGENT)
+  return new AgentRegistry(roles)
+    .register(CLAUDE_AGENT)
+    .register(CODEX_AGENT)
+    .register(OPENCODE_AGENT)
+    // AFTER the run-per-turn entry, which stays the default for `opencode`. This one is asked
+    // for by name (#217): it costs a resident server for the length of a run, which is the right
+    // trade only when the run wants what it buys.
+    .register(OPENCODE_API_AGENT)
+    .register(KIMI_AGENT)
 }

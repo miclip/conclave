@@ -37,7 +37,7 @@ import { main } from '../../bin/conclave.ts'
 import { FakeRotationSession } from '../rotation/fakeSession.ts'
 import { Relay } from '../relay/relay.ts'
 import { worktreePaths } from '../relay/subagents.ts'
-import { CLAUDE_AGENT, CODEX_AGENT, KIMI_AGENT, OPENCODE_AGENT } from './builtin.ts'
+import { CLAUDE_AGENT, CODEX_AGENT, defaultRegistry, KIMI_AGENT, OPENCODE_AGENT } from './builtin.ts'
 import {
   checkCommandAvailable,
   findExecutable,
@@ -507,17 +507,22 @@ test('the command the preflight validates is the command the adapter actually sp
   assert.equal(readFileSync(ran, 'utf8'), 'ran\n', 'the configured wrapper is what ran, exactly once')
 })
 
-test('all four built-in adapters are handed the command their definition declares', () => {
-  // The other three cannot be driven as cheaply as OpenCode above -- two need a pty and Kimi needs
+test('every built-in adapter is handed the command its definition declares', () => {
+  // The others cannot be driven as cheaply as OpenCode above -- two need a pty and Kimi needs
   // its generated provider config -- so the wiring itself is asserted, against the source of the
   // one expression that could silently go back to a hardcoded filename. A `create` that stops
   // forwarding the field is the whole defect, and it is invisible from outside until a wrapper
   // is configured.
+  //
+  // COUNTED AGAINST THE REGISTRY rather than a literal, because the literal was `4` and a fifth
+  // adapter arrived (#217). A hardcoded count makes adding an adapter fail this test for the one
+  // reason it does not care about, and the number tells a reader nothing the registry does not.
   const builtins = readFileSync(join(import.meta.dirname, 'builtin.ts'), 'utf8')
+  const registered = defaultRegistry().list().filter((a: { create?: unknown }) => a.create !== undefined).length
   assert.equal(
     builtins.match(/command: resolved\.agent\.launch\.command,/g)?.length,
-    4,
-    'every built-in create must forward its declared command',
+    registered,
+    `every built-in create must forward its declared command (${registered} registered)`,
   )
   for (const [adapter, fallback] of [
     ['claude', "'claude'"],

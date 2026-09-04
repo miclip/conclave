@@ -119,6 +119,51 @@ export const CODEX_CAPABILITIES: AdapterCapabilities = {
  * genuine capability gap rather than an untested claim, and grading it as merely unverified
  * would imply a fixture could someday close it.
  */
+/**
+ * The same agent over its HTTP API rather than one process per turn (#217).
+ *
+ * A SECOND DECLARATION FOR ONE AGENT, because these are claims about a TRANSPORT and the two
+ * transports answer differently. Sharing one would make every answer below true of neither.
+ *
+ * Everything here is graded `inferred_from_documented_event` and that is deliberate. Each event
+ * named is declared in the installed bundle AND was seen firing against a live 1.18.27 server
+ * while this adapter was written -- but no fixture was captured that the conformance suite can
+ * replay, and `observed` means a recording exists. Claiming it would be downgraded on sight and
+ * would deserve to be.
+ */
+export const OPENCODE_API_CAPABILITIES: AdapterCapabilities = {
+  agent: 'opencode-api',
+  // The server announces its port and a session is created before any turn is sent, so readiness
+  // is a real state here rather than something the first turn has to stand in for.
+  readinessSignal: 'first_turn',
+  // Minted by this adapter from the session id and a turn ordinal. The server's own ids identify
+  // messages and parts, which are narrower than a turn -- the same reason the run-per-turn
+  // adapter cannot use `messageID` either.
+  turnKeySource: 'run_invocation',
+  outcomes: {
+    // `session.idle`, which is the server stating the session stopped working. Not an inference
+    // from a process going away, which is what the run-per-turn seat has to settle for.
+    completed: 'inferred_from_documented_event',
+    // `POST /session/{id}/abort` and nothing is killed. Attributable because THIS adapter asked:
+    // there is no signal to interpret and no child whose death has to be explained.
+    cancelled: 'inferred_from_documented_event',
+    // `permission.asked` and `/session/{id}/permissions/{id}` both exist; neither has been seen
+    // firing, and `decidePermission` refuses rather than guessing at a payload nobody has read.
+    permission_refused: 'unsupported',
+    // There is no per-turn process to exit. The server outlives every turn it runs, which is the
+    // whole point of the transport.
+    process_exited: 'unsupported',
+    // No deadline is wired to this adapter yet. When one is, it will be the run's, not a
+    // property of the transport.
+    timed_out: 'reasoned_but_unverified',
+    // The event stream ending with a turn open. Reported `uncertain` on purpose: the turn may
+    // well have finished after we stopped listening, and inventing a verdict for it is what #146
+    // forbids.
+    transport_lost: 'inferred_from_documented_event',
+    unknown_abnormal_end: 'reasoned_but_unverified',
+  },
+}
+
 export const OPENCODE_CAPABILITIES: AdapterCapabilities = {
   agent: 'opencode',
   // Literal rather than a concession. There is no resident process between turns, so
@@ -189,5 +234,12 @@ export const ALL_CAPABILITIES = [
   CLAUDE_CAPABILITIES,
   CODEX_CAPABILITIES,
   OPENCODE_CAPABILITIES,
+  // #217: graded like every other adapter, deliberately. A declaration the suite does not walk
+  // is a claim nothing checks -- which is the shape of defect this repository has spent
+  // #196, #201, #202 and #205 removing. Its outcomes are currently
+  // `inferred_from_documented_event` rather than `observed`, so the suite has something to hold
+  // it to the day a recording is captured and someone is tempted to upgrade the claim without
+  // one.
+  OPENCODE_API_CAPABILITIES,
   KIMI_CAPABILITIES,
 ]

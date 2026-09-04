@@ -25,9 +25,14 @@ const spec = (over: Partial<ParticipantSpec> = {}): ParticipantSpec => ({
 })
 
 test('the default registry lists every built-in agent, all constructible', () => {
+  // `opencode-api` is the same AGENT over a different transport (#217), and it is a separate
+  // entry rather than a flag because almost every field would otherwise have to be conditional:
+  // it has a silence clock the run-per-turn seat cannot have, and a command policy the
+  // run-per-turn seat has nowhere to deliver.
   const r = defaultRegistry()
-  assert.deepEqual(r.list().map((a) => a.id).sort(), ['claude', 'codex', 'kimi', 'opencode'])
-  assert.deepEqual(r.listAvailable().map((a) => a.id).sort(), ['claude', 'codex', 'kimi', 'opencode'])
+  const expected = ['claude', 'codex', 'kimi', 'opencode', 'opencode-api']
+  assert.deepEqual(r.list().map((a) => a.id).sort(), expected)
+  assert.deepEqual(r.listAvailable().map((a) => a.id).sort(), expected, 'listed and constructible must not diverge')
 })
 
 test('an agent without an adapter is described, not hidden', () => {
@@ -130,8 +135,12 @@ test('a new adapter arrives by registration alone', () => {
       return { agent: 'local-critic' } as any
     },
   }
+  // Counted RELATIVE to the built-ins rather than against a literal: this test is about
+  // registration adding one, and a hardcoded total makes it fail whenever a built-in is added
+  // for the one reason it does not care about.
+  const before = defaultRegistry().listAvailable().length
   const r = defaultRegistry().register(fake)
-  assert.equal(r.listAvailable().length, 5)
+  assert.equal(r.listAvailable().length, before + 1, 'registration alone adds exactly one')
   assert.equal(r.resolve(spec({ agent: 'local-critic', role: 'advisor' })).agent.id, 'local-critic')
 })
 
