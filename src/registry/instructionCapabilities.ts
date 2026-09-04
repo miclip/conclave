@@ -36,7 +36,7 @@
 import type { InstructionCapabilities } from './types.ts'
 
 /** Verbatim `claude --version`. */
-const CLAUDE_VERSION = '2.1.252 (Claude Code)'
+const CLAUDE_VERSION = '2.1.260 (Claude Code)'
 /** Verbatim `codex --version`. */
 const CODEX_VERSION = 'codex-cli 0.147.0'
 /** Verbatim `opencode --version`. */
@@ -49,6 +49,9 @@ export const CLAUDE_INSTRUCTION_CAPABILITIES: InstructionCapabilities = {
     supported: true,
     evidence: 'inferred_from_documented_event',
     source: '`claude --help`: `--agents <json>  JSON object defining custom agents`; `Task` and `Agent` in the installed bundle',
+    // Not the `--help` line: that text is generated and its spacing shifts between builds, so a
+    // search on it fails for formatting rather than for truth.
+    probes: ['--agents', 'Task'],
     sourceVersion: CLAUDE_VERSION,
   },
   backgroundTasks: {
@@ -59,12 +62,14 @@ export const CLAUDE_INSTRUCTION_CAPABILITIES: InstructionCapabilities = {
     // `sessionBackgrounding` below, not this. `run_in_background` is the in-turn form, and it is
     // the same shape as the literal kimi advertises for the same capability.
     source: '`run_in_background` in the installed bundle',
+    probes: ['run_in_background'],
     sourceVersion: CLAUDE_VERSION,
   },
   sessionBackgrounding: {
     supported: true,
     evidence: 'inferred_from_documented_event',
     source: '`claude --help`: `--bg, --background  Start the session in the background and return immediately`, with `claude attach <id>`',
+    probes: ['--background'],
     sourceVersion: CLAUDE_VERSION,
   },
   autonomousLoop: {
@@ -73,6 +78,7 @@ export const CLAUDE_INSTRUCTION_CAPABILITIES: InstructionCapabilities = {
     // The FORM is advertised; no cap on it is. That asymmetry is the point of grading rather
     // than a boolean -- kimi below advertises the same capability WITH an integer bound.
     source: '`ProposeGoalTool` and `<<autonomous-loop>>` in the installed bundle',
+    probes: ['ProposeGoalTool', 'autonomous-loop'],
     sourceVersion: CLAUDE_VERSION,
   },
 }
@@ -82,12 +88,14 @@ export const CODEX_INSTRUCTION_CAPABILITIES: InstructionCapabilities = {
     supported: true,
     evidence: 'inferred_from_documented_event',
     source: '`codex features list`: `multi_agent  stable  true`; `spawn_agent`, `wait_agent`, `close_agent` in the installed binary',
+    probes: ['spawn_agent', 'wait_agent', 'close_agent'],
     sourceVersion: CODEX_VERSION,
   },
   backgroundTasks: {
     supported: true,
     evidence: 'inferred_from_documented_event',
     source: '"Waited for background terminal: " in the installed binary',
+    probes: ['Waited for background terminal: '],
     sourceVersion: CODEX_VERSION,
   },
   // No `autonomousLoop`. "This goal persists across turns." establishes that a goal SURVIVES a
@@ -106,6 +114,7 @@ export const OPENCODE_INSTRUCTION_CAPABILITIES: InstructionCapabilities = {
     supported: true,
     evidence: 'inferred_from_documented_event',
     source: '`experimental.session.background` in the installed bundle',
+    probes: ['experimental.session.background'],
     sourceVersion: OPENCODE_VERSION,
   },
   asyncPromptSubmission: {
@@ -113,12 +122,14 @@ export const OPENCODE_INSTRUCTION_CAPABILITIES: InstructionCapabilities = {
     evidence: 'inferred_from_documented_event',
     // The only one of the four advertising this at all.
     source: '`session.prompt_async` in the installed bundle',
+    probes: ['session.prompt_async'],
     sourceVersion: OPENCODE_VERSION,
   },
   boundedIteration: {
     supported: true,
     evidence: 'inferred_from_documented_event',
     source: '"The maximum number of steps allowed for this task has been reached. Tools are disabled until next user input." in the installed bundle',
+    probes: ['The maximum number of steps allowed for this task has been reached.'],
     sourceVersion: OPENCODE_VERSION,
   },
 }

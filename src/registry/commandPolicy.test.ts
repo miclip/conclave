@@ -46,7 +46,7 @@ const PINNED: ReadonlyArray<readonly [string, string, Extract<CommandPolicy, { k
   ['codex', 'codex-cli 0.147.0', CODEX_COMMAND_POLICY as Extract<CommandPolicy, { kind: 'declared' }>],
 ]
 
-for (const [command, version, policy] of PINNED) {
+for (const [command, , policy] of PINNED) {
   test(`every command the ${command} policy considered is one the installed ${command} still has`, (t) => {
     // Asserted BEFORE the skip below, deliberately. Everything after it degrades to a skip on
     // a machine without that CLI installed, and a guard that can be skipped must not be the
@@ -79,10 +79,18 @@ for (const [command, version, policy] of PINNED) {
     )
   })
 
-  test(`the ${command} policy pins the version its literals were read from`, () => {
-    // Verbatim `--version`, the same freshness convention `GradedClaim` sets: a staleness
-    // check is a string comparison and needs no parser.
-    assert.equal(policy.sourceVersion, version)
+  test(`the ${command} policy records ONE version its literals were read from`, () => {
+    // #201: this compared the pin against a hardcoded copy of itself, and passed while the pin
+    // sat two releases behind the installed CLI. Both sides said the same thing, so it proved
+    // the file agreed with itself and nothing about the program it describes.
+    //
+    // What the pin is FOR is saying when someone last looked. Whether the declarations are still
+    // true is answered by the bundle search above, which needs no version to do it -- and must
+    // not depend on one, because every contributor's install moves on its own schedule.
+    assert.match(policy.sourceVersion, /\S/, `${command} must record the version its literals came from`)
+    for (const c of policy.commands) {
+      assert.ok(c.source.length > 0, `${c.command} must carry a literal the search above can find`)
+    }
   })
 }
 
