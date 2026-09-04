@@ -65,7 +65,7 @@ conclave config check       # is it present, current, and trusted
 Node 24 or newer.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/miclip/conclave/v0.5.18/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/miclip/conclave/v0.5.19/scripts/install.sh | sh
 ```
 
 Installs the newest tagged release into `~/.local/share/conclave`, compiles `node-pty`, and
