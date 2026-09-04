@@ -37,7 +37,8 @@ import { main } from '../../bin/conclave.ts'
 import { FakeRotationSession } from '../rotation/fakeSession.ts'
 import { Relay } from '../relay/relay.ts'
 import { worktreePaths } from '../relay/subagents.ts'
-import { CLAUDE_AGENT, CODEX_AGENT, KIMI_AGENT, OPENCODE_AGENT } from './builtin.ts'
+import { CLAUDE_AGENT, CODEX_AGENT, defaultRegistry, KIMI_AGENT, OPENCODE_AGENT } from './builtin.ts'
+import { fakeOpenCode } from '../adapters/opencodeApi/fakeServer.ts'
 import {
   checkCommandAvailable,
   findExecutable,
@@ -469,15 +470,27 @@ test('the command the preflight validates is the command the adapter actually sp
   // A validated field that nothing spawns is worse than no check: it reports on a configuration
   // the run does not have. All four now thread `launch.command` through to the spawn.
   //
-  // Proved end to end on OpenCode, whose adapter spawns an ordinary child rather than a pty, and
-  // against the recorded stdout of a real `opencode run --format json` -- so the wrapper is a real
-  // executable running a real turn, not a probe of the spawn call.
+  // Proved end to end on OpenCode, whose adapter spawns an ordinary child rather than a pty -- so
+  // the wrapper is a real executable the adapter really launches, not a probe of the spawn call.
+  //
+  // The wrapper now announces a port and waits, because since #217 that adapter spawns
+  // `opencode serve` and connects to it rather than running one process per turn. A fake server
+  // stands behind the announced port, so the adapter gets a session and the wrapper is exercised
+  // the way production exercises the real binary.
+  const fake = fakeOpenCode()
+  const port = await fake.port
+  t.after(async () => {
+    await fake.close()
+  })
   const dir = tempDir(t, 'conclave-wrapper')
   const ran = join(dir, 'ran.log')
   const wrapped = join(dir, 'opencode-wrapper')
   writeFileSync(
     wrapped,
-    `#!/bin/sh\nprintf 'ran\\n' >> ${JSON.stringify(ran)}\ncat ${JSON.stringify(FIXTURE)}\n`,
+    `#!/bin/sh\nprintf 'ran\\n' >> ${JSON.stringify(ran)}\n` +
+      `echo "opencode server listening on http://127.0.0.1:${port}"\n` +
+      // Stays up, as a server does. The adapter kills it on close.
+      `while true; do sleep 1; done\n`,
   )
   chmodSync(wrapped, 0o755)
 
@@ -507,17 +520,22 @@ test('the command the preflight validates is the command the adapter actually sp
   assert.equal(readFileSync(ran, 'utf8'), 'ran\n', 'the configured wrapper is what ran, exactly once')
 })
 
-test('all four built-in adapters are handed the command their definition declares', () => {
-  // The other three cannot be driven as cheaply as OpenCode above -- two need a pty and Kimi needs
+test('every built-in adapter is handed the command its definition declares', () => {
+  // The others cannot be driven as cheaply as OpenCode above -- two need a pty and Kimi needs
   // its generated provider config -- so the wiring itself is asserted, against the source of the
   // one expression that could silently go back to a hardcoded filename. A `create` that stops
   // forwarding the field is the whole defect, and it is invisible from outside until a wrapper
   // is configured.
+  //
+  // COUNTED AGAINST THE REGISTRY rather than a literal, because the literal was `4` and a fifth
+  // adapter arrived (#217). A hardcoded count makes adding an adapter fail this test for the one
+  // reason it does not care about, and the number tells a reader nothing the registry does not.
   const builtins = readFileSync(join(import.meta.dirname, 'builtin.ts'), 'utf8')
+  const registered = defaultRegistry().list().filter((a: { create?: unknown }) => a.create !== undefined).length
   assert.equal(
     builtins.match(/command: resolved\.agent\.launch\.command,/g)?.length,
-    4,
-    'every built-in create must forward its declared command',
+    registered,
+    `every built-in create must forward its declared command (${registered} registered)`,
   )
   for (const [adapter, fallback] of [
     ['claude', "'claude'"],

@@ -119,52 +119,58 @@ export const CODEX_CAPABILITIES: AdapterCapabilities = {
  * genuine capability gap rather than an untested claim, and grading it as merely unverified
  * would imply a fixture could someday close it.
  */
+/**
+ * The same agent over its HTTP API rather than one process per turn (#217).
+ *
+ * A SECOND DECLARATION FOR ONE AGENT, because these are claims about a TRANSPORT and the two
+ * transports answer differently. Sharing one would make every answer below true of neither.
+ *
+ * Everything here is graded `inferred_from_documented_event` and that is deliberate. Each event
+ * named is declared in the installed bundle AND was seen firing against a live 1.18.27 server
+ * while this adapter was written -- but no fixture was captured that the conformance suite can
+ * replay, and `observed` means a recording exists. Claiming it would be downgraded on sight and
+ * would deserve to be.
+ */
 export const OPENCODE_CAPABILITIES: AdapterCapabilities = {
   agent: 'opencode',
-  // Literal rather than a concession. There is no resident process between turns, so
-  // there is nothing that could become ready before the first one.
+  // The server announces its port and a session is created before any turn is sent, so readiness
+  // is a real state here rather than something the first turn has to stand in for.
   readinessSignal: 'first_turn',
-  // Neither of the other two sources exists here. A turn is one `run` invocation, and the
-  // ids OpenCode does emit (messageID) change per STEP, so they identify something
-  // narrower than a turn and cannot stand in for one.
+  // Minted by this adapter from the session id and a turn ordinal. The server's own ids identify
+  // messages and parts, which are narrower than a turn -- the same reason the run-per-turn
+  // adapter cannot use `messageID` either.
   turnKeySource: 'run_invocation',
   outcomes: {
-    // step_finish reason=stop, then process exit. Two independent signals, both observed.
-    completed: 'observed',
-    // We own the process; killing it IS the cancellation, which is why this is `proven`
-    // rather than the `assumed` the pty adapters have to settle for. Captured live.
-    cancelled: 'observed',
-    // No dialog exists in `run` mode. See above.
+    // `session.idle`, which is the server stating the session stopped working. Not an inference
+    // from a process going away, which is what the run-per-turn adapter had to settle for.
+    //
+    // DO NOT UPGRADE THIS ON `edit-turn.ndjson`. The suite reports `upgrade_available` against
+    // that recording, and the recording is real -- but it was captured from the RUN-PER-TURN
+    // adapter this replaced (#217), whose completion signal was `step_finish reason=stop` parsed
+    // out of stdout. This transport has no such record; it learns a turn ended from `session.idle`
+    // on an event stream. Upgrading to `observed` on that fixture would claim a recording proves
+    // a code path that never runs.
+    completed: 'inferred_from_documented_event',
+    // `POST /session/{id}/abort` and nothing is killed. Attributable because THIS adapter asked:
+    // there is no signal to interpret and no child whose death has to be explained.
+    cancelled: 'inferred_from_documented_event',
+    // `permission.asked` and `/session/{id}/permissions/{id}` both exist; neither has been seen
+    // firing, and `decidePermission` refuses rather than guessing at a payload nobody has read.
     permission_refused: 'unsupported',
-    // `close('graceful')` with a turn in flight. Distinct from `cancelled`, which is the
-    // same signal with our own bookkeeping saying we asked for it.
-    process_exited: 'observed',
-    // Driven past a 5s watchdog on a real run.
-    timed_out: 'observed',
-    // The binary is not on PATH. No CLI version behind it, because the failure IS that
-    // there is no CLI.
-    transport_lost: 'observed',
-    // Deliberately distinct from `completed`: a run CAN exit non-zero, or exit 0 having
-    // silently failed an auxiliary model call, so exit status alone never proves a turn
-    // finished. Captured from a paid model on an account with no payment method.
-    unknown_abnormal_end: 'observed',
+    // There is no per-turn process to exit. The server outlives every turn it runs, which is the
+    // whole point of the transport.
+    process_exited: 'unsupported',
+    // No deadline is wired to this adapter yet. When one is, it will be the run's, not a
+    // property of the transport.
+    timed_out: 'reasoned_but_unverified',
+    // The event stream ending with a turn open. Reported `uncertain` on purpose: the turn may
+    // well have finished after we stopped listening, and inventing a verdict for it is what #146
+    // forbids.
+    transport_lost: 'inferred_from_documented_event',
+    unknown_abnormal_end: 'reasoned_but_unverified',
   },
 }
 
-/**
- * kimi 1.49.0, via `--print --output-format stream-json`.
- *
- * `completed` is `observed`, and since the adapter registers hooks its CONFIDENCE is now
- * `proven`: a live run reports `provenance: hook:Stop` with `synthesized: false`. The
- * message-stream fixture in `spikes/kimi/fixtures/` still backs the outcome; the hook is what
- * makes it announced rather than inferred.
- *
- * The `inferred` grading has not gone away -- it is the documented fallback when hook mode
- * cannot be set up, and it then describes that SESSION rather than this agent.
- *
- * `permission_refused` stays `unsupported`: `--print` auto-approves for the invocation, so
- * there is no dialog to refuse and no hook can create one.
- */
 export const KIMI_CAPABILITIES: AdapterCapabilities = {
   agent: 'kimi',
   readinessSignal: 'first_turn',
@@ -188,6 +194,11 @@ export const KIMI_CAPABILITIES: AdapterCapabilities = {
 export const ALL_CAPABILITIES = [
   CLAUDE_CAPABILITIES,
   CODEX_CAPABILITIES,
+  // #217: graded like every other adapter, deliberately. A declaration the suite does not walk
+  // is a claim nothing checks -- the shape this repository spent #196, #201, #202 and #205
+  // removing. Its outcomes are `inferred_from_documented_event` rather than `observed`: every
+  // event was seen firing against a live server, but no fixture was captured that the suite can
+  // replay, and the recordings that DID exist belonged to the run-per-turn adapter this replaced.
   OPENCODE_CAPABILITIES,
   KIMI_CAPABILITIES,
 ]

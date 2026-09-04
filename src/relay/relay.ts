@@ -722,6 +722,13 @@ export interface TurnResult {
   emittedBefore: number
   /** Paths that became dirty in this participant's own root during the turn. */
   changedDuringTurn: string[]
+  /**
+   * Whether the prose was rebuilt from streamed narration rather than read from the transcript's
+   * closing message. A reconstructed report is narration, not the participant's final statement,
+   * and a reader deciding how much to trust an instruction built on it should know which one
+   * they have (#218).
+   */
+  reconstructed?: boolean
 }
 
 /**
@@ -4167,6 +4174,7 @@ export class Relay {
     // the closing message, so it is longer and less pointed than what the peer would have
     // received -- and a reader deciding how much to trust an instruction built on it should
     // be told which one they have.
+    let reconstructed = false
     if (prose.trim() === '') {
       const streamed = p.events
         .slice(before)
@@ -4175,6 +4183,7 @@ export class Relay {
         .filter(Boolean)
       if (streamed.length > 0) {
         prose = streamed.join('\n\n')
+        reconstructed = true
         this.#record({
           from: 'orchestrator',
           fromRank: 'human',
@@ -4219,7 +4228,7 @@ export class Relay {
     // it would shift every flag position in this turn by one, and those positions are what
     // `restated` pairs on.
     this.#noteUnexpectedWrite(p, turnRoot, changedDuringTurn)
-    return { prose, end, unsettled, emittedSinceSend: p.events.length - before, emittedBefore: before, changedDuringTurn }
+    return { prose, end, unsettled, emittedSinceSend: p.events.length - before, emittedBefore: before, changedDuringTurn, reconstructed }
   }
 
   /**
@@ -5731,7 +5740,7 @@ export class Relay {
    * dependency: a rule that only starts running once there is something to test it with is a
    * rule nobody has tested.
    */
-  #admit(instruction: string, target: TaskTarget, origin: number, purpose: TaskPurpose, parent?: string): Task {
+  #admit(instruction: string, target: TaskTarget, origin: number, purpose: TaskPurpose, parent?: string, reconstructed?: boolean): Task {
     const task: Task = {
       id: `t-${++this.#taskSeq}`,
       seq: this.#taskSeq,
@@ -5749,6 +5758,10 @@ export class Relay {
       // messages that existed when the advisor decided rather than against later ones.
       restrictedOrigins: this.restrictedOrigins.map((o) => o.seq),
       admittedAt: Date.now(),
+      // Why the instruction is marked reconstructed at all: the advisor's turn was rebuilt from
+      // narration because its closing statement never settled, and a repeat of the last dispatch
+      // built on that reconstruction is suppressed rather than sent (#218).
+      ...(reconstructed ? { reconstructed: true } : {}),
     }
     this.#queue.push(task)
     this.#taskRuntime.set(task.id, { state: 'admitted', marks: [] })
@@ -6695,6 +6708,15 @@ export class Relay {
      */
     const abandoned: string[] = []
     /**
+     * The last instruction text dispatched to each seat, used for repeat-suppression (#218).
+     *
+     * An exact `===` match between a reconstructed instruction and the last instruction sent to
+     * the eventual same seat means the advisor was re-issued the same work on the basis of a
+     * reconstructed report that was narration rather than a closing statement. The repetition
+     * costs an implementer turn and produces a second copy of work already dispatched.
+     */
+    const lastInstructionBySeat = new Map<string, string>()
+    /**
      * Turns this run still owes an answer to: sent and not back, or back and not yet processed.
      *
      * Both, and the second is not pedantry. A turn that has arrived has left `inflight` and has
@@ -6731,21 +6753,43 @@ export class Relay {
         this.#record({ from: 'orchestrator', fromRank: 'human', to: [seat.id], kind: 'note', text: notice })
       }
       this.#record({ from: lead.id, fromRank: 'advisor', to: [seat.id], kind: 'instruction', text: task.instruction })
+
       const aside = this.#drain(seat.id)
       this.#sending(task)
+      // A reconstructed instruction's provenance belongs in the record AND in the prompt: the
+      // routing log is the complete account, and the seat itself is the one that must decide how
+      // much to trust an instruction rebuilt from narration (#218).
+      const provPrefix =
+        task.reconstructed
+          ? `[ORCHESTRATOR — mechanical, not a participant speaking]\n\nthe instruction below was produced by a turn reconstructed from streamed narration — it is narration, not the advisor's closing statement, and may be less precise than the original would have been`
+          : ''
+      if (provPrefix !== '') {
+        this.#record({
+          from: 'orchestrator',
+          fromRank: 'human',
+          to: [seat.id],
+          kind: 'note',
+          text:
+            `the instruction to ${seat.id} came from a turn reconstructed from streamed narration ` +
+            `(narration, not the advisor's closing statement); it may be less precise than the original`,
+        })
+      }
       const work = (async (): Promise<Completion> => {
         const report = await this.#exchange(
           seat,
           [
             aside,
-            // Before the instruction, so the instruction is still the last thing read, and
-            // marked mechanical the way every other orchestrator-authored line is (`#tellLead`).
+            provPrefix,
             notice === undefined ? '' : `[ORCHESTRATOR — mechanical, not a participant speaking]\n\n${notice}`,
             envelope({ from: lead.id, fromRank: 'advisor', fromRole: lead.role, kind: 'instruction', text: task.instruction }),
           ]
             .filter(Boolean)
             .join('\n\n'),
         )
+        // Only a SUCCESSFUL exchange counts as the instruction having been sent to this seat:
+        // a send that fails never actually reached it, so it must not become the "last"
+        // instruction a repeat is checked against (#218).
+        lastInstructionBySeat.set(exec.seat, task.instruction)
         const recorded = this.#record({
           from: seat.id,
           fromRank: 'implementer',
@@ -6786,7 +6830,13 @@ export class Relay {
      * ready IS obeying it, and ending a run that is progressing would be the ceiling doing
      * something nobody asked it to.
      */
-    const dispatchReady = (): CeilingBreach | undefined => {
+    const dispatchReady = (): { breach: CeilingBreach | undefined; suppressed: boolean } => {
+      // Whether a reconstructed instruction was suppressed during THIS dispatch pass. Returned
+      // rather than kept on the loop scope: `dispatchReady` also runs after a seat is released,
+      // where a suppression must not re-ask the advisor (that would leak a stale notice into the
+      // routing after a later reply). The re-ask is the caller's decision, and only the caller
+      // that just admitted a batch is the one that may make it (#218).
+      let suppressed = false
       /**
        * Assigned and not yet launched, so every seat this pass puts to work is on the table
        * before any of them is sent anything (#152).
@@ -6829,11 +6879,40 @@ export class Relay {
           breach = inflight.size + ready.length > 0 ? undefined : wouldRun
           break
         }
+        // Repeat-suppression (#218): a reconstructed advisor instruction that exactly repeats
+        // the last instruction actually sent to the same seat is suppressed before assignment.
+        // The advisor turn was rebuilt from narration and its instruction was a duplicate of the
+        // prior instruction; dispatching it would waste an implementer turn on a repeat.
+        if (
+          d.task.reconstructed &&
+          d.task.instruction === lastInstructionBySeat.get(d.seat.seat)
+        ) {
+          this.#record({
+            from: 'orchestrator',
+            fromRank: 'human',
+            to: [],
+            kind: 'note',
+            text:
+              `suppressed instruction for ${d.seat.seat}: it is an exact repeat of the last instruction ` +
+              `sent to this seat (${JSON.stringify(d.task.instruction)}), which was already dispatched; ` +
+              `spending no implementer turn`,
+          })
+          const runtime = this.#taskRuntime.get(d.task.id)!
+          runtime.state = 'cancelled'
+          this.#mark(d.task, 'cancelled')
+          suppressed = true
+          this.#tellLead(
+            `Your reconstructed turn for ${d.seat.seat} produced an instruction that is an exact ` +
+            `repeat of the prior instruction to that seat (${JSON.stringify(d.task.instruction)}). ` +
+            `It was suppressed and not delivered. Give ${d.seat.seat} a new instruction.`,
+          )
+          break
+        }
         this.#assign(d.task, d.seat)
         ready.push(d)
       }
       for (const d of ready) launch(d.task, d.seat)
-      return breach
+      return { breach, suppressed }
     }
 
     // The dispatcher. One iteration is one ADVISOR TURN: the advisor's standing reply is read
@@ -7028,6 +7107,11 @@ export class Relay {
             ? this.#end(closing.reason, closing.detail)
             : this.#redAware(closing.outcome)
         }
+        // Whether the admission dispatch pass suppressed a reconstructed repeat this turn (#218).
+        // Declared on the loop scope (not inside the admission block) and reset at the foot of
+        // the re-ask: only the ADMISSION dispatch sets it, so a suppression during the post-report
+        // dispatch cannot leak a stale re-ask into the next report's routing.
+        let suppressedThisTurn = false
         if (!closing) {
         // What this turn did about assigning work, and the ONLY thing the instrument reads (#79).
         //
@@ -7476,7 +7560,25 @@ export class Relay {
               if ((this.#pending.get(seat.id) ?? []).length === 0) continue
               const extra = await this.#exchange(seat, this.#drain(seat.id))
               this.#record({ from: seat.id, fromRank: 'implementer', to: [lead.id], kind: 'report', text: extra.prose })
-              answers.push(envelope({ from: seat.id, fromRank: 'implementer', fromRole: seat.role, kind: 'report', text: extra.prose }))
+              // Same provenance contract as the ordinary report path (#218): a report that was
+              // lost and rebuilt from narration is named as such both in the record (addressed to
+              // the advisor) and in the prompt handed to it.
+              const extraProv =
+                extra.reconstructed
+                  ? `[ORCHESTRATOR — mechanical, not a participant speaking]\n\n${seat.id}'s report below was lost and reconstructed from streamed narration — it is narration, not a closing statement, and may be less precise than the original would have been`
+                  : ''
+              if (extra.reconstructed) {
+                this.#record({
+                  from: 'orchestrator',
+                  fromRank: 'human',
+                  to: [lead.id],
+                  kind: 'note',
+                  text:
+                    `${seat.id}'s report to the advisor was lost and reconstructed from streamed ` +
+                    `narration (narration, not a closing statement); it may be less precise than the original`,
+                })
+              }
+              answers.push(...[extraProv, envelope({ from: seat.id, fromRank: 'implementer', fromRole: seat.role, kind: 'report', text: extra.prose })].filter(Boolean))
             }
             next = await this.#exchange(lead, [this.#drain(lead.id), ...answers, advisorTurnsLeftNotice(advisorTurn + 1, maxAdvisorTurns)].filter(Boolean).join('\n\n'))
             // Bounded by the advisor-turn budget like everything else, so a human who keeps talking
@@ -7645,7 +7747,7 @@ export class Relay {
             // exists whether or not it survives adjudication. Admission logs nothing: the task
             // record is the dispatcher's account of the schedule, and the routing log stays the
             // account of what actually moved between participants.
-            const task = this.#admit(admitting.instruction, admitting.target, next.end.seq, purposeFor(admitting.target))
+            const task = this.#admit(admitting.instruction, admitting.target, next.end.seq, purposeFor(admitting.target), undefined, next.reconstructed)
 
             // BEFORE delivery, not after. The point of the pause is that the human adjudicates
             // while the instruction is still a proposal. Once per admission rather than once per
@@ -7710,10 +7812,11 @@ export class Relay {
           // Everything the seat table can take, sent now and not awaited. At N=1 that is the one
           // task just admitted going to the one seat that can take it; at N>1 a reply naming two
           // seats puts both to work before either has replied, which is the whole point.
-          const breach = dispatchReady()
-          if (breach) {
-            this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text: breach.detail })
-            closing ??= { kind: 'end', reason: 'ceiling', detail: breach.detail }
+          const dispatched = dispatchReady()
+          if (dispatched.suppressed) suppressedThisTurn = true
+          if (dispatched.breach) {
+            this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text: dispatched.breach.detail })
+            closing ??= { kind: 'end', reason: 'ceiling', detail: dispatched.breach.detail }
             continue advisor
           }
         }
@@ -7733,6 +7836,21 @@ export class Relay {
         // Everything above is admission and dispatch, and none of it runs once the run has
         // decided to end. Everything below is the drain: turns already sent come back, are
         // graded, integrated and routed, and only then does the loop reach the exit at the top.
+
+        // A reconstructed instruction was suppressed because it exactly repeated the last one
+        // sent to the same seat (#218). The notification was recorded via #tellLead; drain it
+        // now and re-ask the advisor for a new instruction.
+        if (suppressedThisTurn) {
+          suppressedThisTurn = false
+          const advisorAside = this.#drain(lead.id)
+          next = await this.#exchange(
+            lead,
+            [advisorAside, this.#drainLeadNotices(), advisorTurnsLeftNotice(advisorTurn + 1, maxAdvisorTurns)]
+              .filter(Boolean)
+              .join('\n\n'),
+          )
+          continue
+        }
 
         // Nothing in flight and nothing dispatchable: the advisor asked for work that no seat can
         // ever take. Thrown rather than worked around, because there is no correct fallback --
@@ -7960,7 +8078,11 @@ export class Relay {
         // to collect work already sitting in the queue is the lockstep this design exists to
         // remove, reached from the other end. At N=1 the queue is empty here -- one reply
         // admits one task and it was dispatched immediately -- so nothing happens.
-        const filled = dispatchReady()
+        //
+        // A suppression on THIS pass is deliberately ignored: it is not an admission that
+        // warrants re-asking the advisor, and `suppressedThisTurn` is reset above, so returning
+        // it here could only leak a stale re-ask into the next report's routing (#218).
+        const filled = dispatchReady().breach
         if (filled) {
           this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text: filled.detail })
           closing ??= { kind: 'end', reason: 'ceiling', detail: filled.detail }
@@ -7975,9 +8097,29 @@ export class Relay {
         //
         // Placed with the other orchestrator notices rather than after the report, which is where every conditional
         // block in the opening briefing sits: ahead of the substantive content, so it cannot be displaced by it.
+        //
+        // For a reconstructed report (#218), the provenance notice is in the prompt text itself
+        // AND recorded as an orchestrator note addressed to the advisor: the routing log is the
+        // complete account, and the advisor is the one that must know it is reading narration
+        // because the report's closing statement was lost.
+        const reportProvNote =
+          report.reconstructed
+            ? `[ORCHESTRATOR — mechanical, not a participant speaking]\n\n${seat.id}'s report below was lost and reconstructed from streamed narration — it is narration, not a closing statement, and may be less precise than the original would have been`
+            : ''
+        if (report.reconstructed) {
+          this.#record({
+            from: 'orchestrator',
+            fromRank: 'human',
+            to: [lead.id],
+            kind: 'note',
+            text:
+              `${seat.id}'s report to the advisor was lost and reconstructed from streamed narration ` +
+              `(narration, not a closing statement); it may be less precise than the original`,
+          })
+        }
         next = await this.#exchange(
           lead,
-          [leadAside, this.#drainLeadNotices(), closing ? '' : advisorTurnsLeftNotice(advisorTurn + 1, maxAdvisorTurns), envelope({ from: seat.id, fromRank: 'implementer', fromRole: seat.role, kind: 'report', text: report.prose })]
+          [leadAside, this.#drainLeadNotices(), reportProvNote, closing ? '' : advisorTurnsLeftNotice(advisorTurn + 1, maxAdvisorTurns), envelope({ from: seat.id, fromRank: 'implementer', fromRole: seat.role, kind: 'report', text: report.prose })]
             .filter(Boolean)
             .join('\n\n'),
         )

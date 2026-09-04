@@ -295,12 +295,16 @@ test('every declaration says why, and quotes what it was read from', () => {
   }
 })
 
-test('the run-per-turn adapters declare unsupported, which is not the same answer as a refusal list', () => {
+test('a run-per-turn adapter declares unsupported, which is not the same answer as a refusal list', () => {
   // A statement about the transport rather than about any verb. Collapsing it into a list of
   // refusals would say someone weighed those commands and said no; collapsing it into absence
   // would say nobody looked. Both misdescribe a structural fact.
+  //
+  // KIMI ALONE since #217. OpenCode was the other one until its adapter was replaced with an API
+  // transport that has somewhere to send a command -- which is the point of that change: the
+  // `unsupported` answer was true of the shape conclave drove it through, not of the agent.
   const r = defaultRegistry()
-  for (const agent of ['opencode', 'kimi']) {
+  for (const agent of ['kimi']) {
     const policy = r.get(agent).commandPolicy
     assert.ok(policy, `${agent} must carry a policy`)
     assert.equal(policy.kind, 'unsupported', `${agent} has no composer to deliver a command to`)
@@ -316,36 +320,67 @@ test('no built-in is left undeclared: all four say something', () => {
 })
 
 test('the no-composer reason is true of the code, not just of the sentence', () => {
-  // `InputQueue` is the thing that types into a composer. If either run-per-turn adapter ever
-  // acquires one, `NO_COMPOSER_COMMAND_POLICY` stops being the right answer for it, and this
-  // fails rather than leaving a confident sentence guarding nothing.
-  const importers: string[] = []
-  for (const adapter of ['claude', 'codex', 'opencode', 'kimi']) {
-    const src = readFileSync(join(import.meta.dirname, '..', 'adapters', `${adapter}.ts`), 'utf8')
-    if (src.includes('InputQueue')) importers.push(adapter)
-  }
-  assert.deepEqual(
-    importers.sort(),
-    ['claude', 'codex'],
-    'exactly the two adapters with a declared command list are the two that can type into a composer',
+  // `InputQueue` is the thing that types into a composer. If the adapter carrying
+  // `NO_COMPOSER_COMMAND_POLICY` ever acquires one, that policy stops being the right answer and
+  // this fails rather than leaving a confident sentence guarding nothing.
+  //
+  // NARROWED TO THE CLAIM ITSELF since #217. It used to assert that exactly the two composer
+  // adapters were the two with a declared list, which stopped being true when `opencode` gained
+  // commands it delivers by POST -- a declared list without a composer, which the old assertion
+  // had no way to express. What is checked now is the thing the policy actually says: no
+  // composer.
+  const src = readFileSync(join(import.meta.dirname, '..', 'adapters', 'kimi.ts'), 'utf8')
+  assert.ok(
+    !src.includes('InputQueue'),
+    'kimi carries the no-composer policy, so it must not have acquired a composer',
   )
 })
 
-test('exactly the two adapters with a declared list implement submitRaw, and through InputQueue', () => {
-  // Three claims that have to agree or the policy is describing a capability the code does not
-  // have: the seam's method exists on Claude and Codex, on neither of the others, and it goes
-  // through the SAME `InputQueue.submit` every prompt goes through -- so a command cannot
-  // interleave with a send at the same pty, and the ordering the relay relies on is the
-  // queue's rather than a second path's.
-  const implementers: string[] = []
-  const viaQueue: string[] = []
-  for (const adapter of ['claude', 'codex', 'opencode', 'kimi']) {
-    const src = readFileSync(join(import.meta.dirname, '..', 'adapters', `${adapter}.ts`), 'utf8')
-    if (/async submitRaw\(/.test(src)) implementers.push(adapter)
-    if (/async submitRaw\([\s\S]{0,900}?this\.#input\.submit\(/.test(src)) viaQueue.push(adapter)
+test('every adapter with a declared list can actually deliver one', () => {
+  // The claim that has to hold or a policy describes a capability the code does not have: an
+  // agent whose policy DECLARES commands must implement `submitRaw`, and one whose policy says
+  // `unsupported` must not.
+  //
+  // "Exactly the two pty adapters, through `InputQueue`" was the rule until #217. It is not any
+  // more: `opencode` delivers a command as a POST to `/session/{id}/command`, with no composer,
+  // no queue and nothing typed. What survives is the pairing between what a policy says and what
+  // the transport can do -- which is the thing worth pinning, and the reason the old rule
+  // existed rather than the rule itself.
+  const SOURCES: Record<string, string> = {
+    claude: 'claude.ts',
+    codex: 'codex.ts',
+    opencode: 'opencodeApi/adapter.ts',
+    kimi: 'kimi.ts',
   }
-  assert.deepEqual(implementers.sort(), ['claude', 'codex'], 'only the pty adapters can type at a composer')
-  assert.deepEqual(viaQueue.sort(), ['claude', 'codex'], 'and each does it through the existing input queue, not a second write path')
+  const r = defaultRegistry()
+  for (const [agent, file] of Object.entries(SOURCES)) {
+    const src = readFileSync(join(import.meta.dirname, '..', 'adapters', file), 'utf8')
+    const implementsIt = /async submitRaw\(/.test(src)
+    const policy = r.get(agent).commandPolicy
+    const declares = policy?.kind === 'declared'
+    assert.equal(
+      implementsIt,
+      declares,
+      declares
+        ? `${agent} declares commands but has no submitRaw to deliver them`
+        : `${agent} implements submitRaw but declares no commands, so nothing can reach it`,
+    )
+  }
+})
+
+test('a pty adapter types its commands through the SAME queue its prompts go through', () => {
+  // Scoped to the pty adapters, where it means something. A command typed by a second write path
+  // could interleave with a send at the same terminal, and the ordering the relay relies on is
+  // the queue's. An adapter that POSTs has no such hazard -- there is no shared terminal to
+  // interleave at -- which is the same reason it needs none of the prompt-fidelity machinery.
+  for (const file of ['claude.ts', 'codex.ts']) {
+    const src = readFileSync(join(import.meta.dirname, '..', 'adapters', file), 'utf8')
+    assert.match(
+      src,
+      /async submitRaw\([\s\S]{0,900}?this\.#input\.submit\(/,
+      `${file} must deliver a command through the existing input queue, not a second write path`,
+    )
+  }
 })
 
 test('an agent with no policy at all refuses every command, and says nobody looked', () => {

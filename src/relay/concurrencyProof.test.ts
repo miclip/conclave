@@ -36,7 +36,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 
 import { join } from 'node:path'
 import test from 'node:test'
 import type { TestContext } from 'node:test'
-import { OpenCodeRunAdapter } from '../adapters/opencode.ts'
+import { OpenCodeApiAdapter } from '../adapters/opencodeApi/adapter.ts'
 import { OPENCODE_CAPABILITIES } from '../conformance/capabilities.ts'
 import { AgentRegistry } from '../registry/registry.ts'
 import type { CreateParticipantContext, ResolvedParticipant } from '../registry/types.ts'
@@ -98,12 +98,14 @@ function fixtureRegistry(): AgentRegistry {
     deadlines: { absolute: { supported: true }, silence: { supported: false } },
     launch: { command: FIXTURE, baseArgs: [] },
     async create(resolved: ResolvedParticipant, ctx: CreateParticipantContext) {
-      return OpenCodeRunAdapter.start({
+      // THE PRODUCTION ADAPTER with its executable swapped, as before -- the fixture is now a
+      // stand-in for `opencode serve` rather than for `opencode run` (#217), and the proof is
+      // unchanged: two real children, each refusing to finish its turn until it has seen the
+      // other's marker.
+      return OpenCodeApiAdapter.start({
         cwd: ctx.cwd,
         role: resolved.role.id,
-        inputOwnership: resolved.inputOwnership,
         command: FIXTURE,
-        args: [...(resolved.spec.args ?? [])],
       })
     },
   })

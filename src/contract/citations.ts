@@ -108,21 +108,21 @@ export const CITED: Record<string, string> = {
   // and `#join` (#71). Repaired rather than deleted: each still points at the thing it was
   // written about, and the one whose LINE no longer says what it said -- `#join` now passes a
   // named context object rather than an inline literal -- is pinned on the new spelling.
-  'src/relay/relay.ts:2190-2192': 'get cwd(): string',
-  'src/relay/relay.ts:2489-2495': 'const ctx = { cwd, watchdogMs: this.#opts.turnWatchdogMs, idleMs: this.#opts.silenceWatchdogMs }',
-  'src/relay/relay.ts:3427-3428': "this.#worktreesSeen.add(w)\n    return {",
-  'src/relay/relay.ts:3528': 'NOT ARMED (no checks configured)',
-  'src/relay/relay.ts:4025': 'if (this.#worktreesAtStart) for (const w of worktreePaths',
-  'src/relay/relay.ts:4518': 'resolutionFor(p.subject, { rotationArmed: armed })',
-  'src/relay/relay.ts:5123': 'No rotation checks are configured',
+  'src/relay/relay.ts:2197-2199': 'get cwd(): string',
+  'src/relay/relay.ts:2494-2500': 'const ctx = { cwd, watchdogMs: this.#opts.turnWatchdogMs, idleMs: this.#opts.silenceWatchdogMs }',
+  'src/relay/relay.ts:3434-3435': "this.#worktreesSeen.add(w)\n    return {",
+  'src/relay/relay.ts:3535': 'NOT ARMED (no checks configured)',
+  'src/relay/relay.ts:4032': 'if (this.#worktreesAtStart) for (const w of worktreePaths',
+  'src/relay/relay.ts:4527': 'resolutionFor(p.subject, { rotationArmed: armed })',
+  'src/relay/relay.ts:5132': 'No rotation checks are configured',
   'src/relay/relay.ts:349': "onDegradation ?? 'candidate'",
   // The console's status line, cited by `activeTurn` for the claim its own doc rests on: the
   // footer's notion of "working" is `turn_start` until `turn_end`, and `tool_use` only relabels
   // a turn that is already running. If that ever stops being true, the predicate the relay and
   // `/continue` both send on is no longer the thing the operator is watching.
   'src/repl/session.ts:1325': 'progress.note(e.participant, () => labelFor(e.participant) ?? ev.tool)',
-  'src/relay/relay.ts:6594': 'this.#worktreesAtStart = worktreePaths(this.#opts.cwd)',
-  'src/relay/relay.ts:7389': "subject: { reason: 'turn_incomplete', participant: lead.id }",
+  'src/relay/relay.ts:6607': 'this.#worktreesAtStart = worktreePaths(this.#opts.cwd)',
+  'src/relay/relay.ts:7473': "subject: { reason: 'turn_incomplete', participant: lead.id }",
   // The five below are what the console's `/continue` liveness guard cites for reading a
   // pause's SCOPE rather than `verdictOf` or a rank scan (`seatsToSampleAtPause` in
   // src/repl/session.ts). Two of them pin the ONLY sites that populate `verdictOf` -- the
@@ -136,13 +136,13 @@ export const CITED: Record<string, string> = {
   // below always has, so both sites quote the SAME resolved end. The claim this pin supports is
   // untouched -- these are still the only two that populate `verdictOf`, both `turn_incomplete`
   // -- and the token moved with the thing it points at rather than the pin being dropped.
-  'src/relay/relay.ts:7393': 'verdictOf: { participant: lead.id, endSeq: current.seq },',
-  'src/relay/relay.ts:7510': 'The human has seen your escalation and asked you to continue.',
+  'src/relay/relay.ts:7477': 'verdictOf: { participant: lead.id, endSeq: current.seq },',
+  'src/relay/relay.ts:7612': 'The human has seen your escalation and asked you to continue.',
   // The workstream a conflicted instruction belongs to, named after the seat when exactly one
   // seat could take it -- the N=1 coincidence a scope reader must not mistake for a seat.
-  'src/relay/relay.ts:7677': "reason: 'authority_conflict', workstream:",
-  'src/relay/relay.ts:7776': "subject: { reason: 'implementer_unanswered', participant: seat.id }",
-  'src/relay/relay.ts:7827': "its report could not be read, so there is",
+  'src/relay/relay.ts:7779': "reason: 'authority_conflict', workstream:",
+  'src/relay/relay.ts:7894': "subject: { reason: 'implementer_unanswered', participant: seat.id }",
+  'src/relay/relay.ts:7945': "its report could not be read, so there is",
   // Repaired rather than deleted, and it now pins a DESCRIPTOR rather than a call: #101 moved
   // the measurement inside `#halt`, so the halt site says which seat to measure and no longer
   // builds the sentence itself. The claim the citation supports is unchanged -- this halt does
@@ -152,9 +152,9 @@ export const CITED: Record<string, string> = {
   // `turn_incomplete` halt below, so only a shift of exactly the distance between the two would
   // slip past. There is nothing unique on the line to pin instead. It is also why this entry
   // is never auto-relocated -- two matches is not a pin, and `planRepairs` refuses it by rule.
-  'src/relay/relay.ts:7838': "knowing whether the child is still writing changes what the operator does.",
-  'src/relay/relay.ts:7909': "subject: { reason: 'turn_incomplete', participant: seat.id }",
-  'src/relay/relay.ts:7913': 'verdictOf: { participant: seat.id, endSeq: current.seq },',
+  'src/relay/relay.ts:7956': "knowing whether the child is still writing changes what the operator does.",
+  'src/relay/relay.ts:8027': "subject: { reason: 'turn_incomplete', participant: seat.id }",
+  'src/relay/relay.ts:8031': 'verdictOf: { participant: seat.id, endSeq: current.seq },',
   // The one sentence #66's bypass rests on: a verdict withdrawn with no replacement can come
   // from nowhere but `resetTranscript`, so the open turn the console stops refusing on is a
   // deleted record rather than an observed one. If that ever stops being true, the guard's
@@ -202,21 +202,21 @@ export const CITED: Record<string, string> = {
   'src/adapters/codex.ts:1516-1529': 'containedFallback: true,',
   'src/rotation/rotate.ts:484':
     'const generation = snap.containedFallback ? UNKNOWN_GENERATION : snap.compactionGeneration',
-  'src/relay/relay.ts:4942': 'async #considerRotation(',
-  'src/relay/relay.ts:5165-5169':
+  'src/relay/relay.ts:4951': 'async #considerRotation(',
+  'src/relay/relay.ts:5174-5178':
     "      // RETIRED session's, and acknowledging it against the replacement would hand a session at\n" +
     "      // generation 0 a baseline of 1.\n" +
     "      return replaced\n" +
     "        ? this.#answeredByReplacement(impl, snap.compactionGeneration)\n" +
     "        : this.#acknowledge(impl, snap.compactionGeneration)",
-  'src/relay/relay.ts:5210-5214':
+  'src/relay/relay.ts:5219-5223':
     "      // As above (#128): `snap` describes the session that was in the seat when the question was\n" +
     "      // put, and the operator may have answered it by replacing that session.\n" +
     "      return replaced\n" +
     "        ? this.#answeredByReplacement(impl, snap.compactionGeneration)\n" +
     "        : this.#acknowledge(impl, snap.compactionGeneration)",
-  'src/relay/relay.ts:5236': 'return this.#acknowledge(impl, snap.compactionGeneration)',
-  'src/relay/relay.ts:5267-5277':
+  'src/relay/relay.ts:5245': 'return this.#acknowledge(impl, snap.compactionGeneration)',
+  'src/relay/relay.ts:5276-5286':
     "        detail:\n" +
     "          `rotation could not be accepted and ROTATION IS NOT THE REMEDY: ${result.detail} ` +\n" +
     "          `${impl.id} is back in service and no further rotation will be attempted this run.`,\n" +
@@ -228,16 +228,16 @@ export const CITED: Record<string, string> = {
     "        ],\n" +
     "      })\n" +
     "      return halted ?? this.#acknowledge(impl, (await impl.session.snapshot()).compactionGeneration)",
-  'src/relay/relay.ts:5281-5284':
+  'src/relay/relay.ts:5290-5293':
     "      detail: `rotation failed (${result.reason}): ${result.detail}`,\n" +
     "      evidence: [...verdict.evidence, 'the original implementer is back in service'],\n" +
     "    })\n" +
     "    return halted ?? this.#acknowledge(impl, (await impl.session.snapshot()).compactionGeneration)",
-  'src/relay/relay.ts:7933':
+  'src/relay/relay.ts:8051':
     'const rotated = await this.#considerRotation(seat, report.prose, handle)',
   'src/adapters/codex.ts:641-647': 'this.#view = new TranscriptSessionView({',
   'src/adapters/claude.ts:1255-1259': 'this.#view = new TranscriptSessionView({',
-  'src/relay/relay.ts:2496':
+  'src/relay/relay.ts:2503':
     'const p: RelayParticipant = { id: spec.id, agent: spec.agent, rank, role: spec.role, launch, session, events: [], baselineGeneration: 0, degradationCursor: 0 }',
   'src/relay/report.ts:311-321': 'const snap = await p.session.snapshot()',
   // The two console lines the #171 sequence test says it is not going around: the operator's
@@ -246,13 +246,12 @@ export const CITED: Record<string, string> = {
   'src/repl/session.ts:1621': "inject(text, 'all')",
   'src/repl/session.ts:2559': 'inject(rest, { only: who })',
   'src/adapters/kimi.ts:752': 'compactionGeneration: 0,',
-  'src/adapters/opencode.ts:790': 'compactionGeneration: 0,',
   'src/rotation/rotate.ts:412': 'export async function rotate(',
   'src/adapters/claude.ts:1799': "#state: SessionState = 'running'",
   'src/adapters/codex.ts:1139': "#state: SessionState = 'running'",
   'src/rotation/handoff.ts:74': 'compactionGeneration: CompactionGeneration',
   'src/workspace/sessionRecord.ts:1412': 'snap.turns.map(',
-  'src/relay/relay.ts:4098':
+  'src/relay/relay.ts:4105':
     "const unsettled = snap.turns.at(-1)?.state === 'in_progress'",
 }
 

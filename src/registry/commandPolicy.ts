@@ -337,6 +337,50 @@ export const CODEX_COMMAND_POLICY: CommandPolicy = {
  * considered and rejected; this says the question does not arise, and the repair is a different
  * adapter rather than a different list.
  */
+/** Verbatim `opencode --version` on the machine these were read from. */
+const OPENCODE_VERSION = '1.18.27'
+
+/**
+ * What an OpenCode seat driven through its API may be asked to run (#217).
+ *
+ * READ OFF THE SERVER, not grepped out of a binary. `GET /command` returns this registry with a
+ * name, a source and a description for each entry, so this is the one agent whose command list
+ * can be ASKED FOR at runtime rather than pinned to a version and left to go stale -- the failure
+ * that produced #196, #201, #202 and #205. What is declared here is the stock set; a project may
+ * define more, and `OpenCodeClient.commands()` is how a run would find them.
+ *
+ * NOT THE TUI'S SLASH COMMANDS. `/compact`, `/clear` and `/model` are not in this registry and
+ * are not reachable this way; compaction is `/session/{id}/summarize`, whose payload is
+ * unestablished. Anyone extending this list should ask the server rather than assume a `/name`
+ * works because the TUI accepts it.
+ *
+ * SYNCHRONOUS, unlike a prompt: a valid name holds the connection until the command has run.
+ */
+export const OPENCODE_COMMAND_POLICY: CommandPolicy = {
+  kind: 'declared',
+  sourceVersion: OPENCODE_VERSION,
+  commands: [
+    {
+      command: 'review',
+      disposition: 'allowed',
+      description:
+        'Reviews the changes in the tree and reports what it finds. Reach for it when work is finished and wants checking before it is handed on.',
+      reason:
+        'Reads the tree and reports. It starts no session, discards no context and changes no operator configuration, so nothing the relay believes about this seat stops being true.',
+      argumentHint: '[commit|branch|pr]',
+      source: 'GET /command: name "review", description "review changes [commit|branch|pr], defaults to uncommitted"',
+    },
+    {
+      command: 'init',
+      disposition: 'refused',
+      description: 'Creates or updates AGENTS.md for the repository, a guided setup of the instructions future sessions read.',
+      reason:
+        'Writes an instruction file that every later session in this repository reads. That is a change to the operator’s configuration made by a seat mid-run, and the run report states the operator’s setup as fact.',
+      source: 'GET /command: name "init", description "guided AGENTS.md setup"',
+    },
+  ],
+}
+
 export const NO_COMPOSER_COMMAND_POLICY: CommandPolicy = {
   kind: 'unsupported',
   reason:

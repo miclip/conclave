@@ -11,7 +11,7 @@ import type { AgentSession } from '../contract/session.ts'
 import type { RoleDefinition, RoleId } from './roles.ts'
 import { ClaudePtyHookAdapter } from '../adapters/claude.ts'
 import { CodexPtyHookAdapter } from '../adapters/codex.ts'
-import { OpenCodeRunAdapter } from '../adapters/opencode.ts'
+import { OpenCodeApiAdapter } from '../adapters/opencodeApi/adapter.ts'
 import { KimiPrintAdapter } from '../adapters/kimi.ts'
 import {
   CLAUDE_CAPABILITIES,
@@ -32,6 +32,7 @@ import {
 import {
   CLAUDE_COMMAND_POLICY,
   CODEX_COMMAND_POLICY,
+  OPENCODE_COMMAND_POLICY,
   NO_COMPOSER_COMMAND_POLICY,
 } from './commandPolicy.ts'
 import {
@@ -79,6 +80,22 @@ const PTY_HOOK_DEADLINES: DeadlineSupport = {
  * against. `unsupported` rather than a default nobody enforces: a turn that goes quiet on
  * these seats produces no verdict at all, and that is what a reader needs told.
  */
+/**
+ * The OpenCode seat driven through its API (#217).
+ *
+ * SILENCE IS SUPPORTED HERE, and that is the difference from `RUN_PER_TURN_DEADLINES` above.
+ * That profile declares it `unsupported` because nothing tracks activity WITHIN a turn: the JSON
+ * arrives when the process exits, so there is no signal a silence clock could be measured
+ * against. This transport streams `message.part.delta` continuously, so there is.
+ *
+ * The absolute clock is the run's, as everywhere else. Nothing about this transport bounds a
+ * turn on its own; what it changes is that a quiet turn can now be told from a stopped one.
+ */
+const OPENCODE_DEADLINES: DeadlineSupport = {
+  absolute: { supported: true, defaultMs: DEFAULT_WATCHDOG_MS },
+  silence: { supported: true, defaultMs: DEFAULT_IDLE_MS },
+}
+
 const RUN_PER_TURN_DEADLINES: DeadlineSupport = {
   absolute: { supported: true },
   silence: { supported: false },
@@ -276,23 +293,23 @@ export const OPENCODE_AGENT: AgentDefinition = {
   id: 'opencode',
   displayName: 'OpenCode',
   capabilities: OPENCODE_CAPABILITIES,
-  deadlines: RUN_PER_TURN_DEADLINES,
+  deadlines: OPENCODE_DEADLINES,
   models: OPENCODE_MODELS,
+  // The agent's own capabilities, unchanged: what OpenCode can be TOLD to do is a fact about
+  // OpenCode, and does not move because conclave reached it over HTTP instead of argv.
   instructionCapabilities: OPENCODE_INSTRUCTION_CAPABILITIES,
-  commandPolicy: NO_COMPOSER_COMMAND_POLICY,
+  commandPolicy: OPENCODE_COMMAND_POLICY,
   launch: {
     command: 'opencode',
     baseArgs: [],
     executable: { install: 'npm install -g opencode-ai', installFrom: INSTALL_HINT_SOURCE },
   },
   async create(resolved: ResolvedParticipant, ctx: CreateParticipantContext): Promise<AgentSession> {
-    return OpenCodeRunAdapter.start({
+    return OpenCodeApiAdapter.start({
       cwd: ctx.cwd,
       command: resolved.agent.launch.command,
       role: resolved.role.id,
-      inputOwnership: resolved.inputOwnership,
-      args: effectiveLaunchArgs(resolved, ctx),
-      watchdogMs: ctx.watchdogMs,
+      ...(ctx.watchdogMs === undefined ? {} : { watchdogMs: ctx.watchdogMs }),
     })
   },
 }
@@ -353,5 +370,12 @@ export const KIMI_AGENT: AgentDefinition = {
 }
 
 export function defaultRegistry(roles?: Record<RoleId, RoleDefinition>): AgentRegistry {
-  return new AgentRegistry(roles).register(CLAUDE_AGENT).register(CODEX_AGENT).register(OPENCODE_AGENT).register(KIMI_AGENT)
+  return new AgentRegistry(roles)
+    .register(CLAUDE_AGENT)
+    .register(CODEX_AGENT)
+    // `opencode` is the API transport (#217). The run-per-turn adapter it replaced observed no
+    // turn boundary except a process exiting, had no within-turn activity and so no silence
+    // clock, and had nowhere to deliver a command. It is in the history if it is ever wanted.
+    .register(OPENCODE_AGENT)
+    .register(KIMI_AGENT)
 }
