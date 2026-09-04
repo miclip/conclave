@@ -49,12 +49,19 @@ export const OUTCOMES = [
    *              is not evidence the turn ended -- so the re-check changes nothing and the run
    *              reports a working turn as `timed_out`.
    *
-   *              Derived from the mechanism, not from an incident. The observed #36 report is
-   *              the static-transcript hang in the first row: a child took a tool result, went
-   *              quiet, and the run sat ~44 minutes. This row is what the two clocks and the
-   *              re-check still allow, and it has not been seen in the wild. Recorded anyway,
-   *              because a reader deciding what a `timed_out` means needs the whole set --
-   *              but not to be cited as the thing #36 was filed about.
+   *              SEEN IN THE WILD, three times, which this comment used to deny (#227). Counted
+   *              across the fifteen most recent run logs in this repo: 77 turn verdicts, 74
+   *              `completed`, 3 `timed_out` -- and all three fired on a turn that was still
+   *              working, with the evidence line recording the terminal at that instant:
+   *              `Nesting… 5 0s · ↓ 14.0k tokens`, `Spinning… 5 0s · ↓ 4 .1k tokens`, and
+   *              `Brewing…` for the silence clock. TWO of the three were then withdrawn and
+   *              replaced with `completed`, which is the proof they were productive rather than
+   *              wedged.
+   *
+   *              The observed #36 report remains the static-transcript hang in the first row: a
+   *              child took a tool result, went quiet, and the run sat ~44 minutes. This row is
+   *              still not to be cited as the thing #36 was filed about -- it is its own
+   *              population now, and #227 is where its cost was measured.
    *
    * The absolute clock is kept rather than retired at the child's first output, and that is a
    * decision rather than an omission: `--max-turns` and `--max-minutes` are checked at turn
