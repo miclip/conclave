@@ -300,6 +300,24 @@ conclave status --json                       # state: paused, with reason, evide
 readily about premises and ambiguous criteria, never about permission — and is recorded in
 the run report.
 
+The seats escalate to the driving agent. When that agent needs the human whose project this
+is, `conclave notify` is the only channel to them:
+
+```sh
+conclave notify tell "<headline>"                        # say it; no answer expected
+conclave notify ask  "<headline>" --options a:Yes,b:No   # ask, and wait for one of those
+conclave notify vetoes                                   # answers that arrived late
+conclave notify log                                      # what was asked, answered, by whom
+```
+
+Conclave never sends these by itself. It does not turn pauses into messages, because the agent
+driving the run has the context that decides whether a human is needed and conclave does not —
+so an unasked question is never asked. An allow-list decides which fields reach a transport, and
+the headline is cut to what the surface can show: no file contents, no diffs, no tool output.
+Write it as a pointer rather than a summary someone might approve on instead of looking. An
+option that was not offered is refused rather than passed through, and free text comes back as a
+message, never as a command.
+
 Commands arrive on stdin as lines: `/continue`, `/rotate`, `/abort`, `/allow`, `/deny`, or a
 message addressed with `>advisor` / `>implementer`. Nothing needs scraping off the console.
 
