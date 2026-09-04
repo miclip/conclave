@@ -1311,6 +1311,14 @@ export class ClaudePtyHookAdapter implements AgentSession {
         // A turn is running: tail the transcript so its narration and tool use exist while
         // they are useful, not in a burst after it ends.
         this.#startTailing()
+        // CLASSIFIED BEFORE IT IS ANNOUNCED (#208). All three inputs are readable here and the
+        // consumption of the raw echo is unconditional either way, so moving it ahead of the
+        // emit changes nothing except that `turn_start` can now say what kind of turn it is.
+        const rawEcho = this.#takeRawEcho(turn.prompt)
+        const pending = this.#pendingPrompt
+        const harness = isHarnessBlock(turn.prompt)
+        // Nothing asked for this and it is not housekeeping: the seat dispatched work itself.
+        const unsolicited = pending === undefined && !rawEcho && !harness
         this.#emit({
           type: 'turn_start',
           prompt: turn.prompt,
@@ -1318,6 +1326,7 @@ export class ClaudePtyHookAdapter implements AgentSession {
           seq: this.#next(),
           at: turn.startedAt,
           provisional: false,
+          ...(unsolicited ? { unsolicited: true } : {}),
         })
         // #174: the hook echoes back the prompt the child ACTUALLY took. Comparing it to what
         // was sent is the one end-to-end check of the transport that does not itself depend on
@@ -1334,13 +1343,11 @@ export class ClaudePtyHookAdapter implements AgentSession {
         // the advisor's envelope against it, calling the send corrupt, and then trying to
         // recover by cancelling a turn that will never report a `Stop`. The claim is left
         // untouched, so the echo of our own send still resolves it when it arrives.
-        // #207: taken UNCONDITIONALLY, before the pending claim is even read. A command's echo
-        // is its own turn whether or not a send happens to be in flight behind it, and leaving
-        // the entry in place because nothing was pending would let it suppress a later prompt
-        // that genuinely was corrupt.
-        const rawEcho = this.#takeRawEcho(turn.prompt)
-        const pending = this.#pendingPrompt
-        if (pending && !isHarnessBlock(turn.prompt) && !rawEcho) {
+        // #207: the raw echo was taken UNCONDITIONALLY above, before the pending claim was read.
+        // A command's echo is its own turn whether or not a send happens to be in flight behind
+        // it, and leaving the entry in place because nothing was pending would let it suppress a
+        // later prompt that genuinely was corrupt.
+        if (pending && !harness && !rawEcho) {
           const corrupted = describePromptMismatch(pending.prompt, turn.prompt)
           if (!corrupted) {
             this.#pendingPrompt = undefined

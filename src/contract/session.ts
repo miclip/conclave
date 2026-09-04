@@ -101,6 +101,24 @@ export interface EventBase {
 export interface TurnStartEvent extends EventBase {
   type: 'turn_start'
   prompt: string
+  /**
+   * The seat began this turn on its own: nothing the orchestrator sent asked for it (#208).
+   *
+   * Set only where an adapter can tell. Absent means "not known to be unsolicited" rather than
+   * "solicited", which is the honest reading for a transport that cannot distinguish them --
+   * and the difference matters, because the relay CHARGES this against `--max-turns` and a
+   * false positive would end a run early.
+   *
+   * Three things are deliberately NOT this. A turn the orchestrator sent is the ordinary case
+   * and is already counted where it is dispatched. A turn carrying a harness block is the
+   * child's own harness talking to it (#185) -- real work, but not the seat helping itself, and
+   * charging it would fire ceilings for something no operator chose. A turn whose prompt is a
+   * command this process typed (#207) is housekeeping that does no work at all.
+   *
+   * What is left is the case this exists for: `/loop` handing the seat its own next prompt, and
+   * anything else that dispatches a turn nobody here asked for.
+   */
+  unsolicited?: boolean | undefined
 }
 
 /**
