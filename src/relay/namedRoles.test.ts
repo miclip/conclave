@@ -204,3 +204,19 @@ test('the default run reports role implementer and its routing text is unchanged
   const inbound = lead.received.find((m) => m.includes('FROM THE IMPLEMENTER'))
   assert.ok(inbound?.includes('[FROM THE IMPLEMENTER (implementer) —'), 'the N=1 header must be the old one')
 })
+
+test('#225 an envelope never ends in the separator, however empty the body', () => {
+  // `header\n\n${text}` with an empty body left the message ending in blank lines, which a
+  // child's composer strips -- and the #174 fidelity check then read the missing bytes as the
+  // transport losing the tail, ending the run `transport_failed` with no work done. #224
+  // producing an empty report is what made it happen; this is the half that keeps an empty body
+  // sendable at all.
+  const rendered = envelope({ from: 'implementer', fromRank: 'implementer', kind: 'report', text: '' })
+  assert.equal(rendered, rendered.trimEnd(), `no trailing whitespace: ${JSON.stringify(rendered.slice(-12))}`)
+  assert.match(rendered, /FROM THE IMPLEMENTER/, 'and the header still arrives')
+})
+
+test('#225 a body that ends in blank lines keeps its content and loses the tail', () => {
+  const rendered = envelope({ from: 'advisor', fromRank: 'advisor', kind: 'instruction', text: 'do the thing\n\n\n' })
+  assert.ok(rendered.endsWith('do the thing'), `body kept, tail trimmed: ${JSON.stringify(rendered.slice(-20))}`)
+})

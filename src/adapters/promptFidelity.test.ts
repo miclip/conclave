@@ -756,3 +756,49 @@ test('genuine interior corruption is still INTERIOR, and still says so', () => {
   assert.match(m.message, /INTERIOR/)
   assert.match(m.message, /corrupted in transport/, 'this one really is a damaged copy')
 })
+
+test('#225 trailing whitespace the composer stripped is not corruption', () => {
+  // Measured against a real Claude Code seat: `Say only OK.` is accepted and `Say only OK.\n\n`
+  // was refused as a two-byte PREFIX loss, which ended a run `transport_failed` having done no
+  // work. The bytes really are absent; what was wrong was calling that a broken transport.
+  assert.equal(describePromptMismatch('Say only OK.\n\n', 'Say only OK.'), undefined)
+  assert.equal(describePromptMismatch('body\n', 'body'), undefined)
+  assert.equal(describePromptMismatch('body   \t\n', 'body'), undefined)
+  // And the other direction, for a child that adds it rather than removes it.
+  assert.equal(describePromptMismatch('body', 'body\n\n'), undefined)
+})
+
+test('#225 the exact incident: an envelope with an empty body', () => {
+  // 136 bytes of header, 138 sent, 136 taken. Reconstructed from the run report rather than
+  // paraphrased, so the arithmetic that identified the cause stays checkable.
+  const header =
+    '[FROM THE IMPLEMENTER (implementer) — a peer AI model doing the work. ' +
+    'You cannot see its tool calls or its code, only what it writes.]'
+  const sent = `${header}\n\n`
+  assert.equal(Buffer.byteLength(sent, 'utf8'), 138, 'the message that killed the run')
+  assert.equal(Buffer.byteLength(header, 'utf8'), 136, 'what the child took')
+  assert.equal(describePromptMismatch(sent, header), undefined)
+})
+
+test('#225 a loss at the FRONT is still corruption, whatever the whitespace', () => {
+  // #174's observed incidents were losses at the front, and one read like an instruction. The
+  // trailing-whitespace exception must not widen into forgiving those.
+  assert.equal(describePromptMismatch('the whole message', 'message')?.shape, 'suffix')
+  // And a front loss on a message that ALSO had trailing whitespace is still reported. It is no
+  // longer a clean `suffix` -- the tail differs too -- but the requirement is that it is caught,
+  // not which of the damaged shapes it is called.
+  assert.ok(describePromptMismatch('the whole message\n\n', 'message'), 'still reported')
+})
+
+test('#225 a real tail loss is still corruption when what is lost is not whitespace', () => {
+  const m = describePromptMismatch('the whole message', 'the whole')
+  assert.ok(m, 'still reported')
+  assert.equal(m.shape, 'prefix')
+})
+
+test('#225 interior whitespace is still compared exactly', () => {
+  // Only the TAIL is forgiven. A child that collapsed a blank line in the middle changed the
+  // message, and `claudeSendLanded.test.ts` established that a CLI does not do that.
+  const m = describePromptMismatch('one\n\ntwo', 'one\ntwo')
+  assert.ok(m, 'still reported')
+})
