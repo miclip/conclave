@@ -30,6 +30,8 @@ import type {
   TurnKey,
 } from '../../contract/session.ts'
 import { guaranteesFor, turnKey } from '../../contract/session.ts'
+import { DEFAULT_WATCHDOG_MS, TurnWatchdog } from '../../outcomes/watchdog.ts'
+import { TurnVerdictTracker } from '../../outcomes/tracker.ts'
 import { AsyncQueue } from '../asyncQueue.ts'
 import { OpenCodeClient, OpenCodeApiError } from './client.ts'
 import { startOpenCodeServer, type StartedServer } from './server.ts'
@@ -39,6 +41,13 @@ interface TurnState {
   key: TurnKey
   prompt: string
   startedAt: number
+  /**
+   * Last time the child produced anything, which is what separates a quiet turn from a stopped
+   * one. Maintained by `touch` on the same events `isChildOutput` counts (#220).
+   */
+  lastActivityAt?: number
+  /** Owns this turn's verdict, so a deadline grades it the way every other adapter's does. */
+  tracker: TurnVerdictTracker
   /** Set when this adapter asked for the turn to stop, so the verdict can say who ended it. */
   cancelled: boolean
   /** Whether the child produced anything at all, which is what separates quiet from silent. */
@@ -50,8 +59,16 @@ export interface OpenCodeApiAdapterOptions {
   cwd: string
   role: string
   command?: string | undefined
-  /** Present for symmetry with the other adapters; unused until a deadline is wired. */
+  /** The absolute per-turn deadline. Refreshed by nothing, as everywhere else. */
   watchdogMs?: number | undefined
+  /**
+   * The silence deadline: how long a turn may produce NOTHING before it is called stopped.
+   *
+   * Accepted here because the seat declares `silence: supported`, and a clock the run cannot
+   * configure is one the operator's `--silence-timeout` never reaches. Omitted at first along
+   * with the watchdog itself (#220), which is how a declared clock came to be no clock at all.
+   */
+  idleMs?: number | undefined
   /**
    * Injected so the adapter can be driven against a stand-in server.
    *
@@ -77,8 +94,30 @@ export class OpenCodeApiAdapter implements AgentSession {
   #closed = false
   #abort = new AbortController()
   #following: Promise<void>
+  /**
+   * The clock this adapter DECLARED and did not arm (#220).
+   *
+   * `OPENCODE_API_DEADLINES` promises this seat both a silence clock and an absolute one, and
+   * for one commit it had neither: `watchdogMs` was accepted and ignored, with a comment saying
+   * a deadline would be wired later. A real run then hung for 72 minutes with the turn open and
+   * nothing to notice, because the relay awaits an exchange that a clock is the only thing that
+   * releases (`DEFAULT_WATCHDOG_MS`: "a turn that output can extend without limit is a run whose
+   * ceilings can never fire").
+   *
+   * A declaration written from what a transport COULD support rather than what the adapter does
+   * is the failure this repository spent #196, #201, #202 and #205 removing. This is the same
+   * shape, committed hours after closing the last of them.
+   */
+  #watchdog: TurnWatchdog<TurnState>
+  readonly #watchdogMs: number | undefined
 
-  private constructor(server: StartedServer, client: OpenCodeClient, sessionId: string) {
+  private constructor(
+    server: StartedServer,
+    client: OpenCodeClient,
+    sessionId: string,
+    watchdogMs?: number,
+    idleMs?: number,
+  ) {
     this.#server = server
     this.#client = client
     this.sessionId = sessionId
@@ -86,6 +125,28 @@ export class OpenCodeApiAdapter implements AgentSession {
     // it created the session and holds the only credential for the server it lives on. Nothing
     // else is typing, so a turn nobody here started cannot appear.
     this.guarantees = guaranteesFor('mediated')
+    // Armed on `send`, touched by child output, disarmed when the turn ends -- the same three
+    // points the pty adapters use. A hung turn produces no events at all, so a clock is the only
+    // thing that can notice it.
+    this.#watchdogMs = watchdogMs
+    this.#watchdog = new TurnWatchdog<TurnState>(
+      watchdogMs ?? DEFAULT_WATCHDOG_MS,
+      (turn, update) => {
+        if (!update?.verdict || turn.ended) return
+        turn.ended = true
+        this.#emit({
+          type: 'turn_end',
+          turnKey: turn.key,
+          seq: ++this.#seq,
+          at: Date.now(),
+          provisional: false,
+          verdict: update.verdict,
+          // Nothing from the child said this. The clock did.
+          synthesized: true,
+        })
+      },
+      idleMs,
+    )
     this.#following = this.#follow()
   }
 
@@ -105,7 +166,7 @@ export class OpenCodeApiAdapter implements AgentSession {
       await server.stop()
       throw e
     }
-    return new OpenCodeApiAdapter(server, client, sessionId)
+    return new OpenCodeApiAdapter(server, client, sessionId, opts.watchdogMs, opts.idleMs)
   }
 
   get state(): SessionState {
@@ -134,7 +195,14 @@ export class OpenCodeApiAdapter implements AgentSession {
           now: () => Date.now(),
         })
         if (mapped) {
-          if (open) open.spoke = true
+          if (open) {
+            open.spoke = true
+            // A SIGN OF LIFE, so the silence deadline moves out. The deltas that make this seat
+            // noisy (#219) are the same thing that lets it have a silence clock at all -- which
+            // is why coalescing them must keep touching, not just emit less.
+            open.lastActivityAt = Date.now()
+            this.#watchdog.touch(String(open.key))
+          }
           this.#events.push(mapped)
         }
         // THE SESSION IS CHECKED HERE TOO, and it was not at first. `translate` filters by
@@ -175,6 +243,9 @@ export class OpenCodeApiAdapter implements AgentSession {
   #endTurn(turn: TurnState, forced?: 'transport_lost'): void {
     if (turn.ended) return
     turn.ended = true
+    // Every path out of a turn passes through here, which is why the disarm belongs here rather
+    // than beside each caller: a clock left armed on a settled turn fires a second verdict for it.
+    this.#watchdog.disarm(String(turn.key))
     const outcome = forced ?? (turn.cancelled ? 'cancelled' : 'completed')
     this.#emit({
       type: 'turn_end',
@@ -208,11 +279,27 @@ export class OpenCodeApiAdapter implements AgentSession {
     if (open) throw new Error('a turn is already in flight on this session')
 
     const key = turnKey(`${this.sessionId}-turn-${this.#turns.length}`)
-    const turn: TurnState = { key, prompt: message, startedAt: Date.now(), cancelled: false, spoke: false, ended: false }
+    const turn: TurnState = {
+      key,
+      prompt: message,
+      startedAt: Date.now(),
+      tracker: new TurnVerdictTracker({
+        agent: this.agent,
+        orchestrator: { sentCancel: false, inputIsMediated: this.guarantees.inputOwnership === 'mediated' },
+        watchdogSeconds: (this.#watchdogMs ?? DEFAULT_WATCHDOG_MS) / 1000,
+      }),
+      cancelled: false,
+      spoke: false,
+      ended: false,
+    }
     this.#turns.push(turn)
     // Announced BEFORE the POST, so a prompt the server refuses still has a turn to attach the
     // failure to rather than an error belonging to nothing.
     this.#emit({ type: 'turn_start', prompt: message, turnKey: key, seq: ++this.#seq, at: turn.startedAt, provisional: false })
+    // ARMED HERE, not after the POST succeeds. A prompt the server accepts and then never
+    // answers is exactly the case that hung for 72 minutes, and the window between sending and
+    // hearing back is the one the clock exists to cover.
+    this.#watchdog.arm(String(key), turn)
     try {
       await this.#client.promptAsync(this.sessionId, message)
     } catch (e) {
@@ -299,6 +386,7 @@ export class OpenCodeApiAdapter implements AgentSession {
     if (this.#closed) return
     this.#closed = true
     this.#state = 'terminated'
+    this.#watchdog.disarmAll()
     this.#abort.abort()
     // The follow loop is awaited before the server goes, so a `session.idle` already on the wire
     // is read rather than lost to the teardown that was about to happen anyway.

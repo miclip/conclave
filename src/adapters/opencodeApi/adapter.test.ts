@@ -199,6 +199,54 @@ test('cancel stops the turn without killing anything, and the verdict says who e
   }
 })
 
+test('#220 a turn that goes silent is ended by the clock, not left open forever', async () => {
+  // THE 72-MINUTE HANG. The first run to seat this adapter sent a prompt, the seat produced
+  // nothing -- no output, no error, not one event -- and the turn stayed open indefinitely
+  // because the adapter declared two deadline clocks and armed neither.
+  //
+  // Nothing else can catch this. There is no process to notice exiting, and the server emits
+  // nothing at all when it stalls, so a clock is the only instrument that applies.
+  const fake = fakeOpenCode()
+  const port = await fake.ready
+  const adapter = await OpenCodeApiAdapter.start({
+    cwd: '/tmp',
+    role: 'implementer',
+    spawnFn: spawnAnnouncing(port),
+    // Milliseconds, so the deadline is reachable in a test. Production is 135 minutes.
+    watchdogMs: 120,
+    idleMs: 120,
+  })
+  const seen: AgentEvent[] = []
+  const reading = (async () => {
+    for await (const e of adapter.events()) seen.push(e)
+  })()
+  try {
+    await adapter.send('a prompt this seat will never answer', { kind: 'orchestrator' })
+    // Nothing pushed: the server accepts the prompt and says nothing, which is what happened.
+    await settle(400)
+
+    const end = seen.find((e) => e.type === 'turn_end') as TurnEndEvent | undefined
+    assert.ok(end, 'a silent turn must still end, or the run can never reach a boundary')
+    assert.equal(end?.synthesized, true, 'nothing from the child said this; the clock did')
+    assert.equal(end?.verdict.confidence, 'uncertain', 'a deadline is not proof the seat stopped')
+  } finally {
+    await adapter.close('graceful')
+    await reading
+    await new Promise<void>((r) => fake.server.close(() => r()))
+  }
+})
+
+// NOT TESTED HERE, and stated rather than faked: that streamed output pushes the silence
+// deadline out. A test was written for it and REMOVED, because it passed with the activity
+// record deleted -- the clock never fired inside its window either way, so it asserted nothing
+// while looking like a guard. Two mutations proved that: removing `touch` and removing
+// `lastActivityAt` both left it green.
+//
+// The mechanism is shared with the pty adapters -- the watchdog reads `lastActivityAt` and this
+// adapter sets it on every child event -- and `watchdog.test.ts` covers the clock itself. What is
+// missing is an adapter-level test that the wiring between them is connected, and that is worth
+// having: the whole of #220 was wiring that was never connected.
+
 test('a second prompt into a working session is refused rather than queued', async () => {
   // The server does not queue it, and pretending it opened a turn would attribute the first
   // turn's events to the second.
