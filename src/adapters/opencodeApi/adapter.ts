@@ -82,6 +82,23 @@ export interface OpenCodeApiAdapterOptions {
    */
   idleMs?: number | undefined
   /**
+   * The model every prompt asks for, as `provider/model` (#221).
+   *
+   * A SESSION-LEVEL SETTING DELIVERED PER PROMPT, because that is where this transport puts it:
+   * `prompt_async` takes a `model` in its body. The old adapter took it in argv, which is why
+   * `--model` reached a seat at all; when the transport changed, launch args stopped reaching
+   * anything and were dropped in silence while the run report went on stating them.
+   */
+  model?: string | undefined
+  /**
+   * Launch args this transport cannot use, carried so it can SAY so.
+   *
+   * A server takes no per-turn argv. Anything that is not the model has nowhere to go, and the
+   * failure worth avoiding is not that it is unusable -- it is that it was unusable and nobody
+   * was told, while the run report recorded it as the launch configuration.
+   */
+  ignoredArgs?: readonly string[] | undefined
+  /**
    * Injected so the adapter can be driven against a stand-in server.
    *
    * Not a testing back door bolted on: the alternative is tests that spawn a real OpenCode, which
@@ -122,6 +139,8 @@ export class OpenCodeApiAdapter implements AgentSession {
    */
   #watchdog: TurnWatchdog<TurnState>
   readonly #watchdogMs: number | undefined
+  readonly #model: string | undefined
+  readonly startupNotices: readonly string[] | undefined
 
   private constructor(
     server: StartedServer,
@@ -129,6 +148,8 @@ export class OpenCodeApiAdapter implements AgentSession {
     sessionId: string,
     watchdogMs?: number,
     idleMs?: number,
+    model?: string,
+    ignoredArgs?: readonly string[],
   ) {
     this.#server = server
     this.#client = client
@@ -141,6 +162,17 @@ export class OpenCodeApiAdapter implements AgentSession {
     // points the pty adapters use. A hung turn produces no events at all, so a clock is the only
     // thing that can notice it.
     this.#watchdogMs = watchdogMs
+    this.#model = model
+    // SAID AT STARTUP, where a notice is read, rather than left for someone to discover from a
+    // seat behaving as though it had been configured differently.
+    this.startupNotices =
+      ignoredArgs && ignoredArgs.length > 0
+        ? [
+            `opencode: ${JSON.stringify([...ignoredArgs])} cannot be delivered to this seat. ` +
+              `Its child is a server rather than a turn, so it takes no per-turn argv; only the ` +
+              `model is carried, and it goes with each prompt. See #221.`,
+          ]
+        : undefined
     this.#watchdog = new TurnWatchdog<TurnState>(
       watchdogMs ?? DEFAULT_WATCHDOG_MS,
       (turn, update) => {
@@ -178,7 +210,7 @@ export class OpenCodeApiAdapter implements AgentSession {
       await server.stop()
       throw e
     }
-    return new OpenCodeApiAdapter(server, client, sessionId, opts.watchdogMs, opts.idleMs)
+    return new OpenCodeApiAdapter(server, client, sessionId, opts.watchdogMs, opts.idleMs, opts.model, opts.ignoredArgs)
   }
 
   get state(): SessionState {
@@ -367,7 +399,7 @@ export class OpenCodeApiAdapter implements AgentSession {
     // hearing back is the one the clock exists to cover.
     this.#watchdog.arm(String(key), turn)
     try {
-      await this.#client.promptAsync(this.sessionId, message)
+      await this.#client.promptAsync(this.sessionId, message, this.#model)
     } catch (e) {
       this.#endTurn(turn, 'transport_lost')
       throw e

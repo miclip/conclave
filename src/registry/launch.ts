@@ -107,6 +107,41 @@ export function modelFromArgs(args: readonly string[]): string | null {
   return found
 }
 
+/**
+ * The args left once the ones that selected the model are taken out (#221).
+ *
+ * Beside `modelFromArgs` and walking the same spellings deliberately. A transport that consumes
+ * the model separately -- OpenCode's API takes it per prompt rather than in argv -- needs to know
+ * which tokens it has already used, and a second copy of `-m` / `--model` / `-c model=` written
+ * where that answer was needed would drift the first time a spelling is added here. When the two
+ * disagree, the seat reports an arg as undeliverable while acting on it, which is a worse report
+ * than saying nothing.
+ */
+export function argsWithoutModel(args: readonly string[]): string[] {
+  const rest: string[] = []
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]!
+    if (INLINE_MODEL.test(arg)) continue
+    if (MODEL_FLAGS.has(arg)) {
+      const next = args[i + 1]
+      // Consume the value only when `modelFromArgs` would have. A dangling `--model` selected
+      // nothing, so it is undeliverable like any other arg and belongs in what is reported.
+      if (next !== undefined && !next.startsWith('-')) {
+        i++
+        continue
+      }
+      rest.push(arg)
+      continue
+    }
+    if (CONFIG_FLAGS.has(arg) && CONFIG_MODEL.test(args[i + 1] ?? '')) {
+      i++
+      continue
+    }
+    rest.push(arg)
+  }
+  return rest
+}
+
 /** A quoted or bare value, or `undefined` when there is nothing left of it. */
 function value(raw: string): string | undefined {
   const trimmed = raw.trim()

@@ -27,7 +27,7 @@ measured.
 |---|---|---|---|
 | `claude` | Claude Code | pty + hooks + transcript | generated `--settings`, and the folder trusted — both answered for you |
 | `codex` | Codex CLI | pty + hooks + transcript | project `.codex/hooks.json`, and those hooks trusted in your user config |
-| `opencode` | OpenCode | `run --format json` on stdout | none |
+| `opencode` | OpenCode | `serve` + HTTP API + SSE | none |
 | `kimi` | Kimi CLI (needs a provider; access waitlisted) | `--print --output-format stream-json` | none |
 
 Any of the four can take either seat:

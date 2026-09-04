@@ -79,9 +79,10 @@ export class OpenCodeClient {
    * prompt route would make `send` block for the length of a turn and there would be nothing to
    * observe in the meantime.
    */
-  async promptAsync(sessionId: string, text: string): Promise<void> {
+  async promptAsync(sessionId: string, text: string, model?: string): Promise<void> {
     await this.#json('POST', `/session/${encodeURIComponent(sessionId)}/prompt_async`, {
       parts: [{ type: 'text', text }],
+      ...(model === undefined ? {} : { model: splitModel(model) }),
     })
   }
 
@@ -210,5 +211,23 @@ const BASIC_AUTH_USER = 'opencode'
 
 const basicAuth = (password: string): string =>
   `Basic ${Buffer.from(`${BASIC_AUTH_USER}:${password}`).toString('base64')}`
+
+/**
+ * `provider/model` as the two fields the API asks for (#221).
+ *
+ * Split on the FIRST slash, not the last: `openrouter/anthropic/claude-3.5` is one provider and a
+ * model id that itself contains a slash, and splitting the other way would name a provider that
+ * does not exist. A name with no slash at all keeps the provider empty rather than guessing one --
+ * the server refuses it and says so, which is better than silently asking a provider nobody chose.
+ *
+ * Probed against opencode 1.18.27: a `model` string is refused with 400 `Expected object | null`,
+ * so this shape is not a preference.
+ */
+function splitModel(model: string): { providerID: string; modelID: string } {
+  const at = model.indexOf('/')
+  return at < 0
+    ? { providerID: '', modelID: model }
+    : { providerID: model.slice(0, at), modelID: model.slice(at + 1) }
+}
 
 const describe = (e: unknown): string => (e instanceof Error ? e.message : String(e))

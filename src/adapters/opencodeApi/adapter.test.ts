@@ -26,9 +26,12 @@ function fakeOpenCode(): {
   push: (event: unknown) => void
   endStream: () => void
   posted: string[]
+  /** What was POSTed, by path -- so a test can assert on a body and not merely on the call. */
+  bodies: Array<{ path: string; body: string }>
 } {
   const clients: Array<{ write: (s: string) => void; end: () => void }> = []
   const posted: string[] = []
+  const bodies: Array<{ path: string; body: string }> = []
   const server = createServer((req, res) => {
     const url = req.url ?? ''
     posted.push(`${req.method} ${url.split('?')[0]}`)
@@ -40,6 +43,7 @@ function fakeOpenCode(): {
     let body = ''
     req.on('data', (c) => (body += c))
     req.on('end', () => {
+      if (req.method === 'POST') bodies.push({ path: url.split('?')[0] ?? '', body })
       if (url === '/session' && req.method === 'POST') {
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ id: 'ses_fake' }))
@@ -58,6 +62,7 @@ function fakeOpenCode(): {
     push: (event) => clients.forEach((c) => c.write(`data: ${JSON.stringify(event)}\n\n`)),
     endStream: () => clients.forEach((c) => c.end()),
     posted,
+    bodies,
   }
 }
 
@@ -73,10 +78,12 @@ function spawnAnnouncing(port: number): NonNullable<Parameters<typeof OpenCodeAp
   return (() => child) as unknown as NonNullable<Parameters<typeof OpenCodeApiAdapter.start>[0]['spawnFn']>
 }
 
-async function seat(): Promise<{ adapter: OpenCodeApiAdapter; fake: ReturnType<typeof fakeOpenCode>; seen: AgentEvent[]; stop: () => Promise<void> }> {
+async function seat(
+  extra: Partial<Parameters<typeof OpenCodeApiAdapter.start>[0]> = {},
+): Promise<{ adapter: OpenCodeApiAdapter; fake: ReturnType<typeof fakeOpenCode>; seen: AgentEvent[]; stop: () => Promise<void> }> {
   const fake = fakeOpenCode()
   const port = await fake.ready
-  const adapter = await OpenCodeApiAdapter.start({ cwd: '/tmp', role: 'implementer', spawnFn: spawnAnnouncing(port) })
+  const adapter = await OpenCodeApiAdapter.start({ cwd: '/tmp', role: 'implementer', spawnFn: spawnAnnouncing(port), ...extra })
   const seen: AgentEvent[] = []
   const reading = (async () => {
     for await (const e of adapter.events()) seen.push(e)
@@ -258,6 +265,52 @@ test('a second prompt into a working session is refused rather than queued', asy
   try {
     await adapter.send('first', { kind: 'orchestrator' })
     await assert.rejects(() => adapter.send('second', { kind: 'orchestrator' }), /already in flight/)
+  } finally {
+    await stop()
+  }
+})
+
+test('#221 args that cannot reach a server seat are stated at startup, in the operator\u2019s own spelling', async () => {
+  // Half of #221 is that the un-deliverable ones are SAID. A notice that merely summarised them
+  // ("some launch args were ignored") would leave the operator to guess which, so the assertion
+  // is on the exact flags they typed appearing in the text.
+  const dropped = ['--dangerously-skip-permissions', '--log-level', 'DEBUG']
+  const { adapter, stop } = await seat({ ignoredArgs: dropped })
+  try {
+    const notice = (adapter.startupNotices ?? []).join('\n')
+    for (const arg of dropped) assert.ok(notice.includes(arg), `the notice names ${arg}: ${notice}`)
+    assert.ok(/#221/.test(notice), 'and points at why, so the reason outlives this conversation')
+  } finally {
+    await stop()
+  }
+})
+
+test('#221 a seat given nothing to drop starts without a notice', async () => {
+  // The quiet default matters: a notice on every run is a notice nobody reads.
+  const { adapter, stop } = await seat()
+  try {
+    assert.equal(adapter.startupNotices, undefined)
+  } finally {
+    await stop()
+  }
+})
+
+test('#221 the seat\u2019s model travels with every prompt, not only the first', async () => {
+  // A server outlives the turn, so there is no launch to carry the model -- it has to ride each
+  // prompt. A model that reached only the opening turn would be the same silent drop #221 is
+  // about, one turn later.
+  const { adapter, fake, stop } = await seat({ model: 'anthropic/claude-sonnet-4-5' })
+  try {
+    await adapter.send('first', { kind: 'orchestrator' })
+    fake.push({ type: 'session.idle', properties: { sessionID: 'ses_fake' } })
+    await settle()
+    await adapter.send('second', { kind: 'orchestrator' })
+    await settle()
+    const prompts = fake.bodies.filter((b) => b.path.endsWith('/prompt_async'))
+    assert.equal(prompts.length, 2, `two prompts were posted: ${fake.posted.join(' | ')}`)
+    for (const p of prompts) {
+      assert.deepEqual(JSON.parse(p.body).model, { providerID: 'anthropic', modelID: 'claude-sonnet-4-5' })
+    }
   } finally {
     await stop()
   }

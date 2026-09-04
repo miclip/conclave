@@ -47,6 +47,39 @@ test('a prompt is POSTed as parts, and returns before the turn does', async () =
   assert.deepEqual(calls[0]?.body, { parts: [{ type: 'text', text: 'do the thing' }] })
 })
 
+test('#221 a model travels with the prompt, as the object the API wants', async () => {
+  // Probed against a running 1.18.27 server: `"model":"anthropic/claude-sonnet-4-5"` answers
+  // `400 Expected object | null`; the two-field object answers 204. `opencode models` prints the
+  // slash form and `--model` is written that way, so the split belongs here rather than in every
+  // caller.
+  const { calls, fetch } = stub(() => ({ status: 200 }))
+  await client(fetch).promptAsync('ses_a', 'go', 'anthropic/claude-sonnet-4-5')
+  assert.deepEqual((calls[0]?.body as Record<string, unknown>)['model'], {
+    providerID: 'anthropic',
+    modelID: 'claude-sonnet-4-5',
+  })
+})
+
+test('#221 a model id containing a slash keeps it', async () => {
+  // `openrouter/anthropic/claude-3.5` is ONE provider and one model whose name has a slash in it.
+  // Splitting on the last would name a provider that does not exist, and the failure would be a
+  // 4xx from a server that was asked for something real.
+  const { calls, fetch } = stub(() => ({ status: 200 }))
+  await client(fetch).promptAsync('ses_a', 'go', 'openrouter/anthropic/claude-3.5')
+  assert.deepEqual((calls[0]?.body as Record<string, unknown>)['model'], {
+    providerID: 'openrouter',
+    modelID: 'anthropic/claude-3.5',
+  })
+})
+
+test('#221 no model asked for means none sent, rather than an empty one', async () => {
+  // `null` is a legal value for that field, and an empty object is not the same request: it would
+  // ask the server for a model whose provider is the empty string.
+  const { calls, fetch } = stub(() => ({ status: 200 }))
+  await client(fetch).promptAsync('ses_a', 'go')
+  assert.ok(!('model' in (calls[0]?.body as Record<string, unknown>)), 'the key is absent, not empty')
+})
+
 test('a command is a POST, not something typed at a composer', async () => {
   // The whole of #215: a slash command for this agent is a route. Nothing is typed, so nothing
   // echoes, so none of the prompt-fidelity machinery (#174, #185, #207, #216) applies.

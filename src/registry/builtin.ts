@@ -21,7 +21,7 @@ import {
 } from '../conformance/capabilities.ts'
 import { assertCodexHooksExecutable, CONCLAVE_HOOK_MATCH } from '../deployment/codexHookTrust.ts'
 import { DEFAULT_IDLE_MS, DEFAULT_WATCHDOG_MS } from '../outcomes/watchdog.ts'
-import { effectiveLaunchArgs } from './launch.ts'
+import { argsWithoutModel, effectiveLaunchArgs, modelFromArgs } from './launch.ts'
 import {
   claudeAliasOf,
   claudeAliases,
@@ -305,11 +305,21 @@ export const OPENCODE_AGENT: AgentDefinition = {
     executable: { install: 'npm install -g opencode-ai', installFrom: INSTALL_HINT_SOURCE },
   },
   async create(resolved: ResolvedParticipant, ctx: CreateParticipantContext): Promise<AgentSession> {
+    // LAUNCH ARGS ARE READ, not ignored (#221). This transport has no per-turn argv -- its child
+    // is a server -- so the model is lifted out and delivered with each prompt, which is where
+    // this API puts it, and everything else is handed to the adapter so it can SAY it cannot be
+    // used. Dropping them in silence while `launchRecordFor` recorded them as the launch
+    // configuration was the defect: a report stating a configuration the run does not have.
+    const args = effectiveLaunchArgs(resolved, ctx)
+    const model = modelFromArgs(args)
+    const ignored = model === null ? [...args] : argsWithoutModel(args)
     return OpenCodeApiAdapter.start({
       cwd: ctx.cwd,
       command: resolved.agent.launch.command,
       role: resolved.role.id,
       ...(ctx.watchdogMs === undefined ? {} : { watchdogMs: ctx.watchdogMs }),
+      ...(model === null ? {} : { model }),
+      ...(ignored.length === 0 ? {} : { ignoredArgs: ignored }),
     })
   },
 }
