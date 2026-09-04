@@ -53,7 +53,10 @@ test('a command is a POST, not something typed at a composer', async () => {
   const { calls, fetch } = stub(() => ({ status: 200 }))
   await client(fetch).command('ses_a', '/compact')
   assert.equal(calls[0]?.url, 'http://127.0.0.1:4599/session/ses_a/command')
-  assert.deepEqual(calls[0]?.body, { command: '/compact' })
+  // `arguments` IS REQUIRED even when empty: without it the server answers 400 with
+  // `Missing key at ["arguments"]`. Probed against a running 1.18.27 server after a 400 that a
+  // schema nobody had read would have explained.
+  assert.deepEqual(calls[0]?.body, { command: '/compact', arguments: '' })
 })
 
 test('a session id with a slash in it cannot escape its route', async () => {

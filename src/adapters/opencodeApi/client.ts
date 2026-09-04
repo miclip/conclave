@@ -85,9 +85,49 @@ export class OpenCodeClient {
     })
   }
 
-  /** Run a command in the session — the route that makes slash commands a POST (#215). */
-  async command(sessionId: string, command: string): Promise<void> {
-    await this.#json('POST', `/session/${encodeURIComponent(sessionId)}/command`, { command })
+  /**
+   * The commands this server offers, by name.
+   *
+   * NOT the TUI's slash commands. `GET /command` returns a registry of named prompt templates --
+   * `init`, `review`, and whatever the project or user has defined -- each with a description and
+   * a template. `/compact`, `/clear` and `/model` are not in it; they are TUI concepts, and
+   * compaction has its own route (`/session/{id}/summarize`).
+   *
+   * This exists so a command policy for this seat can be READ off the server rather than pinned
+   * from a bundle string. The pty adapters have to grep a binary because their CLIs offer no way
+   * to ask; this one asks.
+   */
+  async commands(): Promise<{ name: string; description?: string; source?: string }[]> {
+    const body = await this.#json<unknown>('GET', '/command', undefined)
+    if (!Array.isArray(body)) return []
+    return body.flatMap((c) => {
+      if (typeof c !== 'object' || c === null) return []
+      const name = (c as Record<string, unknown>)['name']
+      if (typeof name !== 'string') return []
+      const description = (c as Record<string, unknown>)['description']
+      const source = (c as Record<string, unknown>)['source']
+      return [{
+        name,
+        ...(typeof description === 'string' ? { description } : {}),
+        ...(typeof source === 'string' ? { source } : {}),
+      }]
+    })
+  }
+
+  /**
+   * Run one of those commands.
+   *
+   * `arguments` IS REQUIRED even when empty: without it the server answers 400 with
+   * `Missing key at ["arguments"]`. Probed rather than inferred, after a 400 that a schema
+   * nobody had read would have explained.
+   *
+   * SYNCHRONOUS, unlike `prompt_async`. A valid name blocks until the command has run -- `review`
+   * held the connection past 15 seconds doing real work -- so a caller must not await this on a
+   * path that has to stay responsive. An unknown name answers 500 rather than 404, so a failure
+   * here cannot be read as "no such command" without checking `commands()` first.
+   */
+  async command(sessionId: string, command: string, args = ''): Promise<void> {
+    await this.#json('POST', `/session/${encodeURIComponent(sessionId)}/command`, { command, arguments: args })
   }
 
   /** Stop the turn in flight without killing anything. */
@@ -95,7 +135,11 @@ export class OpenCodeClient {
     await this.#json('POST', `/session/${encodeURIComponent(sessionId)}/abort`, {})
   }
 
-  /** Subscribe to the server's event stream. Ends when the server closes it or `signal` aborts. */
+  // COMPACTION IS NOT HERE. `/session/{id}/summarize` exists and answers 400 to an empty body,
+  // so it wants a payload this has not established. Left unimplemented rather than shipped
+  // untested -- the whole argument for this transport is that it can be verified against a
+  // running server, and a method that has never worked would be the first thing to contradict it.
+
   async *events(signal?: AbortSignal): AsyncGenerator<ServerEvent> {
     const route = '/event'
     let res: Response
@@ -126,7 +170,9 @@ export class OpenCodeClient {
       res = await this.#fetch(`${this.#baseUrl}${route}`, {
         method,
         headers: this.#headers(),
-        body: JSON.stringify(body),
+        // A GET carries none. `fetch` rejects outright on a GET with a body, so this is not
+        // tidiness -- it is the difference between a working read and a TypeError.
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       })
     } catch (e) {
       // The server is not there. Distinct from a refusal, and the repair is different.
