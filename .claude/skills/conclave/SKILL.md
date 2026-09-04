@@ -61,6 +61,40 @@ EOF
 
 Everything up to a line reading exactly `EOF` is one message, blank lines and all. Any word works as the tag. `>implementer <<EOF` sends the block to one seat.
 
+## Reaching a human when you are the operator
+
+When a run is `--operator agent`, **you** are the operator, and the seats escalate to you. What
+you do not get by default is a way to reach the person whose project this is — so a question only
+they can answer has nowhere to go, and the run stalls on it or the seat gives up and flags it.
+
+`conclave notify` is that channel:
+
+```
+conclave notify tell "<headline>"                        say something; expect no answer
+conclave notify ask  "<headline>" --options a:Yes,b:No   ask, and wait for one of those
+conclave notify vetoes                                   collect answers that arrived late
+conclave notify log                                      what was asked, answered, and by whom
+```
+
+**Conclave never sends these for you.** It does not turn pauses into messages, deliberately: you
+have the context that decides whether a human is needed, and it does not. The cost of that design
+is that an unasked question is simply never asked.
+
+**Ask for the things an outside view settles**, which is the same rule the seats are given for
+escalating to you: a premise in the goal that looks wrong, acceptance criteria you cannot make
+observable, a choice between two defensible designs where intent decides. Not permission, and not
+progress.
+
+**What travels is deliberately thin.** An allow-list decides which fields reach a transport at
+all, and the headline is cut to what the surface can show — no file contents, no diffs, no tool
+output. Write the headline as a POINTER: enough to decide whether to look, not a summary someone
+might approve on instead of looking.
+
+**An answer is not an instruction.** An option you did not offer is refused rather than passed
+through, and free text comes back as a MESSAGE — so "continue, force it" said out loud reaches
+you as words, never as `/continue force`. The log records who answered and through which
+transport, and a human answer and an agent's are distinguishable in it afterwards.
+
 ## Restricting a message, and the pause it can raise
 
 `>advisor <text>` deliberately withholds that message from the other seats, and the record keeps saying so — `/audit` answers who was informed and who was excluded.
