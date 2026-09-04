@@ -283,6 +283,52 @@ test('#12 does /quit produce a SessionEnd on Codex?', { skip }, async (t) => {
   await session.close('abandoned').catch(() => undefined)
 })
 
+test('#216 does a slash command raise UserPromptSubmit on Codex?', { skip }, async (t) => {
+  // THE EXPERIMENT #216 TURNS ON. `CODEX_COMMAND_POLICY` allows `/compact` and `/review`, and
+  // `submitRaw` can deliver them -- but the correlation in `#onHook` has neither the raw-echo
+  // exemption (#207) nor the harness-block one (#185). If a typed command raises
+  // `UserPromptSubmit`, then a command sent between turns opens a turn, its echo lands while the
+  // NEXT instruction is in flight, the two are correlated, and the run dies on a transport fault
+  // that never happened. That is exactly what killed a Claude run before #207.
+  //
+  // `/compact` rather than `/quit`: quitting is special-cased and its hooks say nothing about
+  // the ordinary case. `/compact` is a real allowed command that leaves the session running.
+  //
+  // AN EXPERIMENT, not an assertion of the answer. Either result is a finding, and only one of
+  // them means #216 is live.
+  const session = await participant()
+  const rec = new Recorder(session)
+
+  await session.send('Reply with exactly READY and nothing else. No tools.', { kind: 'orchestrator' })
+  await rec.waitForSettled(120_000)
+
+  const before = session.receiver.journal.read().length
+  await session.submitRaw('/compact', 'the #216 probe')
+
+  // Wait for anything new rather than a fixed sleep, so a slow hook is not read as no hook.
+  const deadline = Date.now() + 45_000
+  while (Date.now() < deadline && session.receiver.journal.read().length === before) {
+    await new Promise((r) => setTimeout(r, 250))
+  }
+  await new Promise((r) => setTimeout(r, 3_000))
+
+  const after = session.receiver.journal.read().slice(before)
+  const events = [...new Set(after.map((d) => d.event))]
+  const prompts = after.filter((d) => d.event === 'UserPromptSubmit')
+  t.diagnostic(
+    `codex ${currentVersion('codex')} after typing /compact: hooks=${JSON.stringify(events)} ` +
+      `UserPromptSubmit=${prompts.length} ` +
+      `prompts=${JSON.stringify(prompts.map((d) => String((d.payload as Record<string, unknown>)?.['prompt'] ?? '').slice(0, 40)))}`,
+  )
+
+  // Deliberately not asserted either way. A negative cannot distinguish "cannot fire" from "did
+  // not this time", and a positive would make this test the thing that fails when #216 is FIXED.
+  // The diagnostic is the result; the fix is guarded by the offline test in codexCommandEcho.
+  assert.ok(session.pty.alive, 'the probe must not have killed the session, or it measured nothing')
+
+  await session.close('abandoned').catch(() => undefined)
+})
+
 test('#14 are turn_aborted and Stop still mutually exclusive on this Codex?', { skip }, async (t) => {
   // `turn_aborted > Stop` is covered synthetically in `outcomes/precedence.test.ts`, and #14
   // says the rule never fires in practice because the two records are mutually exclusive --

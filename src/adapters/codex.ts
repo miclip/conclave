@@ -62,6 +62,7 @@ import {
   describePromptMismatch,
   isCorruptedPrompt,
   PROMPT_RECOVERY_MS,
+  RAW_ECHO_MEMORY,
   PROMPT_SEND_ATTEMPTS,
   promptRetryExhausted,
   promptRetryNotAttempted,
@@ -368,6 +369,21 @@ export class CodexPtyHookAdapter implements AgentSession {
   #closed = false
   #closeMode: 'graceful' | 'abandoned' | undefined
   #pendingPrompt: PendingPrompt | undefined
+  /**
+   * Text handed to `submitRaw` whose prompt hook has not come back yet (#216).
+   *
+   * The same mechanism, for the same reason, as `#rawSubmissions` on the Claude adapter (#207) --
+   * and it is here because a fix to one pty adapter has now twice failed to reach the other. A
+   * slash command is typed into the composer a prompt goes into; if the CLI raises its ordinary
+   * prompt hook for it, the echo lands while the next instruction is in flight, the correlation
+   * below compares two unrelated strings, and the run dies on a transport fault that never
+   * happened.
+   *
+   * Whether Codex raises that hook for a command is unproven -- `codex.live.test.ts` carries the
+   * probe. The guard is cheap and the failure it prevents is a dead run rather than a degraded
+   * one, so it does not wait for the answer.
+   */
+  #rawSubmissions: string[] = []
   #opts: CodexAdapterOptions
   #watchdog: TurnWatchdog<TurnState>
 
@@ -680,8 +696,13 @@ export class CodexPtyHookAdapter implements AgentSession {
         //
         // An unsolicited hook has no pending send and is not a mismatch: the child is allowed
         // to start turns nobody here asked for, and always was.
+        // #216: taken UNCONDITIONALLY, before the pending claim is read, exactly as on the Claude
+        // adapter (#207). A command's echo is its own turn whether or not a send happens to be in
+        // flight behind it, and leaving the entry because nothing was pending would let it
+        // suppress a later prompt that genuinely was corrupt.
+        const rawEcho = this.#takeRawEcho(turn.prompt)
         const pending = this.#pendingPrompt
-        if (pending) {
+        if (pending && !rawEcho) {
           const corrupted = describePromptMismatch(pending.prompt, turn.prompt)
           if (!corrupted) {
             this.#pendingPrompt = undefined
@@ -1166,11 +1187,30 @@ export class CodexPtyHookAdapter implements AgentSession {
    * thing this method can prevent, and it is why the relay records a submission and never an
    * outcome.
    */
+  /**
+   * Whether this prompt is the echo of a raw submission still waiting for one, consuming it.
+   *
+   * EXACT on the trimmed text. A looser match would let a genuine corruption of an instruction
+   * pass as a command's echo -- the failure the correlation exists to catch, reintroduced
+   * through its own exemption.
+   */
+  #takeRawEcho(prompt: string): boolean {
+    const i = this.#rawSubmissions.indexOf(prompt.trim())
+    if (i < 0) return false
+    this.#rawSubmissions.splice(i, 1)
+    return true
+  }
+
   async submitRaw(text: string, detail?: string): Promise<void> {
     if (this.#state !== 'running') {
       throw new Error(`session is ${this.#state}; it is not accepting input`)
     }
     if (!this.acceptsInput) throw new Error('session is not accepting input')
+    // BEFORE the keystrokes (#216, and #207 on the other pty adapter): a hook for this text can
+    // land while `submit` is still resolving, and an echo that arrives before it was recorded is
+    // the bug itself.
+    this.#rawSubmissions.push(text.trim())
+    if (this.#rawSubmissions.length > RAW_ECHO_MEMORY) this.#rawSubmissions.shift()
     await this.#input.submit(text, detail ?? `raw command: ${text.slice(0, 80)}`)
   }
 
