@@ -136,6 +136,13 @@ export interface Task {
   readonly restrictedOrigins: readonly number[]
   /** Wall clock, for ceiling accounting. */
   readonly admittedAt: number
+  /**
+   * Whether this task's instruction was produced by a reconstructed advisor turn (its
+   * narration was rebuilt from streamed prose). A reconstructed instruction that exactly
+   * duplicates the last instruction actually sent to its target seat is suppressed at
+   * dispatch to avoid wasting an implementer turn on a repeat.
+   */
+  readonly reconstructed?: boolean
 }
 
 /**
