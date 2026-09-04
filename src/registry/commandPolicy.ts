@@ -356,7 +356,7 @@ const OPENCODE_VERSION = '1.18.27'
  *
  * SYNCHRONOUS, unlike a prompt: a valid name holds the connection until the command has run.
  */
-export const OPENCODE_API_COMMAND_POLICY: CommandPolicy = {
+export const OPENCODE_COMMAND_POLICY: CommandPolicy = {
   kind: 'declared',
   sourceVersion: OPENCODE_VERSION,
   commands: [

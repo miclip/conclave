@@ -38,6 +38,7 @@ import { FakeRotationSession } from '../rotation/fakeSession.ts'
 import { Relay } from '../relay/relay.ts'
 import { worktreePaths } from '../relay/subagents.ts'
 import { CLAUDE_AGENT, CODEX_AGENT, defaultRegistry, KIMI_AGENT, OPENCODE_AGENT } from './builtin.ts'
+import { fakeOpenCode } from '../adapters/opencodeApi/fakeServer.ts'
 import {
   checkCommandAvailable,
   findExecutable,
@@ -469,15 +470,27 @@ test('the command the preflight validates is the command the adapter actually sp
   // A validated field that nothing spawns is worse than no check: it reports on a configuration
   // the run does not have. All four now thread `launch.command` through to the spawn.
   //
-  // Proved end to end on OpenCode, whose adapter spawns an ordinary child rather than a pty, and
-  // against the recorded stdout of a real `opencode run --format json` -- so the wrapper is a real
-  // executable running a real turn, not a probe of the spawn call.
+  // Proved end to end on OpenCode, whose adapter spawns an ordinary child rather than a pty -- so
+  // the wrapper is a real executable the adapter really launches, not a probe of the spawn call.
+  //
+  // The wrapper now announces a port and waits, because since #217 that adapter spawns
+  // `opencode serve` and connects to it rather than running one process per turn. A fake server
+  // stands behind the announced port, so the adapter gets a session and the wrapper is exercised
+  // the way production exercises the real binary.
+  const fake = fakeOpenCode()
+  const port = await fake.port
+  t.after(async () => {
+    await fake.close()
+  })
   const dir = tempDir(t, 'conclave-wrapper')
   const ran = join(dir, 'ran.log')
   const wrapped = join(dir, 'opencode-wrapper')
   writeFileSync(
     wrapped,
-    `#!/bin/sh\nprintf 'ran\\n' >> ${JSON.stringify(ran)}\ncat ${JSON.stringify(FIXTURE)}\n`,
+    `#!/bin/sh\nprintf 'ran\\n' >> ${JSON.stringify(ran)}\n` +
+      `echo "opencode server listening on http://127.0.0.1:${port}"\n` +
+      // Stays up, as a server does. The adapter kills it on close.
+      `while true; do sleep 1; done\n`,
   )
   chmodSync(wrapped, 0o755)
 

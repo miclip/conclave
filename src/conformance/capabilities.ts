@@ -131,8 +131,8 @@ export const CODEX_CAPABILITIES: AdapterCapabilities = {
  * replay, and `observed` means a recording exists. Claiming it would be downgraded on sight and
  * would deserve to be.
  */
-export const OPENCODE_API_CAPABILITIES: AdapterCapabilities = {
-  agent: 'opencode-api',
+export const OPENCODE_CAPABILITIES: AdapterCapabilities = {
+  agent: 'opencode',
   // The server announces its port and a session is created before any turn is sent, so readiness
   // is a real state here rather than something the first turn has to stand in for.
   readinessSignal: 'first_turn',
@@ -142,7 +142,14 @@ export const OPENCODE_API_CAPABILITIES: AdapterCapabilities = {
   turnKeySource: 'run_invocation',
   outcomes: {
     // `session.idle`, which is the server stating the session stopped working. Not an inference
-    // from a process going away, which is what the run-per-turn seat has to settle for.
+    // from a process going away, which is what the run-per-turn adapter had to settle for.
+    //
+    // DO NOT UPGRADE THIS ON `edit-turn.ndjson`. The suite reports `upgrade_available` against
+    // that recording, and the recording is real -- but it was captured from the RUN-PER-TURN
+    // adapter this replaced (#217), whose completion signal was `step_finish reason=stop` parsed
+    // out of stdout. This transport has no such record; it learns a turn ended from `session.idle`
+    // on an event stream. Upgrading to `observed` on that fixture would claim a recording proves
+    // a code path that never runs.
     completed: 'inferred_from_documented_event',
     // `POST /session/{id}/abort` and nothing is killed. Attributable because THIS adapter asked:
     // there is no signal to interpret and no child whose death has to be explained.
@@ -164,52 +171,6 @@ export const OPENCODE_API_CAPABILITIES: AdapterCapabilities = {
   },
 }
 
-export const OPENCODE_CAPABILITIES: AdapterCapabilities = {
-  agent: 'opencode',
-  // Literal rather than a concession. There is no resident process between turns, so
-  // there is nothing that could become ready before the first one.
-  readinessSignal: 'first_turn',
-  // Neither of the other two sources exists here. A turn is one `run` invocation, and the
-  // ids OpenCode does emit (messageID) change per STEP, so they identify something
-  // narrower than a turn and cannot stand in for one.
-  turnKeySource: 'run_invocation',
-  outcomes: {
-    // step_finish reason=stop, then process exit. Two independent signals, both observed.
-    completed: 'observed',
-    // We own the process; killing it IS the cancellation, which is why this is `proven`
-    // rather than the `assumed` the pty adapters have to settle for. Captured live.
-    cancelled: 'observed',
-    // No dialog exists in `run` mode. See above.
-    permission_refused: 'unsupported',
-    // `close('graceful')` with a turn in flight. Distinct from `cancelled`, which is the
-    // same signal with our own bookkeeping saying we asked for it.
-    process_exited: 'observed',
-    // Driven past a 5s watchdog on a real run.
-    timed_out: 'observed',
-    // The binary is not on PATH. No CLI version behind it, because the failure IS that
-    // there is no CLI.
-    transport_lost: 'observed',
-    // Deliberately distinct from `completed`: a run CAN exit non-zero, or exit 0 having
-    // silently failed an auxiliary model call, so exit status alone never proves a turn
-    // finished. Captured from a paid model on an account with no payment method.
-    unknown_abnormal_end: 'observed',
-  },
-}
-
-/**
- * kimi 1.49.0, via `--print --output-format stream-json`.
- *
- * `completed` is `observed`, and since the adapter registers hooks its CONFIDENCE is now
- * `proven`: a live run reports `provenance: hook:Stop` with `synthesized: false`. The
- * message-stream fixture in `spikes/kimi/fixtures/` still backs the outcome; the hook is what
- * makes it announced rather than inferred.
- *
- * The `inferred` grading has not gone away -- it is the documented fallback when hook mode
- * cannot be set up, and it then describes that SESSION rather than this agent.
- *
- * `permission_refused` stays `unsupported`: `--print` auto-approves for the invocation, so
- * there is no dialog to refuse and no hook can create one.
- */
 export const KIMI_CAPABILITIES: AdapterCapabilities = {
   agent: 'kimi',
   readinessSignal: 'first_turn',
@@ -233,13 +194,11 @@ export const KIMI_CAPABILITIES: AdapterCapabilities = {
 export const ALL_CAPABILITIES = [
   CLAUDE_CAPABILITIES,
   CODEX_CAPABILITIES,
-  OPENCODE_CAPABILITIES,
   // #217: graded like every other adapter, deliberately. A declaration the suite does not walk
-  // is a claim nothing checks -- which is the shape of defect this repository has spent
-  // #196, #201, #202 and #205 removing. Its outcomes are currently
-  // `inferred_from_documented_event` rather than `observed`, so the suite has something to hold
-  // it to the day a recording is captured and someone is tempted to upgrade the claim without
-  // one.
-  OPENCODE_API_CAPABILITIES,
+  // is a claim nothing checks -- the shape this repository spent #196, #201, #202 and #205
+  // removing. Its outcomes are `inferred_from_documented_event` rather than `observed`: every
+  // event was seen firing against a live server, but no fixture was captured that the suite can
+  // replay, and the recordings that DID exist belonged to the run-per-turn adapter this replaced.
+  OPENCODE_CAPABILITIES,
   KIMI_CAPABILITIES,
 ]

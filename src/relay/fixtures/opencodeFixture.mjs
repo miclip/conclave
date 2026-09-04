@@ -1,14 +1,20 @@
 #!/usr/bin/env node
 /**
- * A deterministic stand-in for `opencode run --format json`, used to prove concurrency.
+ * A deterministic stand-in for `opencode serve`, used to prove concurrency.
+ *
+ * IT WAS A STAND-IN FOR `opencode run` until #217 replaced that adapter with one that drives a
+ * server. The proof is unchanged in every way that matters -- a real executable, spawned as a
+ * real child by the real adapter, with two children refusing to finish until each has seen the
+ * other -- but the child now lives for the whole run rather than for one turn, and answers over
+ * HTTP instead of printing JSON and exiting.
  *
  * NOT production code and not imported by any of it. It exists because the claim "two seats
  * work at the same time" cannot be proved with an in-process fake: a `FakeRotationSession`
  * shares this process's single thread, so two of them "overlapping" is a statement about
  * promise scheduling rather than about two agents running. This is a real executable, spawned
  * as a real child by the real adapter, reached through the two seams that already exist for
- * it -- `OpenCodeAdapterOptions.command`, documented as overridable so a test can point at a
- * stub, and PATH, which is how the built-in registry resolves `opencode`.
+ * it -- `OpenCodeApiAdapterOptions.command`, overridable so a test can point at a stub, and
+ * PATH, which is how the built-in registry resolves `opencode`.
  *
  * ## The rendezvous, and why it is not a timing measurement
  *
@@ -24,15 +30,17 @@
  *
  * ## What it emits
  *
- * The minimum `OpenCodeRunAdapter` needs for an observed completion: a `text` part carrying
- * the report, and `step_finish reason=stop`, which is the announced terminal signal the
- * adapter grades `completed (proven)` from. Exit 0 alone would grade `unknown_abnormal_end`,
- * so the fixture cannot accidentally pass by being silent.
+ * The minimum the API adapter needs for an observed completion: `message.part.delta` carrying
+ * the report, then `session.idle`, which is the terminal signal it grades `completed (proven)`
+ * from. Staying quiet would leave the turn open until a clock ended it, so the fixture cannot
+ * accidentally pass by saying nothing.
  *
  * ## How it knows who it is
  *
  * From its own cwd, because that is the one thing the orchestrator gives a seat that differs
- * per seat: at N>1 every implementer is launched in `.conclave/worktrees/<run>/<seat-id>`.
+ * per seat: at N>1 every implementer is launched in `.conclave/worktrees/<run>/<seat-id>`. The
+ * server is spawned in that cwd, so the discriminator survives the move from per-turn to
+ * per-seat unchanged.
  * Participant `args` would not do -- `--implementer-args` reaches every seat with the same
  * value -- and an environment variable would have to be set per child by something, which is
  * the production seam this fixture exists to avoid needing.
@@ -58,7 +66,8 @@ mkdirSync(dir, { recursive: true })
 /** Everything after the `--` separator the adapter puts before the prompt. */
 const argv = process.argv.slice(2)
 const at = argv.indexOf('--')
-const prompt = at >= 0 ? argv.slice(at + 1).join(' ') : ''
+// Reassigned per prompt: a server answers many, where the per-turn fixture answered one.
+let prompt = at >= 0 ? argv.slice(at + 1).join(' ') : ''
 
 /**
  * The seat this child is filling, or the advisor.
@@ -123,16 +132,73 @@ function implementerReply(turn) {
   return `${seat} ran concurrently: sibling ${sawSibling ? 'observed' : 'NOT observed'}.`
 }
 
-const turn = nextTurn()
-const text = seat === 'advisor' ? advisorReply(turn) : implementerReply(turn)
+import { createServer } from 'node:http'
 
-// One session id per seat, stable across turns, so `--session` resumption is exercised
-// exactly as it is against the real CLI.
-const sessionID = `fixture-${seat}`
-const say = (record) => process.stdout.write(`${JSON.stringify(record)}\n`)
-say({ type: 'step_start', sessionID, timestamp: Date.now(), part: {} })
-say({ type: 'text', sessionID, timestamp: Date.now(), part: { text } })
-// The announced terminal signal. Without it the adapter grades the turn
-// `unknown_abnormal_end (assumed)` however cleanly the process exits.
-say({ type: 'step_finish', sessionID, timestamp: Date.now(), part: { reason: 'stop' } })
-process.exit(0)
+/**
+ * One session per seat, and every prompt on it answered the way the per-turn fixture answered.
+ *
+ * The rendezvous still happens INSIDE a turn rather than at startup, which is what keeps the
+ * proof honest: two servers existing simultaneously would only prove the orchestrator spawned
+ * two children, and the claim is that it RUNS them at once. Holding both turns open is what lets
+ * the seat table be read while two seats are working.
+ */
+const SESSION = `fixture-${seat}`
+const subscribers = []
+
+const push = (event) => {
+  const line = `data: ${JSON.stringify(event)}\n\n`
+  for (const res of subscribers) res.write(line)
+}
+
+const server = createServer((req, res) => {
+  const url = (req.url ?? '').split('?')[0]
+  if (url === '/event') {
+    res.writeHead(200, { 'content-type': 'text/event-stream' })
+    subscribers.push(res)
+    push({ id: 'evt_hello', type: 'server.connected', properties: {} })
+    return
+  }
+  let body = ''
+  req.on('data', (c) => (body += c))
+  req.on('end', () => {
+    if (url === '/session' && req.method === 'POST') {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ id: SESSION }))
+      return
+    }
+    if (url === `/session/${SESSION}/prompt_async` && req.method === 'POST') {
+      // ACCEPTED IMMEDIATELY, answered later: that asymmetry is the whole reason the adapter
+      // uses this route, and a fixture that answered inline would not exercise it.
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end('')
+      let sent = ''
+      try {
+        sent = (JSON.parse(body).parts ?? []).map((p) => p.text ?? '').join(' ')
+      } catch {
+        sent = ''
+      }
+      setTimeout(() => answer(sent), 0)
+      return
+    }
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end('')
+  })
+})
+
+/** Compute the reply exactly as the per-turn fixture did, then say it and go idle. */
+function answer(sent) {
+  prompt = sent
+  const turn = nextTurn()
+  const text = seat === 'advisor' ? advisorReply(turn) : implementerReply(turn)
+  push({ type: 'message.part.delta', properties: { sessionID: SESSION, text } })
+  // The terminal signal. Without it the turn stays open until a clock ends it (#220), which is
+  // a different verdict and would not prove what this file exists to prove.
+  push({ type: 'session.idle', properties: { sessionID: SESSION } })
+}
+
+server.listen(0, '127.0.0.1', () => {
+  const { port } = server.address()
+  // The line the adapter greps for. Exactly the real server's wording, because that is what it
+  // is matching against.
+  process.stdout.write(`opencode server listening on http://127.0.0.1:${port}\n`)
+})

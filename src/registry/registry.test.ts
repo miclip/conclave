@@ -30,7 +30,9 @@ test('the default registry lists every built-in agent, all constructible', () =>
   // it has a silence clock the run-per-turn seat cannot have, and a command policy the
   // run-per-turn seat has nowhere to deliver.
   const r = defaultRegistry()
-  const expected = ['claude', 'codex', 'kimi', 'opencode', 'opencode-api']
+  // Four, not five: `opencode-api` existed for exactly as long as the API adapter was unproven
+  // (#217). It is now what `opencode` means, and the run-per-turn adapter it replaced is gone.
+  const expected = ['claude', 'codex', 'kimi', 'opencode']
   assert.deepEqual(r.list().map((a) => a.id).sort(), expected)
   assert.deepEqual(r.listAvailable().map((a) => a.id).sort(), expected, 'listed and constructible must not diverge')
 })

@@ -86,14 +86,19 @@ test('an argv that names no model records null, and never an empty string', () =
   }
 })
 
-test('the launch argv is composed in one place, and every built-in adapter uses it', () => {
+test('the launch argv is composed in one place, and every adapter that takes one uses it', () => {
   // A text pin, and a narrow one: the claim being guarded is that the recorded argv is the
   // SAME LIST the adapter was handed. That holds because both come from `effectiveLaunchArgs`,
   // and it stops holding the moment an adapter goes back to spreading the three layers itself.
+  //
+  // THREE, not four, since #217. `opencode`'s child is a SERVER rather than a turn: it is spawned
+  // once as `opencode serve --port 0` and every prompt after that is a POST. There is no per-turn
+  // argv for launch args to compose into, so that adapter takes none -- which is a real gap for
+  // anyone who set `--args` expecting model selection, and is filed rather than hidden here.
   assert.equal(
     [...BUILTIN.matchAll(/args: effectiveLaunchArgs\(resolved, ctx\),/g)].length,
-    4,
-    'all four built-in adapters must compose their child argv through effectiveLaunchArgs',
+    3,
+    'every adapter that composes a child argv must do it through effectiveLaunchArgs',
   )
   assert.doesNotMatch(
     BUILTIN,
