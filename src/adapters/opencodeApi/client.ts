@@ -115,7 +115,7 @@ export class OpenCodeClient {
   #headers(extra: Record<string, string> = {}): Record<string, string> {
     return {
       'content-type': 'application/json',
-      ...(this.#password === undefined ? {} : { authorization: `Bearer ${this.#password}` }),
+      ...(this.#password === undefined ? {} : { authorization: basicAuth(this.#password) }),
       ...extra,
     }
   }
@@ -147,5 +147,22 @@ export class OpenCodeClient {
     }
   }
 }
+
+/**
+ * The username OpenCode's Basic auth requires. NOT decoration -- it is checked.
+ *
+ * Probed against a running 1.18.27 server: `opencode:<password>` answers 200, while
+ * `anything:<password>`, `x:<password>` and an EMPTY username all answer 401, as does
+ * `opencode:<wrong>`. So both halves are verified and the username is not free.
+ *
+ * This was `Bearer <password>` first, written from the shape of most APIs rather than from this
+ * one. It returns 401. The mistake was invisible on 1.18.15, which did not enforce the password
+ * at all -- it printed "OPENCODE_SERVER_PASSWORD is not set; server is unsecured" and answered
+ * anyway -- so a client with the wrong scheme worked until the server started checking.
+ */
+const BASIC_AUTH_USER = 'opencode'
+
+const basicAuth = (password: string): string =>
+  `Basic ${Buffer.from(`${BASIC_AUTH_USER}:${password}`).toString('base64')}`
 
 const describe = (e: unknown): string => (e instanceof Error ? e.message : String(e))

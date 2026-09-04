@@ -74,9 +74,17 @@ test('the password travels when there is one, and nothing invented when there is
   // The server announces "OPENCODE_SERVER_PASSWORD is not set; server is unsecured" at startup.
   // An unsecured loopback server takes a prompt from anything on the machine, so a password is
   // carried whenever one exists — and never fabricated when it does not.
+  // BASIC, and the username is checked. Probed against a running 1.18.27 server:
+  // `opencode:<password>` answers 200; `anything:<password>`, `x:<password>` and an empty
+  // username all answer 401. This was `Bearer` first, which 401s -- and the error was invisible
+  // on 1.18.15, which did not enforce the password at all and answered regardless.
   const withPw = stub(() => ({ status: 200 }))
   await client(withPw.fetch, 's3cret').abort('ses_a')
-  assert.equal(withPw.calls[0]?.headers['authorization'], 'Bearer s3cret')
+  assert.equal(
+    withPw.calls[0]?.headers['authorization'],
+    `Basic ${Buffer.from('opencode:s3cret').toString('base64')}`,
+    'the scheme and the username are both part of what the server checks',
+  )
 
   const without = stub(() => ({ status: 200 }))
   await client(without.fetch).abort('ses_a')
