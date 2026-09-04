@@ -93,8 +93,13 @@ test('the launch argv is composed in one place, and every adapter that takes one
   //
   // THREE, not four, since #217. `opencode`'s child is a SERVER rather than a turn: it is spawned
   // once as `opencode serve --port 0` and every prompt after that is a POST. There is no per-turn
-  // argv for launch args to compose into, so that adapter takes none -- which is a real gap for
-  // anyone who set `--args` expecting model selection, and is filed rather than hidden here.
+  // argv for launch args to compose into, so that adapter takes none.
+  //
+  // That is not the same as ignoring them, which it did until #221. It calls `effectiveLaunchArgs`
+  // and reads the result: the model is lifted out and travels in each prompt body, where this API
+  // takes it, and everything left over is named in a startup notice rather than dropped in
+  // silence. So the count stays at three, and `src/registry/opencodeLaunchArgs.test.ts` guards
+  // what the fourth does instead.
   assert.equal(
     [...BUILTIN.matchAll(/args: effectiveLaunchArgs\(resolved, ctx\),/g)].length,
     3,
