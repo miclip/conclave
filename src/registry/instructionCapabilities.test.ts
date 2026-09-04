@@ -18,6 +18,7 @@ import {
   KIMI_INSTRUCTION_CAPABILITIES,
   OPENCODE_INSTRUCTION_CAPABILITIES,
 } from './instructionCapabilities.ts'
+import { ABSENT_LITERAL_CANARY, installedBundle } from './installedBundle.ts'
 import { NO_DEADLINE_CLOCKS, type GradedClaim, type InstructionCapabilities } from './types.ts'
 
 const DECLARED: ReadonlyArray<readonly [string, InstructionCapabilities]> = [
@@ -97,18 +98,73 @@ test('every claim names a source and pins the version it was read from', () => {
   }
 })
 
-test('each agent pins one version literal, exactly as that CLI reports itself', () => {
-  // Verbatim `--version` output, so a freshness check is a string comparison and needs no
-  // parser. One literal per agent: two claims for the same CLI read from different versions
-  // would make "is this stale" unanswerable for the agent as a whole.
-  const literal: Record<string, string> = {
-    claude: '2.1.252 (Claude Code)',
-    codex: 'codex-cli 0.147.0',
-    opencode: '1.18.15',
-    kimi: 'kimi, version 1.49.0',
-  }
+test('each agent pins ONE version literal, so "is this stale" has a single answer', () => {
+  // Consistency WITHIN an agent, which is all this can honestly check. Two claims for the same
+  // CLI read from different versions would make staleness unanswerable for the agent as a whole.
+  //
+  // What this deliberately no longer does is compare the pin against a hardcoded copy of itself
+  // (#201). That assertion passed while the Claude pin drifted eight versions behind the
+  // installed CLI, because both sides of it said the same thing -- a claim about another program
+  // checked against a restatement of itself, which is the failure `hookEventNames.test.ts` was
+  // written to prevent. Whether a claim is still TRUE is answered by the probe search below;
+  // this only answers whether the file disagrees with itself.
+  const seen = new Map<string, string>()
   for (const { agent, capability, claim } of claims()) {
-    assert.equal(claim.sourceVersion, literal[agent], `${agent}.${capability} is pinned`)
+    const first = seen.get(agent)
+    if (first === undefined) seen.set(agent, claim.sourceVersion)
+    else assert.equal(claim.sourceVersion, first, `${agent}.${capability} pins a different version from its siblings`)
+  }
+  assert.ok(seen.size > 0, 'the walk must find claims, or this asserts nothing')
+})
+
+test('#201 every claim can still be re-derived from the installed bundle', (t) => {
+  // THE CHECK THAT WAS MISSING. `sourceVersion` was the staleness rule and nothing enforced it,
+  // so four Claude claims sat unverified for eight releases while a briefing was built on one of
+  // them (`autonomousLoop`, #192). A stale claim there is a promise nobody re-checked.
+  //
+  // Version-agnostic on purpose. Every contributor's install moves independently of this repo --
+  // Claude Code went 2.1.252 to 2.1.260 while this file sat still -- so failing on drift would
+  // fail the suite for everyone whose CLI updated overnight, on a day when nothing was wrong.
+  // What matters is whether the literal is STILL THERE, and that question does not need the
+  // version to answer it.
+  let checked = 0
+  for (const { agent, capability, claim } of claims()) {
+    const probes = claim.probes
+    if (!probes || probes.length === 0) continue
+    const found = installedBundle(agent)
+    if ('why' in found) {
+      t.diagnostic(`${agent}: skipped -- ${found.why}`)
+      continue
+    }
+    assert.equal(
+      found.bytes.includes(ABSENT_LITERAL_CANARY),
+      false,
+      `${agent}: the canary was found, so the search matches anything and the assertions below are vacuous`,
+    )
+    for (const probe of probes) {
+      assert.ok(
+        found.bytes.includes(probe),
+        `${agent}.${capability}: ${JSON.stringify(probe)} is no longer in the installed bundle (${found.at}). ` +
+          `The claim was read at ${claim.sourceVersion} and is now WRONG rather than merely old -- re-derive it or withdraw it.`,
+      )
+      checked += 1
+    }
+  }
+  t.diagnostic(`${checked} probe(s) re-derived`)
+})
+
+test('#201 a claim that is graded on evidence carries something to re-derive it from', () => {
+  // The hole this would otherwise leave: probes are optional on the type, because a claim about
+  // an agent with no searchable bundle cannot have them. So "the search passed" could also mean
+  // "nothing was searched". Every claim that names a bundle as its source must carry probes, or
+  // the guard above is opt-in and the next claim added quietly opts out.
+  for (const { agent, capability, claim } of claims()) {
+    if (claim.evidence === 'unsupported') continue
+    if (!/installed (bundle|binary)/.test(claim.source)) continue
+    assert.ok(
+      claim.probes && claim.probes.length > 0,
+      `${agent}.${capability} cites the installed bundle as its source but carries no probe, so nothing can re-derive it`,
+    )
   }
 })
 

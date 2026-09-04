@@ -35,7 +35,7 @@
 import type { CommandDeclaration, CommandPolicy } from './types.ts'
 
 /** Verbatim `claude --version` on the machine every Claude literal below was read from. */
-const CLAUDE_VERSION = '2.1.258 (Claude Code)'
+const CLAUDE_VERSION = '2.1.260 (Claude Code)'
 /** Verbatim `codex --version` on the machine every Codex literal below was read from. */
 const CODEX_VERSION = 'codex-cli 0.147.0'
 

@@ -172,7 +172,35 @@ export interface GradedClaim {
    * this whole axis exists to refuse.
    */
   source: string
-  /** WHICH version of the CLI `source` was read from, exactly as that CLI reports itself. */
+  /**
+   * Literals from the installed bundle that this claim can be RE-DERIVED from, searched
+   * verbatim (#201).
+   *
+   * Separate from `source` because the two have different readers. `source` is prose for a
+   * human -- it quotes help text, names files, and explains where to look. Prose cannot be
+   * searched: help output is generated, spacing shifts, and a test built on it fails for
+   * formatting rather than for truth.
+   *
+   * These are the strings a machine can look for. They are what makes the claim CHECKABLE
+   * rather than merely attributed, and their absence from the installed bundle is the one
+   * signal that the claim has become false rather than merely old.
+   *
+   * WHY THIS EXISTS AT ALL. `sourceVersion` was the staleness rule, and nothing enforced it:
+   * the test asserting the pin compared the constant against a hardcoded copy of itself, so it
+   * passed while the pin drifted eight versions behind the installed CLI. A claim about another
+   * program, checked against a restatement of itself, is the exact failure
+   * `hookEventNames.test.ts` exists to prevent -- one level up.
+   */
+  probes?: readonly string[]
+  /**
+   * WHICH version of the CLI `source` was read from, exactly as that CLI reports itself.
+   *
+   * A RECORD OF WHEN, not a gate. Every contributor's install moves independently of this
+   * repository -- Claude Code went 2.1.252 to 2.1.260 while this file sat still -- so failing a
+   * suite on drift would fail it for everyone whose CLI updated overnight, on a day when
+   * nothing was wrong. `probes` answer whether the claim is still TRUE; this answers when
+   * someone last looked.
+   */
   sourceVersion: string
 }
 
