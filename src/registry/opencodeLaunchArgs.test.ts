@@ -29,12 +29,27 @@ async function optionsFor(args: string[]): Promise<Record<string, unknown>> {
   }
   try {
     await new AgentRegistry()
-      .register(OPENCODE_AGENT)
+      .register(seatable)
       .createParticipant({ id: 'implementer', agent: 'opencode', role: 'implementer', args }, { cwd: process.cwd() })
   } finally {
     ;(OpenCodeApiAdapter as unknown as { start: unknown }).start = original
   }
   return captured
+}
+
+/**
+ * `OPENCODE_AGENT` with its launch command pointed at a binary that is present everywhere.
+ *
+ * The registry's #51 preflight refuses to seat an agent whose command is not on PATH, and CI has
+ * no `opencode` -- which is right, and is why the live test is gated separately. What is under
+ * test here is the COMPOSITION: the real `create`, the real `models`, the real launch-arg
+ * resolution. Only the identity of the binary changes, and `start` is stubbed above so nothing is
+ * spawned either way. Swapping in a hand-written `create` instead would have tested a copy of
+ * `builtin.ts` that agrees with itself forever.
+ */
+const seatable = {
+  ...OPENCODE_AGENT,
+  launch: { ...OPENCODE_AGENT.launch, command: process.execPath },
 }
 
 /**
