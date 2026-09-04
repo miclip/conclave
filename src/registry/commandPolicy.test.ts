@@ -179,43 +179,42 @@ test('/model is refused because the launch-model report is immutable, not merely
   }
 })
 
-test('/loop is refused for accounting, and stays a declared command checked against the bundle', () => {
-  // The reversal this test exists for: #200 declared /loop ALLOWED as a work-mode change, and
-  // it is one -- the seat, its context and its history all survive it. What it fails is a
-  // clause that rule did not have. `Relay#exchangeTurn` returns on the first `turn_end` after
-  // its send and increments `#turnsTaken` once per dispatch, so a turn the seat gives itself
-  // is charged to neither counter that bounds a run.
+test('/loop names what it still costs, now that the accounting no longer costs anything', () => {
+  // THE REVERSAL, TWICE. #200 declared /loop allowed as a work-mode change; it was then refused
+  // on a clause that rule did not have -- a looped turn landed after `#exchangeTurn` returned
+  // and was charged to neither `--max-turns` nor `--rounds`. That was written down as a property
+  // of the command. It was a property of the RELAY, and #208 fixed it: an unsolicited
+  // `turn_start` is charged like any other, so the ceilings are true and the refusal lost its
+  // argument.
   //
-  // The DISPOSITION is not asserted here; the two lists above own it, and a copy of that
-  // assertion would only mean no mutation could kill either one alone. What is asserted is the
-  // reason, which nothing else reads: an entry that flipped to a refusal while keeping the old
-  // work-mode prose would read as a mistake rather than as a decision, and the next person to
-  // weigh it would weigh the wrong argument.
-  // `?? ''` rather than an `assert.ok` to narrow. A narrowing assertion pins nothing -- the
-  // lists above already require this entry to exist -- and the empty string fails both matches
-  // below anyway, so dropping the entry is still caught here without an assertion of its own.
+  // What survives is a real cost of a different kind, and this test exists to keep the entry
+  // naming it. `#exchangeTurn` returns on the first `turn_end` after its send, so a looped
+  // turn's REPORT is not the report the relay collected: the run cannot say what those turns
+  // did. An entry that kept the old counter prose would send the next reader to weigh an
+  // argument that has already been answered.
+  //
+  // The DISPOSITION is not asserted here; the two lists above own it, and duplicating that
+  // would mean no mutation could kill either alone.
   const policy = declared(defaultRegistry().get('claude').commandPolicy, 'claude')
-  const reason = policy.commands.find((c) => c.command === '/loop')?.reason ?? ''
+  const entry = policy.commands.find((c) => c.command === '/loop')
+  const reason = entry?.reason ?? ''
   assert.match(
     reason,
-    /--max-turns/,
-    'the reason must name the counter that stops bounding the run, not restate a continuity or configuration clause it does not fail',
+    /report/i,
+    'the reason must name what is still lost -- the report -- rather than the counters #208 fixed',
   )
-  assert.match(reason, /--rounds/, 'and the other one: they are two counters, and a looped turn is absent from both')
-
-  // The rule prose and the policy must not answer this in opposite directions. `/loop` stood in
-  // the ALLOWED clause on `CommandPolicy` as its Claude exemplar; a refusal here with that
-  // sentence still there is a rule contradicting its own application.
-  // Bounded by the NEXT BULLET rather than by the next clause's opening words, which is not
-  // fussiness: the refusal clause added for /loop names /loop, and anchoring on a named clause
-  // put it inside the slice and failed this assertion for the opposite of the reason it exists.
-  // A bullet boundary holds however the clauses are ordered or worded.
-  const rule = readFileSync(join(import.meta.dirname, 'types.ts'), 'utf8')
-  const from = rule.indexOf('A work-mode change is ALLOWED')
-  const allowedClause = rule.slice(from, rule.indexOf('\n *   - ', from))
   assert.ok(
-    !allowedClause.includes('/loop'),
-    'the rule’s allowed-work-mode clause must not still offer /loop as its example of one',
+    !/not charged|charged to neither/i.test(reason),
+    'and must not still claim the turns escape the ceilings, which stopped being true at #208',
+  )
+
+  // The ADVISOR's copy has to carry it too, and that is the half that actually reaches a
+  // decision: `reason` is for reviewers and the refusal path, `description` is what the
+  // briefing renders (#206). A cost stated only in the reason is a cost the advisor never sees.
+  assert.match(
+    entry?.description ?? '',
+    /report/i,
+    'the description is what the advisor reads, so the cost it is being asked to spend belongs there',
   )
 })
 

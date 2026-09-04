@@ -137,8 +137,8 @@ const POLICY: CommandPolicy = {
   kind: 'declared',
   sourceVersion: 'test',
   commands: [
-    { command: '/allowed', disposition: 'allowed', reason: 'a mode change this test invented.', source: 'test' },
-    { command: '/forbidden', disposition: 'refused', reason: 'a refusal this test invented.', source: 'test' },
+    { command: '/allowed', disposition: 'allowed', description: 'what the seat gets out of it.', reason: 'a mode change this test invented.', source: 'test' },
+    { command: '/forbidden', disposition: 'refused', description: 'what this invented command does.', reason: 'a refusal this test invented.', source: 'test' },
   ],
 }
 
@@ -150,9 +150,18 @@ test('the block also lists the seat’s allowed commands, and teaches how to ask
   const text = instructionCapabilityBriefing(CAPABILITY_DESCRIPTORS, ALL_SUPPORTED, undefined, POLICY)
 
   // Rendered from the policy's own words, in the shape the capability bullets use.
+  // #206: THE DESCRIPTION, not the reason. The two were one field, and the briefing rendered
+  // the wrong one -- an advisor deciding whether to ask for a command was handed the argument
+  // for why conclave permits it. That matters most where it is least visible: the advisor need
+  // not share a vendor with the seat it is briefing, so this string is not a reminder of
+  // something it already knows, it is the entire basis of the decision.
   assert.ok(
-    text.includes('  - /allowed — a mode change this test invented.'),
-    'an allowed command is rendered as its verb and the policy’s own reason for allowing it',
+    text.includes('  - /allowed — what the seat gets out of it.'),
+    'an allowed command is rendered as its verb and what it DOES',
+  )
+  assert.ok(
+    !text.includes('a mode change this test invented.'),
+    'and the disposition’s justification is for reviewers and the refusal path, not the menu',
   )
 
   // A transport with no composer offers no verb, so it must add NOTHING -- not its reason, not
@@ -194,8 +203,8 @@ test('a command that takes an argument is briefed with it, and one that takes no
     kind: 'declared',
     sourceVersion: 'test',
     commands: [
-      { command: '/takes', disposition: 'allowed', reason: 'takes one.', source: 'x', argumentHint: '[<condition>]' },
-      { command: '/bare', disposition: 'allowed', reason: 'takes none.', source: 'x' },
+      { command: '/takes', disposition: 'allowed', description: 'takes one.', reason: 'allowed because the reviewer said so.', source: 'x', argumentHint: '[<condition>]' },
+      { command: '/bare', disposition: 'allowed', description: 'takes none.', reason: 'allowed because the reviewer said so.', source: 'x' },
     ],
   }
   const text = instructionCapabilityBriefing(CAPABILITY_DESCRIPTORS, ALL_SUPPORTED, undefined, withArg)

@@ -229,17 +229,20 @@ export interface InstructionCapabilities {
  *     continuity that is gone.
  *   - A command that ALTERS OPERATOR CONFIGURATION is REFUSED. The operator chose the seat's
  *     model, its permissions and its hooks, and the run report states those choices as fact.
- *   - A command that MAKES THE SEAT'S WORK UNACCOUNTABLE is REFUSED, even when it changes
- *     nothing but the work mode. `/loop` on Claude is the only one of these found so far, and
- *     it was ALLOWED here until the accounting was worked through. It makes the seat dispatch
- *     its own subsequent turns; `Relay#exchangeTurn` returns on the FIRST `turn_end` after its
- *     send and increments `#turnsTaken` exactly once per dispatch, before the send. So a
- *     looped turn is never reconciled -- its report is not the report the relay collected --
- *     and is charged to neither `--max-turns` nor `--rounds`. The seat survives it. What does
- *     not survive is the relay's ability to say what the seat did or to stop it doing more,
- *     which is the same failure `autonomousLoop` is withheld from the advisor's capability
- *     briefing for (`src/registry/instructionBriefing.ts`). Offering the verb while withholding
- *     the capability would be the two files answering one question two ways.
+ *   - A command that MAKES THE SEAT'S WORK UNACCOUNTABLE was REFUSED on that ground alone, and
+ *     `/loop` on Claude was the only one ever found. IT IS ALLOWED NOW, and the history is worth
+ *     keeping because the reasoning is the point: a looped turn lands after `#exchangeTurn` has
+ *     returned, and `#turnsTaken` was incremented once per DISPATCH, so such a turn was charged
+ *     to neither `--max-turns` nor `--rounds`. That was written down here as a property of the
+ *     command. It was a property of THIS RELAY, and #208 fixed it -- an unsolicited `turn_start`
+ *     is charged like any other, so the ceilings are true again and the clause has no command
+ *     left to refuse.
+ *
+ *     What #208 did not restore is the REPORT. `#exchangeTurn` still returns on the first
+ *     `turn_end` after its send, so a looped turn's report is not the report the relay
+ *     collected, and the run cannot say what those turns did. That is a real cost and it is
+ *     stated in the command's own `description`, where the advisor deciding whether to spend it
+ *     will read it -- rather than being spent on its behalf by a refusal here.
  *
  * THREE STATES, AND THEY MUST NOT COLLAPSE INTO TWO. This is a union rather than a list with
  * a nullable field because the three answers have different causes and want different
@@ -296,7 +299,28 @@ export interface CommandDeclaration {
   /** Exactly as it would be typed into the composer, leading slash included. */
   command: string
   disposition: CommandDisposition
-  /** Which clause of the rule on `CommandPolicy` decides it, in that clause's own terms. */
+  /**
+   * What the command DOES, and when a seat would want it -- in the installed tool's own terms.
+   *
+   * This is the advisor's field. `reason` below is the reviewer's, and the two were one field
+   * until #206: the briefing rendered the disposition's justification, so an advisor deciding
+   * whether to ask for `/goal` was reading an argument about conclave's turn accounting.
+   *
+   * IT IS THE WHOLE BASIS OF THE DECISION, which is why the split matters more than it looks.
+   * The advisor need not be the same vendor as the seat it is briefing -- the default run is a
+   * Codex advisor over a Claude seat -- and a Codex model has no prior knowledge of Claude
+   * Code's commands whatsoever. This string is not a reminder of something it already knows.
+   *
+   * Grounded in `source` where the tool states one, so the description and the literal it was
+   * read from move together and the binary check keeps them honest.
+   */
+  description: string
+  /**
+   * Which clause of the rule on `CommandPolicy` decides it, in that clause's own terms.
+   *
+   * REVIEWERS, and the refusal message. Not the briefing: an allowance list is a menu, and the
+   * reason a thing is on the menu is not what a reader of a menu needs.
+   */
   reason: string
   /**
    * What the command takes after its name, in the installed bundle's own words, for the

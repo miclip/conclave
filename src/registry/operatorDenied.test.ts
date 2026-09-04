@@ -32,8 +32,8 @@ const POLICY: CommandPolicy = {
   kind: 'declared',
   sourceVersion: 'test',
   commands: [
-    { command: '/allowed', disposition: 'allowed', reason: 'allowed in this test.', source: 'test' },
-    { command: '/already-refused', disposition: 'refused', reason: 'refused for correctness.', source: 'test' },
+    { command: '/allowed', disposition: 'allowed', description: 'what this invented command does.', reason: 'allowed in this test.', source: 'test' },
+    { command: '/already-refused', disposition: 'refused', description: 'what this invented command does.', reason: 'refused for correctness.', source: 'test' },
   ],
 }
 

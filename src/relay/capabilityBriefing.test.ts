@@ -67,7 +67,13 @@ function policyAllowing(command: string): CommandPolicy {
   return {
     kind: 'declared',
     sourceVersion: 'test',
-    commands: [{ command, disposition: 'allowed', reason: `${command} is allowed in this test.`, source: 'test' }],
+    commands: [{
+      command,
+      disposition: 'allowed',
+      description: `${command} does something this test invented.`,
+      reason: `${command} is allowed in this test.`,
+      source: 'test',
+    }],
   }
 }
 
@@ -412,7 +418,7 @@ test('a policy that allows nothing costs the run nothing, and one with no capabi
         policy: {
           kind: 'declared',
           sourceVersion: 'test',
-          commands: [{ command: '/nope', disposition: 'refused', reason: 'refused in this test.', source: 'test' }],
+          commands: [{ command: '/nope', disposition: 'refused', description: 'what this invented command does.', reason: 'refused in this test.', source: 'test' }],
         },
         sessions: [new FakeRotationSession('impl', 'claude', [])],
       },

@@ -45,6 +45,8 @@ export const CLAUDE_COMMAND_POLICY: CommandPolicy = {
   commands: [
     {
       command: '/compact',
+      description:
+        'Summarises the conversation so far and frees the context it was using. Reach for it when a seat has been running long and its context is filling.',
       disposition: 'allowed',
       reason:
         'Housekeeping, and continuity-preserving by its own description: it summarises the conversation rather than dropping it, so nothing the relay believes about this seat stops being true.',
@@ -55,6 +57,8 @@ export const CLAUDE_COMMAND_POLICY: CommandPolicy = {
     },
     {
       command: '/goal',
+      description:
+        'Sets a condition the seat checks before it stops, so it keeps working until the condition holds. Reach for it when the work has a finish line the seat might stop short of.',
       disposition: 'allowed',
       // Verbatim `argumentHint` from the same declaration. The only command on either agent
       // that takes one, and the briefing renders it for that reason.
@@ -80,20 +84,24 @@ export const CLAUDE_COMMAND_POLICY: CommandPolicy = {
     },
     {
       command: '/loop',
+      description:
+        'Repeats a prompt or command on an interval -- `/loop 5m /foo` -- so the seat drives its own subsequent turns rather than waiting to be asked again. Those turns count against `--max-turns` and `--rounds` like any other, but nothing collects their reports, so what they did will not be in the run record.',
       disposition: 'allowed',
-      // DELEGATION, not a loss of control, and the distinction is who chose it. The turns a
-      // loop dispatches land after `#exchangeTurn` has returned and are charged to neither
-      // `--max-turns` nor `--rounds` (#208) -- but a run reaches this only when the operator
-      // permitted the command and the advisor then decided to hand the loop to its seat. Turns
-      // going uncounted because work was deliberately delegated is the delegation working.
-      // A ceiling exists to stop what nobody sanctioned; this was sanctioned twice.
+      // DELEGATION, not a loss of control, and the distinction is who chose it: a run reaches
+      // this only when the operator permitted the command and the advisor then decided to hand
+      // the loop to its seat -- sanctioned twice.
+      //
+      // The accounting argument this was allowed OVER has since been answered rather than
+      // merely accepted. A looped turn used to land after `#exchangeTurn` returned and be
+      // charged to nothing; #208 charges it, so the ceilings are true again. What remains
+      // uncollected is the REPORT of such a turn, which is why the description says so.
       //
       // It was refused here first, on the accounting alone. That made conclave's own missing
       // feature read as a fact about the command, and withheld it from the briefing so the
       // advisor could not weigh the trade for itself. #208 is the feature; it is worth having
       // and it is not a precondition for this.
       reason:
-        'Hands the seat a prompt to repeat on an interval, so it drives its own subsequent turns. Those turns are not charged to `--max-turns` or `--rounds` and the relay does not collect their reports -- delegate the loop only when losing that count is the intended trade.',
+        'Hands the seat a prompt to repeat on an interval, so it drives its own subsequent turns. Those turns are now charged like any other (#208), so the ceilings stay true; what is still lost is their reports, which nothing collects.',
       // As the composer renders it: typing `/loop` shows `[interval] [prompt]` beside it.
       argumentHint: '[interval] [prompt]',
       // ALLOWED HERE UNTIL THE ACCOUNTING WAS WORKED THROUGH, and the reversal is the entry's
@@ -121,6 +129,8 @@ export const CLAUDE_COMMAND_POLICY: CommandPolicy = {
     },
     {
       command: '/clear',
+      description:
+        'Starts a new session with empty context. The previous one stays on disk and is resumable.',
       disposition: 'refused',
       reason:
         'Discards continuity. Its own description says the session is replaced by an empty one; the relay would go on addressing a seat it believes has the run behind it.',
@@ -133,6 +143,8 @@ export const CLAUDE_COMMAND_POLICY: CommandPolicy = {
     },
     {
       command: '/rewind',
+      description:
+        'Restores an earlier checkpoint of the conversation and the files it changed.',
       disposition: 'refused',
       reason:
         'Discards continuity backwards. It restores the conversation to an earlier point, so turns the relay has already recorded, attributed and reported stop having happened -- the run report would describe a history the seat no longer has.',
@@ -143,6 +155,8 @@ export const CLAUDE_COMMAND_POLICY: CommandPolicy = {
     },
     {
       command: '/exit',
+      description:
+        'Ends the CLI session.',
       disposition: 'refused',
       reason:
         'Ends the seat. Every later instruction the relay routes to it is routed to a process that is gone, and the run finds out through a deadline rather than through the command.',
@@ -150,6 +164,8 @@ export const CLAUDE_COMMAND_POLICY: CommandPolicy = {
     },
     {
       command: '/quit',
+      description:
+        'Ends the CLI session. An alias of /exit rather than a command of its own.',
       disposition: 'refused',
       // Declared in its own right rather than resolved through `/exit`. An undeclared command
       // is refused anyway, so this entry changes no outcome -- what it adds is that the alias
@@ -160,6 +176,8 @@ export const CLAUDE_COMMAND_POLICY: CommandPolicy = {
     },
     {
       command: '/model',
+      description:
+        'Changes which model the seat runs on.',
       disposition: 'refused',
       reason:
         'Alters operator configuration, and uniquely among these it makes an existing report FALSE rather than merely stale: the launch model is recorded once and never revised, so a mid-run switch leaves the report naming a model that is no longer the one answering.',
@@ -171,6 +189,8 @@ export const CLAUDE_COMMAND_POLICY: CommandPolicy = {
     },
     {
       command: '/config',
+      description:
+        'Opens the settings interface.',
       disposition: 'refused',
       reason:
         'Alters operator configuration. The settings a seat launched under are the operator’s choices, and an advisor that can rewrite them is deciding how the run is set up rather than how the work is done.',
@@ -179,6 +199,8 @@ export const CLAUDE_COMMAND_POLICY: CommandPolicy = {
     },
     {
       command: '/permissions',
+      description:
+        'Manages the allow and deny rules governing what the seat may run.',
       disposition: 'refused',
       reason:
         'Alters operator configuration, and the part of it the operator is most entitled to hold: which tools the seat may use. An advisor that can widen the allow rules can grant itself, through the seat, capabilities the human declined to grant.',
@@ -186,6 +208,8 @@ export const CLAUDE_COMMAND_POLICY: CommandPolicy = {
     },
     {
       command: '/hooks',
+      description:
+        'Shows the hook configuration for tool events.',
       disposition: 'refused',
       reason:
         'Alters operator configuration, and specifically the configuration conclave’s own evidence rests on: the adapter generates a hook registration and learns that a turn ended because `Stop` fires. A seat able to edit its hooks is a seat able to remove the thing that reports it finishing.',
@@ -204,6 +228,8 @@ export const CODEX_COMMAND_POLICY: CommandPolicy = {
   commands: [
     {
       command: '/compact',
+      description:
+        'Summarises the conversation to stay under the context limit.',
       disposition: 'allowed',
       reason:
         'The same housekeeping allowance as on Claude, and on the same ground: it summarises the conversation to stay under the context limit rather than discarding it.',
@@ -221,6 +247,8 @@ export const CODEX_COMMAND_POLICY: CommandPolicy = {
     },
     {
       command: '/review',
+      description:
+        'Reviews the changes currently in the tree and reports what it finds. Reach for it when work is finished and wants checking before it is handed on.',
       disposition: 'allowed',
       reason:
         'A work-mode change: it puts the seat into reviewing its own changes. Nothing about the thread, its rollout or its history is replaced, so the relay’s belief about the seat survives it.',
@@ -228,6 +256,8 @@ export const CODEX_COMMAND_POLICY: CommandPolicy = {
     },
     {
       command: '/new',
+      description:
+        'Starts a new chat, ending the current conversation.',
       disposition: 'refused',
       reason:
         'Discards continuity, and on Codex it also breaks the PARSER, which is why this refusal is stronger than its Claude counterpart rather than merely parallel to it. `CodexPtyHookAdapter.#onHook` latches the transcript path the first time a hook carries one and never revises it, so a new chat leaves the adapter tailing a rollout the session has stopped writing to: no `task_complete` ever appears again and every later turn resolves by deadline.',
@@ -235,6 +265,8 @@ export const CODEX_COMMAND_POLICY: CommandPolicy = {
     },
     {
       command: '/fork',
+      description:
+        'Forks the current chat into a second one.',
       disposition: 'refused',
       reason:
         'Discards continuity by the same route as `/new`: the fork is a different thread with a different rollout, and the latched transcript path still points at the one that was left behind.',
@@ -242,6 +274,8 @@ export const CODEX_COMMAND_POLICY: CommandPolicy = {
     },
     {
       command: '/archive',
+      description:
+        'Archives this session and exits.',
       disposition: 'refused',
       reason:
         'Ends the seat. Its own description says the session is archived AND exited, so it is `/exit` with a filing step attached.',
@@ -249,6 +283,8 @@ export const CODEX_COMMAND_POLICY: CommandPolicy = {
     },
     {
       command: '/quit',
+      description:
+        'Ends the CLI session.',
       disposition: 'refused',
       reason: 'Ends the seat.',
       // Evidence of a different KIND from the entries above, and weaker, so it is spelled out
@@ -259,12 +295,16 @@ export const CODEX_COMMAND_POLICY: CommandPolicy = {
     },
     {
       command: '/exit',
+      description:
+        'Ends the CLI session.',
       disposition: 'refused',
       reason: 'Ends the seat.',
       source: 'logoutquitexitrollout',
     },
     {
       command: '/model',
+      description:
+        'Chooses the model and the reasoning effort it runs at.',
       disposition: 'refused',
       reason:
         'Alters operator configuration, and falsifies the immutable launch-model report exactly as it does on Claude. On Codex it moves the reasoning effort with the model, so one command changes two things the run report states as launch facts.',
@@ -272,6 +312,8 @@ export const CODEX_COMMAND_POLICY: CommandPolicy = {
     },
     {
       command: '/permissions',
+      description:
+        'Chooses what the seat is allowed to do.',
       disposition: 'refused',
       reason:
         'Alters operator configuration, and on Codex it changes what the ADAPTER is asked to decide: this seat mediates approvals through `decidePermission`, so rewriting the approval policy rewrites the questions conclave answers on the operator’s behalf.',

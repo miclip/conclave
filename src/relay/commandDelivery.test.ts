@@ -218,9 +218,9 @@ const TEST_POLICY: CommandPolicy = {
   kind: 'declared',
   sourceVersion: 'test',
   commands: [
-    { command: '/compact', disposition: 'allowed', reason: 'summarises rather than discards', source: 'test' },
-    { command: '/focus', disposition: 'allowed', reason: 'changes how the seat spends its turns', source: 'test' },
-    { command: '/clear', disposition: 'refused', reason: 'discards the continuity the relay believes it has', source: 'test' },
+    { command: '/compact', disposition: 'allowed', description: 'what this invented command does.', reason: 'summarises rather than discards', source: 'test' },
+    { command: '/focus', disposition: 'allowed', description: 'what this invented command does.', reason: 'changes how the seat spends its turns', source: 'test' },
+    { command: '/clear', disposition: 'refused', description: 'what this invented command does.', reason: 'discards the continuity the relay believes it has', source: 'test' },
   ],
 }
 

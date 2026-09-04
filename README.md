@@ -265,14 +265,16 @@ of its own. What a Claude seat allows by default:
 | --- | --- |
 | `/compact` | nothing the run depends on: the conversation is summarised, not dropped |
 | `/goal [<condition> \| clear]` | turn duration. The seat keeps working on the turn it is already running, so the count stays right and `deadlines` still bounds it |
-| `/loop [interval] [prompt]` | **the turn count.** The seat drives its own subsequent turns; they are charged to neither `--max-turns` nor `--rounds`, and the relay does not collect their reports |
+| `/loop [interval] [prompt]` | **the record.** The seat drives its own subsequent turns. They count against `--max-turns` and `--rounds` like any other, but nothing collects their reports, so what they did is not in the run record |
 
 A Codex seat allows `/compact` and `/review`.
 
-`/loop` is on by default and is the one to think about before leaving it that way. It is
-allowed because a loop the operator permitted and the advisor then chose to delegate is work
-that was sanctioned twice, not work nobody asked for — but a run that uses it can exceed the
-turn ceiling it was given. `{"commands": {"/loop": false}}` takes it away.
+`/loop` is the one to think about before leaving it on. It is allowed because a loop the
+operator permitted and the advisor then chose to delegate is work sanctioned twice, not work
+nobody asked for. It used to cost the turn ceiling as well; it no longer does — those turns are
+counted like any other. What it still costs is the record: nothing collects a looped turn's
+report, so the run cannot say what those turns did. `{"commands": {"/loop": false}}` takes it
+away.
 
 **Both are deny-only. The only value is `false`.** Writing `true` is refused at startup, and
 so is a name nothing declares. Config may narrow what an adapter declares and may never widen

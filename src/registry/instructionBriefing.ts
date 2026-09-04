@@ -244,7 +244,7 @@ export function instructionCapabilityBriefing(
     sections.push(
       `${subject} CAN ALSO BE ASKED TO RUN THESE SLASH COMMANDS. A command changes how the ` +
         `seat WORKS; it is not an instruction and it does no work:\n\n` +
-        `${commands.map((c) => `  - ${c.command}${c.argumentHint ? ` ${c.argumentHint}` : ''} — ${c.reason}`).join('\n')}\n\n` +
+        `${commands.map((c) => `  - ${c.command}${c.argumentHint ? ` ${c.argumentHint}` : ''} — ${c.description}`).join('\n')}\n\n` +
         `Ask for one on a line of ITS OWN, with nothing else on that line:\n\n` +
         `COMMAND: ${example.command}\n\n` +
         `That line is lifted OUT of your reply and is never delivered to the seat as prose; ` +
