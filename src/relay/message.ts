@@ -134,5 +134,10 @@ export function envelope(
       : m.fromRank === 'advisor'
         ? `[FROM THE ADVISOR (${who}) — a peer AI model, not your user. It outranks you on process and continuity, and it cannot see your tool calls or your code, only what you write. You may disagree: say so plainly, then proceed unless a human overrules.]`
         : `[FROM THE IMPLEMENTER (${who}) — a peer AI model doing the work. You cannot see its tool calls or its code, only what it writes.]`
-  return `${header}\n\n${m.text}`
+  // TRIMMED, so an empty body cannot leave the message ending in the separator (#225). A child
+  // whose composer strips trailing whitespace then echoes back fewer bytes than were sent, and
+  // the #174 fidelity check reads that as the transport losing the tail. One run died exactly
+  // there. The trim is here as well as in the comparison because a message that ends in blank
+  // lines is not worth sending either way.
+  return `${header}\n\n${m.text}`.trimEnd()
 }

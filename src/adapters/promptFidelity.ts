@@ -137,6 +137,29 @@ function bytes(s: string): number {
 export function describePromptMismatch(sent: string, received: string): PromptMismatch | undefined {
   if (received === sent) return undefined
 
+  // THE CHILD'S COMPOSER TRIMS TRAILING WHITESPACE, and that is not corruption (#225).
+  //
+  // Measured against a real Claude Code seat, deterministically: `Say only OK.` is accepted and
+  // `Say only OK.\n\n` is refused as a two-byte PREFIX loss. The bytes are genuinely absent from
+  // what the child took, so the comparison above was not wrong about the facts -- it was wrong
+  // about what they meant, and it went on to tell the operator the transport was broken, that
+  // this was "not a hook failure and not a slow child", and that `--settle` would not help.
+  //
+  // It killed a run. `renderForRecipient` builds an envelope as `header\n\n${text}`, so an empty
+  // body -- which #224 had just produced -- leaves the message ending in the separator. 136 bytes
+  // of header, 138 sent, 136 taken, and the run ended `transport_failed` having done no work.
+  //
+  // The exception is TRAILING whitespace only, and both sides are trimmed so it covers a child
+  // that adds it as well as one that removes it. Leading and interior whitespace stay exact:
+  // `claudeSendLanded.test.ts` established that a CLI stores typed text verbatim, and #174's
+  // observed corruptions were losses at the FRONT, which this must never forgive.
+  //
+  // The blind spot, stated rather than discovered later: a transport that truncated exactly the
+  // trailing whitespace and nothing else is now indistinguishable from the composer doing it.
+  // What is lost in that case is whitespace, so the message the child works on is the message
+  // that was sent.
+  if (sent.trimEnd() === received.trimEnd()) return undefined
+
   const sentBytes = bytes(sent)
   const receivedBytes = bytes(received)
 
