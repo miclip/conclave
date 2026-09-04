@@ -2539,6 +2539,7 @@ export class Relay {
           p.events.push(e)
           this.#trackPermission(p, e)
           this.#trackSupersession(p, e)
+          this.#chargeUnsolicitedTurn(e)
           this.#stream.emit({ type: 'activity', participant: p.id, rank: p.rank, event: e })
         }
       })(),
@@ -2588,6 +2589,35 @@ export class Relay {
    * child's terminal and then using `/allow` writes a keystroke that no dialog consumes.
    * That is a stray key in a session, against a request that could not be answered at all.
    */
+  /**
+   * Charge a turn the seat started for itself against the run's ceilings (#208).
+   *
+   * `#turnsTaken` was incremented in exactly one place -- `#exchangeTurn`, where this relay
+   * DISPATCHES a turn -- so a turn the seat began on its own was work the ceilings could not
+   * see. `--max-turns` and `--rounds` counted instructions sent rather than turns taken, and the
+   * two stopped being the same number the moment `/loop` was allowed: it hands the seat its own
+   * next prompt, by design, with the operator's permission and the advisor's decision behind it.
+   *
+   * The evidence was already arriving. Every adapter event reaches this loop and is recorded;
+   * nothing read `turn_start`. So this is a consumer for evidence the run already had, not a new
+   * instrument.
+   *
+   * WHAT IS NOT CHARGED, because a ceiling that fires for the wrong reason is worse than one
+   * that fires late: a dispatched turn (already counted, and counted BEFORE it starts, so
+   * charging its `turn_start` too would double every ordinary turn), a harness block (#185 --
+   * the child's own harness talking to it, which no operator chose), and a command this process
+   * typed (#207 -- housekeeping that does no work). The adapter draws all three lines; this only
+   * reads the answer.
+   */
+  #chargeUnsolicitedTurn(e: AgentEvent): void {
+    if (e.type !== 'turn_start' || e.unsolicited !== true) return
+    // Replayed history is not a turn happening now. A rewritten transcript re-emits every
+    // turn_start the session ever produced, and charging those would end a run for work it
+    // already paid for.
+    if (e.replay) return
+    this.#turnsTaken += 1
+  }
+
   #trackPermission(p: RelayParticipant, e: AgentEvent): void {
     if (e.type === 'permission_requested') this.#awaitingPermission.set(p.id, { tool: e.tool })
     else if (e.type === 'turn_end') this.#awaitingPermission.delete(p.id)

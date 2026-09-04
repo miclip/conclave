@@ -89,6 +89,40 @@ class CommandSession implements AgentSession {
     return this.#open !== undefined
   }
 
+  /**
+   * A turn the seat began for ITSELF, which is what `/loop` produces (#208).
+   *
+   * No `send` behind it and no command typed at it: the adapter marks such a turn `unsolicited`
+   * and the relay charges it, because a ceiling that counts only what the orchestrator
+   * dispatched is counting instructions rather than work.
+   */
+  selfDispatch(prompt: string, opts: { replay?: boolean } = {}): void {
+    const key = turnKey(`${this.sessionId}-self-${this.#seq}`)
+    this.#emit({
+      type: 'turn_start',
+      prompt,
+      turnKey: key,
+      seq: ++this.#seq,
+      at: Date.now(),
+      provisional: false,
+      unsolicited: true,
+      ...(opts.replay ? { replay: true } : {}),
+    })
+    // A COMPLETE turn, start and end. A looped turn runs and finishes like any other; a start
+    // with no end is a dangling turn rather than a self-dispatched one, and modelling it that
+    // way tests the relay's handling of a malformed stream instead of the thing this is about.
+    // It also does not touch `#open`, because this turn is not the one `send` is holding.
+    this.#emit({
+      type: 'turn_end',
+      verdict: { outcome: 'completed', confidence: 'proven', provenance: [{ source: 'hook', detail: 'Stop' }] },
+      synthesized: false,
+      turnKey: key,
+      seq: ++this.#seq,
+      at: Date.now(),
+      provisional: false,
+    })
+  }
+
   async send(message: string): Promise<TurnKey> {
     this.received.push(message)
     const index = this.#turns.length
@@ -403,6 +437,47 @@ test('a command is not a turn: it does not count against the turn ceiling', asyn
     withCommand.relay.turnsTaken,
     without.relay.turnsTaken,
     'the two runs did the same work; only one of them also typed a command',
+  )
+})
+
+test('#208 a turn the seat started for itself IS a turn, and is charged', async () => {
+  // The mirror of the test above, and the reason that one is not the whole rule. `--max-turns`
+  // and `--rounds` are meant to measure work the seat did. Until #208 they measured turns this
+  // relay DISPATCHED, and the two stopped being the same number when `/loop` was allowed: it
+  // hands the seat its own next prompt, deliberately, with the operator's permission and the
+  // advisor's decision behind it. Uncharged, a looping seat is a run no ceiling can end.
+  const looped = await run(['Carry on.', 'DONE'], {
+    // ONCE, on the first turn only. `onSend` fires for every turn the seat is given, so an
+    // unguarded call loops as many times as the run has turns and the assertion below stops
+    // being about one extra turn.
+    onImplSend: (impl) => (_m, index) => {
+      if (index === 0) impl.selfDispatch('the next iteration, which nobody sent')
+    },
+  })
+  const plain = await run(['Carry on.', 'DONE'])
+
+  assert.equal(
+    looped.relay.turnsTaken,
+    plain.relay.turnsTaken + 1,
+    'the looped run did one more turn of work, and the ceiling must have seen it',
+  )
+})
+
+test('#208 a REPLAYED self-dispatched turn is history, and is not charged again', async () => {
+  // A rewritten transcript re-emits everything the session ever produced, in one burst, at a
+  // moment the FILE chose -- which is why `EventBase.replay` exists. Charging those would end a
+  // run for work it has already paid for, and the run would blame a ceiling the operator set.
+  const replayed = await run(['Carry on.', 'DONE'], {
+    onImplSend: (impl) => (_m, index) => {
+      if (index === 0) impl.selfDispatch('a turn from before the rewrite', { replay: true })
+    },
+  })
+  const plain = await run(['Carry on.', 'DONE'])
+
+  assert.equal(
+    replayed.relay.turnsTaken,
+    plain.relay.turnsTaken,
+    'replayed history is not new work, however unsolicited it was the first time',
   )
 })
 
