@@ -58,6 +58,7 @@ import {
   isHarnessBlock,
   isCorruptedPrompt,
   PROMPT_RECOVERY_MS,
+  RAW_ECHO_MEMORY,
   PROMPT_SEND_ATTEMPTS,
   promptRetryExhausted,
   promptRetryNotAttempted,
@@ -540,14 +541,6 @@ const DEADLINE_OUTCOMES = new Set(['timed_out', 'unknown_abnormal_end'])
  */
 const RECOVERY_POLL_MS = 50
 
-/**
- * How many raw submissions may be awaiting their echo at once (#207).
- *
- * Commands are typed one at a time between turns and their hooks come back immediately, so the
- * live depth is one. The margin is for a CLI that dispatches no hook for some command at all,
- * where the unmatched entry would otherwise sit in the list forever.
- */
-const RAW_ECHO_MEMORY = 8
 
 const SUBMIT_LANDED_MS = 6_000
 

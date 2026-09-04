@@ -60,6 +60,20 @@ const HARNESS_TAGS = ['<task-notification>', '<system-reminder>']
  * Deliberately not a fifth `MismatchShape`. This is not a verdict about a comparison; it is the
  * reason not to make the comparison at all.
  */
+/**
+ * How many raw submissions may be awaiting their echo at once (#207, #216).
+ *
+ * Commands are typed one at a time between turns and their hooks come back immediately, so the
+ * live depth is one. The margin is for a CLI that dispatches no hook for some command at all,
+ * where the unmatched entry would otherwise sit in the list forever.
+ *
+ * HERE rather than in either adapter, because BOTH need it and a copy in each is how this class
+ * of defect spreads: #185 fixed one pty adapter and left the other, #207 did it again, and #216
+ * is the bill for the second. A constant is a small thing to share; the point is that the next
+ * person adding a guard finds its neighbours already here.
+ */
+export const RAW_ECHO_MEMORY = 8
+
 export function isHarnessBlock(text: string): boolean {
   const head = text.trimStart()
   return HARNESS_TAGS.some((tag) => head.startsWith(tag))
