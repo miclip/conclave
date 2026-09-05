@@ -27,6 +27,32 @@
         ]
       }
     ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node {{CONCLAVE_ROOT}}/src/hooks/client.ts codex",
+            "async": false,
+            "timeout": 10,
+            "statusMessage": "conclave: recording PreToolUse"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node {{CONCLAVE_ROOT}}/src/hooks/client.ts codex",
+            "async": false,
+            "timeout": 10,
+            "statusMessage": "conclave: recording PostToolUse"
+          }
+        ]
+      }
+    ],
     "PermissionRequest": [
       {
         "hooks": [

@@ -26,6 +26,7 @@
  * turn-completion signal at all.
  */
 
+import { TurnTools } from './claude.ts'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -87,6 +88,8 @@ interface TurnState {
   /** Seq of the last `turn_end` emitted, so a revision can withdraw it by number. */
   endSeq: number | undefined
   assistantText: string | undefined
+  /** Tool calls started and not seen to finish, so the idle clock can tell blocked from stopped. */
+  tools: TurnTools
   /**
    * Whether the CHILD has said anything during this turn (#82).
    *
@@ -350,6 +353,25 @@ const DEADLINE_TRANSCRIPT_MS = 2_000
  */
 const DEADLINE_OUTCOMES = new Set(['timed_out', 'unknown_abnormal_end'])
 
+
+/**
+ * The id pairing a tool start with its stop (#226 follow-on).
+ *
+ * PROBED, not copied from Claude. Against codex-cli 0.147.0, with `PreToolUse`/`PostToolUse`
+ * registered and trusted, a shell tool call delivered:
+ *
+ *     PreToolUse   keys [session_id, turn_id, transcript_path, cwd, hook_event_name, model,
+ *                        permission_mode, tool_name, tool_input, tool_use_id]
+ *     PostToolUse  the same, plus tool_response
+ *     tool_use_id  "exec-80cc4a26-9bfe-40fe-ad78-05de18942158" -- IDENTICAL across the pair
+ *
+ * It happens to be the same field name Claude uses, which is why it was worth checking rather
+ * than assuming: reading one vendor's name onto another is the mistake this project has made.
+ */
+function toolIdOf(payload: Record<string, unknown>): string | undefined {
+  const v = payload['tool_use_id']
+  return typeof v === 'string' && v !== '' ? v : undefined
+}
 
 export class CodexPtyHookAdapter implements AgentSession {
   readonly agent = 'codex'
@@ -664,6 +686,7 @@ export class CodexPtyHookAdapter implements AgentSession {
           tracker,
           endSeq: undefined,
           assistantText: undefined,
+          tools: new TurnTools(),
           produced: false,
           childClosure: undefined,
         }
@@ -733,6 +756,22 @@ export class CodexPtyHookAdapter implements AgentSession {
         return
       }
 
+      case 'PreToolUse': {
+        // The LIVE turn, as `PermissionRequest` above uses: a tool event belongs to the turn
+        // still running, never to one being settled.
+        const turn = this.#turnFor(d) ?? this.#latestLiveTurn()
+        const id = toolIdOf(d.payload)
+        // No id is no pairing, and an unpairable start is worse than an uncounted one: it holds
+        // the silence clock open for the rest of the turn with nothing able to bring it down.
+        if (turn && id !== undefined) turn.tools.start(id)
+        return
+      }
+      case 'PostToolUse': {
+        const turn = this.#turnFor(d) ?? this.#latestLiveTurn()
+        const id = toolIdOf(d.payload)
+        if (turn && id !== undefined) turn.tools.finish(id)
+        return
+      }
       case 'Stop': {
         const turn = this.#turnFor(d) ?? this.#latestSettleableTurn()
         if (!turn) return
