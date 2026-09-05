@@ -1739,6 +1739,21 @@ const DECLARED: Record<string, string> = {
     'document records no conclusion for the attempt pre-registered 2026-08-07. If that study is ' +
     'still open, this block should be gated off until it closes; the gate is one condition at ' +
     'the call site and nothing else moves.',
+  'status.progress, what the RUN is doing':
+    'A status document now says what the RUN is doing -- `in_turn`, `paused` or `idle` -- and ' +
+    'since when (#231). Additive, and reported rather than acted on: nothing here ends a run. ' +
+    'It exists because both existing clocks measure a TURN. The silence clock is a TurnWatchdog ' +
+    'armed against a specific turn and disarmed when it ends, so nothing is armed between turns; ' +
+    'the ceilings are evaluated at turn boundaries, for the good reason that a run cannot be ' +
+    'interrupted mid-turn without discarding the turn\'s work, so a run that reaches no further ' +
+    'boundary never evaluates --max-minutes. Each does what it says and neither says the RUN is ' +
+    'alive. Two operators running detached sessions independently derived the same missing ' +
+    'instrument, a watch on the log file mtime, against a path and format that are not ' +
+    'contracts. `since` is sticky: it moves when the STATE changes, never when the document is ' +
+    'rewritten, which is what `updatedAt` already does and why `updatedAt` could not answer ' +
+    'this. An ENDED run reads `idle` -- it drained and stopped -- so a bound on `idle` has to ' +
+    'gate on `state` as well, which is pinned rather than left to be discovered. Nothing an ' +
+    'existing consumer read changed value.',
   'status.blocked, the one place a blocked run is named':
     'A run waiting on somebody now says so at the top of `status --json` (#234). Additive: ' +
     '`blocked` appears only while something is outstanding, and every field it reports was ' +
@@ -1756,7 +1771,7 @@ const DECLARED: Record<string, string> = {
     'second clock.',
 }
 
-test('DECLARED contains exactly the routing, pause-resolution, attribution, ceiling-flag, seat-flag, seat-status, launch-record, flag-reader, integration-check, per-seat-rotation, reviewer, resume-guard, mixed-liveness, timestamped-liveness, model-validation, executable-preflight, compaction-survival, rotation-reporting, send-precondition, process-tree-liveness, ceiling-reporting, record-heartbeat, rotation-intent, console-dry-run, flag-reconciliation, paused-time, advisor-targeting, silence-timeout, launch-bounds, origin-reconciliation, capability-briefing and blocked-rollup entries', () => {
+test('DECLARED contains exactly the routing, pause-resolution, attribution, ceiling-flag, seat-flag, seat-status, launch-record, flag-reader, integration-check, per-seat-rotation, reviewer, resume-guard, mixed-liveness, timestamped-liveness, model-validation, executable-preflight, compaction-survival, rotation-reporting, send-precondition, process-tree-liveness, ceiling-reporting, record-heartbeat, rotation-intent, console-dry-run, flag-reconciliation, paused-time, advisor-targeting, silence-timeout, launch-bounds, origin-reconciliation, capability-briefing, run-progress and blocked-rollup entries', () => {
   assert.deepEqual(Object.keys(DECLARED), [
     'deny-only project configuration for capabilities and commands',
     'implementer_unanswered -> advisor',
@@ -1791,6 +1806,7 @@ test('DECLARED contains exactly the routing, pause-resolution, attribution, ceil
     'the launch surfaces name the absolute cap, and the dry-run plan carries what bounds the run (#162)',
     'a restricted origin records the seats it has since been given to in full (#171)',
     'the advisor is told what its writing seats can be instructed to do (#192)',
+    'status.progress, what the RUN is doing',
     'status.blocked, the one place a blocked run is named',
   ])
 })
@@ -2828,7 +2844,7 @@ test('an ended conclave status --json emits exactly these keys at every depth', 
   assert.deepEqual(
     shapeOf(status),
     {
-      '': 'abandoned, alive, build, ceilings, cwd, deadlines, eventsPath, forces, front, goal, id, logPath, messages, operator, outcome, participants, pid, rotations, schema, startedAt, state, updatedAt',
+      '': 'abandoned, alive, build, ceilings, cwd, deadlines, eventsPath, forces, front, goal, id, logPath, messages, operator, outcome, participants, pid, progress, rotations, schema, startedAt, state, updatedAt',
       outcome: 'detail, reason',
       // Every ceiling, on a run that configured none of them -- which is exactly when the
       // block has something to say. See DECLARED['every ceiling is reported at launch and in
@@ -2837,6 +2853,10 @@ test('an ended conclave status --json emits exactly these keys at every depth', 
       // would reproduce #103's failure in a second place, a reader taking a missing key for a
       // configured value of none.
       ceilings: 'advisorTurns, maxConcurrentSeats, maxDurationMs, maxQueueDepth, maxTurns',
+      // An ENDED run still reports what it was doing when it stopped -- `idle`, having drained.
+      // The block is not cleared at the close: a reader asking why a run ended is exactly the
+      // reader who wants to know it had been idle since some moment (#231).
+      progress: 'since, state',
       // The declared addition; see DECLARED['--silence-timeout on both front-ends']. The block
       // arrives here for the first time: `status --json` could report what BOUNDS THE RUN and
       // never what bounds a TURN, so an agent operator polling this had no way to learn that a
@@ -2887,7 +2907,7 @@ test('an ended conclave status --json emits exactly these keys at every depth', 
  * that the array is there and that its entries are not objects.
  */
 const PAUSED_COMMON = {
-  '': 'abandoned, alive, blocked, build, ceilings, cwd, deadlines, eventsPath, forces, front, goal, id, logPath, messages, operator, participants, pause, pid, rotations, schema, startedAt, state, updatedAt',
+  '': 'abandoned, alive, blocked, build, ceilings, cwd, deadlines, eventsPath, forces, front, goal, id, logPath, messages, operator, participants, pause, pid, progress, rotations, schema, startedAt, state, updatedAt',
   // Present on a paused document too, and for the sharper version of the reason: the operator
   // answering a pause is deciding how much run is left, and until #119 the only surface that
   // could tell them was the flags they typed an hour ago. Same five keys at every pause reason,
@@ -2897,6 +2917,10 @@ const PAUSED_COMMON = {
   // different keys (`participant`, `tool`) and is pinned in `blockedStatus.test.ts`, where it
   // can be reached without provoking a halt.
   blocked: 'authority, kind, reason, since',
+  // `state` is `paused` on every document in this corpus, which is the arm that keeps a driver
+  // bounding `idle` from firing on a run that is correctly waiting for a person. The `idle` and
+  // `in_turn` arms are pinned in `runProgress.test.ts`.
+  progress: 'since, state',
   ceilings: 'advisorTurns, maxConcurrentSeats, maxDurationMs, maxQueueDepth, maxTurns',
   // The declared addition; see DECLARED['--silence-timeout on both front-ends']. The block
   // arrives here for the first time: `status --json` could report what BOUNDS THE RUN and
@@ -3030,7 +3054,7 @@ const PAUSED_SUBTREE: Record<PauseReason, Record<string, string>> = {
     // the advisor used the assignment syntax, in the run report and in status --json (#79)']:
     // the key is absent from every one-seat document in this file, and its presence here is
     // what makes that absence a decision rather than a build that reports nothing.
-    '': 'abandoned, alive, blocked, build, ceilings, cwd, deadlines, eventsPath, forces, front, goal, id, logPath, messages, operator, participants, pause, pid, rotations, schema, startedAt, state, targeting, updatedAt',
+    '': 'abandoned, alive, blocked, build, ceilings, cwd, deadlines, eventsPath, forces, front, goal, id, logPath, messages, operator, participants, pause, pid, progress, rotations, schema, startedAt, state, targeting, updatedAt',
     targeting:
       'addressedTurns, applicable, ceilingTurns, conclusion, incompleteTurns, invalidTurns, records, ' +
       'seats, unaddressedFailedTurns, unaddressedTurns, unadmittedTurns, withdrawnTurns',

@@ -475,6 +475,53 @@ export function blockedFrom(
   return undefined
 }
 
+/**
+ * What the RUN is doing, as distinct from what any seat is doing (#231).
+ *
+ * Both of conclave's existing clocks measure a TURN. The silence clock is a `TurnWatchdog` armed
+ * against a specific turn in the send path and disarmed when that turn ends, so with no turn in
+ * flight there is no armed timer at all. The ceilings are evaluated at turn boundaries -- for a
+ * good reason, that a run cannot be interrupted mid-turn without discarding the turn's work --
+ * so a run that never reaches another boundary never evaluates `--max-minutes`. Each clock does
+ * exactly what it says, and what neither says is "the RUN is alive".
+ *
+ * Two operators running detached sessions independently derived the same missing instrument: a
+ * watch on the log file's mtime, to catch a run that is alive and getting nowhere. That works,
+ * and it reads a path and a format that are not contracts. This is the same reading taken from
+ * something conclave actually knows.
+ *
+ * REPORTED, NEVER ACTED ON. Nothing here ends a run. A paused run deliberately has no clock --
+ * it is waiting for a human, and a timeout that killed it would be worse than the wait -- and
+ * the wedge this makes visible has been reasoned about but not yet observed, which is a poor
+ * basis for conclave deciding to stop anything. The driver has the context to judge it; this
+ * gives them the number to judge it with.
+ */
+export interface SessionProgressStatus {
+  /**
+   * `in_turn`  at least one seat has an unfinished turn -- the per-turn clocks apply and this
+   *            is not the unmeasured case
+   * `paused`   waiting for a person, deliberately unclocked; `pause` says what for
+   * `idle`     neither: no turn in flight and no pause open. THIS is the state nothing else
+   *            measures, and the one a driver should bound.
+   *
+   * GATE ON `state` BEFORE BOUNDING `idle`. A run that has ENDED is also idle -- it drained and
+   * stopped -- so `progress.state === 'idle' && now - since > budget` is true of every finished
+   * run in the directory, forever. The check a driver wants is that AND `state === 'running'`,
+   * the same gate `alive` already needs. Said here because the field is most useful to a poller,
+   * and a poller is exactly who would meet this on their second run rather than their first.
+   */
+  state: 'in_turn' | 'paused' | 'idle'
+  /**
+   * When the run entered this state, so `now - since` is how long it has been in it.
+   *
+   * Sticky across writes: it moves when the STATE changes and not when the document is
+   * rewritten. `updatedAt` is a heartbeat that moves every few seconds whether anything
+   * happened or not, which is exactly why it cannot answer this question -- and why the two
+   * operators went to the log file instead.
+   */
+  since: number
+}
+
 export interface SessionStatus {
   schema: number
   id: string
@@ -520,6 +567,14 @@ export interface SessionStatus {
    * second writer is how it would come to disagree with the fields it summarises.
    */
   blocked?: SessionBlockedStatus | undefined
+  /**
+   * What the run is doing, and since when. See `SessionProgressStatus`.
+   *
+   * Unlike `blocked`, this is NOT derived from the document: `since` is the moment a state was
+   * entered, which the document does not carry -- it has to be observed as it happens. The
+   * recorder tracks it from the event stream and writes it like `rotations` and `forces`.
+   */
+  progress?: SessionProgressStatus | undefined
   outcome?: RunOutcome | undefined
   /** Where the streams are, so a reader never has to reconstruct a path. */
   eventsPath: string
@@ -1327,6 +1382,39 @@ export function recordSession(
    */
   const permissionSince = new Map<string, number>()
   /**
+   * Seats with an unfinished turn, counted from the stream rather than asked of the relay.
+   *
+   * A `turn_start` puts a seat in, its `turn_end` takes it out. Kept here rather than added to
+   * `RecordableRelay` because a relay that answered "how many turns are in flight, for the
+   * recorder" would be a relay that knows about being recorded -- the argument the rest of that
+   * contract is built on.
+   */
+  const inFlight = new Set<string>()
+  let progressState: SessionProgressStatus['state'] = 'idle'
+  let progressSince = opts.startedAt
+
+  /**
+   * The run's state and when it was entered, for the write about to happen.
+   *
+   * `since` moves only when the STATE changes, which is the whole value of the field: a
+   * timestamp that moved on every write would be `updatedAt`, and `updatedAt` is a heartbeat.
+   *
+   * `at` is the event's own timestamp, so a transition carries the moment the stream stamped it
+   * rather than the moment this got around to writing. NOT pinned by a test, and deliberately
+   * not: `RelayEventStream.emit` stamps `at` itself and a caller cannot supply one, so the two
+   * readings differ only by the recorder's own lag and no test here could tell them apart. It
+   * is the better of two equally cheap choices, recorded as a preference rather than dressed up
+   * as a guarantee.
+   */
+  const progressOf = (at: number, paused: boolean): { progress: SessionProgressStatus } => {
+    const next: SessionProgressStatus['state'] = paused ? 'paused' : inFlight.size > 0 ? 'in_turn' : 'idle'
+    if (next !== progressState) {
+      progressState = next
+      progressSince = at
+    }
+    return { progress: { state: progressState, since: progressSince } }
+  }
+  /**
    * The last snapshot's turns per seat.
    *
    * Cached rather than read at write time because `seats()` is synchronous and `snapshot()`
@@ -1575,6 +1663,9 @@ export function recordSession(
       ...rotations(),
       ...forces(),
       ...targeting(),
+      // The state being SET, not the one on the record: this is the transition itself, and
+      // reading the old value here would date every pause one write late.
+      ...progressOf(Date.now(), state === 'paused'),
     })
     // Detached: `set` is called from the run loop and a lifecycle change must not wait on a
     // transcript read. The state above is written immediately; the turns catch up.
@@ -1646,6 +1737,11 @@ export function recordSession(
         })
         // The moment the prompt was raised, kept where a later event cannot move it.
         if (e.event.type === 'permission_requested') permissionSince.set(e.participant, e.at)
+        // A seat is IN a turn from its `turn_start` until its `turn_end`. A Set rather than a
+        // counter: turns do not nest on a seat, and a Set makes a duplicated start idempotent
+        // where a counter would leave the run reading `in_turn` forever after one.
+        if (e.event.type === 'turn_start') inFlight.add(e.participant)
+        if (e.event.type === 'turn_end') inFlight.delete(e.participant)
         // The two events that change a VERDICT, as opposed to what a seat is doing. A turn
         // ending produces the grade; a revision withdraws or replaces one. Snapshotting on
         // every event would re-read the transcript for every tool call the child makes, and
@@ -1656,7 +1752,14 @@ export function recordSession(
       // Every event refreshes the participant block, so a permission prompt appears in the
       // status file at the moment it appears in the stream rather than at the next
       // lifecycle change -- which for a seat stopped at a prompt would be never.
-      recorder.update({ messages: relay.log.length, participants: seats(), ...rotations(), ...forces(), ...targeting() })
+      recorder.update({
+        messages: relay.log.length,
+        participants: seats(),
+        ...rotations(),
+        ...forces(),
+        ...targeting(),
+        ...progressOf(e.at, recorder.status.state === 'paused'),
+      })
     }
   })()
 

@@ -1498,6 +1498,10 @@ test('status --json says a live record has stopped moving, and leaves a fresh on
     'schema',
     'eventsPath',
     'updatedAt',
+    // Appended after `updatedAt` rather than inserted, which is where a key added by `update()`
+    // lands: the constructor's keys come first and a merge puts new ones at the end. `alive` and
+    // `abandoned` follow because the READER adds them, not the recorder (#231).
+    'progress',
     'alive',
     'abandoned',
   ]
