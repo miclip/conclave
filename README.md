@@ -321,11 +321,23 @@ message, never as a command.
 Commands arrive on stdin as lines: `/continue`, `/rotate`, `/abort`, `/allow`, `/deny`, or a
 message addressed with `>advisor` / `>implementer`. Nothing needs scraping off the console.
 
+Stdin has to stay open. A redirect from a file, or a pipe from one `echo`, delivers everything
+and then closes — which ends the session at its first pause. Give it a fifo and hold the write
+end open:
+
+```sh
+mkfifo ctl
+sleep 86400 > ctl &                                   # holds it open; the & matters
+conclave session "<goal>" --checks "npm test" --operator agent < ctl > run.log 2>&1 &
+
+echo '/continue' > ctl                                # from any later shell
+```
+
 One line is one message, so a multi-paragraph answer needs framing. `<<TAG` opens a block
 and a line equal to `TAG` closes it:
 
 ```sh
-printf '>implementer <<EOF\n%s\nEOF\n' "$(cat answer.txt)" > "$fifo"
+printf '>implementer <<EOF\n%s\nEOF\n' "$(cat answer.txt)" > ctl
 ```
 
 `conclave relay --json` prints the run as a structured record: the outcome, each turn's

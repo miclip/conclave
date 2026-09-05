@@ -106,7 +106,11 @@ Driving conclave from an agent
   that fails do you need "config install --trust", which records them with no TUI at all.
 
   Keep stdin OPEN and write commands as lines. Closing it ends the session once its
-  current run finishes.
+  current run finishes, so a redirect from a file or a pipe from one echo ends the run at
+  its first pause. Use a fifo and hold the write end open:
+      mkfifo ctl; sleep 86400 > ctl &
+      conclave session "<goal>" --operator agent < ctl &
+      echo '/continue' > ctl
     /continue /rotate /abort        answer a pause. /rotate REQUIRES a reason and records it
                                     — unless the pause is a rotation candidate, where taking
                                     it is agreement, so the record keeps the proxy's own

@@ -2622,10 +2622,30 @@ export async function runSession(opts: SessionOptions): Promise<number> {
         closed = resolve
       })
     } else {
-      await Promise.race([
-        firstRunEnded,
-        new Promise<void>((resolve) => rl!.once('close', () => resolve())),
+      // WHICH ONE WON MATTERS (#191). A script closing stdin after the work is done is the
+      // ordinary ending above. Stdin reaching EOF while a run is STILL GOING is a different
+      // thing wearing the same clothes: no further command can arrive, so a pause that has not
+      // happened yet can never be answered, and the run ends looking like an operator who went
+      // quiet. That is indistinguishable from one who is merely slow, which is the failure the
+      // whole fifo arrangement exists to avoid.
+      //
+      // Found by driving `--operator agent` from a non-terminal for the first time: a redirect
+      // from a file, or a pipe from one `echo`, delivers everything and then EOF.
+      const ended = Symbol('run ended')
+      const won = await Promise.race([
+        firstRunEnded.then(() => ended),
+        new Promise<symbol>((resolve) => rl!.once('close', () => resolve(Symbol('stdin closed')))),
       ])
+      if (won !== ended) {
+        write(
+          yellow(
+            '  stdin reached EOF while the run was still going, so no further command can arrive. ' +
+              'A redirect from a file, or a pipe from one echo, delivers everything and then closes. ' +
+              'Keep the write end open instead: `mkfifo ctl; sleep 86400 > ctl &` and start the ' +
+              'session with `< ctl`.',
+          ),
+        )
+      }
     }
   } catch (err) {
     // A run that cannot write stops DELIBERATELY, saying so, instead of leaving through an
