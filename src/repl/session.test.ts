@@ -5514,3 +5514,36 @@ test('#229 the pause menu separates what resolves it from what merely queues', a
   input.write('/abort\n')
   await running
 })
+
+test('#191 stdin closing mid-run says so, rather than looking like an operator who went quiet', async (t) => {
+  // Found by driving `--operator agent` from a non-terminal for the first time. A redirect from
+  // a file, or a pipe from one echo, delivers everything and then EOF -- and the session ended
+  // at its first pause with nothing said. That is indistinguishable from an operator who is
+  // merely slow, which is the failure the fifo arrangement exists to avoid.
+  const dir = repo(t)
+  const impl = slow('impl', 'claude', ['ack', 'Did it, slowly.'])
+  impl.endTurn = { index: 1, verdict: TIMED_OUT }
+  const out = collect()
+  const input = new PassThrough()
+  const running = runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'claude',
+    rounds: 4,
+    checks: [],
+    registry: registryOf({ codex: [slow('advisor', 'codex', ['Do it.', 'DONE'])], claude: [impl] }),
+    input,
+    output: out.stream,
+  })
+
+  // Wait until the run is genuinely underway, then do what a naive driver does.
+  await untilText('the pause to be printed', out.text, /paused/)
+  input.end()
+  await running
+
+  const text = out.text()
+  assert.match(text, /stdin reached EOF while the run was still going/)
+  // The remedy, where it is read: the recipe rather than a diagnosis alone.
+  assert.match(text, /mkfifo ctl/)
+})
