@@ -314,6 +314,23 @@ for `gh pr view` and one for `rm -rf` arrive identically, and the driver is the 
 them apart. Answer permission prompts from a list you wrote; stop on an escalation, which is by
 construction the case where judgement was asked for.
 
+Neither of conclave's clocks measures the run. The silence clock is armed against a turn and
+disarmed when it ends; the ceilings are evaluated at turn boundaries, because a run cannot be
+interrupted mid-turn without discarding the turn's work. So a run that starts no turn is measured
+by nothing, and `progress` is what to bound instead of the log file's mtime:
+
+```jsonc
+"progress": { "state": "idle", "since": 0 }   // in_turn | paused | idle
+```
+
+`since` moves when the state changes, not when the record is rewritten — `updatedAt` is a
+heartbeat and cannot answer this. Gate on `state` as well: a run that has ENDED is idle too, and
+stays that way in the directory forever, so bound `state == "running" && progress.state == "idle"`.
+A `paused` run is waiting for a person on purpose and is not the same condition.
+
+Conclave reports this and acts on none of it. It ends no run for being idle, the same way it sends
+no notification for being blocked.
+
 `--operator agent` changes what the advisor is told about who is answering — escalate
 readily about premises and ambiguous criteria, never about permission — and is recorded in
 the run report.
