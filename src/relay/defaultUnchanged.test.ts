@@ -1738,10 +1738,25 @@ const DECLARED: Record<string, string> = {
     'mid-experiment because it confounds the second attempt against the first, and that ' +
     'document records no conclusion for the attempt pre-registered 2026-08-07. If that study is ' +
     'still open, this block should be gated off until it closes; the gate is one condition at ' +
-    'the call site and nothing else moves.'
+    'the call site and nothing else moves.',
+  'status.blocked, the one place a blocked run is named':
+    'A run waiting on somebody now says so at the top of `status --json` (#234). Additive: ' +
+    '`blocked` appears only while something is outstanding, and every field it reports was ' +
+    'already in the document -- it is DERIVED from `pause` and `participants[].awaitingPermission` ' +
+    'on every write (src/workspace/sessionRecord.ts), never stored, so it cannot come to disagree ' +
+    'with either. Nothing an existing consumer read changed value. It exists because the two ' +
+    'blocking conditions were reported in two different places and nothing said a reader had to ' +
+    'watch both: an escalation is `state: paused` with a pause, while a permission prompt leaves ' +
+    '`state` at `running` and appears only as one participant\'s `awaitingPermission`. Two agent ' +
+    'operators wrote a watcher against one and lost time to the other, in that order. It is ' +
+    'deliberately DESCRIPTIVE: it says what is being waited on and never whether a machine may ' +
+    'answer it, because conclave does not know that -- the same argument the README makes about ' +
+    'why conclave does not turn pauses into notifications. `awaitingPermission` gains `since` ' +
+    'alongside `tool`, so the roll-up can be derived from the document rather than measured by a ' +
+    'second clock.',
 }
 
-test('DECLARED contains exactly the routing, pause-resolution, attribution, ceiling-flag, seat-flag, seat-status, launch-record, flag-reader, integration-check, per-seat-rotation, reviewer, resume-guard, mixed-liveness, timestamped-liveness, model-validation, executable-preflight, compaction-survival, rotation-reporting, send-precondition, process-tree-liveness, ceiling-reporting, record-heartbeat, rotation-intent, console-dry-run, flag-reconciliation, paused-time, advisor-targeting, silence-timeout, launch-bounds, origin-reconciliation and capability-briefing entries', () => {
+test('DECLARED contains exactly the routing, pause-resolution, attribution, ceiling-flag, seat-flag, seat-status, launch-record, flag-reader, integration-check, per-seat-rotation, reviewer, resume-guard, mixed-liveness, timestamped-liveness, model-validation, executable-preflight, compaction-survival, rotation-reporting, send-precondition, process-tree-liveness, ceiling-reporting, record-heartbeat, rotation-intent, console-dry-run, flag-reconciliation, paused-time, advisor-targeting, silence-timeout, launch-bounds, origin-reconciliation, capability-briefing and blocked-rollup entries', () => {
   assert.deepEqual(Object.keys(DECLARED), [
     'deny-only project configuration for capabilities and commands',
     'implementer_unanswered -> advisor',
@@ -1776,6 +1791,7 @@ test('DECLARED contains exactly the routing, pause-resolution, attribution, ceil
     'the launch surfaces name the absolute cap, and the dry-run plan carries what bounds the run (#162)',
     'a restricted origin records the seats it has since been given to in full (#171)',
     'the advisor is told what its writing seats can be instructed to do (#192)',
+    'status.blocked, the one place a blocked run is named',
   ])
 })
 
@@ -2871,11 +2887,16 @@ test('an ended conclave status --json emits exactly these keys at every depth', 
  * that the array is there and that its entries are not objects.
  */
 const PAUSED_COMMON = {
-  '': 'abandoned, alive, build, ceilings, cwd, deadlines, eventsPath, forces, front, goal, id, logPath, messages, operator, participants, pause, pid, rotations, schema, startedAt, state, updatedAt',
+  '': 'abandoned, alive, blocked, build, ceilings, cwd, deadlines, eventsPath, forces, front, goal, id, logPath, messages, operator, participants, pause, pid, rotations, schema, startedAt, state, updatedAt',
   // Present on a paused document too, and for the sharper version of the reason: the operator
   // answering a pause is deciding how much run is left, and until #119 the only surface that
   // could tell them was the flags they typed an hour ago. Same five keys at every pause reason,
   // because a ceiling does not depend on why the run stopped.
+  // Every document in this corpus is PAUSED, so every one carries the `pause` arm of the block
+  // -- the arm that outranks a permission prompt when both are true. The `permission` arm has
+  // different keys (`participant`, `tool`) and is pinned in `blockedStatus.test.ts`, where it
+  // can be reached without provoking a halt.
+  blocked: 'authority, kind, reason, since',
   ceilings: 'advisorTurns, maxConcurrentSeats, maxDurationMs, maxQueueDepth, maxTurns',
   // The declared addition; see DECLARED['--silence-timeout on both front-ends']. The block
   // arrives here for the first time: `status --json` could report what BOUNDS THE RUN and
@@ -3009,7 +3030,7 @@ const PAUSED_SUBTREE: Record<PauseReason, Record<string, string>> = {
     // the advisor used the assignment syntax, in the run report and in status --json (#79)']:
     // the key is absent from every one-seat document in this file, and its presence here is
     // what makes that absence a decision rather than a build that reports nothing.
-    '': 'abandoned, alive, build, ceilings, cwd, deadlines, eventsPath, forces, front, goal, id, logPath, messages, operator, participants, pause, pid, rotations, schema, startedAt, state, targeting, updatedAt',
+    '': 'abandoned, alive, blocked, build, ceilings, cwd, deadlines, eventsPath, forces, front, goal, id, logPath, messages, operator, participants, pause, pid, rotations, schema, startedAt, state, targeting, updatedAt',
     targeting:
       'addressedTurns, applicable, ceilingTurns, conclusion, incompleteTurns, invalidTurns, records, ' +
       'seats, unaddressedFailedTurns, unaddressedTurns, unadmittedTurns, withdrawnTurns',
