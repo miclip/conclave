@@ -1799,6 +1799,14 @@ export class Relay {
   #windowOpened = false
   /** Turns taken across all participants, which is what a ceiling counts. */
   #turnsTaken = 0
+  /**
+   * Whether the note below has already been written, so a looping seat writes it once.
+   *
+   * A seat that has passed a ceiling keeps producing turns until the boundary arrives, and each
+   * one re-enters the check. Recording every one would bury the moment it happened under a
+   * hundred copies of itself.
+   */
+  #unsolicitedBreachNoted = false
   #participants = new Map<string, RelayParticipant>()
   #seq = 0
   #opts: RelayOptions
@@ -2633,6 +2641,42 @@ export class Relay {
     // already paid for.
     if (e.replay) return
     this.#turnsTaken += 1
+    this.#noteUnsolicitedBreach()
+  }
+
+  /**
+   * Say when a ceiling was passed, as opposed to when it was acted on (#208).
+   *
+   * Ceilings are ACTED ON at turn boundaries, and that is not going to change here: a run
+   * cannot be interrupted mid-turn without discarding the turn's work, which is the same reason
+   * `#exchange` has no timeout of its own. So a ceiling passed by a turn the seat started for
+   * itself is enforced at the next boundary rather than at the moment it was passed.
+   *
+   * What was wrong is that the gap was INVISIBLE. The run ended saying `turn ceiling reached: 21
+   * of a maximum 20` with a timestamp from the boundary, and nothing anywhere said the twenty-
+   * first turn had been taken twenty minutes earlier. An operator reading that cannot tell a
+   * ceiling that fired promptly from one that fired late, and the whole open half of #208 is
+   * about how late it can be.
+   *
+   * So this notes the passing and leaves the enforcement where it is. It is also the measurement
+   * that half needs: how long a breach actually waits, on real runs, rather than the bound
+   * reasoned from `DEFAULT_WATCHDOG_MS`. Deciding what to do about the latency without that
+   * number is how the first estimate of it came to be wrong.
+   */
+  #noteUnsolicitedBreach(): void {
+    if (this.#unsolicitedBreachNoted) return
+    const breach = this.#breachedNow()
+    if (!breach) return
+    this.#unsolicitedBreachNoted = true
+    this.#record({
+      from: 'orchestrator',
+      fromRank: 'human',
+      to: [],
+      kind: 'note',
+      text:
+        `${breach.detail} — passed by a turn a seat started for itself, so it is enforced at ` +
+        `the next turn boundary rather than here; ceilings are checked where a turn ends`,
+    })
   }
 
   #trackPermission(p: RelayParticipant, e: AgentEvent): void {
