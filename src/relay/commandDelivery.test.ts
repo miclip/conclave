@@ -269,6 +269,8 @@ async function run(
     composer?: boolean
     implReplies?: string[]
     onImplSend?: (impl: CommandSession) => (message: string, index: number) => void
+    /** What bounds the run, for the tests about when a ceiling is passed as against acted on. */
+    ceilings?: { maxTurns?: number | undefined } | undefined
   } = {},
 ) {
   const lead = new CommandSession('fake-lead', 'lead-1', leadReplies)
@@ -289,6 +291,7 @@ async function run(
     lead: { id: 'advisor', agent: 'fake-lead', role: 'advisor' },
     implementer: { id: 'implementer', agent: 'fake-impl', role: 'implementer' },
     maxAdvisorTurns: 4,
+    ...(opts.ceilings ? { ceilings: opts.ceilings } : {}),
     ...(opts.denied ? { denied: opts.denied } : {}),
     onLog: (m) => log.push(m),
   })
@@ -478,6 +481,55 @@ test('#208 a REPLAYED self-dispatched turn is history, and is not charged again'
     replayed.relay.turnsTaken,
     plain.relay.turnsTaken,
     'replayed history is not new work, however unsolicited it was the first time',
+  )
+})
+
+test('#208 a ceiling passed by a self-dispatched turn says so WHEN it is passed', async () => {
+  // Part one made the count true. This is about the gap between a ceiling being PASSED and
+  // being ACTED ON, which stays: ceilings are enforced at turn boundaries, because a run cannot
+  // be interrupted mid-turn without discarding the turn's work.
+  //
+  // What was wrong is that the gap was invisible. The run ended quoting a ceiling with a
+  // timestamp from the boundary, and nothing said the turn that passed it had been taken
+  // earlier -- so an operator could not tell a ceiling that fired promptly from one that fired
+  // late, which is the whole open question about how late it can get.
+  const { log } = await run(['Carry on.', 'DONE'], {
+    ceilings: { maxTurns: 1 },
+    onImplSend: (impl) => (_m, index) => {
+      // THREE, not one. A looping seat does not stop when it passes a ceiling -- it keeps going
+      // until the boundary -- and every one of those turns re-enters the check. One
+      // self-dispatch would leave "said once" true whether or not anything deduplicated it.
+      if (index === 0) {
+        impl.selfDispatch('the next iteration, which nobody sent')
+        impl.selfDispatch('and another')
+        impl.selfDispatch('and another still')
+      }
+    },
+  })
+
+  const notes = orchestratorNotes(log)
+  const passed = notes.filter((t) => t.includes('passed by a turn a seat started for itself'))
+  assert.equal(passed.length, 1, 'said ONCE, though three turns passed the ceiling after it broke')
+  // The reading, not just the fact: an operator needs the number the ceiling was checked
+  // against, and it comes from the same `breached()` detail the enforcement quotes.
+  assert.match(passed[0]!, /turn ceiling reached: \d+ of a maximum 1/)
+  // And it says where enforcement happens, because "passed but still running" is otherwise
+  // indistinguishable from a ceiling that is not working.
+  assert.match(passed[0]!, /enforced at the next turn boundary/)
+})
+
+test('#208 a run that passes no ceiling says nothing about one', async () => {
+  // The identity case. A note that appeared on ordinary runs would be noise on every run that
+  // ever loops within its budget, which is most of them.
+  const { log } = await run(['Carry on.', 'DONE'], {
+    ceilings: { maxTurns: 50 },
+    onImplSend: (impl) => (_m, index) => {
+      if (index === 0) impl.selfDispatch('one extra turn, well within the budget')
+    },
+  })
+  assert.deepEqual(
+    orchestratorNotes(log).filter((t) => t.includes('passed by a turn a seat started for itself')),
+    [],
   )
 })
 
