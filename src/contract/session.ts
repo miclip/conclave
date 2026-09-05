@@ -475,6 +475,32 @@ export interface SendProvenance {
   attributedTo?: string | undefined
 }
 
+/**
+ * A larger absolute deadline, requested for ONE turn (#193).
+ *
+ * `deadlines.ts` states the ordinary rule: "Nothing here is per-turn. It is the policy each seat
+ * is under for the whole run." That is right for a run of comparable turns and wrong the moment
+ * an advisor delegates a deliberately larger chunk -- such a turn is killed for doing exactly
+ * what it was asked to do, and graded `timed_out`, which is a claim about a stalled child rather
+ * than a long one.
+ *
+ * A REQUEST, not a setting, and the distinction is what keeps a seat from exempting itself: it
+ * applies to the turn being sent and nothing after it, the relay bounds it, and the run record
+ * says which turns were armed differently and why.
+ *
+ * Only the ABSOLUTE clock. The silence clock already survives a long turn -- `workInFlight`
+ * suspends it while a tool call or subagent is outstanding -- so widening it here would give up
+ * the instrument that reaches a genuinely stalled child in minutes.
+ *
+ * An adapter with no clocks ignores this, as it ignores every other deadline; `DeadlineSupport`
+ * is where an agent says whether it has them at all.
+ */
+export interface TurnBudget {
+  absoluteMs: number
+  /** Why it was granted, for the record. Free text from the requester, never parsed. */
+  reason: string
+}
+
 export type CloseMode = 'graceful' | 'abandoned'
 
 /**
@@ -523,7 +549,7 @@ export interface AgentSession {
 
   readonly state: SessionState
 
-  send(message: string, provenance: SendProvenance): Promise<TurnKey>
+  send(message: string, provenance: SendProvenance, budget?: TurnBudget): Promise<TurnKey>
 
   /**
    * Type a raw line at the seat's composer and press Enter, WITHOUT starting a turn (#200).

@@ -19,16 +19,7 @@
  * correlate wrongly.
  */
 
-import type {
-  AgentEvent,
-  AgentSession,
-  CloseMode,
-  Guarantees,
-  SendProvenance,
-  SessionSnapshot,
-  SessionState,
-  TurnKey,
-} from '../../contract/session.ts'
+import type { AgentEvent, AgentSession, CloseMode, Guarantees, SendProvenance, SessionSnapshot, SessionState, TurnBudget, TurnKey } from '../../contract/session.ts'
 import { guaranteesFor, turnKey } from '../../contract/session.ts'
 import { DEFAULT_WATCHDOG_MS, TurnWatchdog } from '../../outcomes/watchdog.ts'
 import { TurnVerdictTracker } from '../../outcomes/tracker.ts'
@@ -441,7 +432,7 @@ export class OpenCodeApiAdapter implements AgentSession {
     })
   }
 
-  async send(message: string, _provenance: SendProvenance): Promise<TurnKey> {
+  async send(message: string, _provenance: SendProvenance, budget?: TurnBudget): Promise<TurnKey> {
     if (this.#state !== 'running') throw new Error(`session is ${this.#state}; it is not accepting work`)
     const open = this.#openTurn()
     // The same refusal the pty adapters make. A second prompt into a session already working is
@@ -457,11 +448,14 @@ export class OpenCodeApiAdapter implements AgentSession {
       tracker: new TurnVerdictTracker({
         agent: this.agent,
         orchestrator: { sentCancel: false, inputIsMediated: this.guarantees.inputOwnership === 'mediated' },
-        watchdogSeconds: (this.#watchdogMs ?? DEFAULT_WATCHDOG_MS) / 1000,
+        // The budget that will actually fire (#193).
+        watchdogSeconds: (budget?.absoluteMs ?? this.#watchdogMs ?? DEFAULT_WATCHDOG_MS) / 1000,
       }),
       cancelled: false,
       spoke: false,
       ended: false,
+      // This turn's own absolute budget, when one was asked for (#193).
+      ...(budget === undefined ? {} : { absoluteMs: budget.absoluteMs }),
     }
     this.#turns.push(turn)
     // Announced BEFORE the POST, so a prompt the server refuses still has a turn to attach the

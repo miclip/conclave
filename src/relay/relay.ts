@@ -14,13 +14,7 @@
  *     implemented here.
  */
 
-import type {
-  AgentEvent,
-  AgentSession,
-  RevisionEvent,
-  SessionSnapshot,
-  TurnEndEvent,
-} from '../contract/session.ts'
+import type { AgentEvent, AgentSession, RevisionEvent, SessionSnapshot, TurnBudget, TurnEndEvent } from '../contract/session.ts'
 import { formatVerdict, type Verdict } from '../contract/outcome.ts'
 import { AgentRegistry } from '../registry/registry.ts'
 import {
@@ -3922,10 +3916,36 @@ export class Relay {
    * nothing here -- but a reader who takes a deadline for a thrower will go looking for a
    * cancellation that this code does not perform.
    */
-  async #exchange(p: RelayParticipant, text: string): Promise<TurnResult> {
+  /**
+   * Dispatch a task, granting the larger turn the advisor asked for (#193).
+   *
+   * RECORDED WHERE IT IS GRANTED, because "the run record says which turns were treated
+   * differently" is half of what the issue asks for. A budget that silently changed a clock
+   * would leave a `timed_out` at ninety minutes unexplainable against a run whose stated
+   * deadline is forty-five.
+   */
+  async #exchangeWithBudget(p: RelayParticipant, task: Task, text: string): Promise<TurnResult> {
+    if (task.budgetMin === undefined) return this.#exchange(p, text)
+    const budget: TurnBudget = {
+      absoluteMs: task.budgetMin * 60_000,
+      reason: `advisor asked for a larger turn on ${task.id}`,
+    }
+    this.#record({
+      from: 'orchestrator',
+      fromRank: 'human',
+      to: [],
+      kind: 'note',
+      text:
+        `${p.id}: this turn was given ${task.budgetMin} minutes, which the advisor asked for with ` +
+        `\`+${task.budgetMin}m\`. The seat's other turns are unchanged.`,
+    })
+    return this.#exchange(p, text, budget)
+  }
+
+  async #exchange(p: RelayParticipant, text: string, budget?: TurnBudget): Promise<TurnResult> {
     this.#exchanges.set(p.id, (this.#exchanges.get(p.id) ?? 0) + 1)
     try {
-      return await this.#exchangeTurn(p, text)
+      return await this.#exchangeTurn(p, text, budget)
     } finally {
       const left = (this.#exchanges.get(p.id) ?? 1) - 1
       if (left > 0) this.#exchanges.set(p.id, left)
@@ -4087,7 +4107,7 @@ export class Relay {
     return signal
   }
 
-  async #exchangeTurn(p: RelayParticipant, text: string): Promise<TurnResult> {
+  async #exchangeTurn(p: RelayParticipant, text: string, budget?: TurnBudget): Promise<TurnResult> {
     // Nothing is sent to a participant that is still working. First, because a send that lands
     // mid-turn is not queued -- it ends the run (#117) -- and second, because everything below
     // this line is bookkeeping for a turn that is about to start, and a turn that will never be
@@ -4110,7 +4130,9 @@ export class Relay {
     // seat actually wrote. At N=1 the two are the same directory.
     const turnRoot = this.#rootOf(p.id)
     const treeBeforeTurn = new Set(dirtyPaths(turnRoot))
-    await p.session.send(text, { kind: 'peer_relay' })
+    // The turn's own budget when the advisor asked for one (#193). Passed rather than set on the
+    // seat: it applies to this turn and is gone when it ends.
+    await p.session.send(text, { kind: 'peer_relay' }, budget)
 
     // No timeout of its own. The adapter's watchdog guarantees a terminal verdict for a
     // hung turn -- that is what it is for -- so a deadline here would be a second clock
@@ -5809,13 +5831,15 @@ export class Relay {
    * dependency: a rule that only starts running once there is something to test it with is a
    * rule nobody has tested.
    */
-  #admit(instruction: string, target: TaskTarget, origin: number, purpose: TaskPurpose, parent?: string, reconstructed?: boolean): Task {
+  #admit(instruction: string, target: TaskTarget, origin: number, purpose: TaskPurpose, parent?: string, reconstructed?: boolean, budgetMin?: number): Task {
     const task: Task = {
       id: `t-${++this.#taskSeq}`,
       seq: this.#taskSeq,
       origin,
       instruction,
       target,
+      // Absent unless the advisor asked, which keeps every other task exactly as it was (#193).
+      ...(budgetMin === undefined ? {} : { budgetMin }),
       // Designated at admission by whoever routed it, never inferred from the prose. See
       // `TaskPurpose`: this is the one fact that lets a blocked seat accept its repair and
       // nothing else.
@@ -6844,8 +6868,9 @@ export class Relay {
         })
       }
       const work = (async (): Promise<Completion> => {
-        const report = await this.#exchange(
+        const report = await this.#exchangeWithBudget(
           seat,
+          task,
           [
             aside,
             provPrefix,
@@ -7816,7 +7841,7 @@ export class Relay {
             // exists whether or not it survives adjudication. Admission logs nothing: the task
             // record is the dispatcher's account of the schedule, and the routing log stays the
             // account of what actually moved between participants.
-            const task = this.#admit(admitting.instruction, admitting.target, next.end.seq, purposeFor(admitting.target), undefined, next.reconstructed)
+            const task = this.#admit(admitting.instruction, admitting.target, next.end.seq, purposeFor(admitting.target), undefined, next.reconstructed, admitting.budgetMin)
 
             // BEFORE delivery, not after. The point of the pause is that the human adjudicates
             // while the instruction is still a proposal. Once per admission rather than once per

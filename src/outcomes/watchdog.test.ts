@@ -529,3 +529,52 @@ test('a touch under a key that was never armed refreshes nothing', async () => {
   )
   w.disarmAll()
 })
+
+test('#193 a turn granted its own budget is measured against that, not the run default', async () => {
+  // `deadlines.ts` states the ordinary rule: the clocks are the policy a seat is under for the
+  // WHOLE run. That is right for comparable turns and wrong the moment an advisor delegates a
+  // deliberately larger chunk -- such a turn is killed for doing what it was asked, and graded
+  // `timed_out`, which is a claim about a stalled child rather than a long one.
+  const turn = turnAt(Date.now(), { ms: MS * 10 })
+  turn.absoluteMs = MS * 10
+  const { updates, onUpdate } = collector()
+  const w = new TurnWatchdog<Turn>(MS, onUpdate, MS * 100)
+  w.arm(turn.key, turn)
+  // Well past the run default and well short of this turn's own budget.
+  await new Promise((r) => setTimeout(r, MS * 4))
+  assert.deepEqual(updates, [], 'the run default must not reach a turn that was granted more')
+  await new Promise((r) => setTimeout(r, MS * 10))
+  assert.equal(updates.length, 1, 'and its own budget still does')
+  w.disarm(turn.key)
+})
+
+test('#193 a turn without a budget is unchanged', async () => {
+  // "the default run's clocks are unchanged" is in the issue's own done-when.
+  const turn = turnAt(Date.now())
+  const { updates, onUpdate } = collector()
+  const w = new TurnWatchdog<Turn>(MS, onUpdate, MS * 100)
+  w.arm(turn.key, turn)
+  await new Promise((r) => setTimeout(r, MS * 4))
+  assert.equal(updates.length, 1, 'the run default still applies where nothing asked for more')
+  w.disarm(turn.key)
+})
+
+test('#193 the verdict quotes the budget that actually fired', async () => {
+  // A turn killed at its granted budget must not be reported against the run default: the
+  // deadline that fired and the duration the verdict names have to be the same number, or the
+  // record sends a reader to the wrong clock.
+  //
+  // SECOND-SCALE deliberately. The verdict renders whole seconds, so the millisecond values the
+  // tests above use all print as `0s` and this assertion could not tell the two numbers apart --
+  // it passed against a wiring that quoted the wrong one until the values were widened.
+  const granted = 2_000
+  const turn = turnAt(Date.now(), { ms: granted })
+  turn.absoluteMs = granted
+  const { updates, onUpdate } = collector()
+  const w = new TurnWatchdog<Turn>(200, onUpdate, 60_000)
+  w.arm(turn.key, turn)
+  await new Promise((r) => setTimeout(r, 2_400))
+  const detail = JSON.stringify(updates)
+  assert.match(detail, /2s > 2s/, `the granted budget, not the 0.2s run default: ${detail}`)
+  w.disarm(turn.key)
+})
