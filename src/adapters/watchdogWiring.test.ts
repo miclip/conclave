@@ -520,3 +520,31 @@ test('#203 a run whose attempts journal was named to the operator keeps it', asy
   assert.equal(existsSync(dir), true, `the evidence the operator was pointed at survives: ${dir}`)
   rmSync(dir, { recursive: true, force: true })
 })
+
+test('#187 a graceful close asks the child to leave on its own terms first', async () => {
+  // Every teardown before this killed the child before it could run its own exit hook. #12
+  // established that `/quit` is what makes `SessionEnd` fire, and a probe against codex-cli
+  // 0.147.0 confirmed it still does: the child left in 0.9-2.9s with SessionEnd in the journal.
+  process.env['ORCH_FAKE_HONOURS_QUIT'] = '1'
+  const session = await CodexPtyHookAdapter.start({ cwd: RUN, role: 'implementer', readyTimeoutMs: 20_000 })
+  try {
+    await session.close('graceful')
+    const typed = session.inputLog.map((a) => a.detail ?? '').join(' | ')
+    assert.match(typed, /own way out/, `the child was asked to quit: ${typed}`)
+  } finally {
+    delete process.env['ORCH_FAKE_HONOURS_QUIT']
+  }
+})
+
+test('#187 a child that ignores /quit is still killed, and the shutdown still ends', async () => {
+  // THE SAFETY PROPERTY, and the reason the issue called this a trade rather than a change.
+  // #12's own words are that Codex "does not quit promptly on Ctrl-C", and teardown is the path
+  // least able to afford a hang. The stand-in here ignores `/quit` entirely, so this is the
+  // fallback: bounded by QUIT_GRACE_MS and then exactly the behaviour that came before.
+  const session = await CodexPtyHookAdapter.start({ cwd: RUN, role: 'implementer', readyTimeoutMs: 20_000 })
+  const started = Date.now()
+  await session.close('graceful')
+  const took = Date.now() - started
+  assert.ok(took < 20_000, `a shutdown a child ignores still ends: took ${took} ms`)
+  assert.equal(session.pty.alive, false, 'and the child is gone either way')
+})

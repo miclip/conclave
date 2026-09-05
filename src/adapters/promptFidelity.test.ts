@@ -261,7 +261,12 @@ async function attempt(
       turns: snap.turns,
       notices: events.filter((e) => e.type === 'error') as AdapterErrorEvent[],
       written: session.inputLog.find((a) => a.kind === 'submit')?.bytes,
-      actions: session.inputLog,
+      // COPIED, not referenced. `inputLog` hands back the queue's live array, and `close()` runs
+      // in the `finally` below -- so a reference captured here keeps growing after the exchange
+      // this helper is describing has ended. #187 made that visible by typing `/quit` at
+      // teardown: three assertions about "what was typed for this message" started counting a
+      // shutdown keystroke. The bug was here rather than there.
+      actions: [...session.inputLog],
     }
   } finally {
     delete process.env['ORCH_FAKE_LOSE']

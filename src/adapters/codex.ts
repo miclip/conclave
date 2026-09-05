@@ -276,6 +276,16 @@ export const CANCEL_EVIDENCE_POLL_MS = 750
  * neither of them has anything to notify. Short enough that the common case -- a `Stop` landing
  * a moment after the ESC -- costs the recovery nothing measurable.
  */
+/**
+ * How long `close('graceful')` waits for the child to act on `/quit` before killing it (#187).
+ *
+ * Measured rather than guessed: on codex-cli 0.147.0 a probe saw the child exit 906 ms, 1405 ms
+ * and 2907 ms after the command across three runs. Five seconds is comfortably past the slowest
+ * of those and short enough that a shutdown which does not work still feels like one.
+ */
+const QUIT_GRACE_MS = 5_000
+const QUIT_POLL_MS = 100
+
 const RECOVERY_POLL_MS = 50
 
 const SEND_TURN_IN_FLIGHT =
@@ -1490,6 +1500,28 @@ export class CodexPtyHookAdapter implements AgentSession {
     return this.#runDir
   }
 
+  /**
+   * Ask the child to leave on its own terms, and wait a bounded moment for it to (#187).
+   *
+   * Returns whether it went. A `false` is not a failure -- it is the ordinary path resuming --
+   * so nothing here throws and nothing is reported: the caller terminates next either way.
+   */
+  async #quitPolitely(): Promise<boolean> {
+    if (this.#openTurnKey !== undefined) return false
+    try {
+      await this.#input.submit('/quit', "close: the child's own way out (#187)")
+    } catch {
+      // The composer refused it. Terminate, as before.
+      return false
+    }
+    const deadline = Date.now() + QUIT_GRACE_MS
+    while (Date.now() < deadline) {
+      if (!this.#pty.alive) return true
+      await new Promise((r) => setTimeout(r, QUIT_POLL_MS))
+    }
+    return false
+  }
+
   async decidePermission(decision: 'allow' | 'deny'): Promise<void> {
     if (this.guarantees.inputOwnership !== 'mediated') {
       throw new Error('permission decisions require mediated input ownership')
@@ -1715,6 +1747,20 @@ export class CodexPtyHookAdapter implements AgentSession {
         // Reconcile before terminating: an established verdict must not be replaced by a
         // weaker causal guess because cleanup killed the process.
         await this.#reconcileFromTranscript()
+        // THE CHILD'S OWN WAY OUT, TRIED FIRST (#187). `/quit` is what makes `SessionEnd` fire --
+        // #12 established that, and it still holds on codex-cli 0.147.0, where a probe measured
+        // the child leaving in 0.9-2.9s with `SessionEnd` in the journal. Every teardown before
+        // this killed the child before it could run its own exit hook.
+        //
+        // Bounded, and the fallback is EXACTLY what happened before rather than a new path, so
+        // the worst case is `QUIT_GRACE_MS` of extra latency on a shutdown. That bound is the
+        // whole safety argument: #12's own words are that Codex "does not quit promptly on
+        // Ctrl-C", and teardown is the path least able to afford a hang.
+        //
+        // NOT while a turn is in flight, because neither CLI accepts input mid-turn: the command
+        // would be spliced into the turn rather than executed, which is #117 arriving during
+        // cleanup. A seat still working is killed as it always was.
+        await this.#quitPolitely()
         const exit = await this.#pty.terminate()
         // Anything still live at this point had no verdict from the transcript, and the child is
         // now definitively gone -- `terminate()` escalates to SIGKILL and returns only once it
