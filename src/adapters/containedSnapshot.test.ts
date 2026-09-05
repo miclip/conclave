@@ -35,7 +35,7 @@ import { wedgeOneTailPoll, type TailWedge } from '../transcript/tailWedge.ts'
 import { ClaudePtyHookAdapter } from './claude.ts'
 import { CodexPtyHookAdapter } from './codex.ts'
 import { installFakeClis } from './fakeCli.ts'
-import { suiteTempDir, tempDir } from '../testkit/tempDir.ts'
+import { containAdapterRunDirs, tempDir } from '../testkit/tempDir.ts'
 
 /**
  * The run directories the adapters this file boots make for themselves, contained.
@@ -51,8 +51,7 @@ import { suiteTempDir, tempDir } from '../testkit/tempDir.ts'
  * this one stay isolated from each other exactly as before -- by `tempDir` handing each its
  * own uniquely named child of this root.
  */
-const ADAPTER_TMP_ROOT = suiteTempDir('adapter-run-root')
-process.env['TMPDIR'] = ADAPTER_TMP_ROOT
+const ADAPTER_TMP_ROOT = containAdapterRunDirs()
 
 const { dir: RUN } = installFakeClis()
 

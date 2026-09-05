@@ -17,6 +17,16 @@ import test from 'node:test'
 import type { AgentEvent, TurnStartEvent } from '../contract/session.ts'
 import { CodexPtyHookAdapter } from './codex.ts'
 import { installFakeClis } from './fakeCli.ts'
+import { containAdapterRunDirs } from '../testkit/tempDir.ts'
+
+/**
+ * The run directories the adapters this file boots make for themselves, contained (#211).
+ *
+ * `claude`, `codex` and `kimi` each `mkdtemp` under `os.tmpdir()` at boot. #203 gives that back
+ * on close; this covers what close cannot -- a boot that throws first, and the run that keeps its
+ * directory because its attempts journal was named to the operator.
+ */
+containAdapterRunDirs()
 
 const { dir: RUN } = installFakeClis()
 process.env['ORCH_FAKE_DEFER_SLASH'] = '1'

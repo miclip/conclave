@@ -31,6 +31,10 @@ test('nothing exported can delete a caller-supplied path', () => {
   assert.deepEqual(Object.keys(tempDirModule).sort(), [
     'TEMP_DIR_PREFIX',
     'canonicalTempTarget',
+    // #211. Takes a LABEL, not a path: it calls `suiteTempDir` for a directory this module
+    // issued and points `TMPDIR` at it, so the only thing it can cause to be deleted is
+    // something this module made. The safety argument above survives it.
+    'containAdapterRunDirs',
     'suiteTempDir',
     'tempDir',
     'tempDirAsync',

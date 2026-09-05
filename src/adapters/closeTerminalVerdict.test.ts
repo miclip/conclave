@@ -31,7 +31,7 @@ import type { AgentEvent, TurnEndEvent, TurnStartEvent } from '../contract/sessi
 import { ClaudePtyHookAdapter } from './claude.ts'
 import { CodexPtyHookAdapter } from './codex.ts'
 import { installFakeClis } from './fakeCli.ts'
-import { suiteTempDir } from '../testkit/tempDir.ts'
+import { containAdapterRunDirs } from '../testkit/tempDir.ts'
 
 /**
  * The run directories the adapters this file boots make for themselves, contained.
@@ -47,8 +47,7 @@ import { suiteTempDir } from '../testkit/tempDir.ts'
  * this one stay isolated from each other exactly as before -- by `tempDir` handing each its
  * own uniquely named child of this root.
  */
-const ADAPTER_TMP_ROOT = suiteTempDir('adapter-run-root')
-process.env['TMPDIR'] = ADAPTER_TMP_ROOT
+const ADAPTER_TMP_ROOT = containAdapterRunDirs()
 
 // ORCH_FAKE_STOP_MS is left unset, so the stand-in acknowledges the prompt and then never
 // reports the turn ending. That is the whole precondition: a turn that is live when we close.

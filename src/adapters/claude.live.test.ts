@@ -29,7 +29,16 @@ import { join } from 'node:path'
 import test from 'node:test'
 import { ClaudePtyHookAdapter } from './claude.ts'
 import type { AgentEvent, SessionSnapshot, TurnEndEvent } from '../contract/session.ts'
-import { tempDir } from '../testkit/tempDir.ts'
+import { containAdapterRunDirs, tempDir } from '../testkit/tempDir.ts'
+
+/**
+ * The run directories the adapters this file boots make for themselves, contained (#211).
+ *
+ * `claude`, `codex` and `kimi` each `mkdtemp` under `os.tmpdir()` at boot. #203 gives that back
+ * on close; this covers what close cannot -- a boot that throws first, and the run that keeps its
+ * directory because its attempts journal was named to the operator.
+ */
+containAdapterRunDirs()
 
 const LIVE = process.env.ORCH_LIVE === '1'
 const CWD = process.cwd()

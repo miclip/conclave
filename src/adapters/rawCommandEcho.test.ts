@@ -22,7 +22,7 @@ import test from 'node:test'
 import type { AgentEvent, TurnStartEvent } from '../contract/session.ts'
 import { ClaudePtyHookAdapter } from './claude.ts'
 import { installFakeClis } from './fakeCli.ts'
-import { suiteTempDir } from '../testkit/tempDir.ts'
+import { containAdapterRunDirs } from '../testkit/tempDir.ts'
 
 /**
  * The run directories the adapters this file boots make for themselves, contained.
@@ -38,8 +38,7 @@ import { suiteTempDir } from '../testkit/tempDir.ts'
  * this one stay isolated from each other exactly as before -- by `tempDir` handing each its
  * own uniquely named child of this root.
  */
-const ADAPTER_TMP_ROOT = suiteTempDir('adapter-run-root')
-process.env['TMPDIR'] = ADAPTER_TMP_ROOT
+const ADAPTER_TMP_ROOT = containAdapterRunDirs()
 
 const { dir: RUN } = installFakeClis()
 process.env['ORCH_FAKE_DEFER_SLASH'] = '1'

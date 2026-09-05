@@ -159,6 +159,32 @@ export function suiteTempDir(label = ''): string {
   return dir
 }
 
+/**
+ * Contain every run directory the adapters booted by THIS FILE make for themselves (#211).
+ *
+ * An adapter takes a `mkdtemp` under `os.tmpdir()` at boot. Since #203 it gives that back on
+ * close, so this is no longer the only thing standing between the suite and a scattered
+ * `$TMPDIR` -- but it is still what covers the cases close does not: a boot that throws before
+ * anything can call close, and the one run that deliberately KEEPS its directory because its
+ * attempts journal was named to the operator.
+ *
+ * `tmpdir()` re-reads `TMPDIR` on every call, so pointing it at a directory the testkit issued
+ * puts everything booted here inside something whose lifetime the helper already owns.
+ *
+ * PER FILE, which is what makes it safe rather than a shared global: every test file runs in its
+ * own process under `node --test`, so this reaches no other suite, and tests within the file
+ * stay isolated exactly as before -- `tempDir` still hands each its own uniquely named child.
+ *
+ * It was two lines copied into fourteen files, and a fifteenth file that booted an adapter and
+ * forgot them would have leaked with nothing failing. `adapterContainment.test.ts` is the half
+ * that catches the forgetting; this is the half that makes it one call to remember.
+ */
+export function containAdapterRunDirs(label = 'adapter-run-root'): string {
+  const root = suiteTempDir(label)
+  process.env['TMPDIR'] = root
+  return root
+}
+
 /** The async twin, for the two call sites that already await their directory. */
 export async function tempDirAsync(t: TestContext, label = ''): Promise<string> {
   const root = realpathSync(tmpdir())
