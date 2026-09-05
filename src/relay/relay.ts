@@ -2671,7 +2671,26 @@ export class Relay {
    * reach the operator's console today, as one line reading `transcript revised
    * (late_signal)`, which names neither the verdict nor the pause it demolishes.
    *
-   * It surfaces and does not decide: the run stays paused. See `RunHandle.supersede`.
+   * It surfaces and does not decide -- EXCEPT where there is nothing left to decide (#227).
+   *
+   * A withdrawal replaced by `completed` means the turn ended and the run knows it. The pause
+   * was raised because the turn MIGHT be wedged; it demonstrably was not, so there is no
+   * decision left to put to anyone. Measured across this repo's own run logs: 77 turn verdicts,
+   * 3 `timed_out`, and two of those three were withdrawn and replaced with `completed` -- both
+   * runs then sat parked on a premise that was gone, under a note reading "the run is still
+   * paused until you decide".
+   *
+   * Every other replacement still stops. Another `timed_out` means the turn is still running and
+   * the same question faces the operator unchanged; any terminal verdict is a real outcome
+   * someone should see. Only `completed` disproves the reason for pausing.
+   *
+   * WHY THIS DOES NOT BLIND A MONITOR, which was the fear worth taking seriously: `run.pause`
+   * clears on resume, and `#emitSupersession` exists because `state` never changed across a
+   * supersession -- "a monitor polling state is silent through exactly the event it is waiting
+   * for". Resuming is what makes `state` change, `paused` to `running`, which is the signal that
+   * workaround was standing in for. The record is unaffected: the note is in the log, the
+   * `supersede` event is still emitted, and the pause object handed to a caller is mutated in
+   * place rather than replaced. See `RunHandle.supersede`.
    */
   #trackSupersession(p: RelayParticipant, e: AgentEvent): void {
     const pending = this.#verdictPause
@@ -2698,17 +2717,48 @@ export class Relay {
       // the operator must be told the running state explicitly; other outcomes are terminal
       // verdicts and use the neutral `formatVerdict()` wording instead.
       const outcome = e.verdict.outcome
+      // WHETHER THE RUN WILL RESUME decides the wording, because the old wording becomes a lie
+      // the moment it does (#227). "The run is still paused until you decide" was true when
+      // nothing acted on a supersession; saying it while releasing the loop in the next
+      // statement would be the report-states-what-is-not-so failure this project keeps finding.
+      const willResume = outcome === 'completed' && pending.handle.pause !== undefined
       const note =
         outcome === 'completed'
-          ? `the ${pending.outcome} verdict this pause was raised on was withdrawn and replaced ` +
-            `with completed; the turn ended, but the run is still paused until you decide`
+          ? willResume
+            ? `the ${pending.outcome} verdict this pause was raised on was withdrawn and replaced ` +
+              `with completed; the turn ended, so the run is RESUMING rather than holding you to a ` +
+              `decision that no longer exists`
+            : `the ${pending.outcome} verdict this pause was raised on was withdrawn and replaced ` +
+              `with completed; the turn ended, but the run is still paused until you decide`
           : outcome === 'timed_out'
             ? `the ${pending.outcome} verdict this pause was raised on was withdrawn and replaced ` +
               `with another timed_out; the turn is still running, so the same decision faces you`
             : `the ${pending.outcome} verdict this pause was raised on was withdrawn and replaced ` +
               `with ${formatVerdict(e.verdict)}; the run is still paused, and the decision is still yours`
-      this.#supersede(pending, note, e.verdict)
+      const amended = this.#supersede(pending, note, e.verdict)
       this.#verdictPause = undefined
+      // RESUMED, and only for `completed` (#227). `amended` is false when the operator has
+      // already answered, in which case there is no pause to release and releasing would
+      // resolve one decision twice.
+      if (willResume && amended && pending.handle.pause) {
+        this.#record({
+          from: 'orchestrator',
+          fromRank: 'human',
+          to: [],
+          kind: 'note',
+          text:
+            `resuming: this pause was raised because that turn might be wedged, and the turn has ` +
+            `since ended. Nobody decided this -- the question stopped existing. The pause and its ` +
+            `withdrawal are both above.`,
+          supersession: true,
+        })
+        // Not awaited: `continue()` releases the suspended loop, and awaiting it inside the
+        // event handler that resumed it would nest the run within its own notification.
+        void pending.handle.continue().catch(() => {
+          // The run ended while this was in flight. There is nothing to resume and nothing to
+          // report: the outcome the operator receives already says the run is over.
+        })
+      }
     }
   }
 
@@ -2724,7 +2774,8 @@ export class Relay {
     this.#stream.emit({ type: 'supersede', pause })
   }
 
-  #supersede(pending: VerdictPause, note: string, verdict?: Verdict): void {
+  /** True when the pause was still open and was amended; false when it had already been answered. */
+  #supersede(pending: VerdictPause, note: string, verdict?: Verdict): boolean {
     const info: PauseSupersession = { at: Date.now(), note, ...(verdict === undefined ? {} : { verdict }) }
     // Recorded only if the pause was still there to amend. Logging a supersession for a
     // pause the operator has already resolved would put a decision in the log that nobody made.
@@ -2737,7 +2788,9 @@ export class Relay {
       // pause printed after the fact; the mark is what lets a reader see the two arrival
       // orders the same way instead of one shouting and the other reading as more background.
       this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text: note, supersession: true })
+      return true
     }
+    return false
   }
 
   #record(m: Omit<RelayMessage, 'seq' | 'at' | 'visibility' | 'excluded'>): RelayMessage {

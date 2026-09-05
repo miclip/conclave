@@ -1456,23 +1456,33 @@ test('a verdict withdrawn while the operator reads the pause is surfaced in the 
   const note = superseded['pause'].superseded.note as string
   assert.match(note, /timed_out verdict .* was withdrawn/, 'the verdict the pause rested on, by name')
   assert.match(note, /replaced with completed/, 'the replacement is terminal and the note says the turn ended')
-  assert.match(note, /still paused/, 'surfaced, not decided')
+  // WAS `/still paused/` (#227). The note used to end "but the run is still paused until you
+  // decide", which was true while nothing acted on a supersession. The run now resumes when the
+  // replacement is `completed`, so that sentence would be a lie printed one statement before the
+  // loop is released -- and the console is where an operator would read it.
+  assert.match(note, /RESUMING/, 'the note says what the run actually does next')
+  assert.doesNotMatch(note, /still paused/, 'and does not claim a pause it is about to release')
 
-  // ...and it reaches the STATUS FILE, which is where an operator outside the process reads
-  // it. This is load-bearing operational advice: the run stays paused across a supersession
-  // by design, so `state` is unchanged before and after and a watcher polling it is silent
-  // through the one event a waiting operator is waiting for. `pause.superseded` is the
-  // signal, and it only lands because the recorder re-serialises the LIVE pause object --
-  // which `supersede()` mutates in place -- on the next event, and the supersession note is
-  // itself an event. Asserted rather than reasoned, because someone is relying on it.
-  const outside = resolveSession(dir)
-  assert.ok('session' in outside, 'the session must be readable from outside')
-  assert.ok(
-    outside.session.status.pause?.superseded,
-    `pause.superseded must reach the status file:\n${JSON.stringify(outside.session.status.pause, null, 2)}`,
-  )
+  // ...and the run MOVES, which is what an operator outside the process now sees (#227).
+  //
+  // This paragraph used to assert the opposite, and the reason it did is worth keeping: the run
+  // stayed paused across a supersession by design, so `state` was unchanged before and after,
+  // and a watcher polling it was silent through the one event a waiting operator was waiting
+  // for. `pause.superseded` was the only signal, and it landed because the recorder
+  // re-serialises the LIVE pause object -- which `supersede()` mutates in place -- on the next
+  // event. It was asserted rather than reasoned because someone was relying on it.
+  //
+  // What changed is that the silence it worked around is gone. A supersession by `completed`
+  // now releases the loop, so `state` DOES change -- which is the signal that workaround stood
+  // in for, and it is visible to exactly the same poller. The record is unaffected: the console
+  // lines asserted above, the `supersede` event on the stream, and the note in the run log all
+  // still carry it. What no longer persists is `status.pause`, because there is no longer a
+  // pause.
+  await untilText('the run to resume itself', out.text, /resumed from turn_incomplete/)
 
-  input.write('/continue\n')
+  // Closing stdin rather than answering: there is nothing left to answer, and a `/continue`
+  // into a run that is no longer paused is a command with no pause to apply to.
+  input.end()
   assert.equal(await running, 0)
 })
 
@@ -3952,16 +3962,19 @@ test('a completed replacement verdict bypasses child liveness sampling on /conti
 
   await until((f) => 'session' in f && f.session.status.state === 'paused')
   impl.lateSignal(COMPLETED)
-  await until(
-    (f) => 'session' in f && f.session.status.pause?.superseded?.verdict?.outcome === 'completed',
-  )
-  input.write('/continue\n')
-  const resumed = await until((f) => 'session' in f && f.session.status.state === 'running')
-  assert.ok('session' in resumed)
+  // NO `/continue` SINCE #227: the run resumes itself when the replacement is `completed`, so
+  // there is no operator command to bypass anything on. The guarantee this test exists for is
+  // unchanged and now holds more strongly -- the sampler must not be consulted, because the
+  // replacement Stop verdict is the authority on whether the turn ended and a busy child does
+  // not mean a turn is in flight.
+  // WAITED FOR ON THE CONSOLE, not by polling the session record. The run resumes itself and can
+  // reach the END before the next poll, at which point `resolveSession` no longer returns a
+  // session at all -- so any state predicate is a race this test loses on a fast machine.
+  await untilText('the run to resume itself', out.text, /resumed from turn_incomplete/)
   assert.equal(sampled, false, 'liveness must not be sampled when the replacement is completed')
   // An ABSENCE, read off the record rather than off the screen: a wrap inside `not continuing`
   // satisfies a console `doesNotMatch` whether or not the refusal happened.
-  assert.equal(resumed.session.status.pause, undefined, 'the run must resume without refusing')
+  assert.doesNotMatch(out.text(), /not continuing/, 'the run must resume without refusing')
 
   input.end()
   await running
@@ -4504,7 +4517,7 @@ test('a participant-scoped pause samples that seat and no other, at every reason
   assert.deepEqual(sampled(pauseFor({ reason: 'rotation_candidate', participant: 'implementer-2' })), ['implementer-2'])
   assert.deepEqual(sampled(pauseFor({ reason: 'implementer_unanswered', participant: 'implementer-2' })), ['implementer-2'])
   // The ADVISOR is a participant like any other, and its own bad turn pauses the run
-  // (src/relay/relay.ts:7473). A rank scan for implementers sampled the wrong child here too.
+  // (src/relay/relay.ts:7526). A rank scan for implementers sampled the wrong child here too.
   assert.deepEqual(
     sampled(pauseFor({ reason: 'turn_incomplete', participant: 'advisor' }, { participant: 'advisor', endSeq: 2 })),
     ['advisor'],
@@ -4513,13 +4526,13 @@ test('a participant-scoped pause samples that seat and no other, at every reason
 
 test('a conclave- or workstream-scoped pause samples nobody, with no fall back to rank', () => {
   // Both conclave-scoped reasons. Resuming an `advisor_escalated` pause sends to the ADVISOR
-  // (src/relay/relay.ts:7612), so measuring implementer children was never the question; and
+  // (src/relay/relay.ts:7665), so measuring implementer children was never the question; and
   // `operator_requested` is consumed at an advisor-turn boundary that states no turn is in
   // flight. Neither has anything for this guard to sample.
   assert.deepEqual(sampled(pauseFor({ reason: 'advisor_escalated' })), [])
   assert.deepEqual(sampled(pauseFor({ reason: 'operator_requested' })), [])
   // Workstream scope, and the id deliberately COLLIDES with a seat id -- at N=1 the workstream
-  // is named after the seat carrying the instruction (src/relay/relay.ts:7779), which is exactly
+  // is named after the seat carrying the instruction (src/relay/relay.ts:7832), which is exactly
   // the coincidence a guard could read as "so sample that seat". A workstream is not a seat.
   assert.deepEqual(sampled(pauseFor({ reason: 'authority_conflict', workstream: 'implementer' })), [])
 })
@@ -4535,7 +4548,7 @@ test('a scope naming a seat that is gone samples nobody rather than falling back
 test('a rotation_candidate pause on one seat resumes while the OTHER seat is genuinely mid-turn', async (t) => {
   // The production shape of the N>1 case the rank scan got wrong, and the reason it has to be
   // this shape: `rotation_candidate` carries NO `verdictOf` -- that field is set at two halt
-  // sites, both turn_incomplete (src/relay/relay.ts:7477, src/relay/relay.ts:8031) -- so under
+  // sites, both turn_incomplete (src/relay/relay.ts:7530, src/relay/relay.ts:8084) -- so under
   // the old expression this pause fell through to the rank scan and sampled EVERY implementer.
   // A simpler `turn_incomplete` fixture cannot show that: it populates the field, takes the
   // named-seat branch, and passes against the code being replaced.
@@ -4587,7 +4600,7 @@ test('a rotation_candidate pause on one seat resumes while the OTHER seat is gen
     ],
     rounds: 6,
     // ARMS ROTATION, which is what makes degradation a pause instead of an ended run
-    // (src/relay/relay.ts:5132). A command that exits 0 immediately: what the checks DO is
+    // (src/relay/relay.ts:5185). A command that exits 0 immediately: what the checks DO is
     // not what this test is about, only that a replacement would have something to reproduce.
     checks: ['true'],
     registry: registryOf({

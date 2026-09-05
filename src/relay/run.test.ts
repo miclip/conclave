@@ -842,7 +842,7 @@ test('a verdict withdrawn while the human is deciding is surfaced on the pause i
   // The late Stop the watchdog beat to it.
   impl.lateSignal(COMPLETED)
 
-  const superseded = await until('the pause to be marked superseded', () => run.pause?.superseded?.verdict)
+  const superseded = await until('the pause to be marked superseded', () => pause.superseded?.verdict)
   assert.equal(superseded.outcome, 'completed')
   // The object the operator was handed, not a replacement they will never see.
   assert.equal(pause.superseded?.verdict?.outcome, 'completed')
@@ -850,8 +850,13 @@ test('a verdict withdrawn while the human is deciding is surfaced on the pause i
   assert.match(pause.superseded!.note, /withdrawn/)
   assert.match(pause.superseded!.note, /completed/)
 
-  // Surfaced, not decided.
-  assert.equal(run.state, 'paused', 'withdrawing the reason for a decision is not making it')
+  // SURFACED, AND -- since #227 -- ALSO ACTED ON, but only because the replacement is
+  // `completed`. This read `paused`, on the principle that withdrawing the reason for a decision
+  // is not making it. That principle still governs every other replacement; what it got wrong is
+  // that `completed` leaves no decision to make. Two of the three `timed_out` verdicts in this
+  // repo's run logs ended exactly here, with the run parked on a premise that was gone.
+  await until('the run to resume itself', () => (run.state === 'paused' ? undefined : run.state))
+  assert.notEqual(run.state, 'paused', 'a pause with nothing left to decide does not hold the run')
   await run.abort()
 })
 
@@ -866,7 +871,7 @@ test('the withdrawal is recorded, so the log says why the pause stopped meaning 
   const pause = await run.untilPause()
   assert.ok(pause)
   impl.lateSignal(COMPLETED)
-  await until('the pause to be marked superseded', () => run.pause?.superseded?.verdict)
+  await until('the pause to be marked superseded', () => pause.superseded?.verdict)
 
   const notes = relay.log.filter((m) => m.kind === 'note').map((m) => m.text)
   const raised = notes.findIndex((t) => t.startsWith('paused (turn_incomplete)'))
@@ -935,11 +940,14 @@ test("an ADVISOR verdict pause is amended when the verdict behind it is withdraw
   assert.equal(pause.verdictOf?.participant, 'advisor', 'the pause is about the ADVISOR turn')
 
   advisor.lateSignal(COMPLETED)
-  await until('the advisor pause to be marked superseded', () => run.pause?.superseded?.verdict)
-  assert.equal(run.pause?.superseded?.verdict?.outcome, 'completed')
-  assert.match(run.pause!.superseded!.note, /withdrawn/)
-  // Surfaced, not decided: the run is still paused, exactly as it is for an implementer.
-  assert.equal(run.state, 'paused', 'withdrawing the reason for a decision is not making it')
+  // OBSERVED ON THE CAPTURED PAUSE, not on `run.pause` (#227). The run resumes itself when the
+  // replacement is `completed`, so the field clears -- the object a caller was handed is mutated
+  // in place and keeps the whole record.
+  await until('the advisor pause to be marked superseded', () => pause.superseded?.verdict)
+  assert.equal(pause.superseded?.verdict?.outcome, 'completed')
+  assert.match(pause.superseded!.note, /withdrawn/)
+  // An advisor pause resumes on the same rule as an implementer one.
+  await until('the run to resume itself', () => (run.state === 'paused' ? undefined : run.state))
   await run.abort()
 })
 
@@ -994,15 +1002,18 @@ test('supersession by completed says the turn ended', async (t) => {
   t.after(() => relay.stop())
 
   const run = relay.start('Keep the work moving.')
-  await run.untilPause()
+  const pause = await run.untilPause()
+  assert.ok(pause)
 
   impl.lateSignal(COMPLETED)
-  await until('the pause to be marked superseded', () => run.pause?.superseded?.verdict)
+  // On the CAPTURED pause: the run resumes itself here (#227), so `run.pause` clears. The object
+  // handed to a caller is mutated in place and keeps the whole record.
+  await until('the pause to be marked superseded', () => pause.superseded?.verdict)
 
-  assert.equal(run.pause?.superseded?.verdict?.outcome, 'completed')
-  assert.match(run.pause!.superseded!.note, /completed/i)
-  assert.match(run.pause!.superseded!.note, /turn ended|turn has ended|the turn landed/i)
-  assert.doesNotMatch(run.pause!.superseded!.note, /still running|another timeout|watchdog fired again/i)
+  assert.equal(pause.superseded?.verdict?.outcome, 'completed')
+  assert.match(pause.superseded!.note, /completed/i)
+  assert.match(pause.superseded!.note, /turn ended|turn has ended|the turn landed/i)
+  assert.doesNotMatch(pause.superseded!.note, /still running|another timeout|watchdog fired again/i)
   await run.abort()
 })
 
@@ -1103,11 +1114,12 @@ test('a /wait is not carried to a fresh pause on a different turn', async (t) =>
   const firstEndSeq = first.verdictOf?.endSeq
   assert.ok(run.wait({ at: Date.now(), until: Date.now() + 10_000 }))
 
-  // The supersession resolves the first turn, so the operator can continue. The next turn ends
-  // with another timed_out and raises a fresh pause — the wait decision was tied to the first.
+  // The supersession resolves the first turn and the run resumes itself (#227), so there is no
+  // `continue()` to make here any more -- the question stopped existing. The next turn ends with
+  // another timed_out and raises a fresh pause; the wait decision was tied to the first.
   impl.lateSignal(COMPLETED)
-  await until('the first pause to be marked superseded', () => run.pause?.superseded?.verdict)
-  await run.continue()
+  await until('the first pause to be marked superseded', () => first.superseded?.verdict)
+  await until('the run to resume itself', () => (run.state === 'paused' ? undefined : run.state))
 
   impl.endTurn = { index: 2, verdict: TIMED_OUT }
   const second = await run.untilPause()
@@ -1343,7 +1355,10 @@ test('the pause on the stream is the one that gets amended, not a snapshot of it
   assert.equal(before, undefined, 'nothing has contradicted it yet')
 
   impl.lateSignal(COMPLETED)
-  await until('the pause to be marked superseded', () => run.pause?.superseded?.verdict)
+  // Observed on the EMITTED pause, which is the object this test is about. `run.pause` clears
+  // when the run resumes itself (#227); mutation in place is exactly why that does not matter
+  // to anyone already holding it.
+  await until('the emitted pause to be marked superseded', () => emitted.pause.superseded?.verdict)
   assert.equal(
     emitted.pause.superseded?.verdict?.outcome,
     'completed',
@@ -1514,4 +1529,74 @@ test('a pause naming no rotation target demands a reason rather than borrowing o
 
   await run.continue()
   await decision
+})
+
+test('#227 a withdrawal replaced by another timed_out still holds the run', async (t) => {
+  // The other half, and what stops the resume from becoming "any supersession resumes". Another
+  // `timed_out` means the turn is STILL running: the question the pause asked is the question
+  // that faces the operator, unchanged, and answering it for them would be inventing a decision.
+  const dir = repo(t)
+  const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Still going.'])
+  impl.endTurn = { index: 1, verdict: TIMED_OUT }
+  const relay = await relayOf(dir, new FakeRotationSession('advisor', 'codex', ['Do it.', 'DONE']), [impl])
+  t.after(() => relay.stop())
+
+  const run = relay.start('Keep the work moving.')
+  const pause = await run.untilPause()
+  assert.ok(pause)
+
+  impl.lateSignal(TIMED_OUT)
+  await until('the pause to be marked superseded', () => pause.superseded?.verdict)
+  assert.match(pause.superseded!.note, /still running/)
+
+  // Given time to resume, if it were going to.
+  await new Promise((r) => setTimeout(r, 200))
+  assert.equal(run.state, 'paused', 'the same decision still faces the operator')
+  await run.abort()
+})
+
+test('#227 a withdrawal replaced by a terminal verdict still holds the run', async (t) => {
+  // `cancelled` is a real outcome someone should see and decide about. Only `completed`
+  // disproves the premise the pause was raised on -- that the turn might be wedged.
+  const dir = repo(t)
+  const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Stopped.'])
+  impl.endTurn = { index: 1, verdict: TIMED_OUT }
+  const relay = await relayOf(dir, new FakeRotationSession('advisor', 'codex', ['Do it.', 'DONE']), [impl])
+  t.after(() => relay.stop())
+
+  const run = relay.start('Keep the work moving.')
+  const pause = await run.untilPause()
+  assert.ok(pause)
+
+  impl.lateSignal(CANCELLED)
+  await until('the pause to be marked superseded', () => pause.superseded?.verdict)
+  await new Promise((r) => setTimeout(r, 200))
+  assert.equal(run.state, 'paused', 'a terminal verdict is still a decision')
+  await run.abort()
+})
+
+test('#227 the log says the run resumed itself, and that nobody decided it', async (t) => {
+  // The record is the whole mitigation for `run.pause` clearing. A run that resumed without a
+  // human must say so in the place a human reads afterwards, or the pause simply vanishes.
+  const dir = repo(t)
+  const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it, slowly.'])
+  impl.endTurn = { index: 1, verdict: TIMED_OUT }
+  const relay = await relayOf(dir, new FakeRotationSession('advisor', 'codex', ['Do it.', 'DONE']), [impl])
+  t.after(() => relay.stop())
+
+  const run = relay.start('Keep the work moving.')
+  const pause = await run.untilPause()
+  assert.ok(pause)
+  impl.lateSignal(COMPLETED)
+  await until('the run to resume itself', () => (run.state === 'paused' ? undefined : run.state))
+
+  const notes = relay.log.filter((m) => m.kind === 'note').map((m) => m.text)
+  const raised = notes.findIndex((t) => t.startsWith('paused (turn_incomplete)'))
+  const withdrawn = notes.findIndex((t) => /withdrawn/.test(t))
+  const resumed = notes.findIndex((t) => /^resuming:/.test(t))
+  assert.ok(raised >= 0, `the pause is in the log:\n${notes.join('\n')}`)
+  assert.ok(withdrawn > raised, 'the withdrawal follows it')
+  assert.ok(resumed > withdrawn, `and the resume follows that:\n${notes.join('\n')}`)
+  assert.match(notes[resumed]!, /Nobody decided this/, 'said plainly, so it is not read as a human choice')
+  await run.abort()
 })
