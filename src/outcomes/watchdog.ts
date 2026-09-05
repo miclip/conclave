@@ -129,7 +129,17 @@ export const TAIL_INTERVAL_MS = 400
  * Widening is a stopgap, not the fix: it moves the point at which a healthy turn gets a wrong
  * verdict. The fix is to stop ending turns that are working -- either by letting activity
  * evidence veto the verdict, or by making ceilings checkable during a turn so this can default
- * to off. Override with `--turn-timeout <seconds>`, on either front-end. It is a default of THIS clock rather than of the system: the adapters
+ * to off.
+ *
+ * THE FIRST OF THOSE NOW EXISTS (#213): work outstanding at the moment the cap fires pushes it
+ * back, up to `MAX_ACTIVITY_EXTENSIONS`. That changes what this number MEANS, and the change is
+ * not in its favour. It is no longer "how long a turn may run"; it is "how long a turn that has
+ * stopped producing, but not for long enough to be idle, is given before it is called hung".
+ * 135 minutes was chosen for the first reading and is very likely too long for the second.
+ *
+ * Left as it is deliberately, to be decided on evidence rather than argument: the number was
+ * tripled once already on reasoning, and the runs since are what should choose it. What a
+ * reader should NOT do is take 135 as endorsed for the semantics it now has. Override with `--turn-timeout <seconds>`, on either front-end. It is a default of THIS clock rather than of the system: the adapters
  * that run no absolute deadline unless asked never reach it, which is why the terminal record
  * reports each seat's resolved clocks instead of this number.
  *
@@ -170,6 +180,19 @@ export const DEFAULT_WATCHDOG_MS = 135 * 60 * 1000
 export const DEFAULT_IDLE_MS = 12 * 60 * 1000
 
 /**
+ * How many times work in flight may push the absolute cap back before it fires anyway (#213).
+ *
+ * Not unlimited, and the reason is the same one that keeps the cap at all: ceilings are checked
+ * at turn boundaries, so a turn nothing ends is a run nothing ends. Two extensions bound the
+ * worst case at three budgets while removing the false pause from the case that was actually
+ * observed -- a `/goal` turn doing what it was told, killed for doing it.
+ *
+ * Each one is earned separately. The check is made when the cap fires, against work outstanding
+ * AT THAT MOMENT, so a turn that quietly stopped between extensions does not collect them.
+ */
+export const MAX_ACTIVITY_EXTENSIONS = 2
+
+/**
  * Whether this turn has work in flight that it is waiting on rather than producing.
  *
  * TWO SOURCES, one question. A subagent started and not seen to stop (#214), or a tool call
@@ -190,17 +213,31 @@ export class TurnWatchdog<T extends WatchdogTarget> {
   readonly #idleMs: number
   readonly #onUpdate: (target: T, update: VerdictUpdate | undefined) => void
   readonly #timers = new Map<string, NodeJS.Timeout>()
+  /** Extensions granted per turn, so the veto above stays bounded. Cleared with the timer. */
+  readonly #extensions = new Map<string, number>()
   /** Retained so `touch()` can re-arm without the caller passing the target again. */
   readonly #targets = new Map<string, T>()
+
+  /**
+   * Told when activity pushed the cap back, so the run can say so (#213).
+   *
+   * Optional because it is a NOTICE rather than a verdict: an adapter that does not pass one
+   * still gets the veto, and the only thing lost is the operator learning about it while it
+   * happens. A turn silently running three budgets would be the same surprise the veto exists
+   * to remove, one level up.
+   */
+  readonly #onExtend: ((target: T, nth: number, elapsedMs: number) => void) | undefined
 
   constructor(
     ms: number,
     onUpdate: (target: T, update: VerdictUpdate | undefined) => void,
     idleMs: number = DEFAULT_IDLE_MS,
+    onExtend?: (target: T, nth: number, elapsedMs: number) => void,
   ) {
     this.#ms = ms
     this.#idleMs = idleMs
     this.#onUpdate = onUpdate
+    this.#onExtend = onExtend
   }
 
   /** Start the deadline for a turn. Re-arming a key replaces its pending timer. */
@@ -289,6 +326,7 @@ export class TurnWatchdog<T extends WatchdogTarget> {
   }
 
   disarm(key: string): void {
+    this.#extensions.delete(key)
     const t = this.#timers.get(key)
     if (t) {
       clearTimeout(t)
@@ -385,6 +423,33 @@ export class TurnWatchdog<T extends WatchdogTarget> {
 
     if (idlePassed && !workInFlight(target)) {
       this.#onUpdate(target, target.tracker.observeIdle(idleMs / 1000))
+      return
+    }
+
+    // ACTIVITY VETOES THE VERDICT, up to a bound (#213).
+    //
+    // The idle path above already refuses to call a turn silent while work is outstanding. The
+    // absolute path had no equivalent, and that asymmetry is the defect: a turn cannot REACH
+    // this deadline without having produced output inside every idle window, so every turn it
+    // ends was demonstrably working -- and `timed_out` is a claim about a stalled child.
+    //
+    // Observed in session 20260902-205917-10485, the first run where an advisor issued `/goal`:
+    // the seat was told not to stop until a condition held, it did as told, the cap fired at
+    // 2700s, and an unattended run paused asking a human to adjudicate a hang while the
+    // transport reported three descendants working and 189 events since the prompt. The verdict
+    // was withdrawn and replaced with `completed` a moment later, which is the recovery working
+    // and not a reason to have asked.
+    //
+    // BOUNDED, because the ceiling argument survives `/goal` intact: `--max-turns` and
+    // `--max-minutes` are checked at turn boundaries only, so a turn nothing ever stops is a run
+    // no ceiling can end. Each extension requires FRESH evidence at the moment the cap fires --
+    // work outstanding right now, not work seen once -- and there are only so many. A turn that
+    // stops working between extensions is caught by the idle clock in minutes, as it always was.
+    const used = this.#extensions.get(key) ?? 0
+    if (workInFlight(target) && used < MAX_ACTIVITY_EXTENSIONS) {
+      this.#extensions.set(key, used + 1)
+      this.#onExtend?.(target, used + 1, elapsedMs)
+      this.#armIn(key, target, absoluteMs)
       return
     }
 
