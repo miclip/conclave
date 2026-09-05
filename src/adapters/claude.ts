@@ -23,18 +23,7 @@ import { hookTimeoutSeconds } from './hookTimeout.ts'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type {
-  AgentEvent,
-  AgentSession,
-  Guarantees,
-  InputOwnership,
-  Role,
-  SendProvenance,
-  SessionSnapshot,
-  SessionState,
-  TurnKey,
-  TurnRecord,
-} from '../contract/session.ts'
+import type { AgentEvent, AgentSession, Guarantees, InputOwnership, Role, SendProvenance, SessionSnapshot, SessionState, TurnBudget, TurnKey, TurnRecord } from '../contract/session.ts'
 import { guaranteesFor, isChildOutput, turnKey } from '../contract/session.ts'
 import { emptyTranscriptState } from '../outcomes/classify.ts'
 import { TurnVerdictTracker, type VerdictUpdate } from '../outcomes/tracker.ts'
@@ -870,6 +859,15 @@ export class ClaudePtyHookAdapter implements AgentSession {
    * the record it contradicts.
    */
   readonly #reconfigured: Array<{ from: string; to: string; at: number }> = []
+  /**
+   * A larger absolute budget requested for the turn now being sent (#193).
+   *
+   * Held between `send()` and the turn's creation because those are not the same moment on this
+   * adapter: the turn state is built when `UserPromptSubmit` comes back, which is the only point
+   * the child's own key is known. Cleared as it is consumed, so a request never outlives the one
+   * turn it was made for -- that is what makes it a request rather than an exemption.
+   */
+  #pendingBudget: TurnBudget | undefined
   #runDir: string | undefined
   /**
    * Set when the operator has been told to inspect the attempts journal, which lives in
@@ -1305,7 +1303,11 @@ export class ClaudePtyHookAdapter implements AgentSession {
             sentCancel: false,
             inputIsMediated: this.guarantees.inputOwnership === 'mediated',
           },
-          watchdogSeconds: (this.#opts.watchdogMs ?? DEFAULT_WATCHDOG_MS) / 1000,
+          // THE BUDGET THAT WILL ACTUALLY FIRE (#193), so the deadline and the number the
+          // verdict quotes are the same. A turn granted more, reported against the run default,
+          // would send a reader to the wrong clock.
+          watchdogSeconds:
+            (this.#pendingBudget?.absoluteMs ?? this.#opts.watchdogMs ?? DEFAULT_WATCHDOG_MS) / 1000,
           // What this child was started with, so a deadline that fires on a turn which never
           // produced anything can name the model as a candidate cause (#82). `#order` is empty
           // for exactly one turn per session, which is the only turn the launch is a suspect on.
@@ -1323,7 +1325,9 @@ export class ClaudePtyHookAdapter implements AgentSession {
           childClosure: undefined,
           subagents: new TurnSubagents(),
           tools: new TurnTools(),
+          ...(this.#pendingBudget === undefined ? {} : { absoluteMs: this.#pendingBudget.absoluteMs }),
         }
+        this.#pendingBudget = undefined
         if (this.#producedBeforeTurn) {
           this.#producedBeforeTurn = false
           turn.produced = true
@@ -1943,12 +1947,14 @@ export class ClaudePtyHookAdapter implements AgentSession {
     await this.#input.submit(text, detail ?? `raw command: ${text.slice(0, 80)}`)
   }
 
-  async send(message: string, _provenance: SendProvenance): Promise<TurnKey> {
+  async send(message: string, _provenance: SendProvenance, budget?: TurnBudget): Promise<TurnKey> {
     if (this.#state !== 'running') {
       throw new Error(`session is ${this.#state}; it is not accepting work`)
     }
     if (!this.acceptsInput) throw new Error('session is not accepting input')
     this.#refuseOverlappingSend()
+    // Held for the turn this send is about to open; see `#pendingBudget`.
+    this.#pendingBudget = budget
 
     // ONE claim, held across both attempts. See `PROMPT_SEND_ATTEMPTS`: the window between a
     // corrupted prompt and its re-send is exactly when a second caller could type into the

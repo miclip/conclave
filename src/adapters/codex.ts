@@ -30,18 +30,7 @@ import { TurnTools } from './claude.ts'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type {
-  AgentEvent,
-  AgentSession,
-  Guarantees,
-  InputOwnership,
-  Role,
-  SendProvenance,
-  SessionSnapshot,
-  SessionState,
-  TurnKey,
-  TurnRecord,
-} from '../contract/session.ts'
+import type { AgentEvent, AgentSession, Guarantees, InputOwnership, Role, SendProvenance, SessionSnapshot, SessionState, TurnBudget, TurnKey, TurnRecord } from '../contract/session.ts'
 import { guaranteesFor, isChildOutput, turnKey } from '../contract/session.ts'
 import { emptyTranscriptState } from '../outcomes/classify.ts'
 import { TurnVerdictTracker, type VerdictUpdate } from '../outcomes/tracker.ts'
@@ -653,7 +642,9 @@ export class CodexPtyHookAdapter implements AgentSession {
         sentCancel: false,
         inputIsMediated: this.guarantees.inputOwnership === 'mediated',
       },
-      watchdogSeconds: (this.#opts.watchdogMs ?? DEFAULT_WATCHDOG_MS) / 1000,
+      // The budget that will actually fire (#193): a turn granted more must not be reported
+      // against the run default.
+      watchdogSeconds: (this.#pendingBudget?.absoluteMs ?? this.#opts.watchdogMs ?? DEFAULT_WATCHDOG_MS) / 1000,
       // What this child was started with, so a deadline that fires on a turn which never
       // produced anything can name the model as a candidate cause (#82). `#order` is empty for
       // exactly one turn per session, which is the only turn the launch is a suspect on.
@@ -698,6 +689,9 @@ export class CodexPtyHookAdapter implements AgentSession {
           endSeq: undefined,
           assistantText: undefined,
           tools: new TurnTools(),
+          // The turn's own absolute budget, when the caller asked for one (#193). Per turn, so
+          // it is gone when this turn ends and cannot widen the seat's clocks for the run.
+          ...(this.#pendingBudget === undefined ? {} : { absoluteMs: this.#pendingBudget.absoluteMs }),
           produced: false,
           childClosure: undefined,
         }
@@ -709,6 +703,7 @@ export class CodexPtyHookAdapter implements AgentSession {
         this.#turns.set(String(key), turn)
         this.#order.push(String(key))
         // The child is now working on this. Nothing but an observed stop closes it again.
+        this.#pendingBudget = undefined
         this.#openTurnKey = String(key)
         this.#watchdog.arm(String(key), turn)
         // A turn is running: tail the transcript so its narration and tool use exist while
@@ -1264,7 +1259,9 @@ export class CodexPtyHookAdapter implements AgentSession {
     await this.#input.submit(text, detail ?? `raw command: ${text.slice(0, 80)}`)
   }
 
-  async send(message: string, _provenance: SendProvenance): Promise<TurnKey> {
+  async send(message: string, _provenance: SendProvenance, budget?: TurnBudget): Promise<TurnKey> {
+    // Held for the turn this send is about to open; see `#pendingBudget`.
+    this.#pendingBudget = budget
     if (this.#state !== 'running') {
       throw new Error(`session is ${this.#state}; it is not accepting work`)
     }
@@ -1702,6 +1699,14 @@ export class CodexPtyHookAdapter implements AgentSession {
    */
   #attemptJournal = ''
   /** The per-session scratch directory, kept so it can be given back (#203). */
+  /**
+   * A larger absolute budget requested for the turn now being sent (#193).
+   *
+   * Held between `send()` and the turn's creation, because the turn state is built when the
+   * child's own `UserPromptSubmit` comes back rather than when the text is typed. Cleared as it
+   * is consumed, so a request never outlives the one turn it was made for.
+   */
+  #pendingBudget: TurnBudget | undefined
   #runDir: string | undefined
   /**
    * Set when the operator has been told to inspect the attempts journal, which lives in

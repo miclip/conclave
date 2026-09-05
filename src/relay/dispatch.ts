@@ -107,6 +107,14 @@ export interface Task {
    */
   readonly purpose: TaskPurpose
   /**
+   * A larger absolute budget the advisor asked for, in minutes (#193).
+   *
+   * On the TASK because that is what carries an assignment from the reply that made it to the
+   * seat that takes it, and the request belongs to one assignment. Absent for every task that
+   * did not ask, which is the ordinary case and leaves the run's clocks exactly as configured.
+   */
+  readonly budgetMin?: number
+  /**
    * The task this one is FOR, for `review` and `review_resolution` purposes only. Unset for
    * `work` and `merge_resolution`.
    *
@@ -567,7 +575,18 @@ export function refuseDispatch(
  * this replaced matched them, because a reply that ended a run yesterday must end one today.
  */
 export type Decision =
-  | { kind: 'instruct'; instruction: string; target: TaskTarget }
+  | {
+      kind: 'instruct'
+      instruction: string
+      target: TaskTarget
+      /**
+       * A larger absolute budget the advisor asked for, in minutes (#193).
+       *
+       * Written `@seat implementer +90m: ...`. Absent is the identity and the ordinary case; the
+       * run's own clocks are unchanged for every turn that does not ask.
+       */
+      budgetMin?: number
+    }
   | { kind: 'done'; instruction: string }
   | { kind: 'escalate'; instruction: string }
 
@@ -578,6 +597,9 @@ export type Decision =
  * uses `@seat`/`@role` at all is held to it completely, because a reply that is half addressed
  * and half not is exactly the ambiguity a parser must not resolve on its own.
  *
+ *   - `budget_out_of_range` — `+Nm` outside 1..MAX_TURN_BUDGET_MIN. Refused rather than clamped:
+ *     granting a number nobody asked for would let the advisor believe it had more time than it
+ *     has, which is the same class of falsehood as a report naming a model the seat is not on.
  *   - `unknown_target` — a seat id or role the run does not have. A hallucinated seat id that
  *     silently created capacity would be a scheduling decision nobody made.
  *   - `stray_prose` — text outside every directive. It is an instruction with no target, and
@@ -588,7 +610,7 @@ export type Decision =
  *     assigning work are different decisions and a reply cannot be both.
  */
 export type ParseFailure = {
-  why: 'empty' | 'unknown_target' | 'stray_prose' | 'empty_instruction' | 'mixed_keyword'
+  why: 'empty' | 'unknown_target' | 'stray_prose' | 'empty_instruction' | 'mixed_keyword' | 'budget_out_of_range'
   detail: string
 }
 
@@ -655,7 +677,20 @@ export type ParseResult = { ok: true; form: DecisionForm; decisions: Decision[] 
  * console's `@advisor` / `@implementer` asides -- so the advisor is not learning a second
  * convention for the same idea.
  */
-const DIRECTIVE = /^@(seat|role)[ \t]+([^\s:]+)[ \t]*:[ \t]*(.*)$/
+const DIRECTIVE = /^@(seat|role)[ \t]+([^\s:]+)(?:[ \t]+\+(\d+)m)?[ \t]*:[ \t]*(.*)$/
+
+/**
+ * The largest turn an advisor may ask for, in minutes (#193).
+ *
+ * A bound rather than a free hand, because the point of the per-turn budget is that it is a
+ * REQUEST: a seat that could name any number would have exempted itself from the clock, and the
+ * absolute deadline is the only thing that bounds what a run waits for -- ceilings are checked
+ * between turns, so a turn nothing ends is a run nothing ends.
+ *
+ * Four hours is roughly twice the current default and far past any turn observed here; the
+ * number is a ceiling on a mistake rather than a target.
+ */
+export const MAX_TURN_BUDGET_MIN = 240
 
 /** DONE and ESCALATE, matched the way the whole-reply forms are, for the mixed-form refusal. */
 const KEYWORD_LINE = /^(DONE|ESCALATE)\b/i
@@ -780,11 +815,17 @@ export function parseDecisions(
   }
 
   /** One directive and its body, before either has been validated. */
-  const blocks: { kind: string; name: string; body: string[] }[] = []
+  const blocks: { kind: string; name: string; budgetMin?: number; body: string[] }[] = []
   for (const line of lines.slice(first)) {
     const m = DIRECTIVE.exec(line)
     if (m) {
-      blocks.push({ kind: m[1]!, name: m[2]!, body: m[3]! === '' ? [] : [m[3]!] })
+      blocks.push({
+        kind: m[1]!,
+        name: m[2]!,
+        // `+90m` between the seat and the colon: a request for a larger turn (#193).
+        ...(m[3] === undefined ? {} : { budgetMin: Number(m[3]) }),
+        body: m[4]! === '' ? [] : [m[4]!],
+      })
       continue
     }
     blocks.at(-1)!.body.push(line)
@@ -819,7 +860,25 @@ export function parseDecisions(
           target.kind === 'seat' ? `no seat named ${target.seat}` : `no seat fills the role ${target.role}`,
       }
     }
-    decisions.push({ kind: 'instruct', instruction: body, target })
+    // A budget larger than the ceiling is REFUSED rather than clamped (#193). Clamping would
+    // grant a number nobody asked for and let the advisor believe it had more time than it has,
+    // which is the same class of falsehood as a report naming a model the seat is not running.
+    if (block.budgetMin !== undefined && (block.budgetMin < 1 || block.budgetMin > MAX_TURN_BUDGET_MIN)) {
+      return {
+        ok: false,
+        form: 'addressed',
+        named,
+        why: 'budget_out_of_range',
+        detail:
+          `@${block.kind} ${block.name} asked for +${block.budgetMin}m; the range is 1..${MAX_TURN_BUDGET_MIN}`,
+      }
+    }
+    decisions.push({
+      kind: 'instruct',
+      instruction: body,
+      target,
+      ...(block.budgetMin === undefined ? {} : { budgetMin: block.budgetMin }),
+    })
   }
   return { ok: true, form: 'addressed', decisions }
 }

@@ -73,6 +73,25 @@ export interface WatchdogTarget {
    * every time.
    */
   tools?: { readonly outstanding: number }
+  /**
+   * This turn's own absolute budget, when one was granted (#193).
+   *
+   * The clocks are otherwise the policy a seat is under for the WHOLE run -- `deadlines.ts` says
+   * so outright -- which is right for a run of comparable turns and wrong the moment one is
+   * deliberately larger. An advisor delegating a bounded chunk of work rather than a single step
+   * had no way to say "this one is big", and the operator's only lever was raising the clock for
+   * every turn, which gives up the instrument everywhere to accommodate a few.
+   *
+   * PER TURN AND NOT PER SEAT, which is what keeps it a request rather than an exemption: it is
+   * set when the turn is armed and gone when the turn ends, so a seat cannot quietly widen its
+   * own clocks for the rest of the run.
+   *
+   * Absent is the identity. The silence clock is untouched by this and needs to be: #193's own
+   * second candidate was "progress as a silence reset", and that already exists -- `workInFlight`
+   * suspends the idle deadline while a tool call or a subagent is outstanding, so a long turn
+   * that keeps working never trips it. What was left is the absolute cap alone.
+   */
+  absoluteMs?: number | undefined
   tracker: TurnVerdictTracker
 }
 
@@ -252,7 +271,14 @@ export class TurnWatchdog<T extends WatchdogTarget> {
    */
   #nextDelay(target: T): number {
     const now = Date.now()
-    const absolute = this.#ms - (now - target.startedAt)
+    // The turn's own budget when it has one (#193). SCHEDULING, not correctness: `#fire`
+    // re-checks the same number, so a version of this line that ignored `absoluteMs` still
+    // produces the right verdict -- it just wakes at the run default, finds the deadline has
+    // not passed, and re-arms on a remainder that is already negative, which is a 1 ms timer
+    // loop for the length of the extra budget. A mutation removing it from here failed no test
+    // for exactly that reason, and the note is here rather than a test because the observable
+    // behaviour is identical and only the wakeup count differs.
+    const absolute = (target.absoluteMs ?? this.#ms) - (now - target.startedAt)
     // #214: no idle deadline to wake for while a subagent is outstanding. Waking anyway would
     // be harmless -- `#fire` refuses to report idle for the same reason -- but it would arm a
     // timer per idle budget for the length of the delegation, and the honest spelling of "this
@@ -316,7 +342,10 @@ export class TurnWatchdog<T extends WatchdogTarget> {
     // this module's header describes, reintroduced by the fix for it, and it reproduced only
     // on Linux where timers ran early.
     const idlePassed = idleMs >= this.#idleMs
-    const absolutePassed = elapsedMs > this.#ms
+    // The turn's own budget when it was granted one (#193), so the deadline that fires and the
+    // duration the verdict quotes are the same number.
+    const absoluteMs = target.absoluteMs ?? this.#ms
+    const absolutePassed = elapsedMs > absoluteMs
 
     if (!idlePassed && !absolutePassed) {
       // Fired early against BOTH. Wait out whichever remains nearer, rather than reporting a
@@ -350,7 +379,7 @@ export class TurnWatchdog<T extends WatchdogTarget> {
     // delegating turn that has ALSO outrun the absolute cap falls through to `observeElapsed`
     // below, which is the correct diagnosis anyway: what caught it was the cap, not the quiet.
     if (idlePassed && !absolutePassed && workInFlight(target)) {
-      this.#armIn(key, target, Math.max(1, this.#ms - elapsedMs))
+      this.#armIn(key, target, Math.max(1, absoluteMs - elapsedMs))
       return
     }
 

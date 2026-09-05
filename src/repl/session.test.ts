@@ -4517,7 +4517,7 @@ test('a participant-scoped pause samples that seat and no other, at every reason
   assert.deepEqual(sampled(pauseFor({ reason: 'rotation_candidate', participant: 'implementer-2' })), ['implementer-2'])
   assert.deepEqual(sampled(pauseFor({ reason: 'implementer_unanswered', participant: 'implementer-2' })), ['implementer-2'])
   // The ADVISOR is a participant like any other, and its own bad turn pauses the run
-  // (src/relay/relay.ts:7542). A rank scan for implementers sampled the wrong child here too.
+  // (src/relay/relay.ts:7567). A rank scan for implementers sampled the wrong child here too.
   assert.deepEqual(
     sampled(pauseFor({ reason: 'turn_incomplete', participant: 'advisor' }, { participant: 'advisor', endSeq: 2 })),
     ['advisor'],
@@ -4526,13 +4526,13 @@ test('a participant-scoped pause samples that seat and no other, at every reason
 
 test('a conclave- or workstream-scoped pause samples nobody, with no fall back to rank', () => {
   // Both conclave-scoped reasons. Resuming an `advisor_escalated` pause sends to the ADVISOR
-  // (src/relay/relay.ts:7681), so measuring implementer children was never the question; and
+  // (src/relay/relay.ts:7706), so measuring implementer children was never the question; and
   // `operator_requested` is consumed at an advisor-turn boundary that states no turn is in
   // flight. Neither has anything for this guard to sample.
   assert.deepEqual(sampled(pauseFor({ reason: 'advisor_escalated' })), [])
   assert.deepEqual(sampled(pauseFor({ reason: 'operator_requested' })), [])
   // Workstream scope, and the id deliberately COLLIDES with a seat id -- at N=1 the workstream
-  // is named after the seat carrying the instruction (src/relay/relay.ts:7848), which is exactly
+  // is named after the seat carrying the instruction (src/relay/relay.ts:7873), which is exactly
   // the coincidence a guard could read as "so sample that seat". A workstream is not a seat.
   assert.deepEqual(sampled(pauseFor({ reason: 'authority_conflict', workstream: 'implementer' })), [])
 })
@@ -4548,7 +4548,7 @@ test('a scope naming a seat that is gone samples nobody rather than falling back
 test('a rotation_candidate pause on one seat resumes while the OTHER seat is genuinely mid-turn', async (t) => {
   // The production shape of the N>1 case the rank scan got wrong, and the reason it has to be
   // this shape: `rotation_candidate` carries NO `verdictOf` -- that field is set at two halt
-  // sites, both turn_incomplete (src/relay/relay.ts:7546, src/relay/relay.ts:8100) -- so under
+  // sites, both turn_incomplete (src/relay/relay.ts:7571, src/relay/relay.ts:8125) -- so under
   // the old expression this pause fell through to the rank scan and sampled EVERY implementer.
   // A simpler `turn_incomplete` fixture cannot show that: it populates the field, takes the
   // named-seat branch, and passes against the code being replaced.
@@ -4600,7 +4600,7 @@ test('a rotation_candidate pause on one seat resumes while the OTHER seat is gen
     ],
     rounds: 6,
     // ARMS ROTATION, which is what makes degradation a pause instead of an ended run
-    // (src/relay/relay.ts:5201). A command that exits 0 immediately: what the checks DO is
+    // (src/relay/relay.ts:5223). A command that exits 0 immediately: what the checks DO is
     // not what this test is about, only that a replacement would have something to reproduce.
     checks: ['true'],
     registry: registryOf({

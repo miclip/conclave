@@ -30,24 +30,7 @@ import { AgentRegistry } from '../registry/registry.ts'
 import { NO_DEADLINE_CLOCKS } from '../registry/types.ts'
 import { FakeRotationSession } from '../rotation/fakeSession.ts'
 import { tempDir } from '../testkit/tempDir.ts'
-import {
-  canTake,
-  cancelledByFailedDependencies,
-  dependenciesMet,
-  isFree,
-  nextDispatch,
-  parseDecisions,
-  recordCompletion,
-  refuseDispatch,
-  routedSuccessfully,
-  seatFor,
-  type SeatExecution,
-  type Task,
-  type TaskEvent,
-  type TaskGrade,
-  type TaskRuntime,
-  type TaskTarget,
-} from './dispatch.ts'
+import { MAX_TURN_BUDGET_MIN, canTake, cancelledByFailedDependencies, dependenciesMet, isFree, nextDispatch, parseDecisions, recordCompletion, refuseDispatch, routedSuccessfully, seatFor, type SeatExecution, type Task, type TaskEvent, type TaskGrade, type TaskRuntime, type TaskTarget } from './dispatch.ts'
 import { InvariantViolatedError, Relay, type RelayOptions } from './relay.ts'
 
 function repo(t: TestContext): string {
@@ -1094,4 +1077,61 @@ test('a queue scan sends the repair to the blocked seat and ordinary work to its
   const second = nextDispatch([impostor, repair, ordinary], runtime, seats)
   assert.equal(second?.task.id, 't-2')
   assert.equal(second?.seat.seat, 'impl-b')
+})
+
+test('#193 an advisor can ask for a larger turn, and the request rides the task', () => {
+  // `deadlines.ts` states the ordinary rule: the clocks are the policy a seat is under for the
+  // WHOLE run. An advisor delegating a deliberately larger chunk had no way to say "this one is
+  // big", and the operator's only lever was raising the clock for every turn -- which gives up
+  // the instrument everywhere to accommodate a few.
+  //
+  // Spelled on the directive that already addresses the seat, so the advisor is not learning a
+  // second convention for the same idea.
+  const r = parseDecisions('@seat implementer +90m: Rewrite the parser and its tests.', [seat()], { kind: 'role', role: 'implementer' })
+  assert.ok(r.ok)
+  assert.equal(r.decisions.length, 1)
+  const d = r.decisions[0]!
+  assert.equal(d.kind, 'instruct')
+  assert.equal(d.kind === 'instruct' ? d.budgetMin : undefined, 90)
+  assert.equal(d.kind === 'instruct' ? d.instruction : '', 'Rewrite the parser and its tests.')
+})
+
+test('#193 a directive without a budget is unchanged, body and all', () => {
+  // The ordinary case has to stay exactly as it was: the optional group must not eat any part of
+  // a normal instruction.
+  const r = parseDecisions('@seat implementer: Do the ordinary thing.', [seat()], { kind: 'role', role: 'implementer' })
+  assert.ok(r.ok)
+  const d = r.decisions[0]!
+  assert.equal(d.kind === 'instruct' ? d.budgetMin : 'set', undefined)
+  assert.equal(d.kind === 'instruct' ? d.instruction : '', 'Do the ordinary thing.')
+})
+
+test('#193 a budget past the ceiling is refused, not clamped', () => {
+  // Clamping would grant a number nobody asked for and let the advisor believe it had more time
+  // than it has -- the same class of falsehood as a report naming a model the seat is not on.
+  const r = parseDecisions(`@seat implementer +${MAX_TURN_BUDGET_MIN + 1}m: Too much.`, [seat()], { kind: 'role', role: 'implementer' })
+  assert.equal(r.ok, false)
+  assert.equal(r.ok === false ? r.why : '', 'budget_out_of_range')
+  assert.match(r.ok === false ? r.detail : '', new RegExp(String(MAX_TURN_BUDGET_MIN)))
+})
+
+test('#193 a zero budget is refused too', () => {
+  // `+0m` is not "no budget", it is a request for a turn that cannot finish. Refusing says so
+  // rather than arming a clock that fires immediately.
+  const r = parseDecisions('@seat implementer +0m: Nothing.', [seat()], { kind: 'role', role: 'implementer' })
+  assert.equal(r.ok, false)
+  assert.equal(r.ok === false ? r.why : '', 'budget_out_of_range')
+})
+
+test('#193 the budget belongs to one directive, not to the reply', () => {
+  // Two seats, one asking for more. A request that leaked to its neighbour would widen a clock
+  // nobody asked to widen.
+  const r = parseDecisions(
+    ['@seat implementer +30m: The big one.', '@seat implementer-2: The ordinary one.'].join('\n'),
+    [seat(), seat({ seat: 'implementer-2' })],
+    { kind: 'role', role: 'implementer' },
+  )
+  assert.ok(r.ok)
+  assert.equal(r.decisions[0]!.kind === 'instruct' ? r.decisions[0]!.budgetMin : undefined, 30)
+  assert.equal(r.decisions[1]!.kind === 'instruct' ? r.decisions[1]!.budgetMin : 'set', undefined)
 })
