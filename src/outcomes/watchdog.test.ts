@@ -19,7 +19,7 @@ import { strict as assert } from 'node:assert'
 import test from 'node:test'
 import type { VerdictUpdate } from './tracker.ts'
 import { TurnVerdictTracker } from './tracker.ts'
-import { TurnWatchdog, type WatchdogTarget } from './watchdog.ts'
+import { MAX_ACTIVITY_EXTENSIONS, TurnWatchdog, type WatchdogTarget } from './watchdog.ts'
 
 const MS = 40
 
@@ -576,5 +576,87 @@ test('#193 the verdict quotes the budget that actually fired', async () => {
   await new Promise((r) => setTimeout(r, 2_400))
   const detail = JSON.stringify(updates)
   assert.match(detail, /2s > 2s/, `the granted budget, not the 0.2s run default: ${detail}`)
+  w.disarm(turn.key)
+})
+
+test('#213 a turn still working at the cap is not called timed_out', async () => {
+  // The observed failure, in session 20260902-205917-10485: an advisor issued `/goal`, the seat
+  // was told not to stop until a condition held, it did as told, and the cap fired at 2700s.
+  // An unattended run paused asking a human whether the turn was hung -- while the transport
+  // reported three descendants working and 189 events since the prompt.
+  //
+  // A turn cannot REACH this deadline without having produced output inside every idle window,
+  // so every turn it ends was demonstrably working, and `timed_out` is a claim about a stalled
+  // child. The idle path already refuses to call a turn silent while work is outstanding; this
+  // is the same refusal on the absolute path.
+  const turn = turnAt(Date.now())
+  turn.tools = { outstanding: 1 }
+  const { updates, onUpdate } = collector()
+  const w = new TurnWatchdog<Turn>(MS, onUpdate, MS * 100)
+  w.arm(turn.key, turn)
+  // Past the first cap and inside the first extension. Waiting longer would walk through every
+  // extension and reach the bound, which is the NEXT test's claim rather than this one's -- an
+  // earlier version of this test did exactly that and failed against correct code.
+  await new Promise((r) => setTimeout(r, MS * 1.5))
+  assert.deepEqual(updates, [], 'work in flight vetoes the verdict the cap would have given')
+  w.disarm(turn.key)
+})
+
+test('#213 the veto is bounded, so a turn nothing stops still ends', async () => {
+  // The ceiling argument survives `/goal` intact and is why this is not simply "raise it":
+  // `--max-turns` and `--max-minutes` are checked at turn boundaries only, so a turn nothing
+  // ever ends is a run no ceiling can end. Two extensions, then the cap fires anyway.
+  const turn = turnAt(Date.now())
+  turn.tools = { outstanding: 1 }
+  const { updates, onUpdate } = collector()
+  const w = new TurnWatchdog<Turn>(MS, onUpdate, MS * 100)
+  w.arm(turn.key, turn)
+  // Past three budgets: the original plus MAX_ACTIVITY_EXTENSIONS.
+  await new Promise((r) => setTimeout(r, MS * (MAX_ACTIVITY_EXTENSIONS + 2) * 2))
+  assert.equal(updates.length, 1, `it ends after ${MAX_ACTIVITY_EXTENSIONS} extensions`)
+  w.disarm(turn.key)
+})
+
+test('#213 a turn with nothing outstanding is unchanged at the cap', async () => {
+  // The veto must be earned. A turn that reached the cap with no work in flight is the case the
+  // cap was written for, and it is graded exactly as before.
+  const turn = turnAt(Date.now())
+  const { updates, onUpdate } = collector()
+  const w = new TurnWatchdog<Turn>(MS, onUpdate, MS * 100)
+  w.arm(turn.key, turn)
+  await new Promise((r) => setTimeout(r, MS * 4))
+  assert.equal(updates.length, 1, 'no evidence, no veto')
+  w.disarm(turn.key)
+})
+
+test('#213 each extension is earned separately, on evidence at the moment the cap fires', async () => {
+  // A turn that quietly stopped between extensions must not collect the rest of them. The check
+  // is made when the cap fires, against work outstanding AT THAT MOMENT.
+  const turn = turnAt(Date.now())
+  turn.tools = { outstanding: 1 }
+  const { updates, onUpdate } = collector()
+  const w = new TurnWatchdog<Turn>(MS, onUpdate, MS * 100)
+  w.arm(turn.key, turn)
+  await new Promise((r) => setTimeout(r, MS * 2))
+  // The command returned; nothing is outstanding any more.
+  turn.tools = { outstanding: 0 }
+  await new Promise((r) => setTimeout(r, MS * 4))
+  assert.equal(updates.length, 1, 'the next cap finds no evidence and ends the turn')
+  w.disarm(turn.key)
+})
+
+test('#213 the run is told when activity pushed the cap back', async () => {
+  // A turn silently running three budgets would be the same surprise the veto exists to remove,
+  // one level up. The notice is optional for an adapter and the veto works without it; what is
+  // not acceptable is the veto happening with nothing able to say so.
+  const turn = turnAt(Date.now())
+  turn.tools = { outstanding: 1 }
+  const extended: number[] = []
+  const { onUpdate } = collector()
+  const w = new TurnWatchdog<Turn>(MS, onUpdate, MS * 100, (_t, nth) => extended.push(nth))
+  w.arm(turn.key, turn)
+  // The first extension only; see the timing note above.
+  await new Promise((r) => setTimeout(r, MS * 1.5))
+  assert.deepEqual(extended, [1], 'the first extension is announced, with its number')
   w.disarm(turn.key)
 })
