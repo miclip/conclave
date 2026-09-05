@@ -58,6 +58,7 @@ import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
 import { suiteTempDir } from '../testkit/tempDir.ts'
+import { waitFor } from '../testkit/waitFor.ts'
 import { envelope } from '../relay/message.ts'
 import { chunkForPty, InputQueue } from './input.ts'
 import { PtyProcess } from './pty.ts'
@@ -187,6 +188,20 @@ if (Number(readAfterMs) > 0) setTimeout(start, Number(readAfterMs))
 else start()
 setTimeout(() => process.exit(0), 60000)
 `
+
+/**
+ * The stall the hazard test builds: long enough that the write completes into a tty nobody is
+ * draining, which is the condition being measured.
+ */
+const STALL_MS = 1500
+/**
+ * The bound on "the child got there", NOT a margin over `STALL_MS` (#197). It is the point past
+ * which a runner is not slow but broken, and it is deliberately far from the stall so that load
+ * cannot reach it -- the same 10s already allowed for a child to announce READY.
+ */
+const FIRST_BYTE_MS = 10_000
+/** Drain allowance once reading has been OBSERVED to start. See the note at its use. */
+const DRAIN_MS = 300
 
 const dir = suiteTempDir('conclave-174')
 const recorderPath = join(dir, 'recorder.mjs')
@@ -592,13 +607,35 @@ test('#174 hazard: what a stalled child keeps of a chunked submit', async (t) =>
   // linux 4096 B, in the same run. Reported, not asserted.
   const text = payload(8192)
   const framed = PASTE_START.length + text.length + PASTE_END.length + 1
-  const { pty, read } = await spawnChild(recorderPath, { readAfterMs: 1500 })
+  const { pty, read } = await spawnChild(recorderPath, { readAfterMs: STALL_MS })
   try {
     await new InputQueue(pty).submit(text)
-    await settle(1800)
+    // WAIT FOR THE CHILD TO HAVE READ, RATHER THAN ASSUME IT HAS BY NOW (#197).
+    //
+    // A fixed `settle(1800)` stood here against a child that starts reading at 1500ms: a 300ms
+    // margin for another process's timer to fire, for it to be scheduled, and for its bytes to
+    // reach the file. `ubuntu-latest` failed it once and passed the rerun of the same commit,
+    // and the message it failed with -- `nothing arrived at all from a 8205 B write` -- reads as
+    // a finding about the transport when it is this test failing to reach its own preconditions.
+    // #178 was the same defect and was fixed by widening the same margin; widening it a third
+    // time would pick the number by guess again.
+    //
+    // The two outcomes this must not conflate:
+    //   the child read, and what survived is now measurable -- the actual subject
+    //   the child never read, which is a starved runner and says nothing about chunked writes
+    await waitFor(() => read().length > 0, {
+      within: FIRST_BYTE_MS,
+      describe: `the stalled child (reading from ${STALL_MS}ms) to receive any byte of the submit`,
+    })
+    // A clock again, but not the same bet. What is being waited on here is a drain of bytes the
+    // tty is ALREADY holding for a child that is ALREADY reading -- work measured in ms on any
+    // machine -- not the arrival of a timer in another process. Its failure mode is a smaller
+    // number in the diagnostic below, which is reported rather than asserted, and never the
+    // assertion failure that made this test flake.
+    await settle(DRAIN_MS)
     const kept = read().length
     t.diagnostic(
-      `a child that read nothing for 1.5 s on ${THIS_PLATFORM} kept ${kept} B of a ${framed} B framed submit`,
+      `a child that read nothing for ${STALL_MS / 1000} s on ${THIS_PLATFORM} kept ${kept} B of a ${framed} B framed submit`,
     )
     assertNothingInvented(framed, kept, 'a stalled child')
   } finally {
