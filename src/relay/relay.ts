@@ -30,7 +30,7 @@ import {
 import { narrowCapabilities, narrowPolicy, type OperatorDenials } from '../registry/operatorDenied.ts'
 import type { CommandPolicy, InstructionCapabilities } from '../registry/types.ts'
 import { launchRecordFor, type ParticipantLaunch } from '../registry/launch.ts'
-import { refuseMissingCommands } from '../registry/executables.ts'
+import { commandDependsOnCwd, refuseMissingCommands } from '../registry/executables.ts'
 import { refuseUnknownModels } from '../registry/models.ts'
 import { ruleOnCommand } from '../registry/commandPolicy.ts'
 import type { ParticipantSpec } from '../registry/types.ts'
@@ -2151,7 +2151,23 @@ export class Relay {
         // and steers; it is not one of the writers this isolates from each other.
         const tree = relay.#worktrees?.seats.find((s) => s.seatId === spec.id)
         if (tree) ensureWorktreeHookTrigger(tree)
-        await relay.#join(spec, 'implementer', tree ? seatCwd(tree) : opts.cwd)
+        const cwd = tree ? seatCwd(tree) : opts.cwd
+        // CHECKED AGAIN, HERE, and only for the seats the first check could not answer for
+        // (#194). The preflight above runs against the run root because it must: a seat's
+        // worktree does not exist until a few lines ago, and the placement of that check --
+        // before hooks, trust and the routed goal -- is what #51 is for.
+        //
+        // A relative command that names a path is the one case where those two directories
+        // disagree. A worktree is cut from a COMMIT, so a tracked `./bin/agent` exists in both
+        // and the first check accidentally agrees with exec; an untracked or gitignored one -- a
+        // locally built wrapper, a shim in `./tools/` -- exists in the integration root and not
+        // in the fresh worktree. Preflight passed and the child died at launch, which is exactly
+        // the state #51 exists to prevent.
+        const resolved = opts.registry.resolve(spec)
+        if (tree && commandDependsOnCwd(resolved.agent.launch.command)) {
+          refuseMissingCommands([{ participant: spec.id, agent: resolved.agent, cwd }])
+        }
+        await relay.#join(spec, 'implementer', cwd)
       }
       // The reviewer, if declared (#72). Rank `implementer` -- D5's job/authority split is
       // exactly what makes this legal: identical authority to the seats above, a different

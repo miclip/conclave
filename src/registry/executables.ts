@@ -63,10 +63,32 @@ export interface CommandSelection {
   /**
    * The directory a RELATIVE command is resolved against.
    *
-   * The seat's own cwd, which is the directory the adapter will spawn in -- so `./bin/agent`
-   * means the same thing here as it will mean at exec time.
+   * WHATEVER THE CALLER PASSES, and that is the honest statement of it (#194). This used to
+   * claim "the seat's own cwd, which is the directory the adapter will spawn in", which was a
+   * guarantee about another module's behaviour that the caller did not provide: the relay
+   * preflights every seat against the run root because a worktree-hosted seat's directory does
+   * not exist yet at that point, so at N>1 a relative command was resolved here against one
+   * directory and at exec time against another.
+   *
+   * The relay closes that by checking such a seat AGAIN once its worktree exists -- see
+   * `commandDependsOnCwd`, which is what tells it which commands the second check is for.
    */
   cwd: string
+}
+
+/**
+ * Does resolving this command depend on which directory it is resolved from? (#194)
+ *
+ * True only for a command that names a path and is not absolute. An absolute path means the same
+ * thing everywhere, and a bare name is searched on PATH rather than against a directory -- so
+ * neither can be checked in one place and executed in another with a different answer.
+ *
+ * The rules are `resolveCommand`'s own, not a second reading of them: a command containing a
+ * separator is a PATH and is never searched for, and on Windows a backslash separates too.
+ */
+export function commandDependsOnCwd(command: string, platform: NodeJS.Platform = process.platform): boolean {
+  const separated = command.includes('/') || (platform === 'win32' && command.includes('\\'))
+  return separated && !isAbsolute(command)
 }
 
 /** One seat's launch command, and what could be established about it. */
