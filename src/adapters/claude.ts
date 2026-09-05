@@ -599,15 +599,78 @@ export function folderTrustDialogVisible(raw: string): boolean {
  * that lives in someone else's interface. On the day those swap, this stops matching and the
  * run fails with a diagnostic instead of confidently pressing "No, exit".
  */
-const ANSWERABLE_SIGNATURE = [
-  // The gap is bounded tightly on purpose. A screen is normalised to one long line -- the TUI
-  // positions rows with cursor moves rather than newlines, so there are no line boundaries left
-  // to anchor on -- and a generous bound lets `1. Yes, <another option> ... trust this folder`
-  // satisfy this from two different options. In the real dialog the gap is ", I ".
-  /(^|[^0-9])1\s*[.)]\s*Yes\b.{0,24}trust this folder/i,
-  /(^|[^0-9])2\s*[.)]\s*No\b/i,
-  /Is this a project you created|Enter to confirm/i,
-] as const
+/** The option that grants trust, identified by what it SAYS rather than where it sits. */
+const ACCEPT_OPTION = /trust this folder/i
+/** The option that declines. Required, so a menu with only one identifiable row is refused. */
+const DECLINE_OPTION = /\bNo,?\s*exit\b|\b2\s*[.)]\s*No\b/i
+/** The affordance the menu is drawn with, which is what makes Enter mean anything. */
+const CONFIRM_AFFORDANCE = /Is this a project you created|Enter to confirm/i
+/** The selection cursor. Claude Code draws U+276F; `>` is accepted for a plainer terminal. */
+const CURSOR_GLYPH = /[\u276f>]/g
+/** The legacy numbered form, kept for older builds. The DIGIT is read, never assumed. */
+const NUMBERED_ACCEPT = /(^|[^0-9])([0-9])\s*[.)]\s*Yes\b.{0,24}trust this folder/i
+
+/**
+ * What to press to land on "trust this folder", or `undefined` if that cannot be established.
+ *
+ * BY TEXT, never by position, and #232 is why. The dialog used to be `1. Yes, I trust this folder`
+ * / `2. No`, and the old matcher required exactly that shape. Claude Code 2.1.261 renders it with
+ * no numbers at all and with the options REVERSED:
+ *
+ *     ❯ No, exit
+ *       Yes, I trust this folder
+ *     Enter to confirm · Esc to cancel
+ *
+ * So `1` selects nothing and Enter confirms the highlighted row -- which is now the one that
+ * EXITS. A matcher keyed to a digit or a position would have killed the session silently, and it
+ * would have read as a crash rather than a refusal. The old signature's own comment predicted the
+ * day: "on the day those swap, this stops matching and the run fails with a diagnostic instead of
+ * confidently pressing No, exit". That is what it did, and this keeps that property.
+ *
+ * ORDERING, NOT ROWS. The raw pty buffer positions rows with cursor moves rather than newlines --
+ * `trust\x1b[20Gthis\x1b[25Gfolder` -- so there are no line boundaries to count. What survives
+ * normalisation is the ORDER the options were drawn in and where the cursor glyph sits relative to
+ * them, which is enough for a two-option menu and does not pretend to more.
+ */
+export function folderTrustAction(raw: string): { key: string; repeat: number } | undefined {
+  const screen = plainScreen(raw).replace(/\s+/g, ' ')
+  const accept = screen.search(ACCEPT_OPTION)
+  const decline = screen.search(DECLINE_OPTION)
+  if (accept < 0 || decline < 0) return undefined
+
+  // TWO OPTIONS, and no more. This knows a menu with one row that trusts and one that declines;
+  // a third row is a shape it has not seen, and both readings below would be guessing at it --
+  // the ordering one about which row the cursor sits on, the numbered one about whether a digit
+  // still selects. The fixture that motivates this is real in spirit: `1. Yes, just this session`
+  // above `3. Yes, I trust this folder`, where the narrower grant is the one a positional guess
+  // would take. Refusing an unfamiliar menu is the property that made the old signature safe.
+  const numbered = [...screen.matchAll(/(^|[^0-9])([0-9])\s*[.)]\s*(?=[A-Za-z])/g)]
+  if (numbered.length > 2) return undefined
+
+  // Where the cursor is: the last glyph appearing before one of the two options. A glyph after
+  // both is a composer prompt further down the buffer, not this menu's selection.
+  let cursor = -1
+  for (const m of screen.matchAll(CURSOR_GLYPH)) {
+    const i = m.index ?? -1
+    if (i >= 0 && i < Math.max(accept, decline)) cursor = i
+  }
+
+  if (cursor >= 0) {
+    // The option the cursor is on is the first one drawn after it.
+    const on = accept > cursor && (accept < decline || decline < cursor) ? accept : decline
+    if (on === accept) return { key: '\r', repeat: 0 }
+    // One move toward the accepting row, in whichever direction it lies.
+    return { key: accept > decline ? '\u001b[B' : '\u001b[A', repeat: 1 }
+  }
+
+  // LEGACY, for a build that numbers its options and draws no cursor. The digit is READ off the
+  // row whose text grants trust rather than assumed to be 1, so a renumbering of a two-option
+  // menu presses the right row instead of refusing -- while a menu with more rows is refused
+  // above, unread.
+  const accepting = NUMBERED_ACCEPT.exec(screen)
+  if (accepting) return { key: accepting[2]!, repeat: 1 }
+  return undefined
+}
 
 /**
  * Whether the dialog is on screen AND has the shape this knows how to answer.
@@ -615,8 +678,8 @@ const ANSWERABLE_SIGNATURE = [
  * The only reading that authorises a write. See `ANSWERABLE_SIGNATURE`.
  */
 export function answerableFolderTrustDialog(raw: string): boolean {
-  const screen = plainScreen(raw).replace(/\s+/g, ' ')
-  return ANSWERABLE_SIGNATURE.every((re) => re.test(screen))
+  if (!CONFIRM_AFFORDANCE.test(plainScreen(raw).replace(/\s+/g, ' '))) return false
+  return folderTrustAction(raw) !== undefined
 }
 
 /**
@@ -727,7 +790,11 @@ export async function acceptFolderTrustDialog(
     pty.write(k)
     keys.push(k)
   }
-  await send('1') // "1. Yes, I trust this folder"
+  // What `folderTrustAction` established, not what this function assumes (#232): a move toward
+  // the row whose TEXT grants trust, or the digit that build numbered it with.
+  const action = folderTrustAction(pty.output)
+  if (!action) return undefined
+  for (let i = 0; i < action.repeat; i++) await send(action.key)
   await send('\r')
   return { directory, keys, at: (opts.now ?? Date.now)() }
 }

@@ -16,15 +16,7 @@
 
 import { strict as assert } from 'node:assert'
 import test from 'node:test'
-import {
-  acceptFolderTrustDialog,
-  dismissableModalVisible,
-  answerableFolderTrustDialog,
-  bootFailureMessage,
-  folderTrustDialogVisible,
-  type FolderTrustAcceptance,
-  type TrustDialogPty,
-} from './claude.ts'
+import { acceptFolderTrustDialog, answerableFolderTrustDialog, bootFailureMessage, dismissableModalVisible, folderTrustAction, folderTrustDialogVisible, type FolderTrustAcceptance, type TrustDialogPty } from './claude.ts'
 
 const ESC = '\u001b'
 
@@ -147,11 +139,32 @@ test('a screen that merely mentions trusting a folder is never typed at', async 
 })
 
 test('the option about to be pressed is the one that trusts, checked rather than assumed', () => {
-  // The keystroke is `1`. If a future build renumbers the menu, the signature stops matching and
-  // the run fails with a diagnostic -- rather than confidently pressing "No, exit".
+  // The standard has not changed and the mechanism has (#232). This used to REFUSE a renumbered
+  // menu, because the keystroke was the literal `1` and a renumbering made it wrong. The digit is
+  // now read off the row whose text grants trust, so a renumbered TWO-option menu is answered
+  // correctly rather than refused -- which satisfies this test's own stated standard ("checked
+  // rather than assumed") more strongly than refusing did, and its stated harm ("confidently
+  // pressing No, exit") cannot occur, because the key comes from the accepting row.
   const swapped = DIALOG.replace('1.', '9.').replace('2.', '1.')
   assert.equal(folderTrustDialogVisible(swapped), true, 'still recognisably the dialog')
-  assert.equal(answerableFolderTrustDialog(swapped), false, 'but not one we know how to answer')
+  assert.equal(answerableFolderTrustDialog(swapped), true, 'and answerable, by reading the digit')
+  assert.deepEqual(folderTrustAction(swapped), { key: '9', repeat: 1 }, 'the trusting row, not the first')
+
+  // A THIRD option is a shape this has never seen, and both readings would be guessing at it.
+  // `1. Yes, just this session` above `3. Yes, I trust this folder` is the case that costs most:
+  // a positional guess takes the narrower grant. Refused unread.
+  //
+  // Built with the escapes rather than by string replace: the words in `DIALOG` are separated by
+  // cursor moves, so a literal `.replace('2. No, exit', ...)` matches nothing and silently leaves
+  // the two-option dialog -- which is how the first version of this assertion passed against the
+  // wrong screen.
+  const three =
+    `${ESC}[2GQuick${ESC}[8Gsafety${ESC}[15Gcheck:${ESC}[22GIs${ESC}[25Gthis${ESC}[30Ga` +
+    `${ESC}[32Gproject${ESC}[40Gyou${ESC}[44Gcreated${ESC}[2G${ESC}[4G1.${ESC}[8GYes,` +
+    `${ESC}[13Gjust${ESC}[18Gthis${ESC}[23Gsession${ESC}[2G${ESC}[4G2.${ESC}[8GNo,` +
+    `${ESC}[12Gexit${ESC}[2G${ESC}[4G3.${ESC}[8GYes,${ESC}[13GI${ESC}[15Gtrust` +
+    `${ESC}[21Gthis${ESC}[26Gfolder${ESC}[2GEnter${ESC}[10Gto${ESC}[13Gconfirm`
+  assert.equal(answerableFolderTrustDialog(three), false, 'an unfamiliar menu is refused')
 
   // Half a dialog is not a dialog: the accept option without the decline option is what a
   // partially drawn screen looks like, and pressing Enter into one is a guess.
@@ -312,4 +325,83 @@ test('the trust dialog is not mistaken for a modal to decline', () => {
   // turn a working boot into a declined one.
   assert.equal(dismissableModalVisible(TRUST_DIALOG_WITH_AFFORDANCE), false)
   assert.equal(answerableFolderTrustDialog(TRUST_DIALOG_WITH_AFFORDANCE), true)
+})
+
+
+/**
+ * The dialog as Claude Code 2.1.261 actually draws it (#232).
+ *
+ * Captured from a live child in a fresh untrusted directory, then written here in the buffer's
+ * own shape: words separated by cursor moves rather than newlines, because that is what the pty
+ * hands the adapter. No numbers at all, and `No, exit` FIRST with the cursor sitting on it.
+ */
+const DIALOG_2_1_261 =
+  `${ESC}[2GQuick${ESC}[8Gsafety${ESC}[15Gcheck:${ESC}[22GIs${ESC}[25Gthis${ESC}[30Ga` +
+  `${ESC}[32Gproject${ESC}[40Gyou${ESC}[44Gcreated${ESC}[2G${ESC}[4G❯${ESC}[6GNo,` +
+  `${ESC}[10Gexit${ESC}[2G${ESC}[6GYes,${ESC}[11GI${ESC}[13Gtrust${ESC}[19Gthis` +
+  `${ESC}[24Gfolder${ESC}[2GEnter${ESC}[8Gto${ESC}[11Gconfirm`
+
+/** The arrow the adapter sends, without its escape prefix. */
+const DOWN_KEY = `${ESC}[B`
+
+test('#232 the dialog Claude Code actually draws today is answerable', () => {
+  // The old signature required `1. Yes ... trust this folder` and `2. No`. This build numbers
+  // nothing, so both clauses failed and every fresh directory blocked with a diagnostic instead.
+  assert.equal(folderTrustDialogVisible(DIALOG_2_1_261), true)
+  assert.equal(answerableFolderTrustDialog(DIALOG_2_1_261), true, 'and now answerable')
+})
+
+test('#232 the cursor starts on "No, exit", so confirming without moving would kill the session', () => {
+  // THE HAZARD, and why a positional or numbered fix would have been worse than the bug it fixed.
+  // `No, exit` is drawn first and holds the cursor; Enter alone exits the child, which reads as a
+  // crash rather than a refusal. One move toward the trusting row is the whole answer.
+  const action = folderTrustAction(DIALOG_2_1_261)
+  assert.equal(action?.repeat, 1, 'it moves')
+  assert.equal(action?.key, DOWN_KEY, 'downward, because the trusting row is below')
+})
+
+test('#232 a build that draws the trusting row first is confirmed without moving', () => {
+  // The same menu the other way up. Nothing may depend on which order a vendor chose this week --
+  // that dependency IS #232.
+  const inverted =
+    `${ESC}[2GIs${ESC}[5Gthis${ESC}[10Ga${ESC}[12Gproject${ESC}[20Gyou${ESC}[24Gcreated` +
+    `${ESC}[2G${ESC}[4G❯${ESC}[6GYes,${ESC}[11GI${ESC}[13Gtrust${ESC}[19Gthis` +
+    `${ESC}[24Gfolder${ESC}[2G${ESC}[6GNo,${ESC}[10Gexit${ESC}[2GEnter${ESC}[8Gto${ESC}[11Gconfirm`
+  assert.deepEqual(folderTrustAction(inverted), { key: '\r', repeat: 0 })
+})
+
+test('#232 accepting the real dialog moves to the trusting row, then confirms', async () => {
+  const pty = new FakePty(DIALOG_2_1_261)
+  const accepted = await acceptFolderTrustDialog(pty, '/Users/x/fresh', FAST)
+  assert.ok(accepted)
+  assert.deepEqual(pty.writes, [DOWN_KEY, '\r'], 'down to the trusting row, then confirm')
+  assert.deepEqual(accepted.keys, [DOWN_KEY, '\r'])
+})
+
+test('#232 a screen carrying the wording but no menu is still never typed at', () => {
+  // The property that made the old refusal safe, re-checked against the new reading: identifying
+  // the option by its TEXT must not make a mere mention of that text answerable.
+  const narration =
+    `${ESC}[2GI${ESC}[4Gwill${ESC}[9Gtrust${ESC}[15Gthis${ESC}[20Gfolder${ESC}[27Gand` +
+    `${ESC}[31Gcarry${ESC}[37Gon`
+  assert.equal(answerableFolderTrustDialog(narration), false)
+  assert.equal(folderTrustAction(narration), undefined)
+})
+
+
+test('#232 the move goes UP when the trusting row is above the cursor', () => {
+  // What tells the direction apart from a default. The inverted fixture above has the cursor
+  // already ON the trusting row, so it never exercises which way to move -- a mutation that
+  // always moved DOWN passed every other test in this file, which is how this gap was found.
+  //
+  // Here the trusting row is drawn FIRST and the cursor sits on the decline below it, so the
+  // only correct answer is upward. Moving down from here would land on nothing, and confirming
+  // would take `No, exit`.
+  const acceptAbove =
+    `${ESC}[2GIs${ESC}[5Gthis${ESC}[10Ga${ESC}[12Gproject${ESC}[20Gyou${ESC}[24Gcreated` +
+    `${ESC}[2G${ESC}[6GYes,${ESC}[11GI${ESC}[13Gtrust${ESC}[19Gthis${ESC}[24Gfolder` +
+    `${ESC}[2G${ESC}[4G❯${ESC}[6GNo,${ESC}[10Gexit${ESC}[2GEnter${ESC}[8Gto${ESC}[11Gconfirm`
+  const action = folderTrustAction(acceptAbove)
+  assert.equal(action?.repeat, 1, 'it moves')
+  assert.equal(action?.key, `${ESC}[A`, 'upward, because the trusting row is above')
 })
