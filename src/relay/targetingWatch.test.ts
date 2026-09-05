@@ -995,12 +995,15 @@ test('an advisor turn whose verdict is replaced DURING the pause is reconciled, 
     // The late Stop, arriving while the operator is deciding. The watch that matches it to this
     // pause is armed at the top of the turn, before anything in the turn can pause.
     lead.lateSignal(COMPLETED)
-    const replacement = await until('the advisor pause to be marked superseded', () => run.pause?.superseded?.verdict)
+    // On the CAPTURED pause: a supersession by `completed` releases the run (#227), so
+    // `run.pause` clears. The object handed to a caller is mutated in place and keeps the record.
+    const replacement = await until('the advisor pause to be marked superseded', () => pause.superseded?.verdict)
     assert.equal(replacement.outcome, 'completed')
-    // Surfaced, not decided: the run is still paused, exactly as it was before this change.
-    assert.equal(run.state, 'paused')
+    // RESUMED, not held. This read `assert.equal(run.state, 'paused')` with the comment
+    // "surfaced, not decided" -- true while nothing acted on a supersession, and now true only
+    // of replacements that are not `completed`. The turn ended; there is no decision left.
+    await until('the run to resume itself', () => (run.state === 'paused' ? undefined : run.state))
 
-    await run.continue()
     const outcome = await run.result()
     assert.equal(outcome.reason, 'done')
 
@@ -1145,16 +1148,18 @@ test('an addressed turn paused BEFORE its record exists reads as open, never as 
     // record is written when the turn ends and not when its verdict changes. A second recording
     // site here is exactly what the restructure removed, and it would produce two records.
     lead.lateSignal(COMPLETED)
-    const replacement = await until('the advisor pause to be marked superseded', () => run.pause?.superseded?.verdict)
+    // See above: the pause is released by a `completed` replacement (#227), so this reads the
+    // captured object rather than `run.pause`.
+    const replacement = await until('the advisor pause to be marked superseded', () => pause.superseded?.verdict)
     assert.equal(replacement.outcome, 'completed')
-    assert.equal(run.state, 'paused')
+    await until('the run to resume itself', () => (run.state === 'paused' ? undefined : run.state))
     assert.deepEqual(relay.targeting().pending, { turn: 2, addressed: true, targets: ['@seat seat-beta'] })
     assert.equal(relay.targetingRecords().length, 1, 'a replaced verdict does not record the turn early')
     assert.match(relay.targetingSummary() ?? '', /NOT SETTLED YET/)
 
     // Resolution. The turn finally ends, and the open observation becomes one record -- filed
     // against the adapter's last word, which is the reconciliation the surrounding tests pin.
-    await run.continue()
+    // No `continue()`: the run released itself above.
     const outcome = await run.result()
     assert.equal(outcome.reason, 'done')
     assert.equal(relay.targetingWatch.pending, undefined, 'the open turn is closed exactly where it is recorded')

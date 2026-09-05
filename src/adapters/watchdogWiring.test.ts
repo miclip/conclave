@@ -103,6 +103,30 @@ onComposerSubmit(function (prompt) {
       await post('PermissionRequest', { prompt_id: id, turn_id: id, tool_name: 'Bash', tool_input: { command: 'ls' } })
     }
     await post('UserPromptSubmit', { prompt_id: id, turn_id: id, prompt })
+    // ORCH_FAKE_LONG_TOOL: go into a tool call and STAY there -- PreToolUse with no PostToolUse.
+    // That is what a multi-minute command looks like to a hook receiver for its whole duration,
+    // and without the start being counted it is indistinguishable from a hang.
+    if (process.env.ORCH_FAKE_LONG_TOOL) {
+      await post('PreToolUse', {
+        prompt_id: id,
+        turn_id: id,
+        tool_name: 'Bash',
+        tool_input: { command: 'run the suite' },
+        tool_use_id: 'exec-' + id,
+      })
+      // ORCH_FAKE_TOOL_RETURNS: the command comes back, and THEN the turn goes quiet. The
+      // difference between a seat waiting and a seat that stopped, expressed as one extra POST.
+      if (process.env.ORCH_FAKE_TOOL_RETURNS) {
+        await post('PostToolUse', {
+          prompt_id: id,
+          turn_id: id,
+          tool_name: 'Bash',
+          tool_input: { command: 'run the suite' },
+          tool_response: { exit_code: 0 },
+          tool_use_id: 'exec-' + id,
+        })
+      }
+    }
     if (stopAfter > 0) {
       setTimeout(function () {
         post('Stop', { prompt_id: id, turn_id: id, last_assistant_message: 'done' })
@@ -397,6 +421,66 @@ test('codex: a turn that spoke and then went quiet is not blamed on its model', 
     assert.equal(turn?.state, 'timed_out', 'snapshot() must agree with what events() said')
   } finally {
     delete process.env['ORCH_FAKE_SPEAK']
+    await session.close()
+  }
+})
+
+test('codex: a turn blocked inside a long tool call is not killed by the silence clock', async () => {
+  // The gap #226 left on the pty side. Codex registered no tool hooks at all, so a seat blocked
+  // on a command looked exactly like a seat that had stopped -- and `npm test` on this repo,
+  // which is what runs are told to check with, takes minutes.
+  //
+  // The counterpart is the `hang please` test above: SAME adapter, SAME silence budget, and it
+  // does end. The only difference is that this turn said a tool had started.
+  process.env['ORCH_FAKE_LONG_TOOL'] = '1'
+  const session = await CodexPtyHookAdapter.start({
+    cwd: RUN,
+    role: 'implementer',
+    // Absolute clock far out, silence clock short: only the idle deadline is under test.
+    watchdogMs: 60_000,
+    idleMs: 600,
+    readyTimeoutMs: 20_000,
+  })
+  try {
+    await session.send('go and run the suite', { kind: 'orchestrator' })
+    const events = await collect(session, (e) => endOf(e) !== undefined, 3_000)
+    assert.equal(
+      endOf(events),
+      undefined,
+      'a turn waiting on a tool it told us about is waiting, not stopped',
+    )
+  } finally {
+    delete process.env['ORCH_FAKE_LONG_TOOL']
+    await session.close()
+  }
+})
+
+test('codex: once the command returns, silence is silence again', async () => {
+  // The other half, and what stops the fix from being "a tool call disables the clock". A start
+  // with no stop would hold the silence deadline open for the rest of the turn with nothing able
+  // to bring it down -- the an-outstanding-nothing-can-bring-down hazard `TurnTools` names.
+  //
+  // Codex needs no `PostToolUseFailure` for this: probed against codex-cli 0.147.0, a command
+  // that exits non-zero still delivers `PostToolUse` with the matching tool_use_id, so the
+  // failing path closes the pair exactly as the succeeding one does.
+  process.env['ORCH_FAKE_LONG_TOOL'] = '1'
+  process.env['ORCH_FAKE_TOOL_RETURNS'] = '1'
+  const session = await CodexPtyHookAdapter.start({
+    cwd: RUN,
+    role: 'implementer',
+    watchdogMs: 60_000,
+    idleMs: 600,
+    readyTimeoutMs: 20_000,
+  })
+  try {
+    await session.send('go and run the suite', { kind: 'orchestrator' })
+    const events = await collect(session, (e) => endOf(e) !== undefined, 6_000)
+    const end = endOf(events)
+    assert.ok(end, 'a turn that finished its tool and then said nothing is stopped, not waiting')
+    assert.equal(end.verdict.outcome, 'timed_out')
+  } finally {
+    delete process.env['ORCH_FAKE_LONG_TOOL']
+    delete process.env['ORCH_FAKE_TOOL_RETURNS']
     await session.close()
   }
 })

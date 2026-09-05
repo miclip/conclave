@@ -147,3 +147,30 @@ test('both halves of the subagent lifecycle are registered on Claude, and the CL
     )
   }
 })
+
+test('the Codex sidecar registers the tool pair, because the silence clock depends on it', (t) => {
+  // The adapter counts `PreToolUse`/`PostToolUse` so a seat blocked inside a long command reads
+  // as waiting rather than stopped. That counting is dead code if the sidecar stops registering
+  // the events -- the handlers stay, no hook fires, and a turn running the checks gets killed by
+  // the idle clock again with nothing in the diff to explain why.
+  //
+  // Both halves are asserted: the template asks for them, and the installed Codex has them.
+  const sidecar = JSON.parse(
+    readFileSync(join(import.meta.dirname, '..', '..', 'config', 'templates', 'codex-hooks.json'), 'utf8'),
+  ) as { hooks: Record<string, unknown> }
+  for (const event of ['PreToolUse', 'PostToolUse']) {
+    assert.ok(event in sidecar.hooks, `the sidecar registers ${event}`)
+  }
+
+  const found = bundleOf('codex')
+  if ('why' in found) {
+    t.diagnostic(`skipped the availability half: ${found.why}`)
+    return
+  }
+  for (const event of ['PreToolUse', 'PostToolUse']) {
+    // Via `dispatches`, so this asks the same question the rest of the file does: the name as a
+    // QUOTED LITERAL in the program's own source, not a substring that could match anything.
+    assert.ok(dispatches(found.bytes, event), `the installed Codex dispatches ${event}`)
+  }
+  assert.ok(!dispatches(found.bytes, CANARY), 'and the search still discriminates')
+})
