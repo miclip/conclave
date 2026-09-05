@@ -25,7 +25,7 @@
  */
 
 import { strict as assert } from 'node:assert'
-import { chmodSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
 import type { AgentEvent, TurnEndEvent } from '../contract/session.ts'
@@ -483,4 +483,41 @@ test('codex: once the command returns, silence is silence again', async () => {
     delete process.env['ORCH_FAKE_TOOL_RETURNS']
     await session.close()
   }
+})
+
+test('#203 both pty adapters give their run directory back on close', async () => {
+  // Measured on one machine before this: 4,936 `orch-claude-` and 5,207 `orch-codex-`
+  // directories against a single `orch-kimi-` -- 10,143 directories and 55 MB of hook journals
+  // and generated settings in a world-readable temp root, one per session ever started. The
+  // kimi count is the control: the adapter that already cleaned up had one outstanding.
+  //
+  // Asserted by watching the directory the adapter itself names, not by counting `$TMPDIR`,
+  // which would make the test depend on whatever else the machine has been doing.
+  for (const start of [
+    () => ClaudePtyHookAdapter.start({ cwd: RUN, role: 'advisor', readyTimeoutMs: 20_000 }),
+    () => CodexPtyHookAdapter.start({ cwd: RUN, role: 'implementer', readyTimeoutMs: 20_000 }),
+  ]) {
+    const session = await start()
+    const dir = session.runDir
+    assert.ok(dir, 'the adapter names its run directory')
+    assert.ok(existsSync(dir), `it exists while the session does: ${dir}`)
+    await session.close()
+    assert.equal(existsSync(dir), false, `and is gone once the session is: ${dir}`)
+  }
+})
+
+test('#203 a run whose attempts journal was named to the operator keeps it', async () => {
+  // The hazard a naive cleanup creates. `SEND_HOOK_TIMEOUT` tells the operator that if the
+  // attempts journal EXISTS the handler ran and could not deliver, and if it is ABSENT the
+  // handler never executed. Deleting the directory makes it absent every time, which answers
+  // that question wrongly -- a wrong diagnosis is worse than a full disk, because it is acted
+  // on. So the one run whose evidence was named to a human is the one that keeps it.
+  const session = await ClaudePtyHookAdapter.start({ cwd: RUN, role: 'advisor', readyTimeoutMs: 20_000 })
+  const dir = session.runDir
+  assert.ok(dir)
+  // The same call the send-timeout path makes, without waiting 30s for a real one.
+  session.preserveRunDir()
+  await session.close()
+  assert.equal(existsSync(dir), true, `the evidence the operator was pointed at survives: ${dir}`)
+  rmSync(dir, { recursive: true, force: true })
 })

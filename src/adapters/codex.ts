@@ -27,7 +27,7 @@
  */
 
 import { TurnTools } from './claude.ts'
-import { mkdtempSync } from 'node:fs'
+import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type {
@@ -464,6 +464,7 @@ export class CodexPtyHookAdapter implements AgentSession {
 
   async #boot(): Promise<void> {
     const runDir = mkdtempSync(join(tmpdir(), 'orch-codex-'))
+    this.#runDir = runDir
 
     this.#receiver = new HookReceiver(join(runDir, 'hooks.ndjson'))
     this.#attemptJournal = join(runDir, 'attempts.ndjson')
@@ -1305,7 +1306,12 @@ export class CodexPtyHookAdapter implements AgentSession {
     // pending keeps the event loop alive long after the send resolved.
     let timer: NodeJS.Timeout | undefined
     const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new Error(SEND_HOOK_TIMEOUT(this.#attemptJournal))), 60_000)
+      timer = setTimeout(() => {
+        // The operator is about to be pointed at the attempts journal, so this run keeps its
+        // directory. See `#keepRunDir`.
+        this.preserveRunDir()
+        reject(new Error(SEND_HOOK_TIMEOUT(this.#attemptJournal)))
+      }, 60_000)
     })
     try {
       await this.#input.submit(message)
@@ -1446,6 +1452,42 @@ export class CodexPtyHookAdapter implements AgentSession {
     // the transcript upgrades it to `proven`. A single fixed sleep raced the write.
     await this.#awaitTranscriptEvidence(turn, this.#cancelEvidenceBudgetMs)
     return turn.key
+  }
+
+  /**
+   * Remove the scratch directory, unless its evidence was named to the operator.
+   *
+   * Failures are swallowed: this runs during teardown, often because something else already
+   * went wrong, and "the temp directory would not delete" must not become the error a caller
+   * reads instead of the reason they are here.
+   */
+  #removeRunDir(): void {
+    if (!this.#runDir || this.#keepRunDir) return
+    try {
+      rmSync(this.#runDir, { recursive: true, force: true })
+    } catch {
+      // Left behind. One directory is cheaper than masking a teardown failure.
+    }
+    this.#runDir = undefined
+  }
+
+  /**
+   * Keep the run directory past `close()`, because its contents have been named to a human.
+   *
+   * Called from the send-timeout path, whose message tells the operator that the attempts
+   * journal EXISTING means the handler ran and could not deliver, and its being ABSENT means the
+   * handler never executed. Cleanup would make it absent every time and answer that wrongly.
+   *
+   * A named operation rather than a private flag, so the test for this exercises the same call
+   * production makes instead of reaching into the instance.
+   */
+  preserveRunDir(): void {
+    this.#keepRunDir = true
+  }
+
+  /** Test/diagnostic access. */
+  get runDir(): string | undefined {
+    return this.#runDir
   }
 
   async decidePermission(decision: 'allow' | 'deny'): Promise<void> {
@@ -1627,6 +1669,18 @@ export class CodexPtyHookAdapter implements AgentSession {
    * different remedy.
    */
   #attemptJournal = ''
+  /** The per-session scratch directory, kept so it can be given back (#203). */
+  #runDir: string | undefined
+  /**
+   * Set when the operator has been told to inspect the attempts journal, which lives in
+   * `#runDir` (#203).
+   *
+   * `SEND_HOOK_TIMEOUT` distinguishes "the handler ran and could not deliver" from "the handler
+   * never executed" by whether that file EXISTS. Deleting the directory would make it absent
+   * every time and answer that question wrongly, which is worse than the leak: a full disk is
+   * noticed, a wrong diagnosis is acted on.
+   */
+  #keepRunDir = false
 
   async close(mode: 'graceful' | 'abandoned' = 'graceful'): Promise<void> {
     if (this.#closed) return
@@ -1702,6 +1756,10 @@ export class CodexPtyHookAdapter implements AgentSession {
       await this.#receiver.stop()
       this.#state = 'terminated'
     } finally {
+      // GIVEN BACK (#203). 5,207 `orch-codex-` directories were counted on one machine against
+      // a single `orch-kimi-`, the adapter that already did this. In the `finally` so a close
+      // that threw above still returns it -- a leak on the failing path is the one nobody sees.
+      this.#removeRunDir()
       this.#events.close()
     }
   }

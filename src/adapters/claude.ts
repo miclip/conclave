@@ -20,7 +20,7 @@
  */
 
 import { hookTimeoutSeconds } from './hookTimeout.ts'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type {
@@ -848,7 +848,25 @@ export class ClaudePtyHookAdapter implements AgentSession {
   #opts: ClaudeAdapterOptions
   #folderTrust: FolderTrustAcceptance | undefined
   #notices: string[] = []
-  #settingsDir: string | undefined
+  /**
+   * The per-session scratch directory, kept so it can be given back (#203).
+   *
+   * Was `#settingsDir`, written and never read -- one of the dead fields #212 counted. It is the
+   * handle this needs, so it is repurposed rather than joined by a second field naming the same
+   * path.
+   */
+  #runDir: string | undefined
+  /**
+   * Set when the operator has been told to inspect the attempts journal, which lives in
+   * `#runDir` (#203).
+   *
+   * `SEND_HOOK_TIMEOUT` says: "if that file EXISTS the handler ran and could not deliver... if
+   * it is ABSENT the handler never executed". Deleting the directory on close would make it
+   * absent every time and turn a delivery problem into a misdiagnosed timeout -- a worse defect
+   * than the leak, because it is a wrong answer rather than a full disk. So the one run whose
+   * evidence was named to a human is the one run that keeps it.
+   */
+  #keepRunDir = false
   #watchdog: TurnWatchdog<TurnState>
 
   private constructor(opts: ClaudeAdapterOptions) {
@@ -903,7 +921,7 @@ export class ClaudePtyHookAdapter implements AgentSession {
 
   async #boot(): Promise<void> {
     const runDir = mkdtempSync(join(tmpdir(), 'orch-claude-'))
-    this.#settingsDir = runDir
+    this.#runDir = runDir
 
     this.#receiver = new HookReceiver(join(runDir, 'hooks.ndjson'))
     this.#attemptJournal = join(runDir, 'attempts.ndjson')
@@ -2083,7 +2101,12 @@ export class ClaudePtyHookAdapter implements AgentSession {
     // pending keeps the event loop alive long after the send resolved.
     let timer: NodeJS.Timeout | undefined
     const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new Error(SEND_HOOK_TIMEOUT(this.#attemptJournal))), 30_000)
+      timer = setTimeout(() => {
+        // The operator is about to be pointed at the attempts journal, so this run keeps its
+        // directory. See `#keepRunDir`.
+        this.preserveRunDir()
+        reject(new Error(SEND_HOOK_TIMEOUT(this.#attemptJournal)))
+      }, 30_000)
     })
     try {
       return await Promise.race([keyed, timeout])
@@ -2321,11 +2344,56 @@ export class ClaudePtyHookAdapter implements AgentSession {
       await this.#receiver.stop()
       this.#state = 'terminated'
     } finally {
+      // GIVEN BACK (#203). Measured on one machine: 4,936 `orch-claude-` and 5,207
+      // `orch-codex-` directories against a single `orch-kimi-`, which is the adapter that
+      // already did this -- 10,143 directories and 55 MB of hook journals and generated
+      // settings in a world-readable temp root, one per session ever started.
+      //
+      // AFTER the receiver stops, so nothing is still writing into it. In the `finally` for the
+      // same reason the queue close is: a close that threw anywhere above still gives the
+      // directory back, and a leak that only happens on the failing path is the one nobody
+      // notices.
+      this.#removeRunDir()
       this.#events.close()
     }
   }
 
+  /**
+   * Remove the scratch directory, unless its evidence was named to the operator.
+   *
+   * `force` swallows a directory that is already gone; a failure to remove one that is not is
+   * swallowed too, deliberately. This runs while a session is being torn down, often because
+   * something else already went wrong, and turning "the temp directory would not delete" into
+   * the error a caller sees would bury the reason they are here.
+   */
+  #removeRunDir(): void {
+    if (!this.#runDir || this.#keepRunDir) return
+    try {
+      rmSync(this.#runDir, { recursive: true, force: true })
+    } catch {
+      // Left behind. One directory is the cost; masking a teardown failure is not worth it.
+    }
+    this.#runDir = undefined
+  }
+
+  /**
+   * Keep the run directory past `close()`, because its contents have been named to a human.
+   *
+   * Called from the send-timeout path, whose message tells the operator that the attempts
+   * journal EXISTING means the handler ran and could not deliver, and its being ABSENT means the
+   * handler never executed. Cleanup would make it absent every time and answer that wrongly.
+   *
+   * A named operation rather than a private flag, so the test for this exercises the same call
+   * production makes instead of reaching into the instance.
+   */
+  preserveRunDir(): void {
+    this.#keepRunDir = true
+  }
+
   /** Test/diagnostic access. */
+  get runDir(): string | undefined {
+    return this.#runDir
+  }
   get closeMode(): string | undefined {
     return this.#closeMode
   }
