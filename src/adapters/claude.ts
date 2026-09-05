@@ -103,6 +103,13 @@ export const HOOK_EVENTS = [
   'PostToolUseFailure',
   'SubagentStart',
   'SubagentStop',
+  // A SEAT CAN BE RECONFIGURED MID-RUN AND THE REPORT WOULD NOT KNOW (#202). The report states
+  // the launch model as fact and `#200`'s command policy refuses `/model` on that ground -- but
+  // that refusal covers the advisor, not a human typing into the seat's own pane. All three
+  // names verified as quoted literals in the installed bundle (2.1.261) before being registered.
+  'PreModelSwitch',
+  'PostModelSwitch',
+  'ConfigChange',
   'Stop',
   'SessionEnd',
 ]
@@ -855,6 +862,14 @@ export class ClaudePtyHookAdapter implements AgentSession {
    * handle this needs, so it is repurposed rather than joined by a second field naming the same
    * path.
    */
+  /**
+   * Model switches this seat has been through mid-run (#202).
+   *
+   * Kept because the launch record cannot be corrected -- it is immutable by construction and
+   * that is the point of it -- so the only honest thing to do with a switch is record it beside
+   * the record it contradicts.
+   */
+  readonly #reconfigured: Array<{ from: string; to: string; at: number }> = []
   #runDir: string | undefined
   /**
    * Set when the operator has been told to inspect the attempts journal, which lives in
@@ -1407,6 +1422,47 @@ export class ClaudePtyHookAdapter implements AgentSession {
         const turn = this.#turnFor(String(d.turnKey ?? '')) ?? this.#latestLiveTurn()
         const id = typeof d.payload.tool_use_id === 'string' ? d.payload.tool_use_id : undefined
         if (turn && id !== undefined) turn.tools.finish(id)
+        return
+      }
+      // PRE is ignored on purpose: a switch that is about to happen has not happened, and a
+      // report that named a model the seat never ran would be the same falsehood pointed the
+      // other way. Registered anyway, because the pair is how the CLI describes the transition
+      // and hearing only the second half of a documented pair is how #193 went wrong.
+      case 'PreModelSwitch':
+        return
+      case 'PostModelSwitch': {
+        const from = String(d.payload['from_model'] ?? '')
+        const to = String(d.payload['to_model'] ?? '')
+        // A switch to the same model is not a switch. The CLI does not dispatch one -- verified,
+        // by asking twice for the model already in force and seeing no hook -- so this is a
+        // guard against a payload shape rather than an observed case.
+        if (to === '' || from === to) return
+        this.#reconfigured.push({ from, to, at: Date.now() })
+        this.#emit({
+          type: 'error',
+          // NOT fatal, and not really an error in the seat -- it is an error in the RECORD. The
+          // run report states the launch model as fact and #200 refuses `/model` from the
+          // advisor on exactly that ground; this is the same falsification arriving by the door
+          // that refusal does not cover, a human typing into the seat's own pane. The seat is
+          // fine and the run can continue; what is no longer true is what the report says.
+          message:
+            `this seat is no longer running the model the run report names: ` +
+            `${from} -> ${to}` +
+            (d.payload['source'] === undefined ? '' : ` (via ${String(d.payload['source'])})`) +
+            `. The launch record is immutable by construction, so it still says ${from}. See #202.`,
+          fatal: false,
+          seq: this.#next(),
+          at: Date.now(),
+          provisional: false,
+        })
+        return
+      }
+      case 'ConfigChange': {
+        // Registered and deliberately not interpreted. `PostModelSwitch` carries named fields
+        // this adapter has seen fire and can read; `ConfigChange` was verified present in the
+        // bundle but has not been observed, and what it carries is therefore a guess. Reading a
+        // name as a behaviour is the mistake #217 made on another agent. It is registered so the
+        // deliveries are journalled, which is what the next person needs to map it.
         return
       }
       case 'SubagentStart':
@@ -2388,6 +2444,11 @@ export class ClaudePtyHookAdapter implements AgentSession {
    */
   preserveRunDir(): void {
     this.#keepRunDir = true
+  }
+
+  /** Model switches seen mid-run, oldest first. Empty on a seat nobody reconfigured (#202). */
+  get reconfigured(): ReadonlyArray<{ from: string; to: string; at: number }> {
+    return this.#reconfigured
   }
 
   /** Test/diagnostic access. */
