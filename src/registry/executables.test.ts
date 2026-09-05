@@ -28,7 +28,6 @@ import { strict as assert } from 'node:assert'
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { execFileSync as run } from 'node:child_process'
 import { delimiter, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
 import { PassThrough, Writable } from 'node:stream'
 import test from 'node:test'
 import type { TestContext } from 'node:test'
@@ -55,14 +54,6 @@ import { NO_DEADLINE_CLOCKS, type AgentDefinition } from './types.ts'
  * and a fixed one makes a failure reproducible.
  */
 const ABSENT = 'conclave-agent-that-is-definitely-not-installed'
-
-/**
- * The verbatim stdout of a real `opencode run --format json` on 1.18.15.
- *
- * Borrowed from src/adapters/opencode.test.ts, which established it: the wrapper below has to be
- * a real executable taking a real turn, or "it was spawned" is a claim about a mock.
- */
-const FIXTURE = join(fileURLToPath(new URL('../..', import.meta.url)), 'spikes/opencode/fixtures/edit-turn.ndjson')
 
 /** An agent definition carrying a launch command and, optionally, the requirement to have it. */
 function agentWith(id: string, command: string, executable?: ExecutableRequirement): AgentDefinition {

@@ -860,8 +860,6 @@ test('the box is drawn under the newest line, and nothing is scrolled to make ro
   // satisfies it whether or not it moved the screen to get there.
   const dir = repo(t)
   const c = await spawnConsole(dir, t)
-  const rows = 30
-  const cols = 100
   const plain = (s: string) => s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '')
   assert.ok(
     await c.until((s) => /─{20,}/.test(plain(s)), 20_000),

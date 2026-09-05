@@ -45,7 +45,7 @@ import {
 } from '../registry/operatorDenied.ts'
 import { dirname, join } from 'node:path'
 import type { AgentKind } from './install.ts'
-import { AGENT_KINDS } from './install.ts'
+import {  } from './install.ts'
 
 export const CONFIG_RELATIVE = '.conclave/config.json'
 

@@ -19,7 +19,7 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync } from 'node:child_process'
-import { join } from 'node:path'
+import {  } from 'node:path'
 import test from 'node:test'
 import type { TestContext } from 'node:test'
 import { AgentRegistry } from '../registry/registry.ts'

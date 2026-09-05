@@ -52,7 +52,7 @@ import { containAdapterRunDirs, suiteTempDir, tempDir } from '../testkit/tempDir
  * this one stay isolated from each other exactly as before -- by `tempDir` handing each its
  * own uniquely named child of this root.
  */
-const ADAPTER_TMP_ROOT = containAdapterRunDirs()
+containAdapterRunDirs()
 
 /**
  * Stands in for `claude` on PATH: a child mid-turn, swallowing input, transcript still moving.
