@@ -7,11 +7,12 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync } from 'node:child_process'
-import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import test from 'node:test'
 import type { TestContext } from 'node:test'
 import { tempDir } from '../testkit/tempDir.ts'
+import { sessionDir } from './sessionRecord.ts'
 import {
   acquire,
   appendParticipant,
@@ -234,4 +235,67 @@ test('the lock is replaced by rename, so a reader gets the old file or the new o
     [],
     'no temporary file may be left beside the lock',
   )
+})
+
+/** A minimal status record on disk, which is where guard reads pause state from (#228). */
+function writeStatus(dir: string, id: string, pid: number, pause?: { reason: string; at: number }): void {
+  const d = sessionDir(dir, id)
+  mkdirSync(d, { recursive: true })
+  writeFileSync(
+    join(d, 'status.json'),
+    JSON.stringify({
+      schema: 1,
+      id,
+      pid,
+      cwd: dir,
+      goal: 'Keep the work moving.',
+      front: 'session',
+      operator: 'agent',
+      state: pause ? 'paused' : 'running',
+      startedAt: Date.now() - 600_000,
+      updatedAt: Date.now(),
+      messages: 0,
+      participants: [],
+      ...(pause ? { pause: { reason: pause.reason, at: pause.at, detail: '', evidence: [], options: [], atSeq: 1 } } : {}),
+    }),
+  )
+}
+
+test('#228 guard says a run is PAUSED, not merely that its participants are live', (t) => {
+  // "participants are live" was true of a run parked at a pause and true of one doing the work,
+  // which made it useless to the reader who most needs it. Two sessions sat at
+  // `implementer_unanswered` for hours -- one unnoticed, with four operator messages queued
+  // behind it -- while guard reported them healthy the whole time.
+  const dir = repo(t)
+  const lock = acquire(dir, PARTICIPANTS)
+  writeStatus(dir, '20260904-000000-1', lock.pid, { reason: 'implementer_unanswered', at: Date.now() - 125 * 60_000 })
+
+  const report = guard(dir)
+  assert.equal(report.live, true)
+  const said = report.messages.join('\n')
+  assert.match(said, /PAUSED, not working/)
+  assert.match(said, /125 minutes/, 'how long it has been waiting, which is the actionable part')
+  assert.match(said, /implementer_unanswered/, 'and what it is waiting on')
+  // The advice that would have saved 3.5 hours: a bare message does not resolve a pause.
+  assert.match(said, /a message on its own is queued/)
+})
+
+test('#228 a working run is not described as paused', (t) => {
+  // The quiet default. A guard line on every healthy run is a line nobody reads.
+  const dir = repo(t)
+  const lock = acquire(dir, PARTICIPANTS)
+  writeStatus(dir, '20260904-000000-2', lock.pid)
+  const report = guard(dir)
+  assert.equal(report.live, true)
+  assert.doesNotMatch(report.messages.join('\n'), /PAUSED/)
+})
+
+test('#228 a pause belonging to an EARLIER run is not attributed to this one', (t) => {
+  // `listSessions` orders by recency, so without the pid check a stale record from a previous
+  // run would be read as the live run's state -- a false alarm is as bad as the silence.
+  const dir = repo(t)
+  const lock = acquire(dir, PARTICIPANTS)
+  writeStatus(dir, '20260904-000000-3', lock.pid + 99_000, { reason: 'implementer_unanswered', at: Date.now() })
+  const report = guard(dir)
+  assert.doesNotMatch(report.messages.join('\n'), /PAUSED/)
 })
