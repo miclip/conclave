@@ -68,6 +68,26 @@ function serializeArgs(input: unknown): string | undefined {
 
 const CLAUDE_COMPACTION_ATTACHMENTS = new Set(['compact_file_reference'])
 
+/**
+ * What Claude Code writes into the transcript when a turn is interrupted (#225).
+ *
+ * It arrives as a USER message whose content is a plain string, which is the same shape as a
+ * prompt -- so without this it opens a new turn whose prompt is the marker, leaves the real
+ * turn `in_progress` forever, and hides the one piece of evidence that the turn ended.
+ *
+ * This matters beyond tidiness. The #174 retry may only re-type a message once the CHILD has
+ * confirmed the turn ended, and no hook says so: `SessionEnd`, `Stop` and `StopFailure` are the
+ * only closures Claude Code dispatches, and `StopFailure` fires for API errors -- rate limits,
+ * auth -- not for an interruption. Verified against the installed bundle rather than believed:
+ * its full hook list carries no interruption event at 2.1.261, and `claudeInterrupted.test.ts`
+ * pins both halves of that so the next version cannot quietly change either.
+ *
+ * So the transcript is the only place the child records it, and reading it is what makes the
+ * retry reachable on a Claude seat at all. The trailing `[^\]]*` is the program's own: it
+ * matches the marker with or without the suffix Claude Code appends.
+ */
+export const CLAUDE_INTERRUPTION = /^\[Request interrupted by user[^\]]*\]/
+
 export function parseClaude(records: Record<string, any>[]): ParsedTranscript {
   const turns: TurnRecord[] = []
   let compactions = 0
@@ -85,7 +105,19 @@ export function parseClaude(records: Record<string, any>[]): ParsedTranscript {
       }
       case 'user': {
         const content = d.message?.content
-        if (typeof content === 'string') {
+        if (typeof content === 'string' && CLAUDE_INTERRUPTION.test(content.trim())) {
+          // NOT a prompt, though it is shaped exactly like one. The child is recording that the
+          // turn above it was interrupted, so it CLOSES that turn rather than opening another.
+          //
+          // `cancelled` rather than a new outcome: the union already says what this is, and its
+          // own note is that cancellation is known "because we caused it". Here the child says
+          // so as well, which is the difference between our record of typing ESC and evidence
+          // the child acted on it (#225).
+          if (current) {
+            current.state = 'cancelled'
+            current = undefined
+          }
+        } else if (typeof content === 'string') {
           // A plain-string user message is a prompt; a list is tool results coming back.
           current = {
             // Claude Code has no per-turn id in the transcript itself -- prompt_id

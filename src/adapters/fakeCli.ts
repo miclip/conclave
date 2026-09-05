@@ -78,6 +78,10 @@ function onComposerSubmit(handler) {
         // picture. That is the case the #174 retry must refuse rather than type into.
         pending = pending.slice(esc + 1)
         if (!process.env.ORCH_FAKE_DEAF) composer = ''
+        // ORCH_FAKE_INTERRUPT_TRANSCRIPT: record the interruption the way Claude Code does --
+        // in the TRANSCRIPT, as a user message, and with no hook of any kind (#225). That
+        // combination is the whole point: a child that is silent on every hook conclave listens
+        // for, and yet has written down that it stopped.
         continue
       }
       if (open === at) {
@@ -114,7 +118,26 @@ function onComposerSubmit(handler) {
  * what a test needs before it can send it more than MAX_CANON bytes.
  */
 export const FAKE_CLI = `#!/usr/bin/env node
+const { appendFileSync } = require('node:fs')
 const url = process.env.ORCH_HOOK_URL
+
+/**
+ * ORCH_FAKE_WRITE_TRANSCRIPT: a child that keeps a transcript at all, as both real CLIs do.
+ *
+ * Separate from ORCH_FAKE_INTERRUPT_TRANSCRIPT below, and the split is the point: a child that
+ * writes its prompts but records no interruption is a child whose transcript still shows a turn
+ * IN PROGRESS, and that one must still be refused (#225). Without the split the refusing case
+ * has an empty transcript, which is answered by a different branch and leaves the guard that
+ * matters untested.
+ */
+function writeTranscript(record) {
+  if (!process.env.ORCH_FAKE_WRITE_TRANSCRIPT || !process.env.ORCH_FAKE_TRANSCRIPT) return
+  try {
+    appendFileSync(process.env.ORCH_FAKE_TRANSCRIPT, JSON.stringify(record) + '\\n')
+  } catch (e) {
+    // A stand-in that cannot write its transcript is a broken fixture, not a test result.
+  }
+}
 const agent = String(process.argv[1] || '').split('/').pop()
 const stopAfter = Number(process.env.ORCH_FAKE_STOP_MS || 0)
 
@@ -166,6 +189,9 @@ let turns = 0
 let deferredSlash = null
 onComposerSubmit(function (prompt) {
   if (!prompt.trim()) return
+  // The prompt goes in the transcript too, or the marker below has no turn to close and the
+  // record shows a child that never started anything.
+  writeTranscript({ type: 'user', message: { content: prompt } })
   // ORCH_FAKE_HONOURS_QUIT: leave on the child's own terms, as codex does (#187). Without it
   // this stand-in ignores /quit, which is the OTHER case worth testing -- the bounded fallback
   // to terminate, and the guarantee that a child which never goes still ends the shutdown.
@@ -253,8 +279,31 @@ onComposerSubmit(function (prompt) {
 //
 // Off by default: the suites that send small payloads are unaffected either way, and flipping
 // a shared fixture for all of them is a larger change than the two tests that need it.
-if (process.env.ORCH_FAKE_RAW || process.env.ORCH_FAKE_ESC_TURN) {
+if (process.env.ORCH_FAKE_RAW || process.env.ORCH_FAKE_ESC_TURN || process.env.ORCH_FAKE_INTERRUPT_TRANSCRIPT) {
   if (process.stdin.isTTY) process.stdin.setRawMode(true)
+}
+
+// ORCH_FAKE_INTERRUPT_TRANSCRIPT: what Claude Code does with an interruption -- it writes it
+// into the TRANSCRIPT and dispatches no hook for it (#225).
+//
+// Listened for HERE rather than in COMPOSER_JS, because a lone ESC never reaches that branch:
+// InputQueue.cancel() writes exactly one byte, and the composer holds back the last five of
+// any read in case they are a partial paste terminator, so a one-byte chunk is held for a
+// continuation that never comes. That is a property of the fixture. This listener answers the
+// question the fixture is actually being asked -- did the child see the cancellation -- using
+// the same bare-ESC test the listener below already uses.
+//
+// No backticks anywhere in this comment: it lives inside a template literal.
+if (process.env.ORCH_FAKE_INTERRUPT_TRANSCRIPT) {
+  process.stdin.on('data', function (d) {
+    var s = d.toString()
+    for (var i = 0; i < s.length; i++) {
+      if (s.charAt(i) === '\\x1b' && s.charAt(i + 1) !== '[') {
+        writeTranscript({ type: 'user', message: { content: '[Request interrupted by user]' } })
+        return
+      }
+    }
+  })
 }
 
 if (process.env.ORCH_FAKE_ESC_TURN) {

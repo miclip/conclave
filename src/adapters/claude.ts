@@ -2139,13 +2139,26 @@ export class ClaudePtyHookAdapter implements AgentSession {
     }
     while (!malformed.childClosure && Date.now() < until) {
       await new Promise((r) => setTimeout(r, RECOVERY_POLL_MS))
+      // THE CHILD'S OWN RECORD, when no hook will say it (#225).
+      //
+      // Claude Code dispatches no interruption event -- verified against the installed bundle in
+      // `claudeInterrupted.test.ts`, not believed -- so `Stop`, `SessionEnd` and an exit were the
+      // only closures reachable here, and none of them follows an ESC. That made this loop
+      // unwinnable on a Claude seat: the retry existed and could never be taken, so every
+      // corrupted prompt was terminal for the run. That is the whole of #225.
+      //
+      // It does record the interruption in the TRANSCRIPT, and the parser now reads it. So this
+      // asks the weaker and sufficient question: does the child's own record still show a turn in
+      // progress? An empty answer is not evidence -- a transcript that cannot be read says
+      // nothing -- so only a positive reading counts.
+      await this.#interruptionRecorded(malformed)
     }
     if (!malformed.childClosure) {
       throw refuse(
         `the child never confirmed that turn ${bad.turnKey} ended: ESC was typed and ${this.#recoveryMs} ms ` +
-          `passed with no Stop, no SessionEnd and no exit. Claude Code records an interruption nowhere, so ` +
-          `conclave's own note of having sent ESC is not evidence the child stopped -- and it may still be ` +
-          `running the fragment`,
+          `passed with no Stop, no SessionEnd, no exit, and no interruption recorded in its transcript. ` +
+          `Claude Code dispatches no interruption hook, so conclave's own note of having sent ESC is not ` +
+          `evidence the child stopped -- and it may still be running the fragment`,
       )
     }
     const open = this.#openTurn()
@@ -2153,6 +2166,34 @@ export class ClaudePtyHookAdapter implements AgentSession {
     if (this.#state !== 'running' || !this.acceptsInput) {
       throw refuse(`the session is ${this.#state} and no longer accepting input`)
     }
+  }
+
+  /**
+   * Set `childClosure` if the child's transcript now shows this turn is not running (#225).
+   *
+   * Deliberately does NOT try to match the transcript's turn to `bad.turnKey`. Claude Code has
+   * no per-turn id in the transcript -- `prompt_id` arrives only through hooks -- so a match
+   * would rest on an index the parser assigns and the adapter overwrites. The question that can
+   * be answered from the file alone is the one that matters here: is the child mid-turn? We
+   * typed ESC at the only open turn, so a record with nothing in progress is the child saying it
+   * stopped.
+   *
+   * `inferred` rather than `proven` in spirit: it is the child's own writing, but read as an
+   * absence rather than as a statement about this turn by name. Stated in the reason, because
+   * this string is what an operator reads when they ask why a retry was allowed.
+   */
+  async #interruptionRecorded(malformed: TurnState): Promise<void> {
+    if (!this.#view || malformed.childClosure) return
+    let snap: SessionSnapshot
+    try {
+      snap = await this.#view.snapshot()
+    } catch {
+      // Unreadable is not evidence of anything. Leave the loop to keep waiting.
+      return
+    }
+    if (snap.turns.length === 0) return
+    if (snap.turns.some((t) => t.state === 'in_progress')) return
+    malformed.childClosure = 'the child recorded the interruption in its transcript and shows no turn running'
   }
 
   /** The shipped recovery bound unless this session was given another. */

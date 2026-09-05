@@ -511,7 +511,7 @@ it appears again, keep the assertion text and the file it came from before anyth
 
 **Subject: #156's premise does not hold on main — the unverified-generation guards live only in the uncommitted fix-36 worktree.**
 
-1. The defect shape is real on main: both PTY adapters answer `snapshot()` from a synthesized object before the transcript view exists (`src/adapters/claude.ts:2331-2344`, `src/adapters/codex.ts:1629-1642`), carrying `compactionGeneration: 0` with nothing distinguishing "not looked" from "looked, none". But the guards the issue says it passes — `containedFallback`, `UNKNOWN_GENERATION` at `src/rotation/rotate.ts:484`, the `#considerRotation` withholding — exist only as uncommitted work in the fix-36 worktree (`containedFallback` appears in no ref; `git grep` on main finds neither symbol). The issue was filed against that state.
+1. The defect shape is real on main: both PTY adapters answer `snapshot()` from a synthesized object before the transcript view exists (`src/adapters/claude.ts:2370-2383`, `src/adapters/codex.ts:1629-1642`), carrying `compactionGeneration: 0` with nothing distinguishing "not looked" from "looked, none". But the guards the issue says it passes — `containedFallback`, `UNKNOWN_GENERATION` at `src/rotation/rotate.ts:484`, the `#considerRotation` withholding — exist only as uncommitted work in the fix-36 worktree (`containedFallback` appears in no ref; `git grep` on main finds neither symbol). The issue was filed against that state.
 
 2. Every consumer of a snapshot's `compactionGeneration` on main, and whether a pre-view snapshot can reach it:
 
