@@ -1263,23 +1263,39 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
     // session at a time always means. An ambiguous prefix is refused rather than resolved.
     const wanted = sub && !sub.startsWith('--') ? sub : undefined
     const found = resolveSession(root, wanted)
+    const flags = [sub, ...rest]
     if ('error' in found) {
       // A directory with no status.json is its own condition, and a different one from "no
       // such session": it means the id WAS issued and the process never got far enough to
       // describe itself. Saying "no sessions recorded" there sends the operator looking for
       // a typo instead of at the one file that holds the answer.
       const dir = wanted ? sessionDir(root, wanted) : undefined
-      if (dir && existsSync(dir)) {
-        console.error(
-          `conclave: session ${wanted} was started but never recorded its state — ` +
-            `it most likely died during startup. What it printed is in ${join(dir, 'stdio.log')}`,
-        )
-        return 1
+      const detail =
+        dir && existsSync(dir)
+          ? `session ${wanted} was started but never recorded its state — ` +
+            `it most likely died during startup. What it printed is in ${join(dir, 'stdio.log')}`
+          : found.error
+      // `--json` MEANS JSON, including when the answer is "there is nothing" (#233). This wrote
+      // the message to stderr and nothing at all to stdout, so the polling loop everyone reaches
+      // for first --
+      //
+      //     until [ "$(conclave status --json | jq -r .state)" != running ]; do ...
+      //
+      // -- read an empty string on its first pass and exited immediately, which is
+      // indistinguishable from a run that finished. `json.load` raises instead. `sessions --json`
+      // answers `[]` in the same window, so the two commands disagreed about one condition.
+      //
+      // NOT a synthesised `{"state":"starting"}`: no session has been recorded, and one may never
+      // be. `state: null` is the honest shape -- there is no state to report -- and it is what
+      // `jq -r .state` reads as `null` rather than dying. The message an operator needs is in
+      // `error`, and the exit code is unchanged so a script gating on it still gates.
+      if (flags.includes('--json')) {
+        console.log(JSON.stringify({ state: null, session: null, error: detail }, null, 2))
+      } else {
+        console.error(`conclave: ${detail}`)
       }
-      console.error(`conclave: ${found.error}`)
       return 1
     }
-    const flags = [sub, ...rest]
     if (flags.includes('--json')) {
       console.log(formatSessionJson(found.session))
     } else {
