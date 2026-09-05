@@ -73,7 +73,8 @@ import type { Confidence, Provenance } from '../contract/outcome.ts'
 import type { RunCeilings } from '../relay/guardrails.ts'
 import type { RunDeadlines } from '../relay/deadlines.ts'
 import type { RelayEvent } from '../relay/observe.ts'
-import type { ForceRecord, RunOutcome, RunPause } from '../relay/run.ts'
+import type { ForceRecord, PauseReason, RunOutcome, RunPause } from '../relay/run.ts'
+import type { ResolutionAuthority } from '../relay/resolution.ts'
 import type { RotationRecord } from '../relay/rotationIntent.ts'
 import { reportedTargeting, type ReportedTargeting, type TargetingWatch } from '../relay/targeting.ts'
 // The two accessors, not a third copy of them. A check is a bare string or a pair, and a
@@ -344,8 +345,15 @@ export interface SessionParticipantStatus {
    * them, and the run report at the end carries the graded verdicts.
    */
   activity?: { kind: string; tool?: string | undefined; since: number } | undefined
-  /** Stopped at a permission prompt, and for what. Read from `relay.permissionsPending()`. */
-  awaitingPermission?: { tool: string } | undefined
+  /**
+   * Stopped at a permission prompt, for what, and since when. Read from
+   * `relay.permissionsPending()`, with the timestamp of the `permission_requested` event.
+   *
+   * `since` is here so the top-level `blocked` roll-up can be DERIVED from this document
+   * rather than computed alongside it -- see `SessionBlockedStatus`. Without it the roll-up
+   * would need its own clock, and two clocks measuring one wait is how they come to disagree.
+   */
+  awaitingPermission?: { tool: string; since: number } | undefined
   /**
    * This seat's effective rotation policy. See `SessionRotationStatus`.
    *
@@ -384,6 +392,89 @@ export interface SessionParticipantStatus {
   seat?: SessionSeatStatus | undefined
 }
 
+/**
+ * The one place that says this run is waiting on somebody, and what KIND of question it is.
+ *
+ * It exists because the two blocking conditions were reported in two different parts of this
+ * document, and nothing said a reader had to watch both (#234):
+ *
+ *   an escalation      `state: 'paused'` with a `pause`
+ *   a permission prompt `state` stays `running`; the only trace is one participant's
+ *                      `awaitingPermission`, several levels down a list
+ *
+ * Two agent operators, on two repos, wrote a watcher against the obvious one and lost time to
+ * the other. The first watched `pause` and a permission decision is not a pause: a prompt sat
+ * 42 minutes. The second answered permission prompts within 15 seconds, and having got that
+ * working stopped watching -- so the escalation that paused later, the one that paused
+ * PRECISELY BECAUSE judgement was required, sat instead.
+ *
+ * DERIVED, never stored: computed from `pause` and `participants[].awaitingPermission` on every
+ * write, so it cannot come to disagree with either. A reader that prefers the underlying fields
+ * keeps reading them and sees exactly the same thing.
+ *
+ * DESCRIPTIVE, never prescriptive. It says what is being waited on; it does not say whether a
+ * machine may answer it, because conclave does not know that. A permission prompt for
+ * `gh pr view` and one for `rm -rf` arrive here identically, and the driving agent is the one
+ * with the context to tell them apart -- the same argument the README makes about why conclave
+ * does not turn pauses into notifications. Publishing a `machineAnswerable: true` would be
+ * conclave asserting a safety property it cannot check.
+ *
+ * A PAUSE OUTRANKS A PERMISSION PROMPT when both are true at once. The pause stops the whole
+ * conclave and the prompt stops one seat, so the pause is the fact about the run.
+ */
+export type SessionBlockedStatus =
+  /** One seat is stopped at a permission prompt. Answered with `/allow` or `/deny`. */
+  | { kind: 'permission'; since: number; participant: string; tool: string }
+  /**
+   * The run is paused. `reason` is the pause's own reason and `authority` its classification
+   * from `resolution.ts` -- both copied rather than re-derived, so this block and `pause`
+   * cannot say different things about one halt.
+   */
+  | { kind: 'pause'; since: number; reason: PauseReason; authority: ResolutionAuthority }
+
+/**
+ * A document with its roll-up brought up to date. The only writer of `blocked`.
+ *
+ * Spread-away rather than `blocked: undefined`, so a document with nothing blocked carries no
+ * key at all -- the rule the rest of this file follows for facts that do not exist.
+ */
+function withBlocked(status: SessionStatus): SessionStatus {
+  const blocked = blockedFrom(status)
+  const { blocked: _dropped, ...rest } = status
+  return blocked ? { ...rest, blocked } : rest
+}
+
+/**
+ * Derive the roll-up from the document that carries it.
+ *
+ * Exported so the rule can be tested directly on a document, without a relay: what this
+ * returns is a pure function of the two fields it reads, and that is the property the
+ * "cannot disagree" claim above rests on.
+ */
+export function blockedFrom(
+  status: Pick<SessionStatus, 'pause' | 'participants'>,
+): SessionBlockedStatus | undefined {
+  const pause = status.pause
+  // Pause first: see the ranking note above.
+  if (pause) {
+    return {
+      kind: 'pause',
+      since: pause.at,
+      reason: pause.reason,
+      authority: pause.resolution.authority,
+    }
+  }
+  // First in participant order rather than earliest, deliberately. Two seats can be stopped at
+  // once and this block reports ONE; a reader that needs every prompt reads the participant
+  // list, which is where they all are. Participant order is stable across writes, so a driver
+  // polling this does not see the answer flip between two equally blocked seats.
+  for (const p of status.participants) {
+    const waiting = p.awaitingPermission
+    if (waiting) return { kind: 'permission', since: waiting.since, participant: p.id, tool: waiting.tool }
+  }
+  return undefined
+}
+
 export interface SessionStatus {
   schema: number
   id: string
@@ -420,6 +511,15 @@ export interface SessionStatus {
    * the evidence and the options, and an agent operator has no console to read them from.
    */
   pause?: RunPause | undefined
+  /**
+   * Whether this run is waiting on somebody, in one place. See `SessionBlockedStatus`.
+   *
+   * Absent when nothing is blocked, which is the same rule `pause` and `outcome` follow: a key
+   * that is not here because the fact does not exist is the honest report. Written by the
+   * recorder on every write and derived by `blockedFrom` -- never set by a caller, because a
+   * second writer is how it would come to disagree with the fields it summarises.
+   */
+  blocked?: SessionBlockedStatus | undefined
   outcome?: RunOutcome | undefined
   /** Where the streams are, so a reader never has to reconstruct a path. */
   eventsPath: string
@@ -665,12 +765,12 @@ export class SessionRecorder {
     this.dir = sessionDir(repoRoot, status.id)
     this.statusPath = join(this.dir, 'status.json')
     this.eventsPath = join(this.dir, 'events.ndjson')
-    this.#status = {
+    this.#status = withBlocked({
       ...status,
       schema: SESSION_SCHEMA,
       eventsPath: this.eventsPath,
       updatedAt: status.startedAt,
-    }
+    })
     try {
       mkdirSync(this.dir, { recursive: true })
     } catch {
@@ -686,7 +786,11 @@ export class SessionRecorder {
 
   /** Merge a change and rewrite. Fields not named keep their current value. */
   update(patch: Partial<Omit<SessionStatus, 'schema' | 'id' | 'eventsPath'>>): void {
-    this.#status = { ...this.#status, ...patch, updatedAt: Date.now() }
+    // Re-derived AFTER the merge, so `blocked` describes the document as it is about to be
+    // written rather than as it was. A patch that clears a pause clears the roll-up with it,
+    // and one that names a new pause renames it, without either caller knowing this field
+    // exists -- which is what keeps it from drifting.
+    this.#status = withBlocked({ ...this.#status, ...patch, updatedAt: Date.now() })
     this.write()
   }
 
@@ -1209,6 +1313,20 @@ export function recordSession(
   /** The last adapter event per seat, which is what "what is it doing" means live. */
   const activity = new Map<string, { kind: string; tool?: string | undefined; since: number }>()
   /**
+   * When each seat's outstanding permission prompt was RAISED.
+   *
+   * Kept separately from `activity` although the same event feeds both, because `activity` is
+   * the LAST event and this one has to survive later ones. Nothing stops a seat emitting after
+   * it has asked -- and if it does, `activity` moves on while the prompt is still outstanding,
+   * so reading the timestamp off `activity` would report a wait that had reset itself. That is
+   * exactly the reading a driver is bounding its patience against (#234).
+   *
+   * Never cleared. A stale entry cannot be read: it is only consulted for a seat that
+   * `permissionsPending()` currently names, and every prompt raises the event that overwrites
+   * it. Clearing on answer would need the answer to be observable here, which it is not.
+   */
+  const permissionSince = new Map<string, number>()
+  /**
    * The last snapshot's turns per seat.
    *
    * Cached rather than read at write time because `seats()` is synchronous and `snapshot()`
@@ -1266,7 +1384,14 @@ export function recordSession(
         launch: { args: [...p.launch.args], model: p.launch.model },
         turns: turns.get(p.id) ?? [],
         ...(seen ? { activity: seen } : {}),
-        ...(pending ? { awaitingPermission: { tool: pending.tool } } : {}),
+        // `?? Date.now()` is the floor for a pending prompt whose event this recorder never
+        // saw -- a relay stand-in, or a recorder attached after the prompt was raised. It
+        // reports the wait as starting now, which understates it; the alternative is omitting
+        // the whole block and reporting a blocked seat as unblocked, which is the failure this
+        // issue is about.
+        ...(pending
+          ? { awaitingPermission: { tool: pending.tool, since: permissionSince.get(p.id) ?? Date.now() } }
+          : {}),
         ...(rotation ? { rotation } : {}),
         ...(exec
           ? {
@@ -1519,6 +1644,8 @@ export function recordSession(
           ...('tool' in e.event ? { tool: e.event.tool } : {}),
           since: e.at,
         })
+        // The moment the prompt was raised, kept where a later event cannot move it.
+        if (e.event.type === 'permission_requested') permissionSince.set(e.participant, e.at)
         // The two events that change a VERDICT, as opposed to what a seat is doing. A turn
         // ending produces the grade; a revision withdraws or replaces one. Snapshotting on
         // every event would re-read the transcript for every tool call the child makes, and

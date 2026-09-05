@@ -296,6 +296,24 @@ conclave session "<goal>" --operator agent   # stdin stays open; the driver writ
 conclave status --json                       # state: paused, with reason, evidence, options
 ```
 
+A run stops for two different reasons and they are not both pauses. `blocked` is the one field
+that reports either:
+
+```jsonc
+"blocked": { "kind": "pause", "since": 0, "reason": "advisor_escalated", "authority": "operator" }
+"blocked": { "kind": "permission", "since": 0, "participant": "implementer", "tool": "Bash" }
+```
+
+A permission prompt leaves `state` at `running` — `paused` is set only alongside a pause — so a
+watcher written against `state` or `pause` sees a healthy run for as long as the prompt is
+outstanding. Two agent operators wrote one and lost time to it; the second, having got prompts
+answered automatically, stopped watching and missed the escalation instead.
+
+`blocked` says what is being waited on. It does not say whether a machine may answer it: a prompt
+for `gh pr view` and one for `rm -rf` arrive identically, and the driver is the one that can tell
+them apart. Answer permission prompts from a list you wrote; stop on an escalation, which is by
+construction the case where judgement was asked for.
+
 `--operator agent` changes what the advisor is told about who is answering — escalate
 readily about premises and ambiguous criteria, never about permission — and is recorded in
 the run report.

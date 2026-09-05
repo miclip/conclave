@@ -411,6 +411,129 @@ test('a seat stopped at a permission prompt says so in the status file', async (
   const seat = readSession(root, 'perm')?.status.participants.find((p) => p.id === 'implementer')
   assert.equal(seat?.awaitingPermission?.tool, 'Bash')
   assert.equal(seat?.activity?.kind, 'permission_requested')
+  // WHEN the prompt was raised, taken from the event rather than from the clock at write time,
+  // so a driver bounding its patience measures the wait and not the poll (#234).
+  assert.equal(seat?.awaitingPermission?.since, seat?.activity?.since)
+
+  relay.stream.close()
+  await recording.close()
+})
+
+test('#234 a permission prompt reaches the top-level `blocked` block, on a run still `running`', async (t) => {
+  // The whole point, through a real recorder rather than the derivation alone: `state` never
+  // leaves `running` for a permission prompt -- `paused` is only ever set alongside a
+  // `RunPause` -- so a driver watching `state` or `pause` sees a healthy run for as long as the
+  // prompt is outstanding. That is the 42 minutes.
+  const root = tempDir(t, 'conclave-record')
+  const relay = fakeRelay()
+  const recording = recordSession(relay, {
+    repoRoot: root,
+    id: 'blocked',
+    goal: 'g',
+    front: 'relay',
+    startedAt: Date.now(),
+    build: 'test-build',
+  })
+  recording.set('running')
+  relay.pending.push({ id: 'implementer', tool: 'Bash' })
+  relay.stream.emit({ type: 'activity', participant: 'implementer', rank: 'implementer', event: { type: 'permission_requested', seq: 1, at: 7, tool: 'Bash', input: {} } as never })
+  await settle()
+
+  const status = readSession(root, 'blocked')?.status
+  assert.equal(status?.state, 'running', 'the state is unchanged, which is why the roll-up is needed')
+  assert.equal(status?.pause, undefined, 'and there is no pause for a pause-watcher to find')
+  const raised = status?.participants.find((p) => p.id === 'implementer')?.awaitingPermission?.since
+  assert.ok(raised !== undefined)
+  assert.deepEqual(status?.blocked, { kind: 'permission', since: raised, participant: 'implementer', tool: 'Bash' })
+
+  relay.stream.close()
+  await recording.close()
+})
+
+test('#234 an unblocked run carries no `blocked` key, in memory as well as on disk', (t) => {
+  // The on-disk half is free -- `JSON.stringify` drops an undefined value, so the FILE looks the
+  // same either way. The in-memory record does not: `recorder.status` is public, and a key
+  // present with an undefined value answers `'blocked' in status` with true. A reader testing
+  // for the key rather than its value would read every healthy run as blocked.
+  const root = tempDir(t, 'conclave-record')
+  const rec = new SessionRecorder(root, {
+    id: 'clear',
+    pid: process.pid,
+    cwd: root,
+    goal: 'g',
+    front: 'relay',
+    operator: 'human',
+    state: 'running',
+    startedAt: 1,
+    messages: 0,
+    participants: [],
+    build: 'test-build',
+  })
+  assert.equal('blocked' in rec.status, false, 'absent at construction')
+  rec.update({ messages: 1 })
+  assert.equal('blocked' in rec.status, false, 'and still absent after an unrelated update')
+  assert.equal(/"blocked"/.test(readFileSync(rec.statusPath, 'utf8')), false, 'and nothing on disk')
+})
+
+test('#234 a later event does not reset how long the prompt has been waiting', async (t) => {
+  // Why the raise time is kept apart from `activity` although one event feeds both. `activity`
+  // is the LAST event; nothing stops a seat emitting after it has asked. If the wait were read
+  // off `activity` it would restart on every such event, and a driver bounding its patience --
+  // the reader this whole block exists for -- would never see the bound pass.
+  const root = tempDir(t, 'conclave-record')
+  const relay = fakeRelay()
+  const recording = recordSession(relay, {
+    repoRoot: root,
+    id: 'held',
+    goal: 'g',
+    front: 'relay',
+    startedAt: Date.now(),
+    build: 'test-build',
+  })
+  relay.pending.push({ id: 'implementer', tool: 'Bash' })
+  relay.stream.emit({ type: 'activity', participant: 'implementer', rank: 'implementer', event: { type: 'permission_requested', seq: 1, at: 7, tool: 'Bash', input: {} } as never })
+  await settle()
+  const raised = readSession(root, 'held')?.status.blocked
+  assert.ok(raised?.kind === 'permission')
+
+  // Still pending -- the prompt has NOT been answered -- and something else happens on that seat.
+  await new Promise((r) => setTimeout(r, 25))
+  relay.stream.emit({ type: 'activity', participant: 'implementer', rank: 'implementer', event: { type: 'error', seq: 2, at: 8, message: 'noise' } as never })
+  await settle()
+
+  const after = readSession(root, 'held')?.status
+  const seat = after?.participants.find((p) => p.id === 'implementer')
+  assert.equal(seat?.activity?.kind, 'error', 'the last event moved on')
+  assert.ok((seat?.activity?.since ?? 0) > raised.since, 'and its clock moved with it')
+  assert.equal(after?.blocked?.since, raised.since, 'while the wait is still measured from the prompt')
+
+  relay.stream.close()
+  await recording.close()
+})
+
+test('#234 answering the prompt clears the block, without anyone clearing it', async (t) => {
+  // `blocked` is derived on every write, so it goes when the condition goes. Nothing in the
+  // relay, the front-ends or the recorder knows this field exists -- which is what stops it
+  // drifting away from what it summarises.
+  const root = tempDir(t, 'conclave-record')
+  const relay = fakeRelay()
+  const recording = recordSession(relay, {
+    repoRoot: root,
+    id: 'cleared',
+    goal: 'g',
+    front: 'relay',
+    startedAt: Date.now(),
+    build: 'test-build',
+  })
+  relay.pending.push({ id: 'implementer', tool: 'Bash' })
+  relay.stream.emit({ type: 'activity', participant: 'implementer', rank: 'implementer', event: { type: 'permission_requested', seq: 1, at: 7, tool: 'Bash', input: {} } as never })
+  await settle()
+  assert.equal(readSession(root, 'cleared')?.status.blocked?.kind, 'permission', 'blocked first')
+
+  relay.pending.length = 0
+  relay.stream.emit({ type: 'activity', participant: 'implementer', rank: 'implementer', event: { type: 'tool_use', seq: 2, at: 8, tool: 'Bash' } as never })
+  await settle()
+  assert.equal(readSession(root, 'cleared')?.status.blocked, undefined, 'and unblocked after, with no key left behind')
 
   relay.stream.close()
   await recording.close()
