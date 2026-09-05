@@ -63,13 +63,52 @@ install_dir() {
 # hazard is a module the process has not read yet, so it holds no handle on the file now.
 # `lsof` answers "what is being read right now" when the question is "what could be read
 # next".
+#
+# TWO PATTERNS, because a run started through the installed CLI never names the checkout (#230).
+# `~/.local/bin/conclave` is a symlink into it, and the SYMLINK's own path is what lands in argv:
+#
+#     node /Users/x/.local/bin/conclave session --advisor codex ...
+#
+# So `pgrep -f "<checkout>"` returned nothing while three such runs were live, and this guard --
+# the one protecting against a checkout swapped under a live process -- would have let all three
+# through. Observed while cutting v0.5.22, not reasoned about.
 in_use() {
-  pgrep -f "$1" 2>/dev/null || true
+  { pgrep -f "$1" 2>/dev/null || true; [ -n "${2:-}" ] && { pgrep -f "$2" 2>/dev/null || true; }; } | sort -u
+}
+
+# Live conclave RUNS, however they were started.
+#
+# `conclave session` and `conclave.ts session` are the same thing wearing two spellings, and the
+# guard below used to know only the second. The optional `.ts` covers both; requiring a
+# subcommand keeps it from matching this script, whose own path contains "conclave".
+#
+# Own pid excluded for the reason it always should be: a pattern that matches the process asking
+# the question answers "yes" forever, which is how a wait loop in this session's own history
+# spun for thirty-two minutes against nothing.
+conclave_runs() {
+  # Matched on `/conclave session`, WITH THE SLASH, and what that buys was measured rather than
+  # assumed -- an earlier version of this comment claimed the wrong reason for it.
+  #
+  # A real run always carries a resolved path, because the shebang resolves before exec:
+  #
+  #     node /Users/x/.local/bin/conclave session ...      matches
+  #     node /repo/bin/conclave.ts session ...             matches
+  #     /bin/sh -c conclave session --advisor codex        does NOT
+  #
+  # The third is a launcher naming the command it is about to start, not a run. Counting it
+  # would refuse a release for a shell, and the run it starts appears as its own process a
+  # moment later anyway.
+  #
+  # The wider hazard this shape guards against is a pattern that matches the process asking the
+  # question. That is what made a wait loop in this project's own history spin for thirty-two
+  # minutes against nothing, and requiring an invocation rather than a mention is what keeps a
+  # command line that merely discusses conclave from counting as one.
+  ps -eo pid=,command= 2>/dev/null | awk '$0 ~ /\/conclave(\.ts)? (session|relay)([ ]|$)/ { print $1 }'
 }
 
 refuse_if_in_use() {
   dir="$1"
-  pids=$(in_use "$dir")
+  pids=$(in_use "$dir" "${2:-}")
   [ -n "$pids" ] || return 0
   if [ "$FORCE" = 1 ]; then
     say "WARNING: processes are live in $dir and --force was given"
@@ -109,7 +148,8 @@ update_install() {
     say "refusing: $dir has uncommitted changes"
     exit 1
   fi
-  refuse_if_in_use "$dir"
+  # The checkout path AND the symlink that resolves into it -- see `in_use`.
+  refuse_if_in_use "$dir" "$(command -v conclave 2>/dev/null || true)"
 
   before=$(git -C "$dir" rev-parse --short HEAD)
   run "git -C '$dir' fetch origin --tags --quiet"
@@ -171,8 +211,11 @@ git rev-parse "$TAG" >/dev/null 2>&1 && { say "refusing: $TAG already exists"; e
 
 # A run in flight owns a branch this tag would collide with, and its participants are
 # writing to the tree being tagged.
-if pgrep -f "conclave.ts session|conclave.ts relay" >/dev/null 2>&1; then
+if [ -n "$(conclave_runs)" ]; then
   say "refusing: a run is in flight — wait for it to finish and merge"
+  for p in $(conclave_runs); do
+    echo "    pid $p: $(ps -o command= -p "$p" 2>/dev/null | cut -c1-100)" >&2
+  done
   exit 1
 fi
 
