@@ -5476,3 +5476,41 @@ test('a well-formed id naming no seat in THIS run is refused, and the refusal na
   // that would show a restricted message, and there is none to show.
   assert.match(text, /no restricted messages/)
 })
+
+test('#229 the pause menu separates what resolves it from what merely queues', async (t) => {
+  // An operator agent read "or type a message", sitting in the same list as three verbs that
+  // all resolve the pause, as a fourth way to answer. It is not: a bare message is queued for
+  // the next exchange and the run stays paused. They wrote two long answers into a void, lost
+  // 3.5 hours, then found a second session stalled the same way with four queued messages.
+  //
+  // The consequence now appears where the reader is choosing, rather than by implication in a
+  // trailing clause about the combined form.
+  const dir = repo(t)
+  const impl = slow('impl', 'claude', ['ack', 'Did it, slowly.'])
+  impl.endTurn = { index: 1, verdict: TIMED_OUT }
+  const out = collect()
+  const input = new PassThrough()
+  const running = runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'claude',
+    rounds: 4,
+    checks: [],
+    registry: registryOf({ codex: [slow('advisor', 'codex', ['Do it.', 'DONE'])], claude: [impl] }),
+    input,
+    output: out.stream,
+  })
+
+  await untilText('the pause menu to be printed', out.text, /these resolve the pause/)
+  const text = out.text()
+  // Not `/rotate`: the offered verbs depend on the pause, and rotation is off with no checks.
+  assert.match(text, /\/continue\s+\/abort\s+— these resolve the pause/, 'the verbs, named as resolving')
+  assert.match(text, /a message on its own is QUEUED for the next exchange and the run stays paused/)
+  assert.match(text, /\/continue <message> does both/, 'the combined form is still offered')
+  // The failure mode, pinned: a message must never be listed as though it were a fourth verb.
+  assert.doesNotMatch(text, /\/abort\s+or type a message/, 'not a fourth item in the same list')
+
+  input.write('/abort\n')
+  await running
+})

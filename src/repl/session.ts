@@ -638,11 +638,26 @@ function renderPause(p: RunPause, width: number): string {
   // `constrain` is not a command — you constrain by typing. Offering it as one sent people
   // looking for a slash command that does not exist.
   const commands = p.options.filter((o) => o !== 'constrain').map((o) => `/${o}`)
-  // The combined form, named where the menu is. A menu that lists `/continue` above "or type
-  // a message" reads as two exclusive choices, and an operator with something to say who
-  // picks the command loses the saying of it. `/continue <message>` is both, so the line that
-  // offers the two separately is the line that has to admit they compose.
-  lines.push('', `  ${dim(commands.join('   '))}   ${dim('or type a message — /continue <message> does both')}`, '')
+  // Two lines, and the split is the point (#229).
+  //
+  // The first line is what RESOLVES the pause. The second is what a bare message does, said as
+  // a consequence rather than as a fourth item in the same list -- because as one list it read
+  // as a fourth way to proceed, and an operator agent answered two pauses that way, into a
+  // void, losing 3.5 hours and then finding a second session stalled the same way with four
+  // queued messages behind it. Their words: "I would not have written two long answers into a
+  // void if it had said the message queues without resuming."
+  //
+  // The combined form is still named where the menu is, for the reason it always was: a menu
+  // that offers `/continue` and a message as separate choices makes an operator with something
+  // to say pick one and lose the other. `/continue <message>` is both, so the line that offers
+  // them separately is the line that has to admit they compose.
+  lines.push(
+    '',
+    `  ${dim(commands.join('   '))}   ${dim('— these resolve the pause')}`,
+    `  ${dim('a message on its own is QUEUED for the next exchange and the run stays paused')}`,
+    `  ${dim('/continue <message> does both')}`,
+    '',
+  )
   return lines.join('\n')
 }
 
@@ -2410,7 +2425,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
       // FALSIFIER, stated because it is the strongest argument against this shape: the
       // console has no general "trailing text is a message" rule and does not gain one here.
       // `/rotate <text>` and `/abort <text>` consume their text as a REASON
-      // (`src/repl/session.ts:2463`, `src/repl/session.ts:2496`) and `/pause`, `/queue`, `/audit` ignore
+      // (`src/repl/session.ts:2478`, `src/repl/session.ts:2511`) and `/pause`, `/queue`, `/audit` ignore
       // whatever follows them. So an operator who learns this from `/continue` and carries
       // it to `/pause I'll be back` still loses the sentence. That inconsistency is not
       // repaired by making `/continue` a third behaviour; it is narrowed by it, and the

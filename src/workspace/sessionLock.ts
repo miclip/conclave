@@ -23,6 +23,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node
 import { dirname, join } from 'node:path'
 
 import { writeAtomic } from '../config/install.ts'
+import { resolveSession } from './sessionRecord.ts'
 
 /**
  * Who is live. NOT where they are working, and not what they wrote.
@@ -201,6 +202,33 @@ export function read(repoRoot: string): { session: LiveSession; stale: boolean }
   return { session, stale: !alive }
 }
 
+/**
+ * How long this run has been waiting for its operator, or `undefined` when it is not waiting.
+ *
+ * The pid check is what stops this describing SOME session in the project: `listSessions` orders
+ * by recency and the lock names the process guard is reporting on, so a stale record from an
+ * earlier run cannot be attributed to the live one.
+ */
+function pauseLine(repoRoot: string, pid: number): string | undefined {
+  let found
+  try {
+    found = resolveSession(repoRoot)
+  } catch {
+    return undefined
+  }
+  if (!('session' in found)) return undefined
+  const status = found.session.status
+  if (status.pid !== pid) return undefined
+  const pause = status.pause
+  if (!pause) return undefined
+  const mins = Math.max(0, Math.round((Date.now() - pause.at) / 60_000))
+  const waited = mins < 1 ? 'less than a minute' : mins === 1 ? '1 minute' : `${mins} minutes`
+  return (
+    `PAUSED, not working: waiting for an operator answer for ${waited} (${pause.reason}). ` +
+    `Answer it with \`/continue\` -- a message on its own is queued and leaves the run paused.`
+  )
+}
+
 export interface GuardReport {
   live: boolean
   stale: boolean
@@ -245,6 +273,24 @@ export function guard(repoRoot: string): GuardReport {
     messages.push(
       `participants are live: ${found.session.participants.map((p) => `${p.id} (${p.agent})`).join(', ')}`,
     )
+    // ...AND WHETHER THEY ARE WORKING OR WAITING FOR THE OPERATOR (#228).
+    //
+    // "Participants are live" was true of a run parked at a pause and true of one doing the
+    // work, which made it useless to the reader who most needs it. Two sessions sat at
+    // `implementer_unanswered` for hours -- one of them unnoticed with four operator messages
+    // queued behind it -- while guard reported them healthy throughout. #126 is the same shape
+    // one layer down: an agent operator polled for 73 minutes and was told `running,
+    // pause: none`.
+    //
+    // Read from the STATUS RECORD rather than the lock, because that is where the answer
+    // already is. Putting it in the lock would mean a second writer for a fact one file already
+    // holds, and the lock exists to survive a crash rather than to describe a run.
+    //
+    // Silent when there is no pause and silent when the record cannot be read: guard's job here
+    // is to add what it knows, and a run whose record is missing is a case `sessionStaleness`
+    // and the `status` command already speak to at more length than one guard line should.
+    const paused = pauseLine(repoRoot, found.session.pid)
+    if (paused) messages.push(paused)
   }
   if (changedSinceStart.length > 0) {
     // Named as a SNAPSHOT, because that is the honest description and the thing a reader
