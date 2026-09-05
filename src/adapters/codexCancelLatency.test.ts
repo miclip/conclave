@@ -75,7 +75,7 @@ import {
 } from '../transcript/reconcile.ts'
 import { CANCEL_EVIDENCE_BUDGET_MS, CANCEL_EVIDENCE_POLL_MS, CodexPtyHookAdapter } from './codex.ts'
 import { installFakeClis } from './fakeCli.ts'
-import { suiteTempDir, tempDir } from '../testkit/tempDir.ts'
+import { containAdapterRunDirs, tempDir } from '../testkit/tempDir.ts'
 
 /**
  * The run directories the adapters this file boots make for themselves, contained.
@@ -91,8 +91,7 @@ import { suiteTempDir, tempDir } from '../testkit/tempDir.ts'
  * this one stay isolated from each other exactly as before -- by `tempDir` handing each its
  * own uniquely named child of this root.
  */
-const ADAPTER_TMP_ROOT = suiteTempDir('adapter-run-root')
-process.env['TMPDIR'] = ADAPTER_TMP_ROOT
+const ADAPTER_TMP_ROOT = containAdapterRunDirs()
 
 const { dir: RUN } = installFakeClis()
 

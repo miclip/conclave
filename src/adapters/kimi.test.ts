@@ -19,7 +19,16 @@ import type { TestContext } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import type { AgentEvent, TurnEndEvent } from '../contract/session.ts'
 import { KimiPrintAdapter, parseRecord, sessionIdFrom, textOf } from './kimi.ts'
-import { tempDir } from '../testkit/tempDir.ts'
+import { containAdapterRunDirs, tempDir } from '../testkit/tempDir.ts'
+
+/**
+ * The run directories the adapters this file boots make for themselves, contained (#211).
+ *
+ * `claude`, `codex` and `kimi` each `mkdtemp` under `os.tmpdir()` at boot. #203 gives that back
+ * on close; this covers what close cannot -- a boot that throws first, and the run that keeps its
+ * directory because its attempts journal was named to the operator.
+ */
+containAdapterRunDirs()
 
 const REPO = fileURLToPath(new URL('../..', import.meta.url))
 const FIXTURE = join(REPO, 'spikes/kimi/fixtures/edit-turn.ndjson')

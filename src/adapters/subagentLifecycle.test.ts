@@ -37,7 +37,7 @@ import test from 'node:test'
 import type { AgentEvent, SubagentStartEvent, SubagentStopEvent } from '../contract/session.ts'
 import { ClaudePtyHookAdapter, TurnSubagents } from './claude.ts'
 import { COMPOSER_JS } from './fakeCli.ts'
-import { suiteTempDir } from '../testkit/tempDir.ts'
+import { containAdapterRunDirs, suiteTempDir } from '../testkit/tempDir.ts'
 
 /**
  * The run directories the adapters this file boots make for themselves, contained.
@@ -53,8 +53,7 @@ import { suiteTempDir } from '../testkit/tempDir.ts'
  * this one stay isolated from each other exactly as before -- by `tempDir` handing each its
  * own uniquely named child of this root.
  */
-const ADAPTER_TMP_ROOT = suiteTempDir('adapter-run-root')
-process.env['TMPDIR'] = ADAPTER_TMP_ROOT
+const ADAPTER_TMP_ROOT = containAdapterRunDirs()
 
 /**
  * Stands in for `claude` on PATH. Extensionless and shebanged, so Node runs it as CJS.
