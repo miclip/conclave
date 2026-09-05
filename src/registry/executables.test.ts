@@ -38,12 +38,7 @@ import { Relay } from '../relay/relay.ts'
 import { worktreePaths } from '../relay/subagents.ts'
 import { CLAUDE_AGENT, CODEX_AGENT, defaultRegistry, KIMI_AGENT, OPENCODE_AGENT } from './builtin.ts'
 import { fakeOpenCode } from '../adapters/opencodeApi/fakeServer.ts'
-import {
-  checkCommandAvailable,
-  findExecutable,
-  refuseMissingCommands,
-  type ExecutableRequirement,
-} from './executables.ts'
+import { checkCommandAvailable, commandDependsOnCwd, findExecutable, refuseMissingCommands, type ExecutableRequirement } from './executables.ts'
 import { AgentRegistry } from './registry.ts'
 import { NO_DEADLINE_CLOCKS, type AgentDefinition } from './types.ts'
 
@@ -629,3 +624,42 @@ for (const front of ['relay', 'session'] as const) {
     assert.deepEqual(side.creates, ['advisor', 'implementer', 'implementer-2'])
   })
 }
+
+test('#194 a command that names a relative path depends on where it is resolved from', () => {
+  // What tells the relay which seats need a second check once their worktree exists. The rules
+  // are `resolveCommand`'s own: a separator makes it a path, and a path that is not absolute
+  // means different files in different directories.
+  assert.equal(commandDependsOnCwd('./bin/agent'), true)
+  assert.equal(commandDependsOnCwd('tools/shim'), true)
+  // Absolute: the same file from anywhere.
+  assert.equal(commandDependsOnCwd('/usr/local/bin/claude'), false)
+  // Bare: searched on PATH, never resolved against a directory.
+  assert.equal(commandDependsOnCwd('claude'), false)
+  assert.equal(commandDependsOnCwd('opencode'), false)
+  // Windows separates with a backslash too, and its drive-absolute form is still absolute.
+  assert.equal(commandDependsOnCwd('bin\\agent', 'win32'), true)
+  assert.equal(commandDependsOnCwd('bin\\agent', 'linux'), false, 'a backslash is a filename character on POSIX')
+})
+
+test('#194 the same relative command passes in one directory and is refused in another', () => {
+  // THE DEFECT, reduced to the two calls the relay makes. A worktree is cut from a COMMIT, so a
+  // tracked `./bin/agent` exists in both directories and the preflight accidentally agrees with
+  // exec. An UNTRACKED one -- a locally built wrapper, a gitignored shim -- exists only where
+  // the operator built it, and the check that ran in the run root said the seat could start.
+  const root = tempDir({ after: () => {} } as unknown as TestContext, 'root')
+  const worktree = tempDir({ after: () => {} } as unknown as TestContext, 'worktree')
+  mkdirSync(join(root, 'bin'), { recursive: true })
+  writeFileSync(join(root, 'bin', 'agent'), '#!/bin/sh\nexit 0\n')
+  chmodSync(join(root, 'bin', 'agent'), 0o755)
+
+  const agent = agentWith('local', './bin/agent', { install: 'build it', installFrom: 'source' })
+
+  // In the root, where the operator built it: fine, and this is what preflight sees.
+  assert.doesNotThrow(() => refuseMissingCommands([{ participant: 'implementer', agent, cwd: root }]))
+  // In the seat's actual worktree: the file is not there, and the seat cannot start.
+  assert.throws(
+    () => refuseMissingCommands([{ participant: 'implementer', agent, cwd: worktree }]),
+    /implementer/,
+    'the second check is the one that can see this',
+  )
+})
