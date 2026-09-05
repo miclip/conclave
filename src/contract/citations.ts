@@ -247,7 +247,7 @@ export const CITED: Record<string, string> = {
   'src/repl/session.ts:2574': 'inject(rest, { only: who })',
   'src/adapters/kimi.ts:752': 'compactionGeneration: 0,',
   'src/rotation/rotate.ts:412': 'export async function rotate(',
-  'src/adapters/claude.ts:1873': "#state: SessionState = 'running'",
+  'src/adapters/claude.ts:1867': "#state: SessionState = 'running'",
   'src/adapters/codex.ts:1179': "#state: SessionState = 'running'",
   'src/rotation/handoff.ts:74': 'compactionGeneration: CompactionGeneration',
   'src/workspace/sessionRecord.ts:1412': 'snap.turns.map(',

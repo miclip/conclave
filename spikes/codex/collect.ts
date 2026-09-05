@@ -23,7 +23,7 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { homedir } from 'node:os'
+import {  } from 'node:os'
 import { join } from 'node:path'
 import { sanitizedCopy } from '../../src/process/childenv.ts'
 import { PtyProcess, squash, stripAnsi } from '../../src/process/pty.ts'

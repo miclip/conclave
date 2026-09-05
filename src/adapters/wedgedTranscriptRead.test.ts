@@ -41,7 +41,7 @@ import { appendFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
 import type { TestContext } from 'node:test'
-import type { AgentEvent, AgentSession, RevisionEvent, TurnEndEvent } from '../contract/session.ts'
+import type { AgentEvent, AgentSession, TurnEndEvent } from '../contract/session.ts'
 import { wedgeOneTailPoll, type TailWedge } from '../transcript/tailWedge.ts'
 import { ClaudePtyHookAdapter } from './claude.ts'
 import { CANCEL_EVIDENCE_BUDGET_MS, CodexPtyHookAdapter } from './codex.ts'
@@ -62,7 +62,7 @@ import { containAdapterRunDirs, tempDir } from '../testkit/tempDir.ts'
  * this one stay isolated from each other exactly as before -- by `tempDir` handing each its
  * own uniquely named child of this root.
  */
-const ADAPTER_TMP_ROOT = containAdapterRunDirs()
+containAdapterRunDirs()
 
 const { dir: RUN } = installFakeClis()
 

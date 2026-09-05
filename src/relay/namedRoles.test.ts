@@ -50,7 +50,7 @@ const API_DEV: RoleDefinition = {
 function registryOf(sessions: Record<string, FakeRotationSession>): AgentRegistry {
   const r = new AgentRegistry()
   r.registerRole(API_DEV)
-  for (const [agent, session] of Object.entries(sessions)) {
+  for (const agent of Object.keys(sessions)) {
     r.register({
       id: agent,
       displayName: agent,

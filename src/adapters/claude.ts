@@ -1654,12 +1654,6 @@ export class ClaudePtyHookAdapter implements AgentSession {
     })
   }
 
-  #lastPermissionDecision(since: number): 'allow' | 'deny' | undefined {
-    const a = this.#input.last('permission_decision')
-    if (!a || a.at < since) return undefined
-    return a.detail?.startsWith('deny') ? 'deny' : 'allow'
-  }
-
   /**
    * Rebuild transcript evidence for every turn from the transcript as it CURRENTLY
    * stands, and let each tracker re-decide.

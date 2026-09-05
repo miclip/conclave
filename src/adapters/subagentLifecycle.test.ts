@@ -53,7 +53,7 @@ import { containAdapterRunDirs, suiteTempDir } from '../testkit/tempDir.ts'
  * this one stay isolated from each other exactly as before -- by `tempDir` handing each its
  * own uniquely named child of this root.
  */
-const ADAPTER_TMP_ROOT = containAdapterRunDirs()
+containAdapterRunDirs()
 
 /**
  * Stands in for `claude` on PATH. Extensionless and shebanged, so Node runs it as CJS.

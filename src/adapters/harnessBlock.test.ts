@@ -42,7 +42,7 @@ import { containAdapterRunDirs } from '../testkit/tempDir.ts'
  * this one stay isolated from each other exactly as before -- by `tempDir` handing each its
  * own uniquely named child of this root.
  */
-const ADAPTER_TMP_ROOT = containAdapterRunDirs()
+containAdapterRunDirs()
 
 const { dir: RUN } = installFakeClis()
 process.env['ORCH_FAKE_HARNESS_BLOCK'] = '1'

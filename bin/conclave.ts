@@ -52,7 +52,7 @@ import {
 import { absoluteSummary, resolveDeadlines, silenceSummary } from '../src/relay/deadlines.ts'
 import { ensureCodexHooksTrusted } from '../src/deployment/ensureTrust.ts'
 import type { ReadSession } from '../src/workspace/sessionRecord.ts'
-import { execFileSync, spawn } from 'node:child_process'
+import { spawn } from 'node:child_process'
 import { exitAfterFlush } from '../src/process/exit.ts'
 import {
   listSessions,

@@ -135,11 +135,6 @@ class FakeSession implements AgentSession {
   }
 
   onSend: ((message: string) => void) | undefined
-  #narration: string[] = []
-  streamNarration(...lines: string[]): void {
-    this.#narration = lines
-  }
-
   // One-shot reconstruction. The NEXT `send()` this session performs streams `narration`
   // and lags its transcript; the turn after it is completely normal. Keyed by turn, so a
   // later advisor turn cannot be wrongly reconstructed from the same narration (#218).

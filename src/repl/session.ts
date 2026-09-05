@@ -34,7 +34,7 @@ import {
   preflightRefusals,
   preflightWarnings,
 } from '../relay/guardrails.ts'
-import { createWriteStream, existsSync, realpathSync } from 'node:fs'
+import { createWriteStream } from 'node:fs'
 import { basename, join, relative } from 'node:path'
 import { Writable } from 'node:stream'
 import { clearLine, createInterface, cursorTo, type Interface } from 'node:readline'

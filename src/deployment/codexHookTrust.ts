@@ -1,14 +1,6 @@
 import { dirname, join } from 'node:path'
 import { homedir } from 'node:os'
-import {
-  appendFileSync,
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  realpathSync,
-  statSync,
-  writeFileSync,
-} from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs'
 /**
  * Codex hook trust — a configuration/deployment invariant, not lifecycle evidence.
  *

@@ -5,7 +5,7 @@
  */
 
 import { strict as assert } from 'node:assert'
-import { readFileSync, writeFileSync } from 'node:fs'
+import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
 import { tempDir } from '../testkit/tempDir.ts'
