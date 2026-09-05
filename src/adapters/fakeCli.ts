@@ -211,6 +211,20 @@ onComposerSubmit(function (prompt) {
       post('Stop', { prompt_id: id, turn_id: id, last_assistant_message: 'done' })
     }, stopAfter)
   }
+  // ORCH_FAKE_MODEL_SWITCH: a human reaching into the seat's own pane and typing /model (#202).
+  // Payload fields are the ones the installed Claude Code actually sends, captured from a real
+  // switch: from_model, to_model, requested_model, source.
+  if (process.env.ORCH_FAKE_MODEL_SWITCH) {
+    var pair = String(process.env.ORCH_FAKE_MODEL_SWITCH).split('>')
+    post('PreModelSwitch', {
+      prompt_id: id, turn_id: id,
+      from_model: pair[0], to_model: pair[1], requested_model: pair[1], source: 'command',
+    })
+    post('PostModelSwitch', {
+      prompt_id: id, turn_id: id,
+      from_model: pair[0], to_model: pair[1], requested_model: pair[1], source: 'command',
+    })
+  }
   // Otherwise: nothing, ever. This is the hang the watchdog exists for.
 })
 
