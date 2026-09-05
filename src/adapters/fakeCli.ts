@@ -166,6 +166,13 @@ let turns = 0
 let deferredSlash = null
 onComposerSubmit(function (prompt) {
   if (!prompt.trim()) return
+  // ORCH_FAKE_HONOURS_QUIT: leave on the child's own terms, as codex does (#187). Without it
+  // this stand-in ignores /quit, which is the OTHER case worth testing -- the bounded fallback
+  // to terminate, and the guarantee that a child which never goes still ends the shutdown.
+  if (process.env.ORCH_FAKE_HONOURS_QUIT && prompt.trim() === '/quit') {
+    post('SessionEnd', { reason: 'quit' }).then(function () { process.exit(0) })
+    return
+  }
   if (process.env.ORCH_FAKE_DEFER_SLASH && prompt.trim().charAt(0) === '/' && !deferredSlash) {
     turns += 1
     deferredSlash = { id: 'fake-turn-' + turns, prompt: prompt }
