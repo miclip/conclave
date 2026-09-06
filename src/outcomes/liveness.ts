@@ -130,10 +130,23 @@
  *     than leaving an operator to reconcile two numbers.
  *
  * `-Ao` and not the `-axo` the report used. `-A` is POSIX "select all processes" and means the
- * same thing on both platforms CI runs (macOS, Ubuntu). Linux's `-a` means "all except session
- * leaders", and a CLI spawned on a pty is very often a session leader -- so on Ubuntu the one
- * process this file exists to measure is the one `-axo` could omit, and it would be reported as
- * `gone`. On macOS the two are identical; the difference is only visible where it would hurt.
+ * same thing on both platforms CI runs (macOS, Ubuntu), so it is a superset and cannot omit what
+ * this file exists to measure.
+ *
+ * THE REASON THIS USED TO GIVE WAS WRONG (#240), and it was wrong in the direction that sounds
+ * convincing. Linux's bare `-a` does drop session leaders, and a CLI spawned on a pty routinely
+ * is one -- but `-ax` restores them, so `-axo` could not have omitted the process either.
+ * Measured in `ubuntu:24.04`, procps-ng 4.0.4, against every long-lived session leader
+ * (`pid == sid`):
+ *
+ *     ps -A    includes all of them
+ *     ps -ax   includes all of them
+ *     ps -a    MISSING every one
+ *
+ * The same held on 20.04 (3.3.16) and 22.04 (3.3.17) when the issue was filed. So the premise
+ * about `-a` was right, the conclusion about `-axo` did not follow, and the flag is unchanged
+ * because `-A` is still the POSIX spelling and still a superset -- it just never needed this
+ * argument to justify it.
  *
  * And a tooling failure is not a death. If no snapshot can be taken at all -- a platform whose
  * `ps` does not accept this, a sandbox that refuses it -- the sample falls back to the per-pid

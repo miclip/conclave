@@ -1761,9 +1761,19 @@ export class CodexPtyHookAdapter implements AgentSession {
         // this killed the child before it could run its own exit hook.
         //
         // Bounded, and the fallback is EXACTLY what happened before rather than a new path, so
-        // the worst case is `QUIT_GRACE_MS` of extra latency on a shutdown. That bound is the
-        // whole safety argument: #12's own words are that Codex "does not quit promptly on
-        // Ctrl-C", and teardown is the path least able to afford a hang.
+        // the worst case is `QUIT_GRACE_MS` of extra latency on a shutdown. THE BOUND IS THE
+        // WHOLE SAFETY ARGUMENT, and it does not depend on how any version of Codex behaves --
+        // which matters, because the observation that used to carry it has expired.
+        //
+        // #12 found that Codex "does not quit promptly on Ctrl-C", and three sites carried that
+        // forward in the present tense. At codex-cli 0.153.4 it is false at an idle composer:
+        // one Ctrl-C exits with code 0 in 413-794 ms across three samples, measured through a
+        // plain pty so nothing in this adapter can be the explanation (#236).
+        //
+        // The quotation stays true as history and the bound stays because teardown is the path
+        // least able to afford a hang -- a child that ignores `/quit` is a stand-in this suite
+        // constructs, not a claim about any shipped version. What changed is that the argument
+        // no longer rests on a fact about the current binary.
         //
         // NOT while a turn is in flight, because neither CLI accepts input mid-turn: the command
         // would be spliced into the turn rather than executed, which is #117 arriving during

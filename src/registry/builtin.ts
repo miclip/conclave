@@ -116,7 +116,13 @@ const RUN_PER_TURN_DEADLINES: DeadlineSupport = {
  * Claude Code names its aliases and nothing else, so only aliases are judged.
  *
  * Measured on 2.1.227: there is no `claude models` subcommand, `--model` with no value opens an
- * interactive picker, and `--help` prints the option text quoted in `claudeAliases`. That text
+ * interactive picker, and `--help` prints the option text quoted in `claudeAliases`.
+ *
+ * RE-MEASURED ON 2.1.263 (#241): two of those three still hold. `--model` with no value now
+ * ERRORS — `error: option '--model <model>' argument missing`, both piped and through a pty —
+ * rather than opening a picker. Nothing exercises the picker path, so the grade is unaffected:
+ * it rests on the other two, which are still true. Recorded so the next reader is not left
+ * hunting for a picker that no longer exists. That text
  * says an alias OR a full model name is accepted and enumerates only the first kind, which is
  * exactly the graded middle this field exists for -- a full name goes to the child unjudged, and
  * `--model opus-5`, the spelling that produced #82, is judged and refused.

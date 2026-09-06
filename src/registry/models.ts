@@ -17,7 +17,7 @@
  * The catch is that they answer to different degrees, which is why this is GRADED rather than
  * boolean. Measured on the installed CLIs while writing this:
  *
- *   opencode models   60 names, one `provider/model` per line. The whole set: absence is a fact.
+ *   opencode models   every name, one `provider/model` per line. The whole set: absence is a fact.
  *   claude --help     names three aliases inside the `--model` option text and says a full model
  *                     name is also accepted. Half an answer, and the half it gives is the half
  *                     the reported bug is in.
@@ -213,7 +213,8 @@ async function enumerate(support: ModelSupport, ask: AskCli): Promise<AskOutcome
 /**
  * Names worth putting in front of someone who just mistyped one.
  *
- * `opencode models` lists sixty; printing sixty lines at someone whose real problem is a missing
+ * `opencode models` lists every model the installation has — 69 of them on 1.18.27, and the
+ * count is not the point: printing all of them at someone whose real problem is a missing
  * `-code` suffix buries the answer. The full list is one command away and the refusal says so.
  */
 export function nearestNames(model: string, names: readonly string[], limit = 5): string[] {

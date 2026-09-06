@@ -1073,8 +1073,9 @@ const DECLARED: Record<string, string> = {
     'WHAT IS MEASURED CHANGES. A sample is now ONE `ps -Ao pid=,ppid=,%cpu=` snapshot of the whole ' +
     'table, walked into the descendant tree of the pid, instead of `ps -o %cpu= -p PID`. `-Ao` and ' +
     'not the `-axo` the issue suggests: `-A` is POSIX "all processes" on both CI platforms, while ' +
-    'Linux’s `-a` drops SESSION LEADERS, which a CLI on a pty routinely is — on Ubuntu `-axo` could ' +
-    'omit the one process this file exists to measure and report it as gone. If no table can be ' +
+    'chosen because it is POSIX and a superset. (This used to add that Linux’s `-a` drops session ' +
+    'leaders so `-axo` could omit the process; `-ax` restores them and it could not — measured on ' +
+    'procps-ng 3.3.16, 3.3.17 and 4.0.4, see #240. The flag is unchanged; only its stated reason was wrong.) If no table can be ' +
     'read at all the sample falls back to the old per-pid reading rather than calling a live child ' +
     'gone on the strength of a `ps` that never ran. ' +
     'THE STATUS DOCUMENT IS FOUR KEYS WIDER, which is why this is declared rather than assumed ' +
