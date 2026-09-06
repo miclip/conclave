@@ -84,6 +84,15 @@ const LEASE_MS = 60
  */
 const PATIENCE_MS = LEASE_MS * 50
 
+/**
+ * How long the BASELINE is given to find a read that completed inside the lease.
+ *
+ * Deliberately unrelated to `LEASE_MS`: this is not one lease, nor a multiple chosen to cover a
+ * slow one. It is the bound past which a machine that cannot read a two-line file inside 60ms
+ * even once, over hundreds of attempts, is a machine this suite cannot measure anything on.
+ */
+const BASELINE_MS = 10_000
+
 /** The tail runs on a 400ms interval, so this is several chances to be caught. */
 const CATCH_MS = 3_000
 
@@ -100,6 +109,42 @@ async function holdingEveryRead(wedge: TailWedge): Promise<void> {
   const until = Date.now() + CATCH_MS
   while (!wedge.taken && Date.now() < until) await new Promise((r) => setTimeout(r, 25))
   assert.equal(wedge.taken, true, 'precondition: the tail must actually be holding the read')
+}
+
+/**
+ * The baseline: a snapshot that was actually READ, waited for rather than assumed (#186).
+ *
+ * This establishes a precondition -- "reads work here" -- and it used to be asserted on the
+ * first attempt. That held because a machine is usually fast enough, which is not a property of
+ * the code. `macos-15-intel` took longer than the injected lease on one CI run, the very first
+ * read came back contained, and the test failed on its own setup with `a snapshot that was read
+ * is not marked as a fallback` -- a message describing the shape of the answer rather than the
+ * reason for it.
+ *
+ * Nothing about the subject requires the FIRST read to win. A contained baseline means one read
+ * was slow, not that reads do not work, so the honest response is to take another. What the
+ * test cannot do without is a read that succeeded at some point, and that is what this waits
+ * for.
+ *
+ * The bound is not a margin over the lease. It is the point past which "slow" has become
+ * "reads never complete here", and blowing it says so in those words -- so the next failure on
+ * the slowest runner names the runner instead of accusing the containment logic.
+ */
+async function readBaseline(session: AgentSession, withinMs = BASELINE_MS): Promise<SessionSnapshot> {
+  const started = Date.now()
+  let last: SessionSnapshot | undefined
+  while (Date.now() - started < withinMs) {
+    const snap = await snapshotWithin(session, 10_000)
+    if (snap.containedFallback === undefined && snap.turns.length >= 1) return snap
+    last = snap
+    await new Promise((r) => setTimeout(r, 25))
+  }
+  assert.fail(
+    `no read completed inside the ${LEASE_MS}ms lease within ${withinMs}ms, so the baseline ` +
+      `could not be established: every attempt came back ` +
+      `${last?.containedFallback ? 'contained' : `with ${last?.turns.length ?? 0} turn(s)`}. ` +
+      `This measures how fast this machine reads a file, not containment.`,
+  )
 }
 
 /** `snapshot()`, or a failure that says which of the two ways it failed. */
@@ -162,9 +207,7 @@ test('claude: snapshot() answers from the last good read instead of rejecting', 
     await session.send('first prompt', { kind: 'orchestrator' })
 
     // The baseline, taken while reads work. Everything below is measured against it.
-    const before = await snapshotWithin(session, 10_000)
-    assert.ok(before.turns.length >= 1, 'precondition: the view has read the transcript at least once')
-    assert.equal(before.containedFallback, undefined, 'a snapshot that was read is not marked as a fallback')
+    const before = await readBaseline(session)
 
     await holdingEveryRead(wedge)
 
@@ -245,9 +288,7 @@ test('codex: snapshot() answers from the last good read instead of rejecting', a
     session = await codexSessionOver(path)
     await session.send('first prompt', { kind: 'orchestrator' })
 
-    const before = await snapshotWithin(session, 10_000)
-    assert.ok(before.turns.length >= 1, 'precondition: the view has read the transcript at least once')
-    assert.equal(before.containedFallback, undefined, 'a snapshot that was read is not marked as a fallback')
+    const before = await readBaseline(session)
 
     await holdingEveryRead(wedge)
     appendFileSync(
@@ -280,4 +321,63 @@ test('codex: snapshot() answers from the last good read instead of rejecting', a
     wedge.restore()
     await session?.close()
   }
+})
+
+// --- The baseline helper itself ---------------------------------------------------------
+//
+// `readBaseline` exists because the first read can come back contained on a slow runner
+// (#186). The two tests above cannot exercise that: on every machine available here the first
+// read succeeds, which is exactly why the old assertion looked correct for as long as it did.
+// So the retry is driven directly, against a session that answers the way that runner did.
+
+/** A session whose `snapshot()` returns each of `answers` in turn, then repeats the last. */
+function sessionAnswering(answers: SessionSnapshot[]): { session: AgentSession; calls: () => number } {
+  let n = 0
+  const session = {
+    async snapshot(): Promise<SessionSnapshot> {
+      const at = Math.min(n, answers.length - 1)
+      n += 1
+      return answers[at]!
+    },
+  } as unknown as AgentSession
+  return { session, calls: () => n }
+}
+
+const contained = (turns: number): SessionSnapshot =>
+  ({ turns: Array.from({ length: turns }, () => ({})), containedFallback: true }) as unknown as SessionSnapshot
+
+const read = (turns: number): SessionSnapshot =>
+  ({ turns: Array.from({ length: turns }, () => ({})) }) as unknown as SessionSnapshot
+
+test('#186 a contained first read is retried, not failed on', async () => {
+  // The flake, as the slow runner produced it: turns were present -- so a read HAD happened at
+  // some point -- and the answer was still marked contained. One slow read is not evidence that
+  // reads do not work, and the test needs a read that worked, not the first one.
+  const { session, calls } = sessionAnswering([contained(1), contained(1), read(1)])
+  const snap = await readBaseline(session)
+  assert.equal(snap.containedFallback, undefined)
+  assert.equal(calls(), 3, 'it kept asking until a read came back')
+})
+
+test('#186 a baseline that never reads fails naming the machine, not the containment logic', async () => {
+  // What the next failure on the slowest runner should say. The old message was `a snapshot that
+  // was read is not marked as a fallback`, which describes the shape of the answer and points at
+  // the code under test; the cause is that no read finished in time.
+  // A short bound here on purpose: the real one is ten seconds, and what this asserts is the
+  // MESSAGE on the give-up path, which is the same message at any bound.
+  const { session } = sessionAnswering([contained(1)])
+  const failure = await readBaseline(session, 200).then(() => undefined, (e: Error) => e)
+  assert.ok(failure, 'a machine where no read ever completes must still fail')
+  assert.match(failure.message, /the baseline could not be established/)
+  assert.match(failure.message, /how fast this machine reads a file, not containment/)
+})
+
+test('#186 a read with no turns is not a baseline either', async () => {
+  // The other half of the precondition, and it was a separate assertion before. A snapshot with
+  // nothing in it is what the adapter returns before its view exists at all -- so accepting it
+  // would establish "reads work" from a document that proves no read ever happened.
+  const { session, calls } = sessionAnswering([read(0), read(0), read(2)])
+  const snap = await readBaseline(session)
+  assert.equal(snap.turns.length, 2)
+  assert.equal(calls(), 3)
 })
