@@ -57,23 +57,67 @@ install_dir() {
   dirname "$(dirname "$target")"
 }
 
-# Live processes running FROM that checkout, if any.
+# Live conclave runs whose executable RESOLVES INTO that checkout.
 #
 # Matched on the command line rather than on open file handles, and that is deliberate: the
 # hazard is a module the process has not read yet, so it holds no handle on the file now.
 # `lsof` answers "what is being read right now" when the question is "what could be read
 # next".
 #
-# TWO PATTERNS, because a run started through the installed CLI never names the checkout (#230).
-# `~/.local/bin/conclave` is a symlink into it, and the SYMLINK's own path is what lands in argv:
+# WHAT IT ASKS CHANGED (#245). It used to ask whether a command line CONTAINED the checkout
+# path, or the path of whatever `command -v conclave` resolves to. Two patterns, both
+# substring tests, and each wrong in a different direction:
 #
-#     node /Users/x/.local/bin/conclave session --advisor codex ...
+#   FALSE POSITIVE. Any process merely NAMING the directory matched. Cutting v0.5.26, the
+#   guard refused because of `zsh -c ... cd <checkout> && git describe` -- a shell checking
+#   the install, not running from it. The tag was pushed and the install was not; the release
+#   sat half-done until `--install-only` finished it. The principle that would have prevented
+#   it is stated twenty lines below, for the other guard: require an invocation, not a mention.
 #
-# So `pgrep -f "<checkout>"` returned nothing while three such runs were live, and this guard --
-# the one protecting against a checkout swapped under a live process -- would have let all three
-# through. Observed while cutting v0.5.22, not reasoned about.
+#   FAIL OPEN, which is worse and was found by measuring rather than by it happening. A run
+#   is caught by the symlink pattern only when `command -v conclave` resolves to the same path
+#   the run was launched through. Started by absolute path from inside the checkout, from a
+#   copied install, from a second symlink, or by an operator with a different PATH, and it
+#   matched NEITHER pattern -- so the guard reported the checkout free while a session was
+#   live from it. A false positive announces itself; this does not.
+#
+# Both were the same mistake: asking what a command line SAYS when the question is which
+# checkout a process is RUNNING. So this asks the second question directly -- take the runs
+# `conclave_runs` already identifies (which requires an invocation), pull the script each was
+# launched with, resolve it, and keep the ones that land under this checkout. Symlinks are
+# resolved by the resolver rather than guessed at, so how conclave was installed stops
+# mattering.
 in_use() {
-  { pgrep -f "$1" 2>/dev/null || true; [ -n "${2:-}" ] && { pgrep -f "$2" 2>/dev/null || true; }; } | sort -u
+  dir=$(cd "$1" 2>/dev/null && pwd -P) || return 0
+  for pid in $(conclave_runs); do
+    # NOT named `argv`: that is a special variable in zsh, aliased to the positional
+    # parameters, and zsh does not word-split an unquoted expansion either -- so a reader who
+    # sources these functions into an interactive zsh to try them gets an empty result and a
+    # guard that appears to find nothing. This script runs under /bin/sh, where the splitting
+    # below is correct; the name avoids handing someone a silent failure at the prompt.
+    cmdline=$(ps -o command= -p "$pid" 2>/dev/null) || continue
+    # The token that IS the program: `node /path/to/conclave session ...`. Taken from argv
+    # rather than from `comm`, which reports `node` -- the shebang resolves before exec, so the
+    # interpreter is what the kernel records and the script is only ever an argument.
+    script=$(printf '%s\n' $cmdline | awk '/\/conclave(\.ts)?$/ { print; exit }')
+    [ -n "$script" ] || continue
+    real=$(resolve "$script") || continue
+    case "$real" in "$dir"/*) echo "$pid" ;; esac
+  done
+}
+
+# A path with every symlink resolved, or nothing.
+#
+# `realpath` and `readlink -f` are both present on current macOS and on Linux; neither is on
+# every macOS this might run on. Returning nothing when neither exists makes `in_use` find no
+# runs, so the guard would let a swap through -- which is why the caller treats an unresolvable
+# script as "cannot say" and the ONE case that must not be silent, an install with no resolver
+# at all, is refused up front rather than quietly passed.
+resolve() {
+  if command -v realpath >/dev/null 2>&1; then realpath "$1" 2>/dev/null
+  elif command -v readlink >/dev/null 2>&1; then readlink -f "$1" 2>/dev/null
+  else return 1
+  fi
 }
 
 # Live conclave RUNS, however they were started.
@@ -108,7 +152,15 @@ conclave_runs() {
 
 refuse_if_in_use() {
   dir="$1"
-  pids=$(in_use "$dir" "${2:-}")
+  # Without a resolver `in_use` cannot tell which checkout a run belongs to, and would return
+  # nothing -- which reads as "no runs" and lets the swap through. Refused loudly instead: this
+  # is the one input whose absence turns the guard off, and a guard that is off must say so.
+  if ! command -v realpath >/dev/null 2>&1 && ! command -v readlink >/dev/null 2>&1; then
+    say "refusing to update $dir — neither realpath nor readlink is available, so a live run"
+    echo "  cannot be told from a finished one. Install either, or pass --force." >&2
+    [ "$FORCE" = 1 ] || exit 1
+  fi
+  pids=$(in_use "$dir")
   [ -n "$pids" ] || return 0
   if [ "$FORCE" = 1 ]; then
     say "WARNING: processes are live in $dir and --force was given"
@@ -148,8 +200,9 @@ update_install() {
     say "refusing: $dir has uncommitted changes"
     exit 1
   fi
-  # The checkout path AND the symlink that resolves into it -- see `in_use`.
-  refuse_if_in_use "$dir" "$(command -v conclave 2>/dev/null || true)"
+  # No second pattern any more: `in_use` resolves each run's own script instead of guessing
+  # which paths might name this checkout (#245).
+  refuse_if_in_use "$dir"
 
   before=$(git -C "$dir" rev-parse --short HEAD)
   run "git -C '$dir' fetch origin --tags --quiet"

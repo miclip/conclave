@@ -99,7 +99,10 @@ test('#182 the install checkout is not updated while a process is running from i
   // the path beside it.
   const dir = fakeRepo(t, '9.9.9')
   mkdirSync(join(dir, 'bin'), { recursive: true })
-  writeFileSync(join(dir, 'bin', 'conclave.ts'), '// fixture\n')
+  // Stays alive when run, because the guard now identifies a live RUN by resolving the script
+  // it was launched with (#245) — so the fixture has to BE that script rather than merely be
+  // named on some other process's command line.
+  writeFileSync(join(dir, 'bin', 'conclave.ts'), '#!/usr/bin/env node\nsetTimeout(() => {}, 10_000)\n')
   // Executable, or `command -v` skips it and the script resolves the REAL install instead --
   // which is how the first run of this test refused against the author's own checkout.
   chmodSync(join(dir, 'bin', 'conclave.ts'), 0o755)
@@ -112,7 +115,17 @@ test('#182 the install checkout is not updated while a process is running from i
   symlinkSync(join(dir, 'bin', 'conclave.ts'), join(binDir, 'conclave'))
   const env = { ...process.env, PATH: `${binDir}:${process.env.PATH ?? ''}` }
 
-  const child = spawn('node', ['-e', 'setTimeout(() => {}, 10_000)', join(dir, 'bin', 'conclave.ts')], {
+  // Shaped like a real invocation, which is now what the guard requires (#245). It used to
+  // match any command line CONTAINING the checkout path, so this fixture could be
+  // `node -e '…' <path>` and still count. That is exactly the looseness that refused the
+  // v0.5.26 install because a shell had `cd <checkout>` in it, so the guard now asks whether a
+  // conclave RUN resolves into the checkout.
+  //
+  // The narrowing is real and deliberate: an arbitrary process with its cwd in the checkout no
+  // longer blocks the swap. What the swap breaks is a run reading modules it has not imported
+  // yet, and "which program is this process actually running" is only decidable here for an
+  // invocation conclave recognises.
+  const child = spawn('node', [join(dir, 'bin', 'conclave.ts'), 'session', 'probe'], {
     stdio: 'ignore',
   })
   try {
