@@ -18,12 +18,26 @@ import type { Env } from './childenv.ts'
 // both render inline with cursor-addressed redraws. Bracketed paste is the reliable
 // "this is a real interactive raw-mode UI" signal -- a piped or headless run has no
 // reason to enable it. Testing for ?1049h reports a false negative on both.
-export const TUI_MARKERS: Record<string, string> = {
+//
+// `kittyKeyboard` is a PATTERN where the others are literals, and that is not decoration
+// (#239). It was the literal ESC[>7u and neither CLI has ever sent that: both emit ESC[>5u,
+// measured on Claude Code 2.1.261 and Codex 0.153.4. The number is a flags BITMASK, so
+// naming one combination of bits is the kind of claim that goes stale by itself -- an
+// upstream may legitimately change which bits it asks for, which is how 7 became wrong.
+// What is decisive is that the protocol was negotiated at all, so the value is not read.
+//
+// The dead literal cost nothing YET, and that is the hazard rather than the reassurance:
+// `isInteractive` is an OR over three markers and the other two still match, so detection
+// kept giving the right answer by way of its neighbours. It becomes load-bearing the moment
+// that OR narrows -- and the failure would then read as "interactivity detection broke"
+// rather than as a constant that was wrong from the day it was written.
+export const TUI_MARKERS: Record<string, string | RegExp> = {
   altScreen: '[?1049h',
   bracketedPaste: '[?2004h',
   focusEvents: '[?1004h',
   hideCursor: '[?25l',
-  kittyKeyboard: '[>7u',
+  // eslint-disable-next-line no-control-regex
+  kittyKeyboard: /\x1b\[>[0-9;]*u/,
 }
 
 export const DECISIVE_TUI_MARKERS = ['bracketedPaste', 'focusEvents', 'kittyKeyboard'] as const
@@ -79,7 +93,8 @@ export class PtyProcess extends EventEmitter<PtyProcessEvents> {
     pty.onData((chunk: string) => {
       this.#buffer += chunk
       for (const [name, seq] of Object.entries(TUI_MARKERS)) {
-        if (!this.#markers.has(name) && chunk.includes(seq)) this.#markers.add(name)
+        if (this.#markers.has(name)) continue
+        if (typeof seq === 'string' ? chunk.includes(seq) : seq.test(chunk)) this.#markers.add(name)
       }
       this.emit('data', chunk)
     })
