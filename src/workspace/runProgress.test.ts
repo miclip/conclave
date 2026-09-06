@@ -16,6 +16,8 @@
 
 import { strict as assert } from 'node:assert'
 import test from 'node:test'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { readSession, recordSession } from './sessionRecord.ts'
 import { tempDir } from '../testkit/tempDir.ts'
 import { RelayEventStream } from '../relay/observe.ts'
@@ -176,6 +178,45 @@ test('#231 a paused run reports `paused`, not `idle`', async (t) => {
     within: 2_000,
     describe: 'the paused state to reach the record',
   })
+
+  relay.stream.close()
+  await recording.close()
+})
+
+test('#244 a freshly written record carries every field the README tells an operator to read', async (t) => {
+  // The half `contract/livenessDocs.test.ts` cannot check. It resolves the README's field paths
+  // against whatever `status --json` returns, and that is the last RECORDED document — which an
+  // older build may have written, so a field the current code stopped emitting still resolves
+  // there. This produces a record now.
+  //
+  // The fields are read out of the README rather than restated, so the two cannot drift: if the
+  // documented command changes, this checks the new fields.
+  const readme = readFileSync(join(import.meta.dirname, '..', '..', 'README.md'), 'utf8')
+  const at = readme.indexOf('sleep 86400 > ctl &')
+  assert.notEqual(at, -1, 'the README must still document the fifo recipe')
+  const section = readme.slice(at, readme.indexOf('\n#', at))
+  const documented = [...section.matchAll(/\.(state|alive|progress\.state)\b/g)].map((m) => m[0])
+  assert.ok(documented.length >= 3, `the recipe must document the liveness fields: ${JSON.stringify(documented)}`)
+
+  const { root, relay, recording } = start(t, 'readme')
+  relay.stream.emit(turn('turn_start', 1) as never)
+  await settle()
+  recording.set('running')
+  await waitFor(() => readSession(root, 'readme')?.status.progress !== undefined, {
+    within: 2_000,
+    describe: 'the record to be written',
+  })
+
+  const read = readSession(root, 'readme')
+  assert.ok(read, 'the record must be readable')
+  // `alive` is added by the READER, `state` and `progress` by the recorder — all three are what
+  // the documented command prints, so all three are checked against one document.
+  const doc = { ...read.status, alive: read.alive } as Record<string, unknown>
+  for (const field of new Set(documented)) {
+    let cur: unknown = doc
+    for (const key of field.slice(1).split('.')) cur = (cur as Record<string, unknown> | undefined)?.[key]
+    assert.notEqual(cur, undefined, `the README tells an operator to read ${field}; a fresh record has no such field (#244)`)
+  }
 
   relay.stream.close()
   await recording.close()
