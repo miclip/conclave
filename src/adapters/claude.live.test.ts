@@ -19,7 +19,9 @@ import { createHash } from 'node:crypto'
 import {
   existsSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -28,6 +30,9 @@ import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { ClaudePtyHookAdapter } from './claude.ts'
+import { sanitizedCopy } from '../process/childenv.ts'
+import { PtyProcess } from '../process/pty.ts'
+import { InputQueue } from '../process/input.ts'
 import type { AgentEvent, SessionSnapshot, TurnEndEvent } from '../contract/session.ts'
 import { containAdapterRunDirs, tempDir } from '../testkit/tempDir.ts'
 
@@ -403,7 +408,8 @@ test('a directory claude has never seen still boots, because the dialog gets ans
   //
   // So the child gets its own HOME instead, and the mutation lands in a directory this test
   // deletes. It cannot be done with CLAUDE_CONFIG_DIR: `sanitizedCopy` strips every CLAUDE*
-  // variable, and rightly -- see `childenv.ts` on CLAUDE_CODE_CHILD_SESSION -- and `assertClean`
+  // variable, and rightly -- see `childenv.ts` on CLAUDE_CODE_CHILD_SESSION, whose claim is
+  // qualified by MODE and holds in the pty mode this file drives (#238) -- and `assertClean`
   // throws rather than let one through. HOME is on the allowlist, so it is the seam that exists.
   //
   // Authentication survives on macOS because the OAuth credentials are in the Keychain, which is
@@ -492,4 +498,87 @@ test('a boot failure says WHY, not just that SessionStart never came', () => {
 
   assert.match(stripped, /trust this folder/i, 'contiguous only once the escapes are gone')
   assert.match(stripped, /Is this a project you created/i)
+})
+
+test('#238 CLAUDE_CODE_CHILD_SESSION suppresses the transcript in PTY mode, and only there', { skip }, async (t) => {
+  // The claim `childenv.ts` strips this variable ON, measured rather than restated. It is
+  // MODE-DEPENDENT, which is what made it dangerous: under `claude --print` the variable changes
+  // nothing, so the obvious two-minute check returns the wrong answer and invites removing a
+  // guard that is preventing silent data loss in the mode conclave actually drives (#238).
+  //
+  // Driven through `PtyProcess` rather than through the adapter, because there is no seam in the
+  // adapter to drive it through: `sanitizedCopy` strips this variable from the source and
+  // `assertClean` refuses it in `extra`, which is the guard working. The claim is about Claude
+  // Code, so this spawns Claude Code.
+  //
+  // Sandboxed HOME for the same reason as the folder-trust test above: transcripts are what is
+  // being counted, and counting them in the operator's real ~/.claude/projects would pollute it
+  // and race their own sessions.
+  const realHome = homedir()
+  const home = tempDir(t, 'conclave-childsession-home')
+  writeFileSync(join(home, '.claude.json'), JSON.stringify({ hasCompletedOnboarding: true }))
+  const linuxCreds = join(realHome, '.claude', '.credentials.json')
+  if (existsSync(linuxCreds)) {
+    mkdirSync(join(home, '.claude'), { recursive: true })
+    symlinkSync(linuxCreds, join(home, '.claude', '.credentials.json'))
+  }
+
+  // Trust seeded rather than answered. A fresh directory raises the folder-trust dialog, and
+  // answering it here would mean reimplementing `folderTrustAction` (#232) inside a test that is
+  // about something else -- and getting it subtly wrong would look like this claim failing.
+  // Claude Code keys the record on the REALPATH, which on macOS differs from the temp path
+  // handed out (/var/folders -> /private/var/folders).
+  const cwd = realpathSync(tempDir(t, 'conclave-childsession-cwd'))
+  writeFileSync(
+    join(home, '.claude.json'),
+    JSON.stringify({ hasCompletedOnboarding: true, projects: { [cwd]: { hasTrustDialogAccepted: true } } }),
+  )
+  const projects = join(home, '.claude', 'projects')
+  const transcripts = (): number => {
+    if (!existsSync(projects)) return 0
+    const found = readdirSync(projects, { recursive: true, encoding: 'utf8' }) as string[]
+    return found.filter((f) => f.endsWith('.jsonl')).length
+  }
+
+  /** One real turn in a real pty, with the variable forced in or left out. */
+  const runOnce = async (withVar: boolean): Promise<{ wrote: number; answered: boolean }> => {
+    const before = transcripts()
+    const env = sanitizedCopy(process.env as Record<string, string>, {
+      extra: { HOME: home },
+    }) as Record<string, string>
+    // Put back exactly the thing under test, AFTER the guard, which is the only way to get it
+    // past `assertClean` -- and the reason this cannot be done through the adapter at all.
+    if (withVar) env['CLAUDE_CODE_CHILD_SESSION'] = '1'
+
+    const pty = await PtyProcess.spawn({ file: 'claude', args: [], cwd, env })
+    try {
+      // The raw-mode marker, not a prompt glyph: `>` appears inside the escape sequences the TUI
+      // emits before it is ready, so waiting on it returns instantly and the submit below lands
+      // in whatever dialog is on screen. That is how the first version of this test failed.
+      assert.ok(await pty.waitForOutput((s) => s.includes('\u001b[?2004h'), 60_000), 'the TUI never came up')
+      await new Promise((r) => setTimeout(r, 5_000))
+      new InputQueue(pty).submit('Reply with exactly LIVE-238 and nothing else. No tools.')
+      // A COMPUTED answer would be better, but this is not testing what it said -- only that a
+      // turn ran, so a missing transcript is about persistence and not about a dead child.
+      const answered = await pty.waitForOutput((s) => s.includes('LIVE-238'), 120_000)
+      // The write is not synchronous with the answer appearing on screen.
+      await new Promise((r) => setTimeout(r, 5_000))
+      return { wrote: transcripts() - before, answered }
+    } finally {
+      await pty.terminate({ graceMs: 2_000, killAfterMs: 2_000 }).catch(() => {})
+    }
+  }
+
+  const without = await runOnce(false)
+  assert.ok(without.answered, 'the control turn must run, or this test proves nothing')
+  assert.ok(without.wrote >= 1, 'an ordinary pty session writes a transcript')
+
+  const withIt = await runOnce(true)
+  assert.ok(withIt.answered, 'the turn must run with the variable set too: persistence is what is suppressed, not the child')
+  assert.equal(
+    withIt.wrote,
+    0,
+    'CLAUDE_CODE_CHILD_SESSION no longer suppresses the transcript in pty mode: childenv.ts ' +
+      'strips it for a reason that may have expired (#238). Re-measure before removing the guard.',
+  )
 })

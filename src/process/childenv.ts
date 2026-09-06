@@ -1,11 +1,27 @@
 /**
  * Adapter invariant: a child agent CLI never inherits this process's environment.
  *
- * Ported from spikes/common/childenv.py. Spawning from inside an agent session leaks
- * the parent's session markers, and Claude Code responds to CLAUDE_CODE_CHILD_SESSION by
- * silently disabling transcript persistence -- writing no session file at all. Since the
- * transcript IS the adapter's recovery and audit path, an inherited environment is
- * silent data loss that surfaces much later looking like a parser bug.
+ * Ported from spikes/common/childenv.py. Spawning from inside an agent session leaks the
+ * parent's session markers, and Claude Code responds to CLAUDE_CODE_CHILD_SESSION by silently
+ * disabling transcript persistence -- writing no session file at all. Since the transcript IS
+ * the adapter's recovery and audit path, an inherited environment is silent data loss that
+ * surfaces much later looking like a parser bug.
+ *
+ * THAT IS MODE-DEPENDENT, and the mode it holds in is the one this adapter drives (#238).
+ * Measured on 2.1.261, twice each:
+ *
+ *   interactive pty (`entrypoint: cli`)   set -> NO transcript written.  unset -> written.
+ *   `claude --print` (`entrypoint: sdk-cli`)  set -> written.  unset -> written.
+ *
+ * Said explicitly because the easy way to check this claim is `--print`, where it is FALSE --
+ * and a reader who checks it that way concludes the guard is obsolete and removes something
+ * that is preventing silent data loss in the mode that matters. The turn ran in every case, so
+ * what is suppressed is persistence, not the child.
+ *
+ * The variable is not vestigial: it appears 20 times in the installed 2.1.263 bundle, and
+ * `childenvClaims.test.ts` checks that against the binary rather than restating it here. Plain
+ * `grep` on the bundle finds nothing -- it is a Mach-O executable -- which is a trap worth
+ * knowing for anyone re-checking this by hand.
  *
  * The environment is constructed, never inherited. There is deliberately no default
  * that reaches for process.env behind the caller's back.
@@ -51,7 +67,19 @@ export const KNOWN_PARENT_AGENT_VARS = [
   'AI_AGENT',
 ] as const
 
-/** The one whose leakage is destructive rather than merely untidy. */
+/**
+ * The ones whose leakage is destructive rather than merely untidy.
+ *
+ * Read by `assertClean`, so the failure says which it was. Every parent-agent variable is
+ * stripped and any leak is a bug, but these two facts are not the same size: an inherited
+ * CLAUDE_CODE_ENTRYPOINT is untidy, and an inherited CLAUDE_CODE_CHILD_SESSION means the run
+ * that just started is writing no transcript at all -- which is the adapter's recovery and
+ * audit path, and which fails much later looking like a parser bug.
+ *
+ * It was a bare exported constant that nothing read (#238): dead code asserting a fact, which
+ * is the shape that rots without anything failing. It is wired now, and the fact is checked
+ * against the installed binary in `childenvClaims.test.ts`.
+ */
 export const TRANSCRIPT_KILLING_VARS = ['CLAUDE_CODE_CHILD_SESSION'] as const
 
 const ALLOWLIST_EXACT = new Set([
@@ -99,13 +127,21 @@ function terminalDefaults(rows: number, cols: number): Env {
 }
 
 /**
- * Fail loudly rather than let a leak through. If this ever throws, the child would have
- * run with degraded or absent transcript persistence.
+ * Fail loudly rather than let a leak through.
+ *
+ * If this throws, the child would have run with a parent's markers. For most of them that is
+ * an attribution problem; for `TRANSCRIPT_KILLING_VARS` it is silent data loss in the pty mode
+ * this adapter drives -- see the header -- so the message says which kind was caught rather
+ * than leaving that to be looked up.
  */
 function assertClean(env: Env): Env {
   const leaked = Object.keys(env).filter(isParentAgentVar).sort()
   if (leaked.length > 0) {
-    throw new Error(`parent-agent variables leaked into child env: ${leaked.join(', ')}`)
+    const destructive = leaked.filter((n) => (TRANSCRIPT_KILLING_VARS as readonly string[]).includes(n))
+    const why = destructive.length
+      ? ` — ${destructive.join(', ')} would have left the child writing no transcript at all in pty mode`
+      : ''
+    throw new Error(`parent-agent variables leaked into child env: ${leaked.join(', ')}${why}`)
   }
   return env
 }
