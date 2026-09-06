@@ -210,6 +210,52 @@ export function parseCodex(records: Record<string, any>[]): ParsedTranscript {
   let sessionId: string | undefined
   let current: TurnRecord | undefined
 
+  /**
+   * The text of a wrapped item, from the `content` blocks Codex writes inside it (#242).
+   *
+   * The block discriminator is NOT consistently cased: a `UserMessage` writes
+   * `{"type":"text"}` and an `AgentMessage` writes `{"type":"Text"}`, in the same rollout.
+   * Compared case-insensitively for that reason -- matching one spelling recovers the prompt
+   * and silently drops every report, which is the more expensive half.
+   */
+  const itemText = (item: Record<string, unknown>): string => {
+    const blocks = Array.isArray(item['content']) ? (item['content'] as Record<string, unknown>[]) : []
+    return blocks
+      .filter((b) => String(b?.['type'] ?? '').toLowerCase() === 'text')
+      .map((b) => String(b?.['text'] ?? ''))
+      .filter(Boolean)
+      .join('\n')
+  }
+
+  /**
+   * A prompt arriving, from either record shape.
+   *
+   * Shared so the wrapped and flat paths cannot come to disagree. The rule is the flat one's,
+   * unchanged: `task_started` is written BEFORE the prompt, so the turn usually exists already
+   * and adopting it is right; creating one unconditionally produced a phantom second turn per
+   * exchange.
+   */
+  const adoptPrompt = (text: string): void => {
+    if (current && current.prompt === '') {
+      current.prompt = text
+      return
+    }
+    current = {
+      key: turnKey(`codex-pending-${turns.length}`),
+      prompt: text,
+      state: 'in_progress',
+      toolCalls: [],
+    }
+    turns.push(current)
+  }
+
+  /** A report arriving, from either record shape. The flat branch's rule, unchanged. */
+  const adoptReport = (text: string): void => {
+    if (!current) return
+    current.assistantText = current.assistantText ? `${current.assistantText}\n\n${text}` : text
+    current.report = text
+  }
+
   const ensure = (id: string | undefined): TurnRecord | undefined => {
     if (id && byId.has(id)) return byId.get(id)
     if (!id) return current
@@ -243,22 +289,37 @@ export function parseCodex(records: Record<string, any>[]): ParsedTranscript {
         case 'context_compacted':
           compactions += 1
           break
+        case 'item_completed': {
+          // Codex 0.153.4 does not write flat `user_message` / `agent_message` for ordinary
+          // turns any more. It wraps them (#242):
+          //
+          //   {"type":"event_msg","payload":{"type":"item_completed","turn_id":"…",
+          //     "item":{"type":"UserMessage","content":[{"type":"text","text":"…"}]}}}
+          //
+          // The discriminator is `payload.item.type`. Measured with the shipped parser over 25
+          // real rollouts written by 0.153.4: prompts were recovered on 4 of 71 turns. Reports
+          // mostly survived only because `task_complete.last_agent_message` is a second source
+          // for them, and the prompt had no equivalent -- so a Codex turn reconstructed from
+          // its transcript carried no prompt text at all.
+          //
+          // BOTH shapes are read rather than one swapped for the other: flat records still
+          // appear occasionally on 0.153.4, so the old path is not dead, just displaced.
+          const item = (p.item ?? {}) as Record<string, unknown>
+          const kind = String(item['type'] ?? '')
+          if (kind === 'UserMessage' || kind === 'AgentMessage') {
+            const text = itemText(item)
+            if (text) {
+              if (kind === 'UserMessage') adoptPrompt(text)
+              else adoptReport(text)
+            }
+          }
+          break
+        }
         case 'user_message': {
           // Observed on 0.146.0: `task_started` is written BEFORE `user_message`, so by
           // the time the prompt appears the turn usually already exists. Creating one
           // here unconditionally produced a phantom second turn per exchange.
-          const text = String(p.message ?? '')
-          if (current && current.prompt === '') {
-            current.prompt = text
-          } else {
-            current = {
-              key: turnKey(`codex-pending-${turns.length}`),
-              prompt: text,
-              state: 'in_progress',
-              toolCalls: [],
-            }
-            turns.push(current)
-          }
+          adoptPrompt(String(p.message ?? ''))
           break
         }
         case 'task_started': {
@@ -341,13 +402,7 @@ export function parseCodex(records: Record<string, any>[]): ParsedTranscript {
           break
         }
         case 'agent_message':
-          if (current && p.message) {
-            const text = String(p.message)
-            current.assistantText = current.assistantText
-              ? `${current.assistantText}\n\n${text}`
-              : text
-            current.report = text
-          }
+          if (p.message) adoptReport(String(p.message))
           break
       }
       continue
