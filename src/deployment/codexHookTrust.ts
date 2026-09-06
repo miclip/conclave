@@ -47,9 +47,31 @@ export type HookTrustStatus = 'managed' | 'untrusted' | 'trusted' | 'modified'
  *   trusted     the trust decision covers this handler's current content
  *   executable  loaded && enabled && trusted -- the ONLY one that means "will run"
  *
- * Trust is per *normalised handler definition* (command, type, async, timeout), not per
- * sidecar file. So formatting changes are harmless, unrelated handlers do not disturb an
- * existing decision, and a semantic change invalidates only the handler it touched.
+ * Trust is per *normalised handler definition*, not per sidecar file. So formatting changes are
+ * harmless, unrelated handlers do not disturb an existing decision, and a change invalidates
+ * only the handler it touched. All three measured against codex-cli 0.153.4.
+ *
+ * WHAT COUNTS AS THE DEFINITION IS WIDER THAN IT LOOKS, and this sentence used to enumerate it
+ * as "(command, type, async, timeout)" — which is where the trap was (#243). `statusMessage`
+ * participates too, and the shipped template sets one on all seven hooks. So the single field a
+ * maintainer would most confidently read as cosmetic — the text Codex shows while the hook runs
+ * — re-invalidates trust on every project when edited, exactly as a changed command would. Read
+ * beside "formatting changes are harmless", the old list did not merely omit a field; it
+ * licensed the edit.
+ *
+ * Measured rather than reasoned, on the real sidecar and restored byte-for-byte: reformatting
+ * the whole file to 8-space indent changed none of the seven hashes; rewording ONE
+ * `statusMessage` changed exactly that handler's hash and no other.
+ *
+ * So the rule and not the list: the hash covers the handler's SEMANTIC CONTENT as Codex
+ * normalises it, INCLUDING fields that look cosmetic. Any content edit to a handler costs a
+ * re-trust. The enumeration is deliberately gone — it was arrived at by probing rather than from
+ * a published schema, and a list derived that way reads as exhaustive while being a sample.
+ * `statusMessage` was found because the template sets it; nothing establishes that it is the
+ * last such field.
+ *
+ * The top-level `description` is NOT hashed — measured the same way — which is why the template
+ * can carry a warning about this without invalidating anything.
  */
 export interface CodexHookStatus {
   /** Codex's own key for this hook, and what a `hooks.state` entry is keyed by. */

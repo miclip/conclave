@@ -1,5 +1,5 @@
 {
-  "description": "Conclave hooks. Rendered from config/templates/codex-hooks.json.",
+  "description": "Conclave hooks. Rendered from config/templates/codex-hooks.json. EDITING A HANDLER COSTS A RE-TRUST, INCLUDING statusMessage: Codex hashes the normalised handler definition and statusMessage is part of it, so rewording the text shown while a hook runs invalidates that handler exactly as changing its command would (#243). This description is not hashed; the handlers below are.",
   "hooks": {
     "SessionStart": [
       {
