@@ -110,6 +110,11 @@ is worth stating plainly because it is a fact about the proxy this experiment ex
 with degradation.** Criteria 4 and 5 anticipate a proxy that fires wrongly; they do not
 anticipate one that barely fires.
 
+A third instance, from a second project: a 26.6-minute run that streamed a 16 MB manifest build
+into a gzip upload, with the advisor pushing back over several turns — `rotations: []`, no
+compaction, both seats active throughout. Substantial implementation work, and the seat's window
+never filled. Artifacts preserved at `backend/.conclave/sessions/20260905-174340-10868/`.
+
 **The hypothesis to try next is UNSUMMARISABILITY, not size.** From the same operator: the
 closest they have come to a genuinely full seat was a session that read four manuals and rendered
 pages from each, because a rendered page cannot be summarised into a subagent's report — the seat
@@ -118,3 +123,10 @@ evidence does not survive being described.
 
 Recorded rather than acted on. Nobody has produced a compacted seat yet, which is why #10 is now
 waiting on a naturally-occurring one rather than a manufactured one.
+
+**And a run started in order to be measured is not the thing being measured.** That is the
+strongest argument for waiting rather than manufacturing: both attempts here were sessions whose
+task was chosen to provoke compaction, and a task chosen for that property is already unlike the
+runs the policy question is about. The instruction in session 2 -- work you must hold yourself,
+do not delegate -- is not something any operator would write for its own sake. Waiting costs
+calendar time and buys a measurement of the thing rather than of the experiment.
