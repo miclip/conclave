@@ -538,9 +538,14 @@ test('#187 a graceful close asks the child to leave on its own terms first', asy
 
 test('#187 a child that ignores /quit is still killed, and the shutdown still ends', async () => {
   // THE SAFETY PROPERTY, and the reason the issue called this a trade rather than a change.
-  // #12's own words are that Codex "does not quit promptly on Ctrl-C", and teardown is the path
-  // least able to afford a hang. The stand-in here ignores `/quit` entirely, so this is the
-  // fallback: bounded by QUIT_GRACE_MS and then exactly the behaviour that came before.
+  // Teardown is the path least able to afford a hang, so the fallback is bounded by
+  // QUIT_GRACE_MS and is then exactly the behaviour that came before.
+  //
+  // The stand-in here ignores `/quit` ENTIRELY, which is the point: this asserts the bound holds
+  // against a child that never leaves, and needs no claim about what any real Codex does. #12's
+  // "does not quit promptly on Ctrl-C" used to be quoted here as that claim, and it has expired
+  // — 0.153.4 exits 0 on one Ctrl-C in under a second (#236). The test is unaffected, which is
+  // what a bound is for.
   const session = await CodexPtyHookAdapter.start({ cwd: RUN, role: 'implementer', readyTimeoutMs: 20_000 })
   const started = Date.now()
   await session.close('graceful')

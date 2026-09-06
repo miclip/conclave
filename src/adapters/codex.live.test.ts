@@ -235,8 +235,10 @@ test('send -> cancel -> cancelled, proven from the transcript', { skip }, async 
 
 test('#12 does /quit produce a SessionEnd on Codex?', { skip }, async (t) => {
   // `SessionEnd` is registered and trusted and has never fired: every teardown escalated to
-  // SIGTERM, because Codex does not quit promptly on Ctrl-C. #12 asks for a `/quit` fixture
-  // before anything is concluded about it, and this is that experiment.
+  // SIGTERM, because Codex did not quit promptly on Ctrl-C when #12 was written. That has since
+  // expired -- 0.153.4 exits 0 on one Ctrl-C in well under a second (#236) -- so the premise
+  // behind "never fired" no longer holds and this experiment matters more, not less. #12 asks
+  // for a `/quit` fixture before anything is concluded, and this is it.
   //
   // An EXPERIMENT rather than an assertion of the answer. Either result is a finding: if the
   // hook fires, the "never observed" note in `codex.ts` is stale and the capability can be

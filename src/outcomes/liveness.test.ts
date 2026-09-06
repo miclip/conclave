@@ -272,8 +272,11 @@ test('the pause menu offers `wait` on every reading that saw CPU, mixed included
  */
 test('a quiet parent with a working descendant is reported as working, not as idle', async () => {
   // Detached so the spinner is in its own process group and can be killed with it. It also puts
-  // the parent in a new session, which is the case `ps -Ao` was chosen for: Linux's `-a` drops
-  // session leaders, so `-axo` could omit this very process on the Ubuntu half of CI.
+  // the parent in a new session -- which this comment used to call the case `ps -Ao` was chosen
+  // for, on the grounds that `-axo` could omit a session leader. It cannot: Linux's bare `-a`
+  // drops them and `-ax` restores them (#240). The session leader is still worth constructing
+  // here, because it is the shape the measurement runs against; it just is not evidence for the
+  // flag.
   const parent = spawn('sh', ['-c', 'sh -c "while :; do :; done" & wait'], {
     stdio: 'ignore',
     detached: true,

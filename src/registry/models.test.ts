@@ -26,6 +26,7 @@ import { execFileSync } from 'node:child_process'
 import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { PassThrough, Writable } from 'node:stream'
+import { spawnSync } from 'node:child_process'
 import test from 'node:test'
 import type { TestContext } from 'node:test'
 import { tempDir } from '../testkit/tempDir.ts'
@@ -342,8 +343,10 @@ test('the parsers read the shapes the real CLIs actually print', () => {
   assert.equal(claudeAliasOf('sonnet[1m]'), 'sonnet')
   assert.equal(claudeAliasOf('sonnet'), 'sonnet')
 
-  // Sixty names do not belong in a refusal, so the near ones are picked out. This is a
-  // convenience, and it is asserted so it cannot quietly start returning nothing.
+  // A whole installation's worth of names does not belong in a refusal, so the near ones are
+  // picked out. This is a convenience, and it is asserted so it cannot quietly start returning
+  // nothing. (The list was sixty when this was written and is 69 on 1.18.27 — the count is not
+  // the argument and is deliberately not restated here, see #237.)
   assert.deepEqual(nearestNames('opencode/kimi-k3', opencodeModels(OPENCODE_LIST), 2), ['opencode/kimi-k2.5-code'])
   // Ranked on the MODEL half rather than the whole string: every name in this list starts
   // `opencode/`, so a whole-string comparison would offer whatever came next alphabetically.
@@ -355,9 +358,14 @@ test('the parsers read the shapes the real CLIs actually print', () => {
 
 test('the built-in agents declare the grade their CLI can actually support', () => {
   // Measured against the installed CLIs while writing #82, and each grade is a claim about a
-  // command that was run: `opencode models` listed 60, `claude --help` named three aliases and
-  // said full names are also accepted, `codex models` answered `Error: stdin is not a terminal`,
-  // and `kimi models` answered `No such command 'models'`.
+  // command that was run: `opencode models` enumerated the installation, `claude --help` named
+  // three aliases and said full names are also accepted, `codex models` answered `Error: stdin
+  // is not a terminal`, and `kimi models` answered `No such command 'models'`.
+  //
+  // The opencode COUNT was 60 then and is 69 on 1.18.27 (#237). It is not restated as a number
+  // anywhere any more: what the `enumerated` grade rests on is that the output is complete and
+  // uniformly `provider/model` shaped, so absence is a fact about the installation — and that is
+  // what `#237 opencode models still enumerates` checks against the installed binary.
   assert.equal(OPENCODE_AGENT.models?.grade, 'enumerated')
   assert.deepEqual(OPENCODE_AGENT.models?.ask?.args, ['models'])
   assert.equal(CLAUDE_AGENT.models?.grade, 'aliases_only')
@@ -571,3 +579,27 @@ for (const front of ['relay', 'session'] as const) {
     )
   })
 }
+
+test('#237 opencode models still enumerates: every line provider/model shaped, exit 0', () => {
+  // What the `enumerated` grade actually rests on, checked against the installed binary rather
+  // than restated in a comment. NOT the count: it was 60 when the grade was chosen and is 69 on
+  // 1.18.27, and three comments carried the old number in the present tense until #237.
+  //
+  // The claim that matters is that the output is COMPLETE and uniform — every line a
+  // `provider/model`, nothing else printed, exit 0 — because that is what makes absence a fact
+  // about the installation and the strict refusal honest. A count would go stale by design;
+  // this does not.
+  const probe = spawnSync('opencode', ['models'], { encoding: 'utf8', timeout: 60_000 })
+  // No opencode installed is not a failure — it is a machine that cannot answer.
+  if (probe.error || probe.status === null) return
+
+  assert.equal(probe.status, 0, '`opencode models` must succeed for the enumerated grade to hold')
+  const lines = probe.stdout.split('\n').filter((l) => l.trim().length > 0)
+  assert.ok(lines.length > 0, 'an empty enumeration would make every name absent')
+  const malformed = lines.filter((l) => !/^[^/\s]+\/\S+$/.test(l.trim()))
+  assert.deepEqual(
+    malformed,
+    [],
+    'every line must be `provider/model`, or absence is not a fact about the installation (#237)',
+  )
+})
