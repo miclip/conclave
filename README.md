@@ -368,6 +368,26 @@ conclave session "<goal>" --checks "npm test" --operator agent < ctl > run.log 2
 echo '/continue' > ctl                                # from any later shell
 ```
 
+**Do not ask whether a run is alive with a process check.** `pgrep -f 'conclave session'` matches
+any shell, watcher or tool invocation whose own command line contains those words, and those
+outlive the run — so a finished run looks live, its log has stopped growing and its CPU is at
+zero, which reads exactly like a wedged one. An operator lost three and a half hours to that,
+and reported a stall in a run that had ended cleanly twenty minutes in.
+
+Ask the record instead. `alive` is whether the orchestrator's process exists, checked at every
+read and never taken from the file:
+
+```sh
+conclave status --json | jq -r '.state, .alive, .progress.state'
+# ended  false  idle      <- finished
+# running true  in_turn   <- working
+# running true  idle      <- alive and between turns; bound this one yourself
+```
+
+Bound `state == "running" && progress.state == "idle"` if you want to catch a run that is alive
+and getting nowhere; `progress.since` moves when the state changes and never when the record is
+rewritten. An ended run reads `idle` too, forever, which is why the `state` half matters.
+
 One line is one message, so a multi-paragraph answer needs framing. `<<TAG` opens a block
 and a line equal to `TAG` closes it:
 
@@ -398,8 +418,9 @@ conclave guard                     # are participants live, and what changed sin
 a permission prompt, the pause with its evidence and options, and the outcome once there is
 one. `--json` gives the same record as data.
 
-Liveness is never read from the file: every read checks the pid, so a run whose process is
-gone shows as **abandoned** rather than as whatever it last claimed. A live session rewrites
+Liveness is never read from the file, and never from a process check — see the warning under
+the fifo recipe above. Every read checks the pid, so a run whose process is gone shows as
+**abandoned** rather than as whatever it last claimed. A live session rewrites
 its record every 30 seconds whether anything changed or not, so `updatedAt` means when the
 file was last written. `status --json` grows a `stale` key only once the record has stopped
 moving.
