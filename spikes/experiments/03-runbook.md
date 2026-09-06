@@ -90,3 +90,31 @@ it makes the run less representative of how conclave is normally driven, in exch
 reaching the state the experiment is about at all.
 
 None of this touches the frozen criteria.
+
+**2 — session 2 did not compact either, and the instruction did not hold.** Told explicitly to
+read 165 test files itself, in order, and not to delegate, the seat read 13 in full and did the
+other 78 through "assertion inventories" before the advisor budget ran out. Same avoidance as
+session 1, under a different name. Telling a seat not to delegate does not make it hold the
+material; it makes it find another way to compress.
+
+## What actually fills a seat's context — the open method problem
+
+Two attempts here and, independently, roughly fifteen sessions on another project the same day —
+several of them long, including a twenty-one-device sweep and a ten-device batch — produced
+**not one** compaction between them. That operator had assumed their tasks were too small.
+
+So the size of the TASK and the size of the SEAT'S CONTEXT are barely related. A seat that can
+delegate, summarise or inventory will, and each of those keeps its own window nearly empty. This
+is worth stating plainly because it is a fact about the proxy this experiment exists to evaluate:
+**compaction is rarer than "a long run" suggests, and rare for a reason that has nothing to do
+with degradation.** Criteria 4 and 5 anticipate a proxy that fires wrongly; they do not
+anticipate one that barely fires.
+
+**The hypothesis to try next is UNSUMMARISABILITY, not size.** From the same operator: the
+closest they have come to a genuinely full seat was a session that read four manuals and rendered
+pages from each, because a rendered page cannot be summarised into a subagent's report — the seat
+has to look at it. That is a property to select a task for, and it is testable: work whose
+evidence does not survive being described.
+
+Recorded rather than acted on. Nobody has produced a compacted seat yet, which is why #10 is now
+waiting on a naturally-occurring one rather than a manufactured one.
