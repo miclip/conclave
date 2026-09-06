@@ -72,4 +72,21 @@ is what produced #232 and #225.
 
 ## Deviations
 
-None yet. Recorded here as they happen.
+**1 — session 1 never compacted, so it produced no data point.** The task (audit every comment
+in `src/` making a claim about another program) finished in 21 implementer turns. The run was a
+success on its own terms — nine issues filed, three of them live defects — and worthless to this
+experiment, because point B is defined by a compaction that never happened.
+
+The cause is not that the task was small. It is that the implementer delegated the reading to
+read-only subagents, and a subagent's context is its own: the seat orchestrated, and its window
+stayed nearly empty. A task can be arbitrarily large and still not compact the seat that hands it
+out.
+
+So session 2 changes the TASK SHAPE, not just its size: work the seat must hold itself, in a
+long sequence, with each step depending on what the last one found. The instruction says so
+explicitly rather than relying on the work to resist delegation, because relying on that is what
+failed. That instruction is a departure from "an ordinary session" and is recorded here as one —
+it makes the run less representative of how conclave is normally driven, in exchange for
+reaching the state the experiment is about at all.
+
+None of this touches the frozen criteria.
