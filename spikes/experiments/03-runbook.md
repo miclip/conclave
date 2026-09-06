@@ -47,6 +47,27 @@ They are equivalent in difficulty and independent: answering one gives nothing a
 another. All three were added on 2026-09-05 and are in `main`, so no instance predates the
 session's own checkout.
 
+## A confound the pre-registration did not anticipate
+
+The frozen design requires the probe to be "not memorable enough that answering it at A makes B
+trivial". That guards the probe against ITSELF. It does not guard it against the RUN.
+
+An instance is cheap or expensive to answer depending on what the seat has already read. A
+session whose work happened to take it through the file that pins instance B answers B for
+nothing, while a session that never went near it has to go looking. The wording is identical at
+A, B and C; the COST is not, and it varies with the task rather than with the condition being
+measured. A drop at B could then be a seat that has stopped remembering, or a seat that never had
+the answer to hand -- which is exactly the confusion C exists to prevent one layer up.
+
+**Mitigation, and it is cheap: record which files the session touched, alongside the answers.**
+An instance whose pinning file the run visited is compromised FOR THAT RUN and is discarded
+rather than scored. Three instances give some slack; a run that touched all three is not usable
+and should say so rather than be scored around.
+
+Identified by the Patchscore operator, who also noted the related point that the probe consumes
+context at every point including immediately after a compaction -- constant across conditions,
+so it biases nothing, but it is not free and the notes should say so.
+
 ## Scoring
 
 Per the frozen table. Every dimension is checked against the repository by a party other than
@@ -123,6 +144,16 @@ evidence does not survive being described.
 
 Recorded rather than acted on. Nobody has produced a compacted seat yet, which is why #10 is now
 waiting on a naturally-occurring one rather than a manufactured one.
+
+**Selection is not manufacture, and the line held under test.** The same operator offered a
+split-manual authoring task -- a device whose parameter ranges live only in a second document, so
+a seat must hold both -- then checked the backlog and withdrew it: every such device in that
+repository is already authored. The proposal had come from memory of the shape rather than from
+the work that exists. Their conclusion, which is the right one: picking work BECAUSE it is
+unsummarisable stays honest only while such work is genuinely on the list, and it was not.
+
+What is actually next there is a character-coverage gap requiring twenty-odd manuals to be read
+-- precisely the delegating shape that failed here twice.
 
 **And a run started in order to be measured is not the thing being measured.** That is the
 strongest argument for waiting rather than manufacturing: both attempts here were sessions whose
