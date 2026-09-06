@@ -210,8 +210,10 @@ test('send -> cancel -> cancelled, and it is only ever assumed', { skip }, async
   const end = endOf(events)
   assert.ok(end, 'expected a turn_end for the cancelled turn')
   assert.equal(end.verdict.outcome, 'cancelled')
-  // Nothing in Claude Code records a cancellation -- not a hook, not the transcript.
-  // The only evidence is our own input log, so the grade must stay `assumed`.
+  // No Claude Code HOOK reports a cancellation, and the transcript record it does write
+  // (#225) is not plumbed into the classifier. So the only evidence THIS grade rests on is
+  // our own input log, and it must stay `assumed`. The parenthetical that used to say "not
+  // the transcript" was false from the moment #225 landed.
   assert.equal(end.verdict.confidence, 'assumed')
   assert.equal(end.synthesized, true)
   assert.ok(

@@ -9,10 +9,13 @@
  * The three claims that were hardest to establish, and how they are honoured here:
  *
  *   completion   `Stop` proves it. Nothing else does.
- *   cancellation nothing in the child records it, so it rests entirely on the input
- *                queue's record of having sent ESC -- hence confidence `assumed`, and
- *                hence input mediation being a product-level guarantee rather than a
- *                convenience.
+ *   cancellation no HOOK reports it, so the verdict rests on the input queue's record of
+ *                having sent ESC -- hence confidence `assumed`, and hence input mediation
+ *                being a product-level guarantee rather than a convenience. The child does
+ *                record an interruption in its TRANSCRIPT (`[Request interrupted by user]`),
+ *                which `#recoverForRetry` reads for the one decision that needs the child's
+ *                own word (#225). That evidence is deliberately not fed to the classifier;
+ *                see `outcomes/precedence.test.ts` for what would change if it were.
  *   loss         a lost `Stop` must not become `process_exited` on shutdown. Before
  *                finalising anything, the transcript is reconciled: an assistant entry
  *                with stop_reason=end_turn is correlation evidence that the turn
@@ -1291,10 +1294,13 @@ export class ClaudePtyHookAdapter implements AgentSession {
    * Three of those four are the CHILD's account and the fourth is ours. A completed
    * cancellation is the right rule for THIS question -- may a new send start? -- because a
    * cancelled seat is one an operator has taken back, and refusing forever after an unanswered
-   * ESC would leave the seat unusable. It is not evidence that the child stopped: Claude Code
-   * records an interruption nowhere and Codex may not write `turn_aborted` for a while. Any
+   * ESC would leave the seat unusable. It is not evidence that the child stopped: no Claude Code
+   * HOOK reports an interruption, and Codex may not write `turn_aborted` for a while. Any
    * decision that turns on the child actually having stopped -- the #174 retry is the one that
-   * does -- reads `TurnState.childClosure` instead, which only the child's own signals set.
+   * does -- reads `TurnState.childClosure` instead, which only the child's own signals set. On
+   * Claude that is now reachable: the child writes `[Request interrupted by user]` into its
+   * transcript, and `#recoverForRetry` reads it (#225). It reaches `childClosure` and nothing
+   * else, so this rule is unchanged.
    *
    * The consequence is deliberate and worth stating: a turn whose `Stop` is LOST stays open here
    * until something cancels it, and sends to that seat are refused meanwhile. That is the same
@@ -2077,7 +2083,7 @@ export class ClaudePtyHookAdapter implements AgentSession {
    * settled verdict. Every one of those is something THIS process did. `cancel()` types ESC,
    * calls `#closeTransport(undefined)` itself, and mints a `cancelled` verdict from our own
    * record of the keystroke at `assumed` confidence -- which is exactly what `assumed` means
-   * and why the adapter grades it that way. Claude records a cancellation nowhere at all, and
+   * and why the adapter grades it that way. No Claude Code hook reports a cancellation, and
    * Codex's `turn_aborted` may never arrive within the evidence budget. So a child that took
    * the fragment, ignored the ESC and carried on running it satisfied the whole gate, and the
    * re-send went into a live turn: the precise failure the gate exists to prevent, reached

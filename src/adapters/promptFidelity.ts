@@ -258,10 +258,16 @@ export function describePromptMismatch(sent: string, received: string): PromptMi
  *     than queued (#117), which turns one corrupted message into two. So the retry is gated on
  *     the child's own account of the ending -- its `Stop`, a `SessionEnd`, the process exiting,
  *     or Codex's transcript record of the abort -- and never on conclave having typed ESC.
- *     Typing ESC is something this process did; Claude Code records an interruption nowhere,
+ *     Typing ESC is something this process did; no Claude Code HOOK reports an interruption,
  *     and Codex's `turn_aborted` may never arrive, so a `cancelled` verdict at `assumed`
  *     confidence is compatible with a child still running the fragment. See
  *     `TurnState.childClosure` and `#recoverForRetry` in either adapter.
+ *
+ *     On a Claude seat the child's account IS reachable, which is what made this retry
+ *     usable there at all (#225): Claude Code writes `[Request interrupted by user]` into
+ *     its transcript, and `#recoverForRetry` treats a record showing no turn running as the
+ *     ending it needs. Before that the gate could never open on Claude and every corrupted
+ *     prompt was terminal for the run -- the belief this paragraph used to state as fact.
  *   - The single-flight claim is HELD across the whole thing. The window between the mismatch
  *     and the re-send is exactly when a second caller could type into the gap; `send()` is
  *     already the one holding the slot, so it keeps it rather than releasing and re-taking it.

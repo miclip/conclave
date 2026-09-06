@@ -139,8 +139,9 @@ test('the adapters disagree, and the contract records how', () => {
 })
 
 test('codex cancellation is better evidenced than claude cancellation', () => {
-  // Claude Code's cancelled outcome exists but is only ever `assumed` in confidence,
-  // because nothing in the child records it. Codex proves it from the transcript.
+  // Claude Code's cancelled outcome exists but is only ever `assumed` in confidence, because
+  // no hook reports it and the transcript record it does write is not fed to the classifier
+  // (#225, #235). Codex proves it from the transcript, which IS fed in.
   const claude = checkAdapter(CLAUDE_CAPABILITIES).find((r) => r.outcome === 'cancelled')!
   const codex = checkAdapter(CODEX_CAPABILITIES).find((r) => r.outcome === 'cancelled')!
   assert.ok(claude.fixture.found && codex.fixture.found)

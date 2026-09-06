@@ -35,7 +35,14 @@ export interface TranscriptState {
   hasAssistantAfterPrompt: boolean
   finalStopReason?: string | undefined
   toolResultError: boolean
-  /** Codex only. Claude Code writes no equivalent record anywhere. */
+  /**
+   * Codex only. Claude Code dispatches no equivalent HOOK and writes no equivalent
+   * transcript RECORD that reaches here.
+   *
+   * It does write `[Request interrupted by user]` into its transcript, which the parser reads
+   * as a `cancelled` turn (#225) -- but that never becomes evidence at this layer, so there is
+   * nothing here to outrank a `Stop`. `outcomes/precedence.test.ts` pins the consequence.
+   */
   turnAbortedReason?: string | undefined
   taskComplete: boolean
   /**
@@ -175,7 +182,10 @@ export function classify(ev: Evidence): { state: TurnLiveness } & Partial<Verdic
   //    cancelled turn also is. Reading Stop as completion in the presence of an abort
   //    would upgrade a cancellation into a success on weaker evidence.
   //
-  //    Codex writes this; Claude Code writes nothing equivalent anywhere.
+  //    Codex writes this. Claude Code dispatches no equivalent hook, and although it does
+  //    write `[Request interrupted by user]` into its transcript (#225), that never reaches
+  //    this function -- so on a Claude seat there is nothing here for a `Stop` to be outranked
+  //    BY, and the branch below cannot fire. `outcomes/precedence.test.ts` pins that.
   if (ev.transcript.turnAbortedReason) {
     p.push({ source: 'transcript', detail: `turn_aborted reason=${ev.transcript.turnAbortedReason}` })
     if (ev.hooks.includes('Stop')) {
@@ -267,8 +277,14 @@ export function classify(ev: Evidence): { state: TurnLiveness } & Partial<Verdic
     return { state: 'completed', ...verdict('completed', 'inferred', p) }
   }
 
-  // 3c. We cancelled it ourselves, with nothing from the child recording it. Outranks
-  //     process death: we ended the turn, and a later shutdown says nothing about it.
+  // 3c. We cancelled it ourselves, with nothing from the child reaching this function to
+  //     say so. Outranks process death: we ended the turn, and a later shutdown says nothing
+  //     about it.
+  //
+  //     "Nothing from the child" is a statement about this LAYER, not about the child. A
+  //     Claude seat records the interruption in its transcript and one caller reads it
+  //     (#225); it is not plumbed here, so the grade below is still `assumed` on our own
+  //     keystroke rather than `proven` on the child's word.
   if (ev.orchestrator.sentCancel) {
     p.push({ source: 'orchestrator', detail: 'sent ESC' })
     if (ev.orchestrator.inputIsMediated) {

@@ -528,8 +528,9 @@ for (const [name, Adapter] of ADAPTERS) {
     // THE GATE. This stand-in takes the fragment and then ignores everything: the ESC changes
     // nothing, no turn ends, and it reports nothing at all. From out here that is
     // indistinguishable from a child still running the fragment -- which is the point, because
-    // it is also exactly what Claude Code looks like when it is interrupted. It records an
-    // interruption nowhere.
+    // it is also exactly what Claude Code looks like when it is interrupted on the HOOK
+    // channel, which is the one this gate reads. It dispatches no interruption hook; it does
+    // record the interruption in its transcript, and `#recoverForRetry` reads that (#225).
     //
     // The earlier version of this gate would have re-sent here. It accepted `cancel()` coming
     // back, a shut transport and a settled verdict as "observed closure", and all three are

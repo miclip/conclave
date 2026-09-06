@@ -9,9 +9,13 @@
  *
  * 2. Attribution. The queue records SEMANTIC ACTIONS -- submit, cancel,
  *    permission_decision -- not just the bytes they turned into. Bytes are transport
- *    evidence; actions are what lets the classifier say `cancelled` at all, since
- *    nothing in Claude Code records a cancellation anywhere. This log IS the evidence
- *    behind an `assumed` confidence grade, so it has to mean something.
+ *    evidence; actions are what lets the classifier say `cancelled` at all, since no
+ *    Claude Code HOOK reports a cancellation. This log IS the evidence behind an `assumed`
+ *    confidence grade, so it has to mean something.
+ *
+ *    Claude Code does record an interruption in its TRANSCRIPT, and one decision reads it
+ *    (#225) -- but it reaches `TurnState.childClosure` and not the classifier, so this log
+ *    is still the whole of what grades a `cancelled` verdict.
  *
  * When input ownership is `external`, actions can enter the child without passing
  * through here. That is exactly why that mode drops cancellation attribution.

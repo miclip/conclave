@@ -166,8 +166,19 @@ test('the tracker stays silent while evidence is inconclusive', () => {
 })
 
 test('claude is unaffected: it has no turn_aborted record to outrank anything', () => {
-  // The precedence rule must not change Claude Code's behaviour, where cancellation is
-  // recorded nowhere in the child at all.
+  // The precedence rule must not change Claude Code's behaviour, where no record of the
+  // cancellation reaches this tracker.
+  //
+  // WHAT THIS DOES NOT ESTABLISH, because the comment here used to imply it did. Claude Code
+  // is not silent about interruptions: it writes `[Request interrupted by user]` into its
+  // transcript, the parser closes the turn as `cancelled` on it, and `#recoverForRetry` reads
+  // it (#225). None of that is plumbed to the tracker, so a Claude seat reaches this test with
+  // a `Stop` and nothing else -- and the answer below is "no conflict to resolve" rather than
+  // "a Stop after an interruption means completed".
+  //
+  // If that evidence were ever fed in, this would be the same conflict `turn_aborted` outranks
+  // on Codex, and this test would be pinning the wrong answer rather than an irrelevant one
+  // (#235). It is scoped to the wiring as it is, deliberately.
   const t = new TurnVerdictTracker({ agent: 'claude' })
   const update = t.observeHook('Stop', { hook_event_name: 'Stop' })
   assert.equal(update?.verdict?.outcome, 'completed')
