@@ -652,3 +652,36 @@ test('#41 the ready line says what it cannot see', async (t) => {
   assert.match(text, /timeout on a loaded machine/, 'naming the state it cannot see')
   assert.match(text, /attempts journal/, 'and where the answer actually is')
 })
+
+test('#243 the shipped template warns that editing a statusMessage costs a re-trust', () => {
+  // The trap this guards, measured against codex-cli 0.153.4 and recorded in
+  // `codexHookTrust.ts`: Codex hashes the NORMALISED HANDLER DEFINITION, `statusMessage` is
+  // part of it, and the shipped template sets one on every hook. Rewording the text Codex shows
+  // while a hook runs therefore invalidates that handler exactly as changing its command would.
+  //
+  // The warning lives in the template because that is the file someone edits. A maintainer
+  // rewording a status message will never open `codexHookTrust.ts`, which is where the old
+  // enumeration — "(command, type, async, timeout)" — told them it was safe.
+  const template = JSON.parse(readFileSync(join(REPO, 'config/templates/codex-hooks.json'), 'utf8')) as {
+    description: string
+    hooks: Record<string, { hooks: { statusMessage?: string }[] }[]>
+  }
+
+  assert.match(
+    template.description,
+    /statusMessage/,
+    'the template must warn about statusMessage where the edit would be made (#243)',
+  )
+  assert.match(template.description, /re-trust/i, 'and say what the edit costs')
+
+  // The warning has to be about a real situation: every handler carries one, so every handler
+  // is exposed. A handler added without one would make the warning partly false.
+  const handlers = Object.values(template.hooks).flatMap((entries) => entries.flatMap((e) => e.hooks))
+  assert.ok(handlers.length > 0, 'the template must have handlers, or this asserts nothing')
+  for (const h of handlers) {
+    assert.ok(typeof h.statusMessage === 'string' && h.statusMessage.length > 0, 'every handler sets a statusMessage')
+  }
+
+  // The description itself is NOT hashed — measured the same way — which is why this warning can
+  // exist at all without invalidating the handlers it warns about.
+})
