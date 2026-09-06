@@ -18,7 +18,8 @@
 
 import { strict as assert } from 'node:assert'
 import test from 'node:test'
-import { writeFileSync } from 'node:fs'
+import { readFileSync, writeFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
 
 import { CLAUDE_INTERRUPTION, parseClaude } from '../transcript/parse.ts'
 import { ABSENT_LITERAL_CANARY, installedBundle } from '../registry/installedBundle.ts'
@@ -230,4 +231,45 @@ test('#225 a transcript that still shows the turn RUNNING is not confirmation', 
   const error = await corruptedSend('transcript, no record')
   assert.ok(error, 'a turn the child still shows as running must not be typed into')
   assert.match(error.message, /no interruption recorded in its transcript/)
+})
+
+test('#235 no comment in the tree says the child records a cancellation NOWHERE', () => {
+  // The third time this exact claim has gone stale, which is why it is now a test rather than a
+  // correction. #225 fixed the code and one comment; an audit found twelve more sites still
+  // asserting it, and a sweep found three the audit missed. All of them were true when written.
+  //
+  // The distinction that has to survive: no HOOK reports an interruption -- pinned by the test
+  // above, against the installed binary -- but the child DOES record it in its transcript. A
+  // comment that collapses those two is wrong in the direction that made every corrupted prompt
+  // on a Claude seat terminal for the run.
+  //
+  // Matched on the ABSOLUTE phrasings only. "No hook reports a cancellation" is true and must
+  // stay sayable; "records a cancellation nowhere" is the claim that keeps rotting.
+  const banned = [
+    /records? an interruption nowhere/,
+    /records? a cancellation nowhere/,
+    /nothing in the child records (?:it|a cancellation)/,
+    /writes nothing equivalent anywhere/,
+    /not a hook, not the transcript/,
+  ]
+  const files = execFileSync('git', ['ls-files', 'src'], { encoding: 'utf8' })
+    .split('\n')
+    .filter((f) => f.endsWith('.ts'))
+
+  const offenders: string[] = []
+  for (const file of files) {
+    const text = readFileSync(file, 'utf8')
+    text.split('\n').forEach((line, i) => {
+      // This file quotes the claim in order to correct it, which is the one legitimate use.
+      if (file.endsWith('claudeInterrupted.test.ts')) return
+      if (banned.some((re) => re.test(line))) offenders.push(`${file}:${i + 1}: ${line.trim()}`)
+    })
+  }
+
+  assert.deepEqual(
+    offenders,
+    [],
+    'these say the child records a cancellation nowhere; it records one in its transcript (#225, #235). ' +
+      'Say "no hook reports it" instead, which is true and is what the code relies on.',
+  )
 })

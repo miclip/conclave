@@ -30,7 +30,8 @@ export const CLAUDE_CAPABILITIES: AdapterCapabilities = {
   turnKeySource: 'prompt_id',
   outcomes: {
     completed: 'observed',
-    // Only ever `assumed` in confidence: nothing in the child records a cancellation.
+    // Only ever `assumed` in confidence: no hook reports a cancellation, and the transcript
+    // record Claude Code does write is not fed to the classifier (#225, #235).
     // The outcome itself was still produced in a real run.
     cancelled: 'observed',
     permission_refused: 'observed',
