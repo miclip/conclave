@@ -4630,6 +4630,8 @@ export class Relay {
       liveness?: { participant: RelayParticipant; emittedBefore: number }
       conflict?: AuthorityConflict
       verdictOf?: { participant: string; endSeq: number }
+      /** `rotation_candidate` only: which class of degradation raised it (#247). */
+      candidate?: { assessedAs: Assessment['reason'] }
       superseded?: PauseSupersession
       /**
        * Remember the answer, and do not put the same question twice. See `#incompleteAnswered`.
@@ -4775,6 +4777,7 @@ export class Relay {
       options,
       ...(p.conflict === undefined ? {} : { conflict: p.conflict }),
       ...(p.verdictOf === undefined ? {} : { verdictOf: p.verdictOf }),
+      ...(p.candidate === undefined ? {} : { candidate: p.candidate }),
       ...(p.superseded === undefined ? {} : { superseded: p.superseded }),
       ...(measured === undefined || p.liveness === undefined
         ? {}
@@ -4881,7 +4884,7 @@ export class Relay {
    * writing down because it points at a different mechanism: the loop is suspended at `await
    * deciding` above for the whole pause, so `#halt` cannot run again, and a watchdog `revision`
    * or replacement `turn_end` arriving meanwhile goes to `#trackSupersession`, which amends THE
-   * SAME `RunPause` in place (`src/relay/run.ts:872`). There was one pause, read twice. The
+   * SAME `RunPause` in place (`src/relay/run.ts:893`). There was one pause, read twice. The
    * evidence was not re-derived because nothing had re-derived it since it was captured -- which
    * is the same defect, reached by a shorter path than the report proposed.
    *
@@ -5277,6 +5280,7 @@ export class Relay {
         const answering = impl.session
         const halted = await this.#halt(handle, {
           subject: { reason: 'rotation_candidate', participant: impl.id },
+          candidate: { assessedAs: cls },
           detail: `${detail}. ${why}, so this cannot be adjudicated — continue, or stop and re-run with --checks.`,
           evidence: verdict.evidence,
         })
@@ -5336,6 +5340,7 @@ export class Relay {
         const answering = impl.session
         const halted = await this.#halt(handle, {
           subject: { reason: 'rotation_candidate', participant: impl.id },
+          candidate: { assessedAs: cls },
           detail: `${detail}. Recorded as a rotation candidate, not acted on.`,
           evidence: verdict.evidence,
         })
@@ -5408,6 +5413,7 @@ export class Relay {
       // an operator told only "rotation failed" will retry, and retrying is the loop.
       const halted = await this.#halt(handle, {
         subject: { reason: 'rotation_candidate', participant: impl.id },
+        candidate: { assessedAs: cls },
         detail:
           `rotation could not be accepted and ROTATION IS NOT THE REMEDY: ${result.detail} ` +
           `${impl.id} is back in service and no further rotation will be attempted this run.`,
@@ -5422,6 +5428,7 @@ export class Relay {
     }
     const halted = await this.#halt(handle, {
       subject: { reason: 'rotation_candidate', participant: impl.id },
+      candidate: { assessedAs: cls },
       detail: `rotation failed (${result.reason}): ${result.detail}`,
       evidence: [...verdict.evidence, 'the original implementer is back in service'],
     })

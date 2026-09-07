@@ -126,6 +126,43 @@ test('a run with nothing to decide ends without ever pausing', async (t) => {
   assert.equal(run.state, 'ended')
 })
 
+test('#247 the pause says WHICH class raised the candidate, not just that one was raised', async (t) => {
+  // `assess` returns `degraded | corroborated | unbacked | nothing`, and the relay carried that
+  // whole internally while every surface a reader could reach folded two of them: `detail` says
+  // "compacted" for both `degraded` and `corroborated`, and `RotationRecord.reason` copies that
+  // prose. The comment at the assignment says why folding is wrong — "two different questions to
+  // put to an operator" — and the folding happened one layer further out.
+  //
+  // Both runs below compact identically. The only difference is whether the seat SAYS so, which
+  // is what separates the two classes, and the whole point is that a reader can now tell.
+  const quietDir = repo(t)
+  const quiet = new FakeRotationSession('impl', 'claude', ['ack', 'Did it.'])
+  const quietRelay = await relayOf(quietDir, new FakeRotationSession('advisor', 'codex', ['Do the thing.', 'DONE']), [quiet])
+  t.after(() => quietRelay.stop())
+  const quietRun = quietRelay.start('Keep the work moving.')
+  quiet.compact()
+  const quietPause = await quietRun.untilPause()
+  assert.equal(quietPause?.reason, 'rotation_candidate')
+  assert.equal(quietPause?.candidate?.assessedAs, 'degraded', 'compacted, and said nothing about it')
+
+  const loudDir = repo(t)
+  // The seat corroborates the compaction in its own prose. `degradation.ts` treats that as a
+  // second, independent witness to the same event — never a precondition for acting.
+  const loud = new FakeRotationSession('impl', 'claude', ['ack', 'I was compacted and have lost track of what we were doing.'])
+  const loudRelay = await relayOf(loudDir, new FakeRotationSession('advisor', 'codex', ['Do the thing.', 'DONE']), [loud])
+  t.after(() => loudRelay.stop())
+  const loudRun = loudRelay.start('Keep the work moving.')
+  loud.compact()
+  const loudPause = await loudRun.untilPause()
+  assert.equal(loudPause?.reason, 'rotation_candidate')
+  assert.equal(loudPause?.candidate?.assessedAs, 'corroborated', 'the same event, with the seat corroborating it')
+
+  // The two are the same pause reason and the same word in `detail`. The class is the only thing
+  // that separates them, which is why a key that merely EXISTS would be worthless here.
+  assert.notEqual(quietPause?.candidate?.assessedAs, loudPause?.candidate?.assessedAs)
+  assert.ok(quietPause?.detail.includes('compacted') && loudPause?.detail.includes('compacted'))
+})
+
 test('a rotation candidate pauses the loop and reports its evidence', async (t) => {
   const dir = repo(t)
   const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it.'])

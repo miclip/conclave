@@ -189,3 +189,35 @@ test('the complaint detector does not fire on prose that discusses the topic', (
     'discussion of compaction must not read as a report of it',
   )
 })
+
+test('#247 the class a candidate is raised with distinguishes corroborated from degraded', () => {
+  // The distinction the relay carries onto the pause as `candidate.assessedAs`, pinned at its
+  // source. It was kept whole in code — "two different questions to put to an operator" — and
+  // then folded on every surface a reader could reach: `detail` says "compacted" for both, and
+  // `RotationRecord.reason` copies that prose.
+  //
+  // The design's own reason for the distinction: a model may compact without noticing, or notice
+  // and not say, so the complaint is corroborating evidence and never a precondition. So
+  // `corroborated` is the same event with an independent second witness, and an operator
+  // weighing whether to accept a candidate is weighing exactly that.
+  const compacted = { participant: 'implementer', baselineGeneration: 0, currentGeneration: 1, at: 1 }
+
+  const quiet = assess({ ...compacted, prose: 'Did the thing.', events: [], ledger: new ComplaintLedger() })
+  assert.equal(quiet.reason, 'degraded', 'compacted and said nothing about it')
+  assert.equal(quiet.degraded, true)
+  assert.equal(quiet.complained, false)
+
+  const said = assess({
+    ...compacted,
+    prose: 'I was compacted and have lost track of what we were doing.',
+    events: [],
+    ledger: new ComplaintLedger(),
+  })
+  assert.equal(said.reason, 'corroborated', 'the same event, with the seat corroborating it')
+  assert.equal(said.degraded, true)
+  assert.equal(said.complained, true)
+
+  // Both are compaction, which is why the ping rule an operator uses — does the detail say
+  // "compacted" — is right for BOTH and cannot tell them apart. That is the whole of #247.
+  assert.notEqual(quiet.reason, said.reason, 'and the class is what separates them')
+})
