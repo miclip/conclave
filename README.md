@@ -68,16 +68,20 @@ Node 24 or newer.
 curl -fsSL https://raw.githubusercontent.com/miclip/conclave/v0.5.29/scripts/install.sh | sh
 ```
 
-Installs the newest tagged release into `~/.local/share/conclave`, compiles `node-pty`, and
-symlinks `conclave` into `~/.local/bin`. Re-running upgrades in place. `CONCLAVE_REF`
-installs a specific ref; `CONCLAVE_PREFIX` and `CONCLAVE_BINDIR` move where it lands.
+Clones the repository into `~/.local/share/conclave`, checks the newest tagged release out
+into its own directory under `~/.local/share/conclave-releases/`, compiles `node-pty` there,
+and symlinks `conclave` into `~/.local/bin`. Re-running installs the newer version beside the
+one you are on and moves the symlink, so upgrading does not disturb a run already in flight.
+Old versions are kept; nothing removes them unless you ask.
+`CONCLAVE_REF` installs a specific ref; `CONCLAVE_PREFIX` and `CONCLAVE_BINDIR` move where it
+lands.
 
 By hand:
 
 ```sh
 git clone https://github.com/miclip/conclave.git && cd conclave
 npm install
-ln -sf "$PWD/bin/conclave.ts" ~/.local/bin/conclave
+ln -sf "$PWD/bin/conclave" ~/.local/bin/conclave
 ```
 
 ## Using it
