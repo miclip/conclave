@@ -367,61 +367,100 @@ test('#250 a version directory that does not answer with its own version never g
   assert.equal(wasPointingAt, join(m.root, 'v9.9.9', 'bin', 'conclave'))
 })
 
-test('#250 migrating off the single legacy checkout still refuses while it is live', async (t) => {
-  // The ONE refusal left, and it is not the old one renamed. A version directory is safe because
-  // its name pins its contents; `conclave-stable` carries no such promise, so moving the symlink
-  // off it strands a live run in the only directory this scheme stops protecting.
+test('#254 migrating off the single legacy checkout proceeds while it is live, and keeps it', async (t) => {
+  // THE POINT OF #254. This used to refuse up front, so a machine with a long-running session
+  // could not migrate at all -- the unbounded wait #250 was filed to end, arriving one directory
+  // further along. Nothing the migration does before the removal touches what a live run depends
+  // on: a worktree is added, node_modules is READ to clone it, and the symlink only affects
+  // processes started afterwards.
   const m = machine(t, { migrated: false })
   const child = liveRun(m.dir)
   try {
     await settle(400)
     const busy = spawnSync('sh', [SCRIPT, '--install-only'], { cwd: m.repo, env: m.env, encoding: 'utf8' })
     const out = `${busy.stdout}${busy.stderr}`
-    assert.equal(busy.status, 1, out)
-    assert.match(out, /refusing to update/)
-    // Naming what is live is half the point: a refusal the operator cannot act on is a wall.
+    assert.equal(busy.status, 0, out)
+    assert.doesNotMatch(out, /refusing to update/)
+    // The install really moved.
+    assert.equal(
+      realpathSync(m.link),
+      join(m.root, 'v9.9.10', 'bin', 'conclave'),
+      'the migration puts the install under the versions directory',
+    )
+    // And the directory the run is executing from is still there, with the pid named.
+    assert.match(out, /keeping .* a run started in it while the migration was running/)
     assert.match(out, new RegExp(`pid ${child.pid}\\b`), 'the pid is named')
-    // And it refused before doing anything, rather than after.
-    assert.equal(realpathSync(m.link), join(m.dir, 'bin', 'conclave'))
-    assert.ok(existsSync(join(m.dir, 'bin', 'conclave.ts')), 'a refused migration removes nothing')
+    assert.ok(existsSync(join(m.dir, 'bin', 'conclave.ts')), 'the live run keeps its directory')
   } finally {
     child.kill('SIGKILL')
   }
-
-  // And it goes clear once the run is gone, or the migration would be a permanent refusal --
-  // which is the failure mode #250 is about, one directory further along.
-  await settle(700)
-  const after = spawnSync('sh', [SCRIPT, '--install-only'], { cwd: m.repo, env: m.env, encoding: 'utf8' })
-  const out = `${after.stdout}${after.stderr}`
-  assert.equal(after.status, 0, out)
-  assert.doesNotMatch(out, /refusing/)
-  assert.equal(
-    realpathSync(m.link),
-    join(m.root, 'v9.9.10', 'bin', 'conclave'),
-    'the migration puts the install under the versions directory',
-  )
 })
 
-test('#250 --force still carries the migration past a live run', async (t) => {
-  // The escape hatch has one use left. It does not make the hazard untrue; it asserts the
-  // operator has checked that the run is finished.
+test('#254 a kept legacy checkout is described as permanent, not as something to re-run', async (t) => {
+  // `remove_migrated_from` runs only on a MIGRATING install, so once the symlink has moved the
+  // old checkout is never looked at again. Telling an operator to re-run --install-only would be
+  // false, and a false instruction is worse than none: they would wait for something that never
+  // comes.
   const m = machine(t, { migrated: false })
   const child = liveRun(m.dir)
+  let out: string
   try {
     await settle(400)
-    const forced = spawnSync('sh', [SCRIPT, '--install-only', '--force'], { cwd: m.repo, env: m.env, encoding: 'utf8' })
-    const out = `${forced.stdout}${forced.stderr}`
-    assert.match(out, /--force was given/)
-    assert.equal(forced.status, 0, out)
-    assert.equal(realpathSync(m.link), join(m.root, 'v9.9.10', 'bin', 'conclave'))
-    // AND IT DOES NOT REACH THE DELETE. `--force` says the operator has checked that the runs
-    // are finished, which is an answer about swapping a symlink; the removal at the end asks
-    // again and keeps the directory, because a swap can be re-run and a delete cannot.
-    assert.match(out, /keeping .* a run started in it while the migration was running/)
-    assert.ok(existsSync(join(m.dir, 'bin', 'conclave.ts')), 'the directory the run is in survives --force')
+    const r = spawnSync('sh', [SCRIPT, '--install-only'], { cwd: m.repo, env: m.env, encoding: 'utf8' })
+    out = `${r.stdout}${r.stderr}`
+    assert.equal(r.status, 0, out)
   } finally {
     child.kill('SIGKILL')
   }
+  // The UP-FRONT line specifically. A first version matched /Nothing retires it later/, which the
+  // removal's own message also carries -- so the assertion passed with this warning deleted, and
+  // the mutation escaped. Matched on the wording only this line has.
+  assert.match(out, /will keep it, and nothing will retire it later/)
+  assert.match(out, /git worktree remove/, 'it says how to remove it by hand')
+
+  // Re-running once the run is gone does NOT retire it, which is what the message promises.
+  await settle(700)
+  const again = spawnSync('sh', [SCRIPT, '--install-only'], { cwd: m.repo, env: m.env, encoding: 'utf8' })
+  const out2 = `${again.stdout}${again.stderr}`
+  assert.equal(again.status, 0, out2)
+  assert.ok(existsSync(join(m.dir, 'bin', 'conclave.ts')), 'a second run does not retire it either')
+})
+
+test('#254 --force is refused rather than accepted and ignored', (t) => {
+  // It existed for exactly one refusal, which is gone. Parsed-but-unused would be worse than
+  // absent: an operator reaching for it out of habit would believe it did something.
+  const m = machine(t, { migrated: false })
+  const r = spawnSync('sh', [SCRIPT, '--install-only', '--force'], { cwd: m.repo, env: m.env, encoding: 'utf8' })
+  const out = `${r.stdout}${r.stderr}`
+  assert.match(out, /unknown flag --force/)
+  assert.notEqual(r.status, 0, out)
+})
+
+test('#254 with no resolver on PATH the install does nothing at all, rather than guessing', (t) => {
+  // `in_use` returns nothing without realpath or readlink, which reads as "no runs" -- so the
+  // question is what stops a migration from deleting a checkout it cannot judge. The answer is
+  // upstream and total: `install_dir` cannot follow the PATH symlink either, so the script never
+  // reaches the migration. Pinned here because it is the reason `remove_migrated_from` carries no
+  // resolver check of its own, and a future reader would otherwise be right to add one.
+  const m = machine(t, { migrated: false })
+  const bare = tempDir(t, 'conclave-no-resolver')
+  for (const tool of ['git', 'ps', 'awk', 'sed', 'grep', 'node', 'npm', 'sh', 'dirname', 'basename', 'cut', 'mkdir', 'rm', 'mv', 'ln', 'cp', 'pwd', 'date', 'cat', 'tr', 'sort', 'head', 'tail', 'wc', 'find', 'chmod', 'touch', 'expr', 'test']) {
+    const found = spawnSync('sh', ['-c', `command -v ${tool}`], { encoding: 'utf8' }).stdout.trim()
+    if (found) symlinkSync(found, join(bare, tool))
+  }
+  const r = spawnSync('sh', [SCRIPT, '--install-only'], {
+    cwd: m.repo,
+    // The fixture's own bin dir stays FIRST: without it `command -v conclave` fails and the script
+    // stops one step earlier still, which would pass this test for the wrong reason.
+    env: { ...m.env, PATH: `${join(m.link, '..')}:${bare}` },
+    encoding: 'utf8',
+  })
+  const out = `${r.stdout}${r.stderr}`
+  assert.equal(r.status, 0, out)
+  assert.match(out, /is not a git checkout — leaving it alone/)
+  // The two things that must not have happened.
+  assert.ok(existsSync(join(m.dir, 'bin', 'conclave.ts')), 'the checkout is not removed')
+  assert.ok(!existsSync(join(m.root, 'v9.9.10')), 'and no version directory is built from a path it guessed')
 })
 
 /** Move the install to the newest tag, which every prune test needs a superseded version for. */
@@ -893,24 +932,16 @@ test('#250 a removal git refuses puts the ownership record back', (t) => {
   assert.equal(existsSync(join(m.root, '.installed', 'v9.9.9.rec.removing')), false)
 })
 
-test('#250 the legacy checkout is removed, and only after the switch and only when nothing is in it', async (t) => {
+test('#250 the legacy checkout is removed, and only after the switch and only when nothing is in it', (t) => {
   // The migration ends by deleting the directory it moved off, because that directory is the
   // one the new layout cannot keep promises about. Which is exactly why it is last: the worktree
   // is built, its version proved out of its own path, and the symlink renamed onto it before
   // anything is removed. Reversed, a bad new version would leave the machine with no CLI at all.
   const m = machine(t, { migrated: false })
 
-  const child = liveRun(m.dir)
-  try {
-    await settle(400)
-    const busy = spawnSync('sh', [SCRIPT, '--install-only'], { cwd: m.repo, env: m.env, encoding: 'utf8' })
-    assert.equal(busy.status, 1, `${busy.stdout}${busy.stderr}`)
-    assert.ok(existsSync(join(m.dir, 'bin', 'conclave.ts')), 'a refused migration removes nothing')
-  } finally {
-    child.kill('SIGKILL')
-  }
-
-  await settle(700)
+  // Nothing live here: since #254 a live run no longer refuses the migration, it only keeps the
+  // directory, and that case is pinned by its own test. What THIS one is for is the ordering --
+  // the removal happens, and happens last.
   const r = spawnSync('sh', [SCRIPT, '--install-only'], { cwd: m.repo, env: m.env, encoding: 'utf8' })
   const out = `${r.stdout}${r.stderr}`
   assert.equal(r.status, 0, out)
