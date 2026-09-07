@@ -149,20 +149,43 @@ test('#182 the install checkout is not updated while a process is running from i
   assert.doesNotMatch(`${after.stdout}${after.stderr}`, /refusing to update/, 'a finished process must not block forever')
 })
 
-test('#182 a dry run executes nothing, and says what it would have done', () => {
+test('#182 a dry run executes nothing, and says what it would have done', (t) => {
+  // AGAINST A FIXTURE, not against this checkout (#248). Run in `REPO`, every assertion below
+  // holds when the script refuses at its first guard and never reaches the dry-run path at all:
+  // HEAD unchanged, tree unchanged and a non-empty stderr are exactly what a refusal produces.
+  // Proved by mutation — an unconditional `exit 1` after argument parsing left this test green.
+  //
+  // And it was not hypothetical. `REPO` refuses on an uncommitted tree, which this file's own
+  // comment admitted is the normal state of it, and refused again whenever a conclave run was
+  // live anywhere on the machine. The test has been passing without reaching its subject for
+  // most of its life.
+  //
+  // A fixture is clean, committed and has an origin, so the script gets past its preconditions
+  // and the dry run actually runs.
+  const dir = fakeRepo(t)
   const state = () => ({
-    head: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: REPO, encoding: 'utf8' }).trim(),
-    tree: execFileSync('git', ['status', '--porcelain'], { cwd: REPO, encoding: 'utf8' }).trim(),
+    head: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: dir, encoding: 'utf8' }).trim(),
+    tree: execFileSync('git', ['status', '--porcelain'], { cwd: dir, encoding: 'utf8' }).trim(),
   })
-  // Compared before and against after, NOT against clean. The repo this runs in usually has
-  // the author's own work in it, and asserting a clean tree tests the author's habits rather
-  // than the script -- it failed exactly that way when first written.
+
   const before = state()
-  const r = run(['0.9.99', '--dry-run'])
+  const r = run(['9.9.100', '--dry-run'], dir)
   const after = state()
+
+  // THE DISCRIMINATOR. `run()` in the script prints `would run: …` instead of executing, and it
+  // prints that ONLY once the preconditions are past — so this is what separates "the dry run
+  // executed nothing" from "nothing executed at all", which is the whole claim of the test.
+  assert.match(r.out, /would run:/, 'the dry-run path must actually be reached')
+  assert.doesNotMatch(r.out, /refusing/, 'and not be refused before it gets there')
+
   assert.equal(after.head, before.head, 'a dry run must not commit')
   assert.equal(after.tree, before.tree, 'a dry run must not change what is modified')
-  assert.ok(r.out.length > 0, 'and it must say something')
+
+  // AND IT MUST SUCCEED. Comparing the tree cannot catch a dry run that really executes: the
+  // first thing it would execute is `npm run test` in a fixture with no dependencies, which
+  // fails and stops the script before it reaches anything that writes. So the tree looks
+  // untouched for the wrong reason, and only the exit code tells the two apart.
+  assert.equal(r.code, 0, 'a dry run must run to the end rather than die partway')
 })
 
 /**

@@ -152,6 +152,15 @@ conclave_runs() {
 
 refuse_if_in_use() {
   dir="$1"
+  # Nothing is swapped on a dry run, so there is nothing to protect and no reason to stop (#248).
+  # Said rather than skipped silently: what a dry run is FOR is telling an operator what would
+  # happen, and "this step would have been refused" is part of that answer.
+  if [ "$DRY" = 1 ]; then
+    if [ -n "$(in_use "$dir")" ]; then
+      say "  would check $dir for live runs — some are running now, so a real release would stop here"
+    fi
+    return 0
+  fi
   # Without a resolver `in_use` cannot tell which checkout a run belongs to, and would return
   # nothing -- which reads as "no runs" and lets the swap through. Refused loudly instead: this
   # is the one input whose absence turns the guard off, and a guard that is off must say so.
@@ -264,7 +273,14 @@ git rev-parse "$TAG" >/dev/null 2>&1 && { say "refusing: $TAG already exists"; e
 
 # A run in flight owns a branch this tag would collide with, and its participants are
 # writing to the tree being tagged.
-if [ -n "$(conclave_runs)" ]; then
+#
+# NOT ON A DRY RUN (#248). Neither half of that reason applies when nothing is written: `run()`
+# prints instead of executing, and every mutating step below is already gated on `DRY`. Refusing
+# anyway made a dry run impossible on a busy machine -- which is the machine an operator most
+# wants to ask "what would this do" from -- and it made `#182 a dry run executes nothing` pass
+# with the script doing nothing at all, because HEAD, the tree and a non-empty stderr are exactly
+# what a refusal also produces.
+if [ "$DRY" = 0 ] && [ -n "$(conclave_runs)" ]; then
   say "refusing: a run is in flight — wait for it to finish and merge"
   for p in $(conclave_runs); do
     echo "    pid $p: $(ps -o command= -p "$p" 2>/dev/null | cut -c1-100)" >&2
