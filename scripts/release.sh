@@ -271,6 +271,33 @@ git fetch origin --quiet
 [ "$(git rev-list --count HEAD..origin/main)" = "0" ] || { say "refusing: behind origin/main"; exit 1; }
 git rev-parse "$TAG" >/dev/null 2>&1 && { say "refusing: $TAG already exists"; exit 1; }
 
+# Runs working in THIS repository, which is the only kind the tag guard is about (#249).
+#
+# `conclave_runs` is machine-wide and correctly so for the install guard: every run on the
+# machine executes from `conclave-stable`, so swapping that checkout under any of them is the
+# hazard `refuse_if_in_use` describes. Tagging is a different question. A session working in
+# another project owns no branch here and writes nothing to this tree, and blocking a release
+# on one holds up the repo-local 90% of the work for a reason that does not apply to it.
+#
+#   tag / bump      protects this repo's branch and tree     -> this repo
+#   install swap    protects the shared install checkout     -> machine-wide
+#
+# A run whose cwd cannot be read is treated as local and refuses. Waiting costs an operator some
+# time; tagging a tree somebody is writing to costs a bad release.
+#
+# That fail-safe is NOT covered by a test, and is recorded as a choice rather than dressed up as
+# a guarantee: producing an unreadable cwd means running this without `lsof` on PATH, and
+# building a PATH that lacks it while keeping git, ps and awk is more fixture than the branch is
+# worth. Mutation confirms the rest of the function; this line is reasoned.
+runs_here() {
+  here=$(git rev-parse --show-toplevel 2>/dev/null) || return 0
+  for p in $(conclave_runs); do
+    cwd=$(lsof -a -p "$p" -d cwd -Fn 2>/dev/null | grep '^n' | cut -c2-)
+    if [ -z "$cwd" ]; then echo "$p"; continue; fi
+    case "$cwd" in "$here" | "$here"/*) echo "$p" ;; esac
+  done
+}
+
 # A run in flight owns a branch this tag would collide with, and its participants are
 # writing to the tree being tagged.
 #
@@ -280,9 +307,9 @@ git rev-parse "$TAG" >/dev/null 2>&1 && { say "refusing: $TAG already exists"; e
 # wants to ask "what would this do" from -- and it made `#182 a dry run executes nothing` pass
 # with the script doing nothing at all, because HEAD, the tree and a non-empty stderr are exactly
 # what a refusal also produces.
-if [ "$DRY" = 0 ] && [ -n "$(conclave_runs)" ]; then
-  say "refusing: a run is in flight — wait for it to finish and merge"
-  for p in $(conclave_runs); do
+if [ "$DRY" = 0 ] && [ -n "$(runs_here)" ]; then
+  say "refusing: a run is in flight in this repository — wait for it to finish and merge"
+  for p in $(runs_here); do
     echo "    pid $p: $(ps -o command= -p "$p" 2>/dev/null | cut -c1-100)" >&2
   done
   exit 1

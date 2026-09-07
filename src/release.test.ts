@@ -11,7 +11,7 @@
  */
 
 import { strict as assert } from 'node:assert'
-import { execFileSync, spawn, spawnSync } from 'node:child_process'
+import { execFileSync, spawn, spawnSync, type ChildProcess } from 'node:child_process'
 import { chmodSync, mkdirSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -272,4 +272,53 @@ test('#182 a dependency that really moved is still detected', (t) => {
     return `${r.stdout}${r.stderr}`
   })()
   assert.match(out, /moved a dependency/, 'a changed dependency must still be noticed')
+})
+
+test('#249 a run in ANOTHER repository does not block the tag; one in this repository does', (t) => {
+  // The tag guard protects this repo's branch and tree, so only runs working HERE can threaten
+  // it. It used to refuse for any conclave run on the machine, which held up a release for an
+  // hour because a session was working in an unrelated project.
+  //
+  // The install guard is deliberately untouched and stays machine-wide: every run executes from
+  // `conclave-stable`, so swapping that under any of them is the hazard it describes.
+  const dir = fakeRepo(t, '9.9.9')
+  const elsewhere = tempDir(t, 'conclave-elsewhere')
+
+  // A process the guard's own matcher recognises: a resolved path ending `/conclave` followed by
+  // a subcommand. Built rather than mocked, because what is under test is which PROCESSES the
+  // script counts, and a mock would decide that itself.
+  // OUTSIDE the fixture, or creating it dirties the tree and the release refuses for that
+  // instead — which would have made the first assertion below pass for the wrong reason.
+  const bin = join(tempDir(t, 'conclave-fakebin'), 'bin')
+  mkdirSync(bin, { recursive: true })
+  const entry = join(bin, 'conclave.ts')
+  writeFileSync(entry, 'setTimeout(() => {}, 60000)\n')
+
+  const started: ChildProcess[] = []
+  const runIn = (cwd: string) => {
+    const c = spawn(process.execPath, [entry, 'session', 'probe'], { cwd, stdio: 'ignore' })
+    started.push(c)
+    return c
+  }
+  try {
+    runIn(elsewhere)
+    execFileSync('/bin/sh', ['-c', 'sleep 1'])
+    // NOT a dry run. Since #248 a dry run skips this guard entirely, so asking with `--dry-run`
+    // would pass whatever the scoping did — which is what the first version of this test did,
+    // and it stayed green with the guard reverted to machine-wide.
+    //
+    // A real invocation stops at `npm run test` in a fixture with no scripts, which is fine: the
+    // guard is evaluated before verification, so reaching "verifying before" is proof it passed.
+    const away = run(['9.9.100'], dir)
+    assert.doesNotMatch(away.out, /a run is in flight/, 'a run in another repository is not this repo’s business')
+    assert.match(away.out, /verifying before/, 'and the release got past the guard')
+
+    runIn(dir)
+    execFileSync('/bin/sh', ['-c', 'sleep 1'])
+    const here = run(['9.9.100'], dir)
+    assert.match(here.out, /a run is in flight in this repository/, 'a run working HERE still refuses')
+    assert.equal(here.code, 1)
+  } finally {
+    for (const c of started) c.kill('SIGKILL')
+  }
 })
