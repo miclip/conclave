@@ -155,7 +155,8 @@ function cli(args: string[], home: string): { code: number; out: string } {
 }
 
 test('#183 the skill is offered rather than installed for you', (t) => {
-  // `install.sh` symlinks one binary and touches nothing else in $HOME. Writing into a user's
+  // `install.sh` writes a checkout and one symlink, both under the directories it is told
+  // about, and touches nothing else in $HOME. Writing into a user's
   // Claude configuration uninvited is a larger change to their environment than installing
   // conclave is, so the bare form only SAYS where it is.
   const home = tempDir(t, 'conclave-skill-home')

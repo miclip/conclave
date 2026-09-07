@@ -1,0 +1,49 @@
+#!/bin/sh
+# The installed CLI's entry point, and the reason it is a shell script rather than a symlink.
+#
+# `~/.local/bin/conclave` used to point straight at `bin/conclave.ts`, whose shebang made the
+# kernel exec `node <the path you typed>`. What lands in argv -- and therefore in `ps` -- is
+# then the SYMLINK, not the file behind it:
+#
+#     node /Users/x/.local/bin/conclave session --advisor codex
+#
+# Everything that asks "which version is this process running" reads that line and resolves the
+# token, and the token is a symlink an install MOVES. So after an upgrade a run that started on
+# v0.5.29 answers `v0.5.30`, and `scripts/release.sh --prune-install` -- which asks exactly that
+# question before removing a directory -- finds v0.5.29 idle and deletes it out from under a
+# live session. Measured, not reasoned: the same live pid resolved to v1 before the swap and v2
+# after it, while still executing out of v1.
+#
+# The fix is to make argv say what is true. This launcher resolves its own path to the physical
+# version directory it lives in and execs node with THAT, so the command line carries a
+# version-pinned real path that no later install can change:
+#
+#     node /Users/x/.local/share/conclave-releases/v0.5.29/bin/conclave.ts session ...
+#
+# `exec`, not a call: without it this shell stays alive as the parent, its own command line
+# still carries the symlink spelling, and the pid an operator is told about is the one that
+# still answers the moving question.
+#
+# Running `bin/conclave.ts` directly still works and is untouched -- that is what a checkout
+# does, and what this script itself ends up doing.
+
+# Symlinks resolved by hand rather than with `realpath` or `readlink -f`: neither is on every
+# macOS this might run on, and this is the one file that has no fallback available if it
+# guesses wrong. Bounded, because a symlink loop is otherwise a hang at every invocation.
+self=$0
+hops=0
+while [ -L "$self" ] && [ "$hops" -lt 40 ]; do
+  target=$(readlink "$self") || break
+  case "$target" in
+    /*) self=$target ;;
+    # A relative link is relative to the directory the LINK is in, not to the cwd.
+    *) self="$(dirname "$self")/$target" ;;
+  esac
+  hops=$((hops + 1))
+done
+dir=$(cd "$(dirname "$self")" && pwd -P) || {
+  echo "conclave: cannot resolve $0 to a version directory" >&2
+  exit 1
+}
+
+exec node "$dir/conclave.ts" "$@"

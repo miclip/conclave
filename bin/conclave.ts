@@ -92,6 +92,22 @@ import {
   restore as restoreMutation,
 } from '../src/workspace/mutationMarker.ts'
 
+/**
+ * The file THIS process is running, with every symlink resolved.
+ *
+ * NOT `process.argv[1]`. Node makes that absolute but does not resolve it, so a run started
+ * through the installed CLI reports `~/.local/bin/conclave` -- the symlink -- and not the file
+ * behind it. Measured rather than assumed: `node <symlink>` puts the symlink in `argv[1]` and
+ * the real file in `import.meta.url`.
+ *
+ * `realpath` is applied on top of `import.meta.url` rather than trusted from it, because this
+ * is the same question `invokedDirectly` asks of the other side and one function is one place
+ * for the answer to be wrong.
+ */
+function selfEntry(): string {
+  return realpathSync(fileURLToPath(import.meta.url))
+}
+
 const USAGE = `conclave <command>
 
 Driving conclave from an agent
@@ -1523,7 +1539,16 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
         '--',
         goal,
       ]
-      const child = spawn(process.execPath, [process.argv[1]!, ...argvOut], {
+      // THE RESOLVED FILE, not the symlink this process was invoked through (#250).
+      //
+      // `process.argv[1]` would hand the child `~/.local/bin/conclave`, and the child follows
+      // that link AT ITS OWN EXEC -- so a release that repoints it between this process
+      // starting and the child starting produces a parent and a child on two different
+      // versions of one run. Since #250 the install repoints that symlink as its last step,
+      // which turns a window nobody could realistically hit into one a release opens on
+      // purpose. Passing the file this process actually loaded closes it: the child runs the
+      // version its parent is running, whatever PATH means by then.
+      const child = spawn(process.execPath, [selfEntry(), ...argvOut], {
         cwd: process.cwd(),
         detached: true,
         stdio: ['ignore', fd, fd],
@@ -2263,7 +2288,7 @@ function invokedDirectly(): boolean {
   const entry = process.argv[1]
   if (entry === undefined) return false
   try {
-    return realpathSync(entry) === realpathSync(fileURLToPath(import.meta.url))
+    return realpathSync(entry) === selfEntry()
   } catch {
     return false
   }

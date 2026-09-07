@@ -3,14 +3,20 @@
  *
  * The guard exists because "a run in flight owns a branch this tag would collide with, and its
  * participants are writing to the tree being tagged". It used to match `conclave.ts session`,
- * which is how a run is started FROM A CHECKOUT and not how anyone starts one: the installed CLI
- * is a symlink, and the symlink's own path is what lands in argv.
+ * which is how a run is started FROM A CHECKOUT and not how anyone started one: the installed
+ * CLI was a symlink straight to the source, and the symlink's own path is what lands in argv.
  *
  *     node /Users/x/.local/bin/conclave session --advisor codex ...
  *
  * So `pgrep -f "conclave.ts session"` returned nothing while three such runs were live, and both
  * guards -- the tag one and the install one -- would have let all three through. Observed while
  * cutting v0.5.22, which is why this is pinned rather than argued.
+ *
+ * SINCE #250 THE INSTALLED CLI IS `bin/conclave`, a launcher that resolves itself and execs
+ * `node <its version directory>/conclave.ts`, so a run started off PATH now records the second
+ * spelling too. The first is still matched and still tested: an older install on the same
+ * machine produces exactly that line, and a pattern that stopped recognising it would go quiet
+ * on the runs it was written for.
  *
  * Tested as the pattern rather than through the script: what went wrong was a regex, the shell
  * around it is one `awk`, and a test that spawned real sessions to check a string would be slower
@@ -54,6 +60,15 @@ test('#230 a run started through the installed CLI is seen', () => {
   // The exact argv observed while cutting v0.5.22, which the old pattern missed entirely.
   assert.deepEqual(
     matches(['24629 node /Users/x/.local/bin/conclave session --advisor codex --implementer claude']),
+    ['24629'],
+  )
+})
+
+test('#250 a run started through the installed launcher is seen, in its own version directory', () => {
+  // What the launcher produces, and the reason it exists: the command line names the directory
+  // the process is executing out of rather than a symlink the next install moves.
+  assert.deepEqual(
+    matches(['24629 node /Users/x/.local/share/conclave-releases/v0.5.30/bin/conclave.ts session --advisor codex']),
     ['24629'],
   )
 })
