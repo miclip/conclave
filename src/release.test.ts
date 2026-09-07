@@ -12,7 +12,7 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync, spawn, spawnSync, type ChildProcess } from 'node:child_process'
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
 import type { TestContext } from 'node:test'
@@ -391,6 +391,48 @@ test('#254 migrating off the single legacy checkout proceeds while it is live, a
     assert.match(out, /keeping .* a run started in it while the migration was running/)
     assert.match(out, new RegExp(`pid ${child.pid}\\b`), 'the pid is named')
     assert.ok(existsSync(join(m.dir, 'bin', 'conclave.ts')), 'the live run keeps its directory')
+  } finally {
+    child.kill('SIGKILL')
+  }
+})
+
+test('#256 a run started through the PATH symlink still keeps the checkout after the symlink moves', async (t) => {
+  // THE FIELD FAILURE. `in_use` resolves a run's argv, and a run that predates `bin/conclave` has
+  // the PATH SYMLINK in its argv. The removal happens after that symlink has been moved onto the
+  // new version, so resolving it answers "v0.5.30" and the live run vanishes from the check that
+  // is supposed to protect it -- while the check run BEFORE the swap saw it correctly. On a real
+  // machine this warned that it would keep the directory and deleted it in the same run.
+  //
+  // Every other liveness test starts its run pointing straight at the directory, so its argv never
+  // goes through the symlink being moved and the condition cannot arise. That is why they are all
+  // green and this was not.
+  const m = machine(t, { migrated: false })
+  // A GENUINE pre-#250 machine. `machine()` links to `bin/conclave` even when un-migrated, so its
+  // legacy install already has the launcher that resolves argv to a real path -- which is the one
+  // thing that stops this bug. A machine that predates #250 has the PATH entry pointing straight
+  // at `bin/conclave.ts`, whose shebang puts the SYMLINK into argv. That is the field condition,
+  // and the fixture could not express it.
+  unlinkSync(m.link)
+  symlinkSync(join(m.dir, 'bin', 'conclave.ts'), m.link)
+
+  const child = liveRunViaPath(m.env)
+  try {
+    await settle(600)
+    const r = spawnSync('sh', [SCRIPT, '--install-only'], { cwd: m.repo, env: m.env, encoding: 'utf8' })
+    const out = `${r.stdout}${r.stderr}`
+    assert.equal(r.status, 0, out)
+    assert.equal(
+      realpathSync(m.link),
+      join(m.root, 'v9.9.10', 'bin', 'conclave'),
+      'the migration still completes',
+    )
+    // The assertion the field failure would fail.
+    assert.ok(
+      existsSync(join(m.dir, 'bin', 'conclave.ts')),
+      'the checkout the live run is executing from must survive',
+    )
+    assert.match(out, /keeping /)
+    assert.doesNotMatch(out, /removing the checkout the install migrated from/)
   } finally {
     child.kill('SIGKILL')
   }

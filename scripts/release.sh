@@ -75,6 +75,7 @@ set -eu
 
 DRY=0
 INSTALL_ONLY=0
+LEGACY_LIVE_BEFORE=""
 PRUNE_INSTALL=0
 VERSION=""
 for arg in "$@"; do
@@ -467,7 +468,17 @@ remove_migrated_from() {
     say "keeping $legacy — it has uncommitted changes"
     return 0
   fi
-  pids=$(in_use "$legacy")
+  # BOTH samples, because they answer different questions (#256). The pre-swap one sees runs whose
+  # argv is the old symlink -- every run that predates the launcher. The post-swap one sees runs
+  # started during the migration, which is a worktree add and a node_modules clone long enough for
+  # that to happen. Neither is a superset of the other, and the code took only the second.
+  #
+  # The pre-swap sample is NOT re-checked for liveness. A first version filtered it with `kill -0`,
+  # so a run that finished mid-migration stopped counting -- correct, and untestable without racing
+  # the script's own timing. An untestable branch on the operation that deletes is worth less than
+  # the tidiness it buys: keeping is the safe answer, this file's every other branch keeps, and the
+  # cost of keeping one directory too long is a `git worktree remove` the message already prints.
+  pids=$(printf '%s %s' "$LEGACY_LIVE_BEFORE" "$(in_use "$legacy")" | tr ' ' '\n' | grep -v '^$' | sort -u)
   if [ -n "$pids" ]; then
     say "keeping $legacy — a run started in it while the migration was running."
     say "  Nothing retires it later; remove it by hand once these are done: git worktree remove $legacy"
@@ -541,7 +552,14 @@ update_install() {
     # retirement below runs only on a migrating install, so once the symlink has moved this
     # directory is never revisited. A checkout kept here is kept for good until somebody removes
     # it, and telling the operator to "re-run later" would be false.
-    if [ -n "$(in_use "$dir")" ]; then
+    # Sampled HERE and kept, because this is the last moment the question can be answered
+    # correctly (#256). `in_use` resolves a run's argv, and a run that predates `bin/conclave` has
+    # the PATH symlink in its argv -- so once the symlink is moved onto the new version, resolving
+    # it answers with the NEW version and the run disappears from the very check meant to protect
+    # it. The migration is the one moment when every live run predates the launcher, so this is
+    # not an edge case: it is the normal case, exactly once, on the operation that deletes.
+    LEGACY_LIVE_BEFORE=$(in_use "$dir")
+    if [ -n "$LEGACY_LIVE_BEFORE" ]; then
       say "$dir has live runs — the migration will keep it, and nothing will retire it later:"
       say "  once those runs finish, remove it with: git worktree remove $dir"
     fi
