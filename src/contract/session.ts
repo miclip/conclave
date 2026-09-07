@@ -422,6 +422,23 @@ export interface SessionSnapshot {
    * byte-level churn was being counted as compaction and raising rotation candidates.
    */
   rewriteGeneration?: number | undefined
+  /**
+   * Every distinct agent-CLI version this seat's transcript was written by (#246).
+   *
+   * Provenance for the grades above, and nothing else: nothing compares it, nothing refuses on
+   * it. A turn's verdict is a claim about what a CLI did, read out of that CLI's own record — so
+   * when one of those record shapes later turns out to have changed, "which runs were affected"
+   * is only answerable if the run said which version wrote it.
+   *
+   * A LIST because it is not one value. Claude Code stamps its version on every record and
+   * updates between resumes: one session file carried six across 29,654 records. Reporting the
+   * newest would name one binary for evidence produced by several.
+   *
+   * Absent where the format carries none, and taken FROM THE TRANSCRIPT rather than by probing
+   * the binary — a probe executes the operator's configured command, which may be a wrapper, and
+   * answers about whatever is installed now rather than about what wrote the evidence.
+   */
+  cliVersions?: string[] | undefined
   /** When this snapshot was rebuilt from the transcript. */
   builtAt: number
   /**

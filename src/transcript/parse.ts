@@ -32,6 +32,25 @@ export interface ParsedTranscript {
    */
   compactions: number
   sessionId?: string | undefined
+  /**
+   * Every distinct agent-CLI version this transcript was written by, in order of first
+   * appearance (#246).
+   *
+   * A LIST, not a value, and that is the finding rather than caution. Claude Code stamps
+   * `version` on every record and updates itself between resumes, so one session file here
+   * carried six -- 2.1.227 through 2.1.259 -- across 29,654 records. A single value would name
+   * one binary for evidence produced by several, which is the error this field exists to
+   * prevent rather than commit.
+   *
+   * Read from the transcript rather than probed from PATH, and the difference is not
+   * fastidiousness: probing `<agent> --version` EXECUTES the operator's configured command,
+   * which may be a wrapper, and reports whatever is installed NOW rather than what wrote the
+   * evidence. Both were measured.
+   *
+   * Absent when the format carries no version. Empty is not a possible state: a transcript
+   * either says or it does not.
+   */
+  cliVersions?: string[] | undefined
 }
 
 /**
@@ -93,9 +112,12 @@ export function parseClaude(records: Record<string, any>[]): ParsedTranscript {
   let compactions = 0
   let sessionId: string | undefined
   let current: TurnRecord | undefined
+  /** Insertion-ordered and de-duplicated: a Set preserves first-seen order in JS. */
+  const cliVersions = new Set<string>()
 
   for (const d of records) {
     sessionId ??= d.sessionId ?? d.session_id
+    if (typeof d.version === 'string' && d.version) cliVersions.add(d.version)
 
     switch (d.type) {
       case 'attachment': {
@@ -187,7 +209,13 @@ export function parseClaude(records: Record<string, any>[]): ParsedTranscript {
     }
   }
 
-  return { turns, declaredCompaction: compactions > 0, compactions, sessionId }
+  return {
+    turns,
+    declaredCompaction: compactions > 0,
+    compactions,
+    sessionId,
+    ...(cliVersions.size > 0 ? { cliVersions: [...cliVersions] } : {}),
+  }
 }
 
 /**
@@ -209,6 +237,8 @@ export function parseCodex(records: Record<string, any>[]): ParsedTranscript {
   let compactions = 0
   let sessionId: string | undefined
   let current: TurnRecord | undefined
+  /** Codex writes it once, in `session_meta`, rather than on every record as Claude does. */
+  const cliVersions = new Set<string>()
 
   /**
    * The text of a wrapped item, from the `content` blocks Codex writes inside it (#242).
@@ -279,6 +309,8 @@ export function parseCodex(records: Record<string, any>[]): ParsedTranscript {
     }
     if (d.type === 'session_meta') {
       sessionId = d.payload?.session_id ?? d.payload?.id
+      const version = d.payload?.cli_version
+      if (typeof version === 'string' && version) cliVersions.add(version)
       continue
     }
 
@@ -427,7 +459,13 @@ export function parseCodex(records: Record<string, any>[]): ParsedTranscript {
     }
   }
 
-  return { turns, declaredCompaction: compactions > 0, compactions, sessionId }
+  return {
+    turns,
+    declaredCompaction: compactions > 0,
+    compactions,
+    sessionId,
+    ...(cliVersions.size > 0 ? { cliVersions: [...cliVersions] } : {}),
+  }
 }
 
 export function parserFor(agent: string): (r: Record<string, any>[]) => ParsedTranscript {
