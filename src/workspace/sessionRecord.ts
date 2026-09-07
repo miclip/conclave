@@ -344,6 +344,18 @@ export interface SessionParticipantStatus {
    * The `events.ndjson` stream carries the same events for a reader that wants to judge
    * them, and the run report at the end carries the graded verdicts.
    */
+  /**
+   * Every distinct agent-CLI version this seat's transcript was written by (#246).
+   *
+   * Provenance for `turns` above and nothing else. A turn's verdict is a claim about what a CLI
+   * did, read out of that CLI's own record; when a record shape later turns out to have changed,
+   * this is what makes "which runs were affected" answerable.
+   *
+   * A LIST because it is not one value — Claude Code stamps its version on every record and
+   * updates between resumes, and one session file carried six. Absent where the transcript
+   * carries none, or before any snapshot has been read.
+   */
+  cliVersions?: string[] | undefined
   activity?: { kind: string; tool?: string | undefined; since: number } | undefined
   /**
    * Stopped at a permission prompt, for what, and since when. Read from
@@ -1217,6 +1229,8 @@ export interface RecordableRelay {
           confidence?: Confidence | undefined
           provenance?: Provenance[] | undefined
         }[]
+        /** Optional, so a stand-in written before #246 satisfies this by omission. */
+        cliVersions?: readonly string[] | undefined
       }>
     }
   }[]
@@ -1423,6 +1437,8 @@ export function recordSession(
    * that is deliberately detached from the run.
    */
   const turns = new Map<string, SessionTurnStatus[]>()
+  /** Per seat, from the same snapshots as `turns`. See `SessionParticipantStatus.cliVersions`. */
+  const cliVersions = new Map<string, string[]>()
 
   const seats = (): SessionParticipantStatus[] => {
     // Read ONCE per document rather than once per participant: `seats()` and `tasks()` both
@@ -1471,6 +1487,7 @@ export function recordSession(
         // of an earlier document see a list that had moved underneath it.
         launch: { args: [...p.launch.args], model: p.launch.model },
         turns: turns.get(p.id) ?? [],
+        ...(cliVersions.has(p.id) ? { cliVersions: cliVersions.get(p.id)! } : {}),
         ...(seen ? { activity: seen } : {}),
         // `?? Date.now()` is the floor for a pending prompt whose event this recorder never
         // saw -- a relay stand-in, or a recorder attached after the prompt was raised. It
@@ -1617,6 +1634,7 @@ export function recordSession(
   const refreshOnce = async (): Promise<void> => {
     const gen = ++issued
     const fresh: [string, SessionTurnStatus[]][] = []
+    const freshVersions: [string, string[]][] = []
     for (const p of relay.participants) {
       try {
         const snap = await p.session.snapshot()
@@ -1629,6 +1647,10 @@ export function recordSession(
             provenance: t.provenance,
           })),
         ])
+        // Under the SAME ordering guard as the turns, and for the same reason: an out-of-order
+        // snapshot must not take the record backwards. A transcript only ever gains versions, so
+        // an older read carries a shorter list (#246).
+        if (snap.cliVersions) freshVersions.push([p.id, [...snap.cliVersions]])
       } catch {
         // A snapshot that cannot be rebuilt right now keeps the last one that could. The
         // final refresh runs AFTER `relay.stop()`, when a session may already be gone, and
@@ -1638,6 +1660,7 @@ export function recordSession(
     if (gen < applied) return
     applied = gen
     for (const [id, ts] of fresh) turns.set(id, ts)
+    for (const [id, vs] of freshVersions) cliVersions.set(id, vs)
     recorder.update({ messages: relay.log.length, participants: seats(), ...rotations(), ...forces(), ...targeting() })
   }
 

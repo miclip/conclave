@@ -961,6 +961,9 @@ export class TranscriptSessionView {
       guarantees: this.#opts.guarantees,
       compactionGeneration: this.#compactionGeneration,
       rewriteGeneration: this.#rewriteGeneration,
+      // Spread away when the transcript carries none, so absent stays "the format does not say"
+      // rather than an empty list, which would read as "it said nothing" (#246).
+      ...(this.#view.cliVersions ? { cliVersions: [...this.#view.cliVersions] } : {}),
       builtAt: this.#builtAt || Date.now(),
     }
   }
