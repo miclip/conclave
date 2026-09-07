@@ -342,6 +342,27 @@ export interface RunPause {
    * pause exactly, rather than guessed at from timing.
    */
   verdictOf?: { participant: string; endSeq: number } | undefined
+  /**
+   * Present only on `rotation_candidate`: which class of degradation raised it (#247).
+   *
+   * `assess` returns `degraded | corroborated | unbacked | nothing`, and the relay is careful to
+   * carry that WHOLE rather than as a boolean -- "two different questions to put to an operator,
+   * and a class this code does not yet know about must not be silently answered by a decision
+   * that was made about a different one". Everything an operator could read then folded two of
+   * them together: `detail` says "compacted" for both `degraded` and `corroborated`, and
+   * `RotationRecord.reason` copies that prose, so the flattening outlived the run.
+   *
+   * The distinction is the design's own. `degradation.ts`: degradation alone is sufficient
+   * because "a model may compact without noticing, or notice and not say", and the complaint is
+   * "corroborating evidence, never a precondition". So `corroborated` is the same event with an
+   * independent second witness, and an operator weighing whether to accept a candidate is
+   * weighing exactly that.
+   *
+   * As DATA beside the prose, not instead of it. `detail` still reads the way it did; this is
+   * the same fact in a form a reader does not have to parse a sentence for -- which is what #10
+   * needs to sort compactions by whether the seat noticed.
+   */
+  candidate?: { assessedAs: 'degraded' | 'corroborated' | 'unbacked' | 'nothing' } | undefined
   /** Set once the verdict named above has been withdrawn. See `PauseSupersession`. */
   superseded?: PauseSupersession | undefined
   /** Set when the operator chose to keep waiting rather than answer. See `PauseWait`. */

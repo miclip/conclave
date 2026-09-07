@@ -348,7 +348,7 @@ const DECLARED: Record<string, string> = {
     'Authority routing (#56, D2) sends implementer_unanswered to the advisor before the operator, ' +
     'so a default run interrupts the human less than today. Real change at N=1, an improvement, ' +
     'declared rather than discovered. The pause reason exists at src/relay/run.ts:52 and the halt ' +
-    'that raises it is at src/relay/relay.ts:8032.',
+    'that raises it is at src/relay/relay.ts:8039.',
   'status.pause.resolution':
     'Classifying unresolved conditions on both axes (#56, D2) added `resolution` to every RunPause ' +
     '(src/relay/run.ts:329), so `conclave status --json` on a paused default run now carries ' +
@@ -630,7 +630,7 @@ const DECLARED: Record<string, string> = {
     'participant and nobody else, and a conclave or workstream scope samples NOBODY. It used to ' +
     'read pause.verdictOf.participant and fall back to scanning participants by rank for ' +
     'implementers — and verdictOf is set at exactly two halt sites, both turn_incomplete ' +
-    '(src/relay/relay.ts:7615, src/relay/relay.ts:8169), so every other pause reached that rank ' +
+    '(src/relay/relay.ts:7622, src/relay/relay.ts:8176), so every other pause reached that rank ' +
     'scan. WHAT CHANGES AT N=1: on the three pauses whose scope names no participant — ' +
     'operator_requested (/pause), advisor_escalated, authority_conflict — the lone implementer ' +
     'child used to be sampled, so a child that measured busy REFUSED the resume and wrote ' +
@@ -639,15 +639,15 @@ const DECLARED: Record<string, string> = {
     'safety guard rather than presented as a pure N>1 fix. The reason it is the right narrowing: ' +
     'the guard exists because continuing SENDS into a child that cannot accept input mid-turn, ' +
     'and on those three pauses the child it measured is not the child being sent to — resuming ' +
-    'advisor_escalated sends to the ADVISOR (src/relay/relay.ts:7750), resuming ' +
+    'advisor_escalated sends to the ADVISOR (src/relay/relay.ts:7757), resuming ' +
     'authority_conflict queues a constraint that is delivered by the dispatcher on the next ' +
     'dispatch to a free seat, and operator_requested is consumed at an advisor-turn boundary ' +
     'whose own evidence line says no turn is in flight. WHAT IS GIVEN UP, named rather than ' +
     'discovered: the advisor_escalated halt raised when a seat’s turn completed and its report ' +
-    'could not be read (src/relay/relay.ts:8083) is conclave-scoped by design, yet the useful ' +
+    'could not be read (src/relay/relay.ts:8090) is conclave-scoped by design, yet the useful ' +
     'question there is whether THAT seat is still writing; at N=1 the rank scan sampled it by ' +
     'coincidence of it being the only implementer, and now nothing does. The pause still carries ' +
-    'that seat’s liveness evidence from the halt site (src/relay/relay.ts:8094), which is what ' +
+    'that seat’s liveness evidence from the halt site (src/relay/relay.ts:8101), which is what ' +
     'the operator actually reads; restoring a refusal there is a change to that halt’s scope, ' +
     'not to the guard. AT N>1 the old behaviour was unsafe in the other direction: a pause about ' +
     'one seat could be refused because a DIFFERENT seat was mid-turn, and the operator was told ' +
@@ -749,7 +749,7 @@ const DECLARED: Record<string, string> = {
     'and concluded evidence is not re-derived BETWEEN pauses. It cannot be. The loop is ' +
     'suspended inside #halt for the whole pause, so #halt cannot run again, and a watchdog ' +
     'revision or replacement turn_end arriving meanwhile amends THE SAME RunPause in place ' +
-    '(src/relay/run.ts:872). There was one pause, read twice — the same defect by a shorter ' +
+    '(src/relay/run.ts:893). There was one pause, read twice — the same defect by a shorter ' +
     'path than the report proposed. ' +
     'Covered in src/relay/pauseLiveness.test.ts, which watches the recorded evidence change ' +
     'after the injected reading changes, and in src/outcomes/liveness.test.ts on the prose.',
@@ -1740,6 +1740,18 @@ const DECLARED: Record<string, string> = {
     'document records no conclusion for the attempt pre-registered 2026-08-07. If that study is ' +
     'still open, this block should be gated off until it closes; the gate is one condition at ' +
     'the call site and nothing else moves.',
+  'a rotation candidate says which class raised it':
+    'A `rotation_candidate` pause now carries `candidate.assessedAs` -- `degraded`, ' +
+    '`corroborated`, `unbacked` or `nothing` -- beside the prose in `detail` (#247). Additive, ' +
+    'and on that reason alone. `assess` returns the class and the relay already carried it WHOLE ' +
+    'internally, with a comment saying `degraded` and `corroborated` are two different questions ' +
+    'to put to an operator and must not be folded into a boolean. Every surface a reader could ' +
+    'reach then folded them anyway: `detail` says "compacted" for both, and ' +
+    '`RotationRecord.reason` copies that prose, so the flattening outlived the run. The ' +
+    'distinction is the design\'s own -- `degradation.ts` holds that a model may compact without ' +
+    'noticing, or notice and not say, so a complaint is corroborating evidence and never a ' +
+    'precondition, and `corroborated` is the same event with an independent second witness. ' +
+    'Nothing an existing consumer read changed value; `detail` is unchanged.',
   'status.progress, what the RUN is doing':
     'A status document now says what the RUN is doing -- `in_turn`, `paused` or `idle` -- and ' +
     'since when (#231). Additive, and reported rather than acted on: nothing here ends a run. ' +
@@ -1772,7 +1784,7 @@ const DECLARED: Record<string, string> = {
     'second clock.',
 }
 
-test('DECLARED contains exactly the routing, pause-resolution, attribution, ceiling-flag, seat-flag, seat-status, launch-record, flag-reader, integration-check, per-seat-rotation, reviewer, resume-guard, mixed-liveness, timestamped-liveness, model-validation, executable-preflight, compaction-survival, rotation-reporting, send-precondition, process-tree-liveness, ceiling-reporting, record-heartbeat, rotation-intent, console-dry-run, flag-reconciliation, paused-time, advisor-targeting, silence-timeout, launch-bounds, origin-reconciliation, capability-briefing, run-progress and blocked-rollup entries', () => {
+test('DECLARED contains exactly the routing, pause-resolution, attribution, ceiling-flag, seat-flag, seat-status, launch-record, flag-reader, integration-check, per-seat-rotation, reviewer, resume-guard, mixed-liveness, timestamped-liveness, model-validation, executable-preflight, compaction-survival, rotation-reporting, send-precondition, process-tree-liveness, ceiling-reporting, record-heartbeat, rotation-intent, console-dry-run, flag-reconciliation, paused-time, advisor-targeting, silence-timeout, launch-bounds, origin-reconciliation, capability-briefing, candidate-class, run-progress and blocked-rollup entries', () => {
   assert.deepEqual(Object.keys(DECLARED), [
     'deny-only project configuration for capabilities and commands',
     'implementer_unanswered -> advisor',
@@ -1807,6 +1819,7 @@ test('DECLARED contains exactly the routing, pause-resolution, attribution, ceil
     'the launch surfaces name the absolute cap, and the dry-run plan carries what bounds the run (#162)',
     'a restricted origin records the seats it has since been given to in full (#171)',
     'the advisor is told what its writing seats can be instructed to do (#192)',
+    'a rotation candidate says which class raised it',
     'status.progress, what the RUN is doing',
     'status.blocked, the one place a blocked run is named',
   ])
@@ -2250,7 +2263,7 @@ async function provokeReviewBlocked(repo: string): Promise<{ relay: Relay; run: 
  * Drive a real relay into one condition and return the pause it raised.
  *
  * The provocations are the ones `resolution.test.ts`'s own `provoke` already uses, deliberately:
- * the same triggers reaching the same single halt site (src/relay/relay.ts:4662), where the
+ * the same triggers reaching the same single halt site (src/relay/relay.ts:4664), where the
  * classification is computed by production `resolutionFor` from the subject the caller passed.
  * Nothing here writes a `RunPause`.
  *
@@ -2591,7 +2604,7 @@ test('default run works in the run cwd and creates no worktree', async (t) => {
 
   // A default run with no subagents must not create any git worktree. The relay only samples
   // the worktree list for its subagent-use report: src/relay/subagents.ts:113 defines
-  // worktreePaths, and src/relay/relay.ts:3541-3542, :4165 and :6744 read it.
+  // worktreePaths, and src/relay/relay.ts:3541-3542, :4165 and :6751 read it.
   // Prove it by exercising the run in a real temporary repository.
   const repo = tempDir(t, 'conclave-default')
   execFileSync('git', ['init', '--quiet'], { cwd: repo })
@@ -2972,7 +2985,11 @@ const PAUSED_COMMON = {
  */
 const PAUSED_SUBTREE: Record<PauseReason, Record<string, string>> = {
   rotation_candidate: {
-    pause: 'at, atSeq, detail, evidence, options, reason, resolution',
+    // `candidate` is on THIS reason and no other, which is what the arm-by-arm shape is for: it
+    // says which class of degradation raised the pause, as data beside the prose in `detail`
+    // (#247). See DECLARED['a rotation candidate says which class raised it'].
+    'pause.candidate': 'assessedAs',
+    pause: 'at, atSeq, candidate, detail, evidence, options, reason, resolution',
     'pause.resolution': 'authority, reason, scope',
     'pause.resolution.scope': 'kind, participantId',
     // The only document in this corpus whose run is ARMED, and therefore the only one whose
