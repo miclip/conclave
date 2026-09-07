@@ -69,7 +69,16 @@ test('#182 a tag that already exists is refused', (t) => {
   assert.match(r.out, /already exists/)
 
   // And a version that does NOT exist gets past this guard, or the check would be a wall.
-  assert.doesNotMatch(run(['9.9.11', '--dry-run'], dir).out, /already exists/)
+  //
+  // `would run:` rather than only the absence of "already exists": a negative assertion passes
+  // whenever the script refuses for ANY other reason, which is how the dry-run test in this file
+  // came to prove nothing (#248). This one was conditionally vacuous the same way — until #248
+  // let a dry run past the run-in-flight guard, it refused outright whenever a conclave session
+  // was live anywhere on the machine, and an output with no "already exists" in it was exactly
+  // what that refusal produced.
+  const past = run(['9.9.11', '--dry-run'], dir)
+  assert.doesNotMatch(past.out, /already exists/)
+  assert.match(past.out, /would run:/, 'and it reached the actions, rather than refusing for something else')
 })
 
 test('#182 a dirty tree and a branch that is not main are both refused', (t) => {
