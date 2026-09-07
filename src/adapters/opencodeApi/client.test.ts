@@ -103,7 +103,17 @@ test('a session id with a slash in it cannot escape its route', async () => {
 test('a base URL with a trailing slash does not produce a doubled one', async () => {
   const { calls, fetch } = stub(() => ({ status: 200 }))
   await client(fetch).abort('ses_a')
-  assert.ok(!calls[0]?.url.includes('//session'), `route must not double the slash: ${calls[0]?.url}`)
+
+  // ASSERTED POSITIVELY, and that is the fix rather than a tidy-up. This read
+  // `assert.ok(!calls[0]?.url.includes('//session'))`, which passes when NO request was made at
+  // all: `calls[0]` is undefined, the optional chain short-circuits, and `!undefined` is true.
+  // Verified by mutation — an `abort()` that returns without calling `fetch` left it green, so
+  // the test proved nothing about a route it never saw.
+  //
+  // The whole URL, not the absence of a substring: a negative assertion about a value that may
+  // not exist cannot tell "the route is right" from "there is no route".
+  assert.equal(calls.length, 1, 'abort must actually make a request, or there is no route to check')
+  assert.equal(calls[0]?.url, 'http://127.0.0.1:4599/session/ses_a/abort')
 })
 
 test('the password travels when there is one, and nothing invented when there is not', async () => {
