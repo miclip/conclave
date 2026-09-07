@@ -4,6 +4,11 @@
 #   scripts/release.sh 0.5.12           # bump, tag, push, then update the install checkout
 #   scripts/release.sh --install-only   # move an existing install to the newest tag
 #   scripts/release.sh --prune-install  # remove superseded version directories, on request
+#
+# `--force` is GONE (#254), not merely unused. It existed for exactly one refusal -- the
+# migration guard -- and that guard was removed because the operation it protected declines on
+# its own. A flag still parsed here would be accepted from an operator reaching for it out of
+# habit and would change nothing; refused as an unknown flag, it says so.
 #   scripts/release.sh 0.5.12 --dry-run
 #
 # The install step is the reason this exists (#182). Tagging, packaging and the notes were
@@ -71,7 +76,6 @@ set -eu
 DRY=0
 INSTALL_ONLY=0
 PRUNE_INSTALL=0
-FORCE=0
 VERSION=""
 for arg in "$@"; do
   case "$arg" in
@@ -82,7 +86,6 @@ for arg in "$@"; do
     # hazard above untrue; it asserts the operator has checked. It does NOT reach the prune:
     # every check there is a reason to keep a directory, and there is no version of "I have
     # checked" that makes deleting one anyway the right answer.
-    --force) FORCE=1 ;;
     -*) echo "release: unknown flag $arg" >&2; exit 2 ;;
     *) VERSION="$arg" ;;
   esac
@@ -422,52 +425,24 @@ conclave_runs() {
 # with that name sitting in the file is a claim a reader would take as current, and the one
 # thing worse than a missing guard is a guard nobody re-checks the reason for.
 #
-# What survives is narrower and has its own reason. A version directory is safe because its name
-# pins its contents -- nothing will ever write `v0.5.29/` again. `conclave-stable` carries no
-# such promise: once the symlink leaves it, it is an ordinary worktree, and THE MIGRATION ENDS
-# BY DELETING IT. A run still executing from it would lose the files it has not imported yet,
-# which is the original hazard arriving by a different route. There is exactly one such install
-# per machine and this fires exactly once on it.
-refuse_if_legacy_in_use() {
-  legacy="$1"
-  # Nothing is migrated on a dry run, so there is nothing to protect and no reason to stop
-  # (#248). Said rather than skipped silently: what a dry run is FOR is telling an operator what
-  # would happen, and "this step would have been refused" is part of that answer.
-  if [ "$DRY" = 1 ]; then
-    if [ -n "$(in_use "$legacy")" ]; then
-      say "  would check $legacy for live runs — some are running now, so a real migration would stop here"
-    fi
-    return 0
-  fi
-  # Without a resolver `in_use` cannot tell which checkout a run belongs to, and would return
-  # nothing -- which reads as "no runs" and lets the migration through. Refused loudly instead:
-  # this is the one input whose absence turns the guard off, and a guard that is off must say so.
-  if ! command -v realpath >/dev/null 2>&1 && ! command -v readlink >/dev/null 2>&1; then
-    say "refusing to update $legacy — neither realpath nor readlink is available, so a live run"
-    echo "  cannot be told from a finished one. Install either, or pass --force." >&2
-    [ "$FORCE" = 1 ] || exit 1
-  fi
-  pids=$(in_use "$legacy")
-  [ -n "$pids" ] || return 0
-  if [ "$FORCE" = 1 ]; then
-    say "WARNING: processes are live in $legacy and --force was given"
-  else
-    say "refusing to update $legacy — processes are running from it:"
-    for p in $pids; do
-      echo "    pid $p: $(ps -o command= -p "$p" 2>/dev/null | cut -c1-100)"
-    done
-    echo "  This is the one-time migration to versioned installs, and it ENDS BY REMOVING" >&2
-    echo "  $legacy. Wait for these runs to finish, or pass --force if you know they are" >&2
-    echo "  done. Every install after this one refuses nobody." >&2
-    exit 1
-  fi
-}
+# `refuse_if_legacy_in_use` is gone for the same reason, one release later (#254). It refused the
+# migration up front because "the migration ends by deleting `conclave-stable`" -- and that
+# sentence is only true when nothing is running from it. `retire_legacy` asks the liveness
+# question itself and KEEPS the directory when the answer is yes, which it has to: a run can
+# start during the worktree add, so the check at the end is the one that actually decides.
+# Refusing up front could not make that safer. It could only refuse earlier, and what it bought
+# with the earliness was a migration that waited for a moment when nothing on the machine was
+# running -- observed not to arrive for four days on the layout this replaced.
+#
+# What the migration does before that point touches nothing a live run depends on: it adds a new
+# worktree, reads `node_modules` to clone it, and moves a symlink that only affects processes
+# started afterwards. A run keeps executing the same bytes at the same path, hooks included.
 
 # Remove the checkout the migration moved off, once it is no longer the install.
 #
-# Every branch here KEEPS, and says why. The liveness question is asked again rather than
-# inherited from the refusal above: the migration in between is a worktree add and an npm
-# install, which is long enough for a run to have started, and the operation on this side of it
+# Every branch here KEEPS, and says why. This is the ONLY place the liveness question decides
+# anything for the migration (#254): the migration is a worktree add and an npm install, which is
+# long enough for a run to have started, and the operation on this side of it
 # is a delete rather than a swap.
 #
 # `git worktree remove` without `--force`, so git refuses a tree with anything in it that this
@@ -476,6 +451,12 @@ refuse_if_legacy_in_use() {
 remove_migrated_from() {
   legacy="$1"
   from="$2"
+  # No resolver check here, and that is measured rather than assumed. Without realpath and
+  # readlink, `install_dir` cannot follow the PATH symlink at all: it falls back to the link's own
+  # path, `git rev-parse` fails on it, and `update_install` returns having said "not a git
+  # checkout — leaving it alone". Nothing reaches this function, so a fail-closed branch here
+  # would be a guard that cannot fire -- and one of those is a claim a reader trusts and nobody
+  # re-checks. The protection is real; it just lives upstream and is pinned as such (#254).
   its=$(common_dir "$legacy") || { say "keeping $legacy — cannot resolve the repository behind it"; return 0; }
   own=$(git_dir_of "$legacy") || { say "keeping $legacy — cannot resolve its git directory"; return 0; }
   if [ "$own" = "$its" ]; then
@@ -488,7 +469,8 @@ remove_migrated_from() {
   fi
   pids=$(in_use "$legacy")
   if [ -n "$pids" ]; then
-    say "keeping $legacy — a run started in it while the migration was running:"
+    say "keeping $legacy — a run started in it while the migration was running."
+    say "  Nothing retires it later; remove it by hand once these are done: git worktree remove $legacy"
     for p in $pids; do
       echo "    pid $p: $(ps -o command= -p "$p" 2>/dev/null | cut -c1-100)"
     done
@@ -555,7 +537,14 @@ update_install() {
       say "refusing: $dir has uncommitted changes"
       exit 1
     fi
-    refuse_if_legacy_in_use "$dir"
+    # Said before the work rather than discovered after it (#254). And said accurately: the
+    # retirement below runs only on a migrating install, so once the symlink has moved this
+    # directory is never revisited. A checkout kept here is kept for good until somebody removes
+    # it, and telling the operator to "re-run later" would be false.
+    if [ -n "$(in_use "$dir")" ]; then
+      say "$dir has live runs — the migration will keep it, and nothing will retire it later:"
+      say "  once those runs finish, remove it with: git worktree remove $dir"
+    fi
   fi
 
   before=$(git -C "$dir" rev-parse --short HEAD)
@@ -846,7 +835,7 @@ if [ "$INSTALL_ONLY" = 1 ]; then
   exit 0
 fi
 
-[ -n "$VERSION" ] || { echo "usage: release.sh <version> [--dry-run] [--force] | --install-only | --prune-install" >&2; exit 2; }
+[ -n "$VERSION" ] || { echo "usage: release.sh <version> [--dry-run] | --install-only | --prune-install" >&2; exit 2; }
 TAG="v$VERSION"
 
 # The release preconditions, in the order that fails cheapest first.
