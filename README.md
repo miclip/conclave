@@ -65,7 +65,7 @@ conclave config check       # is it present, current, and trusted
 Node 24 or newer.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/miclip/conclave/v0.5.29/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/miclip/conclave/v0.5.30/scripts/install.sh | sh
 ```
 
 Clones the repository into `~/.local/share/conclave`, checks the newest tagged release out
