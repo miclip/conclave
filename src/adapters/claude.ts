@@ -39,7 +39,7 @@ import { modelFromArgs } from '../registry/launch.ts'
 import { sanitizedCopy } from '../process/childenv.ts'
 import { PtyProcess } from '../process/pty.ts'
 import { InputQueue } from '../process/input.ts'
-import { HookReceiver } from '../hooks/receiver.ts'
+import { describeListenerFailure, HookReceiver } from '../hooks/receiver.ts'
 import type { HookDelivery } from '../hooks/journal.ts'
 import { TranscriptSessionView } from '../transcript/reconcile.ts'
 import { AsyncQueue } from './asyncQueue.ts'
@@ -1010,6 +1010,19 @@ export class ClaudePtyHookAdapter implements AgentSession {
     this.#attemptJournal = join(runDir, 'attempts.ndjson')
     const url = await this.#receiver.start()
     this.#receiver.on('delivery', (d) => this.#onHook(d))
+    // A listener of ours threw and the receiver contained it (#263). It reaches the operator
+    // as ordinary non-fatal session news, carrying the thrown message verbatim, because the
+    // throw this is here for is a diagnosis worth reading rather than a status code.
+    this.#receiver.on('listener_error', (f) =>
+      this.#emit({
+        type: 'error',
+        message: describeListenerFailure(f),
+        fatal: false,
+        seq: this.#next(),
+        at: Date.now(),
+        provisional: false,
+      }),
+    )
     // Replays are visible rather than silent: a duplicate means recovery ran.
     this.#receiver.on('duplicate', (d) =>
       this.#emit({

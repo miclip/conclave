@@ -49,7 +49,7 @@ import { createInterface } from 'node:readline'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { HookReceiver } from '../hooks/receiver.ts'
+import { describeListenerFailure, HookReceiver } from '../hooks/receiver.ts'
 import type { HookDelivery } from '../hooks/journal.ts'
 import { sanitizedCopy } from '../process/childenv.ts'
 import {
@@ -230,6 +230,17 @@ export class KimiPrintAdapter implements AgentSession {
       this.#receiver = new HookReceiver(join(this.#runDir, 'hooks.ndjson'))
       this.#hookUrl = await this.#receiver.start()
       this.#receiver.on('delivery', (d) => this.#onHook(d))
+      // Contained listener throw (#263), carried to the operator verbatim and non-fatally.
+      this.#receiver.on('listener_error', (f) =>
+        this.#emit({
+          type: 'error',
+          message: describeListenerFailure(f),
+          fatal: false,
+          seq: this.#next(),
+          at: Date.now(),
+          provisional: false,
+        }),
+      )
 
       const base = readKimiConfig(this.#baseConfigPath())
       this.#configPath = writeKimiConfig(

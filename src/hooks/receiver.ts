@@ -51,6 +51,45 @@ export interface ReceiverEvents {
   delivery: [HookDelivery]
   /** A delivery already journalled. Emitted so replays are visible, not silent. */
   duplicate: [HookDelivery]
+  /**
+   * A listener threw and was contained. Reported as an event rather than raised, because
+   * raising is what #263 is about.
+   */
+  listener_error: [ListenerFailure]
+}
+
+/** What a contained listener throw amounts to, for whoever has to explain it afterwards. */
+export interface ListenerFailure {
+  /** Which emit the throw escaped from. */
+  event: 'delivery' | 'duplicate'
+  /** The delivery being announced when it happened. It IS journalled; only the listener failed. */
+  delivery: HookDelivery
+  /** Whatever was thrown, unchanged, for a consumer that wants more than the text. */
+  error: unknown
+  /**
+   * The thrown message, verbatim.
+   *
+   * Verbatim is the requirement, not a nicety. The throw this exists for carries the
+   * prompt-fidelity diagnosis, which is several sentences of reasoning an operator is meant to
+   * read -- summarising it would leave them with the fact that something failed and none of
+   * why.
+   */
+  message: string
+}
+
+/**
+ * One sentence for a contained listener failure, wherever it comes out.
+ *
+ * Shared by the stderr fallback below and by the adapters that turn the event into an
+ * `AgentEvent`, so the operator reads the same words whether the fault reached them through
+ * the session's event stream or off the back of the process. Two phrasings of one fault is how
+ * a reader ends up believing they are two.
+ */
+export function describeListenerFailure(f: ListenerFailure): string {
+  return (
+    `a hook '${f.event}' listener threw on delivery ${f.delivery.deliveryId} ` +
+    `(${f.delivery.event}); the delivery is journalled and the run continues: ${f.message}`
+  )
 }
 
 export class HookReceiver extends EventEmitter<ReceiverEvents> {
@@ -133,8 +172,8 @@ export class HookReceiver extends EventEmitter<ReceiverEvents> {
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ ok: true, deliveryId, duplicate: !fresh }))
 
-        if (fresh) this.emit('delivery', delivery)
-        else this.emit('duplicate', { ...delivery, replay: true })
+        if (fresh) this.#dispatch('delivery', delivery)
+        else this.#dispatch('duplicate', { ...delivery, replay: true })
       })
     })
 
@@ -142,6 +181,63 @@ export class HookReceiver extends EventEmitter<ReceiverEvents> {
     const addr = this.#server!.address() as AddressInfo
     this.#url = `http://${host}:${addr.port}${this.#path}`
     return this.#url
+  }
+
+  /**
+   * The only place this receiver emits a delivery, and the only place a listener may throw
+   * without ending the run (#263).
+   *
+   * WHY THE BOUNDARY IS HERE, and not in the listeners. Both emits happen inside the request's
+   * `'end'` handler, which is an I/O callback with no caller: a listener that throws throws out
+   * of `emit`, out of `'end'`, and into Node's uncaught handler. That killed a multi-hour run
+   * for a prompt-fidelity correlation fault whose own diagnosis says the send is refused and
+   * nothing downstream should treat the other message as this one -- a condition the code had
+   * already decided was recoverable, made fatal by where it was raised.
+   *
+   * Every route to a listener passes through here: three adapters, both events, and the replay
+   * path that only runs after something has ALREADY gone wrong. Containment written in the
+   * listeners instead would be four copies of one policy in the two places, and the copy that
+   * was forgotten would be the one that ran. It is also the only version that covers a listener
+   * this file has never heard of -- a test's, a future adapter's -- which is what "the receiver
+   * does not let its listeners kill the process" has to mean to be worth stating.
+   *
+   * What is NOT decided here: what the failure means. The receiver knows a listener threw and
+   * knows the delivery survived it; whether that is a refused send, a bad parse or a bug is the
+   * listener's business, so the fault is handed on as an event and the receiver keeps receiving.
+   */
+  #dispatch(event: 'delivery' | 'duplicate', delivery: HookDelivery): void {
+    try {
+      this.emit(event, delivery)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      this.#report({ event, delivery, error, message })
+    }
+  }
+
+  /**
+   * Hand the fault on, and never let handing it on be the new way to lose it.
+   *
+   * Two ways the structured route can fail, and both end at stderr rather than at silence: no
+   * `listener_error` listener is registered, or the one that is registered throws as well.
+   * Silence is the outcome worth spending code on -- the crash at least left a stack, and a
+   * correlation fault that vanishes leaves an operator with a run that behaved strangely and
+   * nothing at all to read. The fallback is unconditional and takes no dependency on a
+   * logger, because it has to work in exactly the case where the wiring above it did not.
+   */
+  #report(failure: ListenerFailure): void {
+    if (this.listenerCount('listener_error') === 0) {
+      process.stderr.write(`[conclave] ${describeListenerFailure(failure)}\n`)
+      return
+    }
+    try {
+      this.emit('listener_error', failure)
+    } catch (reporting) {
+      const why = reporting instanceof Error ? reporting.message : String(reporting)
+      process.stderr.write(
+        `[conclave] ${describeListenerFailure(failure)}\n` +
+          `[conclave] and reporting that threw too: ${why}\n`,
+      )
+    }
   }
 
   async stop(): Promise<void> {
