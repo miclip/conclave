@@ -22,6 +22,7 @@ import { dirname, join } from 'node:path'
 import test from 'node:test'
 import type { TestContext } from 'node:test'
 import { tempDir } from '../testkit/tempDir.ts'
+import { legacyInstallRootOf } from './legacyRegistration.ts'
 import {
   formatInstallResult,
   hasDrift,
@@ -33,6 +34,7 @@ import {
   resolveRepoRoot,
   TARGETS,
   TEMPLATE_TOKEN,
+  understandsHook,
   writeAtomic,
 } from './install.ts'
 
@@ -76,13 +78,45 @@ function fixtureWorktreePair(t: TestContext): { main: string; linked: string } {
   return { main, linked: realpathSync(linked) }
 }
 
-test('every template carries the substitution token', () => {
-  // A template without it would render identically on every machine, which is exactly
-  // the bug this whole mechanism exists to remove.
+test('#258 every template invokes the CLI by name and pins no install directory', () => {
+  // The inverse of what this asserted before, and the inversion IS the fix. It used to
+  // require the substitution token in every template, reasoning that a template without
+  // one "would render identically on every machine". Rendering identically everywhere is
+  // now the point: `conclaveRoot` was a single checkout when that rule was written, and
+  // since #250 it is `conclave-releases/v<version>` — a new directory every release. A
+  // project registered on one release kept firing that release's hook code indefinitely,
+  // or stopped firing when `--prune-install` removed the directory.
   for (const t of TARGETS) {
     const text = readFileSync(join(REPO, t.template), 'utf8')
-    assert.ok(text.includes(TEMPLATE_TOKEN), `${t.template} has no ${TEMPLATE_TOKEN}`)
+    assert.ok(text.includes(`conclave hook ${t.agent}`), `${t.template} must invoke \`conclave hook ${t.agent}\``)
+    assert.ok(!text.includes(TEMPLATE_TOKEN), `${t.template} must not render an install path`)
+    // The two spellings that carried one. Named individually rather than by matching the
+    // token, because a template could reach an install directory without going through it.
+    assert.ok(!text.includes('spikes/hooks/hook_post.py'), `${t.template} still names the spike client`)
+    assert.ok(!text.includes('src/hooks/client.ts'), `${t.template} still names a path inside the install`)
   }
+})
+
+test('#258 the same registration renders byte-identically from any release root', async (t) => {
+  // The property every other claim here rests on. Two Conclaves standing in for two
+  // releases -- which is what an upgrade produces -- must write the same bytes into a
+  // project, or the registration is pinned to whichever one ran last.
+  const releaseA = fixtureRepo(t)
+  const releaseB = fixtureRepo(t)
+  const project = fixtureProject(t)
+
+  await installConfig({ projectRoot: project, conclaveRoot: releaseA, diagnose: false })
+  const first = TARGETS.map((t) => readFileSync(join(project, t.output), 'utf8'))
+
+  const second = await installConfig({ projectRoot: project, conclaveRoot: releaseB, diagnose: false })
+  assert.deepEqual(
+    TARGETS.map((t) => readFileSync(join(project, t.output), 'utf8')),
+    first,
+    'a second release must not rewrite a registration the first one wrote',
+  )
+  // And says so: an upgrade that rewrote these would re-hash the Codex handlers and cost
+  // the operator a re-trust on every release.
+  assert.ok(second.written.every((w) => !w.changed), 'upgrading must be a no-op for registrations')
 })
 
 test('no template contains a hardcoded home directory', () => {
@@ -98,8 +132,16 @@ test('render substitutes every occurrence and yields valid JSON', () => {
   assert.deepEqual(JSON.parse(out), { a: '/repo/x', b: '/repo/y' })
 })
 
-test('render refuses a template with no token', () => {
-  assert.throws(() => render('{"a":1}', '/repo'), /no \{\{CONCLAVE_ROOT\}\}/)
+test('render copies a tokenless template through, and still validates it', () => {
+  // This used to assert the opposite: `render` threw on a template with no token, on the
+  // grounds that it would render identically everywhere. Both shipped templates have no
+  // token now and identical rendering is the fix, so the refusal had to go -- but the JSON
+  // check it was bundled with is the half that was earning its keep, because an
+  // unparseable sidecar makes Codex load no hooks at all.
+  assert.equal(render('{"a":1}', '/repo'), '{"a":1}')
+  assert.throws(() => render('{"a":1', '/repo'), /JSON/)
+  // Substitution still works for a template that does carry one.
+  assert.equal(render(`{"a":"${TEMPLATE_TOKEN}/x"}`, '/repo'), '{"a":"/repo/x"}')
 })
 
 test('render refuses to emit invalid JSON', () => {
@@ -117,7 +159,9 @@ test('installing renders both targets, and is idempotent', async (t) => {
 
   for (const t of TARGETS) {
     const text = readFileSync(join(repo, t.output), 'utf8')
-    assert.ok(text.includes(repo), 'the checkout path must be substituted in')
+    // No checkout path, where this used to require one. See `#258 every template invokes
+    // the CLI by name`: the path was the thing that went stale on every release.
+    assert.ok(!text.includes(repo), 'a registration must not name the checkout that wrote it')
     assert.ok(!text.includes(TEMPLATE_TOKEN), 'no token may survive rendering')
     JSON.parse(text)
   }
@@ -128,7 +172,10 @@ test('installing renders both targets, and is idempotent', async (t) => {
   assert.ok(second.written.every((w) => !w.changed))
 })
 
-test('rendering is checkout-relative, so two checkouts differ', async (t) => {
+test('#258 rendering is NOT checkout-relative: two checkouts write the same bytes', async (t) => {
+  // The reverse of what this asserted, and the reversal is the point. Two checkouts
+  // producing different registrations is what made an upgrade a silent downgrade: the
+  // project kept whichever release's path was written first.
   const a = fixtureRepo(t)
   const b = fixtureRepo(t)
   await installConfig({ projectRoot: a, conclaveRoot: a, diagnose: false })
@@ -136,10 +183,11 @@ test('rendering is checkout-relative, so two checkouts differ', async (t) => {
 
   const readA = readFileSync(join(a, '.codex/hooks.json'), 'utf8')
   const readB = readFileSync(join(b, '.codex/hooks.json'), 'utf8')
-  assert.notEqual(readA, readB)
-  assert.ok(readA.includes(a) && readB.includes(b))
-  // Which is why each checkout must trust its own hooks: the command string is part of
-  // the handler Codex hashes.
+  assert.equal(readA, readB)
+  assert.ok(!readA.includes(a) && !readB.includes(b), 'neither names the checkout that wrote it')
+  // A project still trusts its own hooks once: Codex keys trust by sidecar PATH as well as
+  // by handler content, so identical bytes in two projects are still two decisions. What
+  // changed is that upgrading Conclave no longer costs a THIRD.
 })
 
 /** A project with no Conclave in it: package.json and nothing else. The common case. */
@@ -152,7 +200,9 @@ function fixtureProject(t: TestContext): string {
 test('registering a project that is not Conclave writes there and runs from here', async (t) => {
   // The capability the CLI on PATH exists for. The target has no templates, no
   // `src/hooks/client.ts`, and no dependency on Conclave -- which is exactly why the
-  // rendered commands must point back at Conclave rather than at the project.
+  // rendered commands must run Conclave's own client rather than something the project is
+  // expected to provide. They reach it through `conclave` on PATH, so the command names
+  // neither the project nor the release that wrote it.
   const conclave = fixtureRepo(t)
   const project = fixtureProject(t)
 
@@ -169,12 +219,16 @@ test('registering a project that is not Conclave writes there and runs from here
   }
 
   // ...and every command in them runs Conclave's code, not something the project lacks.
+  // Through the CLI on PATH rather than a path into this checkout: the project needs
+  // nothing installed either way, and the name does not move when a release does (#258).
   const sidecar = readFileSync(join(project, '.codex/hooks.json'), 'utf8')
   const claude = readFileSync(join(project, '.claude/settings.json'), 'utf8')
-  assert.ok(sidecar.includes(`node ${conclave}/src/hooks/client.ts`))
-  assert.ok(claude.includes(`${conclave}/spikes/hooks/hook_post.py`))
+  assert.ok(sidecar.includes('conclave hook codex'))
+  assert.ok(claude.includes('conclave hook claude'))
   assert.ok(!sidecar.includes(project), 'the project path must not appear in a command')
   assert.ok(!claude.includes(project))
+  assert.ok(!sidecar.includes(conclave), 'nor the release directory that wrote it')
+  assert.ok(!claude.includes(conclave))
 })
 
 test('the same Conclave registers many projects, each with its own trust identity', async (t) => {
@@ -293,10 +347,13 @@ test('installing from a linked worktree puts the sidecar where Codex will read i
   // Claude has no such indirection: it reads settings from the working directory.
   assert.equal(existsSync(join(linked, '.claude/settings.json')), true)
 
-  // The command must still run the LINKED checkout's code -- only the file moved.
+  // Only the file moved. The command names no checkout at all now, which is what retires
+  // #40's worktree conflict along the way: a linked worktree and its main worktree render
+  // the same sidecar, so neither can hijack the other's Codex trust by re-installing.
   const sidecar = readFileSync(join(realpathSync(main), '.codex/hooks.json'), 'utf8')
-  assert.ok(sidecar.includes(`${linked}/src/hooks/client.ts`))
-  assert.ok(!sidecar.includes(`${realpathSync(main)}/src/hooks/client.ts`))
+  assert.ok(sidecar.includes('conclave hook codex'))
+  assert.ok(!sidecar.includes(linked))
+  assert.ok(!sidecar.includes(realpathSync(main)))
 })
 
 test('a missing template fails loudly rather than rendering nothing', async (t) => {
@@ -394,18 +451,31 @@ test('a dry run detects a template that has moved away from what is installed', 
   assert.equal(checked.written.find((w) => w.label === 'Codex sidecar')?.sharedWith, undefined)
 })
 
+/**
+ * A template that still carries the token, kept because `renderedRootOf` still has to work
+ * for one. Both SHIPPED templates lost theirs in #258; see the test below this pair, which
+ * pins the consequence.
+ */
+// The command is deliberately NOT either historical spelling. A template rendering
+// `src/hooks/client.ts` would be recognised as a legacy registration and reported as a
+// migration, which is the right answer for a real one and would leave the ownership
+// mechanism below untested.
+const TOKENED = `{"hooks":[{"command":"${TEMPLATE_TOKEN}/bin/conclave hook codex"}]}\n`
+
 test('a registration owned by another Conclave is not reported as drift', () => {
   // Two different conditions that a byte comparison cannot tell apart, wanting opposite
   // responses. Drift means "rewrite this"; shared means "rewriting this hijacks a file
   // another worktree depends on, and kills its Codex trust on the way past".
-  const template = readFileSync(join(REPO, 'config/templates/codex-hooks.json'), 'utf8')
+  //
+  // Exercised against a synthetic template rather than the shipped one: the shipped
+  // templates no longer substitute anything, so using one would assert nothing about the
+  // reconstruction this function performs.
+  const mine = render(TOKENED, '/opt/conclave')
+  assert.equal(renderedRootOf(TOKENED, mine), '/opt/conclave')
 
-  const mine = render(template, '/opt/conclave')
-  assert.equal(renderedRootOf(template, mine), '/opt/conclave')
-
-  const theirs = render(template, '/opt/elsewhere/conclave-dogfood')
+  const theirs = render(TOKENED, '/opt/elsewhere/conclave-dogfood')
   assert.equal(
-    renderedRootOf(template, theirs),
+    renderedRootOf(TOKENED, theirs),
     '/opt/elsewhere/conclave-dogfood',
     'the owning checkout must be recoverable from the file itself',
   )
@@ -413,8 +483,58 @@ test('a registration owned by another Conclave is not reported as drift', () => 
   // A template that genuinely changed cannot reconstruct against any root, so it stays
   // drift. This is the half that stops the exemption swallowing real drift.
   const drifted = `${theirs.slice(0, -2)}, "extra": 1}`
-  assert.equal(renderedRootOf(template, drifted), undefined)
+  assert.equal(renderedRootOf(TOKENED, drifted), undefined)
 })
+
+test('#258 a stable registration has no owning checkout to recover', () => {
+  // The consequence of the templates losing their token, stated so it is a decision rather
+  // than something noticed later: nothing can be reconstructed as "rendered against root X"
+  // when no root was substituted, so no shipped registration is ever owned by a checkout.
+  // That is what retires the SHARED case in practice -- a file two worktrees share now
+  // contains the same bytes whichever wrote it, so there is nothing to hijack.
+  for (const t of TARGETS) {
+    const template = readFileSync(join(REPO, t.template), 'utf8')
+    assert.equal(
+      renderedRootOf(template, template),
+      undefined,
+      `${t.template} must not be attributable to a checkout`,
+    )
+  }
+})
+
+test('#258 a registration from an older Conclave is recognised by the path baked into it', () => {
+  // Both historical spellings, because an operator upgrading today may be carrying either:
+  // Claude's registration pointed at the spike's Python client until this change, and the
+  // Codex sidecar moved to `src/hooks/client.ts` before it.
+  assert.equal(
+    legacyInstallRootOf('{"command": "/home/x/.local/share/conclave-releases/v0.5.29/spikes/hooks/hook_post.py claude"}'),
+    '/home/x/.local/share/conclave-releases/v0.5.29',
+  )
+  assert.equal(
+    legacyInstallRootOf('{"command": "node /opt/conclave/src/hooks/client.ts codex"}'),
+    '/opt/conclave',
+  )
+  // What must NOT be claimed. A stable registration names no root; a project's own
+  // unrelated hook is not ours to report on; and a relative path was never something these
+  // templates rendered, so matching one would misattribute somebody else's script.
+  assert.equal(legacyInstallRootOf('{"command": "conclave hook claude"}'), undefined)
+  assert.equal(legacyInstallRootOf('{"command": "/usr/local/bin/their-own-hook.sh"}'), undefined)
+  assert.equal(legacyInstallRootOf('{"command": "node ./src/hooks/client.ts codex"}'), undefined)
+})
+
+/**
+ * A Conclave whose Codex template still carries the token, for the ownership case only.
+ *
+ * Both shipped templates lost theirs in #258, so a checkout can no longer OWN a shipped
+ * registration -- see `#258 a stable registration has no owning checkout to recover`. The
+ * mechanism is still here and still correct for a template that substitutes, so it is
+ * exercised against one that does rather than against a file it can say nothing about.
+ */
+function fixtureRepoWithTokenedCodex(t: TestContext): string {
+  const dir = fixtureRepo(t)
+  writeFileSync(join(dir, 'config/templates/codex-hooks.json'), TOKENED)
+  return dir
+}
 
 test('a shared registration says what running the installer would cost', async (t) => {
   // The first version called this DRIFT, which sent the reader to `config install` -- and
@@ -424,12 +544,12 @@ test('a shared registration says what running the installer would cost', async (
   execFileSync('git', ['init', '-q'], { cwd: dir })
   const sidecar = join(dir, '.codex', 'hooks.json')
   mkdirSync(dirname(sidecar), { recursive: true })
-  const template = readFileSync(join(REPO, 'config/templates/codex-hooks.json'), 'utf8')
-  writeFileSync(sidecar, render(template, '/somewhere/else/conclave'))
+  const conclaveRoot = fixtureRepoWithTokenedCodex(t)
+  writeFileSync(sidecar, render(TOKENED, '/somewhere/else/conclave'))
 
   const result = await installConfig({
     projectRoot: dir,
-    conclaveRoot: REPO,
+    conclaveRoot,
     agents: ['codex'],
     diagnose: false,
     dryRun: true,
@@ -452,6 +572,144 @@ test('a shared registration says what running the installer would cost', async (
     /Registrations differ from the templates/,
     'the drift advice must not also appear; it is the advice that causes the damage',
   )
+})
+
+test('#258 an old registration is a migration, not another checkout to defer to', async (t) => {
+  // The two findings collide exactly here, and the order matters. A sidecar written by an
+  // older Conclave IS reconstructible as "this template rendered against another root",
+  // which is the shape `sharedWith` was built to recognise -- and deferring to it is the
+  // wrong answer twice over: it is not a rival checkout, it is this project's own
+  // registration one release behind, and leaving it in place is the quiet failure in #258
+  // rather than a fix for it.
+  const dir = tempDir(t, 'conclave-legacy')
+  execFileSync('git', ['init', '-q'], { cwd: dir })
+  const sidecar = join(dir, '.codex', 'hooks.json')
+  mkdirSync(dirname(sidecar), { recursive: true })
+  const old = '/home/x/.local/share/conclave-releases/v0.5.29'
+  writeFileSync(sidecar, `{"hooks":[{"command":"node ${old}/src/hooks/client.ts codex"}]}\n`)
+
+  const checked = await installConfig({
+    projectRoot: dir,
+    conclaveRoot: REPO,
+    agents: ['codex'],
+    diagnose: false,
+    dryRun: true,
+  })
+  const codex = checked.written.find((w) => w.label === 'Codex sidecar')
+  assert.equal(codex?.changed, true, 'it must still be reported as changing')
+  assert.equal(codex?.replaces, old, 'and named as pinned to the release it came from')
+  assert.equal(codex?.sharedWith, undefined, 'never deferred to as another checkout')
+
+  const text = formatInstallResult(checked)
+  assert.match(text, /STALE/, 'shown as its own state, not as drift and not as SHARED')
+  assert.doesNotMatch(text, /SHARED/)
+  // Nothing has been replaced yet, and a check claiming otherwise is a check an operator
+  // stops trusting the moment they open the file.
+  assert.doesNotMatch(text, /replaced a registration/, 'a dry run must not report a write')
+  assert.match(text, /\[pinned to /)
+  assert.ok(text.includes(old), 'naming the release it was pinned to')
+  assert.match(text, /each release\s+gets its own/, 'and why that went stale')
+  // The drift advice must not also appear: it tells a reader somebody edited this file.
+  assert.doesNotMatch(text, /Registrations differ from the templates/)
+
+  // ...and a real install says it replaced it, rather than only that it wrote.
+  const wrote = await installConfig({ projectRoot: dir, conclaveRoot: REPO, agents: ['codex'], diagnose: false })
+  const done = formatInstallResult(wrote)
+  assert.match(done, /replaced a registration pinned to/, 'a write must say what it displaced')
+  assert.ok(done.includes(old))
+  assert.ok(
+    readFileSync(sidecar, 'utf8').includes('conclave hook codex'),
+    'and the old command must be gone, not retained',
+  )
+})
+
+test('#258 an install says so when the command it just wrote cannot be found', async (t) => {
+  // The dependency this change creates, and the one way it can fail that an absolute path
+  // could not. `conclave hook claude` is resolved at fire time, which is what makes it
+  // survive a release -- and if `conclave` is not on PATH the CLI reports a hook that
+  // FAILED, not an installation that is missing. Nothing else the operator sees at that
+  // moment would connect the two.
+  const result = await installConfig({
+    projectRoot: fixtureProject(t),
+    conclaveRoot: REPO,
+    agents: ['claude'],
+    diagnose: false,
+  })
+  // Overridden rather than arranged: making `conclave` genuinely unfindable means editing
+  // PATH for the whole test process, and a suite that does that breaks every other test
+  // that shells out.
+  const missing = formatInstallResult({ ...result, conclaveOnPath: undefined })
+  assert.match(missing, /does not resolve on PATH/)
+  assert.match(missing, /the hooks will not run/)
+
+  const found = formatInstallResult({ ...result, conclaveOnPath: '/somewhere/bin/conclave' })
+  assert.doesNotMatch(found, /does not resolve on PATH/, 'silent when there is nothing to say')
+})
+
+test('#258 the report says what runs the hooks, not which release rendered them', async (t) => {
+  // The line this replaces read `hooks run from: <conclaveRoot>`, and it was true only
+  // while the rendered command named that directory. Printing it afterwards told a reader
+  // the one thing they must not believe: that a hook in this project runs the Conclave
+  // somebody happened to install from. It runs whatever is on PATH at the time.
+  const result = await installConfig({
+    projectRoot: fixtureProject(t),
+    conclaveRoot: REPO,
+    agents: ['claude'],
+    diagnose: false,
+    dryRun: true,
+  })
+
+  const text = formatInstallResult({ ...result, conclaveOnPath: '/u/bin/conclave', conclaveOnPathUnderstandsHook: true })
+  assert.match(text, /hooks run: \/u\/bin\/conclave hook <agent>/)
+  assert.doesNotMatch(text, /hooks run from:/, 'the release must not be named as the thing that runs')
+  // The release is still reported, labelled as the provenance it is.
+  assert.match(text, new RegExp(`templates from: ${REPO}`))
+
+  // ...and suppressed inside Conclave's own checkout, where it is noise on every run.
+  assert.doesNotMatch(formatInstallResult({ ...result, selfHosted: true }), /templates from:/)
+})
+
+test('#258 an install says when the conclave on PATH is too old to run what it wrote', async (t) => {
+  // Measured, not reasoned: with a v0.5.32 binary on PATH and a current sidecar, codex-cli
+  // 0.153.4 reported every handler as `Failed` — `unknown command: hook`, exit 1 — for a
+  // registration that was perfectly correct. `config check` says `current`, because it is,
+  // so nothing else the operator can see connects the failing hook to an old binary.
+  const result = await installConfig({
+    projectRoot: fixtureProject(t),
+    conclaveRoot: REPO,
+    agents: ['claude'],
+    diagnose: false,
+  })
+
+  const old = formatInstallResult({ ...result, conclaveOnPath: '/u/bin/conclave', conclaveOnPathUnderstandsHook: false })
+  assert.match(old, /does not understand `hook`/)
+  assert.match(old, /unknown command: hook/, 'quoting what the operator will actually see')
+  assert.match(old, /config check` will keep saying so/, 'and why the check does not catch it')
+
+  // Two separate failures wanting two separate fixes: no PATH entry is not an old binary.
+  const absent = formatInstallResult({ ...result, conclaveOnPath: undefined })
+  assert.match(absent, /does not resolve on PATH/)
+  assert.doesNotMatch(absent, /does not understand/)
+
+  const fine = formatInstallResult({ ...result, conclaveOnPath: '/u/bin/conclave', conclaveOnPathUnderstandsHook: true })
+  assert.doesNotMatch(fine, /does not understand|does not resolve on PATH/)
+})
+
+test('#258 understandsHook asks the binary what it can do, not what version it is', (t) => {
+  // A version comparison would work today and rot the moment the subcommand is backported
+  // or renamed. The refusal for a MISSING AGENT is the probe because it is the one answer
+  // only a conclave that HAS this subcommand can give.
+  assert.equal(understandsHook(join(REPO, 'bin', 'conclave')), true)
+
+  const dir = tempDir(t, 'conclave-old-binary')
+  const older = join(dir, 'conclave')
+  // What a pre-#258 conclave actually answers, taken from running v0.5.32.
+  writeFileSync(older, '#!/bin/sh\necho "unknown command: hook $*" >&2\nexit 1\n')
+  execFileSync('chmod', ['+x', older])
+  assert.equal(understandsHook(older), false)
+
+  // A binary that is not there at all is "cannot confirm", not "confirmed".
+  assert.equal(understandsHook(join(dir, 'nothing-here')), false)
 })
 
 test('no tracked source file hardcodes an absolute home path', () => {

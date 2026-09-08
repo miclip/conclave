@@ -1,7 +1,18 @@
 #!/usr/bin/env node
 /**
- * The hook command the child CLI executes. Registered in the project-local settings the
- * adapter writes.
+ * The hook command the child CLI executes. Registered two ways, and they run THIS code
+ * either way:
+ *
+ *   - a RUN's seat hooks, written by an adapter as `node <this file> <agent>`. Version
+ *     pinned on purpose: a run keeps the hook code it started with (#250), so these
+ *     name a path inside one install and must go on doing so.
+ *   - a PROJECT's registration, written by `conclave config install` as
+ *     `conclave hook <agent>`. Stable on purpose: it is not written for one run, so
+ *     freezing it on whichever version was current the day it was written is what made
+ *     every project's registration go stale or break on the next release (#258).
+ *
+ * Both reach `runHookClient`, which is the reason the two cannot drift apart the way the
+ * spike's Python client and this one did.
  *
  * Contract:
  *   - the POST body is stdin byte-for-byte; envelope metadata rides in X-Orch-* headers
@@ -19,7 +30,8 @@
  * stdout stays empty. Both CLIs treat SessionStart stdout as context to inject.
  */
 
-import { readFileSync } from 'node:fs'
+import { readFileSync, realpathSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { exitAfterFlush } from '../process/exit.ts'
 import { HookJournal, mintDeliveryId } from './journal.ts'
 
@@ -31,8 +43,19 @@ import { HookJournal, mintDeliveryId } from './journal.ts'
  */
 const RUN_MARKERS = ['ORCH_HOOK_ATTEMPT_JOURNAL', 'ORCH_HOOK_TIMEOUT_MS'] as const
 
-async function main(): Promise<number> {
-  const agent = process.argv[2] ?? 'unknown'
+/**
+ * The whole client, as a function, so `conclave hook <agent>` executes it rather than
+ * reimplementing it.
+ *
+ * The agent arrives as an argument instead of being read from `process.argv` here: the
+ * two entry points spell the invocation differently (`node client.ts claude` puts it at
+ * argv[2], `conclave hook claude` at argv[3]), and a client that reads a fixed index is a
+ * client that silently reports `unknown` from one of them.
+ *
+ * Returns the exit code rather than exiting. Non-zero on a lost delivery is the contract
+ * spike 2 paid for, and it has to survive being called from inside another program.
+ */
+export async function runHookClient(agent: string): Promise<number> {
   const firedAt = Date.now() / 1000
 
   let raw = ''
@@ -125,10 +148,32 @@ async function main(): Promise<number> {
   }
 }
 
-main().then(
-  (code) => exitAfterFlush(code),
-  (err) => {
-    process.stderr.write(`[orch-hook] fatal: ${String(err)}\n`)
-    return exitAfterFlush(1)
-  },
-)
+/**
+ * Only when this file IS the program, mirroring `bin/conclave.ts`.
+ *
+ * Without the guard, `bin/conclave.ts` importing `runHookClient` would fire a hook on
+ * every `conclave` invocation -- and under `node --test` every test file that reached
+ * this module would post one.
+ *
+ * Through realpath on both sides because an adapter registers this path from a release
+ * directory that may itself be reached through a link.
+ */
+function invokedDirectly(): boolean {
+  const entry = process.argv[1]
+  if (entry === undefined) return false
+  try {
+    return realpathSync(entry) === realpathSync(fileURLToPath(import.meta.url))
+  } catch {
+    return false
+  }
+}
+
+if (invokedDirectly()) {
+  runHookClient(process.argv[2] ?? 'unknown').then(
+    (code) => exitAfterFlush(code),
+    (err) => {
+      process.stderr.write(`[orch-hook] fatal: ${String(err)}\n`)
+      return exitAfterFlush(1)
+    },
+  )
+}

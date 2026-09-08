@@ -1,12 +1,12 @@
 {
-  "description": "Conclave hooks. Rendered from config/templates/codex-hooks.json. EDITING A HANDLER COSTS A RE-TRUST, INCLUDING statusMessage: Codex hashes the normalised handler definition and statusMessage is part of it, so rewording the text shown while a hook runs invalidates that handler exactly as changing its command would (#243). This description is not hashed; the handlers below are.",
+  "description": "Conclave hooks. Copied from config/templates/codex-hooks.json; the command names no install directory, so every project and every release renders these same bytes (#258) and `conclave` must be on PATH for them to run. EDITING A HANDLER COSTS A RE-TRUST, INCLUDING statusMessage: Codex hashes the normalised handler definition and statusMessage is part of it, so rewording the text shown while a hook runs invalidates that handler exactly as changing its command would (#243). This description is not hashed; the handlers below are.",
   "hooks": {
     "SessionStart": [
       {
         "hooks": [
           {
             "type": "command",
-            "command": "node {{CONCLAVE_ROOT}}/src/hooks/client.ts codex",
+            "command": "conclave hook codex",
             "async": false,
             "timeout": 10,
             "statusMessage": "conclave: recording SessionStart"
@@ -19,7 +19,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node {{CONCLAVE_ROOT}}/src/hooks/client.ts codex",
+            "command": "conclave hook codex",
             "async": false,
             "timeout": 10,
             "statusMessage": "conclave: recording UserPromptSubmit"
@@ -32,7 +32,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node {{CONCLAVE_ROOT}}/src/hooks/client.ts codex",
+            "command": "conclave hook codex",
             "async": false,
             "timeout": 10,
             "statusMessage": "conclave: recording PreToolUse"
@@ -45,7 +45,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node {{CONCLAVE_ROOT}}/src/hooks/client.ts codex",
+            "command": "conclave hook codex",
             "async": false,
             "timeout": 10,
             "statusMessage": "conclave: recording PostToolUse"
@@ -58,7 +58,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node {{CONCLAVE_ROOT}}/src/hooks/client.ts codex",
+            "command": "conclave hook codex",
             "async": false,
             "timeout": 10,
             "statusMessage": "conclave: recording PermissionRequest"
@@ -71,7 +71,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node {{CONCLAVE_ROOT}}/src/hooks/client.ts codex",
+            "command": "conclave hook codex",
             "async": false,
             "timeout": 10,
             "statusMessage": "conclave: recording Stop"
@@ -84,7 +84,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node {{CONCLAVE_ROOT}}/src/hooks/client.ts codex",
+            "command": "conclave hook codex",
             "async": false,
             "timeout": 3,
             "statusMessage": "conclave: recording SessionEnd"

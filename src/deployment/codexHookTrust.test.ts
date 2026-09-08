@@ -266,6 +266,54 @@ test('hook trust is deployment state and must not touch outcome grading', () => 
   assert.equal(CODEX_CAPABILITIES.readinessSignal, 'first_turn')
 })
 
+test('#258 the match constant is what the shipped sidecar actually contains', () => {
+  // The exact drift this constant's comment records happening once already: the sidecar
+  // moved off the spike's Python client and the diagnostic silently reported "no matching
+  // hooks are loaded" -- a green-looking preflight for a project whose hooks were fine. It
+  // has now moved a second time, onto `conclave hook codex` (#258), so the pairing is
+  // pinned rather than remembered.
+  const template = readFileSync(join(ROOT, 'config/templates/codex-hooks.json'), 'utf8')
+  const commands = Object.values(
+    (JSON.parse(template) as { hooks: Record<string, { hooks: { command: string }[] }[]> }).hooks,
+  ).flatMap((entries) => entries.flatMap((e) => e.hooks.map((h) => h.command)))
+
+  assert.ok(commands.length > 0, 'the template must have handlers, or this asserts nothing')
+  for (const command of commands) {
+    assert.ok(command.includes(MATCH), `handler \`${command}\` would not be recognised as ours`)
+  }
+})
+
+test('#258 a sidecar from an older Conclave is named as stale, not blamed on directory trust', (t) => {
+  // Three causes produce an empty match and they want different remedies. Codex reports an
+  // untrusted DIRECTORY as an empty hook list, which is what the existing message explains
+  // -- and after an upgrade it would be the wrong explanation, sending an operator to
+  // re-trust a directory that is already trusted while the real cause is a registration
+  // pinned to a release that no longer runs.
+  const dir = tempDir(t, 'conclave-legacy-sidecar')
+  mkdirSync(join(dir, '.codex'), { recursive: true })
+  const old = '/opt/conclave-releases/v0.5.29'
+  writeFileSync(
+    join(dir, '.codex', 'hooks.json'),
+    `{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"node ${old}/src/hooks/client.ts codex"}]}]}}\n`,
+  )
+
+  // Codex loaded nothing of ours, which is the state every one of the three causes produces.
+  const empty: CodexHookReport = { cwd: dir, hooks: [], errors: [], warnings: [] }
+  const messages = diagnoseHookTrust(empty, MATCH).messages.join('\n')
+
+  assert.match(messages, /written by an older Conclave/)
+  assert.ok(messages.includes(old), 'naming the release it runs')
+  assert.match(messages, /conclave config install/, 'and the remedy')
+  assert.doesNotMatch(messages, /the DIRECTORY is untrusted/, 'not the wrong cause')
+
+  // And a sidecar that is simply this project's own unrelated hook still gets the generic
+  // advice, or the new branch would swallow the case it was carved out of.
+  writeFileSync(join(dir, '.codex', 'hooks.json'), '{"hooks":{"Stop":[{"hooks":[{"command":"./mine.sh"}]}]}}\n')
+  const generic = diagnoseHookTrust(empty, MATCH).messages.join('\n')
+  assert.match(generic, /the DIRECTORY is untrusted/)
+  assert.doesNotMatch(generic, /written by an older Conclave/)
+})
+
 test('enabled is never treated as executable, in either direction', () => {
   // Pure unit check so the vocabulary is protected without needing Codex installed.
   const base = {
