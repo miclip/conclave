@@ -1,18 +1,27 @@
 /**
  * `conclave config install` — register Conclave's hooks in a project.
  *
- * Both CLIs require an absolute command path in their hook configuration, so an active
- * registration is necessarily machine-local. Committing one bakes somebody's home
- * directory into portable source. The split here is: canonical templates are versioned,
- * rendered registrations are generated and git-ignored.
+ * WHERE THE TEMPLATES COME FROM IS NOT WHICH HOOK RUNS, and #258 is what happens when the
+ * two are collapsed. The templates are read from the release that ran this command; the
+ * command they render invokes `conclave` from PATH, resolved afresh every time a hook
+ * fires. Registrations therefore render identically everywhere and cannot be pinned to a
+ * release that a later one supersedes or `--prune-install` deletes.
+ *
+ * This used to say that both CLIs "require an absolute command path", so a registration
+ * was "necessarily machine-local". Neither half survived measurement: codex-cli 0.153.4
+ * resolves a bare command name through PATH and hands the hook the invoking shell's PATH,
+ * and Claude Code runs its hook commands through a shell. The outputs are now portable.
+ * They stay generated and git-ignored anyway, for the remaining reason: this command
+ * writes them into a repository that did not ask for them, and untracked files are a real
+ * hazard in a repo with a `git add -A` habit.
  *
  * THREE ROOTS, deliberately not collapsed. They coincide only when Conclave is installing
  * into its own checkout, which is the case that hid the distinction for as long as that
  * was the only supported one:
  *
- *   conclaveRoot      where Conclave's own code lives. Templates are read from here, and
- *                     the rendered command paths point back here -- the hook that runs is
- *                     always Conclave's, never something expected of the target project.
+ *   conclaveRoot      the release these TEMPLATES were read from. It is no longer where
+ *                     the hook runs from -- nothing rendered points at it -- so it is
+ *                     provenance for this command's own inputs and nothing more.
  *   projectRoot       the repository a session will run in, and where `.claude/settings
  *                     .json` is written. Resolved from the working directory.
  *   codexProjectRoot  where Codex resolves project configuration for `projectRoot`, which
@@ -20,11 +29,17 @@
  *                     and not cosmetically: a sidecar written to the linked worktree is
  *                     never read, so the hooks silently do not exist.
  *
- * A consequence worth surfacing rather than hiding: Codex's trust hash covers the
- * normalised handler, which includes that command string. Every project therefore
- * produces a different hash and must trust its own hooks once. That is inherent to
- * diagnosing trust via `hooks/list` instead of reimplementing Codex's hashing, and the
- * installer says so instead of leaving the next person to rediscover it.
+ * A fourth thing, which is not a root and is the one that decides what executes: whatever
+ * `conclave` resolves to on PATH when a hook fires. Reported by `conclaveOnPath`, and
+ * checked rather than assumed -- an older `conclave` answers `unknown command: hook`.
+ *
+ * On Codex trust, which this file used to get wrong in the operator's favour and then
+ * against it: the hash covers the NORMALISED HANDLER, so it moves when a handler's own
+ * fields move and not otherwise. It is no longer true that every project produces a
+ * different hash -- that was a consequence of the absolute path being in the command, and
+ * the command no longer has one. Two checkouts of Conclave now render the same handler and
+ * share one decision; a project still trusts its own sidecar once, because Codex keys the
+ * decision by sidecar path as well as by content.
  */
 
 import { execFileSync } from 'node:child_process'
@@ -36,6 +51,7 @@ import {
   readCodexHooks,
   resolveCodexProjectRoot,
 } from '../deployment/codexHookTrust.ts'
+import { legacyInstallRootOf } from './legacyRegistration.ts'
 
 // Re-exported where it used to live: it is Codex deployment knowledge, and moving it next
 // to the diagnosis let that diagnosis name an untrusted directory instead of blaming the
@@ -156,10 +172,21 @@ export function resolveRepoRoot(from: string = process.cwd()): string {
   }
 }
 
+/**
+ * A template, with `{{CONCLAVE_ROOT}}` substituted where it appears.
+ *
+ * A template with NO token is valid, and since #258 both shipped ones are. This used to
+ * throw on one, reasoning that it "would render identically everywhere" -- which was the
+ * bug rather than the guard. A project registration rendering identically everywhere is
+ * the point: it names no install directory, so no release can make it stale and no prune
+ * can remove what it points at. Only a RUN's seat hooks are version-pinned, and adapters
+ * write those directly rather than through a template.
+ *
+ * The JSON check stays, and is the part that was actually earning its keep: an
+ * unparseable sidecar makes Codex load no hooks at all, which presents as a lifecycle
+ * problem rather than a config one.
+ */
 export function render(templateText: string, conclaveRoot: string): string {
-  if (!templateText.includes(TEMPLATE_TOKEN)) {
-    throw new Error(`template contains no ${TEMPLATE_TOKEN}; it would render identically everywhere`)
-  }
   const rendered = templateText.split(TEMPLATE_TOKEN).join(conclaveRoot)
   // Fail here rather than handing a broken registration to a CLI that will ignore it
   // silently -- an unparseable sidecar is exactly the failure mode that looks like
@@ -222,10 +249,11 @@ export function writeAtomic(path: string, contents: string): void {
 /**
  * Registrations the project's git is not ignoring.
  *
- * These files are machine-local by construction — they carry absolute paths, which is the
- * whole reason they are generated rather than committed. Writing them into a repository
- * that does not ignore them leaves untracked files in someone's working tree, and the
- * person who ran `config install` has no reason to expect new paths.
+ * These files are GENERATED, which since #258 is the whole of the objection: they no longer
+ * carry an absolute path, so a project that wanted to commit them could. What has not
+ * changed is that this command writes them into a repository that did not ask for them,
+ * leaving untracked files in someone's working tree that the person who ran `config
+ * install` has no reason to expect.
  *
  * Reported, never fixed. Appending to a tracked `.gitignore` edits a file the project owns
  * and would show up in their next diff; the paths and the remedy are enough for them to
@@ -251,8 +279,63 @@ export function unignored(projectRoot: string, paths: string[]): string[] {
   })
 }
 
+/**
+ * Where `conclave` resolves on PATH, or undefined.
+ *
+ * `command -v` rather than `which`: it is POSIX, it is what a shell would actually do when
+ * a CLI spawns the hook command, and it is not a separate binary that can be absent.
+ * Failure of any kind reads as "not found", because every one of them means the operator
+ * cannot be told it IS found.
+ */
+export function conclaveOnPath(): string | undefined {
+  try {
+    const out = execFileSync('/bin/sh', ['-c', 'command -v conclave'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim()
+    return out || undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Whether the `conclave` on PATH understands `hook`, asked by asking it.
+ *
+ * Being on PATH is not enough, and this is not hypothetical: measured against codex-cli
+ * 0.153.4 with a v0.5.32 binary on PATH, every handler in a v0.5.33 sidecar reported
+ * `Failed` — `unknown command: hook`, exit 1 — for a project whose registration was
+ * perfectly correct. Nothing else the operator sees at that moment connects a failing hook
+ * to an older binary, and `config check` would report the registration as current, because
+ * it is.
+ *
+ * The refusal for a MISSING AGENT is the probe, because it is the one answer only a
+ * `conclave` that has this subcommand can give. Asking `--version` and comparing numbers
+ * would work today and rot the moment the command is backported or renamed; asking the
+ * binary what it can do cannot.
+ *
+ * No stdin is attached, so this can never be mistaken for a hook firing.
+ */
+export function understandsHook(binary: string): boolean {
+  try {
+    execFileSync(binary, ['hook'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+    // Exit zero from `hook` with no agent is not something any version does; treat an
+    // answer we do not recognise as "cannot confirm" rather than as confirmation.
+    return false
+  } catch (err) {
+    const stderr = String((err as { stderr?: Buffer | string }).stderr ?? '')
+    return stderr.includes('needs the agent')
+  }
+}
+
 export interface InstallResult {
-  /** Where Conclave itself lives — what the rendered hook commands point at. */
+  /**
+   * The release these templates were read from.
+   *
+   * NOT where the hooks run from, though it was until #258 and the field kept the old
+   * description for a while afterwards. Nothing rendered points here; what executes is
+   * `conclaveOnPath`, resolved when the hook fires.
+   */
   conclaveRoot: string
   /** The repository being registered. */
   projectRoot: string
@@ -268,6 +351,27 @@ export interface InstallResult {
   selfHosted: boolean
   /** Written paths this project's git will not ignore. Empty outside a git repository. */
   unignored: string[]
+  /**
+   * Where `conclave` resolves on PATH, or undefined if it does not resolve at all.
+   *
+   * Reported because the registrations now DEPEND on it. A command naming an absolute
+   * path either worked or named a file that was visibly gone; `conclave hook claude`
+   * fails by not being found, which both CLIs surface as a hook that did not run rather
+   * than as a missing install. Saying it here is the only place an operator is looking at
+   * the moment the dependency is created.
+   *
+   * The installer's own shell, which is a proxy: what matters is the PATH the CLI spawns
+   * its hooks with. They are the same PATH in every ordinary setup and it is the best
+   * evidence available without launching the CLI.
+   */
+  conclaveOnPath?: string | undefined
+  /**
+   * Whether that binary understands `hook`. Undefined when there is none to ask.
+   *
+   * Separate from `conclaveOnPath` because the two failures are separate and an operator
+   * fixes them differently: one is a PATH to repair, the other is a Conclave to upgrade.
+   */
+  conclaveOnPathUnderstandsHook?: boolean | undefined
   dryRun: boolean
   /**
    * `sharedWith` names another Conclave checkout that already owns this registration.
@@ -277,7 +381,27 @@ export interface InstallResult {
    * project. `changed: true, sharedWith: <path>` is not drift and must not be treated as
    * it: the templates agree, and what differs is whose hooks would run (#40).
    */
-  written: { label: string; path: string; changed: boolean; sharedWith?: string | undefined }[]
+  written: {
+    label: string
+    path: string
+    changed: boolean
+    sharedWith?: string | undefined
+    /**
+     * The install root a REPLACED registration was pinned to, when the file already there
+     * was written by a Conclave old enough to bake one in (#258).
+     *
+     * Set alongside `changed`, never instead of it: the file is being rewritten either way
+     * and the operator must be told that -- what this adds is WHY the bytes differ, which
+     * is an upgrade rather than someone having edited the file. Distinguishing them
+     * matters because the remedies are opposite: a hand-edited registration is a decision
+     * to look at, a version-pinned one is a stale artefact to overwrite.
+     *
+     * Never `sharedWith`. That answered "which checkout owns this file", a question the
+     * stable command retires: every Conclave now renders the same bytes, so nothing is
+     * owned and there is nothing to hijack. An old file is a migration, not a rival.
+     */
+    replaces?: string | undefined
+  }[]
   codex?: {
     ready: boolean
     retrustRequired: boolean
@@ -362,11 +486,25 @@ export async function installConfig(opts: InstallOptions = {}): Promise<InstallR
         ? renderedRootOf(readFileSync(templatePath, 'utf8'), previous)
         : undefined
     const sharedWith = owner && !samePath(owner, conclaveRoot) ? owner : undefined
+    // A registration from before #258, recognised by the install path baked into its
+    // command. Checked BEFORE `sharedWith` can claim it and reported instead: a file
+    // rendered against another release is not a rival checkout to defer to, it is this
+    // project's own registration one version behind, and the answer is to replace it.
+    // Deferring would leave the project running a version's hook code indefinitely, which
+    // is the quiet half of #258 rather than a fix for it.
+    const replaces = changed && previous !== undefined ? legacyInstallRootOf(previous) : undefined
     // Never rewrite identical bytes. Harmless for Claude; for Codex a rewritten handler
     // would re-hash and invalidate an existing trust decision for no reason.
     if (changed && !opts.dryRun) writeAtomic(outputPath, contents)
-    written.push({ label: target.label, path: outputPath, changed, ...(sharedWith ? { sharedWith } : {}) })
+    written.push({
+      label: target.label,
+      path: outputPath,
+      changed,
+      ...(replaces ? { replaces } : sharedWith ? { sharedWith } : {}),
+    })
   }
+
+  const onPath = conclaveOnPath()
 
   const result: InstallResult = {
     conclaveRoot,
@@ -374,6 +512,8 @@ export async function installConfig(opts: InstallOptions = {}): Promise<InstallR
     codexProjectRoot,
     agents,
     unignored: unignored(projectRoot, written.map((w) => w.path)),
+    conclaveOnPath: onPath,
+    ...(onPath ? { conclaveOnPathUnderstandsHook: understandsHook(onPath) } : {}),
     selfHosted: samePath(conclaveRoot, projectRoot),
     dryRun: opts.dryRun === true,
     written,
@@ -518,9 +658,15 @@ export function formatInstallResultJson(r: InstallResult): string {
 
 export function formatInstallResult(r: InstallResult): string {
   const lines = [`project: ${r.projectRoot}`]
-  // Only worth a line when they differ. Naming Conclave's own path on every run inside
-  // its own checkout is noise, and noise is what a reader learns to skip.
-  if (!r.selfHosted) lines.push(`hooks run from: ${r.conclaveRoot}`)
+  // What actually executes, which is NOT `conclaveRoot`. This line used to read `hooks run
+  // from: <conclaveRoot>` and was true only while the rendered command named that
+  // directory. Since #258 it names none, so printing the release here told a reader the one
+  // thing they must not believe -- that a hook fired in this project runs the Conclave they
+  // happened to run `config install` from. It runs whatever is on PATH at the time.
+  if (r.conclaveOnPath) lines.push(`hooks run: ${r.conclaveOnPath} hook <agent>`)
+  // Provenance for this command's own inputs, and labelled as nothing more. Suppressed in
+  // Conclave's own checkout, where naming it on every run is noise a reader learns to skip.
+  if (!r.selfHosted) lines.push(`templates from: ${r.conclaveRoot}`)
   if (r.codexProjectRoot !== r.projectRoot) {
     // Say it before listing the paths, so the unexpected one reads as intended rather
     // than as a bug in this command.
@@ -539,10 +685,53 @@ export function formatInstallResult(r: InstallResult): string {
     // `SHARED` still displaces `DRIFT`, which is a different case and stands: under
     // --dry-run the templates agree and only the owner differs, so calling it drift sends a
     // reader to `config install` -- and running it is precisely what hijacks the file.
-    const state = w.sharedWith && r.dryRun ? 'SHARED ' : w.changed ? (r.dryRun ? 'DRIFT  ' : 'wrote  ') : 'current'
+    // STALE displaces DRIFT for the same reason SHARED does: they are different findings
+    // wanting different reading. `DRIFT` says somebody changed this file; `STALE` says
+    // nobody did and the version it was pinned to moved on. Sending a reader to look for
+    // an edit that was never made is the wrong half of a day.
+    const state = w.replaces
+      ? r.dryRun
+        ? 'STALE  '
+        : 'wrote  '
+      : w.sharedWith && r.dryRun
+        ? 'SHARED '
+        : w.changed
+          ? r.dryRun
+            ? 'DRIFT  '
+            : 'wrote  '
+          : 'current'
     const from = w.sharedWith && !r.dryRun ? `  [taken over from ${w.sharedWith}]` : ''
-    lines.push(`  ${state} ${w.label}: ${w.path}${from}`)
+    // Named on the write too, not only under --dry-run. A registration silently swapped
+    // for a different one is exactly what this issue is about, and "wrote" alone does not
+    // say that the thing replaced was running someone's hooks a moment ago.
+    // Past tense only when something actually happened. Under --dry-run nothing was
+    // replaced, and a check that says it replaced a registration is a check an operator
+    // would stop trusting the moment they looked at the file.
+    const replaced = w.replaces
+      ? r.dryRun
+        ? `  [pinned to ${w.replaces}]`
+        : `  [replaced a registration pinned to ${w.replaces}]`
+      : ''
+    lines.push(`  ${state} ${w.label}: ${w.path}${from}${replaced}`)
   }
+  const stale = r.written.filter((w) => w.replaces)
+  if (stale.length > 0) {
+    lines.push('')
+    lines.push(
+      r.dryRun
+        ? 'These registrations were written by an older Conclave and name the install'
+        : 'These registrations were written by an older Conclave and have been replaced:',
+    )
+    if (r.dryRun) lines.push('directory that was current at the time:')
+    for (const w of stale) lines.push(`  ${w.label} was pinned to ${w.replaces}`)
+    lines.push('')
+    lines.push('That directory is one release, not the installation: since #250 each release')
+    lines.push('gets its own, so the hooks kept firing out of that version\'s code — or stopped')
+    lines.push('firing when `--prune-install` removed it. The replacement names no directory at')
+    lines.push('all, so no release can make it stale.')
+    if (r.dryRun) lines.push('Run `conclave config install` to replace them.')
+  }
+
   const shared = r.written.filter((w) => w.sharedWith)
   if (shared.length > 0) {
     lines.push('')
@@ -554,7 +743,7 @@ export function formatInstallResult(r: InstallResult): string {
     lines.push('resolves it from the main worktree wherever you are. So while this stands:')
     lines.push('  - hooks here execute that checkout\'s code, not this one\'s;')
     lines.push('  - re-installing here invalidates that checkout\'s Codex trust, because the')
-    lines.push('    trust hash includes the absolute command path;')
+    lines.push('    trust hash covers the handler, and the handler would change;')
     lines.push('  - and the two will keep re-trusting each other for as long as both are used.')
     lines.push('Run `config install` here only if this checkout should own them. To develop')
     lines.push('hook changes, use a separate clone rather than a worktree — a worktree cannot')
@@ -562,13 +751,36 @@ export function formatInstallResult(r: InstallResult): string {
   }
   if (r.unignored.length > 0) {
     lines.push('')
-    lines.push('These are machine-local and this project does not ignore them:')
+    lines.push('These are generated and this project does not ignore them:')
     for (const p of r.unignored) lines.push(`  ${p.replace(`${r.projectRoot}/`, '')}`)
     lines.push('Add them to .gitignore or .git/info/exclude, or they will show as untracked.')
+    // Said because it changed, and because the old advice was justified by the path: an
+    // operator who remembers "these cannot be committed, they are machine-local" would
+    // otherwise carry a rule that no longer holds.
+    lines.push('They carry no machine-specific path any more, so committing them is a choice')
+    lines.push('rather than a mistake — but nothing here writes to a file the project owns.')
   }
+  // The dependency this command creates, said where it is created. A registration naming
+  // `conclave` is stable across releases precisely because it resolves at fire time --
+  // which is also the one way it can fail that an absolute path could not.
+  if (r.conclaveOnPath === undefined) {
+    lines.push('')
+    lines.push('`conclave` does not resolve on PATH in this shell, and the registrations just')
+    lines.push('written invoke it by name. Until it does, the hooks will not run: both CLIs')
+    lines.push('report that as a hook that failed, not as a missing installation. Put the')
+    lines.push('installed binary (usually ~/.local/bin) on PATH.')
+  } else if (r.conclaveOnPathUnderstandsHook === false) {
+    lines.push('')
+    lines.push(`The \`conclave\` on PATH (${r.conclaveOnPath}) does not understand \`hook\`, so`)
+    lines.push('these registrations will fail on every invocation — `unknown command: hook`,')
+    lines.push('reported as a failed hook. That is an older Conclave than the one you just ran:')
+    lines.push('the registration is correct and `config check` will keep saying so. Install this')
+    lines.push('version, or point PATH at it.')
+  }
+
   // Only for genuine drift. A shared registration has its own paragraph above, and telling
   // a reader to rewrite it would be advice that causes the damage.
-  if (r.dryRun && r.written.some((w) => w.changed && !w.sharedWith)) {
+  if (r.dryRun && r.written.some((w) => w.changed && !w.sharedWith && !w.replaces)) {
     lines.push('')
     lines.push('Registrations differ from the templates. Running `config install` would')
     lines.push('rewrite them, which re-hashes the Codex handlers and requires re-trusting.')
@@ -588,9 +800,11 @@ export function formatInstallResult(r: InstallResult): string {
     lines.push('  named in a send-timeout error for that.')
   } else if (r.codex.retrustRequired) {
     lines.push('Codex hooks need re-trusting before they will run.')
-    lines.push('  Codex hashes the normalised handler, which includes the absolute command')
-    lines.push('  path, so every checkout must trust its own hooks once. Start `codex` in')
-    lines.push('  this directory and choose "Trust all and continue" at the review prompt.')
+    lines.push('  Codex hashes the normalised handler, so a decision lapses when a handler')
+    lines.push('  changes — which is what a first install, or replacing a registration an')
+    lines.push('  older Conclave wrote, does. Upgrading Conclave on its own no longer does:')
+    lines.push('  every release renders the same handler. Start `codex` in this directory')
+    lines.push('  and choose "Trust all and continue" at the review prompt.')
   } else {
     lines.push('Codex state could not be confirmed.')
   }

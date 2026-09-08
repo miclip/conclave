@@ -127,8 +127,11 @@ spike reruns pass.
 ## ~~Portable project hook configuration~~ — done
 
 Landed in `8df69d7` (templates + `conclave config install`), `83cd17f` (paths untracked,
-guard test), `bda5cad` (`config check`). Kept for the rationale, which is still live: the
-trust-hash consequence in particular explains why every checkout re-trusts once.
+guard test), `bda5cad` (`config check`). Kept as written, for the record of what was decided
+and why — **but read the supersession note at the end of this section before acting on any
+of it.** #258 overturned the part a reader is most likely to carry away: registrations no
+longer render an install path, so the trust-hash consequence below no longer means "every
+checkout re-trusts once".
 
 The committed `.claude/settings.json` and `.codex/hooks.json` contain checkout-specific
 absolute paths. Replace them with portable source templates and generated machine-local
@@ -163,6 +166,15 @@ Note the consequence of requirement 5: because Codex's trust hash covers the nor
 handler — including the command string, which contains the absolute path — every checkout
 necessarily produces a different hash and must trust its own hooks once. That is inherent,
 not a defect, and `config install` should say so rather than hide it.
+
+**Superseded in part by #258.** Requirement 2 — render "using the current checkout path" —
+was right while the install was one checkout and wrong once #250 gave each release its own
+directory: a project registered on one release kept firing that release's code, or stopped
+firing when `--prune-install` removed it. Project registrations now invoke `conclave` from
+PATH and name no directory, so the per-checkout hash consequence above no longer applies to
+them: every checkout and every release renders the same bytes, and a project trusts its
+hooks once rather than once per Conclave. A RUN's seat hooks are still version-pinned, for
+the reason #250 gives, and adapters write those directly rather than through a template.
 
 Git history is deliberately **not** being rewritten to remove `/Users/miclip` from
 `c46a1ea`. The path disclosure is low sensitivity, the repository contains no secrets, and

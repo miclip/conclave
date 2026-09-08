@@ -27,6 +27,7 @@ import {
   setPermissionMode,
 } from '../src/config/project.ts'
 import { formatConfigShow, formatConfigShowJson, showConfig } from '../src/config/show.ts'
+import { runHookClient } from '../src/hooks/client.ts'
 import {
   beforeEndOfOptions,
   extraPositionalMessage,
@@ -176,16 +177,32 @@ Driving conclave from an agent
   while participants are live.
 
 Commands:
+  hook           <agent>            Run Conclave's hook client. Not for typing: this is
+                                   what the registrations \`config install\` writes invoke,
+                                   with the CLI's payload on stdin. It exists so a
+                                   project registration can name a command that does not
+                                   move -- \`conclave hook claude\` survives every release,
+                                   where a path into an install directory goes stale or
+                                   is pruned away (#258). Exits non-zero only when a
+                                   delivery was owed and lost; outside a run there is
+                                   nothing to deliver and it exits zero.
   config install [--claude] [--codex] [--no-diagnose] [--trust]
                                    Register Conclave's hooks in the project you are in,
                                    then report whether Codex will run them. The commands
-                                   written point back at this Conclave, so the project
-                                   needs nothing installed. Both CLIs are registered
+                                   written invoke \`conclave\` from PATH, so the project
+                                   needs nothing installed and the registration does not
+                                   go stale when a release does -- it names no install
+                                   directory to become the wrong one (#258). A
+                                   registration left by an older Conclave is named and
+                                   replaced rather than kept. Both CLIs are registered
                                    unless you name one: pass --claude alone if both roles
                                    are Claude, and no Codex sidecar is written or trusted.
   config check   [--claude] [--codex] [--no-diagnose] [--json]
                                    Report drift without writing. Exits non-zero if the
-                                   registrations differ from the templates. Prefer this
+                                   registrations differ from the templates, and says
+                                   which are merely STALE -- written by an older Conclave
+                                   and pinned to its install directory -- rather than
+                                   edited. Prefer this
                                    before anything that depends on stable Codex trust.
                                    --json prints the report as JSON on stdout instead of
                                    prose; the exit code is unchanged. Inside a Conclave
@@ -193,7 +210,9 @@ Commands:
                                    registrations are git-ignored, so a seat never holds
                                    them and only the run root can be checked.
   config show    [--json]          Print what this checkout resolves to: the project root,
-                                   the Conclave whose hooks would run, the permission mode
+                                   the release the templates come from (NOT what runs the
+                                   hooks -- that is whatever \`conclave\` resolves to on
+                                   PATH when one fires), the permission mode
                                    in force for each agent, and where each registration
                                    goes plus what is at that path now — missing, current,
                                    drifted, or unknown when it could not be compared.
@@ -960,6 +979,21 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
   if (beforeEndOfOptions(argv).some((a) => a === '--help' || a === '-h')) {
     console.log(USAGE)
     return 0
+  }
+
+  if (command === 'hook') {
+    // Straight through to the client the adapters run, deliberately: two implementations
+    // of one wire contract is what #258 found, where the project registration posted
+    // X-Spike-* headers at a URL nothing set while the receiver read only X-Orch-*.
+    //
+    // Errors go to STDERR even though every other command here uses stdout. Both CLIs
+    // treat a SessionStart hook's stdout as context to inject into the child, so a usage
+    // line printed there is text the agent reads as if a human had typed it.
+    if (sub === undefined || sub.startsWith('-')) {
+      console.error('conclave: hook needs the agent it is firing for, e.g. `conclave hook claude`')
+      return 1
+    }
+    return runHookClient(sub)
   }
 
   if (command === 'config' && sub === 'show') {

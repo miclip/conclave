@@ -150,7 +150,19 @@ test('prose remains the default output', (t) => {
 
   assert.throws(() => JSON.parse(stdout), 'the default output must not have become JSON')
   assert.ok(stdout.includes(`project: ${repo}`))
-  assert.ok(stdout.includes(`hooks run from: ${REPO}`), 'a reader must be told which Conclave runs')
+  // This asserted `hooks run from: <REPO>`, "a reader must be told which Conclave runs".
+  // The claim was true only while the rendered command named that directory; since #258 it
+  // names none, so the line said the one thing a reader must not believe. The release is
+  // still reported, as the provenance of the templates.
+  assert.ok(stdout.includes(`templates from: ${REPO}`), 'the release the templates came from')
+  assert.ok(!stdout.includes('hooks run from:'), 'and not as the thing that runs')
+  // The reader must still be told what DOES run, in whichever form applies on this
+  // machine: the resolved binary, or the refusal to claim one. Asserted as a pair rather
+  // than by matching an absolute path, which would pin the test to one installation.
+  assert.ok(
+    /hooks run: .+ hook <agent>/.test(stdout) || stdout.includes('does not resolve on PATH'),
+    'a reader must be told what actually executes the hooks',
+  )
   assert.ok(stdout.includes('DRIFT'), 'drift must still be visible to a reader')
   assert.equal(status, 1)
 })

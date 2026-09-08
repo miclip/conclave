@@ -20,6 +20,7 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileS
 
 import { execFileSync, spawn } from 'node:child_process'
 import { createInterface } from 'node:readline'
+import { legacyInstallRootOf } from '../config/legacyRegistration.ts'
 import { sanitizedCopy } from '../process/childenv.ts'
 import { PtyProcess, squash } from '../process/pty.ts'
 
@@ -28,8 +29,19 @@ import { PtyProcess, squash } from '../process/pty.ts'
  * the user has configured. Kept here so the registry preflight, the installer and the
  * tests cannot drift apart -- they did once, when the sidecar moved off the spike's
  * Python client and the diagnostic silently reported "no matching hooks are loaded".
+ *
+ * It has moved a second time, and for the same reason it is worth pinning: since #258 the
+ * sidecar invokes `conclave hook codex` rather than a path into an install directory, so a
+ * match on `src/hooks/client.ts` would now find nothing in a freshly-registered project.
+ * That spelling is not gone -- it is what an adapter writes for a RUN's own seat hooks,
+ * which stay version-pinned on purpose -- but those are per-run settings the Codex sidecar
+ * never carries, so nothing here needs to match both.
+ *
+ * A sidecar still carrying the old spelling is therefore correctly reported as unmatched:
+ * it is a registration from before the upgrade, and `diagnoseHookTrust` names it as such
+ * instead of leaving the reader to conclude their sidecar is missing.
  */
-export const CONCLAVE_HOOK_MATCH = 'src/hooks/client.ts'
+export const CONCLAVE_HOOK_MATCH = 'conclave hook'
 
 export type HookTrustStatus = 'managed' | 'untrusted' | 'trusted' | 'modified'
 
@@ -233,6 +245,21 @@ export interface TrustDiagnosis {
 }
 
 /**
+ * Read at diagnosis time rather than taken from the loaded report: Codex reports the
+ * handlers it PARSED, and a sidecar it declined to load contributes nothing to compare
+ * against. The file on disk is the only evidence available in exactly the case that needs
+ * explaining. Unreadable reads as "not legacy" -- an unproven claim about the file is
+ * worse here than the generic advice.
+ */
+function legacyRootOfSidecar(path: string): string | undefined {
+  try {
+    return legacyInstallRootOf(readFileSync(path, 'utf8'))
+  } catch {
+    return undefined
+  }
+}
+
+/**
  * Turn a report into a launch-time readiness decision.
  *
  * The failure this prevents is the silent one: launching, watching no hooks arrive, and
@@ -268,13 +295,24 @@ export function diagnoseHookTrust(report: CodexHookReport, matchCommand?: string
     // the file is one this tool rendered moments earlier. Distinguish the two causes by
     // the only evidence available, which is whether the sidecar is there at all.
     const sidecar = codexSidecarPath(report.cwd)
+    // A third cause, and the one an upgrade produces: the sidecar is present, parsed and
+    // possibly trusted, but it was written by a Conclave old enough to name an install
+    // directory in its command (#258). Nothing matches, and both messages below would then
+    // be wrong -- one sends the reader to re-trust a directory that is already trusted, the
+    // other says a file they are looking at is not there.
+    const legacyRoot = existsSync(sidecar) ? legacyRootOfSidecar(sidecar) : undefined
     messages.push(
-      existsSync(sidecar)
-        ? `Codex loaded no hooks from ${sidecar}, which it reports the same way whether ` +
-            `the sidecar is missing or the DIRECTORY is untrusted. The file is present, so ` +
-            `this is the directory: run \`codex\` once in ${report.cwd} and accept the ` +
-            `prompts — it asks about the directory first, then about the hooks.`
-        : `no Codex sidecar at ${sidecar}; run \`conclave config install\` in ${report.cwd}`,
+      legacyRoot
+        ? `the Codex sidecar at ${sidecar} was written by an older Conclave and runs ` +
+            `${legacyRoot}, which is one release rather than the installation. Its handlers ` +
+            `are not this Conclave's, so none matched. Run \`conclave config install\` in ` +
+            `${report.cwd} to replace it, then trust the new handlers once.`
+        : existsSync(sidecar)
+          ? `Codex loaded no hooks from ${sidecar}, which it reports the same way whether ` +
+              `the sidecar is missing or the DIRECTORY is untrusted. The file is present, so ` +
+              `this is the directory: run \`codex\` once in ${report.cwd} and accept the ` +
+              `prompts — it asks about the directory first, then about the hooks.`
+          : `no Codex sidecar at ${sidecar}; run \`conclave config install\` in ${report.cwd}`,
     )
   }
 

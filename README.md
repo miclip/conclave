@@ -60,6 +60,12 @@ conclave config install     # write the hook registration for this project
 conclave config check       # is it present, current, and trusted
 ```
 
+The registration invokes `conclave` from PATH, so it does not name a release directory and
+does not go stale when you upgrade. A registration written before v0.5.33 does name one;
+`config check` reports it as `STALE` and `config install` replaces it. Codex hashes the
+command string, so that replacement costs one re-trust — and no further ones, because
+later releases render the same bytes.
+
 ## Install
 
 Node 24 or newer.
@@ -474,9 +480,14 @@ not: it resolves project configuration from the **main** worktree, so one sideca
 every worktree of a project. A linked worktree still needs an empty `.codex/` directory as a
 trigger, which `config install` creates.
 
-If a second checkout of Conclave itself registers the same project, `config check` reports
-`SHARED` rather than drifted and names the checkout whose hooks would run. To develop hook
-changes, use a separate clone rather than a worktree.
+The registrations themselves name no directory — they run whatever `conclave` resolves to on
+PATH when a hook fires. So they are identical in every worktree and every project, and the
+`conclave` on PATH must be new enough to understand `hook`; an older one fails every hook
+with `unknown command: hook`, which `config install` and `config check` check for and say.
+
+A second checkout of Conclave registering the same project used to be a conflict, because
+each rendered its own path into the shared sidecar. It no longer is: every checkout renders
+the same bytes, so neither can take the file over from the other or invalidate its trust.
 
 In a seat worktree `config check` reports `not_applicable` and exits zero, because there is
 no registration there to compare.

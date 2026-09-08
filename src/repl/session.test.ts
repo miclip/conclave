@@ -461,9 +461,11 @@ test('a session registers its hooks in the project, for the CLIs it will actuall
   assert.equal(existsSync(join(dir, '.claude', 'settings.json')), true, 'the project gets Claude hooks')
   assert.equal(existsSync(join(dir, '.codex', 'hooks.json')), false, 'and no sidecar for an unused CLI')
 
-  // The registration points back at Conclave, so the project needs nothing installed.
+  // The registration runs Conclave's hook client, so the project needs nothing installed --
+  // through the CLI on PATH rather than a path into a release directory, which is what went
+  // stale on every install before #258.
   const settings = readFileSync(join(dir, '.claude', 'settings.json'), 'utf8')
-  assert.ok(settings.includes('hook_post.py'))
+  assert.ok(settings.includes('conclave hook claude'))
   assert.ok(!settings.includes(dir), 'a command must not point into the project being registered')
 })
 

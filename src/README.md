@@ -47,7 +47,8 @@ npm run conformance
 | `process/input.ts` | serialized, semantically attributed input |
 | `hooks/journal.ts` | durable journal, stable delivery identities |
 | `hooks/receiver.ts` | per-session receiver; journals before acknowledging |
-| `hooks/client.ts` | the command the child CLI executes |
+| `hooks/client.ts` | the command the child CLI executes, from a run's pinned seat hooks and from `conclave hook <agent>` alike |
+| `config/legacyRegistration.ts` | recognises a registration written by a Conclave that baked an install path in |
 | `adapters/claude.ts` | the first live adapter |
 | `registry/roles.ts` | role definitions as data |
 | `registry/types.ts` | agent definitions, participant specs, input policy |

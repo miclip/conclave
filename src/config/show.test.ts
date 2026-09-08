@@ -73,7 +73,11 @@ function conclave(t: TestContext, bodies: Partial<Record<string, string>> = {}):
 
 /** Distinct per target, so a template read from the wrong place would not compare equal. */
 function templateFor(target: RenderTarget): string {
-  return `{"target":"${target.label}","command":"${TEMPLATE_TOKEN}/spikes/hooks/hook_post.py"}\n`
+  // Still carries the token, though neither shipped template does since #258: this is a
+  // stand-in whose only job is to be distinct per target and to differ per conclaveRoot,
+  // and a tokenless one could not do the second. The command is not either spelling an
+  // older Conclave rendered, so nothing here is mistaken for a legacy registration.
+  return `{"target":"${target.label}","command":"${TEMPLATE_TOKEN}/bin/conclave hook"}\n`
 }
 
 /**
@@ -269,18 +273,57 @@ test('a malformed template is unknown when the file exists, with the reason kept
   assert.equal(notJson.status, 'unknown')
   assert.ok(notJson.error)
 
-  // No token at all: it would render identically for every Conclave, so comparing against
-  // it would say nothing about whether the hooks point back here.
-  const noToken = statusOf(dir, conclave(t, { [claude.template]: '{"cmd":"hook_post.py"}' }), 'claude')
-  assert.equal(noToken.status, 'unknown')
-  assert.match(noToken.error ?? '', /CONCLAVE_ROOT/)
+  // A template with no token is COMPARED, not declined. This asserted the opposite until
+  // #258 -- that a tokenless template was unjudgeable because "it would render identically
+  // for every Conclave" -- and both shipped templates are now tokenless precisely so that
+  // they do. Declining here would report every real registration as `unknown`.
+  const noToken = statusOf(dir, conclave(t, { [claude.template]: '{"cmd":"conclave hook claude"}' }), 'claude')
+  assert.equal(noToken.status, 'drifted', 'the file on disk is `{}`, so it differs')
+  assert.equal(noToken.error, undefined, 'and nothing failed while comparing')
 
   // Prose says which state it is in, and says explicitly that unknown is not a verdict.
   const prose = formatConfigShow(
-    showConfig({ projectRoot: dir, conclaveRoot: conclave(t, { [claude.template]: '{"cmd":"x"}' }) }),
+    showConfig({ projectRoot: dir, conclaveRoot: conclave(t, { [claude.template]: `{"cmd": ${TEMPLATE_TOKEN}}` }) }),
   )
   assert.match(prose, /unknown +Claude project hooks/)
   assert.ok(prose.includes('`unknown` means the comparison could not be made'))
+})
+
+test('#258 the report labels the release as provenance, not as what runs', (t) => {
+  // The header read `conclave: <path>`, which a reader takes as "the Conclave that will
+  // run". It never was after #258 -- the hook command names no directory -- so the label
+  // has to say which of the two questions it is answering.
+  const root = conclave(t)
+  const prose = formatConfigShow(showConfig({ projectRoot: project(t), conclaveRoot: root }))
+
+  assert.match(prose, new RegExp(`templates from: ${root}`))
+  assert.doesNotMatch(prose, /^conclave: /m, 'the ambiguous label must be gone')
+  // And the thing it is NOT is said once, because the status column says nothing about it:
+  // a `current` registration still fails if PATH has no conclave on it.
+  assert.match(prose, /resolves\s+to on PATH when a hook fires/)
+})
+
+test('#258 a registration from an older Conclave is named as one, not just as drift', (t) => {
+  // `drifted` alone sends a reader looking for an edit nobody made. The two causes want
+  // opposite reading: a hand-edited registration is a decision to look at, one pinned to a
+  // release is a stale artefact to overwrite.
+  const claude = TARGETS.find((t) => t.agent === 'claude')!
+  const dir = project(t)
+  mkdirSync(join(dir, dirname(claude.output)), { recursive: true })
+  const old = '/opt/conclave-releases/v0.5.29'
+  writeFileSync(join(dir, claude.output), `{"command":"${old}/spikes/hooks/hook_post.py claude"}\n`)
+
+  const reg = statusOf(dir, conclave(t), 'claude')
+  assert.equal(reg.status, 'drifted', 'it IS drift; the cause is an annotation on top')
+  assert.equal(reg.legacyRoot, old)
+
+  const prose = formatConfigShow(showConfig({ projectRoot: dir, conclaveRoot: conclave(t) }))
+  assert.match(prose, /written by an older Conclave, pinned to/)
+  assert.ok(prose.includes(old))
+
+  // An ordinary edit must NOT be claimed as one, or the annotation means nothing.
+  writeFileSync(join(dir, claude.output), '{"command":"something the project wrote"}\n')
+  assert.equal(statusOf(dir, conclave(t), 'claude').legacyRoot, undefined)
 })
 
 test('the JSON shape is exactly these fields', (t) => {

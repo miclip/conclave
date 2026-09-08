@@ -40,6 +40,7 @@ import {
   type OutputRoot,
   type RenderTarget,
 } from './install.ts'
+import { legacyInstallRootOf } from './legacyRegistration.ts'
 import { permissionModeFor, readProjectConfig, type PermissionMode } from './project.ts'
 
 /**
@@ -80,12 +81,31 @@ export interface ShownRegistration {
    * absence is a fact on its own but a broken template is still worth saying.
    */
   error?: string
+  /**
+   * The install root a `drifted` file is pinned to, when it was written by a Conclave old
+   * enough to bake one in (#258).
+   *
+   * The status stays `drifted`, because that is what it is: the bytes differ from what
+   * this Conclave would write. What this adds is the CAUSE, and it is the difference
+   * between "somebody edited this" and "this is one release behind" -- which `show`, being
+   * the command run to understand a project rather than to fix it, is exactly the place to
+   * say.
+   */
+  legacyRoot?: string
 }
 
 export interface ConfigShowReport {
   /** The repository a session here would run in. */
   projectRoot: string
-  /** Where Conclave itself lives — what the rendered hook commands point back at. */
+  /**
+   * The release the TEMPLATES are read from — not where the hooks run from.
+   *
+   * The old description said the second, and stopped being true in #258: nothing rendered
+   * names this directory any more. What executes is whatever `conclave` resolves to on
+   * PATH when a hook fires, which this read-only command deliberately does not go and
+   * find out — see the header on why it reaches no subprocess but `git rev-parse`.
+   * `config install` and `config check` report it.
+   */
   conclaveRoot: string
   /**
    * Where Codex resolves project configuration from: `projectRoot`'s MAIN worktree.
@@ -133,7 +153,9 @@ function inspect(target: RenderTarget, path: string, conclaveRoot: string): Show
     }
     // Rendered against `conclaveRoot`, exactly as `installConfig` renders it -- comparing
     // against anything else would report drift on a registration that is byte-correct.
-    // `render` also throws on a template with no token and on output that is not JSON.
+    // `render` also throws on output that is not JSON. It does NOT throw on a template
+    // with no token: since #258 both shipped templates have none, because a project
+    // registration that renders identically everywhere is the whole fix.
     expected = render(readFileSync(templatePath, 'utf8'), conclaveRoot)
   } catch (err) {
     // `missing` survives a broken template: the file is not there either way, and that is
@@ -151,7 +173,9 @@ function inspect(target: RenderTarget, path: string, conclaveRoot: string): Show
     return { ...base, exists, status: 'unknown', error: messageOf(err) }
   }
 
-  return { ...base, exists, status: actual === expected ? 'current' : 'drifted' }
+  if (actual === expected) return { ...base, exists, status: 'current' }
+  const legacyRoot = legacyInstallRootOf(actual)
+  return { ...base, exists, status: 'drifted', ...(legacyRoot ? { legacyRoot } : {}) }
 }
 
 function messageOf(err: unknown): string {
@@ -201,7 +225,10 @@ export function formatConfigShowJson(r: ConfigShowReport): string {
 }
 
 export function formatConfigShow(r: ConfigShowReport): string {
-  const lines = [`project: ${r.projectRoot}`, `conclave: ${r.conclaveRoot}`]
+  // Labelled for what it is. `conclave: <path>` read as "the Conclave that will run", which
+  // it never was after #258 -- the hook command names no directory, so this is the release
+  // the templates come from and nothing else.
+  const lines = [`project: ${r.projectRoot}`, `templates from: ${r.conclaveRoot}`]
   if (r.codexProjectRoot !== r.projectRoot) {
     lines.push(
       `  the project is a linked worktree; Codex resolves project config from the main`,
@@ -228,11 +255,22 @@ export function formatConfigShow(r: ConfigShowReport): string {
     // Indented under its own registration, never collected into a footer: a report with
     // one broken target and one fine one must make it obvious which is which.
     if (reg.error) lines.push(`    could not compare: ${reg.error}`)
+    // Under the registration it describes, for the same reason as the error above: a
+    // report with one stale target and one edited one has to make it obvious which is
+    // which, and a footer collecting both makes the reader match them up by path.
+    if (reg.legacyRoot) {
+      lines.push(`    written by an older Conclave, pinned to ${reg.legacyRoot}`)
+      lines.push('    — `config install` replaces it with a command that names no release')
+    }
   }
 
   // What the words mean, and -- said plainly, because a status column reads like a
   // promise of action -- that nothing was done about any of it.
   lines.push('', 'Status compares the file on disk against what this Conclave would render.')
+  // Where the hook actually comes from, said once, because the status column above says
+  // nothing about it and a `current` registration still fails if PATH has no conclave.
+  lines.push('The commands in them name no directory: they run whatever `conclave` resolves')
+  lines.push('to on PATH when a hook fires. `config check` reports whether that resolves.')
   if (r.registrations.some((reg) => reg.status === 'unknown')) {
     lines.push('`unknown` means the comparison could not be made, not that it failed.')
   }

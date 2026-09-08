@@ -1077,13 +1077,16 @@ export async function runSession(opts: SessionOptions): Promise<number> {
    * would have no turn-completion signal at all. Refusing with "run config install" was
    * friction for a fix the tool already knows how to perform.
    *
-   * Both files are machine-local — they contain absolute paths — which is why they are
-   * gitignored and never shipped, and why every project needs this once. Rendering is
+   * Both files are generated rather than shipped, which is why they are gitignored and why
+   * every project needs this once. (They stopped being machine-local in #258 — the command
+   * carries no absolute path any more — so a project that wanted to commit them could; what
+   * remains is that we wrote them into a repository that did not ask.) Rendering is
    * idempotent, so this is a no-op on every run after the first and stays silent then.
    *
-   * The commands written into the target point back at Conclave's own checkout, so the
-   * target needs nothing installed and no dependency on Conclave. That is what makes this
-   * safe to do in a repository that is not ours.
+   * The commands written into the target invoke `conclave` from PATH, so the target needs
+   * nothing installed and no dependency on Conclave. That is what makes this safe to do in
+   * a repository that is not ours — and it is why the registration does not go stale when
+   * this Conclave is superseded by the next release.
    *
    * TRUST IS NOT TOUCHED. Codex will not run hooks in a directory it does not trust, and
    * that lives in the user's global `~/.codex/config.toml`. Writing project-local files
@@ -2449,7 +2452,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
       // FALSIFIER, stated because it is the strongest argument against this shape: the
       // console has no general "trailing text is a message" rule and does not gain one here.
       // `/rotate <text>` and `/abort <text>` consume their text as a REASON
-      // (`src/repl/session.ts:2502`, `src/repl/session.ts:2535`) and `/pause`, `/queue`, `/audit` ignore
+      // (`src/repl/session.ts:2505`, `src/repl/session.ts:2538`) and `/pause`, `/queue`, `/audit` ignore
       // whatever follows them. So an operator who learns this from `/continue` and carries
       // it to `/pause I'll be back` still loses the sentence. That inconsistency is not
       // repaired by making `/continue` a third behaviour; it is narrowed by it, and the

@@ -660,11 +660,14 @@ Verified against git on this machine, because three of these bite immediately:
   for environmental reasons that look exactly like real failures to an advisor reading the
   output. This generalises to any gitignored build state the tests need.
 - **Hook configuration is per worktree.** `.claude/settings.json` and `.codex/hooks.json`
-  are gitignored and rendered per checkout, so each worktree needs its own
-  `conclave config install` — and because Codex's trust hash covers the command string,
-  which contains the absolute path, **each worktree is a separate Codex trust decision**.
+  are gitignored, so each worktree needs its own `conclave config install`.
   The registry preflight already refuses to construct a session whose hooks are registered
   but untrusted, so this surfaces as a clear error rather than a silent no-hooks session.
+  *(Superseded in part by #258: the command no longer contains an absolute path, so the
+  rendered bytes are identical everywhere and each worktree is no longer a separate Codex
+  trust decision. Codex keys trust by sidecar path as well as content, so a PROJECT still
+  trusts once — but a Codex sidecar is one file shared by every worktree of a project, so
+  that is one decision for all of them rather than one each.)*
 
 ### Streaming to the human, and the intervention gap [Added 2026-08-05]
 
