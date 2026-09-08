@@ -41,7 +41,7 @@ import { modelFromArgs } from '../registry/launch.ts'
 import { sanitizedCopy } from '../process/childenv.ts'
 import { PtyProcess } from '../process/pty.ts'
 import { CODEX_PERMISSION_ENCODING, InputQueue } from '../process/input.ts'
-import { HookReceiver } from '../hooks/receiver.ts'
+import { describeListenerFailure, HookReceiver } from '../hooks/receiver.ts'
 import type { HookDelivery } from '../hooks/journal.ts'
 import { TranscriptSessionView } from '../transcript/reconcile.ts'
 import { TASK_COMPLETE_ERROR } from '../transcript/parse.ts'
@@ -469,6 +469,17 @@ export class CodexPtyHookAdapter implements AgentSession {
     this.#attemptJournal = join(runDir, 'attempts.ndjson')
     const url = await this.#receiver.start()
     this.#receiver.on('delivery', (d) => this.#onHook(d))
+    // Contained listener throw (#263), carried to the operator verbatim and non-fatally.
+    this.#receiver.on('listener_error', (f) =>
+      this.#emit({
+        type: 'error',
+        message: describeListenerFailure(f),
+        fatal: false,
+        seq: this.#next(),
+        at: Date.now(),
+        provisional: false,
+      }),
+    )
     this.#receiver.on('duplicate', (d) =>
       this.#emit({
         type: 'error',

@@ -198,8 +198,8 @@ export const CITED: Record<string, string> = {
   // Live-claim section in docs/NOTES.md: #156's premise and the unverified-generation guards.
   // These citations assert current fact in a section marked `## LIVE:`, so they are checked even
   // though the rest of docs/** is frozen design record.
-  'src/adapters/claude.ts:2376-2389': 'containedFallback: true,',
-  'src/adapters/codex.ts:1629-1642': 'containedFallback: true,',
+  'src/adapters/claude.ts:2389-2402': 'containedFallback: true,',
+  'src/adapters/codex.ts:1640-1653': 'containedFallback: true,',
   'src/rotation/rotate.ts:484':
     'const generation = snap.containedFallback ? UNKNOWN_GENERATION : snap.compactionGeneration',
   'src/relay/relay.ts:5089': 'async #considerRotation(',
@@ -235,8 +235,8 @@ export const CITED: Record<string, string> = {
     "    return halted ?? this.#acknowledge(impl, (await impl.session.snapshot()).compactionGeneration)",
   'src/relay/relay.ts:8196':
     'const rotated = await this.#considerRotation(seat, report.prose, handle)',
-  'src/adapters/codex.ts:666-672': 'this.#view = new TranscriptSessionView({',
-  'src/adapters/claude.ts:1359-1363': 'this.#view = new TranscriptSessionView({',
+  'src/adapters/codex.ts:677-683': 'this.#view = new TranscriptSessionView({',
+  'src/adapters/claude.ts:1372-1376': 'this.#view = new TranscriptSessionView({',
   'src/relay/relay.ts:2521':
     'const p: RelayParticipant = { id: spec.id, agent: spec.agent, rank, role: spec.role, launch, session, events: [], baselineGeneration: 0, degradationCursor: 0 }',
   'src/relay/report.ts:311-321': 'const snap = await p.session.snapshot()',
@@ -245,10 +245,10 @@ export const CITED: Record<string, string> = {
   // same call the front end makes, so a pin on the call itself is the whole point.
   'src/repl/session.ts:1650': "inject(text, 'all')",
   'src/repl/session.ts:2601': 'inject(rest, { only: who })',
-  'src/adapters/kimi.ts:752': 'compactionGeneration: 0,',
+  'src/adapters/kimi.ts:763': 'compactionGeneration: 0,',
   'src/rotation/rotate.ts:412': 'export async function rotate(',
-  'src/adapters/claude.ts:1944': "#state: SessionState = 'running'",
-  'src/adapters/codex.ts:1187': "#state: SessionState = 'running'",
+  'src/adapters/claude.ts:1957': "#state: SessionState = 'running'",
+  'src/adapters/codex.ts:1198': "#state: SessionState = 'running'",
   'src/rotation/handoff.ts:74': 'compactionGeneration: CompactionGeneration',
   'src/workspace/sessionRecord.ts:1714': 'snap.turns.map(',
   'src/relay/relay.ts:4240':
