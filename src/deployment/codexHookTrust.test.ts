@@ -347,6 +347,77 @@ test('enabled is never treated as executable, in either direction', () => {
   assert.equal(diagnoseHookTrust(trustedButDisabled, MATCH).ready, false, 'trusted alone is not enough either')
 })
 
+test('#262 the untrusted-hooks message names conclave\'s own remedy before any manual one', () => {
+  // The message is read at the moment of failure by someone who will do exactly what it says.
+  // It used to say "Trust it via the Codex TUI, or pre-seed [hooks.state...] in
+  // ~/.codex/config.toml" and never mention `config install --trust` -- so agents driving
+  // conclave asked their operator to quit the session for a terminal, or pasted keys into a
+  // GLOBAL config, once per hook.
+  const base = {
+    key: 'k',
+    eventName: 'sessionStart',
+    handlerType: 'command',
+    source: 'project',
+    command: 'conclave hook codex',
+    sourcePath: '/p/.codex/hooks.json',
+    loaded: true,
+  }
+  const report: CodexHookReport = {
+    cwd: '/p',
+    hooks: [{ ...base, trustStatus: 'modified', enabled: true, trusted: false, executable: false }],
+    errors: [],
+    warnings: [],
+  }
+  const m = diagnoseHookTrust(report, MATCH).messages.join('\n')
+
+  assert.match(m, /conclave config install --trust/, 'the one-command fix is named')
+  assert.match(m, /Starting a session does it too/, 'and the other way that needs no command at all')
+
+  // ORDER IS THE POINT, not mere presence. A reader acts on the first remedy offered, so the
+  // manual routes must come after conclave's own and be marked as the fallback they are.
+  assert.ok(
+    m.indexOf('config install --trust') < m.indexOf('Codex TUI'),
+    'conclave\'s own remedy must precede the TUI',
+  )
+  assert.ok(
+    m.indexOf('config install --trust') < m.indexOf('config.toml'),
+    'and must precede editing a global config by hand',
+  )
+  assert.match(m, /Only if both fail/, 'the manual routes are labelled as the last resort')
+})
+
+test('#262 a hook whose trust was invalidated does not read as one never trusted', () => {
+  // Different situations, even though one command fixes both. `modified` means a decision WAS
+  // made and then invalidated -- and after a `config install` the thing that invalidated it was
+  // conclave, rewriting the handler it had itself registered. Telling that operator the hook is
+  // untrusted sends them looking for a decision they never made.
+  const base = {
+    key: 'k',
+    eventName: 'sessionStart',
+    handlerType: 'command',
+    source: 'project',
+    command: 'conclave hook codex',
+    sourcePath: '/p/.codex/hooks.json',
+    loaded: true,
+    enabled: true,
+    trusted: false,
+    executable: false,
+  }
+  const say = (trustStatus: 'modified' | 'untrusted') =>
+    diagnoseHookTrust(
+      { cwd: '/p', hooks: [{ ...base, trustStatus }], errors: [], warnings: [] },
+      MATCH,
+    ).messages.join('\n')
+
+  const modified = say('modified')
+  const untrusted = say('untrusted')
+
+  assert.match(modified, /WAS trusted, against a handler that no longer exists/)
+  assert.match(modified, /config install` does when it rewrites one/, 'and says what invalidated it')
+  assert.match(untrusted, /has never been trusted here/)
+  assert.notEqual(modified, untrusted, 'the two conditions must not render identically')
+})
+
 test('the registry runs preflight before create, and refuses on failure', async () => {
   const { AgentRegistry } = await import('../registry/registry.ts')
   const order: string[] = []

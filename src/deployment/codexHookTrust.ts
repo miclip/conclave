@@ -281,10 +281,31 @@ export function diagnoseHookTrust(report: CodexHookReport, matchCommand?: string
   for (const h of blocked) {
     // Say all four states out loud. "enabled but not executable" is the whole point,
     // and a summary that omits it invites the reader to assume the hook works.
+    //
+    // THE REMEDY IS NAMED FIRST, and it is this tool's own (#262). This message used to offer
+    // the Codex TUI and hand-editing `~/.codex/config.toml`, and never mentioned
+    // `config install --trust` -- which exists, needs no TUI, and does every hook at once.
+    // Read at the moment of failure by someone who will do exactly what it says, that sent
+    // operators to quit their session for a terminal, or to paste keys into a GLOBAL config,
+    // one paragraph per hook. An agent driving conclave followed it verbatim and interrupted
+    // its human every time.
+    //
+    // `modified` and `untrusted` are told apart, because they are different situations even
+    // though one command fixes both. `modified` means a decision was made and then invalidated
+    // -- and after a `config install` the thing that invalidated it was conclave, rewriting the
+    // handler it had itself registered. Telling that operator they have an untrusted hook
+    // invites them to go looking for a decision they never made.
+    const why =
+      h.trustStatus === 'modified'
+        ? `it WAS trusted, against a handler that no longer exists — the recorded hash does not ` +
+          `match the handler now registered, which is what \`config install\` does when it rewrites one`
+        : `it has never been trusted here`
     messages.push(
       `${h.eventName}: loaded=${h.loaded} enabled=${h.enabled} trusted=${h.trusted} ` +
         `executable=${h.executable} (trustStatus=${h.trustStatus}) — it is registered and ` +
-        `enabled but will NOT run. Trust it via the Codex TUI, or pre-seed ` +
+        `enabled but will NOT run: ${why}. Fix all of them with \`conclave config install ` +
+        `--trust\`, which records the trust with no TUI. Starting a session does it too. ` +
+        `Only if both fail is there anything to do by hand: the Codex TUI, or ` +
         `[hooks.state."${h.sourcePath}:${snakeEvent(h.eventName)}:0:0"] in ~/.codex/config.toml.`,
     )
   }
