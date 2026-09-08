@@ -192,7 +192,7 @@ test('#244 a freshly written record carries every field the README tells an oper
   // The fields are read out of the README rather than restated, so the two cannot drift: if the
   // documented command changes, this checks the new fields.
   const readme = readFileSync(join(import.meta.dirname, '..', '..', 'README.md'), 'utf8')
-  const at = readme.indexOf('sleep 86400 > ctl &')
+  const at = readme.indexOf('tail -f /dev/null > ctl &')
   assert.notEqual(at, -1, 'the README must still document the fifo recipe')
   const section = readme.slice(at, readme.indexOf('\n#', at))
   const documented = [...section.matchAll(/\.(state|alive|progress\.state)\b/g)].map((m) => m[0])

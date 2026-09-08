@@ -7,7 +7,7 @@
  * got a hit three and a half hours after it had ended, and reported a wedge in a run that
  * finished cleanly in 26 minutes.
  *
- * What matches is not the fifo holder — `sleep 86400` contains none of those words — but the
+ * What matches is not the fifo holder — `tail -f /dev/null` contains none of those words — but the
  * caller's own wrapper, since a shell carries its whole script in its command line. So the
  * warning has to say "do not use a process check at all", not "the holder outlives the run":
  * a reader who fixes only the fifo still gets the wrong answer. That distinction is the reason
@@ -27,7 +27,7 @@ const README = readFileSync(join(import.meta.dirname, '..', '..', 'README.md'), 
 
 /** The detached-run recipe and everything up to the next heading. */
 function recipeSection(): string {
-  const at = README.indexOf('sleep 86400 > ctl &')
+  const at = README.indexOf('tail -f /dev/null > ctl &')
   assert.notEqual(at, -1, 'the README must still document the fifo recipe')
   const nextHeading = README.indexOf('\n#', at)
   return README.slice(at, nextHeading === -1 ? README.length : nextHeading)
@@ -41,14 +41,14 @@ test('#244 the fifo recipe warns against deriving liveness from a process check'
 })
 
 test('#244 the warning is about process checks generally, not about the fifo holder', () => {
-  // The correction that matters. `sleep 86400 > ctl` has the command line `sleep 86400` and
-  // matches `pgrep -f 'conclave session'` on no system. Blaming the holder would send a reader
-  // to fix the recipe and leave them with the same wrong answer, because what actually matches
-  // is their own wrapper.
+  // The correction that matters. `tail -f /dev/null > ctl` has the command line `tail -f
+  // /dev/null` and matches `pgrep -f 'conclave session'` on no system. Blaming the holder
+  // would send a reader to fix the recipe and leave them with the same wrong answer, because
+  // what actually matches is their own wrapper.
   const section = recipeSection()
   assert.doesNotMatch(
     section,
-    /holder outlives|sleep .*outlives|fifo .*outlives the run/i,
+    /holder outlives|tail .*outlives|fifo .*outlives the run/i,
     'the fifo holder is not what a process check matches; saying so would misdirect the fix (#244)',
   )
   assert.match(section, /shell, watcher or tool invocation|command line contains/i, 'it names what does match')

@@ -366,7 +366,7 @@ end open:
 
 ```sh
 mkfifo ctl
-sleep 86400 > ctl &                                   # holds it open; the & matters
+tail -f /dev/null > ctl &                             # holds it open; never exits on its own
 conclave session "<goal>" --checks "npm test" --operator agent < ctl > run.log 2>&1 &
 
 echo '/continue' > ctl                                # from any later shell
@@ -391,6 +391,20 @@ conclave status --json | jq -r '.state, .alive, .progress.state'
 Bound `state == "running" && progress.state == "idle"` if you want to catch a run that is alive
 and getting nowhere; `progress.since` moves when the state changes and never when the record is
 rewritten. An ended run reads `idle` too, forever, which is why the `state` half matters.
+
+Ask it about the fifo too. The holder is a second process that can die on its own, and the run
+goes on looking healthy when it does:
+
+```sh
+conclave status --json | jq -r '.stdin'
+# held          <- commands written to ctl still reach this run
+# closed        <- the write end is gone; nothing more can arrive, and a pause raised from
+#                  here on can never be answered
+# not_attached  <- a console at a keyboard: no fifo to lose
+# null          <- the record's producer reads no commands (relay), or predates the field
+```
+
+`conclave status` without `--json` says the same thing in words, and shouts about `closed`.
 
 One line is one message, so a multi-paragraph answer needs framing. `<<TAG` opens a block
 and a line equal to `TAG` closes it:

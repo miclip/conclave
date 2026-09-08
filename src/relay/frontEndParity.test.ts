@@ -1038,7 +1038,14 @@ test('the agent instructions name only things that exist', () => {
   assert.match(section, /Use "session", not "relay"/)
 
   // Every slash command it lists must be one the console actually accepts.
-  const documented = [...section.matchAll(/\/[a-z]+/g)].map((m) => m[0])
+  //
+  // A PATH SEGMENT IS NOT A COMMAND. The pattern used to be `/\/[a-z]+/g`, which is every
+  // `/word` in the section -- and the section acquired one that is not a command the moment the
+  // fifo recipe stopped recommending a holder that expires: `tail -f /dev/null > ctl &` reads as
+  // documenting `/dev` (#252). The boundaries say what a command looks like where a path does
+  // not: nothing word-like or `/` on either side, so `/dev/null` contributes neither `/dev` nor
+  // `/null` while `/continue` in `echo '/continue' > ctl` still counts.
+  const documented = [...section.matchAll(/(?<![\w/])\/[a-z]+(?![a-z/])/g)].map((m) => m[0])
   assert.ok(documented.length >= 7, 'the section must list the slash commands')
   for (const cmd of new Set(documented)) {
     assert.ok(COMMANDS.includes(cmd), `--help documents ${cmd}, which the console does not accept`)

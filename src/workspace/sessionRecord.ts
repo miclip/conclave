@@ -534,6 +534,34 @@ export interface SessionProgressStatus {
   since: number
 }
 
+/**
+ * Whether the channel an operator writes commands to is still there.
+ *
+ * #252. A detached run is driven by writing lines into a fifo, and the fifo needs a process
+ * holding its write end open -- so the run has a second piece of plumbing whose death is
+ * silent. When the holder goes, stdin reaches EOF, and the first evidence anyone gets is the
+ * run ending. That ending is indistinguishable from the run finishing, which is the whole
+ * defect: an operator reads `ended` and cannot tell whether the goal was met or their fifo
+ * holder was reaped. It has already cost one multi-hour run, found by accident.
+ *
+ * Three values, because the three facts are different and two of them were being collapsed:
+ *
+ *   `held`          a channel exists and has not reached EOF. The run can still be steered.
+ *   `closed`        it reached EOF. Nothing further can arrive; a pause that has not happened
+ *                   yet can never be answered. RECOVERABLE ONLY BEFORE the run needs it, which
+ *                   is why this is reported live rather than only at the end.
+ *   `not_attached`  there is no such channel to lose, because the operator is at a terminal.
+ *                   NOT `held`: a console session's stdin is a keyboard, and reporting it as
+ *                   held would tell a poller that a fifo it never created is fine.
+ *
+ * ABSENT is a fourth reading and the one that has to survive: NOT REPORTED. An older record,
+ * or a producer that does not read commands at all -- `relay` returns an outcome and has no
+ * console -- says nothing here rather than claiming a channel is missing. This is the same
+ * rule `ceilings` and `rotations` argue for, and it matters more here because the honest
+ * absence and the alarming value would otherwise both be falsy to a probe.
+ */
+export type SessionStdinStatus = 'held' | 'closed' | 'not_attached'
+
 export interface SessionStatus {
   schema: number
   id: string
@@ -735,6 +763,21 @@ export interface SessionStatus {
    * taken no advisor turns.
    */
   targeting?: ReportedTargeting | undefined
+  /**
+   * Whether the control channel this run takes commands from is still open. See
+   * `SessionStdinStatus` for what each value means and why absence is a fourth reading.
+   *
+   * Written by the CONSOLE and by nothing else, which is the one place this differs from every
+   * other optional key here. `ceilings`, `rotations` and `targeting` are read off the relay,
+   * because the relay is what obeys them; a control channel is not the relay's at all -- it is
+   * the front-end's stdin, and `relay` has none. So this arrives through `recordSession`'s
+   * options and through `SessionRecording.stdin`, and a producer that never passes either gets
+   * the document it got before.
+   *
+   * Last in the document, like the keys above it, so it is appended rather than inserted among
+   * the ones a consumer already reads.
+   */
+  stdin?: SessionStdinStatus | undefined
 }
 
 /** A status plus what could only be learned from outside it. */
@@ -1346,6 +1389,16 @@ export interface SessionRecording {
    * rather than sleep and hope. `close()` awaits one of these last.
    */
   refresh(): Promise<void>
+  /**
+   * Report a change to the control channel, written immediately.
+   *
+   * Separate from `set` rather than folded into its `extra`, and the reason is the timing this
+   * field exists for: stdin closes while the run's state is unchanged -- still `running`, still
+   * mid-turn -- so there is no lifecycle transition to hang it on. A caller that had to wait
+   * for the next `set` would publish the closure at the moment the run ended, which is the
+   * moment #252 says is already too late.
+   */
+  stdin(state: SessionStdinStatus): void
   /** Stop following the stream. The files stay; only the subscription ends. */
   close(): Promise<void>
 }
@@ -1377,6 +1430,16 @@ export function recordSession(
      * Neither front-end passes it.
      */
     heartbeatMs?: number | undefined
+    /**
+     * The state of the control channel at startup, when the caller has one to report.
+     *
+     * Optional so `relay` -- which reads no commands -- and any older caller produce the
+     * document they produced before, with no key rather than one claiming a channel is
+     * missing. Present from the FIRST write on the console, not added when it changes: a key
+     * that appeared mid-run would make its absence mean two things at once, and the moment it
+     * would appear is exactly the moment a poller is reading (#252).
+     */
+    stdin?: SessionStdinStatus | undefined
   },
 ): SessionRecording {
   /** The last adapter event per seat, which is what "what is it doing" means live. */
@@ -1605,6 +1668,10 @@ export function recordSession(
     // After `forces`, for the same reason it comes after `rotations`: appended to the
     // document rather than inserted among the keys already there.
     ...targeting(),
+    // After `targeting`, for the same reason it comes after `forces`: appended to the document
+    // rather than inserted among the keys already there. Spread away when the caller did not
+    // say, because a caller with no control channel to describe has not said it is gone (#252).
+    ...(opts.stdin ? { stdin: opts.stdin } : {}),
   })
 
   /**
@@ -1786,11 +1853,24 @@ export function recordSession(
     }
   })()
 
+  /**
+   * A control-channel change, on its own write.
+   *
+   * `recorder.update` merges, so this rewrites the document with everything else exactly as it
+   * was -- no participant snapshot, no relay read. That is deliberate: this is called from a
+   * readline `close` handler during teardown, when a seat may already be gone, and a write
+   * that had to ask the participants anything could fail at the one moment the fact matters.
+   */
+  const stdin: SessionRecording['stdin'] = (state) => {
+    recorder.update({ stdin: state })
+  }
+
   return {
     id: opts.id,
     recorder,
     set,
     refresh,
+    stdin,
     /**
      * Wait for the stream to end on its own, then detach.
      *
