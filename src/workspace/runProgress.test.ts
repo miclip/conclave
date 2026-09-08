@@ -12,6 +12,10 @@
  *
  * The state worth the tests is `idle`: no turn in flight, no pause open. That is the one
  * nothing else measures.
+ *
+ * And its twin at the end of a run: an ended run reads `idle` if its last turn completed and
+ * `abandoned` if one was still in flight. `abandoned` is terminal evidence -- the run was cut
+ * off mid-turn -- and never a claim that work is still happening.
  */
 
 import { strict as assert } from 'node:assert'
@@ -129,12 +133,15 @@ test('#231 a second turn_start on one seat does not wedge the run in `in_turn`',
   await recording.close()
 })
 
-test('#231 an ENDED run is idle too, which is why a bound has to gate on `state`', async (t) => {
-  // Pinned as a decision rather than left to be discovered. A run that drained and stopped IS
-  // idle, and stays idle in the directory forever -- so a driver checking `idle` and a duration
-  // without also checking `state` would report every finished run as wedged. Reported honestly
-  // and documented on the type; the alternative, blanking the block at the close, would lose
-  // what the run was doing when it stopped from the one reader asking why it stopped.
+test('#231 an ended run whose turn COMPLETED is idle, which is why a bound has to gate on `state`', async (t) => {
+  // One of the two endings, and the clean one. A run that drained and stopped IS idle, and stays
+  // idle in the directory forever -- so a driver checking `idle` and a duration without also
+  // checking `state` would report every finished run as wedged. Reported honestly and documented
+  // on the type; the alternative, blanking the block at the close, would lose what the run was
+  // doing when it stopped from the one reader asking why it stopped.
+  //
+  // The contrast with the next test is the point: both runs are `state === 'ended'`, and what
+  // separates them is whether a turn was still in flight when the ending was written.
   const { root, relay, recording } = start(t, 'ended')
   relay.stream.emit(turn('turn_start', 1) as never)
   relay.stream.emit(turn('turn_end', 2) as never)
@@ -146,8 +153,87 @@ test('#231 an ENDED run is idle too, which is why a bound has to gate on `state`
   })
 
   const status = readSession(root, 'ended')?.status
-  assert.equal(status?.progress?.state, 'idle', 'an ended run reads idle')
+  assert.equal(status?.progress?.state, 'idle', 'an ended run whose turn finished reads idle')
   assert.equal(status?.state, 'ended', 'and `state` is what tells a reader not to alarm on it')
+
+  relay.stream.close()
+  await recording.close()
+})
+
+test('an ended run with a turn STILL IN FLIGHT reports `abandoned`', async (t) => {
+  // The other ending. The seat opened a turn and never closed it, and then the run stopped --
+  // a teardown, a kill, a crash the recorder outlived. Before this both endings wrote `idle`,
+  // so a run cut off mid-turn was indistinguishable in the record from one that finished its
+  // work, which is the single most useful thing a reader of a dead run wants to know.
+  //
+  // `abandoned` is TERMINAL EVIDENCE, not ongoing work. It never means a seat is busy: it is
+  // only ever reached from `state === 'ended'`, so nothing is going to finish that turn and
+  // nothing should wait for it. That is why it is a fourth value rather than leaving the ended
+  // run reading `in_turn`, which would say the opposite -- that work is still happening -- to
+  // every poller in the directory, forever.
+  const { root, relay, recording } = start(t, 'abandoned')
+  relay.stream.emit(turn('turn_start', 1) as never)
+  await settle()
+  const inTurn = readSession(root, 'abandoned')?.status.progress
+  assert.equal(inTurn?.state, 'in_turn', 'in a turn while the run lives')
+
+  // No `turn_end`. The unfinished turn is the evidence, which is why teardown must not clear it.
+  recording.set('ended')
+  await waitFor(() => readSession(root, 'abandoned')?.status.state === 'ended', {
+    within: 2_000,
+    describe: 'the ended state to reach the record',
+  })
+
+  const status = readSession(root, 'abandoned')?.status
+  assert.equal(status?.progress?.state, 'abandoned', 'the ending plus the unfinished turn')
+  assert.equal(status?.state, 'ended', 'and the run really did end')
+  // `since` is a REAL transition here, not a carried-over one. `abandoned` is a state the run
+  // entered at the moment it was torn down, and the field's whole contract is that `now - since`
+  // is how long it has been in the state it is in -- so a reader asking when this run was cut off
+  // must get the ending, not the moment the turn opened. Carrying the `in_turn` timestamp forward
+  // would answer a different question than the one the field claims to answer, and would do it
+  // silently, since both values are plausible timestamps from the same run.
+  assert.ok(
+    (status?.progress?.since ?? 0) > (inTurn?.since ?? 0),
+    `entering abandoned must advance since: in_turn at ${inTurn?.since}, abandoned at ${status?.progress?.since}`,
+  )
+
+  relay.stream.close()
+  await recording.close()
+})
+
+test('an ended run that was PAUSED mid-turn still reports `abandoned`, not `paused`', async (t) => {
+  // The transition, not a precedence rule -- `state` holds one lifecycle value, so `ended` and
+  // `paused` can never race and no mutation to their order in `progressOf` can fail a test. What
+  // this pins is that nothing carries the previous reading forward: a run torn down while waiting
+  // for a person reports the ending, because the block is recomputed from the state being
+  // written. The unfinished turn survives the pause untouched, so the ending reads it and says
+  // `abandoned` -- terminal evidence again, not a wait anyone should keep watching.
+  const { root, relay, recording } = start(t, 'paused-abandoned')
+  relay.stream.emit(turn('turn_start', 1) as never)
+  await settle()
+  recording.set('paused', {
+    pause: {
+      reason: 'advisor_escalated',
+      resolution: { reason: 'advisor_escalated', authority: 'operator', scope: { kind: 'conclave' } },
+      detail: 'needs a human',
+      evidence: [],
+      options: [],
+      atSeq: 0,
+      at: 9_000,
+    } as never,
+  })
+  await waitFor(() => readSession(root, 'paused-abandoned')?.status.progress?.state === 'paused', {
+    within: 2_000,
+    describe: 'the paused state to reach the record',
+  })
+
+  recording.set('ended')
+  await waitFor(() => readSession(root, 'paused-abandoned')?.status.state === 'ended', {
+    within: 2_000,
+    describe: 'the ended state to reach the record',
+  })
+  assert.equal(readSession(root, 'paused-abandoned')?.status.progress?.state, 'abandoned')
 
   relay.stream.close()
   await recording.close()
