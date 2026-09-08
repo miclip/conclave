@@ -250,7 +250,7 @@ export const CITED: Record<string, string> = {
   'src/adapters/claude.ts:1944': "#state: SessionState = 'running'",
   'src/adapters/codex.ts:1187': "#state: SessionState = 'running'",
   'src/rotation/handoff.ts:74': 'compactionGeneration: CompactionGeneration',
-  'src/workspace/sessionRecord.ts:1710': 'snap.turns.map(',
+  'src/workspace/sessionRecord.ts:1714': 'snap.turns.map(',
   'src/relay/relay.ts:4240':
     "const unsettled = snap.turns.at(-1)?.state === 'in_progress'",
 }

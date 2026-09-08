@@ -25,6 +25,7 @@ import type { ChildLiveness } from '../outcomes/liveness.ts'
 import { IDLE_CPU_PERCENT } from '../outcomes/liveness.ts'
 import { NO_DEADLINE_CLOCKS, type DeadlineSupport } from '../registry/types.ts'
 import type { AgentSession, CloseMode } from '../contract/session.ts'
+import { turnKey } from '../contract/session.ts'
 import { AgentRegistry } from '../registry/registry.ts'
 import { FakeRotationSession } from '../rotation/fakeSession.ts'
 import { summaryLine } from './render.ts'
@@ -5600,6 +5601,22 @@ class SlowClosingSession extends FakeRotationSession {
     if (this.closeDelayMs > 0) await new Promise((r) => setTimeout(r, this.closeDelayMs))
     await super.close(mode)
   }
+
+  /**
+   * And a transcript read that takes time, for the same reason the close does.
+   *
+   * The recorder's final refresh is a `snapshot()` per seat, and on this double it returns on the
+   * same tick -- so publishing `ended` BEFORE that refresh and publishing it after are separated
+   * by under a millisecond, and no poller can tell them apart. A test that cannot tell them apart
+   * cannot fail when the order is wrong, which is the only thing it is there to catch: the
+   * mutation that moves the ending write above `recording.close()` passed against an instant
+   * snapshot. A real read is a file read of a transcript, and takes longer than this.
+   */
+  snapshotDelayMs = 0
+  override async snapshot(): ReturnType<FakeRotationSession['snapshot']> {
+    if (this.snapshotDelayMs > 0) await new Promise((r) => setTimeout(r, this.snapshotDelayMs))
+    return super.snapshot()
+  }
 }
 
 /**
@@ -5673,9 +5690,11 @@ test('#252 a real fifo: held while the holder lives, closed the moment it dies',
   const impl = new SlowClosingSession('impl', 'claude', ['ack', 'Did it, slowly.'])
   impl.delayMs = 2_000
   impl.closeDelayMs = 1_500
+  impl.snapshotDelayMs = 300
   const advisor = new SlowClosingSession('advisor', 'codex', ['Do it.', 'DONE'])
   advisor.delayMs = 2_000
   advisor.closeDelayMs = 1_500
+  advisor.snapshotDelayMs = 300
   const out = collect()
   let returned = false
   const running = runSession({
@@ -5727,10 +5746,23 @@ test('#252 a real fifo: held while the holder lives, closed the moment it dies',
     // Polled tightly rather than after a sleep: the claim is that the closure is readable while
     // the session process is STILL THERE, so the read has to happen inside the window rather
     // than after it. `returned` is checked from the same iteration that saw `closed`.
-    const observed = await untilWith('the closure to reach the record', () => {
+    const read = () => {
       const r = resolveSession(dir)
-      if (!('session' in r) || r.session.status.stdin !== 'closed') return undefined
-      return { progress: r.session.status.progress?.state, state: r.session.status.state, alive: r.session.alive, returned }
+      if (!('session' in r)) return undefined
+      const s = r.session.status
+      return {
+        at: Date.now(),
+        stdin: s.stdin,
+        state: s.state,
+        progress: s.progress?.state,
+        alive: r.session.alive,
+        turns: s.participants.find((p) => p.rank === 'implementer')?.turns ?? [],
+        returned,
+      }
+    }
+    const observed = await untilWith('the closure to reach the record', () => {
+      const r = read()
+      return r?.stdin === 'closed' ? r : undefined
     })
     // THE CLAIM. The closure is readable while the session is still there -- the promise has not
     // resolved, the pid answers, and the turn that was in flight has not finished draining. It is
@@ -5739,13 +5771,63 @@ test('#252 a real fifo: held while the holder lives, closed the moment it dies',
     assert.equal(observed.returned, false, 'the record said closed while the session process was still running')
     assert.equal(observed.alive, true, 'and while its pid was still there')
     assert.equal(observed.progress, 'in_turn', 'and while the turn that was in flight had not finished draining')
-    // ...and the record ALREADY says `ended`, beside a `progress` that says `in_turn`. That is not
-    // this change: `recording.set('ended')` runs in the console's teardown BEFORE `relay.stop()`,
-    // so every run announces its end before it has stopped. Pinned rather than left unsaid because
-    // it is the one thing that keeps `stdin` from being a warning an operator could act on -- the
-    // closure and the ending are the same instant to anyone polling -- and because a fix to that
-    // ordering must change this line rather than slip past it. Filed as #257, with this evidence.
-    assert.equal(observed.state, 'ended', 'the record says ended while progress says in_turn (a separate defect)')
+    // ...and the record still says `running`, which is what makes the three above worth writing
+    // down (#257). `recording.set('ended')` used to be the FIRST line of the console's teardown,
+    // so `ended` landed microseconds after this closure and a poller had no moment in which a run
+    // was still running with a dead control channel -- the window #252 exists to open was written
+    // into the record and immediately overwritten by a claim that was not yet true. The ending is
+    // now published after `relay.stop()` and the recorder's final refresh have returned.
+    assert.equal(observed.state, 'running', 'the run is still running when its channel is reported closed')
+    // Which of this seat's turns had a VERDICT in the record at this instant, kept so the ending
+    // document below is a comparison rather than an isolated fact. A turn still in flight cannot
+    // have one -- the grade is what its ending produces -- so the run's last verdict is not here.
+    const gradedWhileDraining = new Set(observed.turns.filter((t) => t.confidence !== undefined).map((t) => t.key))
+
+    // And it is an INTERVAL, not one lucky read. The seats take `closeDelayMs` to close, so
+    // `relay.stop()` holds the run open for well over a second after the channel dies -- and the
+    // whole of it must be readable as `running` with `stdin: closed`, because that is the state a
+    // poller is meant to be able to act on. Sampled until the record moves off `running`, with
+    // every sample checked rather than only the endpoints.
+    let last = observed
+    let samples = 1
+    let first: NonNullable<ReturnType<typeof read>> | undefined
+    for (;;) {
+      const r = read()
+      if (r === undefined) break
+      if (r.state !== 'running') {
+        first = r
+        break
+      }
+      assert.equal(r.stdin, 'closed', 'the channel stays closed for the whole window')
+      assert.equal(r.alive, true, 'and the pid stays there for the whole window')
+      last = r
+      samples++
+      await new Promise((resolve) => setTimeout(resolve, 25))
+    }
+    const window = last.at - observed.at
+    // A floor well under the ~1.5s drain the fixture makes, so the assertion is about there being
+    // a window at all rather than about how fast the machine running it is.
+    assert.ok(window >= 500, `the window lasted ${window}ms over ${samples} reads; expected at least 500ms`)
+
+    // THE FIRST DOCUMENT THAT SAYS `ended`, not the settled one. This is the other half of #257
+    // and the half a re-read cannot prove: the ending write now happens after the recorder's final
+    // AWAITED refresh, so the document that first announces the ending already carries the last
+    // turn's verdict. Under the old order it did not -- `ended` was published, and the grade
+    // arrived a second and a half later when `close()` finally ran -- so a poller that stopped
+    // reading at `ended`, which is what every `until [ state != running ]` loop does, read the
+    // ending of a run whose last turn was still ungraded.
+    assert.ok(first !== undefined, 'the ending was observed')
+    assert.equal(first.state, 'ended')
+    assert.equal(first.stdin, 'closed')
+    const fresh = first.turns.filter((t) => t.confidence !== undefined && !gradedWhileDraining.has(t.key))
+    assert.ok(
+      fresh.length > 0,
+      `the document that first says ended carries a verdict the draining record did not have: ${JSON.stringify(first.turns)}`,
+    )
+    assert.ok(
+      fresh.every((t) => (t.provenance?.length ?? 0) > 0),
+      'with the evidence each grade rests on',
+    )
 
     const code = await running
     assert.equal(code, 0, 'the run ends as it always did')
@@ -5758,6 +5840,34 @@ test('#252 a real fifo: held while the holder lives, closed the moment it dies',
     assert.ok('session' in ended)
     assert.equal(ended.session.status.state, 'ended')
     assert.equal(ended.session.status.stdin, 'closed', 'and the ending cause survives in the record')
+    const endedTurns = ended.session.status.participants.find((p) => p.rank === 'implementer')?.turns ?? []
+    assert.deepEqual(endedTurns, first.turns, 'and the settled document says exactly what the first ending one did')
+    // `progress` is STILL `in_turn` here, and that is not the ordering defect coming back. No
+    // terminal `turn_end` reached the recorder for this seat: a mid-turn `stop()` may or may not
+    // produce one on every adapter this project has -- `Relay.#closed` says so in full, and
+    // `FakeRotationSession` is its honest floor, emitting none under any circumstances. The grade
+    // asserted above came from the canonical snapshot instead, which is exactly the split the
+    // adapter seam is for. So `progress` reports the last thing anyone OBSERVED about the seat,
+    // which is that it was in a turn when the run was torn down over it. Pinned rather than
+    // corrected: making `progress` agree with `state` would delete that evidence, and a document
+    // that lies consistently is worse than one that visibly disagrees with itself.
+    assert.equal(
+      ended.session.status.progress?.state,
+      'in_turn',
+      'a turn abandoned by teardown leaves progress where the last observation left it',
+    )
+
+    // And NOTHING writes the record after that. The ending is the last word, which is what makes
+    // it safe to act on: the caller `until [ state != running ]` is written for goes on to read
+    // the transcript or remove the working tree, and a write still to come would race it -- and
+    // lose, noisily, since the recorder reports a status it could not write. The seats' snapshots
+    // take `snapshotDelayMs` here, so a refresh queued by the ending write would land well inside
+    // this wait rather than needing to be caught.
+    const settledAt = ended.session.status.updatedAt
+    await new Promise((resolve) => setTimeout(resolve, 3 * 300))
+    const after = resolveSession(dir)
+    assert.ok('session' in after)
+    assert.equal(after.session.status.updatedAt, settledAt, 'the record is not written again after the run has ended')
   } finally {
     killHolder()
     // Bounded, so a failed assertion above leaves a red test rather than a suite that never
@@ -5765,6 +5875,109 @@ test('#252 a real fifo: held while the holder lives, closed the moment it dies',
     // it started.
     await Promise.race([running.catch(() => 0), new Promise((r) => setTimeout(r, 30_000).unref())])
   }
+})
+
+/**
+ * A close that FAILS after its reconcile has already established a verdict.
+ *
+ * Not invented for this test: `Relay.#closed` names the shape -- "a reconcile that established a
+ * verdict and then failed to terminate the pty is exactly that shape" -- and
+ * `FakeRotationSession.closeThrowsBeforeTerminated` is the rejection every real adapter can
+ * produce, transport gone and `terminated` never recorded.
+ *
+ * The verdict is added to the TRANSCRIPT and to nothing else. No event carries it, so the only
+ * way it can reach the status record is a `snapshot()` taken after the close was attempted -- and
+ * the only thing that takes one is the recorder's own final refresh. Its presence in the record
+ * is therefore proof that the recorder was closed on the failing path, which no other observable
+ * this side of a thirty-second heartbeat can give.
+ */
+class ReconcilingFailedCloseSession extends FakeRotationSession {
+  /** The turn the failed close established, by key. */
+  static readonly RECONCILED = 'reconciled-during-a-close-that-failed'
+  override async snapshot(): ReturnType<FakeRotationSession['snapshot']> {
+    const snap = await super.snapshot()
+    if (!this.transportDisposed) return snap
+    return {
+      ...snap,
+      turns: [
+        ...snap.turns,
+        {
+          key: turnKey(ReconcilingFailedCloseSession.RECONCILED),
+          prompt: '',
+          state: 'cancelled' as const,
+          confidence: 'proven' as const,
+          provenance: [{ source: 'hook' as const, detail: 'Stop' }],
+          assistantText: '',
+          toolCalls: [],
+        },
+      ],
+    }
+  }
+}
+
+/**
+ * The cost of publishing `ended` LAST, paid rather than assumed (#257).
+ *
+ * `Relay.stop()` closes the seats in a loop whose `try`/`finally` has no `catch`, so a close that
+ * rejects comes straight back out of it -- with the seats after that one never closed, the run
+ * loop never waited for, and the console's teardown as the caller. `ended` there would be the
+ * very lie the ordering change removes, told about a run that may still have children alive: a
+ * `wait for the run to finish` loop would return on it exactly as before.
+ *
+ * So the ending is NOT written on that path. What the record keeps is what the run last actually
+ * said, and the reading of it is already built: `readSession` calls a record `abandoned` when its
+ * state is not `ended` and its pid is gone. The JSON keeps the raw `state` and ADDS `abandoned`
+ * beside it -- nothing is overwritten there; it is the PROSE view that substitutes the label,
+ * printing `abandoned (last said …)` in place of the claimed state. Here the process is the test
+ * runner and is very much alive, so the raw fields are what this asserts; the pid is what turns
+ * them into `abandoned`, and that half has its own tests.
+ */
+test('#257 a teardown whose stop throws leaves the run not ended, with the recorder still closed', async (t) => {
+  const dir = repo(t)
+  const impl = new ReconcilingFailedCloseSession('impl', 'claude', ['ack', 'Did it.'])
+  impl.delayMs = 250
+  impl.closeThrowsBeforeTerminated = 'the pty would not die'
+  // A verdict that pauses the run, so the console is at a PAUSE when stdin closes and no turn is
+  // in flight through the teardown. That is what makes the reconciled turn below unambiguous: a
+  // `turn_end` arriving mid-drain would queue a refresh of its own, and the proof would no longer
+  // be about `recording.close()`.
+  impl.endTurn = { index: 1, verdict: TIMED_OUT }
+  const out = collect()
+  const input = new PassThrough()
+  const running = runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'claude',
+    rounds: 4,
+    checks: [],
+    registry: registryOf({ codex: [slow('advisor', 'codex', ['Do it.', 'DONE'])], claude: [impl] }),
+    input,
+    output: out.stream,
+  })
+
+  await untilText('the pause to be printed', out.text, /paused/)
+  input.end()
+  // Not swallowed. A teardown that failed is a fact its caller is entitled to, and everything
+  // below is about what the RECORD says rather than about hiding the failure from the process.
+  await assert.rejects(running, /the pty would not die/, 'the close failure still reaches the caller')
+
+  const after = resolveSession(dir)
+  assert.ok('session' in after)
+  // NOT `ended`: the run did not stop, it failed to stop. What it last said stands.
+  assert.notEqual(after.session.status.state, 'ended', 'a run whose teardown threw did not end')
+  assert.equal(after.session.status.state, 'paused', 'the record keeps what the run last actually said')
+  // ...and the recorder was closed anyway. Only its final refresh can have put this turn in the
+  // record: it exists in the transcript alone, from the moment the close began, and nothing
+  // emitted an event for it.
+  const turns = after.session.status.participants.find((p) => p.rank === 'implementer')?.turns ?? []
+  assert.ok(
+    turns.some((t) => t.key === ReconcilingFailedCloseSession.RECONCILED),
+    `the recorder took its final snapshot despite the failure: ${JSON.stringify(turns)}`,
+  )
+  // The whole reading, as an operator gets it: not ended, and the moment the pid goes, abandoned.
+  assert.equal(after.session.abandoned, false, 'not abandoned while this process is the one holding the pid')
+  assert.equal(after.session.alive, true, 'and it is -- `abandoned` is this state plus a pid that is gone')
 })
 
 test('#252 a console reading a pipe reports its control channel as held, then closed', async (t) => {

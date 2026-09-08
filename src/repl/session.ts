@@ -2706,11 +2706,41 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     if (liveTerminal) target.write(releaseTitleSequence())
     screen?.close()
     rl?.close()
+    // `ended` is published LAST, when the run has actually stopped (#257).
+    //
+    // It used to be the first line of this teardown, which made `ended` mean "the console has
+    // begun putting itself away" rather than "the run is over". A poller reading during the
+    // drain got one document that disagreed with itself -- `state: ended` beside `alive: true`
+    // and `progress: in_turn` -- and `until [ "$(conclave status --json | jq -r .state)" !=
+    // running ]` returned while two CLI children were still being killed and the last verdict
+    // had not been read. It also collapsed the window #252 exists to open: a control channel
+    // that dies is reported the instant readline sees EOF, and the `ended` write landed
+    // microseconds later, so there was no moment in which a run was `running` with a dead
+    // channel.
+    //
+    // Nothing is delayed by the move: the same awaits in the same order, one write relocated.
+    //
+    // And it is NOT written at all when the teardown fails, which is the other half of the same
+    // point. `Relay.stop()` closes the seats in a loop with no `catch`, so a close that rejects
+    // comes back out of it with the seats after that one never closed and the run's cleanup
+    // unfinished -- a state in which `ended` would be exactly the lie this change is removing,
+    // told about a run that may still have children. The record keeps whatever the run last
+    // actually said instead, and for a process that then exits, `state != ended` beside a pid
+    // that is gone is `abandoned` -- computed by `readSession`, added beside the raw state in
+    // the JSON and substituted for it in the prose view. The recorder is still closed on that
+    // path, in the `finally`: its heartbeat
+    // has to stop and its final snapshot has to be taken however the stop went.
+    try {
+      // AFTER the relay: stopping it is what closes the event stream, and closing the
+      // recorder first would cut the terminal `run_end` off before it was read.
+      await relay.stop()
+    } finally {
+      // Then the recorder's own final refresh, AWAITED, so the last turn's grade is in the
+      // document before the line that says the run is over -- rather than arriving in a write
+      // after it, which is what a reader who stopped at `ended` would never see.
+      await recording.close()
+    }
     recording.set('ended')
-    // AFTER the relay: stopping it is what closes the event stream, and closing the
-    // recorder first would cut the terminal `run_end` off before it was read.
-    await relay.stop()
-    await recording.close()
     tee?.end()
   }
   return 0
