@@ -11,7 +11,7 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync, spawn, spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { createReadStream, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { resolveSession } from '../workspace/sessionRecord.ts'
 import { acquire as acquireLock } from '../workspace/sessionLock.ts'
 import { formatSessionJson } from '../workspace/sessionView.ts'
@@ -24,7 +24,7 @@ import type { Verdict } from '../contract/outcome.ts'
 import type { ChildLiveness } from '../outcomes/liveness.ts'
 import { IDLE_CPU_PERCENT } from '../outcomes/liveness.ts'
 import { NO_DEADLINE_CLOCKS, type DeadlineSupport } from '../registry/types.ts'
-import type { AgentSession } from '../contract/session.ts'
+import type { AgentSession, CloseMode } from '../contract/session.ts'
 import { AgentRegistry } from '../registry/registry.ts'
 import { FakeRotationSession } from '../rotation/fakeSession.ts'
 import { summaryLine } from './render.ts'
@@ -1392,6 +1392,23 @@ const BLIP_LIVENESS: ChildLiveness = {
   workingDescendants: 0,
   idle: false,
   measuredAt: Date.UTC(2026, 7, 13, 21, 4, 11),
+}
+
+/**
+ * `untilText` for a fact that is not text, returning what the read saw.
+ *
+ * The value matters: an assertion that polls until a condition holds and then RE-READS is
+ * asserting about a second, later read -- which for a race between a record and a process
+ * exiting is precisely the read that no longer proves anything.
+ */
+async function untilWith<T>(what: string, read: () => T | undefined | false, ms = 10_000): Promise<T> {
+  const deadline = Date.now() + ms
+  for (;;) {
+    const got = read()
+    if (got) return got
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`)
+    await new Promise((r) => setTimeout(r, 2))
+  }
 }
 
 async function untilText(what: string, text: () => string, re: RegExp, ms = 5000): Promise<void> {
@@ -5546,4 +5563,247 @@ test('#191 stdin closing mid-run says so, rather than looking like an operator w
   assert.match(text, /stdin reached EOF while the run was still going/)
   // The remedy, where it is read: the recipe rather than a diagnosis alone.
   assert.match(text, /mkfifo ctl/)
+  // ...and a remedy that does not contain the failure (#252). This warning is printed to an
+  // operator whose run has JUST died of a closed stdin, so it is read by someone recovering and
+  // followed exactly -- and what it used to recommend was `sleep 86400`, a holder with a
+  // 24-hour fuse, on a tool whose runs have gone twelve hours. The property is pinned rather
+  // than the spelling: no holder that exits on a timer, whatever it is called.
+  const holder = text.slice(text.indexOf('mkfifo ctl'), text.indexOf('mkfifo ctl') + 60)
+  assert.doesNotMatch(holder, /\bsleep\b|\btimeout\b/, `the printed holder must have no timer: ${holder}`)
+  assert.match(holder, /tail -f \/dev\/null > ctl/, 'the holder with no timer, named')
+
+  // And the record says what happened, which is the other half of #252: an operator reading
+  // this session afterwards can tell a run that ended because its control channel died from one
+  // that ended because it finished. Before this they were the same document.
+  const found = resolveSession(dir)
+  assert.ok('session' in found, 'the run recorded a session')
+  assert.equal(found.session.status.stdin, 'closed', 'the ending cause survives in the record')
+})
+
+/**
+ * A seat whose teardown takes time, which is the ONE respect in which the shared double is not
+ * like an adapter.
+ *
+ * `FakeRotationSession.close()` returns on the same tick. A real one does not: `Relay.stop()`
+ * closes two CLI children -- signal, wait for exit, final transcript read -- and that is the
+ * window in which a run is still there after its stdin has gone. A test built on the instant
+ * double cannot see that window at all, so it would report "no window exists" when what it
+ * measured was its own fixture.
+ *
+ * Local to this file rather than added to the shared double: exactly one test needs it, and the
+ * three suites that share `FakeRotationSession` should not gain a knob to model something none
+ * of them are about.
+ */
+class SlowClosingSession extends FakeRotationSession {
+  closeDelayMs = 0
+  override async close(mode: CloseMode = 'graceful'): Promise<void> {
+    if (this.closeDelayMs > 0) await new Promise((r) => setTimeout(r, this.closeDelayMs))
+    await super.close(mode)
+  }
+}
+
+/**
+ * The recipe itself, driven end to end: a real fifo, a real `tail -f /dev/null` holder, and the
+ * holder killed underneath a live run (#252).
+ *
+ * The pipe test below proves the console reads its stream's EOF. It does NOT prove the thing an
+ * operator is promised, because a `PassThrough` that a test ends is not a fifo whose holder was
+ * reaped: the fifo has a second process in it, a shell redirect that must rendezvous with the
+ * reader, and transient writers -- `echo '/continue' > ctl` -- that open and close the write end
+ * repeatedly WITHOUT ending anything. A report built on the stream ending would be wrong about
+ * every one of those writers if fifos did not behave as assumed here, and nothing in the suite
+ * asked.
+ *
+ * MEASURED HERE, so the rest of this file's claims rest on an observation instead of on fifo
+ * folklore:
+ *
+ *   - a transient writer's close does not end the reader while the holder is alive;
+ *   - the holder's death ends it within milliseconds, not at the next write.
+ *
+ * The second is worth stating plainly because #252's own text says otherwise -- it describes a
+ * session that "keeps running and keeps accepting messages" after the holder dies, and ends only
+ * when the operator sends one more line. That is not what happens. EOF arrives at the moment the
+ * last writer goes, and the run is already ending before any further write is attempted; a write
+ * after that BLOCKS, because there is no longer a reader to rendezvous with. Which makes the
+ * field's live value `held` -- the confirmation that the channel is still there -- and its
+ * after-the-fact value the ending CAUSE, rather than a warning anyone could act on in between.
+ */
+test('#252 a real fifo: held while the holder lives, closed the moment it dies', async (t) => {
+  // `mkfifo` is POSIX; there is no equivalent to point this at on Windows, and a skip that says
+  // so beats a test that passes there by not running.
+  if (process.platform === 'win32') return
+
+  const dir = repo(t)
+  const fifo = join(dir, 'ctl')
+  execFileSync('mkfifo', [fifo])
+
+  // The holder exactly as the README and `conclave help` tell an operator to start one -- the
+  // command under test as much as the console is. `exec` so the process holding the write end is
+  // `tail` itself and killing it is what an operator's holder dying looks like, rather than a
+  // shell that might outlive its child.
+  const holder = spawn('sh', ['-c', `exec tail -f /dev/null > ${fifo}`], { stdio: 'ignore' })
+  let holderAlive = true
+  const killHolder = () => {
+    if (holderAlive) holder.kill('SIGKILL')
+    holderAlive = false
+  }
+  t.after(killHolder)
+
+  // The read end, opened the way `< ctl` opens it. Both opens BLOCK until the other side
+  // arrives, which is the rendezvous a fifo is: the holder above is already waiting, so this
+  // completes -- and the timeout is here because if it ever did not, an unguarded open would
+  // hang the whole suite rather than fail this test.
+  const input = createReadStream(fifo)
+  await new Promise<void>((resolve, reject) => {
+    input.once('open', () => resolve())
+    const bail = setTimeout(() => reject(new Error('the fifo read end never opened')), 10_000)
+    bail.unref()
+    input.once('open', () => clearTimeout(bail))
+  })
+
+  // Long turns on purpose. The window this test reads in is between the holder's death and
+  // `runSession` returning, and that window IS the drain of whatever turn was in flight -- so a
+  // seat that answered instantly would leave nothing to observe and a green run would prove
+  // only that the assertion got lucky.
+  // Long turns AND a teardown that takes time, both on purpose. The window this test reads in
+  // is between the holder's death and `runSession` returning, and that window is the drain --
+  // `Relay.stop()` closing the seats. With the shared double's instantaneous close there is no
+  // drain to observe and the test would be measuring its own fixture rather than the product;
+  // see `SlowClosingSession`.
+  const impl = new SlowClosingSession('impl', 'claude', ['ack', 'Did it, slowly.'])
+  impl.delayMs = 2_000
+  impl.closeDelayMs = 1_500
+  const advisor = new SlowClosingSession('advisor', 'codex', ['Do it.', 'DONE'])
+  advisor.delayMs = 2_000
+  advisor.closeDelayMs = 1_500
+  const out = collect()
+  let returned = false
+  const running = runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'claude',
+    rounds: 4,
+    checks: [],
+    registry: registryOf({ codex: [advisor], claude: [impl] }),
+    input,
+    output: out.stream,
+  })
+  void running.then(
+    () => {
+      returned = true
+    },
+    () => {
+      returned = true
+    },
+  )
+
+  try {
+    await untilText('the session to be recorded', out.text, /inspect from elsewhere/)
+
+    const live = resolveSession(dir)
+    assert.ok('session' in live, 'the record exists while the run is going')
+    assert.equal(live.session.status.stdin, 'held', 'a fifo whose holder is alive is held')
+
+    // A transient writer, which is how every documented command reaches a run: `echo '/continue'
+    // > ctl` opens the write end, writes, and closes it. If that close ended the reader, the
+    // recipe would kill the session on its first instruction -- so this asserts the command
+    // ARRIVED and that the channel is still held afterwards.
+    writeFileSync(fifo, '/state\n')
+    await untilText('the command written through the fifo to be answered', out.text, /run: (running|paused|not started)/)
+    const afterWrite = resolveSession(dir)
+    assert.ok('session' in afterWrite)
+    assert.equal(afterWrite.session.status.stdin, 'held', "a transient writer's close does not end the channel")
+
+    // Wait until a turn is genuinely in flight, so the drain below has something to drain.
+    await untilWith('a turn to be in flight', () => {
+      const r = resolveSession(dir)
+      return 'session' in r && r.session.status.progress?.state === 'in_turn'
+    })
+    assert.equal(returned, false, 'the run is still going when the holder is killed')
+
+    killHolder()
+
+    // Polled tightly rather than after a sleep: the claim is that the closure is readable while
+    // the session process is STILL THERE, so the read has to happen inside the window rather
+    // than after it. `returned` is checked from the same iteration that saw `closed`.
+    const observed = await untilWith('the closure to reach the record', () => {
+      const r = resolveSession(dir)
+      if (!('session' in r) || r.session.status.stdin !== 'closed') return undefined
+      return { progress: r.session.status.progress?.state, state: r.session.status.state, alive: r.session.alive, returned }
+    })
+    // THE CLAIM. The closure is readable while the session is still there -- the promise has not
+    // resolved, the pid answers, and the turn that was in flight has not finished draining. It is
+    // written by the `close` listener at the moment readline sees EOF, not at the end of teardown,
+    // and the mutation that moves it to the end of teardown fails this test and no other.
+    assert.equal(observed.returned, false, 'the record said closed while the session process was still running')
+    assert.equal(observed.alive, true, 'and while its pid was still there')
+    assert.equal(observed.progress, 'in_turn', 'and while the turn that was in flight had not finished draining')
+    // ...and the record ALREADY says `ended`, beside a `progress` that says `in_turn`. That is not
+    // this change: `recording.set('ended')` runs in the console's teardown BEFORE `relay.stop()`,
+    // so every run announces its end before it has stopped. Pinned rather than left unsaid because
+    // it is the one thing that keeps `stdin` from being a warning an operator could act on -- the
+    // closure and the ending are the same instant to anyone polling -- and because a fix to that
+    // ordering must change this line rather than slip past it. Filed as #257, with this evidence.
+    assert.equal(observed.state, 'ended', 'the record says ended while progress says in_turn (a separate defect)')
+
+    const code = await running
+    assert.equal(code, 0, 'the run ends as it always did')
+    // The pre-existing ending, unchanged: the same warning #191 pins, printed for the same
+    // reason. Nothing here waits for the record -- the reporting is a write on the same tick as
+    // the listener that already existed.
+    assert.match(out.text(), /stdin reached EOF while the run was still going/)
+
+    const ended = resolveSession(dir)
+    assert.ok('session' in ended)
+    assert.equal(ended.session.status.state, 'ended')
+    assert.equal(ended.session.status.stdin, 'closed', 'and the ending cause survives in the record')
+  } finally {
+    killHolder()
+    // Bounded, so a failed assertion above leaves a red test rather than a suite that never
+    // exits: killing the holder is what ends the run, and this is only waiting for the teardown
+    // it started.
+    await Promise.race([running.catch(() => 0), new Promise((r) => setTimeout(r, 30_000).unref())])
+  }
+})
+
+test('#252 a console reading a pipe reports its control channel as held, then closed', async (t) => {
+  // The live half. A detached run is steered through a fifo, and until now nothing said whether
+  // the process holding its write end was still there -- so the first evidence of its death was
+  // the run ending, which is indistinguishable from the run finishing. It cost one multi-hour
+  // run, found by accident.
+  //
+  // Driven through `runSession` rather than through the recorder, because the fact being claimed
+  // is about the CONSOLE's stdin: which stream readline was given, and when it closed. A test
+  // against `recordSession` would prove the record can carry the value and nothing about who
+  // supplies it.
+  const dir = repo(t)
+  const impl = slow('impl', 'claude', ['ack', 'Did it.'])
+  const out = collect()
+  const input = new PassThrough()
+  const running = runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'claude',
+    rounds: 4,
+    checks: [],
+    registry: registryOf({ codex: [slow('advisor', 'codex', ['Do it.', 'DONE'])], claude: [impl] }),
+    input,
+    output: out.stream,
+  })
+
+  // While the run is still going and the pipe is still open. `held` has to be readable HERE --
+  // the whole value of the field is that it is true before the ending it predicts.
+  await untilText('the session to be recorded', out.text, /inspect from elsewhere/)
+  const live = resolveSession(dir)
+  assert.ok('session' in live, 'the record exists while the run is going')
+  assert.equal(live.session.status.stdin, 'held', 'a pipe that has not reached EOF is held')
+
+  input.end()
+  await running
+
+  const after = resolveSession(dir)
+  assert.ok('session' in after)
+  assert.equal(after.session.status.stdin, 'closed', 'and the closure reaches the record')
 })

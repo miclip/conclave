@@ -1244,6 +1244,17 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     // this field exists to replace, since the whole point is telling "this build predates
     // the feature" from "the feature is broken" without asking anyone.
     build: version(),
+    // Whether there is a control channel to lose, from the first write (#252). `interactive`
+    // is already the answer: it is true exactly when readline is reading a terminal, which is
+    // an operator at a keyboard and not a fifo anyone can drop. Everything else -- a fifo, a
+    // pipe, a redirect, a test's stream -- is a channel being HELD until it reaches EOF, and
+    // the `close` handler below is what says it did.
+    //
+    // Passed here rather than set after construction so the key exists on the first document a
+    // poller reads. A key that appeared later would make its absence mean two things, and the
+    // window where it was missing is the start of the run -- which is when a detached operator
+    // polls hardest.
+    stdin: interactive ? 'not_attached' : 'held',
   })
   write(dim(`  session ${recording.id} — inspect from elsewhere with: conclave status ${recording.id}`))
 
@@ -2109,6 +2120,19 @@ export async function runSession(opts: SessionOptions): Promise<number> {
       // `[1G[0J>` escape sequences in its log because readline drew a prompt for it.
       terminal: false,
     })
+    /**
+     * The control channel reaching EOF, written to the record at the moment it happens (#252).
+     *
+     * FIRST among the `close` listeners deliberately. The others print, and one of them --
+     * the race below -- lets `runSession` fall through to teardown, which reports `ended` and
+     * closes the recorder. A listener registered after those would be racing the file being
+     * finished, so the one fact this exists to publish would sometimes not be in it.
+     *
+     * Nothing here changes what happens next. The EOF race is untouched and the run ends
+     * exactly as it did; this only means the ending is legible afterwards, and -- for a run
+     * whose holder died while the run was NOT going -- visible while it is still recoverable.
+     */
+    rl.on('close', () => recording.stdin('closed'))
   }
   prompt()
 
@@ -2425,7 +2449,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
       // FALSIFIER, stated because it is the strongest argument against this shape: the
       // console has no general "trailing text is a message" rule and does not gain one here.
       // `/rotate <text>` and `/abort <text>` consume their text as a REASON
-      // (`src/repl/session.ts:2478`, `src/repl/session.ts:2511`) and `/pause`, `/queue`, `/audit` ignore
+      // (`src/repl/session.ts:2502`, `src/repl/session.ts:2535`) and `/pause`, `/queue`, `/audit` ignore
       // whatever follows them. So an operator who learns this from `/continue` and carries
       // it to `/pause I'll be back` still loses the sentence. That inconsistency is not
       // repaired by making `/continue` a third behaviour; it is narrowed by it, and the
@@ -2641,7 +2665,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
           yellow(
             '  stdin reached EOF while the run was still going, so no further command can arrive. ' +
               'A redirect from a file, or a pipe from one echo, delivers everything and then closes. ' +
-              'Keep the write end open instead: `mkfifo ctl; sleep 86400 > ctl &` and start the ' +
+              'Keep the write end open instead: `mkfifo ctl; tail -f /dev/null > ctl &` and start the ' +
               'session with `< ctl`.',
           ),
         )

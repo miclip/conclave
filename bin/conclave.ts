@@ -124,7 +124,7 @@ Driving conclave from an agent
   Keep stdin OPEN and write commands as lines. Closing it ends the session once its
   current run finishes, so a redirect from a file or a pipe from one echo ends the run at
   its first pause. Use a fifo and hold the write end open:
-      mkfifo ctl; sleep 86400 > ctl &
+      mkfifo ctl; tail -f /dev/null > ctl &   # a holder with no timer
       conclave session "<goal>" --operator agent < ctl &
       echo '/continue' > ctl
     /continue /rotate /abort        answer a pause. /rotate REQUIRES a reason and records it

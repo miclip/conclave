@@ -69,6 +69,28 @@ export function formatSession(s: ReadSession, now: number): string {
         `managed to say — not necessarily what it is doing.`,
     )
   }
+  // The control channel, when the producer reports one (#252). Directly under the staleness
+  // warning because it answers the neighbouring question: `updated` and `STALE` say whether the
+  // run is still writing, and this says whether anyone can still write TO it. A run that is
+  // perfectly healthy on every line above and `closed` here is the case the issue is about --
+  // steerable-looking and unsteerable.
+  //
+  // No line at all when the field is absent, which is the rule the rotation and targeting lines
+  // below follow: a prose reader tells an absent line from a present one perfectly well, and
+  // inventing "stdin: unknown" for `relay` -- a front-end that reads no commands -- would put a
+  // caveat on every record that never had a control channel to begin with.
+  if (st.stdin === 'held') {
+    lines.push('  stdin:     held — commands written to this session still reach it')
+  } else if (st.stdin === 'closed') {
+    // Shouted, like STALE above, and for the same reason: this is a warning about everything
+    // else on the page rather than another fact beside it. An operator scanning a healthy
+    // record must not read past it.
+    lines.push('  STDIN CLOSED: the control channel reached EOF — no further command can arrive,')
+    lines.push('             so a pause raised from here on can never be answered. If this run')
+    lines.push('             is driven through a fifo, the process holding its write end is gone.')
+  } else if (st.stdin === 'not_attached') {
+    lines.push('  stdin:     not attached — a terminal, so there is no control channel to lose')
+  }
   lines.push(`  messages:  ${st.messages}`)
   for (const p of st.participants) {
     const bits: string[] = []
