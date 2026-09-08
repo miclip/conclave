@@ -390,6 +390,62 @@ test('an outcome survives a later state change; a pause does not', async (t) => 
   await recording.close()
 })
 
+/**
+ * What a `set` does before `close()` and what it does after it (#257).
+ *
+ * The two front-ends report the ending from opposite sides of `close()`. `bin/conclave.ts` sets
+ * `ended` on the way IN to its teardown, and the refresh that call queues is a real one -- it is
+ * what puts the run's final grades in the record while the report is being printed. The console
+ * sets it on the way OUT, after `close()` has taken the final awaited snapshot, so a refresh
+ * queued there would start after the last one, land after the run has been declared finished, and
+ * rewrite a record whose reader has already moved on -- onto a working tree that may be gone.
+ *
+ * So the guard is on the RECORDING's lifecycle, not on the state being set, and this pins both
+ * halves of that. The first shape of it read `state !== 'ended'` and would pass the second half
+ * while silently taking the first away from the front-end this change was not about.
+ */
+test('a `set` refreshes until the recording is closed, and only writes after', async (t) => {
+  const root = tempDir(t, 'conclave-record')
+  const relay = fakeRelay()
+  const recording = recordSession(relay, {
+    repoRoot: root,
+    id: 'closed',
+    goal: 'g',
+    front: 'relay',
+    startedAt: Date.now(),
+    build: 'test-build',
+  })
+
+  // BEFORE: the relay front-end's shape. `ended` is reported while the recorder is still open,
+  // and the grades have to follow it into the record without anyone awaiting anything.
+  relay.transcripts.implementer!.turns = [graded('turn-0')]
+  recording.set('ended', { outcome: { reason: 'done', detail: 'DONE' } })
+  const landed = await until('the refresh queued by `set` to land', () => {
+    const seat = readSession(root, 'closed')?.status.participants.find((p) => p.id === 'implementer')
+    return seat?.turns.length === 1 ? seat : undefined
+  })
+  assert.equal(landed.turns[0]?.confidence, 'proven', 'the grade the ending write asked for')
+
+  relay.stream.close()
+  await recording.close()
+
+  // AFTER: the console's shape. The state is still written -- synchronously, as every `set` is --
+  // but no transcript read is asked for, so nothing lands later than this statement.
+  const readsAtClose = relay.transcripts.implementer!.snapshots
+  relay.transcripts.implementer!.turns = [graded('turn-0'), graded('turn-1')]
+  recording.set('ended')
+  const written = readSession(root, 'closed')
+  assert.equal(written?.status.state, 'ended', 'the state write itself still happens')
+  await settle()
+  assert.equal(
+    relay.transcripts.implementer!.snapshots,
+    readsAtClose,
+    'a `set` after `close` reads no transcript, so nothing can land after the ending',
+  )
+  const after = readSession(root, 'closed')?.status.participants.find((p) => p.id === 'implementer')
+  assert.equal(after?.turns.length, 1, 'and the turns are the ones the final refresh read')
+})
+
 test('a seat stopped at a permission prompt says so in the status file', async (t) => {
   const root = tempDir(t, 'conclave-record')
   const relay = fakeRelay()

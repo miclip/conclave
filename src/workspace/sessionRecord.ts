@@ -1379,7 +1379,11 @@ export interface RecordableRelay {
 export interface SessionRecording {
   readonly id: string
   readonly recorder: SessionRecorder
-  /** Report a lifecycle change. Participants and counters are refreshed on every call. */
+  /**
+   * Report a lifecycle change. The state is written immediately; participants and counters are
+   * refreshed after it, detached -- except once `close()` has returned, after which a `set` is
+   * the write alone. See the note on the refresh in `set` itself.
+   */
   set(state: SessionRunState, extra?: { pause?: RunPause | undefined; outcome?: RunOutcome | undefined }): void
   /**
    * Re-read every participant's snapshot and rewrite the status.
@@ -1737,6 +1741,14 @@ export function recordSession(
    * of the only thing standing between a poller and a status file that moves backwards.
    */
   let queue: Promise<void> = Promise.resolve()
+  /**
+   * Set by `close()`, and read only by `set`. See the note there for what it is for.
+   *
+   * Not a general "this recording is finished" flag: `close()` remains idempotent-ish in every
+   * other respect, and nothing here refuses a write after it. What it stops is the DETACHED
+   * work -- the one thing a caller cannot wait for and so cannot order after itself.
+   */
+  let closed = false
   const refresh = (): Promise<void> => {
     queue = queue.then(refreshOnce).catch(() => {})
     return queue
@@ -1759,7 +1771,22 @@ export function recordSession(
     })
     // Detached: `set` is called from the run loop and a lifecycle change must not wait on a
     // transcript read. The state above is written immediately; the turns catch up.
-    void refresh()
+    //
+    // Unless this recording is CLOSED, in which case there is nothing left to catch up with and
+    // the write above is the last one (#257). `close()` ends with an awaited refresh, and the
+    // console now publishes `ended` after it -- so a refresh queued here would start after the
+    // final one, land after the process has been declared finished, and rewrite the record from
+    // a run the reader has already been told is over. That is the race the ordering change
+    // exists to close: a caller that acts on `ended` by removing the working tree gets `could
+    // not write session status` shouted at it by the run it just watched end.
+    //
+    // Keyed on the recording's lifecycle rather than on the STATE being set, which was the first
+    // shape of this guard and was wrong. `bin/conclave.ts` reports `ended` on the way IN to its
+    // teardown, before `relay.stop()` and long before `close()`, and that call's refresh is a
+    // real one: it is what puts the run's final grades in the record while the report is being
+    // printed. A guard reading `state === 'ended'` took it away from a front-end this change was
+    // not about.
+    if (!closed) void refresh()
   }
 
   /**
@@ -1883,12 +1910,17 @@ export function recordSession(
      * The race is a backstop for a caller that never stops the relay at all: teardown that
      * hangs is worse than teardown that gives up.
      *
-     * Then one last snapshot, AWAITED and taken after the stream is done. Both front-ends
-     * report `ended` before closing the recorder, and the last turn of a run is graded at
-     * the very end -- so a recorder that detached without re-reading would leave the final
-     * verdicts out of the only file anyone can read once the process is gone. Last, rather
-     * than first, because the follow loop can still queue refreshes while it drains and the
-     * final one has to be the one that wins.
+     * Then one last snapshot, AWAITED and taken after the stream is done. The last turn of a
+     * run is graded at the very end, so a recorder that detached without re-reading would leave
+     * the final verdicts out of the only file anyone can read once the process is gone. Last,
+     * rather than first, because the follow loop can still queue refreshes while it drains and
+     * the final one has to be the one that wins.
+     *
+     * Which of the two front-ends this is the FINAL word for differs, and the difference is the
+     * reason for the flag set at the end of it. `bin/conclave.ts` reports `ended` on the way in
+     * to its teardown and closes the recorder last, so this refresh is simply the last write.
+     * The console reports it on the way OUT, after this call has returned (#257), so a refresh
+     * queued by that write would land after everything here -- see `set`.
      */
     close: async () => {
       // First, before anything that can take time. Teardown writes the final record itself, and
@@ -1907,6 +1939,9 @@ export function recordSession(
       stop?.()
       await Promise.race([following, new Promise((r) => setTimeout(r, 2_000).unref())])
       await refresh()
+      // Last, and after the refresh it describes: from here a `set` is its write and nothing
+      // else. See the note on the flag and the one in `set`.
+      closed = true
     },
   }
 }
