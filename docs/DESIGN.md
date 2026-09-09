@@ -198,6 +198,24 @@ produces a recommendation, never an automatic upgrade.
 - Pauses as decision points — rotation candidate, advisor escalation, authority conflict,
   and an implementer question that would change the build — resolved from the console or from
   `RunHandle`.
+- A pause you schedule rather than one the run raises. `--checkpoint "<milestone>"`, or
+  `/checkpoint` mid-run, names a place you want to look; the advisor is briefed to report
+  reaching it in ordinary prose, and the run stops there. Every other pause is the
+  orchestrator noticing something wrong. This one is you saying in advance where the
+  interesting moment is, which is a thing an operator wants far more often than a thing
+  going wrong.
+  It fails closed, and that is the whole of what makes it worth having. While a checkpoint is
+  armed the advisor's `DONE` does not end the run: it is refused, and the advisor is told why
+  and asked again. A run that could finish before the checkpoint fired would be a checkpoint
+  that silently was not there — and its record would be indistinguishable from a run whose
+  milestone was genuinely reached and released. For the same reason, a run that ends by any
+  route with the checkpoint still armed says so in its own outcome, so a missing signal is
+  never an absence you have to notice. One shot: continuing past the pause spends it, aborting
+  there does not, because ending a run is not the same decision as accepting the milestone.
+  The signal is a reply beginning `MILESTONE:`, which is prose — so every adapter supports it,
+  where a slash command would have been armable on every run and reportable on only one CLI.
+  Console only: `relay` ends the run at every pause, so a checkpoint there would stop the run
+  it was meant to interrupt with nobody able to release it.
 - Rotation as a transaction: quiesce the old implementer, the advisor authors a handoff,
   the replacement reproduces the verification, and it rolls back if it cannot. Both
   branches proven live, rollback included.

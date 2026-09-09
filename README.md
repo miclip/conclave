@@ -153,6 +153,7 @@ seat's summary, and its rejection creates a repair task rather than authority.
 @src/relay/relay.ts    a path. Tab completes both sigils.
 
 /pause  /continue [message | force]  /wait [minutes]  /rotate [reason]  /abort
+/checkpoint <milestone>
 /allow [who]  /deny [who]
 /state  /log [n]  /queue  /audit  /help  /exit
 ```
@@ -162,6 +163,13 @@ At a pause you may also just answer: a reply is delivered and resumes the run.
 and nothing after it, so `/continue force it through` is a message, not an override.
 `/continue` refuses while the child is measurably busy; `force` overrides it. `/wait`
 records that you looked and chose to wait.
+
+`/checkpoint <milestone>` stops the run where you say rather than where it goes wrong. The
+advisor is told what to watch for and how to report it, the run pauses when it does, and until
+then `DONE` will not end the run. One shot: `/continue` past that pause spends it, and a second
+`/checkpoint` replaces the first. `--checkpoint "<milestone>"` arms one at launch, before the
+first turn. Console only — `relay` ends the run at every pause, so a checkpoint there would stop
+it dead with nobody able to release it.
 
 During a run an addressed line is queued and delivered at the next turn boundary — neither
 CLI takes input mid-turn. Between runs the participants are still alive and an addressed
@@ -383,8 +391,9 @@ Write it as a pointer rather than a summary someone might approve on instead of 
 option that was not offered is refused rather than passed through, and free text comes back as a
 message, never as a command.
 
-Commands arrive on stdin as lines: `/continue`, `/rotate`, `/abort`, `/allow`, `/deny`, or a
-message addressed with `>advisor` / `>implementer`. Nothing needs scraping off the console.
+Commands arrive on stdin as lines: `/continue`, `/rotate`, `/abort`, `/checkpoint`, `/allow`,
+`/deny`, or a message addressed with `>advisor` / `>implementer`. Nothing needs scraping off the
+console.
 
 Stdin has to stay open. A redirect from a file, or a pipe from one `echo`, delivers everything
 and then closes — which ends the session at its first pause. Give it a fifo and hold the write

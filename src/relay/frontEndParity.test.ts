@@ -89,6 +89,15 @@ function switchesIn(block: string): Set<string> {
  * not, and the reason is the price of admission.
  */
 const DECLARED: Record<string, string> = {
+  // --- session only ---------------------------------------------------------------------
+  checkpoint:
+    'a checkpoint arms a PAUSE the operator has to answer, and relay cannot hold one: every ' +
+    'halt on that front-end escalates and ends the run (`Relay#halt`, the `!handle` branch). ' +
+    'So `relay --checkpoint` would take the run it was meant to interrupt and end it at the ' +
+    'milestone instead, with nobody able to release it — the flag would do the opposite of ' +
+    'what it says on the only front-end that cannot honour it. This is the first divergence ' +
+    'that runs session-to-relay rather than the other way, and the direction is the argument: ' +
+    'wiring it into both would not be parity, it would be a flag that lies on one of them.',
   // --- relay only -----------------------------------------------------------------------
   detach:
     'a console detached from its terminal has nothing left to be. The session record makes ' +
