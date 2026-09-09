@@ -510,19 +510,33 @@ export function blockedFrom(
  */
 export interface SessionProgressStatus {
   /**
-   * `in_turn`  at least one seat has an unfinished turn -- the per-turn clocks apply and this
-   *            is not the unmeasured case
-   * `paused`   waiting for a person, deliberately unclocked; `pause` says what for
-   * `idle`     neither: no turn in flight and no pause open. THIS is the state nothing else
-   *            measures, and the one a driver should bound.
+   * `in_turn`    at least one seat has an unfinished turn -- the per-turn clocks apply and this
+   *              is not the unmeasured case
+   * `paused`     waiting for a person, deliberately unclocked; `pause` says what for
+   * `abandoned`  the run ENDED with a turn still in flight: the seat was mid-turn when the run
+   *              stopped. Terminal evidence, not ongoing work -- nothing is going to finish
+   *              that turn, and the reading a driver wants from it is "this run was cut off",
+   *              not "this run is busy".
+   * `idle`       none of those: no turn in flight and no pause open. THIS is the state nothing
+   *              else measures, and the one a driver should bound.
    *
-   * GATE ON `state` BEFORE BOUNDING `idle`. A run that has ENDED is also idle -- it drained and
-   * stopped -- so `progress.state === 'idle' && now - since > budget` is true of every finished
-   * run in the directory, forever. The check a driver wants is that AND `state === 'running'`,
-   * the same gate `alive` already needs. Said here because the field is most useful to a poller,
-   * and a poller is exactly who would meet this on their second run rather than their first.
+   * The two ENDINGS are the reason `abandoned` exists as its own value. A run that drained and
+   * stopped ends with nothing in flight and reads `idle`; a run torn down mid-turn ends with a
+   * seat still inside one. Both are `state === 'ended'`, and before this they were both `idle` --
+   * so the difference between a clean finish and a run killed while a participant was still
+   * working was not in the record at all. It is derived rather than stamped, from the same
+   * `inFlight` set the live states use, which is why `inFlight` is NOT cleared at teardown: the
+   * unfinished turn is the evidence.
+   *
+   * GATE ON `state` BEFORE BOUNDING `idle`. A run that has ENDED cleanly is also idle -- it
+   * drained and stopped -- so `progress.state === 'idle' && now - since > budget` is true of
+   * every finished run in the directory, forever. The check a driver wants is that AND
+   * `state === 'running'`, the same gate `alive` already needs. Said here because the field is
+   * most useful to a poller, and a poller is exactly who would meet this on their second run
+   * rather than their first. `abandoned` needs no such gate: it is only ever reached from an
+   * ended run, and it never means work is still happening.
    */
-  state: 'in_turn' | 'paused' | 'idle'
+  state: 'in_turn' | 'paused' | 'abandoned' | 'idle'
   /**
    * When the run entered this state, so `now - since` is how long it has been in it.
    *
@@ -1487,8 +1501,28 @@ export function recordSession(
    * is the better of two equally cheap choices, recorded as a preference rather than dressed up
    * as a guarantee.
    */
-  const progressOf = (at: number, paused: boolean): { progress: SessionProgressStatus } => {
-    const next: SessionProgressStatus['state'] = paused ? 'paused' : inFlight.size > 0 ? 'in_turn' : 'idle'
+  const progressOf = (at: number, state: SessionRunState): { progress: SessionProgressStatus } => {
+    // Both readings, not one. `inFlight` alone cannot tell a seat that is working from a seat
+    // that was working when the run was torn down, and the lifecycle state alone cannot tell a
+    // clean finish from a cut-off one -- an ended run is `ended` either way. Crossing them is
+    // what produces `abandoned`, and it is why teardown does NOT clear `inFlight`: the
+    // unfinished turn is the whole evidence for the distinction.
+    //
+    // The ordering of the branches carries no meaning and no test can give it one: `state` holds
+    // ONE lifecycle value, so `ended` and `paused` are mutually exclusive and swapping them
+    // changes nothing. What does matter is that the block is recomputed from the state being
+    // WRITTEN on every write -- a run torn down while paused reports the ending, not the pause
+    // it was sitting in, because nothing carries the old reading forward.
+    const next: SessionProgressStatus['state'] =
+      state === 'ended'
+        ? inFlight.size > 0
+          ? 'abandoned'
+          : 'idle'
+        : state === 'paused'
+          ? 'paused'
+          : inFlight.size > 0
+            ? 'in_turn'
+            : 'idle'
     if (next !== progressState) {
       progressState = next
       progressSince = at
@@ -1766,8 +1800,10 @@ export function recordSession(
       ...forces(),
       ...targeting(),
       // The state being SET, not the one on the record: this is the transition itself, and
-      // reading the old value here would date every pause one write late.
-      ...progressOf(Date.now(), state === 'paused'),
+      // reading the old value here would date every pause one write late. The same argument
+      // now covers the ending: `set('ended')` is the write that has to carry `abandoned`, and
+      // reading the record here would still say `running` at that moment.
+      ...progressOf(Date.now(), state),
     })
     // Detached: `set` is called from the run loop and a lifecycle change must not wait on a
     // transcript read. The state above is written immediately; the turns catch up.
@@ -1875,7 +1911,7 @@ export function recordSession(
         ...rotations(),
         ...forces(),
         ...targeting(),
-        ...progressOf(e.at, recorder.status.state === 'paused'),
+        ...progressOf(e.at, recorder.status.state),
       })
     }
   })()

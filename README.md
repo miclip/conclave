@@ -330,13 +330,22 @@ interrupted mid-turn without discarding the turn's work. So a run that starts no
 by nothing, and `progress` is what to bound instead of the log file's mtime:
 
 ```jsonc
-"progress": { "state": "idle", "since": 0 }   // in_turn | paused | idle
+"progress": { "state": "idle", "since": 0 }   // in_turn | paused | abandoned | idle
 ```
 
 `since` moves when the state changes, not when the record is rewritten — `updatedAt` is a
-heartbeat and cannot answer this. Gate on `state` as well: a run that has ENDED is idle too, and
-stays that way in the directory forever, so bound `state == "running" && progress.state == "idle"`.
-A `paused` run is waiting for a person on purpose and is not the same condition.
+heartbeat and cannot answer this. Gate on `state` as well: a run that ended CLEANLY is idle too,
+and stays that way in the directory forever, so bound `state == "running" && progress.state ==
+"idle"`. A `paused` run is waiting for a person on purpose and is not the same condition.
+
+The two endings read differently. A run that drained and stopped ends `idle`; a run torn down with
+a turn still open ends `abandoned`. That is terminal evidence — the seat was cut off mid-turn and
+nothing is going to finish it — never a claim that work is still going on, which is what `in_turn`
+on an ended run would have said. It needs no `state` gate: only an ended run reaches it.
+
+Do not confuse it with the top-level `abandoned`, which answers a different question and can never
+be true at the same time: that one is a run still claiming to be RUNNING with nobody home — no
+ending was written at all. `progress.state == "abandoned"` is a run that did write its ending.
 
 Conclave reports this and acts on none of it. It ends no run for being idle, the same way it sends
 no notification for being blocked.
@@ -389,14 +398,16 @@ read and never taken from the file:
 
 ```sh
 conclave status --json | jq -r '.state, .alive, .progress.state'
-# ended  false  idle      <- finished
-# running true  in_turn   <- working
-# running true  idle      <- alive and between turns; bound this one yourself
+# ended  false  idle        <- finished cleanly
+# ended  false  abandoned   <- ended with a turn still open; the seat was cut off
+# running true  in_turn     <- working
+# running true  idle        <- alive and between turns; bound this one yourself
 ```
 
 Bound `state == "running" && progress.state == "idle"` if you want to catch a run that is alive
 and getting nowhere; `progress.since` moves when the state changes and never when the record is
-rewritten. An ended run reads `idle` too, forever, which is why the `state` half matters.
+rewritten. A cleanly ended run reads `idle` too, forever, which is why the `state` half matters;
+`abandoned` is the other ending and never means a seat is still working.
 
 Ask it about the fifo too. The holder is a second process that can die on its own, and the run
 goes on looking healthy when it does:

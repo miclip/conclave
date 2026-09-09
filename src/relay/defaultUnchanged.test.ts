@@ -1753,7 +1753,8 @@ const DECLARED: Record<string, string> = {
     'precondition, and `corroborated` is the same event with an independent second witness. ' +
     'Nothing an existing consumer read changed value; `detail` is unchanged.',
   'status.progress, what the RUN is doing':
-    'A status document now says what the RUN is doing -- `in_turn`, `paused` or `idle` -- and ' +
+    'A status document now says what the RUN is doing -- `in_turn`, `paused`, `abandoned` or ' +
+    '`idle` -- and ' +
     'since when (#231). Additive, and reported rather than acted on: nothing here ends a run. ' +
     'It exists because both existing clocks measure a TURN. The silence clock is a TurnWatchdog ' +
     'armed against a specific turn and disarmed when it ends, so nothing is armed between turns; ' +
@@ -1764,9 +1765,24 @@ const DECLARED: Record<string, string> = {
     'instrument, a watch on the log file mtime, against a path and format that are not ' +
     'contracts. `since` is sticky: it moves when the STATE changes, never when the document is ' +
     'rewritten, which is what `updatedAt` already does and why `updatedAt` could not answer ' +
-    'this. An ENDED run reads `idle` -- it drained and stopped -- so a bound on `idle` has to ' +
-    'gate on `state` as well, which is pinned rather than left to be discovered. Nothing an ' +
-    'existing consumer read changed value.',
+    'this. An ENDED run that drained and stopped reads `idle`, so a bound on `idle` has to ' +
+    'gate on `state` as well, which is pinned rather than left to be discovered. ' +
+    'THIS ENTRY CHANGES A VALUE AN EXISTING CONSUMER READ, which the rest of DECLARED exists ' +
+    'to avoid, so the reason is stated rather than assumed. A run torn down with a turn still ' +
+    'open used to report `in_turn` forever after it ended -- pinned deliberately, because the ' +
+    'only alternative then considered was collapsing to `idle`, which would have deleted the ' +
+    'observation that a seat was cut off mid-turn. But `in_turn` on an ended run is its own ' +
+    'false reading and the more damaging one: it tells every poller in the directory that a ' +
+    'seat is working, forever, when the run is over and nothing will finish that turn. A ' +
+    'consumer bounding `in_turn` for a stall could never fire on an abandoned run, and one ' +
+    'reading it as liveness read the opposite of the truth. `abandoned` is the third option ' +
+    'neither reading had: the turn was open AND the run ended, which is strictly more ' +
+    'information than either previous value carried. It cannot be added as a NEW field instead ' +
+    '-- the wrong value is the one already in `progress.state`, and leaving it there beside a ' +
+    'correction would give a reader two answers and no rule for which wins. The shape is ' +
+    'unchanged: same field, same type, one more member of the union. Only a consumer that ' +
+    'matched `in_turn` on a run whose `state` is `ended` is affected, and that consumer was ' +
+    'reading a claim conclave should not have been making.',
   'status.blocked, the one place a blocked run is named':
     'A run waiting on somebody now says so at the top of `status --json` (#234). Additive: ' +
     '`blocked` appears only while something is outstanding, and every field it reports was ' +

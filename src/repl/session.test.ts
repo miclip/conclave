@@ -5844,19 +5844,29 @@ test('#252 a real fifo: held while the holder lives, closed the moment it dies',
     assert.equal(ended.session.status.stdin, 'closed', 'and the ending cause survives in the record')
     const endedTurns = ended.session.status.participants.find((p) => p.rank === 'implementer')?.turns ?? []
     assert.deepEqual(endedTurns, first.turns, 'and the settled document says exactly what the first ending one did')
-    // `progress` is STILL `in_turn` here, and that is not the ordering defect coming back. No
-    // terminal `turn_end` reached the recorder for this seat: a mid-turn `stop()` may or may not
-    // produce one on every adapter this project has -- `Relay.#closed` says so in full, and
-    // `FakeRotationSession` is its honest floor, emitting none under any circumstances. The grade
-    // asserted above came from the canonical snapshot instead, which is exactly the split the
-    // adapter seam is for. So `progress` reports the last thing anyone OBSERVED about the seat,
-    // which is that it was in a turn when the run was torn down over it. Pinned rather than
-    // corrected: making `progress` agree with `state` would delete that evidence, and a document
-    // that lies consistently is worse than one that visibly disagrees with itself.
+    // `progress` is `abandoned` here, and this is the same evidence the old `in_turn` pin
+    // protected -- now NAMED rather than left to be inferred. No terminal `turn_end` reached the
+    // recorder for this seat: a mid-turn `stop()` may or may not produce one on every adapter this
+    // project has -- `Relay.#closed` says so in full, and `FakeRotationSession` is its honest
+    // floor, emitting none under any circumstances. The grade asserted above came from the
+    // canonical snapshot instead, which is exactly the split the adapter seam is for. So the
+    // unfinished turn is still on the record, and it is still the last thing anyone OBSERVED
+    // about the seat.
+    //
+    // What changed is what the document CALLS it. The earlier reading pinned `in_turn` because
+    // the only alternative considered was collapsing to `idle`, which would indeed have deleted
+    // the observation -- but `in_turn` on an ended run is its own lie, and a louder one: it tells
+    // every poller in the directory that a seat is working, forever, when the run is over and
+    // nothing is going to finish that turn. `abandoned` is the third option, and it is strictly
+    // more informative than either: the turn was open AND the run ended. Terminal evidence, not
+    // ongoing work.
+    //
+    // This is also the only place the distinction is exercised against a REAL run rather than a
+    // stub relay -- a genuine teardown over a live seat, which is the case it exists for.
     assert.equal(
       ended.session.status.progress?.state,
-      'in_turn',
-      'a turn abandoned by teardown leaves progress where the last observation left it',
+      'abandoned',
+      'a turn abandoned by teardown is recorded as abandoned: the run ended with the turn still open',
     )
 
     // And NOTHING writes the record after that. The ending is the last word, which is what makes
