@@ -7,6 +7,7 @@
 import { strict as assert } from 'node:assert'
 import { execFileSync } from 'node:child_process'
 import test from 'node:test'
+import { outstanding } from '../workspace/mutationMarker.ts'
 import { tempDir } from '../testkit/tempDir.ts'
 import {
   breached,
@@ -129,7 +130,15 @@ test('the real reading is a positive number here, and undefined for a path that 
   // free -- an assertion about the environment wearing the clothes of one about the code,
   // which is the #179 shape exactly. A tight CI runner would have failed it for being tight.
   const banded = here !== undefined && here >= DISK_FLOOR_BYTES && here < DISK_WARN_BYTES
-  assert.equal(preflightWarnings(process.cwd()).length, banded ? 1 : 0)
+  // BOTH halves observational, not one (#265). The repair described above made the DISK half
+  // read the machine instead of assuming it, and left the other half assuming the tree holds no
+  // outstanding mutation marker -- which is the same #179 shape one layer along, and it fired
+  // during exactly the workflow this project mandates. `mutations begin` is the tool provided
+  // for holding a marker while the full suite runs, so a suite that fails whenever one is held
+  // reports a second, unrelated failure in every mutation audit: precisely the noise that
+  // trains a reader to skip past the real one.
+  const held = outstanding(process.cwd()).filter((m) => m.dirty).length > 0
+  assert.equal(preflightWarnings(process.cwd()).length, (banded ? 1 : 0) + (held ? 1 : 0))
 })
 
 test('a full volume is recognised through the wrapping that hides it', () => {
