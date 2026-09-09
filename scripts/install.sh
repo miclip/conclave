@@ -1,7 +1,7 @@
 #!/bin/sh
 # Install conclave: fetch a checkout, build its one native dependency, put `conclave` on PATH.
 #
-#   curl -fsSL https://raw.githubusercontent.com/miclip/conclave/v0.5.34/scripts/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/miclip/conclave/v0.5.35/scripts/install.sh | sh
 #
 # NOT a zip of built artefacts. Node 24 strips types natively, so there is nothing to
 # build except `node-pty` — which is a native module and has to be compiled against the
@@ -16,7 +16,7 @@
 #
 #   ~/.local/share/conclave/            the repository, and only that -- no node_modules
 #   ~/.local/share/conclave-releases/   one worktree per installed ref, each with its own deps
-#   ~/.local/bin/conclave -> ~/.local/share/conclave-releases/v0.5.34/bin/conclave
+#   ~/.local/bin/conclave -> ~/.local/share/conclave-releases/v0.5.35/bin/conclave
 #
 # A version directory is named for its ref and never written again, so a run executing out of
 # one is never disturbed by installing another. NOTHING IS EVER REMOVED HERE: old versions are
