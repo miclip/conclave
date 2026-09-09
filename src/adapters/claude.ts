@@ -2053,6 +2053,21 @@ export class ClaudePtyHookAdapter implements AgentSession {
           claim = { resolve, reject, prompt: message }
           this.#pendingPrompt = claim
         })
+        // A rejection arriving after `send()` has returned must not be UNHANDLED (#267).
+        //
+        // The `finally` below says it: "nothing but this method ever awaited it". So once this
+        // method is done, `#onHook` can still reject this slot -- a hook carrying a corrupted
+        // prompt for a turn nobody is waiting on any more -- and a rejected promise with no
+        // handler is an `unhandledRejection`, whose default action ends the process. That is not
+        // theory: a run died this way on 0.5.36, and #263's containment is in its stack, catching
+        // correctly and catching the wrong thing. `#dispatch` wraps `emit` in try/catch, which
+        // sees a listener that THROWS; a listener that REJECTS delivers to the promise instead
+        // and walks straight past it.
+        //
+        // This attaches a handler and changes nothing else. `.catch()` returns a NEW promise and
+        // leaves `keyed` rejected, so `await keyed` below still throws and every existing repair
+        // path is untouched. All it does is tell the runtime the rejection is somebody's.
+        void keyed.catch(() => {})
         try {
           return await this.#submit(message, keyed)
         } catch (e) {
