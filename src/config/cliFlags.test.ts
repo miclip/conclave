@@ -90,6 +90,11 @@ test('a flag nobody declared is named, not skipped with its value (#172)', () =>
   // and skipped `/tmp/goal.txt` with it, and the console came up asking for the goal it had
   // just been handed. Both halves are asserted: the flag is REPORTED, and its value did not
   // quietly become nothing -- it is a bare token, which is its own refusal one level up.
+  //
+  // `--goal-file` IS a flag on both real commands now, and `SURFACE` above is not either of
+  // them: what is pinned here is the rule, against a surface that does not declare it. The
+  // original argv is kept because it is the one that produced the bug -- the rule is about any
+  // flag the surface does not carry, not about that spelling.
   const parsed = parseArgv(['--goal-file', '/tmp/goal.txt'], SURFACE)
   assert.deepEqual(parsed.unknown, ['--goal-file'])
   assert.deepEqual(parsed.positionals, ['/tmp/goal.txt'])
@@ -98,7 +103,7 @@ test('a flag nobody declared is named, not skipped with its value (#172)', () =>
 
 test('a switch the surface declares is accepted, and consumes nothing', () => {
   // The reason the boolean half of the surface has to exist at all: without it a parser cannot
-  // tell `--force` from `--goal-file`, so it must ignore both.
+  // tell `--force`, a switch, from a flag nobody wrote, so it must ignore both.
   const parsed = parseArgv(['--force', '--json', '--rounds', '4'], SURFACE)
   assert.deepEqual(parsed.unknown, [])
   assert.deepEqual(parsed.flags, ['--force', '--json', '--rounds', '4'])

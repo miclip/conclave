@@ -34,24 +34,34 @@ Typecheck is clean. I did not run the suite myself; the implementer reported 169
 Write the rollback path before the commit path.`
 
 test('the handoff asks what the replacement NEEDS, not what the human asked for', () => {
-  // Rotation was the one place a goal reached an implementer verbatim. The advisor holds
-  // the goal and decides what an implementer knows — but `## GOAL` asked it to restate
+  // Rotation was the one place a goal reached an implementer verbatim. The advisor decides
+  // how much of the destination one instruction carries — but `## GOAL` asked it to restate
   // "what the human asked for, in their terms", and `acceptancePrompt` embeds the whole
-  // narrative. So a session that rotated handed the goal to the new implementer and
-  // abandoned the rule for the rest of the run, silently.
+  // narrative. So a session that rotated stopped saying what every other dispatch says, and
+  // did it silently.
   const prompt = handoffPrompt('the implementer compacted')
 
   assert.ok(!/^## GOAL$/m.test(prompt), 'the section must not ask for the goal as such')
   assert.match(prompt, /^## BRIEF$/m)
-  assert.match(prompt, /You hold the goal; decide how much of it belongs here/)
+  assert.match(prompt, /Decide how much of the goal belongs here/)
+  // A question of SCOPE. What stood here was `You hold the goal; decide how much of it
+  // belongs here` and `not necessarily where the work is heading` -- an advisor told it may
+  // WITHHOLD the destination, which is a claim about access that nothing enforces: the goal
+  // is in `status.json` in the directory the replacement will be working in. The section
+  // still asks the same question, and now asks it as the question it actually is.
+  // See `src/relay/goalDisclosure.test.ts`.
   assert.match(
     prompt,
-    /not necessarily where the work is heading/,
-    'the advisor must be told it may withhold the destination, not merely summarise it',
+    /a question of scope, not of secrecy/,
+    'the advisor must be told this is scope, not a confidentiality decision',
   )
-  // And the replacement's own position is stated, so the advisor is not writing for
-  // someone it imagines already knows the goal.
-  assert.match(prompt, /it does not hold this session's goal/)
+  // And the replacement's own position is stated, so the advisor is not writing for someone
+  // it imagines already knows the goal -- NOT SENT it, which is the only true form.
+  assert.match(prompt, /it is not sent this session's goal/)
+  assert.ok(
+    !/it does not hold this session's goal/.test(prompt),
+    'and never the old claim that a replacement cannot hold the goal',
+  )
 })
 
 test('a complete handoff parses into its sections, multi-line ones intact', () => {

@@ -32,10 +32,13 @@
  * cleanly, dropped both tokens on the floor, and opened a console waiting for the goal that was
  * sitting in the file it had been handed -- and the token after the invented flag was exempted
  * from the stray-token warning, so nothing was printed either. An argv that does not mean what
- * was typed must not start a run. So the surface a command accepts is declared as data
- * (`FlagSurface`), the same declaration is what the parser refuses against, what the near-miss
- * suggestion is drawn from, and what `frontEndParity.test.ts` compares -- one list, so a flag
- * cannot be read by code that no check can see.
+ * was typed must not start a run. (`--goal-file` is a declared flag on both commands today and
+ * does exactly what that operator expected; the bug was never about which flag it was.)
+ *
+ * So the surface a command accepts is declared as data (`FlagSurface`), the same declaration is
+ * what the parser refuses against, what the near-miss suggestion is drawn from, and what
+ * `frontEndParity.test.ts` compares -- one list, so a flag cannot be read by code that no check
+ * can see.
  */
 
 /**
@@ -58,9 +61,9 @@ export const PASS_THROUGH_FLAGS: readonly string[] = ['advisor-args', 'lead-args
  * Everything a command accepts, as data.
  *
  * Both halves are required, and the boolean half is the one #172 was missing. A parser that
- * knows only the valued flags cannot tell `--force` (a switch it takes) from `--goal-file` (a
- * flag nobody wrote), so it must ignore both -- and ignoring an invented flag is how an
- * invocation comes to mean something other than what was typed.
+ * knows only the valued flags cannot tell `--force` (a switch it takes) from a flag nobody
+ * wrote, so it must ignore both -- and ignoring an invented flag is how an invocation comes to
+ * mean something other than what was typed.
  *
  * The same declaration serves three purposes on purpose: it is what the scan consumes values
  * against, what an unknown flag is refused against, and what the near-miss suggestion is drawn

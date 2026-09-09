@@ -99,12 +99,17 @@ test('the reviewer is briefed as a reviewer, not as an implementer, and holds no
     maxAdvisorTurns: 1,
   })
   try {
-    await relay.run('a goal the reviewer must never see')
+    await relay.run('a goal the reviewer is not sent')
     const opening = reviewer.received[0] ?? ''
     assert.match(opening, /^You are the REVIEWER/)
     assert.doesNotMatch(opening, /You are the IMPLEMENTER/)
-    assert.doesNotMatch(opening, /a goal the reviewer must never see/)
-    assert.match(opening, /holds this session's goal/)
+    // Not SENT it -- which is a fact about this message, and the only claim available. The
+    // reviewer shares a working directory with the session record that holds the goal, so
+    // "must never see" was never something the briefing could arrange; what makes this seat's
+    // review independent is that its evidence is captured mechanically. See
+    // `goalDisclosure.test.ts`.
+    assert.doesNotMatch(opening, /a goal the reviewer is not sent/)
+    assert.match(opening, /advisor is given this session's goal/)
 
     const implOpening = impl.received[0] ?? ''
     assert.match(implOpening, /^You are the IMPLEMENTER/)

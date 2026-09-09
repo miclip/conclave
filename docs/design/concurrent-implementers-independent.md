@@ -112,9 +112,9 @@ operator request, and abort.
 from #49's design and worth saying out loud.
 
 **The important move: most seat pauses should not reach the operator at all.** A blocked
-seat is a *task* for the advisor, not a question for the human. The advisor holds the goal
-(`relay.ts:368`) and is the right party to decide whether a blocked seat should be
-redirected, have its work reassigned, or wait. Escalate to the human only when the advisor
+seat is a *task* for the advisor, not a question for the human. The advisor is the seat the
+goal is delivered to (`relay.ts:368`) and the one that steers, so it is the right party to
+decide whether a blocked seat should be redirected, have its work reassigned, or wait. Escalate to the human only when the advisor
 itself escalates — which the briefing already has a word for (`ESCALATE`, `relay.ts:331`).
 
 Without this, N seats produce N times the interruptions and the feature is unusable at

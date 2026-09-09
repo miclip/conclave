@@ -348,7 +348,7 @@ const DECLARED: Record<string, string> = {
     'Authority routing (#56, D2) sends implementer_unanswered to the advisor before the operator, ' +
     'so a default run interrupts the human less than today. Real change at N=1, an improvement, ' +
     'declared rather than discovered. The pause reason exists at src/relay/run.ts:52 and the halt ' +
-    'that raises it is at src/relay/relay.ts:8039.',
+    'that raises it is at src/relay/relay.ts:8073.',
   'status.pause.resolution':
     'Classifying unresolved conditions on both axes (#56, D2) added `resolution` to every RunPause ' +
     '(src/relay/run.ts:329), so `conclave status --json` on a paused default run now carries ' +
@@ -630,7 +630,7 @@ const DECLARED: Record<string, string> = {
     'participant and nobody else, and a conclave or workstream scope samples NOBODY. It used to ' +
     'read pause.verdictOf.participant and fall back to scanning participants by rank for ' +
     'implementers — and verdictOf is set at exactly two halt sites, both turn_incomplete ' +
-    '(src/relay/relay.ts:7622, src/relay/relay.ts:8176), so every other pause reached that rank ' +
+    '(src/relay/relay.ts:7656, src/relay/relay.ts:8210), so every other pause reached that rank ' +
     'scan. WHAT CHANGES AT N=1: on the three pauses whose scope names no participant — ' +
     'operator_requested (/pause), advisor_escalated, authority_conflict — the lone implementer ' +
     'child used to be sampled, so a child that measured busy REFUSED the resume and wrote ' +
@@ -639,15 +639,15 @@ const DECLARED: Record<string, string> = {
     'safety guard rather than presented as a pure N>1 fix. The reason it is the right narrowing: ' +
     'the guard exists because continuing SENDS into a child that cannot accept input mid-turn, ' +
     'and on those three pauses the child it measured is not the child being sent to — resuming ' +
-    'advisor_escalated sends to the ADVISOR (src/relay/relay.ts:7757), resuming ' +
+    'advisor_escalated sends to the ADVISOR (src/relay/relay.ts:7791), resuming ' +
     'authority_conflict queues a constraint that is delivered by the dispatcher on the next ' +
     'dispatch to a free seat, and operator_requested is consumed at an advisor-turn boundary ' +
     'whose own evidence line says no turn is in flight. WHAT IS GIVEN UP, named rather than ' +
     'discovered: the advisor_escalated halt raised when a seat’s turn completed and its report ' +
-    'could not be read (src/relay/relay.ts:8090) is conclave-scoped by design, yet the useful ' +
+    'could not be read (src/relay/relay.ts:8124) is conclave-scoped by design, yet the useful ' +
     'question there is whether THAT seat is still writing; at N=1 the rank scan sampled it by ' +
     'coincidence of it being the only implementer, and now nothing does. The pause still carries ' +
-    'that seat’s liveness evidence from the halt site (src/relay/relay.ts:8101), which is what ' +
+    'that seat’s liveness evidence from the halt site (src/relay/relay.ts:8135), which is what ' +
     'the operator actually reads; restoring a refusal there is a change to that halt’s scope, ' +
     'not to the guard. AT N>1 the old behaviour was unsafe in the other direction: a pause about ' +
     'one seat could be refused because a DIFFERENT seat was mid-turn, and the operator was told ' +
@@ -1798,9 +1798,38 @@ const DECLARED: Record<string, string> = {
     'why conclave does not turn pauses into notifications. `awaitingPermission` gains `since` ' +
     'alongside `tool`, so the roll-up can be derived from the document rather than measured by a ' +
     'second clock.',
+  '--goal-file on both front-ends':
+    'The optional flag surface grows by one on each command: --goal-file <path>, which reads ' +
+    'the goal out of a file instead of out of the argv. Valued and optional on both, with no ' +
+    'default and no other effect: a run that does not pass it is parsed, briefed, recorded and ' +
+    'reported exactly as before, because the goal reaches every one of those places as the same ' +
+    'string it always did. D1 forbids an optional flag becoming required; it is not one -- the ' +
+    'positional goal is still the way a run is started and is still refused as absent on relay ' +
+    'when neither form is given. ' +
+    'THE REASON is that an argv is not private. The goal is the whole brief for a run, and on a ' +
+    'shared machine `ps` shows it to every account on the box while the shell writes it to a ' +
+    'history file that outlives the run. Neither is a hypothetical for the front-end this ' +
+    'project is built to be driven from: an agent operator composes a goal that quotes issue ' +
+    'text, file paths and sometimes credentials-adjacent context, and then puts it in argv. ' +
+    'THE TWO FORMS ARE REFUSED TOGETHER rather than reconciled: preferring the file would drop ' +
+    'a goal somebody typed and is watching for, preferring the argument would ignore the file ' +
+    'they pointed at, and both readings lose an intention that was stated out loud. An empty or ' +
+    'whitespace-only file is refused for the same reason -- that is a goal that never got ' +
+    'written, and briefing two agents on nothing is worse than saying so. The text is trimmed ' +
+    'at both ends and nowhere else, so a multi-line goal keeps its blank lines. ' +
+    'DETACHED RUNS PROPAGATE THE FORM, which is the half that would otherwise have made the ' +
+    'flag pointless. `relay --detach` re-executes the CLI as a background child, and it builds ' +
+    'the child argv by appending `-- <goal>`; a run started with --goal-file would have put the ' +
+    'text the operator kept out of the parent argv into the child argv, where it sits for the ' +
+    'life of the run. So the flag and its path are what is handed on -- they are already in ' +
+    'flagArgv -- and the child reads the file itself. The cost is stated in the usage text: the ' +
+    'file has to still exist when the child reads it, moments later. ' +
+    'NOTHING ELSE MOVED. The goal is still recorded in the session record and still linted ' +
+    'before anything starts, in both forms, because those are about the goal and not about how ' +
+    'it was spelled.',
 }
 
-test('DECLARED contains exactly the routing, pause-resolution, attribution, ceiling-flag, seat-flag, seat-status, launch-record, flag-reader, integration-check, per-seat-rotation, reviewer, resume-guard, mixed-liveness, timestamped-liveness, model-validation, executable-preflight, compaction-survival, rotation-reporting, send-precondition, process-tree-liveness, ceiling-reporting, record-heartbeat, rotation-intent, console-dry-run, flag-reconciliation, paused-time, advisor-targeting, silence-timeout, launch-bounds, origin-reconciliation, capability-briefing, candidate-class, run-progress and blocked-rollup entries', () => {
+test('DECLARED contains exactly the routing, pause-resolution, attribution, ceiling-flag, seat-flag, seat-status, launch-record, flag-reader, integration-check, per-seat-rotation, reviewer, resume-guard, mixed-liveness, timestamped-liveness, model-validation, executable-preflight, compaction-survival, rotation-reporting, send-precondition, process-tree-liveness, ceiling-reporting, record-heartbeat, rotation-intent, console-dry-run, flag-reconciliation, paused-time, advisor-targeting, silence-timeout, launch-bounds, origin-reconciliation, capability-briefing, candidate-class, run-progress, blocked-rollup and goal-file entries', () => {
   assert.deepEqual(Object.keys(DECLARED), [
     'deny-only project configuration for capabilities and commands',
     'implementer_unanswered -> advisor',
@@ -1838,6 +1867,7 @@ test('DECLARED contains exactly the routing, pause-resolution, attribution, ceil
     'a rotation candidate says which class raised it',
     'status.progress, what the RUN is doing',
     'status.blocked, the one place a blocked run is named',
+    '--goal-file on both front-ends',
   ])
 })
 
@@ -2027,7 +2057,7 @@ async function seatsFromSessionCli(t: TestContext): Promise<{ creates: CreateRec
  * The two machine-readable documents a default run actually emits.
  *
  * Both come out of one `relay --json` run in a temporary repository, through the production
- * call sites: the report is what `bin/conclave.ts:2028` prints, and the status record is what
+ * call sites: the report is what `bin/conclave.ts:2134` prints, and the status record is what
  * `recordSession` wrote during that same run, read back by `main(['status', '--json'])` --
  * which resolves the most recent session in `process.cwd()`, so the record has to have been
  * written where an operator would look for it.
@@ -2279,7 +2309,7 @@ async function provokeReviewBlocked(repo: string): Promise<{ relay: Relay; run: 
  * Drive a real relay into one condition and return the pause it raised.
  *
  * The provocations are the ones `resolution.test.ts`'s own `provoke` already uses, deliberately:
- * the same triggers reaching the same single halt site (src/relay/relay.ts:4664), where the
+ * the same triggers reaching the same single halt site (src/relay/relay.ts:4698), where the
  * classification is computed by production `resolutionFor` from the subject the caller passed.
  * Nothing here writes a `RunPause`.
  *
@@ -2568,9 +2598,9 @@ test('default run works in the run cwd and creates no worktree', async (t) => {
     assert.equal(c.cwd, fromCli.cwd, `the session CLI must create ${c.id} in the run cwd`)
   }
 
-  // The relay CLI passes process.cwd() as the run cwd: bin/conclave.ts:1929-1931.
-  // The relay hands that same cwd to each participant adapter: src/relay/relay.ts:2518-2524.
-  // The cwd getter simply returns the option: src/relay/relay.ts:2215-2217.
+  // The relay CLI passes process.cwd() as the run cwd: bin/conclave.ts:2035-2037.
+  // The relay hands that same cwd to each participant adapter: src/relay/relay.ts:2551-2557.
+  // The cwd getter simply returns the option: src/relay/relay.ts:2248-2250.
   assert.match(relay, /cwd:\s*process\.cwd\(\)/, 'relay block must start in process.cwd')
   // Both creation sites now pass a NAMED context object rather than an inline literal, because
   // the same object composes the launch args that get recorded -- see
@@ -2620,7 +2650,7 @@ test('default run works in the run cwd and creates no worktree', async (t) => {
 
   // A default run with no subagents must not create any git worktree. The relay only samples
   // the worktree list for its subagent-use report: src/relay/subagents.ts:113 defines
-  // worktreePaths, and src/relay/relay.ts:3541-3542, :4165 and :6751 read it.
+  // worktreePaths, and src/relay/relay.ts:3575-3576, :4199 and :6785 read it.
   // Prove it by exercising the run in a real temporary repository.
   const repo = tempDir(t, 'conclave-default')
   execFileSync('git', ['init', '--quiet'], { cwd: repo })
@@ -2697,6 +2727,10 @@ test('both flag helpers fall back when the flag is absent, and each block reads 
       'detached-id',
       'dry-run',
       'force',
+      // The declared addition; see DECLARED['--goal-file on both front-ends']. Valued and
+      // optional on both, with no default, so a run that does not pass it reads its goal from
+      // the argument exactly as it always did.
+      'goal-file',
       'implementer',
       'implementer-args',
       'implementers',
@@ -2736,6 +2770,9 @@ test('both flag helpers fall back when the flag is absent, and each block reads 
       // parity decision (#134)']. Boolean and optional, so a default console run is unchanged.
       'dry-run',
       'force',
+      // The same declared addition as on relay above, landing on both front-ends in the one
+      // change. See DECLARED['--goal-file on both front-ends'].
+      'goal-file',
       'implementer',
       'implementer-args',
       'implementers',

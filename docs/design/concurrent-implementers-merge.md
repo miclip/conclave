@@ -212,8 +212,9 @@ lane stays `assigned`, not blocked. Without this the per-seat checks the session
 correct in principle and unusable at N=4.
 
 **2. Most seat blocks must go to the advisor, not the operator.** A blocked seat is work, not
-a question for a human. The advisor holds the goal (`relay.ts:368`) and is the right party to
-redirect or reassign; escalate to the human only when the advisor itself says `ESCALATE`
+a question for a human. The advisor is the seat the goal is delivered to (`relay.ts:368`) and
+the one that steers, so it is the right party to redirect or reassign; escalate to the human
+only when the advisor itself says `ESCALATE`
 (`relay.ts:331`). N seats otherwise produce N times the interruptions and the feature is
 unusable at N=4 however good the dispatcher is.
 

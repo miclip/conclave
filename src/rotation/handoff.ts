@@ -22,14 +22,19 @@ import type { RepoRecord } from './record.ts'
 
 export interface HandoffNarrative {
   /**
-   * What the advisor chose to tell the replacement, which is NOT the session's goal.
+   * What the advisor chose to tell the replacement, which is not necessarily the goal.
    *
    * It was `## GOAL`, asking the advisor to restate what the human wanted in their terms.
    * That made rotation the one place a goal reached an implementer verbatim -- the whole
-   * narrative is embedded in `acceptancePrompt` -- so a session that rotated silently
-   * abandoned the rule that the advisor decides what an implementer knows. Reframed rather
-   * than stripped: the replacement still needs something to work from, and the advisor is
-   * the one who should decide how much of the goal that is.
+   * narrative is embedded in `acceptancePrompt` -- so a session that rotated stopped saying
+   * what every other dispatch says: that the advisor decides how much of the destination one
+   * instruction carries. Reframed rather than stripped: the replacement still needs something
+   * to work from, and the advisor is the one who should decide how much of the goal that is.
+   *
+   * A question of SCOPE, and not of access. The goal is written in full to `status.json` in the
+   * working directory every seat shares, so an advisor writing this section is choosing what
+   * makes the next stretch of work clear -- never what the replacement is permitted to know.
+   * A handoff that leant on the second reading would be leaning on nothing.
    */
   brief: string
   currentState: string
@@ -91,15 +96,17 @@ export function handoffPrompt(reason: string): string {
 
 Write the handoff that lets a fresh implementer continue this work. It has none of your
 history: it has not seen the instructions or anything either of us said. Like the
-implementer it replaces, it does not hold this session's goal — what it knows is what you
-write here.
+implementer it replaces, it is not sent this session's goal — so what it is TOLD, it is told
+here.
 
 Use exactly these headings, in this order, and put nothing outside them:
 
 ## BRIEF
 What the replacement needs in order to continue, in the human's terms rather than yours.
-You hold the goal; decide how much of it belongs here exactly as you decide what to put in
-an instruction. Enough to do the work — not necessarily where the work is heading.
+Decide how much of the goal belongs here exactly as you decide what to put in an instruction:
+a question of scope, not of secrecy. The goal is in the session record every seat can read,
+so write what makes the next stretch of work clear — not what you would be willing to
+disclose.
 
 ## STATE
 Where the work actually is right now. Be specific about what is finished and what is not.

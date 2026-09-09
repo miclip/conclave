@@ -657,10 +657,18 @@ test('under --json nothing but the report may reach stdout', () => {
   // re-executing the binary rather than forking a worker -- so the goal has to reach it the way
   // an operator would have to type one that begins with a dash. Without the marker, a goal the
   // parent accepted after a `--` of its own would arrive at the child as a flag it refuses.
+  //
+  // And only when the goal was TYPED. A run started with `--goal-file` has the flag and its
+  // path in `flagArgv` already and the child reads the file itself; appending the text here as
+  // well would put the goal into the child's argv, which is the one thing that flag exists to
+  // prevent. Both halves are proved against the argv of a real detached child in
+  // src/relay/goalFile.test.ts -- what is pinned here is the shape, because this block's stdout
+  // exemption above is argued from the argv it builds.
   assert.match(
     detachBlock,
-    /'--',\n\s*goal,/,
-    'the detached child must be given the goal as a positional after the end-of-options marker',
+    /\.\.\.\(goalFile === '' \? \['--', goal\] : \[\]\),/,
+    'the detached child must be given a typed goal as a positional after the end-of-options ' +
+      'marker, and a file-form goal as the file form',
   )
 })
 

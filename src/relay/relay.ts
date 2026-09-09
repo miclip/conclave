@@ -1234,15 +1234,21 @@ see its tool calls, its diffs, or its code. You see only the prose it writes bac
 as a human following along would. You share its working directory, so you can read files
 and run commands yourself to check any claim it makes; prefer doing that over believing it.
 
-YOU HOLD THE GOAL. The human gave it to you and not to the implementer, which has been
-told only that you are steering. What the implementer needs to know in order to do the
-next piece of work is your call, every time. Sometimes that is the whole goal; sometimes
-it is deliberately less, because knowing the destination changes how the work gets done —
-a reviewer told what verdict is wanted stops being a reviewer. Neither is the safe
-default, so decide rather than reaching for one.
+YOU ARE GIVEN THE GOAL AND YOU STEER. The full goal is included in your briefing and is not
+repeated in the implementer's, which has been told only that you are steering. What the
+implementer needs in order to do the next piece of work is your call, every time. Sometimes
+that is the whole goal; sometimes it is less, because one concrete step lands better without
+the whole destination competing with it.
 
-Withholding is not licence to mislead. Never state something false about the work, and
-never let the implementer believe it has finished something it has not.
+That is a choice about SCOPE AND SEQUENCING, and you must not plan as though it were more.
+You do not control access to the goal: every run writes it in full to
+.conclave/sessions/<id>/status.json in the working directory you share, and any seat here can
+read it. So leaving the goal out of an instruction buys you a sharper instruction and nothing
+else — not a guarantee that the implementer does not know where this is heading, and not an
+independent review from a seat that has not seen what you want.
+
+Never state something false about the work, and never let the implementer believe it has
+finished something it has not.
 
 If the goal is ambiguous, ASK — reply exactly ESCALATE: followed by your question. The
 human sees it, answers, and the run continues with their reply in front of you. That is
@@ -1538,10 +1544,18 @@ function seatCoordinationNotice(seatId: string, seats: readonly SeatExecution[],
  *
  * States the load-bearing rule up front, the same one the module doc of `rotation/review.ts`
  * argues for: everything it is given is captured mechanically, never written by the seat under
- * review. `WITHHELD_GOAL_NOTICE` is sent to this seat too, for the reason `LEAD_BRIEFING`
- * gives its own name to: "a reviewer told what verdict is wanted stops being a reviewer".
+ * review. `GOAL_ROUTING_NOTICE` is sent to this seat too, for the same reason it goes to an
+ * implementer -- to say where the goal went rather than leave its absence to be guessed at.
+ *
+ * NOT as a guarantee of independent review, which is what stood here: "a reviewer told what
+ * verdict is wanted stops being a reviewer". That is a fair principle and this is not a
+ * mechanism that delivers it -- the goal is in the session record this seat shares a directory
+ * with. What makes a review here independent is the PROVENANCE of what it is given: a diff and
+ * a tree captured from git and from the checks, never the producing seat's account of itself.
+ * That property is mechanical and holds whatever the reviewer has read.
  */
-const REVIEWER_BRIEFING = `You are the REVIEWER on this session. You do not write code and hold no goal.
+const REVIEWER_BRIEFING = `You are the REVIEWER on this session. You do not write code, and
+the goal is not sent in this briefing.
 
 You will be sent one review at a time: the instruction a seat was given, and what changed in
 its tree, captured directly from git and from the configured checks — never written or
@@ -1556,18 +1570,31 @@ rejection becomes a task assigned back to that seat automatically; you do not di
 yourself.`
 
 /**
- * What the implementer is told INSTEAD of the goal.
+ * What the implementer is told about where the goal went.
  *
- * The human's goal now reaches the advisor alone. Two reasons, and the second is the one
- * that made it unconditional: a session may deliberately need the implementer not to know
- * where the work is heading — a reviewer told what verdict is wanted stops being a
- * reviewer — and a goal that went to both by default made that impossible to arrange
- * after the fact. The first is simply that the advisor is in charge, and an instruction
- * that has to compete with the recipient's own reading of the goal is a weaker
- * instruction.
+ * The goal is ROUTED to the advisor alone, and routing is all it is. The reason is that the
+ * advisor steers: the seat deciding what happens next is the one that needs to know what the
+ * work is for, and an instruction competing with the recipient's own reading of the goal is a
+ * weaker instruction.
  *
- * Said out loud rather than left as an absence. An implementer that noticed no goal would
- * reasonably go looking for one, or ask, and spend a turn doing it.
+ * IT IS NOT A SECRECY BOUNDARY, and this notice used to say it was -- "you have not been given
+ * it, and that is deliberate rather than an oversight -- do not go looking for it or ask what
+ * it is". False in the one way that matters. Every run writes the goal in full to
+ * `.conclave/sessions/<id>/status.json`, in the working directory every seat shares, and that
+ * file is deliberately inspectable: `sessionRecord.ts` argues for it as a file rather than a
+ * socket precisely so it survives the process and can be read with `cat` from anywhere. A seat
+ * with shell access to the repository cannot be given an enforceable secrecy boundary, so the
+ * old wording asked a participant to believe something the tool does not do -- and, worse,
+ * invited the advisor to plan around a boundary that is not there.
+ *
+ * The second reason that stood here has gone with it: that a session may need the implementer
+ * not to know where the work is heading, "a reviewer told what verdict is wanted stops being a
+ * reviewer". Whatever that is worth as a principle, THIS mechanism does not deliver it, and an
+ * unenforceable guarantee is worse than none, because it is the kind that gets relied on.
+ *
+ * What survives unchanged is why there is a notice at all: said out loud rather than left as an
+ * absence, because an implementer that noticed no goal would reasonably go looking for one, or
+ * ask, and spend a turn doing it.
  */
 /**
  * How a direct question announces itself.
@@ -1586,10 +1613,17 @@ reply goes to them and to nobody else, and nothing you say here is routed to the
 participant. Answer them, or say what you would instruct — do not spawn a subagent to
 stand in for the other participant.]`
 
-const WITHHELD_GOAL_NOTICE = `The advisor holds this session's goal. You have not been given
-it, and that is deliberate rather than an oversight — do not go looking for it or ask what
-it is. Work from the instruction in front of you, and say plainly when something about it
-does not make sense to you.`
+const GOAL_ROUTING_NOTICE = `The advisor is given this session's goal and steers the work, so
+what you are told about it, and when, is its call. It was not sent to you with this briefing.
+
+That is about scope and sequencing, not secrecy. Every run writes the goal in full to
+.conclave/sessions/<id>/status.json in the working directory you share, and nothing prevents
+you or anything else running here from reading it. So a briefing without the goal is not
+evidence that something is being kept from you, and reading the record is not going behind
+anyone's back.
+
+Work from the instruction in front of you, and say plainly when something about it does not
+make sense to you.`
 
 /**
  * Subagents, and the one hard rule about them.
@@ -6676,7 +6710,7 @@ export class Relay {
       const asRole = roleBriefingForSeat(seat.role, this.#roleDescription(seat.role))
       await this.#exchange(
         seat,
-        `${IMPLEMENTER_BRIEFING}\n\n${SUBAGENT_BRIEFING}\n\n${asRole === '' ? '' : `${asRole}\n\n`}${WITHHELD_GOAL_NOTICE}\n\n${prior}Acknowledge briefly; do not start work yet.`,
+        `${IMPLEMENTER_BRIEFING}\n\n${SUBAGENT_BRIEFING}\n\n${asRole === '' ? '' : `${asRole}\n\n`}${GOAL_ROUTING_NOTICE}\n\n${prior}Acknowledge briefly; do not start work yet.`,
       )
     }
     // The reviewer's own opening turn, sent `REVIEWER_BRIEFING` instead of
@@ -6686,7 +6720,7 @@ export class Relay {
     if (reviewerSeat) {
       await this.#exchange(
         reviewerSeat,
-        `${REVIEWER_BRIEFING}\n\n${SUBAGENT_BRIEFING}\n\n${WITHHELD_GOAL_NOTICE}\n\n${prior}Acknowledge briefly; do not start work yet.`,
+        `${REVIEWER_BRIEFING}\n\n${SUBAGENT_BRIEFING}\n\n${GOAL_ROUTING_NOTICE}\n\n${prior}Acknowledge briefly; do not start work yet.`,
       )
     }
     const maxAdvisorTurns = boundOf(this.#opts)

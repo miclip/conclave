@@ -57,10 +57,19 @@ Conclave is the first and has grown into the second:
 | edges | the task queue, and the advisor's own routing decisions |
 | shared state | the integration tree, checked after every merge and not only per seat |
 
-The advisor is the node that holds the goal, and it is the one deciding which edge is taken
-next: it is inside the loop rather than a step in it. That is the whole reason the goal goes
-to it alone — a node that routes work has to know what the work is for, and one that merely
-executes does not.
+The advisor is the node the goal is delivered to, and it is the one deciding which edge is
+taken next: it is inside the loop rather than a step in it. That is the whole reason the goal
+is routed to it alone — a node that routes work has to know what the work is for, and one that
+merely executes does not.
+
+Routing is all it is. The goal is written in full to every run's own `status.json`, in the
+working directory all the seats share, and that record is deliberately inspectable because it
+is the only account a crashed run leaves. So the advisor's choice about how much of the goal an
+instruction carries is a choice about scope and sequencing — never a confidentiality boundary,
+and never a way to buy an unbiased review from a seat that has not been told the destination.
+A seat with shell access to the repository cannot be given a boundary the tool can enforce, and
+the briefings say so rather than implying otherwise; `src/relay/goalDisclosure.test.ts` pins
+both the wording and the fact behind it.
 
 What the vocabulary does not capture is the part this project is actually about. A graph says
 which node ran; it does not say whether to believe what came back. `outcomes/` grades every

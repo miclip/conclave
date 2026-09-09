@@ -366,11 +366,11 @@ test('both participants are told about subagents, and about the worktree rule', 
   }
 })
 
-test('the goal reaches the advisor alone, and the implementer is told so', async () => {
-  // A session may need the implementer not to know where the work is heading — a reviewer
-  // told what verdict is wanted stops being a reviewer — and a goal delivered to both by
-  // default makes that impossible to arrange afterwards. The advisor holds it and decides
-  // what to pass on.
+test('the goal is ROUTED to the advisor alone, and the implementer is told where it went', async () => {
+  // Routing, and only routing. The advisor steers, so the seat deciding what happens next is
+  // the one given what the work is for; an instruction competing with the recipient's own
+  // reading of the goal is a weaker instruction. What this is NOT is a secrecy boundary --
+  // see `goalDisclosure.test.ts`, which pins the honest wording and the fact behind it.
   const { relay, lead, impl } = await twoParty(['DONE'], [])
   await relay.run('ship the dark mode toggle')
 
@@ -384,8 +384,8 @@ test('the goal reaches the advisor alone, and the implementer is told so', async
   )
   // Stated, not merely absent: an implementer that noticed no goal would go looking for
   // one, or ask, and spend a turn doing it.
-  assert.match(impl.received[0]!, /advisor holds this session's goal/i)
-  assert.match(impl.received[0]!, /deliberate/i)
+  assert.match(impl.received[0]!, /advisor is given this session's goal/i)
+  assert.match(impl.received[0]!, /not sent to you with this briefing/i)
 })
 
 test('an advisor-held goal is not an audited withholding', async () => {
@@ -415,9 +415,9 @@ test('the advisor is told to investigate itself rather than delegate everything'
   const opening = lead.received[0]!
   assert.match(opening, /YOURSELF/, 'the advisor must be told to do investigative work itself')
   assert.match(opening, /CHANGING the repository/, 'and what the implementer’s turn is for')
-  // Holding the goal is a responsibility, not just a privilege: it has to know it decides
-  // what to pass on, that withholding is not licence to mislead, and that it can ask.
-  assert.match(opening, /YOU HOLD THE GOAL/)
+  // Being given the goal is a responsibility, not just a privilege: it has to know it decides
+  // what to pass on, that it may not mislead, and that it can ask.
+  assert.match(opening, /YOU ARE GIVEN THE GOAL AND YOU STEER/)
   assert.match(opening, /never state something false/i)
   assert.match(opening, /ESCALATE: followed by your question/)
   // Findings must survive the turn: the advisor's only channel onward is its next
