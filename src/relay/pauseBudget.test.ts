@@ -202,6 +202,10 @@ function inertControl(): RunControl {
     },
     requestStop: () => {},
     requestPause: () => {},
+    // Inert: these doubles drive the handle's own state machine, and arming a checkpoint is
+    // the one verb that acts entirely on the relay's loop. See `RunControl.armCheckpoint`.
+    armCheckpoint: () => undefined,
+    checkpointContinued: () => {},
   }
 }
 

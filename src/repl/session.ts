@@ -184,6 +184,19 @@ export interface SessionOptions {
    */
   rounds: number
   /**
+   * A one-shot checkpoint to arm on the first run, from `--checkpoint <milestone>`.
+   *
+   * Only the FIRST run of the session, and only when a goal was given up front: a console
+   * outlives its runs, and a flag typed once at launch is a statement about the run it launched
+   * rather than a standing policy over every run the operator later starts by typing a goal.
+   * `/checkpoint` is how the second one is armed, which is the same distinction `--rounds` does
+   * NOT make and does not need to -- a ceiling is a property of every run and a checkpoint is a
+   * place in one.
+   *
+   * Absent is the default and must stay behaviourless: no second argument reaches `relay.start`.
+   */
+  checkpoint?: string | undefined
+  /**
    * Verification commands. A bare string is `required`; pass `{command, relevance}` for a
    * check that should run and be reported without gating a transfer.
    *
@@ -380,6 +393,7 @@ export const COMMANDS = [
   '/continue',
   '/wait',
   '/rotate',
+  '/checkpoint',
   '/abort',
   '/allow',
   '/deny',
@@ -531,6 +545,12 @@ export const HELP = `
                          rotation candidate, where accepting it is agreement with the proxy,
                          so the record keeps the PROXY's words and yours is not kept (#75).
                          The console says which it did before the transaction starts.
+  /checkpoint <milestone>
+                         stop the run when the ADVISOR reports reaching <milestone>, whatever
+                         else it thinks. It is told what to watch for and how to say so, and
+                         until it does, DONE will not end the run. One shot: /continue past
+                         the pause spends it. A second /checkpoint replaces the first and
+                         says which it replaced. Needs a milestone and a run.
   /abort [reason]        end the run, and stay here for the next one
 
   /allow [who]           answer a participant stopped at a permission prompt
@@ -664,14 +684,14 @@ function renderPause(p: RunPause, width: number): string {
 /**
  * Which children `/continue` samples for liveness, read off the pause's SCOPE.
  *
- * The scope is the pause's own answer to "what does this stop" (`src/relay/resolution.ts:190`),
+ * The scope is the pause's own answer to "what does this stop" (`src/relay/resolution.ts:199`),
  * and it is the only field here entitled to name a seat: a `participant` scope names the one
  * seat whose continuation would require making the unresolved decision, so that seat is the
  * whole question and every other seat is somebody else's turn.
  *
  * This used to read `pause.verdictOf.participant` instead, and that field is narrower than it
  * looks: it is set at exactly two halt sites, both `turn_incomplete`
-  * (`src/relay/relay.ts:7652` and `src/relay/relay.ts:8206`). So FOUR of the five seat-scoped
+  * (`src/relay/relay.ts:7929` and `src/relay/relay.ts:8649`). So FOUR of the five seat-scoped
  * reasons -- `rotation_candidate`, `implementer_unanswered`, `merge_blocked`, `review_blocked`
  * -- named a seat in their scope and were sampled by rank anyway, because the field the guard
  * read was empty. The scope is the field that is always populated, which is the other half of
@@ -685,16 +705,16 @@ function renderPause(p: RunPause, width: number): string {
  * pause never mentioned. The rank fallback's own comment argued it was right "only because
  * there is one of them", which is an argument for deriving the seat from the pause instead of
  * from a rank. Worse than useless on one of them: resuming an `advisor_escalated` pause sends
-  * to the ADVISOR (`src/relay/relay.ts:7791`), so the fallback measured children that were not
+  * to the ADVISOR (`src/relay/relay.ts:8234`), so the fallback measured children that were not
  * about to be sent to at all.
  *
  * What that gives up, stated rather than discovered: the `advisor_escalated` halt raised when a
-  * seat's turn completed and its report could not be read (`src/relay/relay.ts:8124`) is
+  * seat's turn completed and its report could not be read (`src/relay/relay.ts:8567`) is
  * conclave-scoped by design -- "the reason names who is being asked to take it, and the scope
  * follows the reason" -- yet the thing an operator wants to know there is whether THAT seat's
  * child is still writing. Under the rank fallback that seat was sampled at N=1 by coincidence
  * of being the only implementer. It is not sampled now. The pause still carries its own
-  * liveness EVIDENCE from the halt site (`src/relay/relay.ts:8135`), which is what the operator
+  * liveness EVIDENCE from the halt site (`src/relay/relay.ts:8578`), which is what the operator
  * reads;
  * what is gone is a refusal derived from a rank scan. Narrowing that halt's scope, if the
  * refusal is wanted back, is a change to the halt site rather than to this guard.
@@ -1387,6 +1407,15 @@ export async function runSession(opts: SessionOptions): Promise<number> {
   const firstRunEnded = new Promise<void>((resolve) => {
     runEnded = resolve
   })
+  /**
+   * Whether `--checkpoint` has been spent.
+   *
+   * A launch flag arms the run it launched and no other. A console outlives its runs, and an
+   * operator who typed one goal with a checkpoint and then, an hour later, typed a second goal
+   * would otherwise find the first run's milestone armed on work it was never about -- and be
+   * refused a DONE for it. `/checkpoint` is how the second run gets one.
+   */
+  let launchCheckpointSpent = false
   /** Start a run. Declared here because the line handler may call it before it is read. */
   const begin = (goal: string): void => {
     // Shown, never blocking. In the console the operator is present and can retype in a
@@ -1397,7 +1426,14 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     title('working')
     recording.recorder.update({ goal })
     recording.set('running')
-    run = relay.start(goal)
+    // The launch checkpoint, on the first run only. Spread rather than passed as `undefined`,
+    // so a session started without the flag makes the call it has always made (D1).
+    const arming = opts.checkpoint !== undefined && !launchCheckpointSpent ? { checkpoint: opts.checkpoint } : {}
+    launchCheckpointSpent = true
+    if ('checkpoint' in arming) {
+      write(`  checkpoint armed: the run stops when the advisor reports ${bold(arming.checkpoint!)}`)
+    }
+    run = relay.start(goal, arming)
     void supervise(run)
     refreshPrompt()
   }
@@ -2369,6 +2405,25 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     if (word === '/state') {
       write(`  run: ${run ? `${run.state}${run.pause ? ` (${run.pause.reason})` : ''}` : 'not started'}`)
       if (run?.pause?.superseded) write(`  ${yellow('~')} ${run.pause.superseded.note}`)
+      // The operator's own checkpoint, and BOTH states of it. `reached` is printed as well as
+      // `armed` because the two are the answer to different questions an operator asks here --
+      // "will this stop" and "did it stop and did I let it go" -- and a line that appeared only
+      // while armed would leave the second unanswered on exactly the run that had one. Nothing
+      // at all when none was armed, which is every default run.
+      const armed = relay.checkpoint
+      if (armed) {
+        // THREE readings, because there are three facts and only one of them is acceptance.
+        // `signalled` used to be invisible -- folded into the release -- and an operator sitting
+        // at the pause was told the checkpoint was merely `armed`, which is the state it is in
+        // before the advisor has said anything at all.
+        write(
+          armed.state === 'armed'
+            ? `  checkpoint ${armed.generation}: ${bold(armed.milestone)} — armed; DONE will not end this run until the advisor signals it`
+            : armed.state === 'signalled'
+              ? `  checkpoint ${armed.generation}: ${bold(armed.milestone)} — the advisor says this is reached; /continue accepts it, /abort ends the run without accepting`
+              : dim(`  checkpoint ${armed.generation}: ${armed.milestone} — continued; nothing is armed now`),
+        )
+      }
       for (const p of relay.participants) {
         write(`  ${p.id} (${p.rank}): session ${p.session.state}, ${p.events.length} events`)
       }
@@ -2422,6 +2477,48 @@ export async function runSession(opts: SessionOptions): Promise<number> {
       return
     }
 
+    if (word === '/checkpoint') {
+      // A RUN is required, and this is the one refusal worth spelling out. Arming is a statement
+      // about a run in progress -- the advisor has to be told, and the only way to tell it is a
+      // notice on its next prompt. With no run there is no advisor turn to carry it, so a
+      // checkpoint accepted here would sit in a field nothing reads, and the operator would
+      // discover that by watching the run they started afterwards end on DONE.
+      //
+      // `--checkpoint <milestone>` is what arms one before a run exists, and the message says so
+      // rather than only refusing: an operator at this prompt with no run is one keystroke from
+      // typing the goal, and the flag is not reachable from here.
+      if (!run) {
+        return void write(
+          dim('  nothing is running, so there is nothing to stop — type a goal to start, then ') +
+            dim('/checkpoint <milestone>. To arm one before a run, launch with --checkpoint <milestone>.'),
+        )
+      }
+      const milestone = rest.trim()
+      // An empty value is refused rather than treated as "clear it". Disarming is not a thing
+      // this offers: a checkpoint the operator armed and then silently lost is the failure the
+      // whole feature exists to prevent, and `/checkpoint` with nothing after it is far likelier
+      // to be a half-typed line than a request to cancel.
+      if (!milestone) {
+        return void write(
+          dim('  /checkpoint needs a milestone: what the advisor should report reaching. ') +
+            dim('e.g. /checkpoint the parser lands and its tests pass'),
+        )
+      }
+      let replaced: string | undefined
+      try {
+        replaced = run.armCheckpoint(milestone)
+      } catch (err) {
+        return void write(dim(`  ${(err as Error).message}`))
+      }
+      // WHAT IT REPLACED, named. Two armed checkpoints would need an order and a single
+      // MILESTONE: reply names neither, so the second one displaces the first -- and an operator
+      // who is not told that has a milestone they believe is still armed and is not.
+      if (replaced !== undefined) write(dim(`  replaced the armed checkpoint: ${replaced}`))
+      write(`  checkpoint armed: the run stops when the advisor reports ${bold(milestone)}`)
+      write(dim('  until it does, DONE will not end the run. /continue past the pause spends it.'))
+      return
+    }
+
     if (word === '/pause') {
       if (!run) return void write(dim('  nothing is running; type a goal to start'))
       if (run.state === 'paused') return void write('  already paused')
@@ -2452,7 +2549,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
       // FALSIFIER, stated because it is the strongest argument against this shape: the
       // console has no general "trailing text is a message" rule and does not gain one here.
       // `/rotate <text>` and `/abort <text>` consume their text as a REASON
-      // (`src/repl/session.ts:2505`, `src/repl/session.ts:2538`) and `/pause`, `/queue`, `/audit` ignore
+      // (`src/repl/session.ts:2602`, `src/repl/session.ts:2635`) and `/pause`, `/queue`, `/audit` ignore
       // whatever follows them. So an operator who learns this from `/continue` and carries
       // it to `/pause I'll be back` still loses the sentence. That inconsistency is not
       // repaired by making `/continue` a third behaviour; it is narrowed by it, and the

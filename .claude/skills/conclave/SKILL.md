@@ -21,6 +21,69 @@ conclave session "<goal>" --implementers "claude, claude"
 
 **Ceilings put the intended shape of the run into the record.** `--rounds 6` is a claim about the work, not a budget: a run that hits a ceiling ends loudly and non-zero, so a stop is never mistaken for a finish. Set them because you have a view about how long the work should take. Absent means no limit, which is a real and sometimes correct choice.
 
+## Stopping where you want to look
+
+A pause is normally the run telling you something went wrong. A **checkpoint** is the other
+direction: you say in advance where the interesting moment is, and the run stops there.
+
+```
+conclave session "<goal>" --checkpoint "the parser lands and its tests pass"
+/checkpoint the parser lands and its tests pass
+```
+
+The flag arms the first run; `/checkpoint` arms one on a run already going, and works over the
+open control channel exactly as `/continue` does — write the line into the fifo. **It needs a
+milestone and a run**: an empty value is refused rather than treated as clearing one, and with no
+run started there is no advisor turn to carry the notice, so that is refused too and points you
+at the flag.
+
+**Reach for one when the risk is finishing too early, not when something is going wrong.** The
+advisor decides when the work is done, and it decides from what the implementers report. A
+checkpoint is how you say *"before you call this finished, stop and let me see the tree"* — after
+the schema change lands, before the migration runs, once the parser passes but before it is
+wired up.
+
+**The advisor signals with ordinary prose**, a whole reply reading `MILESTONE: <what it is
+reporting>`. That is deliberate and it is why this works on every adapter: a slash command is a
+Claude Code affordance typed into one seat, so a checkpoint expressed that way would be armable
+on every run and reportable on only some of them. Nothing is dispatched on that turn.
+
+**While a checkpoint is armed the advisor's `DONE` does not end the run.** It is refused, the
+advisor is told why, and it is asked again. That is the whole value: a run that could finish
+before the checkpoint fired would be a checkpoint that silently was not there, and its record
+would read exactly like a run whose milestone was genuinely reached.
+
+**One shot.** `/continue` past the pause spends it and the run carries on with nothing armed.
+`/abort` there does not spend it — ending a run is not the same decision as accepting the
+milestone. Arming a second checkpoint replaces the first and says which it replaced; if you arm
+one while another is paused, continuing answers the one you were shown and the new one stays
+armed for the next phase.
+
+`--checkpoint` is on `session` only. `relay` ends the run at every pause, so a checkpoint there
+would stop the run it was meant to interrupt with nobody able to release it.
+
+### What `status --json` says about it
+
+The `checkpoint` block is the **currently live** checkpoint, and it is absent entirely on a run
+that armed none. `state` is the whole reading:
+
+- `armed` — you asked; nothing has answered. The run cannot end on `DONE` yet
+- `signalled` — the **advisor** judged the milestone reached and said so. The pause is in front
+  of you and `signalledAt` says when. This is not acceptance
+- `continued` — **you** looked and let the run go on. `continuedAt` says when, and `signalledAt`
+  is still there, so the record keeps saying who judged what
+
+A run that ends with `state: armed` — nothing ever signalled — also says so in its own
+`outcome.detail`: *"the operator's checkpoint was NOT reached"*. A run that ends after a signal
+makes no such claim, because the milestone did arrive and you chose to stop rather than accept
+it. **So a missing signal is never something you have to notice by its absence**, on any ending:
+`done`, a ceiling, an abort or a teardown.
+
+`generation` numbers the armings within the run, and the `operator_checkpoint` pause carries
+`checkpoint: {generation, milestone}` of its own. After a re-arm those two deliberately differ —
+the pause is about the one you were shown, the block is about the one now live — and the routing
+log carries what became of the earlier ones.
+
 ## Reading a run without scraping the console
 
 ```

@@ -73,7 +73,7 @@ import type { Confidence, Provenance } from '../contract/outcome.ts'
 import type { RunCeilings } from '../relay/guardrails.ts'
 import type { RunDeadlines } from '../relay/deadlines.ts'
 import type { RelayEvent } from '../relay/observe.ts'
-import type { ForceRecord, PauseReason, RunOutcome, RunPause } from '../relay/run.ts'
+import type { ArmedCheckpoint, ForceRecord, PauseReason, RunOutcome, RunPause } from '../relay/run.ts'
 import type { ResolutionAuthority } from '../relay/resolution.ts'
 import type { RotationRecord } from '../relay/rotationIntent.ts'
 import { reportedTargeting, type ReportedTargeting, type TargetingWatch } from '../relay/targeting.ts'
@@ -778,6 +778,18 @@ export interface SessionStatus {
    */
   targeting?: ReportedTargeting | undefined
   /**
+   * The operator's checkpoint, when this run was given one. See `ArmedCheckpoint`.
+   *
+   * PERSISTS past the release rather than vanishing with the arming, because `state` is the
+   * whole point: a reader has to be able to tell a run that stopped at its checkpoint and was
+   * let go (`reached`) from one that ended having never signalled (`armed`), and a key that
+   * disappeared on release said the same nothing for both.
+   *
+   * Absent -- not `null`, not a record saying nothing -- on every run that armed none, which is
+   * every default run. A machine reader asks whether the key is there.
+   */
+  checkpoint?: ArmedCheckpoint | undefined
+  /**
    * Whether the control channel this run takes commands from is still open. See
    * `SessionStdinStatus` for what each value means and why absence is a fourth reading.
    *
@@ -1349,6 +1361,20 @@ export interface RecordableRelay {
    */
   readonly deadlines?: RunDeadlines | undefined
   /**
+   * The operator's checkpoint on this run, or `undefined` when none was armed.
+   *
+   * Read off the RELAY rather than passed in by the front-end, which is the same rule `ceilings`
+   * and `deadlines` follow and it matters here for the same reason: the front-end knows what it
+   * asked for and the relay knows what is armed, and the two diverge the moment a `/checkpoint`
+   * replaces one. A document built from the caller's own memory would agree with the caller
+   * about a checkpoint the loop is no longer holding.
+   *
+   * OPTIONAL and structural like the rest: a stand-in written before checkpoints existed still
+   * satisfies the contract and gets the document it got before, with no `checkpoint` key rather
+   * than one claiming a run has none when it was never asked.
+   */
+  readonly checkpoint?: ArmedCheckpoint | undefined
+  /**
    * Every accepted rotation and WHY, as the relay recorded it at the moment it accepted one.
    *
    * A method rather than a property because it grows during the run, and the recorder rewrites
@@ -1663,6 +1689,23 @@ export function recordSession(
    * `undefined` when the relay does not answer, spread away rather than written as zeros: a
    * stand-in that was never asked has not said this run's advisor named nobody.
    */
+  /**
+   * The operator's checkpoint, re-read on every write for the reason `rotations` is.
+   *
+   * It CHANGES during the run -- armed mid-session by `/checkpoint`, replaced by a second one,
+   * moved to `signalled` when the advisor reports it and to `continued` when the operator
+   * accepts -- so a block captured once would report `armed` for the whole life of a run whose
+   * checkpoint had already been answered, which is the same staleness #75 fixed for rotations.
+   *
+   * `undefined` when the relay does not answer OR when no checkpoint was armed, spread away
+   * rather than written as a record claiming nothing: absence is what a machine reader asks
+   * about, and every default run has to keep producing the document it produced before.
+   */
+  const checkpoint = (): { checkpoint: ArmedCheckpoint } | Record<string, never> => {
+    const c = relay.checkpoint
+    return c === undefined ? {} : { checkpoint: { ...c } }
+  }
+
   const targeting = (): { targeting: ReportedTargeting } | Record<string, never> => {
     const w = relay.targeting?.()
     // TWO reasons to write nothing, and they are different facts that happen to look alike from
@@ -1707,6 +1750,9 @@ export function recordSession(
     // document rather than inserted among the keys already there.
     ...targeting(),
     // After `targeting`, for the same reason it comes after `forces`: appended to the document
+    // rather than inserted among the keys already there.
+    ...checkpoint(),
+    // After `checkpoint`, for the same reason it comes after `forces`: appended to the document
     // rather than inserted among the keys already there. Spread away when the caller did not
     // say, because a caller with no control channel to describe has not said it is gone (#252).
     ...(opts.stdin ? { stdin: opts.stdin } : {}),
@@ -1766,7 +1812,7 @@ export function recordSession(
     applied = gen
     for (const [id, ts] of fresh) turns.set(id, ts)
     for (const [id, vs] of freshVersions) cliVersions.set(id, vs)
-    recorder.update({ messages: relay.log.length, participants: seats(), ...rotations(), ...forces(), ...targeting() })
+    recorder.update({ messages: relay.log.length, participants: seats(), ...rotations(), ...forces(), ...targeting(), ...checkpoint() })
   }
 
   /**
@@ -1799,6 +1845,7 @@ export function recordSession(
       ...rotations(),
       ...forces(),
       ...targeting(),
+      ...checkpoint(),
       // The state being SET, not the one on the record: this is the transition itself, and
       // reading the old value here would date every pause one write late. The same argument
       // now covers the ending: `set('ended')` is the write that has to carry `abandoned`, and
@@ -1911,6 +1958,7 @@ export function recordSession(
         ...rotations(),
         ...forces(),
         ...targeting(),
+        ...checkpoint(),
         ...progressOf(e.at, recorder.status.state),
       })
     }

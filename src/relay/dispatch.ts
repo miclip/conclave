@@ -696,6 +696,77 @@ export const MAX_TURN_BUDGET_MIN = 240
 const KEYWORD_LINE = /^(DONE|ESCALATE)\b/i
 
 /**
+ * An advisor reply read as a MILESTONE signal, when a checkpoint is armed. See
+ * `operator_checkpoint` in `run.ts`.
+ *
+ * `undefined` for every reply that is not attempting one, which is the ordinary case and the
+ * whole of what an UNARMED run ever sees -- this is never consulted unless the operator armed a
+ * checkpoint, so an advisor writing `MILESTONE:` on a run with none is writing an ordinary
+ * instruction and it is dispatched as one.
+ *
+ * Deliberately NOT a `Decision`, and not folded into `parseDecisions`. Whether a reply is a
+ * milestone signal depends on whether a checkpoint is armed, which is run state the parser does
+ * not have and must not be given: a parser that took an arming flag would be a parser whose
+ * answer to "what did this reply say" depends on something the reply does not contain. So the
+ * shape is read here, the arming is checked by the relay, and the two facts stay separable.
+ *
+ * ## Why the signal is prose rather than a `COMMAND:` directive or a slash command
+ *
+ * Every adapter delivers prose. A participant slash command is a Claude Code affordance that
+ * `#submitAdvisorCommands` types into ONE seat, and an advisor on any other CLI could not send
+ * one at all -- so a checkpoint expressed that way would be armable on every run and reportable
+ * on some of them, which is a checkpoint that silently never fires. `DONE` and `ESCALATE` are
+ * already whole-reply prose keywords for the same reason, and this is the third.
+ */
+export type MilestoneSignal =
+  /** The milestone is reported reached, with what the advisor says about it. */
+  | { ok: true; detail: string }
+  /** It tried to signal and did not manage it. `why` is what the advisor is told. */
+  | { ok: false; why: string }
+
+/**
+ * The keyword, matched exactly as `DONE` and `ESCALATE` are matched: at the start of the reply,
+ * case-insensitively, on a word boundary.
+ *
+ * The cost is the same cost, and it is accepted for the same reason. An armed run whose advisor
+ * opens an instruction with "Milestone two needs the parser first" is read as an attempted
+ * signal, refused for carrying no colon, and asked again -- one turn, with a sentence saying
+ * why. The alternative is a keyword the advisor can miss by shifting case, on the one signal
+ * whose absence lets a run end at the wrong place.
+ */
+const MILESTONE_KEYWORD = /^MILESTONE\b/i
+
+/** `MILESTONE:` and everything after it, which must be non-empty to be a report of anything. */
+const MILESTONE_REPORT = /^MILESTONE:[ \t]*(\S[\s\S]*)$/i
+
+/**
+ * Read a reply as a milestone signal. Fails closed: an attempt that is not well formed is a
+ * refusal, never an instruction.
+ *
+ * The two-step shape is the fail-closed part. A reply that begins with the keyword has
+ * committed to being a signal, and what happens to it from there is either a report or a
+ * refusal -- it is never allowed to fall through and be dispatched to a seat as work, because a
+ * reply the advisor wrote as "we have arrived" delivered to an implementer as an instruction is
+ * the worst of the three outcomes and the only silent one.
+ */
+export function readMilestone(reply: string): MilestoneSignal | undefined {
+  const text = reply.trim()
+  if (!MILESTONE_KEYWORD.test(text)) return undefined
+  const report = MILESTONE_REPORT.exec(text)
+  if (!report) {
+    return {
+      ok: false,
+      why:
+        `a milestone signal is the word MILESTONE, a colon, and what you are reporting -- ` +
+        `"MILESTONE: the parser lands and its tests pass". This reply began with MILESTONE and ` +
+        `carried neither the colon nor anything after it, so nothing was reported and nothing ` +
+        `was dispatched.`,
+    }
+  }
+  return { ok: true, detail: report[1]!.trim() }
+}
+
+/**
  * Parse an advisor reply into decisions, and **fail closed**.
  *
  * Two forms, and which one a reply is in is decided by whether it contains a directive line at

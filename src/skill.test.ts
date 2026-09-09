@@ -41,6 +41,22 @@ function codeOnly(md: string): string {
 }
 const CODE = codeOnly(SKILL)
 
+/**
+ * One `##` section, bounded by the next one.
+ *
+ * Written after a first version sliced from a heading to the END OF THE DOCUMENT, which made
+ * every "the section says X" assertion true of the whole skill: the state list picked up bullets
+ * from `How it ended` and reported that `done` and `ceiling` were checkpoint states. A slice
+ * that cannot fail for its own reason is worse than no slice.
+ */
+function section(md: string, heading: string): string {
+  const from = md.indexOf(heading)
+  if (from < 0) return ''
+  const rest = md.slice(from + heading.length)
+  const next = rest.search(/^## /m)
+  return heading + (next < 0 ? rest : rest.slice(0, next))
+}
+
 /** Every top-level command the CLI dispatches, read off the source that dispatches them. */
 function cliCommands(): Set<string> {
   const src = readFileSync(join(REPO, 'bin', 'conclave.ts'), 'utf8')
@@ -192,6 +208,61 @@ test('#183 installing is idempotent, and never overwrites an edited copy unasked
 
   assert.equal(cli(['skill', 'install', '--force'], home).code, 0)
   assert.doesNotMatch(readFileSync(target, 'utf8'), /my own notes/, '--force replaces it')
+})
+
+test('the checkpoint section names the three states the status document actually emits', () => {
+  // The claim an agent operator will GATE ON: it reads `status --json`, switches on
+  // `checkpoint.state`, and acts. A state named in the skill that the code cannot produce sends
+  // it down a branch that never runs; a state the code produces and the skill omits leaves it
+  // with no branch at all. So the two sets are compared, in both directions, against the union
+  // the type declares rather than against a list copied into this file.
+  const src = readFileSync(join(REPO, 'src', 'relay', 'run.ts'), 'utf8')
+  const declared = src.slice(src.indexOf('export interface ArmedCheckpoint'))
+  const decl = /state: ((?:'[a-z]+'(?: \| )?)+)/.exec(declared.slice(0, declared.indexOf('\n}')))?.[1] ?? ''
+  const actual = new Set([...decl.matchAll(/'([a-z]+)'/g)].map((m) => m[1]!))
+  assert.equal(actual.size, 3, `ArmedCheckpoint must declare three states, found ${[...actual]}`)
+
+  const block = section(SKILL, '### What `status --json` says about it')
+  assert.ok(block.length > 0, 'the skill must describe the status block')
+  const claimed = new Set([...block.matchAll(/^- `([a-z]+)`/gm)].map((m) => m[1]!))
+  assert.deepEqual(
+    [...claimed].sort(),
+    [...actual].sort(),
+    'the skill and ArmedCheckpoint disagree about which checkpoint states exist',
+  )
+})
+
+test('the checkpoint section says the three things an operator cannot infer', () => {
+  // Not a spell-check of the prose. These are the three properties that decide whether an agent
+  // operator uses a checkpoint correctly, and every one of them is counter-intuitive enough that
+  // it will be got wrong if it is not stated:
+  //
+  //   1. DONE is refused while armed -- otherwise the reasonable assumption is that a checkpoint
+  //      is advisory and the advisor may finish anyway.
+  //   2. The signal is ordinary prose, so it works on every adapter -- otherwise an operator on
+  //      a non-Claude advisor has no reason to believe arming one will ever fire.
+  //   3. A run that ends without the signal says so in its own outcome -- otherwise the operator
+  //      has to notice an absence, which is exactly what nobody does.
+  const block = section(SKILL, '## Stopping where you want to look')
+  assert.ok(block.length > 0, 'the checkpoint section must exist')
+  assert.match(block, /`DONE` does not end the run/, 'the DONE refusal is the whole value')
+  assert.match(block, /MILESTONE:/, 'and how the advisor signals')
+  assert.match(block, /every adapter/, 'and why prose rather than a slash command')
+  assert.match(block, /NOT reached/, 'and that a missed checkpoint is stated, not left as an absence')
+})
+
+test('the skill tells an agent operator how to arm one over the control channel', () => {
+  // `--operator agent` drives the console over a fifo, and every other command in this skill is
+  // documented as a line written into it. `/checkpoint` has to be too, or an agent operator that
+  // has read this file will believe a checkpoint can only be set at launch -- and the case it is
+  // most useful for is the one where they have watched a run and decided where to stop it.
+  const block = section(SKILL, '## Stopping where you want to look')
+  assert.match(block, /\/checkpoint/, 'the console command must be named')
+  assert.match(block, /control channel|fifo/, 'and reachable the way an agent operator reaches commands')
+  // The two refusals, because both are reachable by an agent operator writing a line and both
+  // are silent failures if it does not expect them. Whitespace-tolerant: this is prose that gets
+  // rewrapped, and a guard that breaks on a reflowed paragraph teaches people to delete it.
+  assert.match(block, /needs\s+a\s+milestone\s+and\s+a\s+run/i, 'and what it refuses')
 })
 
 test('#183 the skill teaches current behaviour, not issue lore', () => {

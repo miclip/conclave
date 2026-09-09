@@ -372,6 +372,22 @@ async function provoke(t: TestContext, reason: RunPause['reason']): Promise<Prov
       assert.ok(pause)
       return { pause, run, relay, advisor, impl }
     }
+    case 'operator_checkpoint': {
+      // The one condition nothing can provoke without the operator having asked for it in
+      // advance: a checkpoint has to be ARMED before the advisor's signal means anything. Armed
+      // at `start`, so it reaches the briefing, which is the arming path a real operator uses
+      // when they know where they want to stop before the run begins.
+      //
+      // The advisor's first reply is the signal. Nothing has to go wrong for this pause and
+      // nothing does -- which is what makes it unlike every other entry in this table.
+      advisor = new FakeRotationSession('advisor', 'codex', ['MILESTONE: the parser lands.', 'DONE'])
+      impl = new FakeRotationSession('impl', 'claude', ['ack'])
+      const relay = await relayOf(dir, advisor, [impl])
+      const run = relay.start('Keep the work moving.', { checkpoint: 'the parser lands' })
+      const pause = await run.untilPause()
+      assert.ok(pause)
+      return { pause, run, relay, advisor, impl }
+    }
     case 'review_blocked': {
       // One implementer, one reviewer (#72). The reviewer rejects the same work twice; no
       // advisor instruction ever addresses it, since review is dispatched automatically.
@@ -452,6 +468,19 @@ const EXPECTED: Record<
     scope: { kind: 'conclave' },
     options: ['continue', 'rotate', 'constrain', 'abort'],
   },
+  operator_checkpoint: {
+    authority: 'operator',
+    // The conclave, exactly as `operator_requested` above and for the same reason: what stops is
+    // the admission of further work. No seat is what cannot proceed -- the advisor that raised
+    // it is not blocked, it is reporting.
+    scope: { kind: 'conclave' },
+    // `rotate` is offered here on the same terms it is offered everywhere else in this table:
+    // this relay is armed with checks and has one implementer seat, so the option is live rather
+    // than inert. It is emphatically not a suggestion -- nothing about a checkpoint says the
+    // implementer is degraded -- and the menu is a list of what WOULD do something, not of what
+    // the pause recommends.
+    options: ['continue', 'rotate', 'constrain', 'abort'],
+  },
   review_blocked: {
     authority: 'operator',
     // The SEAT, not the conclave: its work is what cannot proceed, and no other seat is
@@ -498,7 +527,7 @@ for (const reason of Object.keys(EXPECTED) as RunPause['reason'][]) {
 
 test('an advisor turn that ends badly scopes to the advisor, not to the implementer', async (t) => {
   // The one place the scope is not obvious. `turn_incomplete` is raised for either seat --
-  // `src/relay/relay.ts:7652` for the advisor, `:8206` for the implementer -- and a scope
+  // `src/relay/relay.ts:7929` for the advisor, `:8649` for the implementer -- and a scope
   // read off "the implementer" rather than off the seat would be silently wrong for half of
   // them, in a way no N=1 run with one implementer would ever reveal.
   const dir = repo(t)

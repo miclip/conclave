@@ -112,6 +112,34 @@ export type PauseReason =
    * It is also the plainer operator need: intervening in a session already in progress.
    */
   | 'operator_requested'
+  /**
+   * A MILESTONE the operator armed in advance, which the advisor now reports reaching.
+   *
+   * Every other reason here is raised by something going wrong, or by an operator reacting to a
+   * run already in front of them. This one is neither: it is scheduled BEFORE the condition
+   * exists, at `Relay.start` or through `RunHandle.armMilestone`, and it fires when a
+   * participant judges that the thing the operator named has happened. `operator_requested` is
+   * the same operator asking the run to stop NOW; this is them asking it to stop THEN.
+   *
+   * Two properties follow from who set it, and both are load-bearing:
+   *
+   *   - ONE SHOT. The checkpoint is disarmed by the resume that answers it, so a run continuing
+   *     past the milestone does not stop again at every subsequent turn. Re-arming is another
+   *     deliberate act.
+   *   - THE OPERATOR'S ALONE to resolve, and `resolutionFor` says so. The advisor cannot resolve
+   *     it by the same act that raised it -- a checkpoint the reporting party could clear is a
+   *     checkpoint that was never set -- and no mechanism can, because what the operator wanted
+   *     was to LOOK. The scope is the conclave for the same reason `operator_requested` is: what
+   *     stops is the admission of further work, not one seat's.
+   *
+   * FAIL CLOSED is the whole of its value. While it is armed the advisor's `DONE` does not end
+   * the run: a run that could finish before the checkpoint fired would be a checkpoint that
+   * silently did not exist, and an operator who armed one and got a completed run has no way to
+   * tell that from a run whose milestone was never reached. So DONE is refused and re-asked, a
+   * malformed milestone signal dispatches nothing and is re-asked, and ordinary instructions
+   * carry on until the signal arrives.
+   */
+  | 'operator_checkpoint'
 
 /**
  * What the operator can do from here — filtered to what would actually change something.
@@ -311,6 +339,79 @@ export interface PauseLiveness {
   final?: string | undefined
 }
 
+/**
+ * The operator's checkpoint on a run: what they armed, and whether it has been answered.
+ *
+ * Lives here rather than in `relay.ts` for the same reason `RunPause` does: it is a fact ABOUT
+ * a run that the recorder, the console and the report all read, and a type declared inside the
+ * relay would make each of them import the loop to describe its state.
+ *
+ * ## Why `state` and not merely presence
+ *
+ * A checkpoint could have been a `string | undefined` cleared on release, and it was, for one
+ * revision. That shape cannot answer the question the whole feature exists for. Three runs have
+ * to be told apart afterwards, and only the first two are distinguishable by presence:
+ *
+ *   - never armed: no checkpoint at all;
+ *   - armed and REACHED: the advisor signalled, the operator looked, and let the run go on;
+ *   - armed and NOT reached: the run ended -- done, budget, aborted, torn down -- with the
+ *     signal never sent.
+ *
+ * The third is the one that must never be silent, and under the cleared-on-release shape it was
+ * indistinguishable from the second in every artefact: both left `undefined` behind. So the
+ * record persists, `#end` reads it, and a run that ended short of its checkpoint says so in its
+ * own outcome detail.
+ */
+export interface ArmedCheckpoint {
+  /**
+   * Which arming this is, within this run. 1 for the first; a re-arm takes the next number.
+   *
+   * IDENTITY, and it exists because two checkpoints can be alive in one operator's head at
+   * once. While checkpoint A is paused the operator may arm B -- a perfectly reasonable thing
+   * to do, since they are looking at the tree and have decided where they want to stop next --
+   * and the `/continue` that follows is an answer to A's question, not to B's. Without an
+   * identity the release resolved whatever was live, so it stamped B as continued: B had never
+   * been signalled, its `DONE` gate dropped, and the run could then finish at a checkpoint the
+   * operator had just set and never seen.
+   *
+   * So the pause carries the generation it was raised for (`RunPause.checkpoint`) and the
+   * release names it. A continuation whose generation is not the live one resolves a checkpoint
+   * that is no longer current, which is exactly right: A is gone, and B is untouched.
+   *
+   * PER RUN, and deliberately not the routing log's `seq`. That number orders MESSAGES and is
+   * the coordinate `atSeq`, `audit()` and every pause already use; a second meaning for it here
+   * would make "checkpoint 3" and "message 3" the same word for different things in one
+   * document.
+   */
+  generation: number
+  /** What the operator said they wanted to stop at, verbatim and trimmed. */
+  milestone: string
+  /**
+   * Three facts, in the order they can happen, and the middle one is the point.
+   *
+   *   - `armed` — the operator asked; nothing has answered. `DONE` is refused here.
+   *   - `signalled` — the ADVISOR judged the milestone reached and said so, and the pause is in
+   *     front of the operator. Still armed in every behavioural sense; what has happened is that
+   *     a participant reported, not that the operator accepted.
+   *   - `continued` — the OPERATOR looked and let the run go on. Only this is acceptance, and
+   *     only this spends the checkpoint.
+   *
+   * `signalled` used to be folded into the release, and that made an abort at the checkpoint
+   * pause unreadable: the record said `armed`, so the run reported that the milestone was never
+   * reached, when in fact the advisor had reported it and the operator had chosen to stop rather
+   * than carry on. Those are opposite readings of the same run. An abort now leaves `signalled`,
+   * and the not-reached sentence is written only for a run that ended with nothing signalled at
+   * all.
+   */
+  state: 'armed' | 'signalled' | 'continued'
+  /** When it was armed. A re-arm is a NEW record, so this is this generation's own time. */
+  at: number
+  /** When the advisor signalled it. Present from `signalled` onward, and never cleared. */
+  signalledAt?: number | undefined
+  /** When the operator continued past its pause. Present exactly when `state` is `continued`. */
+  continuedAt?: number | undefined
+}
+
 export interface RunPause {
   reason: PauseReason
   /**
@@ -342,6 +443,20 @@ export interface RunPause {
    * pause exactly, rather than guessed at from timing.
    */
   verdictOf?: { participant: string; endSeq: number } | undefined
+  /**
+   * Present only on `operator_checkpoint`: WHICH checkpoint this pause is about.
+   *
+   * Structured rather than left to the evidence prose, because a reader has to be able to
+   * correlate "the pause was raised for A" with "the live checkpoint is now B" after a paused
+   * re-arm -- and the only alternative was parsing an English sentence out of `evidence`, which
+   * is the kind of coupling this project has removed twice already (`candidate.assessedAs`
+   * beside `detail`, and `PauseLiveness` beside its rendered line).
+   *
+   * The MILESTONE is copied here as well as the generation. It is the milestone as it stood when
+   * the pause was raised, so a status document showing this pause beside a replaced top-level
+   * block still says what the operator was actually asked about.
+   */
+  checkpoint?: { generation: number; milestone: string } | undefined
   /**
    * Present only on `rotation_candidate`: which class of degradation raised it (#247).
    *
@@ -417,6 +532,40 @@ export interface RunControl {
   requestStop(): void
   /** Ask the loop to pause at its next advisor-turn boundary. */
   requestPause(reason: string): void
+  /**
+   * Arm a one-shot checkpoint the advisor reports reaching. See `operator_checkpoint`.
+   *
+   * A fifth verb rather than a field on the handle, for the reason the other four are verbs:
+   * the relay owns the loop's state and the handle owns none of it, so a checkpoint the handle
+   * stored would be a second copy of a fact the loop is the only thing that can act on.
+   *
+   * Returns the milestone it REPLACED, when it replaced one, so the caller can say so. The
+   * relay is the only thing that knows whether one was armed already, and a front end that
+   * re-derived the answer from its own memory would get it wrong the first time two of them
+   * armed one.
+   */
+  armCheckpoint(milestone: string): string | undefined
+  /**
+   * The checkpoint of THIS generation was continued. Called synchronously from `#release`.
+   *
+   * A sixth verb, and it exists because of a window that a test caught rather than a design that
+   * predicted it. The relay used to spend the checkpoint at the statement after its `#halt`
+   * returned, which is a MICROTASK after the operator's `/continue` -- so a console that read the
+   * state in the same tick was told the checkpoint was still armed and that DONE would not end
+   * the run, one instruction after the operator had released it. That is the stale-menu fault
+   * this project already treats as a defect: an interface asserting something about what will
+   * happen next, after the thing that decides it has already happened.
+   *
+   * So the release is announced from `#release`, which runs inside the operator's own call, and
+   * there is no instant at which the run has resumed and the checkpoint still reads armed. Only
+   * on a CONTINUE: an abort leaves the pause without accepting the milestone, and a run settled
+   * out from under the question was never answered at all.
+   *
+   * `generation` is read off the PAUSE being released, not off whatever is live, so a
+   * `/continue` answering checkpoint A cannot resolve a checkpoint B armed while A was paused.
+   * See `ArmedCheckpoint.generation`.
+   */
+  checkpointContinued(generation: number): void
 }
 
 /** What a handle needs besides its control surface. Exists for the clock; see `RunHandle`. */
@@ -733,6 +882,43 @@ export class RunHandle {
   }
 
   /**
+   * Arm a one-shot checkpoint: stop when the advisor reports reaching `milestone`.
+   *
+   * ARM and SIGNAL are two different acts and keep two different names. The operator ARMS a
+   * checkpoint; the advisor SIGNALS a milestone by replying `MILESTONE: ...`. Naming this
+   * `armMilestone` made the operator's verb and the participant's word the same word, and the
+   * first thing that goes wrong when they are is a front end offering `/milestone` -- which
+   * reads as the operator declaring the milestone reached on the advisor's behalf.
+   *
+   * Usable while the run is going, which is the case it exists for -- an operator who decides
+   * mid-session that they want to look at the tree once the parser lands should not have to
+   * restart to say so. Arming while PAUSED is legal too: the checkpoint takes effect on the
+   * turn after the resume.
+   *
+   * REPLACES any checkpoint already armed rather than queueing a second, and RETURNS the
+   * milestone it replaced so the caller can report it. Two checkpoints would need an order, and
+   * there is no answer to which one a single `MILESTONE:` reply meant -- the signal names no
+   * milestone, it reports that the armed one is reached. An operator who wants the second one
+   * arms it after the first has fired.
+   *
+   * Throws on an ended run and on an empty milestone. The second because the milestone is the
+   * whole of what the advisor is told to watch for and what the pause is raised carrying: an
+   * empty checkpoint would stop the run at a milestone nobody could state.
+   */
+  armCheckpoint(milestone: string): string | undefined {
+    if (this.#state === 'ended') throw new Error('the run has ended')
+    const stated = milestone.trim()
+    if (!stated) {
+      throw new Error(
+        `a checkpoint needs a milestone stated. It is what the advisor is told to watch for and ` +
+          `what the pause is raised carrying, so an empty one would stop the run at a milestone ` +
+          `nobody could name.`,
+      )
+    }
+    return this.#control.armCheckpoint(stated)
+  }
+
+  /**
    * Add a human constraint. Carried into the next exchange at human rank.
    *
    * Usable while paused *and* while running, because the case that motivated the whole
@@ -754,6 +940,18 @@ export class RunHandle {
   #release(d: Decision): void {
     if (this.#state !== 'paused' || !this.#decide) {
       throw new Error(`the run is '${this.#state}', not paused`)
+    }
+    // Announced HERE, inside the operator's own call, rather than left to the loop to notice one
+    // microtask later. See `RunControl.checkpointContinued`. Read off the pause being released,
+    // so a continue at any OTHER pause spends nothing -- and an abort at this one spends nothing
+    // either, because ending the run is not accepting the milestone.
+    //
+    // The GENERATION comes off the pause too, which is what makes this answer the question it
+    // was asked. `#pause.checkpoint` is written when the pause is raised and never edited, so it
+    // names the checkpoint the operator is looking at even if they armed another one while
+    // deciding.
+    if (d.kind === 'continue' && this.#pause?.reason === 'operator_checkpoint' && this.#pause.checkpoint) {
+      this.#control.checkpointContinued(this.#pause.checkpoint.generation)
     }
     const decide = this.#decide
     this.#decide = undefined

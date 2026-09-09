@@ -1180,6 +1180,10 @@ function runHandle(): RunHandle {
     constrain: () => ({}) as any,
     requestStop: () => {},
     requestPause: () => {},
+    // Inert: these doubles drive the handle's own state machine, and arming a checkpoint is
+    // the one verb that acts entirely on the relay's loop. See `RunControl.armCheckpoint`.
+    armCheckpoint: () => undefined,
+    checkpointContinued: () => {},
   } satisfies RunControl
   return new RunHandle(control)
 }
@@ -1432,6 +1436,10 @@ function spyingHandle(target: string | undefined): { run: RunHandle; reasons: st
     constrain: () => ({}) as any,
     requestStop: () => {},
     requestPause: () => {},
+    // Inert: these doubles drive the handle's own state machine, and arming a checkpoint is
+    // the one verb that acts entirely on the relay's loop. See `RunControl.armCheckpoint`.
+    armCheckpoint: () => undefined,
+    checkpointContinued: () => {},
   } satisfies RunControl
   return { run: new RunHandle(control), reasons }
 }

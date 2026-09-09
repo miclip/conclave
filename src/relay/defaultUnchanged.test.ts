@@ -147,7 +147,7 @@ interface CreateRecord {
    * the value on the floor would still be reported correctly, and the seat would be running a
    * clock nobody configured. That is not hypothetical: `--turn-timeout` was parsed into a
    * console option that did not exist, compiled through a conditional spread, and did nothing
-   * for its whole life (src/repl/session.ts:278-290). This is the observation that would have
+   * for its whole life (src/repl/session.ts:291-303). This is the observation that would have
    * caught it.
    */
   watchdogMs: number | undefined
@@ -348,18 +348,18 @@ const DECLARED: Record<string, string> = {
     'Authority routing (#56, D2) sends implementer_unanswered to the advisor before the operator, ' +
     'so a default run interrupts the human less than today. Real change at N=1, an improvement, ' +
     'declared rather than discovered. The pause reason exists at src/relay/run.ts:52 and the halt ' +
-    'that raises it is at src/relay/relay.ts:8073.',
+    'that raises it is at src/relay/relay.ts:8516.',
   'status.pause.resolution':
     'Classifying unresolved conditions on both axes (#56, D2) added `resolution` to every RunPause ' +
-    '(src/relay/run.ts:329), so `conclave status --json` on a paused default run now carries ' +
+    '(src/relay/run.ts:430), so `conclave status --json` on a paused default run now carries ' +
     'pause.resolution = {reason, authority, scope} and pause.resolution.scope = {kind}. Additive and ' +
     'recorded rather than acted on: authority and scope are computed at the halt site from the reason ' +
-    'and the run configuration (src/relay/resolution.ts:190), and a request whose authority is ' +
+    'and the run configuration (src/relay/resolution.ts:199), and a request whose authority is ' +
     'mechanical or advisor still produces the same pause today, because nothing exists yet that could ' +
     'resolve one and dropping the pause first would lose the decision point rather than automate it. ' +
     '`reason` is deliberately duplicated between pause.reason and pause.resolution.reason: the loose ' +
     'field is what every existing reader is written against and the nested one is the whole ' +
-    'classification (src/relay/run.ts:315). Nothing an existing consumer read changed value.',
+    'classification (src/relay/run.ts:416). Nothing an existing consumer read changed value.',
   'per-seat artifact attribution':
     'Artifact attribution (#62) is now scoped to the ROOT a participant works in, and records ' +
     'which seat each attributed path came from. `RestrictedOrigin` gains one key, ' +
@@ -630,7 +630,7 @@ const DECLARED: Record<string, string> = {
     'participant and nobody else, and a conclave or workstream scope samples NOBODY. It used to ' +
     'read pause.verdictOf.participant and fall back to scanning participants by rank for ' +
     'implementers — and verdictOf is set at exactly two halt sites, both turn_incomplete ' +
-    '(src/relay/relay.ts:7656, src/relay/relay.ts:8210), so every other pause reached that rank ' +
+    '(src/relay/relay.ts:7933, src/relay/relay.ts:8653), so every other pause reached that rank ' +
     'scan. WHAT CHANGES AT N=1: on the three pauses whose scope names no participant — ' +
     'operator_requested (/pause), advisor_escalated, authority_conflict — the lone implementer ' +
     'child used to be sampled, so a child that measured busy REFUSED the resume and wrote ' +
@@ -639,15 +639,15 @@ const DECLARED: Record<string, string> = {
     'safety guard rather than presented as a pure N>1 fix. The reason it is the right narrowing: ' +
     'the guard exists because continuing SENDS into a child that cannot accept input mid-turn, ' +
     'and on those three pauses the child it measured is not the child being sent to — resuming ' +
-    'advisor_escalated sends to the ADVISOR (src/relay/relay.ts:7791), resuming ' +
+    'advisor_escalated sends to the ADVISOR (src/relay/relay.ts:8234), resuming ' +
     'authority_conflict queues a constraint that is delivered by the dispatcher on the next ' +
     'dispatch to a free seat, and operator_requested is consumed at an advisor-turn boundary ' +
     'whose own evidence line says no turn is in flight. WHAT IS GIVEN UP, named rather than ' +
     'discovered: the advisor_escalated halt raised when a seat’s turn completed and its report ' +
-    'could not be read (src/relay/relay.ts:8124) is conclave-scoped by design, yet the useful ' +
+    'could not be read (src/relay/relay.ts:8567) is conclave-scoped by design, yet the useful ' +
     'question there is whether THAT seat is still writing; at N=1 the rank scan sampled it by ' +
     'coincidence of it being the only implementer, and now nothing does. The pause still carries ' +
-    'that seat’s liveness evidence from the halt site (src/relay/relay.ts:8135), which is what ' +
+    'that seat’s liveness evidence from the halt site (src/relay/relay.ts:8578), which is what ' +
     'the operator actually reads; restoring a refusal there is a change to that halt’s scope, ' +
     'not to the guard. AT N>1 the old behaviour was unsafe in the other direction: a pause about ' +
     'one seat could be refused because a DIFFERENT seat was mid-turn, and the operator was told ' +
@@ -698,7 +698,7 @@ const DECLARED: Record<string, string> = {
     'The sentence is repaired rather than left standing, on this entry’s own rule. Everything ' +
     'else above is still true: the three readings, the wording, the event count as an input, and ' +
     'the pause menu’s `wait` option, which still asks reportsChildOnCpu. No assertion in this ' +
-    'file was relaxed; one citation moved with the code it pins (src/repl/session.ts:1620). ' +
+    'file was relaxed; one citation moved with the code it pins (src/repl/session.ts:1656). ' +
     'Covered in src/outcomes/liveness.test.ts on the reported numbers, and end to end through ' +
     'the console’s refusal path in src/repl/session.test.ts.',
   'a paused run keeps measuring the child, and its evidence says when it was measured (#101)':
@@ -742,14 +742,14 @@ const DECLARED: Record<string, string> = {
     'not idle, because continuing SENDS and a reading up to 30s old is not a reading of now. It ' +
     'does not read pause.liveness, and that is stated at both ends. ' +
     'TWO RELAY OPTIONS ARE ADDED FOR TESTS ONLY — liveness (the same seam the console already ' +
-    'has at src/repl/session.ts:362) and livenessRefreshMs/livenessRefreshLimit. No CLI flag ' +
+    'has at src/repl/session.ts:375) and livenessRefreshMs/livenessRefreshLimit. No CLI flag ' +
     'exposes them; a default run reads the constants. ' +
     'ONE CLAIM IN THE ISSUE IS FALSIFIED and recorded here because it points at the mechanism: ' +
     'the reporter saw a byte-identical evidence line on what looked like two consecutive pauses ' +
     'and concluded evidence is not re-derived BETWEEN pauses. It cannot be. The loop is ' +
     'suspended inside #halt for the whole pause, so #halt cannot run again, and a watchdog ' +
     'revision or replacement turn_end arriving meanwhile amends THE SAME RunPause in place ' +
-    '(src/relay/run.ts:893). There was one pause, read twice — the same defect by a shorter ' +
+    '(src/relay/run.ts:1091). There was one pause, read twice — the same defect by a shorter ' +
     'path than the report proposed. ' +
     'Covered in src/relay/pauseLiveness.test.ts, which watches the recorded evidence change ' +
     'after the injected reading changes, and in src/outcomes/liveness.test.ts on the prose.',
@@ -1639,7 +1639,7 @@ const DECLARED: Record<string, string> = {
     'TIGHTENED to require `idleMs`, because a context that stops carrying it breaks no type -- ' +
     'the field is optional, as it must be -- and `--turn-timeout` reaching a console option ' +
     'that did not exist, compiling, and doing nothing for its whole life is the standing ' +
-    'example of what that costs (src/repl/session.ts:278-290).',
+    'example of what that costs (src/repl/session.ts:291-303).',
   'the launch surfaces name the absolute cap, and the dry-run plan carries what bounds the run (#162)':
     'NO FLAG IS ADDED on either front-end, no default moves, and nothing about how a run is '
     + 'measured changes: `--turn-timeout`, `--silence-timeout`, `--rounds` and the four ceiling '
@@ -1827,9 +1827,41 @@ const DECLARED: Record<string, string> = {
     'NOTHING ELSE MOVED. The goal is still recorded in the session record and still linted ' +
     'before anything starts, in both forms, because those are about the goal and not about how ' +
     'it was spelled.',
+  '--checkpoint arms a decision point, which relay cannot hold':
+    'THE DEFAULT RUN DOES NOT CHANGE, and every arm of that is pinned below rather than ' +
+    'asserted here. With --checkpoint absent the console calls relay.start(goal) with ONE ' +
+    'argument exactly as it always did, no checkpoint key reaches the status document, the ' +
+    "advisor's briefing is byte-identical (the conditional block is gated on the armed " +
+    'checkpoint, the same gate MULTI_SEAT_BRIEFING uses), and readMilestone is never called on ' +
+    'a reply — so an advisor that writes MILESTONE: on an unarmed run has its reply dispatched ' +
+    'as the ordinary instruction it is. WHAT IS NEW: a PauseReason, operator_checkpoint, whose ' +
+    'pause subtree is pinned below and which is unreachable without the operator arming one, ' +
+    'for the same reason merge_blocked is unreachable without a second implementer seat — ' +
+    'except that this one needs no extra seat, only the operator having asked in advance. ' +
+    'A status key, checkpoint, present exactly when one was armed and PERSISTING past the ' +
+    'release so that a run which reached its checkpoint and one which ended having never ' +
+    'signalled are distinguishable afterwards. Its state is THREE-VALUED — armed, signalled, ' +
+    'continued — because the advisor reporting a milestone and the operator accepting it are ' +
+    'different facts: an abort at the checkpoint pause keeps signalled and makes no ' +
+    'not-reached claim, and only a run that ended with nothing signalled at all says the ' +
+    'checkpoint was missed, appended in #end beside the red-tree sentence and by the same ' +
+    'construction, so a missing signal is never silent. Each arming carries a per-run ' +
+    'generation (never the routing log seq, which orders messages), the operator_checkpoint ' +
+    'pause carries checkpoint {generation, milestone} of its own, and a continuation resolves ' +
+    'only the generation its pause names — so arming a second checkpoint while the first is ' +
+    'paused leaves the second armed and unstamped rather than silently spent. Relay.start ' +
+    'resets the whole record on EVERY run, so a second run inherits neither a spent checkpoint ' +
+    'nor one an abort left armed. THE FLAG IS SESSION-ONLY, which is the ' +
+    'first divergence on this surface running session-to-relay rather than the other way: a ' +
+    'checkpoint arms a pause the operator answers, and relay escalates and ENDS the run at ' +
+    'every pause (Relay#halt, the !handle branch), so relay --checkpoint would take the run it ' +
+    'was meant to interrupt and end it at the milestone with nobody able to release it. Wiring ' +
+    'it into both would not be parity; it would be a flag that lies on one of them. Declared in ' +
+    "frontEndParity.test.ts's DECLARED as well, which is where flag divergence is adjudicated. " +
+    'No assertion in this file was relaxed.',
 }
 
-test('DECLARED contains exactly the routing, pause-resolution, attribution, ceiling-flag, seat-flag, seat-status, launch-record, flag-reader, integration-check, per-seat-rotation, reviewer, resume-guard, mixed-liveness, timestamped-liveness, model-validation, executable-preflight, compaction-survival, rotation-reporting, send-precondition, process-tree-liveness, ceiling-reporting, record-heartbeat, rotation-intent, console-dry-run, flag-reconciliation, paused-time, advisor-targeting, silence-timeout, launch-bounds, origin-reconciliation, capability-briefing, candidate-class, run-progress, blocked-rollup and goal-file entries', () => {
+test('DECLARED contains exactly the routing, pause-resolution, attribution, ceiling-flag, seat-flag, seat-status, launch-record, flag-reader, integration-check, per-seat-rotation, reviewer, resume-guard, mixed-liveness, timestamped-liveness, model-validation, executable-preflight, compaction-survival, rotation-reporting, send-precondition, process-tree-liveness, ceiling-reporting, record-heartbeat, rotation-intent, console-dry-run, flag-reconciliation, paused-time, advisor-targeting, silence-timeout, launch-bounds, origin-reconciliation, capability-briefing, candidate-class, run-progress, blocked-rollup, goal-file and checkpoint entries', () => {
   assert.deepEqual(Object.keys(DECLARED), [
     'deny-only project configuration for capabilities and commands',
     'implementer_unanswered -> advisor',
@@ -1868,6 +1900,7 @@ test('DECLARED contains exactly the routing, pause-resolution, attribution, ceil
     'status.progress, what the RUN is doing',
     'status.blocked, the one place a blocked run is named',
     '--goal-file on both front-ends',
+    '--checkpoint arms a decision point, which relay cannot hold',
   ])
 })
 
@@ -2057,7 +2090,7 @@ async function seatsFromSessionCli(t: TestContext): Promise<{ creates: CreateRec
  * The two machine-readable documents a default run actually emits.
  *
  * Both come out of one `relay --json` run in a temporary repository, through the production
- * call sites: the report is what `bin/conclave.ts:2134` prints, and the status record is what
+ * call sites: the report is what `bin/conclave.ts:2160` prints, and the status record is what
  * `recordSession` wrote during that same run, read back by `main(['status', '--json'])` --
  * which resolves the most recent session in `process.cwd()`, so the record has to have been
  * written where an operator would look for it.
@@ -2101,7 +2134,7 @@ async function defaultRunDocuments(t: TestContext): Promise<{ report: unknown; s
  * blind to that subtree is claiming more than it checks.
  *
  * Built through the real recorder: `recordSession` is what both front-ends call, and
- * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:1620
+ * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:1656
  * with the same object -- a `RunPause` the run handle raised, not one written here. Read back
  * through `main(['status', '--json'])`, so the serialisation and the reconciliation against
  * the pid are the production ones.
@@ -2309,7 +2342,7 @@ async function provokeReviewBlocked(repo: string): Promise<{ relay: Relay; run: 
  * Drive a real relay into one condition and return the pause it raised.
  *
  * The provocations are the ones `resolution.test.ts`'s own `provoke` already uses, deliberately:
- * the same triggers reaching the same single halt site (src/relay/relay.ts:4698), where the
+ * the same triggers reaching the same single halt site (src/relay/relay.ts:4853), where the
  * classification is computed by production `resolutionFor` from the subject the caller passed.
  * Nothing here writes a `RunPause`.
  *
@@ -2362,6 +2395,13 @@ async function provoke(
       advisor: ['Do the first thing.', 'Do the second thing.', 'DONE'],
       impl: ['ack', 'Did the first thing.', 'Did the second thing.', 'NONE'],
     },
+    // The advisor's FIRST reply is the signal, and the checkpoint it reports is armed below --
+    // this is the one condition in the table that is provoked by arming something rather than by
+    // making something go wrong. `DONE` follows it so the run has somewhere to go on release.
+    operator_checkpoint: {
+      advisor: ['MILESTONE: the first thing is done.', 'DONE'],
+      impl: ['ack'],
+    },
   }
   const script = scripts[reason]
   const advisor = new FakeRotationSession('advisor', 'codex', script.advisor)
@@ -2382,7 +2422,15 @@ async function provoke(
     maxRounds: 4,
     ...(armed ? { rotation: { checks: ['exit 0'], checkTimeoutMs: 30_000 } } : {}),
   })
-  const run = relay.start(reason === 'implementer_unanswered' ? 'Add the endpoint.' : 'Keep the work moving.')
+  const run = relay.start(
+    reason === 'implementer_unanswered' ? 'Add the endpoint.' : 'Keep the work moving.',
+    // Armed at `start` for the one reason that needs it, and for no other. A checkpoint is the
+    // operator asking in advance, so there is no way to reach this pause on a run nobody asked
+    // -- which is exactly what makes the entry a declared departure rather than a default
+    // document. Every other variant passes no second argument at all, so the call they make is
+    // the one they have always made.
+    reason === 'operator_checkpoint' ? { checkpoint: 'the first thing is done' } : {},
+  )
   if (reason === 'rotation_candidate') impl.compact()
   if (reason === 'authority_conflict') relay.say('Also write the word into two.txt.', { only: 'implementer' }, 'aside')
   const pause =
@@ -2397,7 +2445,7 @@ async function provoke(
  * The status document of a run paused for one given reason.
  *
  * Built through the real recorder: `recordSession` is what both front-ends call, and
- * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:1620
+ * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:1656
  * with the same object -- a `RunPause` the relay raised, not one written here. Read back
  * through `main(['status', '--json'])`, so the serialisation and the reconciliation against
  * the pid are the production ones.
@@ -2417,7 +2465,7 @@ async function pausedStatusDocument(t: TestContext, reason: PauseReason): Promis
     goal: 'a default goal',
     front: 'session',
     startedAt: Date.now(),
-    // Passed because the console always passes one (src/repl/session.ts:1238), so the status
+    // Passed because the console always passes one (src/repl/session.ts:1258), so the status
     // documents this file pins differ only in what a pause actually changes.
     logPath: join(repo, '.conclave', 'runs', 'session-test.ndjson'),
     build: 'test',
@@ -2598,9 +2646,9 @@ test('default run works in the run cwd and creates no worktree', async (t) => {
     assert.equal(c.cwd, fromCli.cwd, `the session CLI must create ${c.id} in the run cwd`)
   }
 
-  // The relay CLI passes process.cwd() as the run cwd: bin/conclave.ts:2035-2037.
-  // The relay hands that same cwd to each participant adapter: src/relay/relay.ts:2551-2557.
-  // The cwd getter simply returns the option: src/relay/relay.ts:2248-2250.
+  // The relay CLI passes process.cwd() as the run cwd: bin/conclave.ts:2061-2063.
+  // The relay hands that same cwd to each participant adapter: src/relay/relay.ts:2638-2644.
+  // The cwd getter simply returns the option: src/relay/relay.ts:2335-2337.
   assert.match(relay, /cwd:\s*process\.cwd\(\)/, 'relay block must start in process.cwd')
   // Both creation sites now pass a NAMED context object rather than an inline literal, because
   // the same object composes the launch args that get recorded -- see
@@ -2650,7 +2698,7 @@ test('default run works in the run cwd and creates no worktree', async (t) => {
 
   // A default run with no subagents must not create any git worktree. The relay only samples
   // the worktree list for its subagent-use report: src/relay/subagents.ts:113 defines
-  // worktreePaths, and src/relay/relay.ts:3575-3576, :4199 and :6785 read it.
+  // worktreePaths, and src/relay/relay.ts:3728-3729, :4352 and :7039 read it.
   // Prove it by exercising the run in a real temporary repository.
   const repo = tempDir(t, 'conclave-default')
   execFileSync('git', ['init', '--quiet'], { cwd: repo })
@@ -2763,6 +2811,14 @@ test('both flag helpers fall back when the flag is absent, and each block reads 
     [
       'advisor',
       'advisor-args',
+      // SESSION ONLY, and the first entry on this surface that relay does not also have --
+      // every other declared addition landed on both. See
+      // DECLARED['--checkpoint arms a decision point, which relay cannot hold'] and the
+      // matching entry in `frontEndParity.test.ts`: relay ends the run at every pause, so a
+      // checkpoint there would stop the run it was meant to interrupt with nobody able to
+      // release it. Valued and optional, with no default, so a console run that does not pass
+      // it calls `relay.start(goal)` with one argument exactly as it always did.
+      'checkpoint',
       'checks',
       'checks-informational',
       'checks-unrelated',
@@ -2816,7 +2872,7 @@ const runDocuments = (t: TestContext): Promise<{ report: unknown; status: unknow
  *     field added inside any of them was invisible -- which is precisely where per-seat
  *     features land.
  *   - A declared field is not an emitted one. `turnWatchdogMs` was declared and dropped for
- *     its whole life (src/repl/session.ts:278-290), and a text-level pin cannot tell the
+ *     its whole life (src/repl/session.ts:291-303), and a text-level pin cannot tell the
  *     difference.
  *   - An emitted field need not be declared anywhere this test was reading. A key spread in
  *     from another type, or written by a builder that widens its return, appears in the JSON
@@ -3138,6 +3194,51 @@ const PAUSED_SUBTREE: Record<PauseReason, Record<string, string>> = {
     // admitted, and those four shapes are pinned against a real relay in
     // src/relay/targetingWatch.test.ts instead.
     'targeting.records[]': 'addressed, outcome, targets, turn',
+  },
+  // A DECLARED DEPARTURE, and the third kind in this table.
+  //
+  // The other two departures are structural: `merge_blocked` and `review_blocked` need seats a
+  // default run does not have, and `rotation_candidate` needs `--checks`. This one needs neither
+  // -- the run below is a bare default run, one advisor and one implementer, no flags -- but it
+  // cannot be reached without the operator having ARMED a checkpoint before the run began, which
+  // no default invocation does. So the departure is not in the run's configuration; it is that
+  // the operator asked for this pause in advance, which is the whole of what the reason means.
+  //
+  // The subtree is nevertheless the same one `operator_requested` emits, key for key, and that
+  // is the assertion rather than a coincidence worth relaxing. Both are conclave-scoped operator
+  // suspensions carrying nothing but the standard block: no `verdictOf`, because no verdict is
+  // in question -- the advisor's turn completed and its reply was whole; no `candidate`, because
+  // nothing was assessed; no `conflict`, because there are not two sides. A build that started
+  // emitting any of them here would be attaching evidence to a pause that rests on none.
+  operator_checkpoint: {
+    pause: 'at, atSeq, checkpoint, detail, evidence, options, reason, resolution',
+    'pause.resolution': 'authority, reason, scope',
+    'pause.resolution.scope': 'kind',
+    // The ONLY document in this corpus carrying a `checkpoint` block, and the only one that
+    // could: the key is present exactly when the operator armed one, so its absence from the
+    // other eight documents is what makes its presence here a decision rather than a build that
+    // reports it unconditionally. See
+    // DECLARED['--checkpoint arms a decision point, which relay cannot hold'].
+    //
+    // This restates the root key list rather than inheriting PAUSED_COMMON's for the same
+    // reason `merge_blocked` restates it for `targeting`: a common pin that included
+    // `checkpoint` would let it appear on every document, and one that omitted it would let it
+    // vanish from this one.
+    '': 'abandoned, alive, blocked, build, ceilings, checkpoint, cwd, deadlines, eventsPath, forces, front, goal, id, logPath, messages, operator, participants, pause, pid, progress, rotations, schema, startedAt, state, updatedAt',
+    // FIVE keys, and `continuedAt` is the sixth by its ABSENCE. This document is captured at the
+    // checkpoint's own pause: the advisor has signalled -- so `state` is `signalled` and
+    // `signalledAt` is stamped -- and the operator has been asked and has not answered, so there
+    // is no continuation to timestamp. A build that emitted `continuedAt` here would be
+    // reporting an acceptance nobody has given yet; that shape belongs to a document captured
+    // after a `/continue` and is pinned in src/repl/checkpoint.test.ts against a real run
+    // rather than here, because a paused corpus cannot reach it.
+    checkpoint: 'at, generation, milestone, signalledAt, state',
+    // WHICH checkpoint this pause is about, as data. Present on this reason and no other -- the
+    // same arm-by-arm rule `pause.candidate` follows -- and it exists so a reader can line the
+    // pause up against the top-level block after a paused re-arm, when the two are deliberately
+    // different checkpoints. See DECLARED['--checkpoint arms a decision point, which relay
+    // cannot hold'].
+    'pause.checkpoint': 'generation, milestone',
   },
   // Needs a reviewer seat, provoked in its own branch (#72) -- same reason `merge_blocked`
   // above is not a default run either.

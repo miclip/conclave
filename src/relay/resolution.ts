@@ -96,6 +96,15 @@ export type ResolutionSubject =
   | { reason: 'review_blocked'; participant: string }
   | { reason: 'advisor_escalated' }
   | { reason: 'operator_requested' }
+  /**
+   * The checkpoint the operator armed in advance, reported reached.
+   *
+   * No evidence, and the same reason `operator_requested` carries none: the condition is about
+   * the conclave, not about a seat. The advisor is what SIGNALLED it, and attaching that seat
+   * id here would put the reporting party on the scope axis -- the run does not stop because
+   * the advisor is unable to proceed, it stops because the operator said to stop here.
+   */
+  | { reason: 'operator_checkpoint' }
 
 /** Both directions, so neither set can grow past the other. */
 type Exactly<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false
@@ -173,8 +182,8 @@ export interface ResolutionConfig {
    * `--checks` IS the operator pre-delegating rotation authority, by supplying the
    * verification method that makes the decision mechanical: without it the console says a
    * degraded implementer "escalates to you rather than being replaced"
-   * (`src/repl/session.ts:1068`) and the run reports `rotation: NOT ARMED (no checks
-   * configured)` (`src/relay/relay.ts:3676`).
+   * (`src/repl/session.ts:1088`) and the run reports `rotation: NOT ARMED (no checks
+   * configured)` (`src/relay/relay.ts:3829`).
    */
   rotationArmed: boolean
 }
@@ -195,7 +204,7 @@ export function resolutionFor(subject: ResolutionSubject, config: ResolutionConf
         // Derived from configuration, per D2. Note what this does NOT claim: that a run
         // with checks resolves the candidate without asking. Today it asks either way --
         // `onDegradation` defaults to `candidate` because the policy is not earned yet --
-        // resolved for the seat in `rotationFor` (`src/relay/relay.ts:343`), which is where a
+        // resolved for the seat in `rotationFor` (`src/relay/relay.ts:345`), which is where a
         // per-seat policy may override it (D7) and where the default is written once. So this
         // axis records the entitlement the operator has already delegated.
         //
@@ -203,7 +212,7 @@ export function resolutionFor(subject: ResolutionSubject, config: ResolutionConf
         // end on degradation rather than pause, so the one configuration this branch describes
         // was the one that never produced a pause to describe -- the classification was honest
         // and unreachable at the same time. An unarmed run attended by a HUMAN now pauses
-        // (`src/relay/relay.ts:5304`), which is what makes the derivation mean anything: with
+        // (`src/relay/relay.ts:5552`), which is what makes the derivation mean anything: with
         // checks the candidate is mechanical because a replacement could reproduce them, and
         // without checks it is the operator's because nothing else can settle it.
         //
@@ -271,6 +280,17 @@ export function resolutionFor(subject: ResolutionSubject, config: ResolutionConf
     case 'operator_requested':
       // A suspension, not an escalation: the operator stopped the conclave and the operator
       // is the only one who can start it again.
+      return { reason: subject.reason, authority: 'operator', scope: { kind: 'conclave' } }
+    case 'operator_checkpoint':
+      // The operator armed it, so the operator resolves it, and neither of the other two
+      // authorities is available even in principle. `advisor` is wrong because the advisor is
+      // the party that RAISED it: a checkpoint the reporter could clear is a checkpoint that
+      // never stopped anything. `mechanical` is wrong because there is nothing to reproduce --
+      // "has the milestone been reached" is a judgement the run has no second witness for, and
+      // the operator's whole purpose in arming one was to look for themselves.
+      //
+      // Conclave scope, exactly as `operator_requested` above: what stops is the admission of
+      // further work, and no single seat is what cannot proceed.
       return { reason: subject.reason, authority: 'operator', scope: { kind: 'conclave' } }
   }
 }

@@ -76,6 +76,7 @@ import {
   type Decision,
   type ForceRecord,
   type PauseOption,
+  type ArmedCheckpoint,
   type PauseReason,
   type PauseSupersession,
   type RunOutcome,
@@ -109,6 +110,7 @@ import {
   nextDispatch,
   queueDepth,
   parseDecisions,
+  readMilestone,
   recordCompletion,
   refuseDispatch,
   seatsFor,
@@ -618,7 +620,7 @@ export interface RelayOptions {
    * this seam the whole of #101 -- the measurement, its timestamp, and the re-measurement that
    * makes the timestamp move -- is unreachable from any test that does not spawn a real CLI.
    * The console already carries the identical seam for its `/continue` guard
-   * (`src/repl/session.ts:362`), and the two are deliberately the same shape.
+   * (`src/repl/session.ts:375`), and the two are deliberately the same shape.
    */
   liveness?: ((pid: number) => Promise<ChildLiveness>) | undefined
   /**
@@ -1325,6 +1327,50 @@ repair. Address the repair to it BY NAME with @seat — an untargeted instructio
 different free seat, and the blocked one stays blocked until you name it.`
 
 /**
+ * Added to the advisor's briefing when the operator armed a CHECKPOINT (`operator_checkpoint`).
+ *
+ * Conditional for exactly the reason `MULTI_SEAT_BRIEFING` is: a default run must not pay a
+ * word for a feature it did not ask for, and the unmodified `LEAD_BRIEFING` is what a live
+ * experiment is running against. A run with no checkpoint is briefed byte-identically to how it
+ * always was.
+ *
+ * A function rather than a constant, because the milestone is the operator's own sentence and
+ * an advisor told "stop at the checkpoint" without being told what the checkpoint IS has been
+ * given a rule it cannot follow.
+ *
+ * What it teaches is the signal and the consequence, in that order, and the consequence is
+ * stated as something the advisor can avoid rather than as an implementation note: an advisor
+ * that does not know its DONE was refused simply writes DONE again, which is the failure
+ * `MULTI_SEAT_BRIEFING` names for the addressed form and the same one here.
+ *
+ * NOT delivered when the checkpoint is armed mid-run -- the briefing has already been sent by
+ * then. That case goes through `#tellLead`, which is the channel for a mechanical fact the
+ * advisor must have before its next instruction, and it says the same thing.
+ */
+const checkpointBriefing = (milestone: string): string => `THE OPERATOR HAS SET A CHECKPOINT ON THIS RUN. It is:
+
+  ${milestone}
+
+Work towards it exactly as you would otherwise: one concrete instruction at a time, and react
+to what comes back. Nothing about the checkpoint changes how you instruct.
+
+When you judge that the checkpoint has been reached, reply exactly
+
+  MILESTONE: <what you are reporting>
+
+as your WHOLE reply, assigning nothing. The run stops there and the operator looks. They decide
+whether it carries on; if it does, the checkpoint is spent and you will not be asked for it
+again.
+
+Until you send that, DONE DOES NOT END THIS RUN. If you reply DONE first you will be told so and
+asked again, and the turn is spent. If the work really is finished and the checkpoint really has
+been reached, MILESTONE: is the reply that says so -- send it instead of DONE, not after it.
+
+The signal must be the whole reply and it must carry the colon and something after it. A reply
+that begins with MILESTONE and is not in that form is refused, nothing is dispatched, and you
+are asked again.`
+
+/**
  * Added to the advisor's briefing when the operator is an AGENT rather than a human.
  *
  * `LEAD_BRIEFING` tells the advisor that asking is cheaper than guessing, and then leaves the
@@ -1899,6 +1945,47 @@ export class Relay {
   #closed = new Map<string, { done: boolean; promise: Promise<void>; fire: () => void }>()
   /** Set by `RunHandle.requestPause()`; consumed at the next advisor-turn boundary. */
   #pauseRequested: string | undefined
+  /**
+   * The operator's checkpoint, or `undefined` when this run was never given one
+   * (`operator_checkpoint`).
+   *
+   * Set by `start(goal, { checkpoint })` before the loop begins, or by `RunHandle.armCheckpoint`
+   * at any point after. Read on every advisor turn: it is what decides whether a `MILESTONE:`
+   * reply is a signal or an instruction, and whether a `DONE` may end the run.
+   *
+   * A RECORD rather than a bare string, and `state` is why. Two facts have to survive past the
+   * moment the checkpoint stops being armed, and a field that went back to `undefined` on
+   * release could carry neither:
+   *
+   *   - `reached` is what makes a released checkpoint distinguishable from one that never
+   *     fired. The operator looked and let the run go; that is a different run from one that
+   *     ended having never stopped, and the record must not read the same for both.
+   *   - `armed` at the moment the run ENDS is the case that must never be silent. `#end`
+   *     appends a sentence saying the checkpoint was not reached, the same way
+   *     `#integrationRedNote` appends one about a red tree, so an operator reading the outcome
+   *     afterwards is told rather than left to notice an absence.
+   *
+   * SPENT -- `state` moved to `continued` -- by the resume that CONTINUES past the checkpoint's
+   * own pause, and nowhere else. Not by the signal, which only moves it to `signalled`, and
+   * specifically not by an ABORT at that pause: an abort is the operator ending the run, not
+   * accepting the milestone. One shot after a continue: a run let go past the milestone must not
+   * stop again at every turn.
+   *
+   * RESET BY EVERY RUN, in `start()`, and not only by a run that arms one. A relay outlives its
+   * runs, so a field left alone when no checkpoint is asked for is a field the NEXT run inherits:
+   * a second run silently holding the first run's spent record, or -- after an abort at the
+   * checkpoint pause -- still holding an armed one, refusing its `DONE` for a milestone that run
+   * was never about.
+   */
+  #checkpoint: ArmedCheckpoint | undefined
+  /**
+   * How many checkpoints this run has armed. The next one takes `generation` this plus one.
+   *
+   * Reset with `#checkpoint` at the top of every run, so generations are read within the run
+   * they belong to -- and never the routing log's `seq`, which orders messages and is a
+   * different coordinate entirely. See `ArmedCheckpoint.generation`.
+   */
+  #checkpointGeneration = 0
   /** The pause currently in front of a human, when it rests on a verdict. See `#trackSupersession`. */
   #verdictPause: VerdictPause | undefined
   #stream = new RelayEventStream()
@@ -3048,6 +3135,22 @@ export class Relay {
       if (reason === 'done' || reason === 'budget') reason = 'integration_failed'
       detail = detail === undefined ? note : `${detail}. ${note}`
     }
+    // A CHECKPOINT THAT NEVER FIRED, said out loud in the outcome itself.
+    //
+    // The same construction as the red-tree note above and for the same reason: this is the one
+    // place a run ends, however it ends, so a sentence appended here reaches `done`, `budget`,
+    // `ceiling`, `stopped`, a transport failure and every ending added later, without each of
+    // them having to remember. The reason is deliberately NOT changed -- a run that finished its
+    // work finished it, and calling that outcome something else would be the orchestrator
+    // overruling the participants on a question they were right about.
+    //
+    // What it prevents is silence. Before this, an operator who armed a checkpoint and got back
+    // `done` had no way to tell "the advisor signalled, you looked, and let it go" from "it never
+    // signalled and the run ended anyway": both left the same record. A missing signal is the
+    // failure the whole checkpoint exists to make impossible, and it must not be the one thing
+    // the record does not mention.
+    const unreached = this.#checkpointUnreachedNote()
+    if (unreached) detail = detail === undefined ? unreached : `${detail}. ${unreached}`
     if (!this.#ended) {
       this.#ended = true
       // The instant the run is over is the instant its clock stops. Before this, both figures
@@ -3062,6 +3165,47 @@ export class Relay {
       this.#stream.close()
     }
     return detail === undefined ? { reason } : { reason, detail }
+  }
+
+  /**
+   * What an outcome has to say about the operator's checkpoint, or nothing when there is nothing
+   * to say -- no checkpoint was armed, or the one that was has been reached.
+   *
+   * One sentence built in one place, exactly as `#integrationRedNote` is, so `#end` and
+   * `#redAware` cannot describe the same fact two ways.
+   */
+  #checkpointUnreachedNote(): string | undefined {
+    const c = this.#checkpoint
+    // `armed` ONLY. A `signalled` checkpoint WAS reached -- the advisor reported it and the
+    // operator was asked -- and saying otherwise because they then aborted would invert the
+    // reading of the run: "the milestone never arrived" and "the milestone arrived and you chose
+    // to stop there" are opposite facts, and the second is the ordinary use of a checkpoint.
+    if (!c || c.state !== 'armed') return undefined
+    return (
+      `the operator's checkpoint was NOT reached: they armed "${c.milestone}" and the run ended ` +
+      `without the advisor ever signalling it`
+    )
+  }
+
+  /**
+   * Is a checkpoint still holding this run back? `signalled` counts; `continued` does not.
+   *
+   * One predicate, read by the signal reader and by the `DONE` gate, so the two cannot come to
+   * disagree about what "armed" means -- which is the drift that a three-valued state invites
+   * and that a boolean field would have hidden.
+   */
+  #checkpointArmed(): boolean {
+    return this.#checkpoint !== undefined && this.#checkpoint.state !== 'continued'
+  }
+
+  /**
+   * The operator's checkpoint on this run, for whoever reports it. `undefined` if none was armed.
+   *
+   * A read of the live record rather than a copy, spread so a caller cannot edit the relay's
+   * own state through it -- the same care `forceRecords()` takes, for the same reason.
+   */
+  get checkpoint(): ArmedCheckpoint | undefined {
+    return this.#checkpoint === undefined ? undefined : { ...this.#checkpoint }
   }
 
   /**
@@ -3102,6 +3246,15 @@ export class Relay {
    * build must say so in every place it says anything.
    */
   #redAware(outcome: RunOutcome): RunOutcome {
+    // THE RED NOTE ONLY, and the checkpoint note is deliberately not re-applied here.
+    //
+    // This method exists because a red tree can be DISCOVERED after the halt: `#halt` calls
+    // `#end` itself, and the seats still in flight merge afterwards, so the outcome it returned
+    // can become untrue between the two. A checkpoint cannot move that way. Its state at the
+    // halt is its state at the end -- the only transition is the continue that releases it, and
+    // an outcome only comes back from a halt that was NOT continued -- so `#end` has already
+    // appended the sentence, on every path that reaches here, and appending it again would put
+    // the same finding in the detail twice.
     const note = this.#integrationRedNote()
     if (!note || outcome.detail?.includes(note)) return outcome
     return { reason: outcome.reason, detail: outcome.detail === undefined ? note : `${outcome.detail}. ${note}` }
@@ -4666,6 +4819,8 @@ export class Relay {
       verdictOf?: { participant: string; endSeq: number }
       /** `rotation_candidate` only: which class of degradation raised it (#247). */
       candidate?: { assessedAs: Assessment['reason'] }
+      /** `operator_checkpoint` only: which checkpoint this pause is about. See `RunPause`. */
+      checkpoint?: { generation: number; milestone: string }
       superseded?: PauseSupersession
       /**
        * Remember the answer, and do not put the same question twice. See `#incompleteAnswered`.
@@ -4812,6 +4967,7 @@ export class Relay {
       ...(p.conflict === undefined ? {} : { conflict: p.conflict }),
       ...(p.verdictOf === undefined ? {} : { verdictOf: p.verdictOf }),
       ...(p.candidate === undefined ? {} : { candidate: p.candidate }),
+      ...(p.checkpoint === undefined ? {} : { checkpoint: p.checkpoint }),
       ...(p.superseded === undefined ? {} : { superseded: p.superseded }),
       ...(measured === undefined || p.liveness === undefined
         ? {}
@@ -4918,7 +5074,7 @@ export class Relay {
    * writing down because it points at a different mechanism: the loop is suspended at `await
    * deciding` above for the whole pause, so `#halt` cannot run again, and a watchdog `revision`
    * or replacement `turn_end` arriving meanwhile goes to `#trackSupersession`, which amends THE
-   * SAME `RunPause` in place (`src/relay/run.ts:893`). There was one pause, read twice. The
+   * SAME `RunPause` in place (`src/relay/run.ts:1091`). There was one pause, read twice. The
    * evidence was not re-derived because nothing had re-derived it since it was captured -- which
    * is the same defect, reached by a shorter path than the report proposed.
    *
@@ -5037,7 +5193,7 @@ export class Relay {
       else if (!shouldWait && offered !== -1) pause.options.splice(offered, 1)
       // The status file is written from the LIVE pause object on any event, so an in-place
       // change reaches disk on the next one -- and a pause is precisely when nothing else is
-      // flowing. Same reasoning as `/wait` in the console (`src/repl/session.ts:2483`), and the
+      // flowing. Same reasoning as `/wait` in the console (`src/repl/session.ts:2580`), and the
       // reader who needs it most is the one polling from outside.
       this.#stream.emit({ type: 'liveness', pause })
       if (last) return stop()
@@ -5065,8 +5221,40 @@ export class Relay {
    * The supervised form. Pauses suspend the loop rather than ending it, so a rotation
    * candidate is a decision point rather than a dead end -- see `run.ts` for why restarting
    * `run()` is not the same as resuming.
+   *
+   * `checkpoint` arms a one-shot checkpoint before the first prompt is written, which is the
+   * difference between arming here and calling `RunHandle.armCheckpoint` a moment later: only a
+   * checkpoint armed HERE can be in the advisor's briefing, and a briefing is the one place the
+   * advisor reads before it has anything else to do. An optional second argument rather than a
+   * `RelayOptions` field, because a checkpoint belongs to the RUN and not to the relay -- a
+   * relay outlives a run, and a checkpoint stored beside the seat table would survive into the
+   * next one still armed.
    */
-  start(goal: string): RunHandle {
+  start(goal: string, opts: { checkpoint?: string | undefined } = {}): RunHandle {
+    // RESET FIRST, and unconditionally. A relay outlives its runs, so assigning only when a
+    // checkpoint is asked for leaves the previous run's record in place for the next one -- which
+    // inherits a spent checkpoint, or an armed one an abort left behind, and then refuses a
+    // `DONE` for a milestone nobody set on it. The reset happens before the validation below so
+    // that a refused `--checkpoint ""` also leaves nothing behind.
+    //
+    // Set before `#loop` is called, so the briefing assembled inside it can read the field
+    // rather than being handed a second copy of it (`checkpointBriefing`).
+    //
+    // Trimmed and refused empty on the same terms `RunHandle.armCheckpoint` refuses one: the
+    // milestone is the whole of what the advisor is told to watch for and what the pause carries.
+    this.#checkpoint = undefined
+    this.#checkpointGeneration = 0
+    if (opts.checkpoint !== undefined) {
+      const stated = opts.checkpoint.trim()
+      if (!stated) {
+        throw new Error(
+          `a checkpoint needs a milestone stated. It is what the advisor is briefed to watch ` +
+            `for and what the pause is raised carrying, so an empty one would stop the run at a ` +
+            `milestone nobody could name.`,
+        )
+      }
+      this.#checkpoint = { generation: ++this.#checkpointGeneration, milestone: stated, state: 'armed', at: this.#now() }
+    }
     const handle = new RunHandle(
       {
         // The seat the CURRENT pause is about, which is the one the operator is looking at. With
@@ -5087,6 +5275,66 @@ export class Relay {
         },
         requestPause: (reason) => {
           this.#pauseRequested = reason
+        },
+        // Arming mid-run. The handle has already validated and trimmed the milestone; what is
+        // left here is the part only the relay can do -- set the state the loop reads, and tell
+        // the advisor, which a checkpoint armed after the briefing has no other way to reach.
+        armCheckpoint: (milestone) => {
+          // What is REPLACED, and only an armed one counts. Re-arming after the operator has
+          // already continued past a checkpoint is a fresh checkpoint, not a replacement: the
+          // first one was answered, and reporting it as displaced would tell the operator they
+          // had cancelled something they had in fact completed.
+          const replaced =
+            this.#checkpoint !== undefined && this.#checkpoint.state !== 'continued'
+              ? this.#checkpoint.milestone
+              : undefined
+          this.#checkpoint = {
+            generation: ++this.#checkpointGeneration,
+            milestone,
+            state: 'armed',
+            at: this.#now(),
+          }
+          this.#record({
+            from: 'orchestrator',
+            fromRank: 'human',
+            to: [],
+            kind: 'note',
+            text:
+              replaced === undefined
+                ? `operator armed a checkpoint: the run stops when the advisor reports "${milestone}"`
+                : // Replaced rather than queued, and the record says which was dropped. Two armed
+                  // checkpoints would need an order, and a single MILESTONE: reply names neither.
+                  `operator replaced the armed checkpoint "${replaced}" with "${milestone}"`,
+          })
+          this.#tellLead(checkpointBriefing(milestone))
+          return replaced
+        },
+        // Spent, at the instant the operator spends it. The loop learns about it by reading the
+        // field on its next turn rather than by writing it -- one writer, and no window in which
+        // the run has resumed and `/state` still says the checkpoint will hold a DONE back.
+        checkpointContinued: (generation) => {
+          const live = this.#checkpoint
+          // NOT the live checkpoint any more: the operator armed another one while this pause was
+          // in front of them, so their `/continue` is an answer to a question that has since been
+          // displaced. The one that is live was never signalled and must stay armed -- stamping it
+          // here is how a run came to finish at a checkpoint the operator had just set and never
+          // seen. What happened to this generation is in the routing log; the top-level block is
+          // the LIVE checkpoint, and it is B.
+          if (live === undefined || live.generation !== generation) {
+            this.#record({
+              from: 'orchestrator',
+              fromRank: 'human',
+              to: [],
+              kind: 'note',
+              text:
+                `operator continued past checkpoint ${generation}, which had already been replaced` +
+                (live === undefined ? '' : ` by "${live.milestone}" (checkpoint ${live.generation})`) +
+                `; the replacement is still armed and the run does not end before it is signalled`,
+            })
+            return
+          }
+          if (live.state === 'continued') return
+          this.#checkpoint = { ...live, state: 'continued', continuedAt: this.#now() }
         },
       },
       // The handle's suspension ledger is subtracted from this relay's elapsed reading, so the
@@ -6773,6 +7021,12 @@ export class Relay {
         // goal, with the other conditional blocks, so operator prose cannot displace the
         // instructions below it.
         `${((b) => (b === '' ? '' : `${b}\n\n`))(roleBriefingForAdvisor(seats, (r) => this.#roleDescription(r)))}` +
+        // The armed checkpoint, when `start(goal, { milestone })` set one BEFORE the loop began.
+        // A checkpoint armed later cannot be here -- this prompt has already gone -- and reaches
+        // the advisor through `#tellLead` instead, which is where a mechanical fact it must have
+        // before its next instruction belongs. Absent, and therefore costing nothing, on every
+        // run that armed none.
+        `${this.#checkpoint === undefined ? '' : `${checkpointBriefing(this.#checkpoint.milestone)}\n\n`}` +
         `${this.#opts.operator === 'agent' ? `${AGENT_OPERATOR_NOTICE}\n\n` : ''}${((b) => (b === '' ? '' : `${b}\n\n`))(advisorTurnsLeftNotice(1, maxAdvisorTurns))}` +
         `${prior}The goal for this session:\n\n${goal}\n\nGive the implementer its first instruction.`,
     )
@@ -7420,6 +7674,24 @@ export class Relay {
           instruction = secondCommands.rest.trim()
         }
 
+        // The reply, read as a MILESTONE signal FIRST -- and only when a checkpoint is armed.
+        //
+        // Read here, where `instruction` has settled (the note/command re-ask above can replace
+        // it) and before anything below reads the reply for meaning. Read for SHAPE only:
+        // nothing is acted on until past the verdict guard, because a truncated reply is not
+        // evidence of anything and a checkpoint fired on half a sentence is a checkpoint the
+        // advisor did not send.
+        //
+        // `undefined` on every unarmed run, at no cost and with no behaviour: `readMilestone` is
+        // not even called, so `MILESTONE: whatever` on a run with no checkpoint is an ordinary
+        // instruction and is dispatched as one. That is the honest reading -- the word means
+        // nothing on a run where nobody armed anything -- and it is what keeps the default run
+        // identical.
+        // ARMED means "not yet continued", which is what `--checkpoint` promised. `signalled` is
+        // still armed: only the operator's continue spends a checkpoint, and while one is
+        // signalled the loop is parked at its pause anyway.
+        const milestone = this.#checkpointArmed() ? readMilestone(instruction) : undefined
+
         // The reply, read as assignment decisions. Fails closed: a reply that does not parse
         // cleanly -- including one naming a seat id or role the run does not have -- is treated
         // exactly as an empty instruction is treated today, by the guard immediately below.
@@ -7510,7 +7782,12 @@ export class Relay {
         // Nothing here changes the failure. This observes: the reply still fails whole, the halt
         // below still happens on the same terms, the advisor is still re-asked, and no name taken
         // from this attempt is ever routed to.
-        if (!decisions.ok || decisions.decisions.some((d) => d.kind === 'instruct')) {
+        //
+        // A MILESTONE signal is excluded on the same terms DONE and ESCALATE are: it assigns
+        // nothing, it was never asked to name a seat, and counting it in the denominator would
+        // score a run's briefing on turns that were not about assignment at all. Malformed ones
+        // too -- a refused signal is a turn spent reporting, not a turn spent failing to target.
+        if (milestone === undefined && (!decisions.ok || decisions.decisions.some((d) => d.kind === 'instruct'))) {
           attempt = {
             turn: advisorTurn,
             end: next.end,
@@ -7687,6 +7964,131 @@ export class Relay {
           continue
         }
 
+        // THE ARMED CHECKPOINT, acted on here: past the verdict guard, so the reply is whole and
+        // its turn completed, and ahead of every decision below, so nothing the reply might also
+        // have been read as can be dispatched instead.
+        //
+        // `decisions` was computed above and is deliberately thrown away on this path. A
+        // `MILESTONE:` reply parses perfectly well as an unaddressed instruction -- that is what
+        // it would be on a run with no checkpoint -- and dispatching it would hand a seat the
+        // sentence the advisor wrote to say the work had ARRIVED somewhere. That is the one
+        // outcome of the three that is silent, which is why the arming is checked before the
+        // decision is read rather than after.
+        if (milestone) {
+          // Non-null by construction: `milestone` is only read at all when the checkpoint is
+          // armed, and nothing between that read and here can disarm one -- the only disarm is
+          // the continue below, and `armCheckpoint` can replace a checkpoint but never remove
+          // it. Bound once so the three uses below cannot each re-read a field and disagree.
+          const armed = this.#checkpoint!
+          if (!milestone.ok) {
+            // Malformed. Treated exactly as an empty instruction is treated: nothing dispatched,
+            // recorded, and the advisor asked once more -- the same shape as the parse-failure
+            // path above, and for the same reason. Guessing at what a half-written signal meant
+            // would either end a run early or send a report to a seat as work.
+            //
+            // NOT a pause, and not a halt. Nothing has gone wrong that a human is needed for:
+            // the advisor mistyped a keyword, and the remedy is one sentence back to it. Halting
+            // here would put the operator in front of a question they cannot answer better than
+            // the advisor can.
+            this.#record({
+              from: 'orchestrator',
+              fromRank: 'human',
+              to: [],
+              kind: 'note',
+              text: `${lead.id} attempted a milestone signal and it was refused: ${milestone.why}`,
+            })
+            next = await this.#exchange(
+              lead,
+              [
+                this.#drain(lead.id),
+                `[ORCHESTRATOR — mechanical, not a participant speaking]\n\n${milestone.why}`,
+                `The checkpoint is still armed: ${armed.milestone}. Send the signal again in the ` +
+                  `right form if it is reached, or give the implementer its next instruction if ` +
+                  `it is not.`,
+                advisorTurnsLeftNotice(advisorTurn + 1, maxAdvisorTurns),
+              ]
+                .filter(Boolean)
+                .join('\n\n'),
+            )
+            continue
+          }
+          const reached = armed.milestone
+          this.#record({
+            from: lead.id,
+            fromRank: 'advisor',
+            to: [],
+            kind: 'note',
+            text: `advisor reports the checkpoint reached: ${milestone.detail}`,
+          })
+          // SIGNALLED, before the halt and separately from any later acceptance. The advisor
+          // reporting and the operator agreeing are two facts, and folding them into one made an
+          // abort at this pause indistinguishable from a run whose milestone was never reported.
+          this.#checkpoint = { ...armed, state: 'signalled', signalledAt: this.#now() }
+          const halted = await this.#halt(handle, {
+            subject: { reason: 'operator_checkpoint' },
+            // The identity, structured, so a reader can line this pause up against whatever the
+            // live checkpoint is by the time they look. See `RunPause.checkpoint`.
+            checkpoint: { generation: armed.generation, milestone: armed.milestone },
+            // The ADVISOR's sentence, not the operator's. The operator already knows what they
+            // armed; what they stopped to read is what the participant judged had happened, and
+            // a detail composed from the milestone here would put the operator's own words in
+            // the record as though a participant had written them.
+            detail: milestone.detail,
+            evidence: [
+              `the operator armed this checkpoint in advance: ${reached}`,
+              `${lead.id} judged it reached and reported so as its whole reply; ` +
+                `no instruction was dispatched this turn`,
+            ],
+          })
+          // Unattended, or ended under the question: `#halt` returns the outcome and the
+          // checkpoint stays armed, because nothing answered it. The run is over either way, so
+          // arming is moot -- but disarming here would record a checkpoint as spent that no
+          // operator ever saw.
+          if (halted) {
+            closing ??= { kind: 'outcome', outcome: halted }
+            continue advisor
+          }
+          // CONTINUED. The checkpoint has ALREADY been spent by the time this line runs:
+          // `RunHandle.#release` calls `checkpointContinued` synchronously, inside the
+          // operator's own `/continue`, so there is no instant at which the run has resumed and
+          // the state still reads armed. See `RunControl.checkpointContinued` for the window
+          // that arrangement closes.
+          //
+          // Asserted rather than assigned, because a second writer here is exactly what would
+          // let the two disagree. An abort at this pause returns an outcome from `#halt` above
+          // and never reaches this line, so the checkpoint stays `signalled` and `#end` says
+          // nothing about it being unreached -- which is right: the advisor DID report it, and
+          // the operator ended the run rather than accepting.
+          //
+          // Scoped to THIS generation. A checkpoint armed while this pause was in front of the
+          // operator is legitimately still armed here -- it is the next phase, and it has never
+          // been signalled -- so a bare "nothing is armed" assertion would fire on the correct
+          // behaviour.
+          if (this.#checkpoint?.generation === armed.generation && this.#checkpoint.state !== 'continued') {
+            throw new Error(
+              `the run resumed from the pause for checkpoint ${armed.generation} and that ` +
+                `checkpoint is still '${this.#checkpoint.state}'. RunHandle.#release is what ` +
+                `spends it, synchronously and by generation, so reaching here unspent means a ` +
+                `continue arrived by some path that does not go through it -- and the run would ` +
+                `now stop again at the next MILESTONE: reply the advisor sent.`,
+            )
+          }
+          next = await this.#exchange(
+            lead,
+            [
+              this.#drain(lead.id) ||
+                `[ORCHESTRATOR — mechanical, not a participant speaking]\n\nThe operator has seen ` +
+                  `the checkpoint and released the run. It is spent: there is no checkpoint armed ` +
+                  `now, and DONE ends the run again. Give the implementer its next instruction, or ` +
+                  `reply exactly DONE if the work is finished.`,
+              advisorTurnsLeftNotice(advisorTurn + 1, maxAdvisorTurns),
+            ]
+              .filter(Boolean)
+              .join('\n\n'),
+          )
+          continue
+        }
+
         // DONE and ESCALATE are whole-reply decisions and `parseDecisions` guarantees each
         // arrives alone -- a reply that mixed one with an assignment is a `mixed_keyword`
         // failure handled above, so reading the first decision here cannot be dropping work.
@@ -7699,6 +8101,47 @@ export class Relay {
         // already been paid for, and would send the closing question to a seat mid-turn.
         //
         // At N=1 unreachable: the only turn in flight is the one just processed.
+        // A DONE WHILE A CHECKPOINT IS ARMED DOES NOT END THE RUN, and this is what "fail
+        // closed" means for a checkpoint. An operator armed one because they intended to look
+        // BEFORE the run could finish; a run that ended first would be a checkpoint that
+        // silently was not there, and the completed run it produced is indistinguishable from
+        // one whose milestone was genuinely reached and released.
+        //
+        // Ahead of the outstanding-seat check below and ahead of the human-outranks-DONE rule,
+        // because it is the same rule as both and the strongest of the three: DONE is a
+        // PROPOSAL to end, and a fact that contradicts it wins. Here the fact is that the
+        // operator said where this run stops and it has not stopped there yet.
+        //
+        // Re-asked rather than halted. The advisor is not stuck and nothing needs a human: it
+        // has a signal available to it, and the reply below is what tells it so. Halting would
+        // put the operator in front of the checkpoint question one turn before the checkpoint.
+        if (decision.kind === 'done' && this.#checkpointArmed()) {
+          this.#record({
+            from: 'orchestrator',
+            fromRank: 'human',
+            to: [],
+            kind: 'note',
+            text:
+              `advisor reported the work complete while the operator's checkpoint is still ` +
+              `armed ("${this.#checkpoint!.milestone}") — the run does not end before the checkpoint, so ` +
+              `the advisor is asked again`,
+          })
+          next = await this.#exchange(
+            lead,
+            [
+              this.#drain(lead.id),
+              `[ORCHESTRATOR — mechanical, not a participant speaking]\n\nDONE does not end this ` +
+                `run yet. The operator set a checkpoint on it:\n\n  ${this.#checkpoint!.milestone}\n\nIf that ` +
+                `is reached, say so as your WHOLE reply — MILESTONE: followed by what you are ` +
+                `reporting — and the operator looks before the run goes any further. If it is not ` +
+                `reached, give the implementer its next instruction.`,
+              advisorTurnsLeftNotice(advisorTurn + 1, maxAdvisorTurns),
+            ]
+              .filter(Boolean)
+              .join('\n\n'),
+          )
+          continue
+        }
         if (decision.kind === 'done' && outstanding() > 0) {
           this.#record({
             from: 'orchestrator',

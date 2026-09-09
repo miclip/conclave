@@ -135,6 +135,10 @@ Driving conclave from an agent
     /wait [minutes]                 keep waiting, when the child still has CPU. Records
                                     the decision, sends nothing, leaves the run paused
     /allow /deny                    answer a permission prompt
+    /checkpoint <milestone>         stop the run when the ADVISOR reports reaching it, and
+                                    refuse its DONE until then. One shot: /continue past
+                                    that pause spends it. --checkpoint "<milestone>" arms
+                                    one at launch, before the first turn
     /pause /state /log /exit        drive and inspect
     >advisor ... / >implementer ... send a message to one seat. ANY seat, by the id it
     >implementer-2 ...              answers to -- /state names them; an id no seat has is
@@ -448,6 +452,7 @@ Commands:
                    [--turn-timeout SECONDS] [--silence-timeout SECONDS]
                    [--max-turns N] [--max-minutes N]
                    [--max-queue-depth N] [--max-concurrent-seats N] [--dry-run]
+                   [--checkpoint "<milestone>"]
                                    The same session, interactively. The goal is optional:
                                    without one the console waits and the first thing you
                                    type starts the run. Pauses become decision
@@ -455,6 +460,13 @@ Commands:
                                    line of text addressed to a seat by id, e.g. >advisor,
                                    >implementer, >implementer-2.
                                    Shows participant activity while a turn is running.
+                                   --checkpoint arms a ONE-SHOT stop: the advisor is briefed
+                                   to reply "MILESTONE: ..." when it judges that milestone
+                                   reached, the run pauses there for you, and until it does
+                                   DONE will not end the run. /continue past that pause
+                                   spends it; /checkpoint arms another. Console only --
+                                   relay ends the run at every pause, so a checkpoint there
+                                   would stop it dead with nobody able to release it.
                                    --goal-file reads the goal out of a file instead, as in
                                    relay: whole and multi-line, refused if a goal was also
                                    typed as an argument, and it keeps the text out of ps and
@@ -611,7 +623,21 @@ const RELAY_VALUED_FLAGS: readonly string[] = [
   'turn-timeout',
 ]
 
-const SESSION_VALUED_FLAGS: readonly string[] = RELAY_VALUED_FLAGS.filter((f) => f !== 'detached-id')
+/**
+ * The console's valued flags: relay's, minus what only a detached child needs, plus what only a
+ * console can honour.
+ *
+ * `--checkpoint` is the first entry that goes the OTHER way, and the direction is the argument.
+ * A checkpoint arms a pause the operator has to answer, and `relay` cannot hold one: every halt
+ * on that front-end escalates and ends the run (`Relay#halt`, the `!handle` branch). So the flag
+ * would be accepted there and would turn the run it was meant to interrupt into a run that stops
+ * dead at the milestone with nobody able to release it -- which is worse than not offering it.
+ * Declared in `frontEndParity.test.ts`'s DECLARED, like every other divergence.
+ */
+const SESSION_VALUED_FLAGS: readonly string[] = [
+  ...RELAY_VALUED_FLAGS.filter((f) => f !== 'detached-id'),
+  'checkpoint',
+]
 
 /**
  * Every SWITCH each command takes -- the flags that are complete on their own.
@@ -2294,6 +2320,18 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
     const resume = flag('resume', '')
     const turnTimeout = flag('turn-timeout', '')
     const silenceTimeout = flag('silence-timeout', '')
+    // The one-shot checkpoint, console-only. `flagReader` has already refused the invocation
+    // whose `--checkpoint` lost its value, so an empty string here is `--checkpoint ""` typed on
+    // purpose -- refused below rather than armed, because a checkpoint with no milestone would
+    // brief the advisor with a blank line and stop the run at something nobody could state.
+    const checkpoint = flag('checkpoint', '')
+    if (flagArgv.includes('--checkpoint') && checkpoint.trim() === '') {
+      console.error(
+        `--checkpoint needs a milestone: what the advisor should report reaching before the run ` +
+          `may end. e.g. --checkpoint "the parser lands and its tests pass"`,
+      )
+      return 2
+    }
     // Ceilings, console-side for the first time. `--operator agent` already makes this an
     // unattended run, and an unattended run with no ceiling of any kind is the live gap this
     // closes -- not a provision for N>1. Same builder as `relay`, so the two cannot drift.
@@ -2395,6 +2433,9 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
       ...(turnTimeout ? { turnWatchdogMs: Number(turnTimeout) * 1000 } : {}),
       ...(silenceTimeout ? { silenceWatchdogMs: Number(silenceTimeout) * 1000 } : {}),
       ...(ceilings ? { ceilings } : {}),
+      // Absent unless asked for, so a normal console run passes exactly the options it always
+      // passed and `relay.start` is called with one argument, as it always was (D1).
+      ...(checkpoint ? { checkpoint } : {}),
       // Testing seams, and nothing production passes. Wiring one into `relay` and not here
       // is the mistake this codebase keeps making, and this time it made the console CLI
       // itself untestable rather than a flag unreachable.
