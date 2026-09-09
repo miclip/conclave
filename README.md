@@ -102,6 +102,13 @@ conclave session "make the failing test pass" --checks "npm test"
 
 The goal is optional — start with none and the first thing you type becomes it.
 
+`--goal-file <path>` reads the goal out of a file instead, whole and multi-line. An argv is not
+private: `ps` shows it to everyone on the machine and the shell writes it to its history, and the
+goal is the whole brief. Giving the goal both ways is refused rather than reconciled, and so is
+an empty file. With `--detach` the child is handed the flag and the path, not the text, so the
+goal is in neither process's argv — the file has to still be there a moment later when the child
+reads it.
+
 `--checks` enables rotation: a degraded implementer is replaced by one that reproduces the
 verification first. Those checks are required, and a replacement that cannot reproduce one
 is rolled back. `--checks-informational` and `--checks-unrelated` run and report without
@@ -306,6 +313,10 @@ conclave session "<goal>" --operator agent   # stdin stays open; the driver writ
 conclave status --json                       # state: paused, with reason, evidence, options
 ```
 
+A composed goal is often long and often quotes something. `--goal-file <path>` takes it from a
+file instead of the argv, which avoids the quoting entirely and keeps the text out of `ps` and
+out of the shell history.
+
 A run stops for two different reasons and they are not both pauses. `blocked` is the one field
 that reports either:
 
@@ -440,6 +451,7 @@ Every session writes what it is doing to `.conclave/sessions/<id>/`, continuousl
 be read from another terminal, over ssh, or after the process is gone.
 
 ```sh
+conclave relay --goal-file goal.txt --detach   # the goal is in neither argv; see Using it
 conclave relay "<goal>" --detach   # prints a session id and gives you your terminal back
 conclave sessions                  # every session in this project, newest first
 conclave status                    # what the most recent one is doing; a prefix picks another

@@ -268,15 +268,20 @@ test('both front-ends accept the same VALUES for the same flag, not merely the s
 })
 
 test('neither front-end accepts a flag nobody declared, and both refuse it the same way', async () => {
-  // #172, driven through `main` on both commands. `--goal-file` is not a flag either command
-  // has: it was skipped, `/tmp/goal.txt` was skipped with it as the token after a flag, and
-  // the console opened asking for the goal it had just been handed. Nothing was printed.
+  // #172, driven through `main` on both commands. The argv that raised it was
+  // `session --goal-file /tmp/goal.txt`: the flag was skipped, the path was skipped with it as
+  // the token after a flag, and the console opened asking for the goal it had just been handed.
+  // Nothing was printed.
+  //
+  // `--goal-file` is a declared flag on both commands now and reads the goal out of the file,
+  // so the probe here is a flag nobody has written -- which is the class the guard is actually
+  // about. A guard pinned to one spelling would pass while the next invented flag was ignored.
   //
   // The near miss is asserted too, because it is drawn from the same declaration the refusal
   // is made against -- a suggestion computed from a second list would eventually name a flag
   // the parser refuses, and a wrong first suggestion costs more than none.
   for (const front of ['relay', 'session'] as const) {
-    assert.equal(await verdictOf(front, ['--goal-file', '/tmp/goal.txt']), 'refused: unknown flag')
+    assert.equal(await verdictOf(front, ['--goal-url', 'https://example.invalid/goal']), 'refused: unknown flag')
     assert.equal(await verdictOf(front, ['-x']), 'refused: unknown flag')
     assert.equal(await verdictOf(front, ['--round', '4']), 'refused: unknown flag')
   }
@@ -342,9 +347,9 @@ test('an unknown flag beats --dry-run on both front-ends: no plan, and the flag 
   // The same with the flag AFTER --dry-run, since a scan that stopped at the first thing it
   // recognised would pass the case above and none of the arguments for it would hold.
   for (const front of ['relay', 'session'] as const) {
-    const { code, text } = await saidBy([front, 'a goal', '--dry-run', '--goal-file', '/tmp/goal.txt'])
+    const { code, text } = await saidBy([front, 'a goal', '--dry-run', '--goal-url', 'x'])
     assert.equal(code, 1, `${front} must refuse whatever order the flags came in`)
-    assert.match(text, /--goal-file is not a flag this command takes/)
+    assert.match(text, /--goal-url is not a flag this command takes/)
     assert.ok(!/dry run — nothing was started/.test(text), `${front} must not print a plan`)
   }
 })
@@ -802,9 +807,9 @@ test('both front-ends read their argv with the one shared reader, over a declare
 
   // The switches, compared the same way. Both halves of the surface are declared since #172:
   // a parser that knew only the valued flags could not tell `--force`, which relay takes, from
-  // `--goal-file`, which nobody wrote, so it ignored both -- and ignoring an invented flag is
-  // how `session --goal-file /tmp/goal.txt` came to open a console asking for the goal it had
-  // been handed.
+  // a flag nobody wrote, so it ignored both -- and ignoring an invented flag is how
+  // `session --goal-file /tmp/goal.txt` came to open a console asking for the goal it had been
+  // handed. (That flag exists now, on both commands, and reads the file.)
   const onlySwitch = [
     ...FLAG_SURFACE.relay.boolean.filter((f) => !FLAG_SURFACE.session.boolean.includes(f)),
     ...FLAG_SURFACE.session.boolean.filter((f) => !FLAG_SURFACE.relay.boolean.includes(f)),

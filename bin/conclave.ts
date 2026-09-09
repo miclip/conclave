@@ -248,7 +248,7 @@ Commands:
                                    mutation right now. "end" verifies the restore against
                                    the sha256 taken by "begin" and keeps the marker if it
                                    does not match.
-  relay "<goal>" [--advisor codex] [--implementer claude]
+  relay "<goal>" [--goal-file <path>] [--advisor codex] [--implementer claude]
                  [--implementers "claude --model opus-5, claude --model sonnet-5"]
                  [--reviewer claude] [--reviewer-args "..."]
                  [--rounds N] [--settle SECONDS]
@@ -307,6 +307,15 @@ Commands:
                                    nothing observable in it cannot be graded better than
                                    reasoned_but_unverified however well the work goes.
                                    Warnings by default, --strict-goal to refuse.
+                                   --goal-file reads the goal out of a file instead, whole
+                                   and multi-line, and refuses if the goal was also typed as
+                                   an argument. An argv is not private -- ps shows it to
+                                   everyone on the machine and the shell writes it to its
+                                   history -- so this is how a goal stays out of both. With
+                                   --detach the flag and its path are what the child is
+                                   given, not the text, so the goal is in neither process's
+                                   argv; the file has to still be there when the child
+                                   reads it.
                                    So is the seating: a seat whose CLI is not installed, or
                                    which names a model its CLI does not have, is refused
                                    before anything is spawned, registered or written, rather
@@ -428,7 +437,7 @@ Commands:
                                    minutes. --record tees every byte, escape codes
                                    included, so a rendering fault can be inspected rather
                                    than screenshotted.
-  session ["<goal>"] [--advisor codex] [--implementer claude]
+  session ["<goal>"] [--goal-file <path>] [--advisor codex] [--implementer claude]
                    [--implementers "claude --model opus-5, claude --model sonnet-5"]
                    [--reviewer claude] [--reviewer-args "..."]
                    [--rounds N]
@@ -446,11 +455,18 @@ Commands:
                                    line of text addressed to a seat by id, e.g. >advisor,
                                    >implementer, >implementer-2.
                                    Shows participant activity while a turn is running.
+                                   --goal-file reads the goal out of a file instead, as in
+                                   relay: whole and multi-line, refused if a goal was also
+                                   typed as an argument, and it keeps the text out of ps and
+                                   out of the shell history.
                                    A flag this does not recognise is refused rather than
                                    ignored, as in relay -- an invented flag used to be skipped
                                    along with the value after it, which is how
                                    "session --goal-file goal.txt" came to open a console
-                                   asking for the goal it had just been handed. A second bare
+                                   asking for the goal it had just been handed (#172). That
+                                   spelling is a real flag now, which is why the refusal is
+                                   the point rather than the example: any flag nobody
+                                   declared is named and refused. A second bare
                                    token is refused too: the goal is ONE argument, and -- says
                                    the token after it is a goal however it begins.
                                    --advisor-args / --implementer-args pass extra launch
@@ -573,6 +589,7 @@ const RELAY_VALUED_FLAGS: readonly string[] = [
   'checks-informational',
   'checks-unrelated',
   'detached-id',
+  'goal-file',
   'implementer',
   'implementer-args',
   'implementers',
@@ -604,6 +621,11 @@ const SESSION_VALUED_FLAGS: readonly string[] = RELAY_VALUED_FLAGS.filter((f) =>
  * wrote, so it had to ignore both: `session --goal-file /tmp/goal.txt` was parsed, dropped,
  * and started a console asking for the goal that was sitting in the file it had been handed.
  * With both halves declared, an unrecognised flag is a refusal that names the flag.
+ *
+ * That spelling is a real flag now -- it is above, in the valued list, and it does what the
+ * operator who typed it believed it did. The history is kept rather than reworded because the
+ * bug was never about which flag it was: it was that a flag nobody declared was IGNORED, and
+ * the invented flag in that argv today is whatever the next operator guesses at.
  *
  * `--help` and `-h` are absent on purpose: they are answered above the dispatch, for every
  * command, and never reach a command's own surface.
@@ -676,6 +698,66 @@ function parseChecks(
     ...split(informational).map((command): CheckSpec => ({ command, relevance: 'informational' })),
     ...split(unrelated).map((command): CheckSpec => ({ command, relevance: 'unrelated' })),
   ]
+}
+
+/**
+ * The goal, from whichever of the two forms it was given in.
+ *
+ * ONE resolution site, called by both front-ends, rather than a `readFileSync` in each block.
+ * Every refusal the goal can produce comes out of here, which is what keeps the two commands
+ * saying the same thing about the same invocation -- the property `frontEndParity.test.ts`
+ * exists to defend, arrived at from the input side rather than the flag side.
+ *
+ * `--goal-file` exists because an argv is not private. A goal is the whole brief for a run,
+ * and on a shared machine `ps` shows it to everyone; in a shell it lands in the history file.
+ * The file form keeps the text out of both, and the detached path keeps it out of the CHILD's
+ * argv too -- the flag and its path are what is handed on, and the child reads the file itself.
+ *
+ * Called once the argv is understood, and BEFORE anything is written or spawned. The goal is
+ * the one input that comes from outside the argv, so it is resolved after every refusal that
+ * can be made from the tokens alone: nothing reaches the disk until the invocation is known to
+ * be one this command takes.
+ *
+ * Trimmed at both ends and nowhere else. A goal written into a file ends with the newline the
+ * editor put there, and a trailing newline is not part of anybody's ask; a BLANK LINE inside
+ * one is, which is why this is a trim rather than a collapse. A file with nothing but
+ * whitespace in it is refused rather than run as an empty goal -- that is the shape of a goal
+ * that never got written, and relay would otherwise brief two agents on nothing.
+ */
+function resolveGoal(
+  positional: string | undefined,
+  path: string,
+  command: 'relay' | 'session',
+): { goal: string | undefined } | { error: string } {
+  if (path === '') return { goal: positional }
+  // Refused rather than reconciled, in either direction. Preferring the file would silently
+  // drop a goal somebody typed and is watching for; preferring the argument would ignore the
+  // file they pointed at. Both readings lose an intention that was stated out loud.
+  if (positional !== undefined) {
+    return {
+      error:
+        `${command}: the goal was given twice -- as an argument and as --goal-file ${path}.\n\n` +
+        `Pick one. Whichever this command chose, it would be ignoring something you typed.\n\n` +
+        `  node bin/conclave.ts ${command} --goal-file ${path} --checks "npm test"\n`,
+    }
+  }
+  let text: string
+  try {
+    text = readFileSync(path, 'utf8')
+  } catch (err) {
+    // The system's own sentence, kept: ENOENT, EACCES and EISDIR are three different things to
+    // fix and a message of our own would flatten them into "could not read".
+    return {
+      error:
+        `${command}: --goal-file ${path} could not be read.\n  ` +
+        `${err instanceof Error ? err.message : String(err)}\n`,
+    }
+  }
+  const goal = text.trim()
+  if (goal === '') {
+    return { error: `${command}: --goal-file ${path} is empty. A run needs something to do.\n` }
+  }
+  return { goal }
 }
 
 /**
@@ -1411,9 +1493,17 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
     // The goal is the bare token, wherever it sits. It was `argv[1]` and nothing else, which
     // read `relay --json "<goal>"` as a run with no goal at all; now that every flag's value
     // is consumed by the scan, a token nothing consumed is the goal and nothing else can be.
-    const [goal, ...spare] = parsed.positionals
-    if (goal === undefined) {
-      console.error('relay needs a goal: conclave relay "<goal>"\n')
+    const [positionalGoal, ...spare] = parsed.positionals
+    // The other form the goal comes in. Read through the shared reader like every other flag,
+    // so `--goal-file` followed by nothing is a value that went missing rather than a path.
+    const goalFile = flag('goal-file', '')
+    // A bare token is no longer the only way to state a goal, so its absence is only a refusal
+    // when the file form is absent too. The FILE itself is read further down -- see
+    // `resolveGoal` -- because reading it is the one thing here that touches the disk.
+    if (positionalGoal === undefined && goalFile === '') {
+      console.error(
+        'relay needs a goal: conclave relay "<goal>", or conclave relay --goal-file <path>\n',
+      )
       return 1
     }
     // Refused rather than dropped. A second bare token is a goal that lost its quotes or a
@@ -1463,6 +1553,16 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
       console.error(`conclave: ${seatPlan.reason}`)
       return 1
     }
+    // The goal, from whichever form it was given in, and the first thing here that reads a
+    // file. Everything above answers the argv out of the argv; see `resolveGoal`.
+    const resolvedGoal = resolveGoal(positionalGoal, goalFile, 'relay')
+    if ('error' in resolvedGoal) {
+      console.error(resolvedGoal.error)
+      return 1
+    }
+    // Present in both forms by now: the refusal above returns on an invocation that named
+    // neither, and `resolveGoal` refuses an empty file rather than handing back an empty goal.
+    const goal = resolvedGoal.goal!
     // One entry per seat, agent and per-seat launch arguments together. A run that named no
     // list is the one seat `--implementer` names, carrying no arguments of its own -- the
     // `--implementer-args` it may have been given applies to every seat and is composed below.
@@ -1565,13 +1665,19 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
       // `--` before the goal, always: the child parses this argv exactly as an operator's
       // would be parsed, and a goal beginning with a dash -- legal here because the parent
       // accepted it after a marker of its own -- would otherwise reach the child as a flag.
+      //
+      // And the goal is passed in the FORM it was given in, which is the whole of `--goal-file`
+      // on this path. `flagArgv` already carries `--goal-file <path>` when that is how the run
+      // was started, and the child reads the file for itself -- so appending the text here as
+      // well would put the goal into the child's argv, visible to every `ps` on the machine,
+      // after the operator had chosen the form that keeps it out of the parent's. The child
+      // would refuse it anyway: a goal given twice is a goal given twice wherever it came from.
       const argvOut = [
         'relay',
         ...flagArgv.filter((a) => a !== '--detach'),
         '--detached-id',
         id,
-        '--',
-        goal,
+        ...(goalFile === '' ? ['--', goal] : []),
       ]
       // THE RESOLVED FILE, not the symlink this process was invoked through (#250).
       //
@@ -2118,11 +2224,15 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
       console.error(missingValueMessage(flag.missing, 'session'))
       return 1
     }
-    // `session --goal-file /tmp/goal.txt` is the invocation this refuses, and #172 is what it
-    // used to do: the flag matched nothing, so it was skipped, the path after it was skipped
-    // with it, and the console opened asking for the goal it had just been handed. Nothing was
-    // printed either, because the stray-token warning this replaces exempted a token that
-    // followed a flag -- and the flag it followed was one nobody had ever declared.
+    // A flag nobody declared is named here rather than skipped, which is #172: the flag
+    // matched nothing, so it was skipped, the token after it was skipped with it, and the
+    // console opened asking for the goal it had just been handed. Nothing was printed either,
+    // because the stray-token warning this replaces exempted a token that followed a flag --
+    // and the flag it followed was one nobody had ever declared.
+    //
+    // The argv that produced it was `session --goal-file /tmp/goal.txt`, and that flag exists
+    // now: it reads the goal out of the file, which is what its operator expected in the first
+    // place. What this guard is for is the NEXT one nobody has thought of.
     //
     // Below the missing-value refusal, in the same order as `relay`; see the note there.
     if (parsed.unknown.length > 0) {
@@ -2134,11 +2244,15 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
     // operator watching an empty prompt, as the console having ignored their sentence. Every
     // flag's value is consumed by the scan, so a bare token is a goal and a SECOND bare token
     // is something nothing is going to use: refused, rather than started around.
-    const [goal, ...spare] = parsed.positionals
+    const [positionalGoal, ...spare] = parsed.positionals
     if (spare.length > 0) {
       console.error(extraPositionalMessage(spare[0]!, 'session'))
       return 1
     }
+    // The same second form relay takes, read the same way. Here it is optional twice over: the
+    // console starts without a goal at all, so `--goal-file` is one of the three ways in rather
+    // than one of two. The file is read further down, once the argv is understood.
+    const goalFile = flag('goal-file', '')
     const checks = parseChecks(
       flag('checks', ''),
       flag('checks-informational', ''),
@@ -2202,6 +2316,16 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
       console.error(`conclave: ${seatPlan.reason}`)
       return 1
     }
+    // The goal, in whichever form it came, through the one resolver both front-ends use --
+    // above `applyBypassFlag`, which is this block's point of no return, so a `--goal-file`
+    // that does not exist does not leave a permission mode written into the project on its
+    // way out. Still optional here: no goal in either form means the console asks for one.
+    const resolvedGoal = resolveGoal(positionalGoal, goalFile, 'session')
+    if ('error' in resolvedGoal) {
+      console.error(resolvedGoal.error)
+      return 1
+    }
+    const goal = resolvedGoal.goal
     /**
      * `--dry-run` and `--bypass` are refused TOGETHER rather than resolved either way.
      *
