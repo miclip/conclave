@@ -343,6 +343,23 @@ for `gh pr view` and one for `rm -rf` arrive identically, and the driver is the 
 them apart. Answer permission prompts from a list you wrote; stop on an escalation, which is by
 construction the case where judgement was asked for.
 
+**Answer the seat that asked, which is not always the one you expect.** `/allow` and `/deny` take
+a participant, and an unanswered prompt is simply re-asked — so a loop that names the wrong seat
+answers nothing and keeps answering it. Take the name from the record rather than assuming:
+
+```sh
+WHO=$(conclave status --json | jq -r .blocked.participant)
+echo "/allow $WHO" > ctl
+```
+
+An agent driver that hardcoded `/allow implementer` answered the same advisor prompt six times in
+one run before noticing `participant`.
+
+Every seat carries the same tools. The advisor is not a supervisor with a smaller surface — it
+reads files and runs commands like any other seat, and it will raise permission decisions of its
+own. So a driver that means "only the implementer may publish" has to deny the advisor
+explicitly; assuming it will not ask is how the wrong seat's prompt goes unanswered.
+
 Neither of conclave's clocks measures the run. The silence clock is armed against a turn and
 disarmed when it ends; the ceilings are evaluated at turn boundaries, because a run cannot be
 interrupted mid-turn without discarding the turn's work. So a run that starts no turn is measured
