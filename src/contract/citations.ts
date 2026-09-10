@@ -199,7 +199,7 @@ export const CITED: Record<string, string> = {
   // Live-claim section in docs/NOTES.md: #156's premise and the unverified-generation guards.
   // These citations assert current fact in a section marked `## LIVE:`, so they are checked even
   // though the rest of docs/** is frozen design record.
-  'src/adapters/claude.ts:2431-2444': 'containedFallback: true,',
+  'src/adapters/claude.ts:2455-2468': 'containedFallback: true,',
   'src/adapters/codex.ts:1655-1668': 'containedFallback: true,',
   'src/rotation/rotate.ts:484':
     'const generation = snap.containedFallback ? UNKNOWN_GENERATION : snap.compactionGeneration',
@@ -248,7 +248,7 @@ export const CITED: Record<string, string> = {
   'src/repl/session.ts:2730': 'inject(rest, { only: who })',
   'src/adapters/kimi.ts:763': 'compactionGeneration: 0,',
   'src/rotation/rotate.ts:412': 'export async function rotate(',
-  'src/adapters/claude.ts:1984': "#state: SessionState = 'running'",
+  'src/adapters/claude.ts:2008': "#state: SessionState = 'running'",
   'src/adapters/codex.ts:1198': "#state: SessionState = 'running'",
   'src/rotation/handoff.ts:79': 'compactionGeneration: CompactionGeneration',
   'src/workspace/sessionRecord.ts:1794': 'snap.turns.map(',

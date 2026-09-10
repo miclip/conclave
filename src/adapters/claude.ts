@@ -1410,6 +1410,30 @@ export class ClaudePtyHookAdapter implements AgentSession {
       }
       case 'UserPromptSubmit': {
         const key = turnKey(String(d.turnKey ?? `unkeyed-${this.#order.length}`))
+        // A HARNESS BLOCK LANDING ON AN OPEN TURN IS NOT A NEW TURN (#255).
+        //
+        // `<task-notification>` and `<system-reminder>` are injected into the child's session by
+        // its own harness, and each one fires `UserPromptSubmit` like any other prompt. On the
+        // session this was measured from, 23 of the implementer's 32 `turn_start` events were
+        // these -- against 8 real turns -- so anything counting the stream reported four times
+        // the work that happened. That number reached an operator as "40 turns" when it was 8.
+        //
+        // Below, this case builds a FRESH `TurnState` and does `#turns.set(key, turn)`. Reached
+        // again for a key already open, it therefore discards the in-flight turn's accumulated
+        // tools, subagents and `produced` flag along with emitting a second `turn_start`, so the
+        // miscount was the visible half of it.
+        //
+        // NOT a general dedup on the key. A real prompt re-using an open key is a different
+        // event and should still be reported; what is suppressed is specifically an injected
+        // block arriving mid-turn, which the adapter already recognises a few lines down to
+        // classify `unsolicited`. It knew, and emitted anyway.
+        //
+        // Measured rather than assumed: no turn in that session BEGAN with a harness block
+        // (0 of 8), so this suppresses interruptions and never a turn's opening.
+        if (isHarnessBlock(String(d.payload.prompt ?? '')) && this.#turns.has(String(key))) {
+          this.#turns.get(String(key))!.tracker.observeHook('UserPromptSubmit', d.payload)
+          return
+        }
         const tracker = new TurnVerdictTracker({
           agent: this.agent,
           orchestrator: {

@@ -523,7 +523,7 @@ it appears again, keep the assertion text and the file it came from before anyth
 
 **Subject: #156's premise does not hold on main — the unverified-generation guards live only in the uncommitted fix-36 worktree.**
 
-1. The defect shape is real on main: both PTY adapters answer `snapshot()` from a synthesized object before the transcript view exists (`src/adapters/claude.ts:2431-2444`, `src/adapters/codex.ts:1655-1668`), carrying `compactionGeneration: 0` with nothing distinguishing "not looked" from "looked, none". But the guards the issue says it passes — `containedFallback`, `UNKNOWN_GENERATION` at `src/rotation/rotate.ts:484`, the `#considerRotation` withholding — exist only as uncommitted work in the fix-36 worktree (`containedFallback` appears in no ref; `git grep` on main finds neither symbol). The issue was filed against that state.
+1. The defect shape is real on main: both PTY adapters answer `snapshot()` from a synthesized object before the transcript view exists (`src/adapters/claude.ts:2455-2468`, `src/adapters/codex.ts:1655-1668`), carrying `compactionGeneration: 0` with nothing distinguishing "not looked" from "looked, none". But the guards the issue says it passes — `containedFallback`, `UNKNOWN_GENERATION` at `src/rotation/rotate.ts:484`, the `#considerRotation` withholding — exist only as uncommitted work in the fix-36 worktree (`containedFallback` appears in no ref; `git grep` on main finds neither symbol). The issue was filed against that state.
 
 2. Every consumer of a snapshot's `compactionGeneration` on main, and whether a pre-view snapshot can reach it:
 
@@ -531,7 +531,7 @@ it appears again, keep the assertion text and the file it came from before anyth
 
    - `runReport` (`src/relay/report.ts:311-321`): reachable — a never-prompted Codex participant is snapshotted pre-view and the report records 0. But a session that never received a turn has no context and nothing to compact, so a verified read would also return 0; the report is descriptive, nothing acts on it, and it already carries the documented permanent-0 limitation from `KimiPrintAdapter`/`OpenCodeRunAdapter` (`src/adapters/kimi.ts:763`; the OpenCode run-per-turn adapter carried the same limitation and was replaced in #217).
 
-   - `rotate` (`src/rotation/rotate.ts:412`): reachable — both adapters initialize `#state = 'running'` (`src/adapters/claude.ts:1984`, `src/adapters/codex.ts:1198`), so rotating an idle never-prompted Codex seat records `handoff.compactionGeneration: 0` from a pre-view snapshot. On main that field is written once and read nowhere in production (`src/rotation/handoff.ts:79` is the definition; only tests read it). Dead data unless an external embedder reads it — and again the value equals what a verified read of a never-prompted session would produce.
+   - `rotate` (`src/rotation/rotate.ts:412`): reachable — both adapters initialize `#state = 'running'` (`src/adapters/claude.ts:2008`, `src/adapters/codex.ts:1198`), so rotating an idle never-prompted Codex seat records `handoff.compactionGeneration: 0` from a pre-view snapshot. On main that field is written once and read nowhere in production (`src/rotation/handoff.ts:79` is the definition; only tests read it). Dead data unless an external embedder reads it — and again the value equals what a verified read of a never-prompted session would produce.
 
    - Snapshot reads at `src/workspace/sessionRecord.ts:1794` and `src/relay/relay.ts:4450` consume only `snap.turns`; unaffected.
 
