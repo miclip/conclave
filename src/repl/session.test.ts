@@ -26,6 +26,7 @@ import { IDLE_CPU_PERCENT } from '../outcomes/liveness.ts'
 import { NO_DEADLINE_CLOCKS, type DeadlineSupport } from '../registry/types.ts'
 import type { AgentSession, CloseMode } from '../contract/session.ts'
 import { turnKey } from '../contract/session.ts'
+import { findExecutable } from '../registry/executables.ts'
 import { AgentRegistry } from '../registry/registry.ts'
 import { FakeRotationSession } from '../rotation/fakeSession.ts'
 import { summaryLine } from './render.ts'
@@ -1163,8 +1164,22 @@ function lockedRepo(t: TestContext): string {
   return dir
 }
 
-/** The real binary by absolute path, in a scratch project — never in this checkout. */
-function runCli(cwd: string, argv: readonly string[]): { status: number | null; stdout: string; stderr: string } {
+/**
+ * The real binary by absolute path, in a scratch project — never in this checkout.
+ *
+ * `env` describes the MACHINE the invocation is run on, and is what lets a test say "this one
+ * is missing" about a CLI that is installed on the developer's box. Absent means inherit, which
+ * is what every caller but the missing-command test below wants.
+ *
+ * `timeout` is not decoration. A refusal that stops arriving is a hang, and a hang inside
+ * `spawnSync` is bounded by this and by nothing else; the child is killed and `status` comes
+ * back null, which fails the assertions below rather than stalling the suite.
+ */
+function runCli(
+  cwd: string,
+  argv: readonly string[],
+  env?: NodeJS.ProcessEnv,
+): { status: number | null; stdout: string; stderr: string } {
   const root = join(import.meta.dirname, '..', '..')
   const r = spawnSync(process.execPath, [join(root, 'bin/conclave.ts'), ...argv], {
     cwd,
@@ -1174,6 +1189,7 @@ function runCli(cwd: string, argv: readonly string[]): { status: number | null; 
     // refusing.
     stdio: ['ignore', 'pipe', 'pipe'],
     timeout: 60_000,
+    ...(env ? { env } : {}),
   })
   return { status: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' }
 }
@@ -6125,4 +6141,83 @@ test('#252 a console reading a pipe reports its control channel as held, then cl
   const after = resolveSession(dir)
   assert.ok('session' in after)
   assert.equal(after.session.status.stdin, 'closed', 'and the closure reaches the record')
+})
+
+/**
+ * A PATH with the ordinary tools on it and one CLI missing -- built from the real one.
+ *
+ * Filtering the machine's own PATH rather than naming `/usr/bin:/bin`: the property the test
+ * needs is "an operator's normal PATH, minus codex", and a hardcoded pair of directories is a
+ * guess about where `git` lives that is wrong on someone's machine and wrong in a container.
+ * Every directory that would supply `codex` is dropped -- there can be more than one, a version
+ * manager's shim directory beside a homebrew prefix -- and nothing else is.
+ *
+ * An EMPTY entry is dropped too. `searchDirs` reads one as the seat's own cwd (see
+ * `executables.ts`), and a PATH that searched the scratch repository would be describing a
+ * different machine than the one this claims to describe.
+ */
+function pathWithoutCodex(cwd: string): string {
+  return (process.env['PATH'] ?? '')
+    .split(':')
+    .filter((dir) => dir !== '' && findExecutable('codex', { cwd, env: { PATH: dir } }) === undefined)
+    .join(':')
+}
+
+test('a seat whose CLI is absent is refused before the configure phase (#273)', (t) => {
+  // #273. `refuseMissingCommands` has named this exact failure since #51, but it was reachable
+  // only from `Relay.start` -- and the console registers hooks and answers Codex's trust prompts
+  // BEFORE the relay exists, both of which assume the binary is there. With `codex` off PATH the
+  // trust step spent about a minute printing `waiting for Codex to show its trust prompts`
+  // before anything named the cause: the preflight that would have named it was queued behind
+  // the phase that depended on it.
+  //
+  // Driven through the real binary in a scratch repository, with no injected registry, because
+  // the seam being tested is the one the operator uses: an in-process run handed a fake registry
+  // skips the trust probe by construction (see `opts.registry` in session.ts), so it could not
+  // fail the way the issue failed and could not prove the fix either.
+  //
+  // WHAT THE 60s BOUND IS FOR, stated precisely because it is easy to overclaim. `runCli` kills
+  // the child at 60s and reports `status: null`, and the equality below turns that into a
+  // failure. It is what makes a refusal that stops arriving into a failed test instead of a
+  // stalled suite -- it does NOT establish that the configure phase runs forever, and this test
+  // is not evidence that it does. The reverse, if anything: bypassing the early call is what
+  // disproved the issue's "it never stops on its own", because the run left the trust attempts
+  // and reached `confirming Codex recorded the decision` before the kill. What the bound catches
+  // is the diagnosis being absent for at least a minute, which is the whole complaint.
+  const dir = repo(t)
+  const path = pathWithoutCodex(dir)
+  // The PATH under test is ORDINARY-minus-codex, not empty. Without this the test would still go
+  // green with a PATH that had nothing on it at all -- refusing for a reason no operator has.
+  assert.ok(
+    findExecutable('git', { cwd: dir, env: { PATH: path } }),
+    `the filtered PATH must still carry the ordinary tools; it was:\n${path}`,
+  )
+  assert.equal(
+    findExecutable('codex', { cwd: dir, env: { PATH: path } }),
+    undefined,
+    `codex must really be gone from the filtered PATH; it was:\n${path}`,
+  )
+  // HOME is redirected at a scratch directory, not inherited. Codex's trust decision lives in
+  // the operator's GLOBAL `~/.codex/config.toml`, so a regression that let this run reach the
+  // trust step would otherwise edit the machine's real configuration to prove it had done so.
+  const r = runCli(dir, ['session', 'Make `npm test` pass in this repository.', '--advisor', 'codex'], {
+    ...process.env,
+    PATH: path,
+    HOME: tempDir(t, 'conclave-home'),
+  })
+  const said = `${r.stdout}${r.stderr}`
+  assert.equal(r.status, 1, `an absent CLI must refuse promptly, not wait; output was:\n${said}`)
+  // The seat AND the command, which is what makes the refusal a diagnosis: "waiting for Codex"
+  // was true and useless, and an operator reading it had no reason to suspect the binary.
+  assert.match(said, /advisor is seated on .*\(codex\), which launches `codex`/, `output was:\n${said}`)
+  assert.match(said, /it is not on PATH/, `output was:\n${said}`)
+  // BEFORE the configure phase, asserted against the filesystem rather than against the absence
+  // of a line. The registration is what the phase leaves behind, so a check that ran after it
+  // would leave these files in a project that never started a run.
+  assert.ok(!existsSync(join(dir, '.codex', 'hooks.json')), `no Codex sidecar was written; output was:\n${said}`)
+  assert.ok(
+    !existsSync(join(dir, '.claude', 'settings.json')),
+    `no Claude registration was written; output was:\n${said}`,
+  )
+  assert.ok(!/waiting for Codex/.test(said), `the trust probe must never have started; output was:\n${said}`)
 })
