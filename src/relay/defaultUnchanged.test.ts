@@ -698,7 +698,7 @@ const DECLARED: Record<string, string> = {
     'The sentence is repaired rather than left standing, on this entry’s own rule. Everything ' +
     'else above is still true: the three readings, the wording, the event count as an input, and ' +
     'the pause menu’s `wait` option, which still asks reportsChildOnCpu. No assertion in this ' +
-    'file was relaxed; one citation moved with the code it pins (src/repl/session.ts:1737). ' +
+    'file was relaxed; one citation moved with the code it pins (src/repl/session.ts:1770). ' +
     'Covered in src/outcomes/liveness.test.ts on the reported numbers, and end to end through ' +
     'the console’s refusal path in src/repl/session.test.ts.',
   'a paused run keeps measuring the child, and its evidence says when it was measured (#101)':
@@ -1912,14 +1912,27 @@ const DECLARED: Record<string, string> = {
     'its own and then calls `stop(ending)` directly, asserting the `done` survives in ' +
     '`run.result()`, in `Relay.outcome`, with its own detail, and that exactly one `run_end` ' +
     'reaches the stream. ' +
-    'ONE SEAM IS NOT PINNED BY EITHER, disclosed rather than left to be discovered (#274). The ' +
-    "console's own composition -- reading `Relay.outcome` back instead of writing the value it " +
-    'computed locally -- survives mutation of the whole suite, because both values derive from ' +
-    'the one threaded ending and are therefore equal on every path a test can construct. ' +
-    'Agreement between the status document and `events.ndjson` is structural here, not ' +
-    'asserted: there is no line left to mutate that makes the two disagree. So the stream ' +
-    'assertions in the two console tests are a regression guard against a future re-split, and ' +
-    'not coverage of the composition itself. ' +
+    'THE CONSOLE\'S OWN COMPOSITION IS NOW ASSERTED AGAINST A CONSTRUCTED ORDERING, and this ' +
+    'entry used to disclose that nothing asserted it at all (#274). Reading `Relay.outcome` ' +
+    'back instead of writing the locally computed value survived mutation of the whole suite, ' +
+    'because both values derive from the one threaded ending and are equal on every ordering ' +
+    'the code can produce. THE ORDERING THEY WOULD DIFFER ON IS NOT REACHABLE TODAY AND HAS ' +
+    'NOT BEEN OBSERVED: nothing yields between the EOF race resolving and `stop()` calling ' +
+    '`#end`, so no run can finish in that interval, and agreement between the status document ' +
+    'and `events.ndjson` remains STRUCTURAL for as long as that holds. ' +
+    'ONE CONSOLE OPTION IS ADDED FOR TESTS ONLY -- `SessionOptions.onControlChannelClosed`, ' +
+    'the same kind of seam as `liveness` beside it. No CLI flag exposes it, no production ' +
+    'caller passes one, and a console given none behaves exactly as before; it is called at ' +
+    'one point on the non-interactive path, after the EOF has won the race and before the ' +
+    'teardown offers that ending to `stop()`, it is handed the in-flight run\'s own ' +
+    'settlement, and awaiting it is what inserts a yield the default flow does not have. ' +
+    '`#274 the console records the ending the relay latched, on an ordering only the seam can ' +
+    'construct` (src/repl/session.test.ts) uses it to release a held turn inside that yield, ' +
+    'lets the run reach `done` on its own, and reads both records back. It is the sole failure ' +
+    'when the composition is replaced by the local value. So the claim is FUTURE-PROOFING, not ' +
+    'coverage of a live path: if a yield is ever introduced above, the guarantee is already ' +
+    'asserted rather than rediscovered. The stream assertions in the other two console tests ' +
+    'remain a regression guard against a future re-split rather than coverage of this line. ' +
     '`sessions --json` NEEDED NO CHANGE, and #266 asking for one is the stale half of it: the ' +
     'listing spreads the whole status document (bin/conclave.ts:1224), so an outcome written by ' +
     'either front-end has always appeared there. The reason was missing because no run had one ' +
@@ -2214,7 +2227,7 @@ async function defaultRunDocuments(t: TestContext): Promise<{ report: unknown; s
  * blind to that subtree is claiming more than it checks.
  *
  * Built through the real recorder: `recordSession` is what both front-ends call, and
- * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:1737
+ * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:1770
  * with the same object -- a `RunPause` the run handle raised, not one written here. Read back
  * through `main(['status', '--json'])`, so the serialisation and the reconciliation against
  * the pid are the production ones.
@@ -2525,7 +2538,7 @@ async function provoke(
  * The status document of a run paused for one given reason.
  *
  * Built through the real recorder: `recordSession` is what both front-ends call, and
- * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:1737
+ * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:1770
  * with the same object -- a `RunPause` the relay raised, not one written here. Read back
  * through `main(['status', '--json'])`, so the serialisation and the reconciliation against
  * the pid are the production ones.
@@ -2545,7 +2558,7 @@ async function pausedStatusDocument(t: TestContext, reason: PauseReason): Promis
     goal: 'a default goal',
     front: 'session',
     startedAt: Date.now(),
-    // Passed because the console always passes one (src/repl/session.ts:1314), so the status
+    // Passed because the console always passes one (src/repl/session.ts:1347), so the status
     // documents this file pins differ only in what a pause actually changes.
     logPath: join(repo, '.conclave', 'runs', 'session-test.ndjson'),
     build: 'test',

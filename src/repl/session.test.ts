@@ -20,6 +20,7 @@ import { PassThrough, Writable } from 'node:stream'
 import test from 'node:test'
 import type { TestContext } from 'node:test'
 import { tempDir } from '../testkit/tempDir.ts'
+import { waitFor } from '../testkit/waitFor.ts'
 import type { Verdict } from '../contract/outcome.ts'
 import type { ChildLiveness } from '../outcomes/liveness.ts'
 import { IDLE_CPU_PERCENT } from '../outcomes/liveness.ts'
@@ -5691,6 +5692,111 @@ test('#266 EOF on the message that answered a pause is recorded as its own endin
   const end = events(dir).at(-1)
   assert.equal(end?.['type'], 'run_end', 'the stream is terminated by run_end')
   assert.equal(end?.['reason'], 'control_channel_closed_on_answer', 'and both records agree on the ending')
+})
+
+test('#274 the console records the ending the relay latched, on an ordering only the seam can construct', async (t) => {
+  // A COUNTERFACTUAL, and it is labelled as one because the opposite reading is the easy one.
+  //
+  // The ordering below does not occur today and has never been observed. Between the EOF race
+  // resolving and `Relay.stop()` calling `#end` the console does not yield at all — the branch
+  // runs into the `finally`, and `stop()` reaches `#end` before its own first `await` — so no
+  // run can finish in that interval. `SessionOptions.onControlChannelClosed` inserts the yield
+  // deliberately, and nothing else in the product does.
+  //
+  // What is being asserted, then, is not a live behaviour but a composition that would have to
+  // hold if that yield ever appeared: stdin's EOF wins the race, so the console decides on
+  // `control_channel_closed` — and a run ending arrives before the teardown offers that ending
+  // to `stop()`. `#end` is first-outcome-wins, so it keeps the `done` it already latched and
+  // refuses the console's; reading `relay.outcome` back is what carries that refusal into the
+  // status document. A console writing its own `closingOutcome` instead would relabel a
+  // finished run as killed by its pipe — the #266 defect, re-split.
+  //
+  // Every other console test agrees with that mutation by construction: `relay.outcome` and
+  // `closingOutcome` are the same threaded value on every ordering the code can produce. This
+  // test is what makes the difference expressible at all, so that a future yield introduced
+  // above finds the guarantee already asserted rather than silently gone.
+  const dir = repo(t)
+  // Turns are QUICK here, unlike everywhere else in this file: nothing has to be typed at this
+  // console, and what keeps the run alive at the EOF is the hold below rather than a delay.
+  const impl = slow('impl', 'claude', ['ack', 'Did it.', 'NONE', 'NONE'], 20)
+  // HELD, not slow. The run has to be provably live at the moment stdin ends, and a delay
+  // chosen to still be running is a race dressed as a fixture — `holding` is the fake's own
+  // statement that the seat was sent work and has not been allowed to answer.
+  impl.holdTurn = 0
+  // Padded past `DONE`, because ending a run also asks each seat for a closing statement and
+  // that consumes a reply. The number of them is the relay's business; a test that counted
+  // would break when it changed.
+  const advisor = slow('advisor', 'codex', ['Do it.', 'DONE', 'NONE', 'NONE'], 20)
+  const out = collect()
+  const input = new PassThrough()
+  let seamCalls = 0
+  const running = runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'claude',
+    rounds: 4,
+    checks: [],
+    registry: registryOf({ codex: [advisor], claude: [impl] }),
+    input,
+    output: out.stream,
+    onControlChannelClosed: async ({ whenRunEnded }) => {
+      seamCalls += 1
+      // Inside the injected yield: the EOF has won and `closingOutcome` is set, and the
+      // teardown has not run. Releasing here lets the run reach its own ending FIRST, which is
+      // the ordering the read-back would exist for if the code ever produced it.
+      impl.releaseTurn()
+      // Awaited, so the seam does not return until the run has genuinely ended. Returning
+      // early would collapse the constructed ordering and make this a slower version of #191.
+      await whenRunEnded
+    },
+  })
+
+  // No sleep anywhere: the condition is the fake's own `holding`, and the EOF is sent the
+  // instant it holds.
+  await waitFor(() => impl.holding, {
+    within: 10_000,
+    describe: 'the implementer to be holding its first turn, so the run is provably live at EOF',
+  })
+  input.end()
+  await running
+
+  // THE PREMISE, asserted rather than assumed. The seam is only reached when the EOF beat the
+  // run's ending, so a single call is the proof that this test constructed the intended ordering
+  // rather than the ordinary #191 ending — or the healthy one, where the race is already decided
+  // and `stop()` is never handed an ending at all.
+  assert.equal(seamCalls, 1, 'the EOF must have won the race, exactly once')
+  assert.match(
+    out.text(),
+    /stdin reached EOF while the run was still going/,
+    'and the console said so, which is the branch the outcome was decided in',
+  )
+
+  // BOTH RECORDS, and the stream first because it is the one a stranger reads. The run did
+  // finish inside the injected yield, so the terminal `run_end` is the run's own ending and not
+  // the console's.
+  const stream = events(dir)
+  const end = stream.at(-1)
+  assert.equal(
+    end?.['type'],
+    'run_end',
+    `the stream must be terminated by run_end; ended with ${stream.slice(-3).map((e) => e['type']).join(', ')}`,
+  )
+  assert.equal(end?.['reason'], 'done', 'the run finished, so the stream says it finished')
+
+  // And the status document, which is the half the read-back decides. With `closingOutcome`
+  // written here instead, this says `control_channel_closed` while the stream says `done` —
+  // two records of one ending, disagreeing, which is exactly what #266 removed.
+  const found = resolveSession(dir)
+  assert.ok('session' in found, 'the run recorded a session')
+  assert.equal(
+    found.session.status.outcome?.reason,
+    'done',
+    'the status document records the ending the relay latched, not the one the console offered',
+  )
+  // The channel still went away, and the record still says so. The two facts are independent:
+  // #252's field is about the channel, and the outcome is about the run.
+  assert.equal(found.session.status.stdin, 'closed', 'the channel is still recorded as gone (#252)')
 })
 
 /**

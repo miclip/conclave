@@ -386,6 +386,39 @@ export interface SessionOptions {
    * and can be asserted over.
    */
   record?: string
+  /**
+   * Injected to construct ONE COUNTERFACTUAL ORDERING that the default control flow does not
+   * produce (#274).
+   *
+   * Called ONCE, on the non-interactive path only, after stdin's EOF has WON the race against
+   * the run's own ending and `closingOutcome` has been set — and before the teardown hands that
+   * ending to `relay.stop()`. `whenRunEnded` settles when the in-flight run does, so a caller
+   * that makes the run finish here and then awaits it puts a run ending in front of `stop()`:
+   * `#end` latches it, refuses the one the console offers, and `relay.outcome` reads back what
+   * the terminal `run_end` carried. It resolves immediately when no run is in flight.
+   *
+   * NOT A WINDOW THAT EXISTS TODAY, and that is stated first because the opposite would be the
+   * easier thing to believe. From the moment the race resolves to `Relay.stop()` calling `#end`
+   * there is no yield at all: the branch below runs straight into the `finally`, and `stop()`
+   * sets `#stopped` and calls `#end` before its own first `await`. So no run can finish in that
+   * interval as the code stands, and nothing has ever been observed doing so. Awaiting this hook
+   * is what inserts the yield, which is the whole of its job.
+   *
+   * A seam is machinery for a test and is worth arguing for rather than assuming, so the
+   * argument, and it is a future-proofing one rather than a coverage one. `relay.outcome ??
+   * closingOutcome` is deliberately written as a read-back: it is what keeps the status document
+   * a record of the terminal `run_end` rather than a second opinion about it, which is the
+   * defect #266 fixed. On every ordering the default flow can produce, the two values are the
+   * same threaded ending and the read-back is unobservable — so the composition survived
+   * mutation of the whole suite, and a defence nothing can make fail is one nobody can tell has
+   * been removed. This hook makes the counterfactual constructible, so that if a yield is ever
+   * introduced above — an await added to the branch, a `stop()` that reaches `#end` after one —
+   * the guarantee is already asserted rather than rediscovered.
+   *
+   * Absent is the default and must stay behaviourless: no production caller passes one, and a
+   * console given none does what it did before the option existed.
+   */
+  onControlChannelClosed?: ((seam: { whenRunEnded: Promise<void> }) => void | Promise<void>) | undefined
 }
 
 /** Slash commands, for the suggestion row. Kept beside HELP so they cannot drift apart. */
@@ -2637,7 +2670,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
       // FALSIFIER, stated because it is the strongest argument against this shape: the
       // console has no general "trailing text is a message" rule and does not gain one here.
       // `/rotate <text>` and `/abort <text>` consume their text as a REASON
-      // (`src/repl/session.ts:2690`, `src/repl/session.ts:2723`) and `/pause`, `/queue`, `/audit` ignore
+      // (`src/repl/session.ts:2723`, `src/repl/session.ts:2756`) and `/pause`, `/queue`, `/audit` ignore
       // whatever follows them. So an operator who learns this from `/continue` and carries
       // it to `/pause I'll be back` still loses the sentence. That inconsistency is not
       // repaired by making `/continue` a third behaviour; it is narrowed by it, and the
@@ -2878,6 +2911,30 @@ export async function runSession(opts: SessionOptions): Promise<number> {
               'session with `< ctl`.',
           ),
         )
+        if (opts.onControlChannelClosed) {
+          // The seam, and the only place it is ever called (#274). The ending is decided and the
+          // teardown below has not yet offered it to `relay.stop()`. Awaiting here is what puts
+          // a yield in an interval that otherwise has none -- see
+          // `SessionOptions.onControlChannelClosed` for why an ordering the default flow cannot
+          // produce is nonetheless worth being able to construct.
+          //
+          // `done` FIRST, and that is what keeps the constructed ordering coherent rather than
+          // merely early. The `finally` below sets it as its first statement, so the flag is
+          // true throughout the only stretch of this teardown in which a late ending could ever
+          // be seen. Leaving it false across an awaited hook puts the console somewhere it can
+          // otherwise never be: `supervise` wakes on the ending, runs its block against the
+          // readline that closed at the EOF, and draws a prompt on it -- `ERR_USE_AFTER_CLOSE`,
+          // which is what the first shape of this seam produced. A counterfactual worth
+          // asserting on has to differ from the real flow in one thing, not two.
+          //
+          // So the run's own settlement is what is handed over, rather than `firstRunEnded`:
+          // that resolver lives past the `done` guard inside `supervise` and is deliberately
+          // skipped on this path. `RunHandle#settled` answers the same question at the source,
+          // and a second waiter on it is what `untilPause` already supports.
+          done = true
+          const settling = run?.settled()
+          await opts.onControlChannelClosed({ whenRunEnded: settling ? settling.then(() => undefined) : Promise.resolve() })
+        }
       }
     }
   } catch (err) {
@@ -2961,17 +3018,25 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     // ends the run, which does not reach this line today but would silently restore the whole
     // #266 defect if it ever did.
     //
-    // NO TEST STANDS BEHIND THIS COMPOSITION, and it is said here because a reader would
-    // otherwise assume one does (#274). Replacing `relay.outcome ?? closingOutcome` with
-    // `closingOutcome` survives the whole suite: both values derive from the one ending handed
-    // to `relay.stop()` above, so they are equal on every path a test can construct, and the
-    // interleaving this guards against -- the run finishing between the EOF and here -- is not
-    // reachable from the console, whose healthy path closes stdin only after the end has been
-    // observed. `an ending handed to stop() cannot relabel a run that had already finished`
-    // (src/relay/stopWhilePaused.test.ts) pins the guarantee where it lives, in `#end`; nothing
-    // pins the console's USE of it. So agreement between this document and `events.ndjson` is
-    // structural rather than asserted, and the stream assertions in the #191 and #266 console
-    // tests are a regression guard against a future re-split, not coverage of this line.
+    // PINNED SINCE #274 -- AGAINST A CONSTRUCTED ORDERING, WHICH IS THE HONEST DESCRIPTION.
+    // Replacing `relay.outcome ?? closingOutcome` with `closingOutcome` used to survive the
+    // whole suite: both values derive from the one ending handed to `relay.stop()` above, so
+    // they are equal on every ordering the code can currently produce. The ordering they would
+    // differ on -- a run finishing between the EOF and here -- IS NOT REACHABLE TODAY and has
+    // never been observed: nothing yields between the race resolving and `stop()` calling
+    // `#end`, so there is no interval for a run to finish in.
+    //
+    // `an ending handed to stop() cannot relabel a run that had already finished`
+    // (src/relay/stopWhilePaused.test.ts) pins the guarantee where it lives, in `#end`. What
+    // nothing pinned was the console's USE of it, so agreement between this document and
+    // `events.ndjson` is structural rather than asserted for as long as no yield exists above.
+    // `SessionOptions.onControlChannelClosed` inserts one deliberately, and `#274 the console
+    // records the ending the relay latched, on an ordering only the seam can construct`
+    // (src/repl/session.test.ts) drives it: the held turn is released inside that injected
+    // yield, the run reaches `done` on its own, and both records are read back. That test is
+    // what fails when this reads `closingOutcome` -- so the composition is future-proofed
+    // rather than currently exercised, which is a smaller claim than coverage and the one that
+    // is true.
     //
     // Guarded on `closingOutcome` rather than written unconditionally: a console that never ran
     // anything still gets `stopped` out of `relay.outcome`, and an `outcome` on a session that
