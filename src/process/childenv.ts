@@ -39,6 +39,46 @@ export const PARENT_AGENT_PREFIXES = [
 
 export const PARENT_AGENT_EXACT = new Set(['AI_AGENT', 'AGENT_SESSION_ID', 'CI'])
 
+/**
+ * Credentials, which are the operator's and must reach the child (#268).
+ *
+ * THE PREFIX LIST CANNOT TELL TWO DIFFERENT THINGS APART. What the invariant above is about is
+ * SESSION MARKERS -- state describing the parent's own session, of which
+ * `CLAUDE_CODE_CHILD_SESSION` is the one with teeth, silently disabling transcript persistence
+ * in exactly the mode this adapter drives. A credential is not that. It says who the operator
+ * is, not that a session is already in progress, and a child that does not get one cannot work
+ * at all.
+ *
+ * `CLAUDE_CODE_OAUTH_TOKEN` starts with `CLAUDE`, so the prefix test dropped it. On a
+ * workstation that is invisible: the CLI falls back to keychain credentials and nobody notices.
+ * A CI runner has no keychain, so the token in the environment is the ONLY credential, and the
+ * seat comes up at a login prompt and spends its whole turn there -- observed as a 12m01s turn
+ * ending `timed_out` with both seats reporting `Not logged in · Please run /login`.
+ *
+ * EXACT MATCHES ONLY, and checked before the prefixes. A prefix here would re-open the hole in
+ * the other direction: `CLAUDE_CODE_` covers the session marker as readily as the token.
+ *
+ * Each name is verified present in the installed bundle rather than assumed, the same way
+ * `childenvClaims.test.ts` checks the marker itself. Measured on 2.1.267: OAUTH_TOKEN 61
+ * occurrences, ANTHROPIC_API_KEY 74, ANTHROPIC_AUTH_TOKEN 38, ANTHROPIC_BASE_URL 56.
+ *
+ * `ANTHROPIC_BASE_URL` is not a credential and is here deliberately: it is where the credential
+ * is valid. An operator behind a gateway who passes a token without it sends that token to the
+ * wrong endpoint, which fails in a way that looks like a bad token rather than a missing URL.
+ *
+ * NO CODEX OR OPENAI NAMES. Not because a Codex seat does not need one, but because the
+ * installed `codex` is a JS shim that launches a native binary elsewhere, so the same check
+ * that verified the four above returns nothing for it. Adding names on the strength of what
+ * they are probably called is how an allowlist comes to contain a variable nothing reads --
+ * and this one is a hole in a security boundary, so it holds only what has been shown to exist.
+ */
+export const AUTH_PASSTHROUGH = new Set([
+  'CLAUDE_CODE_OAUTH_TOKEN',
+  'ANTHROPIC_API_KEY',
+  'ANTHROPIC_AUTH_TOKEN',
+  'ANTHROPIC_BASE_URL',
+])
+
 /** Not agent markers, but they change how a TUI renders or whether it colours output. */
 export const TERMINAL_NOISE = new Set([
   'NO_COLOR',
@@ -96,6 +136,8 @@ const ALLOWLIST_PREFIXES = ['ORCH_'] as const
 export type Env = Record<string, string>
 
 export function isParentAgentVar(name: string): boolean {
+  // BEFORE the prefixes, or the test below would drop a credential on its way past (#268).
+  if (AUTH_PASSTHROUGH.has(name)) return false
   return PARENT_AGENT_PREFIXES.some((p) => name.startsWith(p)) || PARENT_AGENT_EXACT.has(name)
 }
 
