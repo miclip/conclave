@@ -12,15 +12,24 @@
  * `not_attached` and keep ABSENCE meaning "not reported"; and every place conclave prints the
  * recipe has to print a holder with no timer.
  *
+ * A third half, added by #259, because the first was not carrying its own weight. `held` and
+ * `not_attached` are the two arms of one ternary in the console, and BOTH were checked by
+ * handing the value straight to `recordSession` -- so the file asserted what a caller passed
+ * and never what the console decides. The console derives it from the real process (`interactive`
+ * is stdin being a terminal), and a fixture that supplies the RESULT of that decision cannot
+ * fail when the decision changes. `#259 the console decides ...` below runs the console itself,
+ * once under a pty and once over a pipe, and reads the two values back off disk.
+ *
  *   node --test src/workspace/controlStdin.test.ts
  */
 
 import { strict as assert } from 'node:assert'
-import { spawn, spawnSync } from 'node:child_process'
-import { readFileSync, writeFileSync } from 'node:fs'
+import { execFileSync, spawn, spawnSync } from 'node:child_process'
+import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
 import type { TestContext } from 'node:test'
+import { PtyProcess } from '../process/pty.ts'
 import { RelayEventStream } from '../relay/observe.ts'
 import { tempDir } from '../testkit/tempDir.ts'
 import {
@@ -122,12 +131,149 @@ test('#252 a run driven through a fifo records its control channel as held', asy
   })
 })
 
-test('#252 a console at a terminal records not_attached, which is not held', async (t) => {
-  // The distinction the field would be useless without. A keyboard is not a channel anyone can
-  // drop, and reporting it as `held` would tell a poller that a fifo the run never had is fine.
-  await withRecord(t, 'not_attached', ({ root, id }) => {
-    assert.equal(statusOf(root, id).stdin, 'not_attached')
+/**
+ * A git repository to run a console in, because it refuses to start outside one.
+ *
+ * `.conclave/` is ignored so the run's own record does not dirty the tree it is attributing
+ * work by. Nothing else is written here -- the driver below lives in its own directory, off
+ * to one side, for the same reason.
+ */
+function consoleRepo(t: TestContext): string {
+  const dir = tempDir(t, 'ctl-stdin-repo')
+  execFileSync('git', ['init', '-q'], { cwd: dir })
+  writeFileSync(join(dir, '.gitignore'), '.conclave/\n')
+  execFileSync('git', ['add', '.'], { cwd: dir })
+  execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'i'], { cwd: dir })
+  return dir
+}
+
+/**
+ * One console over fake participants, started with NO goal so it records and then waits.
+ *
+ * The goal is what starts a run, and a run is not what is under test here: the field is
+ * written by `recordSession` during startup, before the console has read a byte. So the
+ * driver's whole job is to get `runSession` as far as its first document and then sit
+ * still, which also means the two transports below differ in exactly one thing -- what
+ * stdin is -- and in nothing about what the run did.
+ *
+ * Written OUTSIDE the repository it runs in: a driver dropped into the checkout is an
+ * untracked file in a tree the session is about to attribute work by diffing.
+ */
+function consoleDriver(t: TestContext, dir: string): string {
+  const path = join(tempDir(t, 'ctl-stdin-driver'), 'driver.mjs')
+  writeFileSync(
+    path,
+    `
+import { runSession } from ${JSON.stringify(join(ROOT, 'src/repl/session.ts'))}
+import { AgentRegistry } from ${JSON.stringify(join(ROOT, 'src/registry/registry.ts'))}
+import { FakeRotationSession } from ${JSON.stringify(join(ROOT, 'src/rotation/fakeSession.ts'))}
+import { NO_DEADLINE_CLOCKS } from ${JSON.stringify(join(ROOT, 'src/registry/types.ts'))}
+
+const caps = {
+  readinessSignal: 'unknown', turnKeySource: 'prompt_id',
+  outcomes: { completed: 'observed', cancelled: 'reasoned_but_unverified',
+    permission_refused: 'reasoned_but_unverified', process_exited: 'reasoned_but_unverified',
+    timed_out: 'reasoned_but_unverified', transport_lost: 'reasoned_but_unverified',
+    unknown_abnormal_end: 'reasoned_but_unverified' },
+}
+const registry = new AgentRegistry()
+for (const [agent, id] of [['codex', 'advisor'], ['claude', 'impl']]) {
+  registry.register({
+    id: agent, displayName: agent, capabilities: { ...caps, agent },
+    deadlines: NO_DEADLINE_CLOCKS,
+    launch: { command: agent, baseArgs: [] },
+    async create() { return new FakeRotationSession(id, agent, []) },
   })
+}
+
+const code = await runSession({
+  cwd: ${JSON.stringify(dir)},
+  lead: 'codex', implementer: 'claude', rounds: 6, checks: [], registry,
+})
+process.exit(code)
+`,
+  )
+  return path
+}
+
+/**
+ * The `stdin` the console wrote into its own record, polled off disk.
+ *
+ * Polled rather than read once: the console is a separate process and the document appears
+ * partway through its startup. Read from the DIRECTORY rather than from a session id scraped
+ * out of the banner, because under a pty the banner is dim-coloured and reflowed at whatever
+ * width the terminal was given -- parsing it would make this a test of the renderer.
+ */
+async function recordedStdin(dir: string, output: () => string, timeoutMs = 30_000): Promise<unknown> {
+  const root = join(dir, '.conclave', 'sessions')
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const ids = existsSync(root) ? readdirSync(root) : []
+    const doc = ids
+      .map((id) => join(root, id, 'status.json'))
+      .filter((f) => existsSync(f))
+      .map((f) => {
+        try {
+          return JSON.parse(readFileSync(f, 'utf8')) as Record<string, unknown>
+        } catch {
+          // A torn read of a file another process is writing. Not an answer; look again.
+          return undefined
+        }
+      })
+      .find((d) => d !== undefined)
+    if (doc) return doc['stdin']
+    await new Promise((r) => setTimeout(r, 50))
+  }
+  assert.fail(`the console wrote no session record within ${timeoutMs}ms. Its output was:\n${output()}`)
+}
+
+test('#259 the console decides the control-stdin state from the real process, not the caller', async (t) => {
+  // The claim #252 made and #259 found unevidenced. `interactive` is derived at startup from
+  // whether stdin is a terminal, and every earlier test in this file handed `recordSession` the
+  // ANSWER -- so the console's ternary was asserted by nothing, and both arms would have stayed
+  // green with it rewritten to a constant.
+  //
+  // So: one driver, two transports, and the difference between the two recorded values IS the
+  // evidence. A pty is a real terminal (`process.stdin.isTTY`), which is an operator at a
+  // keyboard and no channel anyone can drop; a pipe is a channel being HELD until it reaches
+  // EOF, and is what a detached run steered through a fifo actually has.
+  //
+  // Both arms are checked here rather than only the missing one. Splitting them would put the
+  // two halves of a single decision in two fixtures again, and `held` supplied by hand is
+  // exactly the coverage this test exists to replace.
+  const ptyRepo = consoleRepo(t)
+  const pty = await PtyProcess.spawn({
+    file: process.execPath,
+    args: [consoleDriver(t, ptyRepo)],
+    cwd: ptyRepo,
+    env: { PATH: process.env['PATH'] ?? '', HOME: process.env['HOME'] ?? ptyRepo, TERM: 'xterm-256color' },
+  })
+  t.after(() => void pty.terminate())
+
+  const pipeRepo = consoleRepo(t)
+  let piped = ''
+  const pipe = spawn(process.execPath, [consoleDriver(t, pipeRepo)], {
+    cwd: pipeRepo,
+    // stdin a PIPE and deliberately never ended. Closing it is EOF, which the console reports
+    // as `closed` on the spot (the test below this one) -- so an ended pipe would overwrite the
+    // very value being read back and the fixture would assert its own teardown.
+    stdio: ['pipe', 'pipe', 'pipe'],
+    env: { PATH: process.env['PATH'] ?? '', HOME: process.env['HOME'] ?? pipeRepo },
+  })
+  pipe.stdout.on('data', (d) => (piped += d))
+  pipe.stderr.on('data', (d) => (piped += d))
+  t.after(() => void pipe.kill('SIGKILL'))
+
+  assert.equal(
+    await recordedStdin(ptyRepo, () => pty.output),
+    'not_attached',
+    'a console whose stdin is a real terminal has no control channel to lose',
+  )
+  assert.equal(
+    await recordedStdin(pipeRepo, () => piped),
+    'held',
+    'and the same console over a pipe is holding one, from the first document',
+  )
 })
 
 test('#252 the closure is published immediately, with the run still running', async (t) => {

@@ -17,6 +17,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 import type { TestContext } from 'node:test'
 import { tempDir } from './testkit/tempDir.ts'
+import { waitFor } from './testkit/waitFor.ts'
 
 const REPO = realpathSync(join(import.meta.dirname, '..'))
 const SCRIPT = join(REPO, 'scripts', 'release.sh')
@@ -279,6 +280,59 @@ function guardSees(pid: number): boolean {
   const ps = execFileSync('sh', ['-c', 'ps -eo pid=,command='], { encoding: 'utf8' })
   const out = execFileSync('awk', [program[1]!], { input: ps, encoding: 'utf8' })
   return out.trim().split('\n').includes(String(pid))
+}
+
+/**
+ * The working directory the tag guard would read for a pid, through the guard's own `lsof` call.
+ *
+ * Spelled exactly as `runs_here` spells it -- `lsof -a -p <pid> -d cwd -Fn`, stderr discarded,
+ * the `n` line with its leading `n` cut off -- because the thing being waited for is that THAT
+ * command answers, not that some other way of asking the kernel does. An empty string is the
+ * state #261 is about: the process exists and its cwd is not yet readable, which the guard
+ * deliberately counts as "here".
+ */
+function cwdOf(pid: number): string {
+  const out = execFileSync('sh', ['-c', `lsof -a -p ${pid} -d cwd -Fn 2>/dev/null || true`], { encoding: 'utf8' })
+  return out.split('\n').find((l) => l.startsWith('n'))?.slice(1) ?? ''
+}
+
+/**
+ * Wait until the tag guard would classify this run the way the test needs it classified.
+ *
+ * BOTH halves of the guard's own question, because a fixture that has reached only one of them
+ * is not yet a fixture (#261). `runs_here` first asks which processes are runs at all -- the awk
+ * matcher `guardSees` reads out of the script -- and then asks where each one is working. The
+ * second answer is the racy one: `lsof` cannot report a cwd for a process that has only just
+ * been forked, and the guard FAILS CLOSED on that, so a run in another repository reads as a run
+ * in this one for as long as the window lasts.
+ *
+ * The test that this replaces waited `sleep 1` twice and asserted nothing about either
+ * condition, so on a slow runner it invoked the script inside that window and the failure landed
+ * on the assertion below the sleep -- reported as the guard mis-scoping a run, which is a claim
+ * about the subject rather than about the fixture never reaching its preconditions.
+ *
+ * The bound is not a margin: 20s is the point past which "slow" is "never", and blowing it is a
+ * real failure. What it reports is the pair of readings, so the next reader is told which half
+ * did not arrive instead of being handed a mis-scoped release guard to go looking for.
+ */
+async function guardResolves(child: ChildProcess, cwd: string, label: string): Promise<void> {
+  const pid = child.pid!
+  const want = realpathSync(cwd)
+  try {
+    await waitFor(() => guardSees(pid) && cwdOf(pid) === want, {
+      within: 20_000,
+      pollMs: 50,
+      describe: `the tag guard to resolve the ${label} run (pid ${pid}) as working in ${want}`,
+    })
+  } catch (err) {
+    assert.fail(
+      `${(err as Error).message}\n` +
+        `  pid ${pid} (${label} run), still alive: ${child.exitCode === null && child.signalCode === null}\n` +
+        `  the script's own matcher sees it as a run: ${guardSees(pid)}\n` +
+        `  lsof reports its cwd as: ${cwdOf(pid) || '(nothing — this is the fail-closed window #261 is about)'}\n` +
+        `  the fixture intended: ${want}`,
+    )
+  }
 }
 
 test('#250 a live run does not block the install, and the symlink lands on the finished worktree', async (t) => {
@@ -1066,7 +1120,7 @@ test('#182 a dependency that really moved is still detected', (t) => {
   assert.match(out, /moved a dependency/, 'a changed dependency must still be noticed')
 })
 
-test('#249 a run in ANOTHER repository does not block the tag; one in this repository does', (t) => {
+test('#249 a run in ANOTHER repository does not block the tag; one in this repository does', async (t) => {
   // The tag guard protects this repo's branch and tree, so only runs working HERE can threaten
   // it. It used to refuse for any conclave run on the machine, which held up a release for an
   // hour because a session was working in an unrelated project.
@@ -1093,8 +1147,11 @@ test('#249 a run in ANOTHER repository does not block the tag; one in this repos
     return c
   }
   try {
-    runIn(elsewhere)
-    execFileSync('/bin/sh', ['-c', 'sleep 1'])
+    const unrelated = runIn(elsewhere)
+    // Waited FOR rather than waited OUT (#261): the guard reads an unreadable cwd as "here", so
+    // invoking the script before `lsof` can answer tests the fail-closed default and calls the
+    // result a scoping bug.
+    await guardResolves(unrelated, elsewhere, 'unrelated')
     // NOT a dry run. Since #248 a dry run skips this guard entirely, so asking with `--dry-run`
     // would pass whatever the scoping did — which is what the first version of this test did,
     // and it stayed green with the guard reverted to machine-wide.
@@ -1105,10 +1162,25 @@ test('#249 a run in ANOTHER repository does not block the tag; one in this repos
     assert.doesNotMatch(away.out, /a run is in flight/, 'a run in another repository is not this repo’s business')
     assert.match(away.out, /verifying before/, 'and the release got past the guard')
 
-    runIn(dir)
-    execFileSync('/bin/sh', ['-c', 'sleep 1'])
+    const local = runIn(dir)
+    await guardResolves(local, dir, 'local')
+    // The unrelated run is STILL LIVE for the second half, and that is the whole shape of the
+    // claim: the guard is not being asked "is anything running" twice with different answers, it
+    // is being asked to separate two live runs by where each is working.
+    assert.equal(unrelated.exitCode, null, 'the unrelated run must outlive the first half')
+
     const here = run(['9.9.100'], dir)
     assert.match(here.out, /a run is in flight in this repository/, 'a run working HERE still refuses')
+    // WHICH pid, because the refusal is machine-wide prose over a scoped list. A guard that had
+    // gone back to counting everything prints the same sentence, and so does one refusing over
+    // some unrelated conclave run that happened to be live on the machine — so the sentence
+    // alone can be satisfied by contamination. The pid cannot.
+    assert.match(here.out, new RegExp(`pid ${local.pid}\\b`), 'and it names the run that is actually here')
+    assert.doesNotMatch(
+      here.out,
+      new RegExp(`pid ${unrelated.pid}\\b`),
+      'while the run in another repository is still not this repo’s business',
+    )
     assert.equal(here.code, 1)
   } finally {
     for (const c of started) c.kill('SIGKILL')
