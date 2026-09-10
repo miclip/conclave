@@ -567,6 +567,16 @@ export interface RelayOptions {
    */
   turnWatchdogMs?: number
   /**
+   * How long a seat may take to report SessionStart before the adapter gives up (#271).
+   *
+   * Absent means the adapter's own default, sixty seconds on both pty adapters. That default
+   * was unreachable from anywhere until this existed: the failure message said "raise
+   * readyTimeoutMs" and there was no flag, env var or config key that set it, so it asked the
+   * operator for something they could not do. A cold CI runner with a freshly installed CLI is
+   * the case that needs it -- first-run onboarding delays the first hook well past a minute.
+   */
+  readyTimeoutMs?: number
+  /**
    * How long a turn may produce NOTHING before the adapter's watchdog calls it hung.
    *
    * The clock `--silence-timeout` configures, and a different question from
@@ -2177,7 +2187,7 @@ export class Relay {
     // `cwd` is the run's for every seat, including seats that will be launched in their own
     // worktree: a seat's directory does not enter its argv (`effectiveLaunchArgs`), and a relative
     // launch command is written relative to where the operator started the run.
-    const modelCtx = { cwd: opts.cwd, watchdogMs: opts.turnWatchdogMs, idleMs: opts.silenceWatchdogMs }
+    const modelCtx = { cwd: opts.cwd, watchdogMs: opts.turnWatchdogMs, idleMs: opts.silenceWatchdogMs, readyTimeoutMs: opts.readyTimeoutMs }
     const specs = [opts.lead, ...seats, ...(opts.reviewer ? [opts.reviewer] : [])]
     const selected = specs.flatMap((spec) => {
       try {
@@ -2636,7 +2646,7 @@ export class Relay {
     // same function every built-in adapter composes its child's argv with, from the same spec
     // and the same context -- so the record is the launch rather than a reconstruction of it.
     // Read AFTER the session exists, so a seat that failed to start fails exactly as before.
-    const ctx = { cwd, watchdogMs: this.#opts.turnWatchdogMs, idleMs: this.#opts.silenceWatchdogMs }
+    const ctx = { cwd, watchdogMs: this.#opts.turnWatchdogMs, idleMs: this.#opts.silenceWatchdogMs, readyTimeoutMs: this.#opts.readyTimeoutMs }
     const session = await this.#opts.registry.createParticipant(spec, ctx)
     const launch = launchRecordFor(this.#opts.registry.resolve(spec), ctx)
     const p: RelayParticipant = { id: spec.id, agent: spec.agent, rank, role: spec.role, launch, session, events: [], baselineGeneration: 0, degradationCursor: 0 }
@@ -9076,7 +9086,7 @@ export class Relay {
           // THIS SEAT'S tree, so the replacement is launched where its predecessor worked. A
           // replacement started in the integration checkout would prove itself against files
           // the seat it is replacing never wrote to. At N=1 `root` is the run cwd.
-          const ctx = { cwd: root, watchdogMs: this.#opts.turnWatchdogMs, idleMs: this.#opts.silenceWatchdogMs }
+          const ctx = { cwd: root, watchdogMs: this.#opts.turnWatchdogMs, idleMs: this.#opts.silenceWatchdogMs, readyTimeoutMs: this.#opts.readyTimeoutMs }
           const session = await this.#opts.registry.createParticipant(spec, ctx)
           // Same spec, so the same role: a replacement that changed what the seat is FOR
           // would be a different seat wearing the id, and the handoff it just proved was

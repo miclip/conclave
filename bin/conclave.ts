@@ -348,6 +348,10 @@ Commands:
                                    much longer the run waits before treating the report as
                                    lost -- because the alternative is ending the run holding
                                    no account of work already on disk.
+                                   --ready-timeout SECONDS is how long a seat may take to
+                                   report SessionStart before the adapter gives up. Default 60.
+                                   Raise it on a cold CI runner: a freshly installed CLI comes
+                                   up in onboarding and the first hook is well past a minute
                                    --turn-timeout SECONDS bounds one turn, and what that
                                    buys depends on the seat. On Claude and Codex it bounds
                                    what the RUN waits for and nothing more: they already
@@ -619,6 +623,7 @@ const RELAY_VALUED_FLAGS: readonly string[] = [
   'rounds',
   'salvage',
   'settle',
+  'ready-timeout',
   'silence-timeout',
   'turn-timeout',
 ]
@@ -2101,6 +2106,9 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
       ...(flag('turn-timeout', '')
         ? { turnWatchdogMs: Number(flag('turn-timeout', '')) * 1000 }
         : {}),
+      ...(flag('ready-timeout', '')
+        ? { readyTimeoutMs: Number(flag('ready-timeout', '')) * 1000 }
+        : {}),
       // The OTHER clock, and the one a hang actually trips. --turn-timeout bounds the whole
       // turn; this bounds how long it may say nothing, which is the reading #36 was about --
       // a turn that took a tool result and went quiet, waited out at the absolute cap because
@@ -2431,6 +2439,7 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
       ...(reviewerArgs.length > 0 ? { reviewerArgs } : {}),
       version: version(),
       ...(turnTimeout ? { turnWatchdogMs: Number(turnTimeout) * 1000 } : {}),
+      ...(flag('ready-timeout', '') ? { readyTimeoutMs: Number(flag('ready-timeout', '')) * 1000 } : {}),
       ...(silenceTimeout ? { silenceWatchdogMs: Number(silenceTimeout) * 1000 } : {}),
       ...(ceilings ? { ceilings } : {}),
       // Absent unless asked for, so a normal console run passes exactly the options it always

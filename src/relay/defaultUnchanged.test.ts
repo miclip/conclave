@@ -348,7 +348,7 @@ const DECLARED: Record<string, string> = {
     'Authority routing (#56, D2) sends implementer_unanswered to the advisor before the operator, ' +
     'so a default run interrupts the human less than today. Real change at N=1, an improvement, ' +
     'declared rather than discovered. The pause reason exists at src/relay/run.ts:52 and the halt ' +
-    'that raises it is at src/relay/relay.ts:8516.',
+    'that raises it is at src/relay/relay.ts:8526.',
   'status.pause.resolution':
     'Classifying unresolved conditions on both axes (#56, D2) added `resolution` to every RunPause ' +
     '(src/relay/run.ts:430), so `conclave status --json` on a paused default run now carries ' +
@@ -630,7 +630,7 @@ const DECLARED: Record<string, string> = {
     'participant and nobody else, and a conclave or workstream scope samples NOBODY. It used to ' +
     'read pause.verdictOf.participant and fall back to scanning participants by rank for ' +
     'implementers — and verdictOf is set at exactly two halt sites, both turn_incomplete ' +
-    '(src/relay/relay.ts:7933, src/relay/relay.ts:8653), so every other pause reached that rank ' +
+    '(src/relay/relay.ts:7943, src/relay/relay.ts:8663), so every other pause reached that rank ' +
     'scan. WHAT CHANGES AT N=1: on the three pauses whose scope names no participant — ' +
     'operator_requested (/pause), advisor_escalated, authority_conflict — the lone implementer ' +
     'child used to be sampled, so a child that measured busy REFUSED the resume and wrote ' +
@@ -639,15 +639,15 @@ const DECLARED: Record<string, string> = {
     'safety guard rather than presented as a pure N>1 fix. The reason it is the right narrowing: ' +
     'the guard exists because continuing SENDS into a child that cannot accept input mid-turn, ' +
     'and on those three pauses the child it measured is not the child being sent to — resuming ' +
-    'advisor_escalated sends to the ADVISOR (src/relay/relay.ts:8234), resuming ' +
+    'advisor_escalated sends to the ADVISOR (src/relay/relay.ts:8244), resuming ' +
     'authority_conflict queues a constraint that is delivered by the dispatcher on the next ' +
     'dispatch to a free seat, and operator_requested is consumed at an advisor-turn boundary ' +
     'whose own evidence line says no turn is in flight. WHAT IS GIVEN UP, named rather than ' +
     'discovered: the advisor_escalated halt raised when a seat’s turn completed and its report ' +
-    'could not be read (src/relay/relay.ts:8567) is conclave-scoped by design, yet the useful ' +
+    'could not be read (src/relay/relay.ts:8577) is conclave-scoped by design, yet the useful ' +
     'question there is whether THAT seat is still writing; at N=1 the rank scan sampled it by ' +
     'coincidence of it being the only implementer, and now nothing does. The pause still carries ' +
-    'that seat’s liveness evidence from the halt site (src/relay/relay.ts:8578), which is what ' +
+    'that seat’s liveness evidence from the halt site (src/relay/relay.ts:8588), which is what ' +
     'the operator actually reads; restoring a refusal there is a change to that halt’s scope, ' +
     'not to the guard. AT N>1 the old behaviour was unsafe in the other direction: a pause about ' +
     'one seat could be refused because a DIFFERENT seat was mid-turn, and the operator was told ' +
@@ -1590,6 +1590,18 @@ const DECLARED: Record<string, string> = {
     'dispatched-plus-incomplete evidence, and pins that none of them quotes an uncertain turn as ' +
     'usage. The console’s own rendering of the summary is pinned against a real console in ' +
     'src/repl/session.test.ts.',
+  '--ready-timeout on both front-ends':
+    'The optional flag surface grows by one on each command: --ready-timeout SECONDS, which ' +
+    'bounds how long a seat may take to report SessionStart before the adapter gives up. The ' +
+    'window itself is not new -- `readyTimeoutMs` has been read by both pty adapters since they ' +
+    'existed, defaulting to sixty seconds -- and what is new is that anything can set it. It was ' +
+    'declared in registry/types.ts, read in builtin.ts, and constructed nowhere: every ctx was ' +
+    'built as { cwd, watchdogMs, idleMs }. So the readiness failure told an operator to "raise ' +
+    'readyTimeoutMs" and no flag, env var or config key did that. #271 is the incident: a cold CI ' +
+    'runner with a freshly installed CLI comes up in onboarding, the first hook lands well past a ' +
+    'minute, and the run ended on a window that could not be widened. Optional and valued on ' +
+    'both, with no default, so a run that does not pass it is measured exactly as it was before ' +
+    'the flag existed.',
   '--silence-timeout on both front-ends':
     'The optional flag surface grows by one on each command: --silence-timeout SECONDS, which ' +
     'moves the SILENCE clock -- how long a turn may produce nothing before the watchdog calls ' +
@@ -1892,6 +1904,7 @@ test('DECLARED contains exactly the routing, pause-resolution, attribution, ceil
     'the report’s flags are reconciled at the close, and supersededFlags joins them (#131)',
     'the duration ceiling counts active run time, and the report says how long the run was paused (#112)',
     'whether the advisor used the assignment syntax, in the run report and in status --json (#79)',
+    '--ready-timeout on both front-ends',
     '--silence-timeout on both front-ends',
     'the launch surfaces name the absolute cap, and the dry-run plan carries what bounds the run (#162)',
     'a restricted origin records the seats it has since been given to in full (#171)',
@@ -2090,7 +2103,7 @@ async function seatsFromSessionCli(t: TestContext): Promise<{ creates: CreateRec
  * The two machine-readable documents a default run actually emits.
  *
  * Both come out of one `relay --json` run in a temporary repository, through the production
- * call sites: the report is what `bin/conclave.ts:2160` prints, and the status record is what
+ * call sites: the report is what `bin/conclave.ts:2168` prints, and the status record is what
  * `recordSession` wrote during that same run, read back by `main(['status', '--json'])` --
  * which resolves the most recent session in `process.cwd()`, so the record has to have been
  * written where an operator would look for it.
@@ -2342,7 +2355,7 @@ async function provokeReviewBlocked(repo: string): Promise<{ relay: Relay; run: 
  * Drive a real relay into one condition and return the pause it raised.
  *
  * The provocations are the ones `resolution.test.ts`'s own `provoke` already uses, deliberately:
- * the same triggers reaching the same single halt site (src/relay/relay.ts:4853), where the
+ * the same triggers reaching the same single halt site (src/relay/relay.ts:4863), where the
  * classification is computed by production `resolutionFor` from the subject the caller passed.
  * Nothing here writes a `RunPause`.
  *
@@ -2646,9 +2659,9 @@ test('default run works in the run cwd and creates no worktree', async (t) => {
     assert.equal(c.cwd, fromCli.cwd, `the session CLI must create ${c.id} in the run cwd`)
   }
 
-  // The relay CLI passes process.cwd() as the run cwd: bin/conclave.ts:2061-2063.
-  // The relay hands that same cwd to each participant adapter: src/relay/relay.ts:2638-2644.
-  // The cwd getter simply returns the option: src/relay/relay.ts:2335-2337.
+  // The relay CLI passes process.cwd() as the run cwd: bin/conclave.ts:2066-2068.
+  // The relay hands that same cwd to each participant adapter: src/relay/relay.ts:2643-2649.
+  // The cwd getter simply returns the option: src/relay/relay.ts:2345-2347.
   assert.match(relay, /cwd:\s*process\.cwd\(\)/, 'relay block must start in process.cwd')
   // Both creation sites now pass a NAMED context object rather than an inline literal, because
   // the same object composes the launch args that get recorded -- see
@@ -2672,7 +2685,7 @@ test('default run works in the run cwd and creates no worktree', async (t) => {
   )
   assert.match(
     RELAY,
-    /const ctx = \{ cwd, watchdogMs: this\.#opts\.turnWatchdogMs, idleMs: this\.#opts\.silenceWatchdogMs \}\s*const session = await this\.#opts\.registry\.createParticipant\(spec, ctx\)/,
+    /const ctx = \{ cwd, watchdogMs: this\.#opts\.turnWatchdogMs, idleMs: this\.#opts\.silenceWatchdogMs, readyTimeoutMs: this\.#opts\.readyTimeoutMs \}\s*const session = await this\.#opts\.registry\.createParticipant\(spec, ctx\)/,
     'a joining participant must be created in that cwd, on both of this run’s clocks',
   )
   // The rotation replacement's cwd is now the ROTATING SEAT'S root rather than the run's, which
@@ -2682,7 +2695,7 @@ test('default run works in the run cwd and creates no worktree', async (t) => {
   // and `root` is the seat's. See DECLARED['per-seat rotation ...'].
   assert.match(
     RELAY,
-    /const ctx = \{ cwd: root, watchdogMs: this\.#opts\.turnWatchdogMs, idleMs: this\.#opts\.silenceWatchdogMs \}\s*const session = await this\.#opts\.registry\.createParticipant\(spec, ctx\)/,
+    /const ctx = \{ cwd: root, watchdogMs: this\.#opts\.turnWatchdogMs, idleMs: this\.#opts\.silenceWatchdogMs, readyTimeoutMs: this\.#opts\.readyTimeoutMs \}\s*const session = await this\.#opts\.registry\.createParticipant\(spec, ctx\)/,
     'a rotation replacement must be created in the rotating seat’s own root, on both clocks',
   )
   assert.match(
@@ -2698,7 +2711,7 @@ test('default run works in the run cwd and creates no worktree', async (t) => {
 
   // A default run with no subagents must not create any git worktree. The relay only samples
   // the worktree list for its subagent-use report: src/relay/subagents.ts:113 defines
-  // worktreePaths, and src/relay/relay.ts:3728-3729, :4352 and :7039 read it.
+  // worktreePaths, and src/relay/relay.ts:3738-3739, :4362 and :7049 read it.
   // Prove it by exercising the run in a real temporary repository.
   const repo = tempDir(t, 'conclave-default')
   execFileSync('git', ['init', '--quiet'], { cwd: repo })
@@ -2790,6 +2803,10 @@ test('both flag helpers fall back when the flag is absent, and each block reads 
       'max-queue-depth',
       'max-turns',
       'operator',
+      // The declared addition; see DECLARED['--ready-timeout on both front-ends'].
+      // Optional and valued on both, with no default, so a run that does not pass it is
+      // measured exactly as it was before the flag existed.
+      'ready-timeout',
       'record',
       'resume',
       'reviewer',
@@ -2839,6 +2856,10 @@ test('both flag helpers fall back when the flag is absent, and each block reads 
       'max-queue-depth',
       'max-turns',
       'operator',
+      // The declared addition; see DECLARED['--ready-timeout on both front-ends'].
+      // Optional and valued on both, with no default, so a run that does not pass it is
+      // measured exactly as it was before the flag existed.
+      'ready-timeout',
       'record',
       'resume',
       'reviewer',
