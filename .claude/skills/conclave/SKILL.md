@@ -192,6 +192,8 @@ A refusal names the condition and the remedy, and several are forceable. **Read 
 - `transport_failed` — conclave lost the ability to observe a turn. This one is worth checking the CLI and the provider for
 - `invariant_violated` — conclave contradicted itself. Nothing about the child, network or provider is wrong; the detail names the broken rule
 - `escalated` — the agents wanted a human
+- `control_channel_closed` — stdin reached EOF while the run was still going, so it was torn down rather than finished. A redirect from a file, or a pipe from one `echo`, delivers everything and then closes; drive it through a fifo whose write end is held open instead
+- `control_channel_closed_on_answer` — the same, arriving on the message that answered a pause. The message was delivered and both seats acted on it, and the write that delivered it closed the channel behind it. This is the one that looks healthy: everything visible says the answer landed
 
 `status` is non-zero only for an abandoned run, because a run that ended badly still ended and its outcome is in the record.
 

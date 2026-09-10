@@ -49,7 +49,7 @@ import type { AgentRegistry } from '../registry/registry.ts'
 import type { ParticipantSpec } from '../registry/types.ts'
 import { boundOf, implementerSpecsFor, Relay, reviewerSpecFor, type SeatRequest } from '../relay/relay.ts'
 import type { RelayMessage } from '../relay/message.ts'
-import type { ForceRecord, RunHandle, RunPause } from '../relay/run.ts'
+import type { ForceRecord, RunHandle, RunOutcome, RunPause } from '../relay/run.ts'
 import { ensureCodexHooksTrusted } from '../deployment/ensureTrust.ts'
 import { AGENT_KINDS, installConfig, type AgentKind } from '../config/install.ts'
 import { CONFIG_RELATIVE, denialsFrom, launchArgsFor, permissionModeFor, readProjectConfig } from '../config/project.ts'
@@ -691,7 +691,7 @@ function renderPause(p: RunPause, width: number): string {
  *
  * This used to read `pause.verdictOf.participant` instead, and that field is narrower than it
  * looks: it is set at exactly two halt sites, both `turn_incomplete`
-  * (`src/relay/relay.ts:7939` and `src/relay/relay.ts:8659`). So FOUR of the five seat-scoped
+  * (`src/relay/relay.ts:7952` and `src/relay/relay.ts:8672`). So FOUR of the five seat-scoped
  * reasons -- `rotation_candidate`, `implementer_unanswered`, `merge_blocked`, `review_blocked`
  * -- named a seat in their scope and were sampled by rank anyway, because the field the guard
  * read was empty. The scope is the field that is always populated, which is the other half of
@@ -705,16 +705,16 @@ function renderPause(p: RunPause, width: number): string {
  * pause never mentioned. The rank fallback's own comment argued it was right "only because
  * there is one of them", which is an argument for deriving the seat from the pause instead of
  * from a rank. Worse than useless on one of them: resuming an `advisor_escalated` pause sends
-  * to the ADVISOR (`src/relay/relay.ts:8244`), so the fallback measured children that were not
+  * to the ADVISOR (`src/relay/relay.ts:8257`), so the fallback measured children that were not
  * about to be sent to at all.
  *
  * What that gives up, stated rather than discovered: the `advisor_escalated` halt raised when a
-  * seat's turn completed and its report could not be read (`src/relay/relay.ts:8577`) is
+  * seat's turn completed and its report could not be read (`src/relay/relay.ts:8590`) is
  * conclave-scoped by design -- "the reason names who is being asked to take it, and the scope
  * follows the reason" -- yet the thing an operator wants to know there is whether THAT seat's
  * child is still writing. Under the rank fallback that seat was sampled at N=1 by coincidence
  * of being the only implementer. It is not sampled now. The pause still carries its own
-  * liveness EVIDENCE from the halt site (`src/relay/relay.ts:8588`), which is what the operator
+  * liveness EVIDENCE from the halt site (`src/relay/relay.ts:8601`), which is what the operator
  * reads;
  * what is gone is a refusal derived from a rank scan. Narrowing that halt's scope, if the
  * refusal is wanted back, is a change to the halt site rather than to this guard.
@@ -1404,6 +1404,31 @@ export async function runSession(opts: SessionOptions): Promise<number> {
   let run: RunHandle | undefined
   /** Resolves when a run reaches a terminal outcome. Used by the non-interactive form. */
   let runEnded: (() => void) | undefined
+  /**
+   * The ending the CONSOLE knows about when the run itself never got to produce one.
+   *
+   * Only ever the control channel going away (#266): every other ending comes out of the run
+   * and arrives through `supervise`. Handed to `relay.stop()` in the teardown rather than
+   * written to the record here, and that is the whole of the fix -- the relay is where
+   * first-outcome-wins lives, so an ending that goes through it reaches the terminal `run_end`
+   * on the event stream and the status document as ONE value. An earlier shape of this wrote
+   * it straight into `status.outcome`, and left `events.ndjson` ending `run_end: stopped` while
+   * the status said `control_channel_closed`.
+   */
+  let closingOutcome: RunOutcome | undefined
+  /**
+   * Whether the last line the operator sent was the answer to a pause.
+   *
+   * Set by `answerPause` BEFORE it awaits the resume, and that ordering is the whole point.
+   * `dispatch` runs `handle` detached, so the `close` listener for EOF fires while the resume
+   * is still in flight; a flag set after the await would be read as `false` by the very race
+   * it exists to inform, and the distinctive #266 shape -- the run dying on the message that
+   * resumed it -- would be recorded as an ordinary pipe ending.
+   *
+   * Cleared at the top of `handle`, so it means the LAST operator line and not "a pause was
+   * answered at some point in this session".
+   */
+  let answeredPause = false
   const firstRunEnded = new Promise<void>((resolve) => {
     runEnded = resolve
   })
@@ -1683,6 +1708,9 @@ export async function runSession(opts: SessionOptions): Promise<number> {
    * can also carry the override -- see `/continue` in `handle`.
    */
   const answerPause = async (text: string): Promise<void> => {
+    // Before the delivery and before the resume, because the EOF race reads it and this
+    // function does not return until after that race can have been decided. See `answeredPause`.
+    answeredPause = true
     inject(text, 'all')
     write(dim('  delivered, and resuming — the run was paused'))
     await resumeRun()
@@ -2380,6 +2408,10 @@ export async function runSession(opts: SessionOptions): Promise<number> {
    * serve input that did not.
    */
   async function handle(line: string, framed?: string): Promise<void> {
+    // A new line supersedes whatever the last one was. Only `answerPause` sets this again, so
+    // it survives exactly as long as "the most recent thing the operator did was answer a
+    // pause" is true.
+    answeredPause = false
     // `framed` is a head from `heredocOpen`, which is an exact string off an enumerated list
     // — so it is the whole word by construction, and an empty head is the no-prefix form
     // whose message goes to both.
@@ -2549,7 +2581,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
       // FALSIFIER, stated because it is the strongest argument against this shape: the
       // console has no general "trailing text is a message" rule and does not gain one here.
       // `/rotate <text>` and `/abort <text>` consume their text as a REASON
-      // (`src/repl/session.ts:2602`, `src/repl/session.ts:2635`) and `/pause`, `/queue`, `/audit` ignore
+      // (`src/repl/session.ts:2634`, `src/repl/session.ts:2667`) and `/pause`, `/queue`, `/audit` ignore
       // whatever follows them. So an operator who learns this from `/continue` and carries
       // it to `/pause I'll be back` still loses the sentence. That inconsistency is not
       // repaired by making `/continue` a third behaviour; it is narrowed by it, and the
@@ -2761,6 +2793,27 @@ export async function runSession(opts: SessionOptions): Promise<number> {
         new Promise<symbol>((resolve) => rl!.once('close', () => resolve(Symbol('stdin closed')))),
       ])
       if (won !== ended) {
+        // The record's half of the same fact (#266). The yellow line below is addressed to
+        // whoever is watching the terminal now; this is addressed to whoever reads the record
+        // afterwards, which used to be a reader with nothing to read: a run killed by its own
+        // stdin closing left a terminal state identical to one that finished its goal.
+        //
+        // Two reasons, not one, because "EOF arrived on the message that answered a pause" is
+        // the case an operator is most certain is healthy -- the message was delivered, both
+        // seats acted on it, and then the session died of having received it. See both members
+        // in `observe.ts` for the argument.
+        //
+        // The DETAIL says which, in the sentence a human would want, and the reason says it in
+        // the form a script can branch on.
+        closingOutcome = answeredPause
+          ? {
+              reason: 'control_channel_closed_on_answer',
+              detail: 'stdin reached EOF immediately after the pause answer was delivered; the run was torn down, not finished',
+            }
+          : {
+              reason: 'control_channel_closed',
+              detail: 'stdin reached EOF while the run was still going; the run was torn down, not finished',
+            }
         write(
           yellow(
             '  stdin reached EOF while the run was still going, so no further command can arrive. ' +
@@ -2833,14 +2886,42 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     try {
       // AFTER the relay: stopping it is what closes the event stream, and closing the
       // recorder first would cut the terminal `run_end` off before it was read.
-      await relay.stop()
+      await relay.stop(closingOutcome)
     } finally {
       // Then the recorder's own final refresh, AWAITED, so the last turn's grade is in the
       // document before the line that says the run is over -- rather than arriving in a write
       // after it, which is what a reader who stopped at `ended` would never see.
       await recording.close()
     }
-    recording.set('ended')
+    // With the outcome the console knows, when the run never produced one of its own (#266).
+    //
+    // `relay.outcome` and NOT `closingOutcome`, although the two agree on every path anyone has
+    // reached. What the relay ended on is what the terminal `run_end` carried, so reading it
+    // back is what makes this document a record of the stream rather than a second opinion
+    // about it. If the run finished in the window between the EOF and this teardown, `#end`
+    // latched its `done` and refused the ending we offered -- and this reads back the `done`,
+    // where a local value would have relabelled a healthy run. `closingOutcome` remains the
+    // fallback for the one case that leaves nothing to read back: `stop()` throwing before it
+    // ends the run, which does not reach this line today but would silently restore the whole
+    // #266 defect if it ever did.
+    //
+    // NO TEST STANDS BEHIND THIS COMPOSITION, and it is said here because a reader would
+    // otherwise assume one does (#274). Replacing `relay.outcome ?? closingOutcome` with
+    // `closingOutcome` survives the whole suite: both values derive from the one ending handed
+    // to `relay.stop()` above, so they are equal on every path a test can construct, and the
+    // interleaving this guards against -- the run finishing between the EOF and here -- is not
+    // reachable from the console, whose healthy path closes stdin only after the end has been
+    // observed. `an ending handed to stop() cannot relabel a run that had already finished`
+    // (src/relay/stopWhilePaused.test.ts) pins the guarantee where it lives, in `#end`; nothing
+    // pins the console's USE of it. So agreement between this document and `events.ndjson` is
+    // structural rather than asserted, and the stream assertions in the #191 and #266 console
+    // tests are a regression guard against a future re-split, not coverage of this line.
+    //
+    // Guarded on `closingOutcome` rather than written unconditionally: a console that never ran
+    // anything still gets `stopped` out of `relay.outcome`, and an `outcome` on a session that
+    // never had a run is a key claiming a run ended. Passing `undefined` is exactly the call
+    // this line has always made -- `set` carries the last outcome forward when given none.
+    recording.set('ended', closingOutcome ? { outcome: relay.outcome ?? closingOutcome } : undefined)
     tee?.end()
   }
   return 0

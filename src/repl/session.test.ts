@@ -16,7 +16,7 @@ import { resolveSession } from '../workspace/sessionRecord.ts'
 import { acquire as acquireLock } from '../workspace/sessionLock.ts'
 import { formatSessionJson } from '../workspace/sessionView.ts'
 import { join } from 'node:path'
-import { PassThrough, Readable, Writable } from 'node:stream'
+import { PassThrough, Writable } from 'node:stream'
 import test from 'node:test'
 import type { TestContext } from 'node:test'
 import { tempDir } from '../testkit/tempDir.ts'
@@ -283,7 +283,12 @@ async function observedTurn(impl: FakeRotationSession, dir: string, seat = 'impl
 test('a session runs to completion and reports the outcome', async (t) => {
   const dir = repo(t)
   const out = collect()
-  const code = await runSession({
+  // The input is closed AFTER the run has ended, which is the point of driving this one by hand
+  // rather than through `script([])`: a healthy piped run gets an EOF too, and the failure mode
+  // #266's new reasons create is one that fires too eagerly and relabels endings like this one.
+  // See below -- everything up to `input.end()` is the test this always was.
+  const input = new PassThrough()
+  const running = runSession({
     cwd: dir,
     goal: 'Keep the work moving.',
     lead: 'codex',
@@ -294,9 +299,15 @@ test('a session runs to completion and reports the outcome', async (t) => {
       codex: [new FakeRotationSession('advisor', 'codex', ['Do it.', 'DONE'])],
       claude: [new FakeRotationSession('impl', 'claude', ['ack', 'Did it.'])],
     }),
-    input: script([]),
+    input,
     output: out.stream,
   })
+  // The run's own ending, observed before stdin is touched. `Promise.race` settles on whichever
+  // came first and this is what makes the ordering a fact rather than a hope: by the time the
+  // EOF below is delivered, the race has already been decided by the run.
+  await untilText('the run to end', out.text, /run ended: done/)
+  input.end()
+  const code = await running
   assert.equal(code, 0)
   // CONTENT off the record: the run ended, and on what. The `=== run ended: done` line is drawn
   // through `summaryLine`, which wraps — so a console grep for it is a claim about the render
@@ -309,6 +320,28 @@ test('a session runs to completion and reports the outcome', async (t) => {
   // Console-only advice — nothing records that it was given. Without checks, rotation is refused
   // rather than done unverified, and it says so.
   assert.match(out.text(), /pass --checks/)
+
+  // ------------------------------------------------------------------------------------------
+  // A HEALTHY ENDING SURVIVES ITS OWN EOF, in both records (#266).
+  //
+  // The two new control-channel reasons are the one change here that could make a finished run
+  // report something else, and they must not: `done` is what the participants said, and a fact
+  // about the pipe closing afterwards does not overrule them. Both records are asserted, because
+  // the fix threads the ending through `Relay.stop()` and a too-eager reason would reach the
+  // stream and the status document alike.
+  const found = resolveSession(dir)
+  assert.ok('session' in found, 'the run recorded a session')
+  assert.equal(found.session.status.outcome?.reason, 'done', 'a run that finished still says done')
+  // AND WITH `stdin: closed` BESIDE IT, which is the whole reason the outcome had to exist.
+  // #252's field is asserted here as the counter-example to its own claim: this document says
+  // the channel went away AND that the run finished, so a reader who had only `stdin` could not
+  // have told this run from the one #191 kills.
+  assert.equal(found.session.status.stdin, 'closed', 'the channel went away on a healthy run too')
+  assert.doesNotMatch(
+    out.text(),
+    /stdin reached EOF while the run was still going/,
+    'and the mid-run diagnosis is not printed at a run that had already ended',
+  )
 })
 
 test('the console prefers a counted subagent to a guessed one, and keeps the guess until one is counted', async (t) => {
@@ -2005,56 +2038,6 @@ test('a finished console run leaves graded turns in its status, and in its JSON'
   assert.ok(impl.turns.length > 0, 'the turns must survive serialisation, not just the object')
   assert.equal(impl.turns.at(-1).confidence, 'proven')
   assert.equal(impl.turns.at(-1).provenance[0].detail, 'Stop')
-})
-
-/**
- * The record of a session torn down while a run was still going.
- *
- * The path that matters most and the one that broke. When a run reaches its own end the
- * relay has already emitted `run_end` before teardown, so any ordering works and a test
- * built on a completed run proves nothing — the first version of this proved nothing.
- *
- * Tearing down MID-RUN is different: `Relay.#end` is what emits the terminal event, and
- * `relay.stop()` is what calls it. Closing the recorder first detached before the event
- * existed, and the recorded stream stopped on an ordinary `activity` line with nothing
- * saying the session was over. A reader then cannot tell a session that was killed from one
- * still running whose writer is merely quiet — the exact ambiguity these files remove.
- */
-test('a session killed mid-run still records how it ended', async (t) => {
-  const dir = repo(t)
-  const out = collect()
-  // Input closed immediately, participants slow enough that the run is unquestionably in
-  // flight when the console tears down.
-  await runSession({
-    cwd: dir,
-    goal: 'Keep the work moving.',
-    lead: 'codex',
-    implementer: 'claude',
-    rounds: 4,
-    checks: [],
-    registry: registryOf({
-      codex: [slow('advisor', 'codex', ['Do it.', 'More.', 'DONE'], 800)],
-      claude: [slow('impl', 'claude', ['ack', 'Did it.', 'Again.'], 800)],
-    }),
-    input: Readable.from([]),
-    output: out.stream,
-  })
-
-  const found = resolveSession(dir)
-  assert.ok('session' in found)
-  const events = readFileSync(found.session.status.eventsPath, 'utf8')
-    .trim()
-    .split('\n')
-    .map((l) => JSON.parse(l))
-  const last = events.at(-1)
-  assert.equal(
-    last?.type,
-    'run_end',
-    `the stream must end with run_end even when the run did not finish; ended with ` +
-      `${events.slice(-3).map((e) => e.type).join(', ')}`,
-  )
-  // `stopped`, not `done`: the run was cut short and the record says which.
-  assert.equal(last?.reason, 'stopped')
 })
 
 /**
@@ -4537,7 +4520,7 @@ test('a participant-scoped pause samples that seat and no other, at every reason
   assert.deepEqual(sampled(pauseFor({ reason: 'rotation_candidate', participant: 'implementer-2' })), ['implementer-2'])
   assert.deepEqual(sampled(pauseFor({ reason: 'implementer_unanswered', participant: 'implementer-2' })), ['implementer-2'])
   // The ADVISOR is a participant like any other, and its own bad turn pauses the run
-  // (src/relay/relay.ts:7939). A rank scan for implementers sampled the wrong child here too.
+  // (src/relay/relay.ts:7952). A rank scan for implementers sampled the wrong child here too.
   assert.deepEqual(
     sampled(pauseFor({ reason: 'turn_incomplete', participant: 'advisor' }, { participant: 'advisor', endSeq: 2 })),
     ['advisor'],
@@ -4546,13 +4529,13 @@ test('a participant-scoped pause samples that seat and no other, at every reason
 
 test('a conclave- or workstream-scoped pause samples nobody, with no fall back to rank', () => {
   // Both conclave-scoped reasons. Resuming an `advisor_escalated` pause sends to the ADVISOR
-  // (src/relay/relay.ts:8244), so measuring implementer children was never the question; and
+  // (src/relay/relay.ts:8257), so measuring implementer children was never the question; and
   // `operator_requested` is consumed at an advisor-turn boundary that states no turn is in
   // flight. Neither has anything for this guard to sample.
   assert.deepEqual(sampled(pauseFor({ reason: 'advisor_escalated' })), [])
   assert.deepEqual(sampled(pauseFor({ reason: 'operator_requested' })), [])
   // Workstream scope, and the id deliberately COLLIDES with a seat id -- at N=1 the workstream
-  // is named after the seat carrying the instruction (src/relay/relay.ts:8411), which is exactly
+  // is named after the seat carrying the instruction (src/relay/relay.ts:8424), which is exactly
   // the coincidence a guard could read as "so sample that seat". A workstream is not a seat.
   assert.deepEqual(sampled(pauseFor({ reason: 'authority_conflict', workstream: 'implementer' })), [])
 })
@@ -4568,7 +4551,7 @@ test('a scope naming a seat that is gone samples nobody rather than falling back
 test('a rotation_candidate pause on one seat resumes while the OTHER seat is genuinely mid-turn', async (t) => {
   // The production shape of the N>1 case the rank scan got wrong, and the reason it has to be
   // this shape: `rotation_candidate` carries NO `verdictOf` -- that field is set at two halt
-  // sites, both turn_incomplete (src/relay/relay.ts:7943, src/relay/relay.ts:8663) -- so under
+  // sites, both turn_incomplete (src/relay/relay.ts:7956, src/relay/relay.ts:8676) -- so under
   // the old expression this pause fell through to the rank scan and sampled EVERY implementer.
   // A simpler `turn_incomplete` fixture cannot show that: it populates the field, takes the
   // named-seat branch, and passes against the code being replaced.
@@ -4620,7 +4603,7 @@ test('a rotation_candidate pause on one seat resumes while the OTHER seat is gen
     ],
     rounds: 6,
     // ARMS ROTATION, which is what makes degradation a pause instead of an ended run
-    // (src/relay/relay.ts:5562). A command that exits 0 immediately: what the checks DO is
+    // (src/relay/relay.ts:5575). A command that exits 0 immediately: what the checks DO is
     // not what this test is about, only that a replacement would have something to reproduce.
     checks: ['true'],
     registry: registryOf({
@@ -5535,6 +5518,31 @@ test('#229 the pause menu separates what resolves it from what merely queues', a
   await running
 })
 
+/**
+ * The ordinary EOF ending: printed to whoever is there, and recorded for whoever is not.
+ *
+ * ## Why the terminal `run_end` is asserted here
+ *
+ * This test absorbed 'a session killed mid-run still records how it ended', which pinned the
+ * same event on the same teardown. Two owners of one claim is how a pin goes stale here, and
+ * mutating the ending now fails one test rather than two -- which is what makes a mutation run
+ * legible.
+ *
+ * Its argument is kept because the argument is the valuable part. When a run reaches its OWN
+ * end the relay has already emitted `run_end` before teardown, so any ordering works and a
+ * test built on a completed run proves nothing -- the first version of that test proved
+ * nothing. Tearing down mid-run is different: `Relay.#end` is what emits the terminal event
+ * and `relay.stop()` is what calls it, so closing the recorder first detached before the event
+ * existed, and the recorded stream stopped on an ordinary `activity` line with nothing saying
+ * the session was over. A reader then cannot tell a session that was killed from one still
+ * running whose writer is merely quiet.
+ *
+ * The fixture it had was an input that reached EOF before the first turn finished. This one
+ * reaches EOF at a pause, which drives the same sequence under MORE load, not less:
+ * `relay.stop()` has to settle a parked handle and wait for the loop to unwind past a halt
+ * before `#looped` resolves, and every one of those steps is a chance to emit the terminal
+ * event too late. A run in flight is a run in flight; the pause is not a weaker case.
+ */
 test('#191 stdin closing mid-run says so, rather than looking like an operator who went quiet', async (t) => {
   // Found by driving `--operator agent` from a non-terminal for the first time. A redirect from
   // a file, or a pipe from one echo, delivers everything and then EOF -- and the session ended
@@ -5575,12 +5583,98 @@ test('#191 stdin closing mid-run says so, rather than looking like an operator w
   assert.doesNotMatch(holder, /\bsleep\b|\btimeout\b/, `the printed holder must have no timer: ${holder}`)
   assert.match(holder, /tail -f \/dev\/null > ctl/, 'the holder with no timer, named')
 
-  // And the record says what happened, which is the other half of #252: an operator reading
-  // this session afterwards can tell a run that ended because its control channel died from one
-  // that ended because it finished. Before this they were the same document.
+  // ------------------------------------------------------------------------------------------
+  // THE FORENSIC HALF, and it is kept apart from the presentation assertions above on purpose.
+  //
+  // Everything up to here is addressed to whoever is watching the terminal AT THE TIME. The
+  // record answers a reader who was NOT there, and the two are independent: every assertion
+  // above passes with the record left exactly as broken as #266 found it, which is why a test
+  // that stopped at the printed text would have shipped this defect twice.
+  //
+  // `stdin: closed` is NOT that answer, though #252 left this test claiming it was. A run that
+  // ends normally and then has its stdin close records `stdin: closed` too -- pinned in 'a
+  // session runs to completion and reports the outcome' -- so the field says the channel went
+  // away and cannot say the run went with it. It is asserted here as what it is: the live half.
   const found = resolveSession(dir)
   assert.ok('session' in found, 'the run recorded a session')
-  assert.equal(found.session.status.stdin, 'closed', 'the ending cause survives in the record')
+  assert.equal(found.session.status.stdin, 'closed', 'the channel is recorded as gone (#252)')
+
+  // The ending itself, named, in the document a reader opens afterwards (#266). Before this
+  // there was no reason for it to carry: `RunReason` had no member for a control channel that
+  // went away, so this key was absent and the document was indistinguishable from a run that
+  // finished its goal.
+  assert.equal(
+    found.session.status.outcome?.reason,
+    'control_channel_closed',
+    'the record names the ending, not merely the channel',
+  )
+
+  // AND THE SAME VALUE ON THE STREAM. Two records of one ending, and the one a stranger reads
+  // is the stream -- so a status document saying `control_channel_closed` beside a terminal
+  // `run_end` saying `stopped` is worse than either alone: it makes the reader choose. The
+  // first shape of this fix did exactly that, because it wrote the reason into the status
+  // document and left `Relay.stop()` ending the run `stopped` as it always had.
+  const stream = events(dir)
+  const end = stream.at(-1)
+  assert.equal(
+    end?.['type'],
+    'run_end',
+    'the stream must end with run_end even when the run did not finish; ended with ' +
+      `${stream.slice(-3).map((e) => e['type']).join(', ')}`,
+  )
+  assert.equal(end?.['reason'], 'control_channel_closed', 'and both records agree on the ending')
+})
+
+test('#266 EOF on the message that answered a pause is recorded as its own ending', async (t) => {
+  // The observed run, from an --operator agent session ~30 hours old: paused on an escalation,
+  // the operator writes ONE closing message, both seats act on it -- and the run dies of having
+  // received it, because the write that delivered it also closed the channel. `paused` ->
+  // `ended`, not `running` -> `ended`.
+  //
+  // Its own reason rather than the general one, because the repairs differ. The general case is
+  // fixed by holding the write end open for longer; this one by not writing the last message
+  // with a command that closes stdin behind it. And it is the case where every visible sign says
+  // the session was healthy, so it is the one that must not hide inside the expected ending.
+  const dir = repo(t)
+  const impl = slow('impl', 'claude', ['ack', 'Did it, slowly.'])
+  impl.endTurn = { index: 1, verdict: TIMED_OUT }
+  const out = collect()
+  const input = new PassThrough()
+  const running = runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'claude',
+    rounds: 4,
+    checks: [],
+    registry: registryOf({ codex: [slow('advisor', 'codex', ['Do it.', 'DONE'])], claude: [impl] }),
+    input,
+    output: out.stream,
+  })
+
+  await untilText('the pause to be printed', out.text, /paused/)
+  // One write, which is what the operator did: the answer and the EOF in the same act.
+  input.write('one last thing, then we are done\n')
+  input.end()
+  await running
+
+  // PRESENTATION: that this is the pause-answer shape at all, rather than any other EOF. The
+  // message was taken as the decision and the run resumed on it -- so what follows is a record
+  // of a run that died on a message it had accepted, not one that was never spoken to.
+  assert.match(out.text(), /delivered, and resuming — the run was paused/, 'the answer resolved the pause')
+
+  // FORENSIC, and separate for the reason the #191 case gives: the line above passes whatever
+  // the record ends up saying.
+  const found = resolveSession(dir)
+  assert.ok('session' in found, 'the run recorded a session')
+  assert.equal(
+    found.session.status.outcome?.reason,
+    'control_channel_closed_on_answer',
+    'the strangest instance is not filed under the ordinary one',
+  )
+  const end = events(dir).at(-1)
+  assert.equal(end?.['type'], 'run_end', 'the stream is terminated by run_end')
+  assert.equal(end?.['reason'], 'control_channel_closed_on_answer', 'and both records agree on the ending')
 })
 
 /**

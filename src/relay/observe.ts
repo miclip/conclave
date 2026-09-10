@@ -96,6 +96,49 @@ export type RunReason =
    * there is no seat to dispatch it to, which is exactly the final merge.
    */
   | 'integration_failed'
+  /**
+   * The control channel reached EOF while the run was still going, so the run was torn down
+   * (#266).
+   *
+   * NOT `stopped`, which means a human asked for the run to end, and not `done`, which means
+   * it finished. This is the run being killed by the disappearance of the thing that was
+   * driving it: a redirect from a file that delivered everything and closed, or a fifo whose
+   * write-holder died. The operator did not decide anything; the pipe ran out.
+   *
+   * A reason rather than only the yellow line the console already prints, because that line
+   * is addressed to whoever is watching the terminal AT THE TIME, and the question this
+   * answers is asked afterwards, of the record, by a reader who was not there. #252 gave the
+   * LIVE half -- `stdin: held | closed | not_attached` -- and a live field cannot answer it:
+   * `stdin` describes a run while it is going, and this is asked of a run that is over. Until
+   * this existed, a run killed by its own stdin closing and a run that completed its goal
+   * produced the same terminal record, and the only way to tell them apart was to have
+   * watched it happen.
+   *
+   * NOTHING in the listing needs widening for this to show up. `conclave sessions --json`
+   * spreads the whole status document (`bin/conclave.ts:1224`), so an `outcome` written by the
+   * console appears there and in `conclave status <id> --json` alike. #266 read the missing
+   * reason as a serialisation gap between the two commands; it was the absence of this member.
+   */
+  | 'control_channel_closed'
+  /**
+   * The control channel reached EOF immediately after a pause answer was delivered (#266).
+   *
+   * Machine-readably separate from `control_channel_closed` because it is a different event
+   * wearing the same clothes, and it is the one an operator is most certain did not happen.
+   * The observed shape: a session sits paused for hours, the operator writes ONE line to
+   * answer it, both seats act on that line -- and the run dies of having received it, because
+   * the write that delivered it also closed the channel. The transition is `paused` ->
+   * `ended`, not `running` -> `ended`, and everything visible about it says the message
+   * landed and the session was healthy.
+   *
+   * A reader who sees the general reason concludes "the pipe ran out"; a reader who sees this
+   * one concludes "the pipe ran out ON MY MESSAGE" -- which is a different repair. The first
+   * is fixed by holding the write end open for longer, the second by not writing the last
+   * message with a command that closes stdin behind it. Collapsing the two would hide the
+   * more surprising case inside the more expected one, which is the argument every other
+   * split in this union is made on.
+   */
+  | 'control_channel_closed_on_answer'
 
 export interface RelayEventBase {
   /**
