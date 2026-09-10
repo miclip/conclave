@@ -121,7 +121,7 @@ export const CITED: Record<string, string> = {
   // footer's notion of "working" is `turn_start` until `turn_end`, and `tool_use` only relabels
   // a turn that is already running. If that ever stops being true, the predicate the relay and
   // `/continue` both send on is no longer the thing the operator is watching.
-  'src/repl/session.ts:1374': 'progress.note(e.participant, () => labelFor(e.participant) ?? ev.tool)',
+  'src/repl/session.ts:1430': 'progress.note(e.participant, () => labelFor(e.participant) ?? ev.tool)',
   'src/relay/relay.ts:7062': 'this.#worktreesAtStart = worktreePaths(this.#opts.cwd)',
   'src/relay/relay.ts:7952': "subject: { reason: 'turn_incomplete', participant: lead.id }",
   // The five below are what the console's `/continue` liveness guard cites for reading a
@@ -174,27 +174,27 @@ export const CITED: Record<string, string> = {
   // The console's liveness seam, cited by the relay's own copy of it (#101). Two front-ends
   // needing the same injection is not duplication to be noticed later -- it is the shape the
   // relay deliberately copied, and the citation is what keeps the two spellings together.
-  'src/repl/session.ts:375': 'liveness?: (pid: number) => Promise<ChildLiveness>',
+  'src/repl/session.ts:376': 'liveness?: (pid: number) => Promise<ChildLiveness>',
   // The three below moved by the same edit that added `seatsToSampleAtPause` above
   // `runSession`: it inserts a documented function into the middle of the file, so every
   // citation past it shifts. Repaired against this tree rather than deleted -- each still
   // points at the line it was written about.
-  'src/repl/session.ts:1088': 'escalates to you rather than being replaced',
-  'src/repl/session.ts:1258': 'logPath: runLogPath,',
+  'src/repl/session.ts:1144': 'escalates to you rather than being replaced',
+  'src/repl/session.ts:1314': 'logPath: runLogPath,',
   // Moved by #83's edit to the `/continue` refusal, nine lines above it in the same block.
   // Repaired rather than deleted: the call it pins is the one the console still makes.
-  'src/repl/session.ts:1681': 'run.pause.refusal = { at: Date.now(), reason, ...(colour ? { liveness: colour } : {}) }',
+  'src/repl/session.ts:1737': 'run.pause.refusal = { at: Date.now(), reason, ...(colour ? { liveness: colour } : {}) }',
   // Why an in-place amendment to a pause needs an event behind it. Cited by both halves of
   // #101's refresh -- the module that explains the mechanism and the loop that uses it --
   // because the argument was already written here, for `/wait`, and restating it in two more
   // places is how three copies of a reason drift apart.
-  'src/repl/session.ts:2612': 'so an in-place change like `superseded` reaches the file on the next one',
+  'src/repl/session.ts:2668': 'so an in-place change like `superseded` reaches the file on the next one',
   // The falsifier `/continue <message>` is argued against: two commands that already give
   // their trailing text a meaning, so the new rule is narrow by intent rather than by
   // accident. Pinned to the dispatch lines, which is what makes "these are unchanged"
   // checkable rather than a claim about code nobody re-reads.
-  "src/repl/session.ts:2634": "if (word === '/rotate') {",
-  "src/repl/session.ts:2667": "if (word === '/abort') {",
+  "src/repl/session.ts:2690": "if (word === '/rotate') {",
+  "src/repl/session.ts:2723": "if (word === '/abort') {",
 
   // Live-claim section in docs/NOTES.md: #156's premise and the unverified-generation guards.
   // These citations assert current fact in a section marked `## LIVE:`, so they are checked even
@@ -244,8 +244,8 @@ export const CITED: Record<string, string> = {
   // The two console lines the #171 sequence test says it is not going around: the operator's
   // reply at a pause, and `>advisor <text>`. The claim they support is that the test drives the
   // same call the front end makes, so a pin on the call itself is the whole point.
-  'src/repl/session.ts:1714': "inject(text, 'all')",
-  'src/repl/session.ts:2730': 'inject(rest, { only: who })',
+  'src/repl/session.ts:1770': "inject(text, 'all')",
+  'src/repl/session.ts:2786': 'inject(rest, { only: who })',
   'src/adapters/kimi.ts:763': 'compactionGeneration: 0,',
   'src/rotation/rotate.ts:412': 'export async function rotate(',
   'src/adapters/claude.ts:2008': "#state: SessionState = 'running'",

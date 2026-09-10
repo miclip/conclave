@@ -44,6 +44,7 @@ import { banner, bold, colorFor, dim, elapsedSince, grey, markdown, Progress, re
 import { resolveDeadlines } from '../relay/deadlines.ts'
 import type { AgentEvent } from '../contract/session.ts'
 import { defaultRegistry } from '../registry/builtin.ts'
+import { refuseMissingCommands } from '../registry/executables.ts'
 import type { CheckSpec } from '../rotation/record.ts'
 import type { AgentRegistry } from '../registry/registry.ts'
 import type { ParticipantSpec } from '../registry/types.ts'
@@ -952,13 +953,18 @@ export async function runSession(opts: SessionOptions): Promise<number> {
   // changes, only how much happens on their behalf first.
   //
   // What is NOT checked here: whether each seat's CLI is on PATH, and whether it has the model
-  // named. Both spawn or stat things, both are `Relay.start`'s (see `refuseMissingCommands`),
-  // and `relay --dry-run` does not do them either. A spelling this file can settle from a map
-  // it already holds is a different question from an installation it would have to go looking
-  // for.
-  for (const spec of [leadSpec, ...implSpecs, ...(reviewerSpec ? [reviewerSpec] : [])]) {
-    registry.resolve(spec)
-  }
+  // named. Neither is a question this file can settle from a map it already holds; both go
+  // looking at the machine, and `relay --dry-run` does not ask either. The model question stays
+  // `Relay.start`'s. The PATH question is asked BELOW the lock instead of not at all -- see the
+  // `refuseMissingCommands` call there, which is what #273 moved and why it did not move here.
+  //
+  // The resolutions are KEPT, and that is the plumbing #273 needed. `refuseMissingCommands`
+  // takes agent DEFINITIONS, which this loop had in hand and threw away; retaining them is what
+  // lets the CLI check below run off this same seam rather than looking the agents up a second
+  // time. Two places deciding whether a binary exists is how they come to disagree.
+  const seats = [leadSpec, ...implSpecs, ...(reviewerSpec ? [reviewerSpec] : [])].map((spec) =>
+    registry.resolve(spec),
+  )
 
   // A `--resume` naming a log that is not there is the third terminal argument error, and it
   // belongs up here with the other two rather than below the lock. It is the same shape: a
@@ -1001,10 +1007,12 @@ export async function runSession(opts: SessionOptions): Promise<number> {
   const runDeadlines = resolveDeadlines({
     requestedAbsoluteMs: opts.turnWatchdogMs,
     requestedSilenceMs: opts.silenceWatchdogMs,
-    seats: [leadSpec, ...implSpecs, ...(reviewerSpec ? [reviewerSpec] : [])].map((spec) => ({
-      id: spec.id,
-      agent: spec.agent,
-      declared: registry.get(spec.agent).deadlines,
+    seats: seats.map((resolved) => ({
+      id: resolved.spec.id,
+      agent: resolved.spec.agent,
+      // Off the resolution above rather than a second `registry.get`. Same map, same answer --
+      // and one lookup cannot disagree with itself.
+      declared: resolved.agent.deadlines,
     })),
   })
 
@@ -1062,6 +1070,54 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     write(`refusing to start: ${existing.messages.join('\n')}`)
     return 1
   }
+
+  /**
+   * Every seat's CLI, looked for before the phase that needs one (#273).
+   *
+   * `refuseMissingCommands` has done this job since #51, but it was reachable only from
+   * `Relay.start` -- and the console does two things before the relay exists that both assume
+   * the binary is there: it writes the hook registration into the project, and it answers
+   * Codex's trust prompts by driving a real `codex`. With `codex` off PATH that second step
+   * spent about a minute printing `waiting for Codex to show its trust prompts` before anything
+   * named the cause, because the preflight that would have named it was queued behind the phase
+   * that depended on it. The spinner was not wrong about what it was waiting for; it was waiting
+   * for a program that does not exist. #270 stopped that from being a stack trace. This is why
+   * anything got as far as spawning it.
+   *
+   * THE DELAY IS BOUNDED, and #273's "it never stops on its own" is the one part of that report
+   * that did not survive being measured. The spinner it quotes was already the post-#270
+   * behaviour -- before #270 the same PATH produced a stack trace, not a spinner -- so the
+   * conclusion was drawn from watching a phase that was still going, not from one that had been
+   * shown to have no end. Bypassing this call reproduces it and disproves it: the run leaves the
+   * trust attempts and reaches `confirming Codex recorded the decision` about 45s in, which is
+   * what `trustCodexHooks` (at most two attempts, each under its own timeout) followed by
+   * `waitForCodexHooksExecutable` (capped at 15s) predicts.
+   *
+   * The objection is restated rather than withdrawn. A minute of a spinner describing a slow
+   * agent, for a question a synchronous PATH lookup answers before anything is written -- and an
+   * operator watching it has no reason to suspect the binary is absent.
+   *
+   * The SAME function the relay calls, off the `registry.resolve` results kept above -- not a
+   * second check phrased here. Two places deciding whether a binary exists is how they come to
+   * disagree, and the relay's copy stays exactly where it was: a programmatic caller that never
+   * goes through this console still gets checked, and a worktree-hosted seat is still rechecked
+   * against its own directory once that directory exists (`commandDependsOnCwd`).
+   *
+   * NOT FORCEABLE, and unlike the git preflight above that is not a judgement about severity.
+   * `--force` says "I know this tree is dirty and I want the run anyway", which is a preference
+   * about risk. There is no corresponding preference here: a seat whose command is absent cannot
+   * produce work, so forcing past this would buy the operator a run that is guaranteed to end as
+   * `unknown_abnormal_end` with the cause named nowhere.
+   *
+   * It THROWS rather than writing a refusal and returning 1, for the reason the registry check
+   * above throws: the sentence is `executables.ts`'s own, it names the seat and the command and
+   * quotes the install line, `bin/conclave.ts` already puts a thrown message on stderr as
+   * `conclave: ...`, and a copy re-phrased here would be a copy to keep in step. Nothing has been
+   * persisted at this point -- the lock is read and not taken, and the hook write is below.
+   */
+  refuseMissingCommands(
+    seats.map((resolved) => ({ participant: resolved.spec.id, agent: resolved.agent, cwd: opts.cwd })),
+  )
 
   write(
     banner({
@@ -2581,7 +2637,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
       // FALSIFIER, stated because it is the strongest argument against this shape: the
       // console has no general "trailing text is a message" rule and does not gain one here.
       // `/rotate <text>` and `/abort <text>` consume their text as a REASON
-      // (`src/repl/session.ts:2634`, `src/repl/session.ts:2667`) and `/pause`, `/queue`, `/audit` ignore
+      // (`src/repl/session.ts:2690`, `src/repl/session.ts:2723`) and `/pause`, `/queue`, `/audit` ignore
       // whatever follows them. So an operator who learns this from `/continue` and carries
       // it to `/pause I'll be back` still loses the sentence. That inconsistency is not
       // repaired by making `/continue` a third behaviour; it is narrowed by it, and the
