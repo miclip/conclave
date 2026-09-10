@@ -126,6 +126,38 @@ export async function readCodexHooks(cwd: string, timeoutMs = 30_000): Promise<C
   const proc = spawn('codex', ['app-server'], { cwd, env, stdio: ['pipe', 'pipe', 'ignore'] })
   const rl = createInterface({ input: proc.stdout })
 
+  // A spawn that never starts emits an asynchronous 'error' event rather than throwing, and
+  // unhandled it takes the whole process down with a stack trace (#270). `kimi.ts` learned this
+  // and says so at its own spawn: "spawn opencode ENOENT killed a run outright, with no verdict,
+  // no summary and no routing log". This site never did, so a Codex CLI that is not on PATH ends
+  // conclave with `Error: spawn codex ENOENT` and eight lines of node internals -- during hook
+  // DIAGNOSIS, which is a thing this tool does on the operator's behalf before any work starts.
+  //
+  // Resolved rather than rejected. Every caller of this already handles a report it could not
+  // read, and the diagnosis downstream ("Codex reports no hooks") is one an operator can act on;
+  // turning a missing binary into a throw here would put the burden of catching it on each of
+  // them instead, which is the same distribution of responsibility `preflightWarnings` argues
+  // against for refusals and warnings.
+  let spawnFailed: string | undefined
+  proc.on('error', (err: NodeJS.ErrnoException) => {
+    spawnFailed =
+      err.code === 'ENOENT'
+        ? 'codex is not on PATH (spawn ENOENT), so its hooks cannot be read here'
+        : `codex could not be started: ${err.message}`
+    // The INTERFACE, not the stream: destroying `proc.stdout` leaves the reader waiting forever,
+    // which is the mistake kimi.ts records having made and repaired.
+    rl.close()
+    // And settle whatever is already waiting, rather than letting it run out the timeout. A
+    // first version checked `spawnFailed` before the first RPC and called that the guard; the
+    // event is asynchronous, so the check ran first every time and the real answer arrived
+    // `timeoutMs` later. Answering the pending calls here is what makes the failure immediate,
+    // and it needs no new plumbing: an `error` field is what every caller already inspects.
+    for (const [id, resolve] of pending) {
+      pending.delete(id)
+      resolve({ id, error: { message: spawnFailed } })
+    }
+  })
+
   const pending = new Map<number, (msg: any) => void>()
   rl.on('line', (line) => {
     let msg: any
@@ -158,6 +190,12 @@ export async function readCodexHooks(cwd: string, timeoutMs = 30_000): Promise<C
     await rpc(1, 'initialize', {
       clientInfo: { name: 'conclave', version: '0', title: 'Conclave' },
     })
+    // If the event has already fired, answer from it. This is a fast path and NOT the guard --
+    // the event is asynchronous and usually arrives after this line. What actually catches a
+    // missing binary is the handler settling pending calls, plus the catch below (#270).
+    if (spawnFailed !== undefined) {
+      return { cwd, hooks: [], errors: [{ path: 'codex', message: spawnFailed }], warnings: [] }
+    }
     const res = await rpc(2, 'hooks/list', { cwds: [cwd] })
     if (res.error) throw new Error(`hooks/list failed: ${JSON.stringify(res.error)}`)
 
@@ -186,6 +224,15 @@ export async function readCodexHooks(cwd: string, timeoutMs = 30_000): Promise<C
       errors: entry.errors ?? [],
       warnings: entry.warnings ?? [],
     }
+  } catch (err) {
+    // The pre-check above is a fast path, not the guard: `spawnFailed` is set from an
+    // ASYNCHRONOUS 'error' event, so on a missing binary the check may run before the event
+    // fires and the RPC then spends the whole timeout before throwing. This is where a spawn
+    // that never started is actually answered -- and only that: anything else is rethrown,
+    // because a `hooks/list` that failed for its own reasons is a different diagnosis and
+    // swallowing it here would hide it behind "codex is not on PATH", which would be false.
+    if (spawnFailed === undefined) throw err
+    return { cwd, hooks: [], errors: [{ path: 'codex', message: spawnFailed }], warnings: [] }
   } finally {
     proc.kill('SIGTERM')
   }
