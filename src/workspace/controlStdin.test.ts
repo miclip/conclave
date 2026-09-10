@@ -237,11 +237,20 @@ test('#252 the prose shouts about a closed channel and says what it costs', asyn
  * must not come back is a holder that exits on a timer, whatever it is spelled.
  */
 function holderLine(text: string, where: string): string {
-  const at = text.indexOf('> ctl')
-  assert.notEqual(at, -1, `${where} must still document how to hold the fifo open`)
-  const from = text.lastIndexOf('\n', at) + 1
-  const to = text.indexOf('\n', at)
-  return text.slice(from, to === -1 ? text.length : to)
+  // A HOLDER, not merely a line that writes to the fifo. The first version took the first
+  // `> ctl` in the file, which conflated two different things: a holder keeps the write end
+  // open for the life of the run and is backgrounded, while `echo '/continue' > ctl` opens,
+  // writes and closes. Adding a documented WRITE ahead of the holder recipe made this guard
+  // fail on a line that was never a holder -- and the tempting repair, rewording the docs
+  // until the pattern stopped matching, would have left the guard checking whichever `> ctl`
+  // happened to come first.
+  //
+  // `&` is the discriminator and it is not incidental: a holder that is not backgrounded
+  // blocks the shell that started it, so the session never launches.
+  const lines = text.split('\n')
+  const holder = lines.find((l) => l.includes('> ctl') && /&\s*(#.*)?$/.test(l))
+  assert.ok(holder, `${where} must still document how to hold the fifo open`)
+  return holder
 }
 
 function usage(): string {
