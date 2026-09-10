@@ -24,6 +24,16 @@
  * `RelayOptions.now` moves the ceiling's clock and nothing else, so "the ledger closes where the
  * run stopped" can be an equality: every millisecond these runs experience is put there by the
  * test, and time advanced AFTER the stop is time a correct implementation must not count.
+*
+ * ## The ending a caller hands in (#266)
+ *
+ * `stop()` later gained a parameter: the outcome to end an unfinished run on, for a front-end
+ * that knows an ending the relay cannot observe -- the console's stdin reaching EOF. Its two
+ * tests are here rather than with the console's because the guarantee is the relay's: the
+ * ending must reach `#end` and the stream, and it must NOT be able to relabel a run that had
+ * already finished. The second of those cannot be exercised from the console at all -- its
+ * healthy path closes stdin only after the run's end has been observed, so `stop()` is never
+ * called with an ending there -- which is exactly why it is asserted against `stop()` directly.
  */
 
 import { strict as assert } from 'node:assert'
@@ -280,6 +290,91 @@ test('the suspension ledger closes where the run stopped, not where the object d
   assert.equal(report.pausedMs, pausedAtStop)
   assert.equal(report.activeMs, activeAtStop)
   assert.equal(report.outcome.reason, 'stopped')
+})
+
+// ---------------------------------------------------------------------------------------
+// An ending the relay could not observe, handed in by the front-end that could (#266).
+// ---------------------------------------------------------------------------------------
+
+test('a run stopped with an ending reports that ending, on the stream and to its caller', async (t) => {
+  // `stop()` used to end every unfinished run `stopped`, which means a human asked. The console's
+  // non-interactive form is torn down by its stdin reaching EOF instead, and that is a fact only
+  // the front-end holds -- the relay cannot observe a control channel and must not guess at one.
+  // So the ending is passed in, and this is the assertion that it reaches `#end` rather than
+  // being taken as advice.
+  const dir = repo(t)
+  const relay = await relayOf(
+    dir,
+    new FakeRotationSession('advisor', 'codex', endlessly('Keep going')),
+    new FakeRotationSession('impl', 'claude', endlessly('Did step')),
+  )
+
+  const run = relay.start('Keep the work moving.')
+  assert.ok(await run.requestPause('the operator stepped away'), 'the run is parked')
+
+  const seen: { type: string; reason?: string }[] = []
+  const watching = (async () => {
+    for await (const e of relay.observe()) seen.push(e as unknown as { type: string; reason?: string })
+  })()
+
+  await relay.stop({ reason: 'control_channel_closed', detail: 'stdin reached EOF while the run was still going' })
+  await watching
+
+  const outcome = await run.result()
+  assert.equal(outcome.reason, 'control_channel_closed', 'the caller is told the ending it named')
+  assert.equal(outcome.detail, 'stdin reached EOF while the run was still going', 'detail and all')
+  assert.equal(relay.outcome?.reason, 'control_channel_closed', 'and it is readable back off the relay')
+  // THE STREAM, which is the record a stranger reads. A reason that reached only the caller would
+  // leave `events.ndjson` ending `run_end: stopped` beside a status document saying otherwise --
+  // two records of one ending, disagreeing.
+  const end = seen.at(-1)
+  assert.equal(end?.type, 'run_end', 'the stream is terminated by run_end')
+  assert.equal(end?.reason, 'control_channel_closed', 'carrying the ending that was handed in')
+})
+
+test('an ending handed to stop() cannot relabel a run that had already finished', async (t) => {
+  // FIRST OUTCOME WINS, asserted where it can actually be exercised. The console's own healthy
+  // path closes stdin only after the run's end has been observed, so its `Promise.race` has
+  // already chosen and `stop()` is never called with an ending there -- which means that test
+  // proves the console's ORDERING and cannot prove this guarantee. This calls `stop(ending)`
+  // directly on a finished run, which is the shape the guarantee is about: the run ended `done`
+  // in the window between an EOF and the teardown that follows it.
+  //
+  // The failure it forbids is the one the new reasons create: an ending that fires too eagerly
+  // and relabels a healthy run. `done` is what the participants said, and a fact about a pipe
+  // closing afterwards does not overrule them.
+  const dir = repo(t)
+  const relay = await relayOf(
+    dir,
+    // Two turns and the second is DONE, so this run reaches its own ending with no help.
+    new FakeRotationSession('advisor', 'codex', ['Do it.', 'DONE']),
+    new FakeRotationSession('impl', 'claude', ['ack', 'Did it.']),
+  )
+
+  const seen: { type: string; reason?: string }[] = []
+  const watching = (async () => {
+    for await (const e of relay.observe()) seen.push(e as unknown as { type: string; reason?: string })
+  })()
+
+  const run = relay.start('Keep the work moving.')
+  const finished = await run.result()
+  assert.equal(finished.reason, 'done', 'the run finished on its own before anything was stopped')
+
+  await relay.stop({ reason: 'control_channel_closed', detail: 'stdin reached EOF while the run was still going' })
+  await watching
+
+  assert.equal((await run.result()).reason, 'done', 'a run that finished still says done')
+  assert.equal(relay.outcome?.reason, 'done', 'and the relay still reports the ending it actually had')
+  assert.equal(
+    relay.outcome?.detail,
+    finished.detail,
+    'with the detail it finished with, not the one the teardown offered',
+  )
+  // EXACTLY ONE terminal event, which is the other half of it. A second `run_end` on the stream
+  // would leave a reader to choose between them, and choosing the last is the wrong answer.
+  const ends = seen.filter((e) => e.type === 'run_end')
+  assert.equal(ends.length, 1, `one run_end and one only; saw ${ends.map((e) => e.reason).join(', ')}`)
+  assert.equal(ends[0]?.reason, 'done')
 })
 
 // ---------------------------------------------------------------------------------------

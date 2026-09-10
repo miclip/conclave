@@ -1205,6 +1205,22 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
     }
     const all = listSessions(root)
     if (rest.includes('--json') || sub === '--json') {
+      // THE WHOLE STATUS, spread. Not a chosen subset -- which is why a new key in
+      // `status.json` needs nothing done here to appear in the listing.
+      //
+      // Stated because #266 reported the opposite as a defect: "`conclave sessions --json` ->
+      // state=ended, alive=false, and no reason field", read as the listing being narrower
+      // than `status`. It is not. The listing was missing a reason because no run had one to
+      // record -- `RunReason` had no member for a control channel that went away, so nothing
+      // wrote `outcome` on that path and there was nothing here to spread. Adding the reasons
+      // (`control_channel_closed` and `control_channel_closed_on_answer`, in
+      // `src/relay/observe.ts`) closes it on both commands at once, and widening this listing
+      // would be answering a question nobody asked.
+      //
+      // The one key that really IS added rather than spread is `abandoned`, and that is
+      // deliberate: it is COMPUTED by `readSession` against a pid rather than written by the
+      // run, so it cannot be in `status` to be spread. #266's second detail reads its absence
+      // from a `status.json` on disk as #251 having reached only one path; it is on both.
       console.log(JSON.stringify(all.map((s) => ({ ...s.status, alive: s.alive, abandoned: s.abandoned })), null, 2))
       return 0
     }

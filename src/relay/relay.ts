@@ -3109,6 +3109,19 @@ export class Relay {
   }
 
   /**
+   * The outcome the terminal `run_end` actually carried, or `undefined` before the run has one.
+   *
+   * The read side of `#firstEnd`, and the reason it is public is the record. A front-end that
+   * writes its own `status.outcome` from a value it computed locally is a front-end whose
+   * document can disagree with the stream it is a record of -- which is exactly what #266's
+   * teardown did. Reading it back from here means the two cannot: whatever survived
+   * first-outcome-wins is what both say.
+   */
+  get outcome(): RunOutcome | undefined {
+    return this.#firstEnd
+  }
+
+  /**
    * Resolves when the next run opens the stream, or when the session ends (#189).
    *
    * For a consumer whose subject is the SESSION rather than one run -- the record. Its
@@ -5203,7 +5216,7 @@ export class Relay {
       else if (!shouldWait && offered !== -1) pause.options.splice(offered, 1)
       // The status file is written from the LIVE pause object on any event, so an in-place
       // change reaches disk on the next one -- and a pause is precisely when nothing else is
-      // flowing. Same reasoning as `/wait` in the console (`src/repl/session.ts:2580`), and the
+      // flowing. Same reasoning as `/wait` in the console (`src/repl/session.ts:2612`), and the
       // reader who needs it most is the one polling from outside.
       this.#stream.emit({ type: 'liveness', pause })
       if (last) return stop()
@@ -9314,11 +9327,31 @@ export class Relay {
     }
   }
 
-  async stop(): Promise<void> {
+  /**
+   * @param ending the outcome to end an UNFINISHED run on, when the caller knows one.
+   *
+   * `stopped` when nothing is passed, which is every existing caller and the right default: a
+   * relay stopped for no stated reason was stopped by whoever called this.
+   *
+   * The console passes one (#266). Its non-interactive form is torn down by stdin reaching EOF
+   * under a live run, and "the control channel went away" is a fact only the front-end holds --
+   * the relay cannot observe it and must not guess at it. Without this parameter the console
+   * could put that ending in its own status document and nowhere else, so `status.outcome` said
+   * `control_channel_closed` while the terminal `run_end` on the event stream said `stopped`:
+   * two records of the same ending disagreeing, with the stream -- the one a stranger reads --
+   * carrying the less true of the two.
+   *
+   * FIRST OUTCOME STILL WINS, and it wins in `#end` rather than here. A run that had already
+   * ended keeps the reason it ended for, so passing an ending cannot relabel a `done` run that
+   * finished in the window between the EOF and this teardown. That guarantee is why this is a
+   * parameter to `stop()` at all rather than an `#end` call the console makes itself.
+   */
+  async stop(ending?: RunOutcome): Promise<void> {
     this.#stopped = true
     // A run that already ended keeps the reason it ended for; teardown is not a second
-    // outcome. Only a relay stopped without ever finishing a run reports 'stopped'.
-    this.#end('stopped')
+    // outcome. Only a relay stopped without ever finishing a run reports 'stopped' -- or
+    // whatever the caller named, when it knows an ending the relay could not observe.
+    this.#end(ending?.reason ?? 'stopped', ending?.detail)
     // And the HANDLE is settled here rather than left to the loop, which is #142.
     //
     // `start()` settles from `#loop`'s completion callbacks, so a supervised run's ending

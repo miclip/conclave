@@ -348,7 +348,7 @@ const DECLARED: Record<string, string> = {
     'Authority routing (#56, D2) sends implementer_unanswered to the advisor before the operator, ' +
     'so a default run interrupts the human less than today. Real change at N=1, an improvement, ' +
     'declared rather than discovered. The pause reason exists at src/relay/run.ts:52 and the halt ' +
-    'that raises it is at src/relay/relay.ts:8526.',
+    'that raises it is at src/relay/relay.ts:8539.',
   'status.pause.resolution':
     'Classifying unresolved conditions on both axes (#56, D2) added `resolution` to every RunPause ' +
     '(src/relay/run.ts:430), so `conclave status --json` on a paused default run now carries ' +
@@ -630,7 +630,7 @@ const DECLARED: Record<string, string> = {
     'participant and nobody else, and a conclave or workstream scope samples NOBODY. It used to ' +
     'read pause.verdictOf.participant and fall back to scanning participants by rank for ' +
     'implementers — and verdictOf is set at exactly two halt sites, both turn_incomplete ' +
-    '(src/relay/relay.ts:7943, src/relay/relay.ts:8663), so every other pause reached that rank ' +
+    '(src/relay/relay.ts:7956, src/relay/relay.ts:8676), so every other pause reached that rank ' +
     'scan. WHAT CHANGES AT N=1: on the three pauses whose scope names no participant — ' +
     'operator_requested (/pause), advisor_escalated, authority_conflict — the lone implementer ' +
     'child used to be sampled, so a child that measured busy REFUSED the resume and wrote ' +
@@ -639,15 +639,15 @@ const DECLARED: Record<string, string> = {
     'safety guard rather than presented as a pure N>1 fix. The reason it is the right narrowing: ' +
     'the guard exists because continuing SENDS into a child that cannot accept input mid-turn, ' +
     'and on those three pauses the child it measured is not the child being sent to — resuming ' +
-    'advisor_escalated sends to the ADVISOR (src/relay/relay.ts:8244), resuming ' +
+    'advisor_escalated sends to the ADVISOR (src/relay/relay.ts:8257), resuming ' +
     'authority_conflict queues a constraint that is delivered by the dispatcher on the next ' +
     'dispatch to a free seat, and operator_requested is consumed at an advisor-turn boundary ' +
     'whose own evidence line says no turn is in flight. WHAT IS GIVEN UP, named rather than ' +
     'discovered: the advisor_escalated halt raised when a seat’s turn completed and its report ' +
-    'could not be read (src/relay/relay.ts:8577) is conclave-scoped by design, yet the useful ' +
+    'could not be read (src/relay/relay.ts:8590) is conclave-scoped by design, yet the useful ' +
     'question there is whether THAT seat is still writing; at N=1 the rank scan sampled it by ' +
     'coincidence of it being the only implementer, and now nothing does. The pause still carries ' +
-    'that seat’s liveness evidence from the halt site (src/relay/relay.ts:8588), which is what ' +
+    'that seat’s liveness evidence from the halt site (src/relay/relay.ts:8601), which is what ' +
     'the operator actually reads; restoring a refusal there is a change to that halt’s scope, ' +
     'not to the guard. AT N>1 the old behaviour was unsafe in the other direction: a pause about ' +
     'one seat could be refused because a DIFFERENT seat was mid-turn, and the operator was told ' +
@@ -698,7 +698,7 @@ const DECLARED: Record<string, string> = {
     'The sentence is repaired rather than left standing, on this entry’s own rule. Everything ' +
     'else above is still true: the three readings, the wording, the event count as an input, and ' +
     'the pause menu’s `wait` option, which still asks reportsChildOnCpu. No assertion in this ' +
-    'file was relaxed; one citation moved with the code it pins (src/repl/session.ts:1656). ' +
+    'file was relaxed; one citation moved with the code it pins (src/repl/session.ts:1681). ' +
     'Covered in src/outcomes/liveness.test.ts on the reported numbers, and end to end through ' +
     'the console’s refusal path in src/repl/session.test.ts.',
   'a paused run keeps measuring the child, and its evidence says when it was measured (#101)':
@@ -1871,9 +1871,75 @@ const DECLARED: Record<string, string> = {
     'it into both would not be parity; it would be a flag that lies on one of them. Declared in ' +
     "frontEndParity.test.ts's DECLARED as well, which is where flag divergence is adjudicated. " +
     'No assertion in this file was relaxed.',
+  'status.outcome.reason gains the two control-channel endings (#266)':
+    'THE REASON, in one sentence: a run killed by its own stdin closing left a record ' +
+    'indistinguishable from one that finished its goal, so an operator reading it afterwards -- ' +
+    'including the same operator next week -- could not tell which had happened. ' +
+    'TWO NEW RunReason VALUES, which is why this is declared: `control_channel_closed`, the ' +
+    'control channel reaching EOF while the run was still going, and ' +
+    '`control_channel_closed_on_answer`, the same EOF arriving immediately after a pause answer ' +
+    'was delivered. Both are produced ONLY by the non-interactive console -- the path that ' +
+    'reads a pipe, a redirect or a fifo -- and a default `relay` run and an interactive console ' +
+    'can reach neither. ' +
+    'TWO RATHER THAN ONE, because the repairs differ and the second case is the one an operator ' +
+    'is most certain is healthy: the observed run was `paused` -> `ended` on the very message ' +
+    'that resumed it, both seats acted on that message, and the session died of having received ' +
+    'it. The general case is fixed by holding the write end open for longer; that one by not ' +
+    'writing the last message with a command that closes stdin behind it. A single reason would ' +
+    'have filed the strangest instance under the ordinary one. ' +
+    'THE SHAPE PIN IS UNTOUCHED, and that is the precise scope of this entry. No key is added ' +
+    'or removed at any depth: `outcome` is still `detail, reason` on an ended document, and the ' +
+    'ended and paused key sets above are asserted unchanged. What widened is the VALUE SET of ' +
+    '`status.outcome.reason`, which this file pins by shape and not by enumeration -- so the ' +
+    'departure is declared here rather than by relaxing an assertion, because nothing needed ' +
+    'relaxing. ' +
+    'BOTH RECORDS CARRY IT, and the fix is one parameter rather than two writers: ' +
+    '`Relay.stop(ending?)` takes the outcome the front-end knows and the front-end reads back ' +
+    '`Relay.outcome` -- the value the terminal `run_end` actually carried -- for its status ' +
+    'document. The first shape wrote the reason into the status document alone and left ' +
+    '`events.ndjson` ending `run_end: stopped`, which is two records of one ending disagreeing, ' +
+    'with the stream a stranger reads carrying the less true of the two. FIRST OUTCOME STILL ' +
+    'WINS, in `#end` where it always did: a run that finished in the window between the EOF and ' +
+    'the teardown keeps its `done`, and the ending the console offered is refused. ' +
+    'TWO DIFFERENT TESTS COVER TWO DIFFERENT THINGS HERE, and an earlier version of this entry ' +
+    'conflated them. `a session runs to completion and reports the outcome` (src/repl/session.ts ' +
+    "front end) closes its stdin AFTER the run's end has been observed and pins `done` in both " +
+    'records beside a `stdin: closed`: that is the HEALTHY-AFTER-FINISH case, and what it proves ' +
+    'is the ORDERING -- `Promise.race` had already chosen, so no ending is composed and ' +
+    '`stop()` is never passed one. It cannot prove first-outcome-wins, because it never ' +
+    'exercises it. `an ending handed to stop() cannot relabel a run that had already finished` ' +
+    '(src/relay/stopWhilePaused.test.ts) is the test that does: it lets a run reach `done` on ' +
+    'its own and then calls `stop(ending)` directly, asserting the `done` survives in ' +
+    '`run.result()`, in `Relay.outcome`, with its own detail, and that exactly one `run_end` ' +
+    'reaches the stream. ' +
+    'ONE SEAM IS NOT PINNED BY EITHER, disclosed rather than left to be discovered (#274). The ' +
+    "console's own composition -- reading `Relay.outcome` back instead of writing the value it " +
+    'computed locally -- survives mutation of the whole suite, because both values derive from ' +
+    'the one threaded ending and are therefore equal on every path a test can construct. ' +
+    'Agreement between the status document and `events.ndjson` is structural here, not ' +
+    'asserted: there is no line left to mutate that makes the two disagree. So the stream ' +
+    'assertions in the two console tests are a regression guard against a future re-split, and ' +
+    'not coverage of the composition itself. ' +
+    '`sessions --json` NEEDED NO CHANGE, and #266 asking for one is the stale half of it: the ' +
+    'listing spreads the whole status document (bin/conclave.ts:1224), so an outcome written by ' +
+    'either front-end has always appeared there. The reason was missing because no run had one ' +
+    'to record, not because the listing was narrower than `status`. Same for the issue\'s second ' +
+    'detail: `abandoned` is on both paths, and it is ADDED rather than spread on this one ' +
+    'because `readSession` computes it against a pid and it is not in `status` to spread. ' +
+    'NOT DONE, DELIBERATELY: the exit codes do not move. The non-zero list in ' +
+    '`bin/conclave.ts` is the `relay` command\'s, and `relay` reads no commands and so has no ' +
+    'control channel to lose; the console returns 0 on this path as it always has. An ending ' +
+    'that reads "torn down, not finished" arguably belongs on that list by the same argument ' +
+    '`peer_busy` joined it, but that is a behaviour change for an unattended caller and not a ' +
+    'record-shape one, and it was left for a decision rather than taken as a side effect. The ' +
+    "yellow mid-run diagnosis is unchanged, and the console's #191 race is untouched: the same " +
+    'ending, now legible afterwards. Covered in src/repl/session.test.ts (both reasons, in both ' +
+    'records, with the presentation assertions kept separate from the forensic ones) and ' +
+    'src/workspace/controlStdin.test.ts (the live `stdin` field, which answers a different ' +
+    'question and could not answer this one). No assertion in this file was relaxed.',
 }
 
-test('DECLARED contains exactly the routing, pause-resolution, attribution, ceiling-flag, seat-flag, seat-status, launch-record, flag-reader, integration-check, per-seat-rotation, reviewer, resume-guard, mixed-liveness, timestamped-liveness, model-validation, executable-preflight, compaction-survival, rotation-reporting, send-precondition, process-tree-liveness, ceiling-reporting, record-heartbeat, rotation-intent, console-dry-run, flag-reconciliation, paused-time, advisor-targeting, silence-timeout, launch-bounds, origin-reconciliation, capability-briefing, candidate-class, run-progress, blocked-rollup, goal-file and checkpoint entries', () => {
+test('DECLARED contains exactly the routing, pause-resolution, attribution, ceiling-flag, seat-flag, seat-status, launch-record, flag-reader, integration-check, per-seat-rotation, reviewer, resume-guard, mixed-liveness, timestamped-liveness, model-validation, executable-preflight, compaction-survival, rotation-reporting, send-precondition, process-tree-liveness, ceiling-reporting, record-heartbeat, rotation-intent, console-dry-run, flag-reconciliation, paused-time, advisor-targeting, silence-timeout, launch-bounds, origin-reconciliation, capability-briefing, candidate-class, run-progress, blocked-rollup, goal-file, checkpoint and control-channel-ending entries', () => {
   assert.deepEqual(Object.keys(DECLARED), [
     'deny-only project configuration for capabilities and commands',
     'implementer_unanswered -> advisor',
@@ -1914,6 +1980,7 @@ test('DECLARED contains exactly the routing, pause-resolution, attribution, ceil
     'status.blocked, the one place a blocked run is named',
     '--goal-file on both front-ends',
     '--checkpoint arms a decision point, which relay cannot hold',
+    'status.outcome.reason gains the two control-channel endings (#266)',
   ])
 })
 
@@ -2103,7 +2170,7 @@ async function seatsFromSessionCli(t: TestContext): Promise<{ creates: CreateRec
  * The two machine-readable documents a default run actually emits.
  *
  * Both come out of one `relay --json` run in a temporary repository, through the production
- * call sites: the report is what `bin/conclave.ts:2168` prints, and the status record is what
+ * call sites: the report is what `bin/conclave.ts:2184` prints, and the status record is what
  * `recordSession` wrote during that same run, read back by `main(['status', '--json'])` --
  * which resolves the most recent session in `process.cwd()`, so the record has to have been
  * written where an operator would look for it.
@@ -2147,7 +2214,7 @@ async function defaultRunDocuments(t: TestContext): Promise<{ report: unknown; s
  * blind to that subtree is claiming more than it checks.
  *
  * Built through the real recorder: `recordSession` is what both front-ends call, and
- * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:1656
+ * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:1681
  * with the same object -- a `RunPause` the run handle raised, not one written here. Read back
  * through `main(['status', '--json'])`, so the serialisation and the reconciliation against
  * the pid are the production ones.
@@ -2355,7 +2422,7 @@ async function provokeReviewBlocked(repo: string): Promise<{ relay: Relay; run: 
  * Drive a real relay into one condition and return the pause it raised.
  *
  * The provocations are the ones `resolution.test.ts`'s own `provoke` already uses, deliberately:
- * the same triggers reaching the same single halt site (src/relay/relay.ts:4863), where the
+ * the same triggers reaching the same single halt site (src/relay/relay.ts:4876), where the
  * classification is computed by production `resolutionFor` from the subject the caller passed.
  * Nothing here writes a `RunPause`.
  *
@@ -2458,7 +2525,7 @@ async function provoke(
  * The status document of a run paused for one given reason.
  *
  * Built through the real recorder: `recordSession` is what both front-ends call, and
- * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:1656
+ * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:1681
  * with the same object -- a `RunPause` the relay raised, not one written here. Read back
  * through `main(['status', '--json'])`, so the serialisation and the reconciliation against
  * the pid are the production ones.
@@ -2659,7 +2726,7 @@ test('default run works in the run cwd and creates no worktree', async (t) => {
     assert.equal(c.cwd, fromCli.cwd, `the session CLI must create ${c.id} in the run cwd`)
   }
 
-  // The relay CLI passes process.cwd() as the run cwd: bin/conclave.ts:2066-2068.
+  // The relay CLI passes process.cwd() as the run cwd: bin/conclave.ts:2082-2084.
   // The relay hands that same cwd to each participant adapter: src/relay/relay.ts:2643-2649.
   // The cwd getter simply returns the option: src/relay/relay.ts:2345-2347.
   assert.match(relay, /cwd:\s*process\.cwd\(\)/, 'relay block must start in process.cwd')
@@ -2711,7 +2778,7 @@ test('default run works in the run cwd and creates no worktree', async (t) => {
 
   // A default run with no subagents must not create any git worktree. The relay only samples
   // the worktree list for its subagent-use report: src/relay/subagents.ts:113 defines
-  // worktreePaths, and src/relay/relay.ts:3738-3739, :4362 and :7049 read it.
+  // worktreePaths, and src/relay/relay.ts:3751-3752, :4375 and :7062 read it.
   // Prove it by exercising the run in a real temporary repository.
   const repo = tempDir(t, 'conclave-default')
   execFileSync('git', ['init', '--quiet'], { cwd: repo })
@@ -2989,6 +3056,10 @@ test('an ended conclave status --json emits exactly these keys at every depth', 
     shapeOf(status),
     {
       '': 'abandoned, alive, build, ceilings, cwd, deadlines, eventsPath, forces, front, goal, id, logPath, messages, operator, outcome, participants, pid, progress, rotations, schema, startedAt, state, updatedAt',
+      // Two keys, and this pin is about the KEYS. The set of values `reason` can take widened
+      // for #266 -- see DECLARED['status.outcome.reason gains the two control-channel endings
+      // (#266)'] -- and nothing here moved on that account, which is the correct outcome for a
+      // shape guard rather than an oversight in one.
       outcome: 'detail, reason',
       // Every ceiling, on a run that configured none of them -- which is exactly when the
       // block has something to say. See DECLARED['every ceiling is reported at launch and in
