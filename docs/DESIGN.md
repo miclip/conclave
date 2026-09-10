@@ -189,6 +189,36 @@ produces a recommendation, never an automatic upgrade.
 
 ---
 
+## A seat is a terminal session, and that turns out to buy more than fidelity
+
+The PTY adapters exist because hooks and transcripts are what a real session emits, and driving
+one through a pseudo-terminal was the honest way to observe a turn rather than infer it. That was
+the whole reason. A consequence showed up later that was not designed for.
+
+**Some capabilities are gated on a session being interactive, not on permissions or
+configuration.** Measured on Claude Code: a `claude -p` session lists 41 tools and `Artifact` is
+not among them; an interactive session in a terminal has it. The split is print mode versus a real
+session, and nothing an operator can pass to the headless form closes it.
+
+A conclave seat is `claude` running interactively under a pty. So it sits on the interactive side
+of that line — which matters most exactly where no terminal exists. A CI job has no TTY, so
+headless is normally the only option and anything gated this way is simply unavailable there.
+Driving a real session under a pty is the one route that keeps it.
+
+That reframes what the CI-facing work is for. Making conclave usable from a GitHub Actions runner
+is not a second use case competing with the primary one; it is the only way to get a
+terminal-grade session into an environment that has no terminal. Issues that block it — an
+environment sanitiser stripping the token a seat authenticates with, a readiness window too short
+for a cold runner — are blocking a capability with no alternative, rather than an inconvenience
+with a workaround.
+
+**What is measured and what is not.** The tool list on both sides of the split is measured. That a
+conclave seat inherits the interactive side follows from it being an interactive session rather
+than from a test — nothing here yet asserts it, and the general claim is about the
+interactive/print boundary rather than about conclave specifically. A test that drives a seat and
+reads back its own tool list would close that, and until one exists this paragraph is the honest
+extent of it.
+
 ## What works
 
 - Four CLIs under one `AgentSession` contract. Claude Code and Codex have eight live
