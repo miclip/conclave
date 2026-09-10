@@ -264,8 +264,8 @@ test('the pre-existing diagnostics survive, including the unanswered-dialog one'
   assert.match(dead, /conclave config check/)
 
   const slow = bootFailureMessage({ screen: COMPOSER, cwd: '/Users/x/repo', alive: true })
-  assert.match(slow, /did not report SessionStart within the readiness window/)
-  assert.match(slow, /raise readyTimeoutMs/)
+  assert.match(slow, /started and stayed alive but never reported SessionStart/)
+  assert.match(slow, /Raise the window with --ready-timeout/)
 })
 
 /**

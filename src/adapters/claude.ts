@@ -869,9 +869,36 @@ export function bootFailureMessage(state: {
   if (!state.alive) {
     return 'claude exited before reporting SessionStart; run `conclave config check` to verify the hook registration'
   }
+  // ALIVE AND SILENT is its own diagnosis (#271). The old message said "the hooks may not be
+  // registered" for every case that reached here, and sent an operator to `conclave config
+  // check` -- which reported everything healthy, because the hooks WERE registered. The real
+  // cause on a cold CI runner is first-run state: a newly installed CLI with no `~/.claude.json`
+  // comes up in onboarding, so nothing ever reaches SessionStart. Naming the registration first
+  // makes conclave look at fault for a condition that belongs to the CLI's own setup.
+  //
+  // What the seat actually showed is EVIDENCE and goes in the message. The trust-dialog branches
+  // above win where they match; this one is what is left, so the terminal is the only thing that
+  // knows why -- and an operator reading "waiting on onboarding" needs no further hint.
+  // THROUGH `plainScreen` FIRST. A raw pty buffer is mostly cursor moves, and quoting it at an
+  // operator produces `\u001b[2G>\u001b[4GTry\u001b[8G"fix` -- which is not evidence, it is
+  // noise wearing evidence's clothes. Caught by a test asserting the old wording, which failed
+  // showing exactly that string.
+  const tail = plainScreen(state.screen)
+    .split('\n')
+    .map((l) => l.trimEnd())
+    .filter((l) => l.length > 0)
+    .slice(-3)
+  const showed =
+    tail.length > 0
+      ? ` Its terminal last showed: ${tail.map((l) => JSON.stringify(l)).join(' / ')}.`
+      : ' Its terminal showed nothing at all, which is itself the symptom: the CLI produced no output.'
   return (
-    'claude did not report SessionStart within the readiness window. The hooks may not be ' +
-    'registered: run `conclave config check`. If it is merely slow, raise readyTimeoutMs.'
+    'claude started and stayed alive but never reported SessionStart, so the run has no ' +
+    'turn-completion signal. This is NOT necessarily a registration problem -- if `conclave ' +
+    'config check` reports healthy, believe it and look at the CLI\'s own first-run state ' +
+    'instead: an install with no ~/.claude.json comes up in onboarding and never reaches ' +
+    'SessionStart. Running `claude -p "say OK"` once initialises it. Raise the window with ' +
+    `--ready-timeout SECONDS if the seat is merely slow.${showed}`
   )
 }
 
