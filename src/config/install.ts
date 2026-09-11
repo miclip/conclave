@@ -372,6 +372,21 @@ export interface InstallResult {
    * fixes them differently: one is a PATH to repair, the other is a Conclave to upgrade.
    */
   conclaveOnPathUnderstandsHook?: boolean | undefined
+  /**
+   * Registrations this run did NOT write, which still name an install path (#277).
+   *
+   * `--claude` or `--codex` narrows what gets registered, correctly — that is what the flag is
+   * for. What was missing is that the narrowing left no trace: the command reported what it
+   * wrote, exited zero, and never mentioned that the other registration in the SAME project
+   * still pointed at an install directory.
+   *
+   * A project half-migrated is worse than one untouched. The half nobody repaired still
+   * resolves while that directory exists, so nothing reports it — and the operator has every
+   * reason to believe the job is finished, because they just did it and were told it worked.
+   * Observed exactly that way: a workspace repaired with `--claude`, reported done, and found
+   * still stale by `config check --scan` afterwards.
+   */
+  staleElsewhere: { agent: AgentKind; path: string; installRoot: string }[]
   dryRun: boolean
   /**
    * `sharedWith` names another Conclave checkout that already owns this registration.
@@ -506,6 +521,24 @@ export async function installConfig(opts: InstallOptions = {}): Promise<InstallR
 
   const onPath = conclaveOnPath()
 
+  // WHAT THIS RUN DID NOT TOUCH, and whether it is stale (#277). Read after writing, from the
+  // targets `agents` filtered out — the same list the loop above filtered on, so the two cannot
+  // disagree about which were skipped.
+  const staleElsewhere = TARGETS.filter((t) => !agents.includes(t.agent)).flatMap((t) => {
+    const p = join(roots[t.outputRoot], t.output)
+    if (!existsSync(p)) return []
+    let text: string
+    try {
+      text = readFileSync(p, 'utf8')
+    } catch {
+      // Unreadable is not stale, and reporting it as such would put a false entry in a list
+      // whose whole value is that everything in it needs doing.
+      return []
+    }
+    const installRoot = legacyInstallRootOf(text)
+    return installRoot === undefined ? [] : [{ agent: t.agent, path: p, installRoot }]
+  })
+
   const result: InstallResult = {
     conclaveRoot,
     projectRoot,
@@ -515,6 +548,7 @@ export async function installConfig(opts: InstallOptions = {}): Promise<InstallR
     conclaveOnPath: onPath,
     ...(onPath ? { conclaveOnPathUnderstandsHook: understandsHook(onPath) } : {}),
     selfHosted: samePath(conclaveRoot, projectRoot),
+    staleElsewhere,
     dryRun: opts.dryRun === true,
     written,
   }
@@ -663,6 +697,17 @@ export function formatInstallResult(r: InstallResult): string {
   // directory. Since #258 it names none, so printing the release here told a reader the one
   // thing they must not believe -- that a hook fired in this project runs the Conclave they
   // happened to run `config install` from. It runs whatever is on PATH at the time.
+  // SAID WHERE "done" IS READ (#277). Not a refusal -- narrowing with `--claude` or `--codex` is
+  // a legitimate thing to want, and failing it would be wrong. But a run that repaired half a
+  // project and said nothing let an operator report the work finished while the other half still
+  // named an install directory, and the half nobody repaired keeps working until that directory
+  // goes, so nothing else was ever going to raise it.
+  for (const stale of r.staleElsewhere) {
+    lines.push(
+      `  note: ${stale.path} still names ${stale.installRoot} — this run wrote only ` +
+        `${r.agents.join(' and ')}; re-run without the flag to repair it`,
+    )
+  }
   if (r.conclaveOnPath) lines.push(`hooks run: ${r.conclaveOnPath} hook <agent>`)
   // Provenance for this command's own inputs, and labelled as nothing more. Suppressed in
   // Conclave's own checkout, where naming it on every run is noise a reader learns to skip.

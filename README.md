@@ -62,7 +62,24 @@ conclave config check       # is it present, current, and trusted
 
 The registration invokes `conclave` from PATH, so it does not name a release directory and
 does not go stale when you upgrade. A registration written before v0.5.42 does name one;
-`config check` reports it as `STALE` and `config install` replaces it. Codex hashes the
+`config check` reports it as `STALE` and `config install` replaces it.
+
+`config check` answers for the directory it is run from. To ask which projects are affected:
+
+```sh
+conclave config check --scan ~/projects    # exits 1 if any still name a release directory
+```
+
+Read the exit code from the command, not from a pipe. `conclave … | head` reports `head`'s
+status and silently discards the gate — three people made that exact mistake on this command
+in one evening, so it is worth writing down:
+
+```sh
+conclave config check --scan ~/projects > /tmp/stale.txt; echo $?
+```
+
+Those registrations keep working while the directory they name still exists, which is why
+nothing reports them. They stop together the moment it goes. Codex hashes the
 command string, so that replacement costs one re-trust — and no further ones, because
 later releases render the same bytes.
 
