@@ -943,3 +943,89 @@ test('#243 the shipped template warns that editing a statusMessage costs a re-tr
   // The description itself is NOT hashed — measured the same way — which is why this warning can
   // exist at all without invalidating the handlers it warns about.
 })
+
+/**
+ * A narrowed install says what it did not touch (#277).
+ *
+ * `--claude` and `--codex` narrow what gets registered, which is correct and is what the flags
+ * are for. What was missing is that the narrowing left no trace: the command reported what it
+ * wrote, exited zero, and never said the other registration in the SAME project still named an
+ * install path.
+ *
+ * A project half-migrated is worse than one untouched. The half nobody repaired keeps resolving
+ * while that install directory exists, so nothing reports it -- and the operator has every
+ * reason to believe the job is done, because they just did it and were told it worked. Observed
+ * exactly that way: a workspace repaired with `--claude`, reported finished, and found still
+ * stale by `config check --scan` afterwards.
+ */
+
+/** The Codex registration as a pre-#258 install wrote it: a directory, not `conclave hook`. */
+function staleCodexAt(project: string): string {
+  const target = TARGETS.find((x) => x.agent === 'codex')!
+  const p = join(project, target.output)
+  mkdirSync(join(p, '..'), { recursive: true })
+  writeFileSync(
+    p,
+    JSON.stringify({ hooks: [{ command: 'node /opt/agents/conclave-stable/src/hooks/client.ts codex' }] }, null, 2),
+  )
+  return p
+}
+
+test('#277 an install narrowed to claude reports the stale codex registration it left', async (t) => {
+  const repo = fixtureRepo(t)
+  const codexPath = staleCodexAt(repo)
+
+  const r = await installConfig({ projectRoot: repo, conclaveRoot: repo, agents: ['claude'], diagnose: false })
+
+  assert.equal(r.staleElsewhere.length, 1, 'the untouched half is reported')
+  assert.equal(r.staleElsewhere[0]!.agent, 'codex')
+  assert.equal(r.staleElsewhere[0]!.path, codexPath)
+  assert.equal(
+    r.staleElsewhere[0]!.installRoot,
+    '/opt/agents/conclave-stable',
+    'and names the directory that will stop existing, which is what the operator acts on',
+  )
+
+  const text = formatInstallResult(r)
+  assert.match(text, /still names \/opt\/agents\/conclave-stable/, 'said where "done" is read')
+  assert.match(text, /re-run without the flag/, 'and how to finish it')
+})
+
+test('#277 an unnarrowed install reports nothing, because it left nothing', async (t) => {
+  // The note must not fire on the ordinary path. A message that appears every time is one
+  // nobody reads, and it would appear on exactly the runs that need no action.
+  const repo = fixtureRepo(t)
+  staleCodexAt(repo)
+
+  const r = await installConfig({ projectRoot: repo, conclaveRoot: repo, diagnose: false })
+  assert.deepEqual(r.staleElsewhere, [], 'both halves were written, so nothing was left behind')
+  assert.doesNotMatch(formatInstallResult(r), /still names/)
+})
+
+test('#277 a narrowed install over an already-repaired sibling reports nothing', async (t) => {
+  // Narrowing is legitimate. The note is about staleness, not about the flag -- so a project
+  // whose other half is already repaired must stay silent, or it becomes noise attached to
+  // every use of a flag that is working as intended.
+  const repo = fixtureRepo(t)
+  await installConfig({ projectRoot: repo, conclaveRoot: repo, diagnose: false })
+
+  const r = await installConfig({ projectRoot: repo, conclaveRoot: repo, agents: ['claude'], diagnose: false })
+  assert.deepEqual(r.staleElsewhere, [], 'a sibling that names no directory is not stale')
+})
+
+test('#277 it reads the file rather than inferring the skipped half from the flag', async (t) => {
+  // Narrowing to codex must report a stale CLAUDE file. Deriving "the other one" from the flag
+  // would look identical on every two-agent project and be wrong the moment one is added.
+  const repo = fixtureRepo(t)
+  const target = TARGETS.find((x) => x.agent === 'claude')!
+  const p = join(repo, target.output)
+  mkdirSync(join(p, '..'), { recursive: true })
+  writeFileSync(
+    p,
+    JSON.stringify({ hooks: { Stop: [{ hooks: [{ command: '/opt/agents/old/spikes/hooks/hook_post.py claude' }] }] } }),
+  )
+
+  const r = await installConfig({ projectRoot: repo, conclaveRoot: repo, agents: ['codex'], diagnose: false })
+  assert.equal(r.staleElsewhere.length, 1)
+  assert.equal(r.staleElsewhere[0]!.agent, 'claude', 'the other half, whichever it is')
+})
