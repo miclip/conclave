@@ -115,7 +115,7 @@ export type RunReason =
    * watched it happen.
    *
    * NOTHING in the listing needs widening for this to show up. `conclave sessions --json`
-   * spreads the whole status document (`bin/conclave.ts:1224`), so an `outcome` written by the
+   * spreads the whole status document (`bin/conclave.ts:1250`), so an `outcome` written by the
    * console appears there and in `conclave status <id> --json` alike. #266 read the missing
    * reason as a serialisation gap between the two commands; it was the absence of this member.
    */
