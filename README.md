@@ -61,7 +61,7 @@ conclave config check       # is it present, current, and trusted
 ```
 
 The registration invokes `conclave` from PATH, so it does not name a release directory and
-does not go stale when you upgrade. A registration written before v0.5.41 does name one;
+does not go stale when you upgrade. A registration written before v0.5.42 does name one;
 `config check` reports it as `STALE` and `config install` replaces it. Codex hashes the
 command string, so that replacement costs one re-trust — and no further ones, because
 later releases render the same bytes.
@@ -71,7 +71,7 @@ later releases render the same bytes.
 Node 24 or newer.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/miclip/conclave/v0.5.41/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/miclip/conclave/v0.5.42/scripts/install.sh | sh
 ```
 
 Clones the repository into `~/.local/share/conclave`, checks the newest tagged release out
