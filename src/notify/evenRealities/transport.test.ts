@@ -5,34 +5,101 @@
  */
 
 import { strict as assert } from 'node:assert'
+import { execFileSync } from 'node:child_process'
 import test from 'node:test'
 import { tempDir } from '../../testkit/tempDir.ts'
 import { Broker } from '../broker.ts'
-import { transportNames, resolveTransport } from '../registry.ts'
-import { EvenRealitiesTransport } from './transport.ts'
+import { TransportRefused, transportNames, resolveTransport } from '../registry.ts'
+import { resetSharedHub, sharedHub } from './hub.ts'
+import { EvenRealitiesBridge, type SessionMetadata } from './client.ts'
+import { SessionRecorder } from '../../workspace/sessionRecord.ts'
 
-
-async function up(): Promise<EvenRealitiesTransport> {
-  const t = new EvenRealitiesTransport({ port: 0, token: 'tok', sessionId: 's' })
-  await t.listen()
-  return t
+/** A run's metadata as a session would describe it; mutable so a test can advance it. */
+function meta(over: Partial<SessionMetadata> = {}): SessionMetadata {
+  return { title: 'fix the thing', timestamp: '2026-09-11T12:00:00.000Z', cwd: '/w', status: 'busy', ...over }
 }
 
-/** Answer whatever question is outstanding, as the app would. */
+import { EvenRealitiesTransport } from './transport.ts'
+
+/** A live run's record, written by the real writer, so the registry has something to resolve. */
+function record(root: string, id: string): SessionRecorder {
+  return new SessionRecorder(root, {
+    id,
+    pid: process.pid,
+    cwd: root,
+    goal: 'the goal on the glasses',
+    front: 'session',
+    operator: 'agent',
+    state: 'running',
+    startedAt: 1_700_000_000_000,
+    messages: 0,
+    participants: [],
+    build: 'test-build',
+  })
+}
+
+/** One run's transport over a bridge that is listening. */
+async function up(): Promise<EvenRealitiesTransport> {
+  const bridge = new EvenRealitiesBridge({ port: 0, token: 'tok' })
+  await bridge.listen()
+  bridge.openSession('run-1', () => meta())
+  return new EvenRealitiesTransport(bridge, 'run-1')
+}
+
+/** Answer whatever question is outstanding on the run, as the app would. */
 async function answer(t: EvenRealitiesTransport, text: string): Promise<void> {
   await new Promise((r) => setTimeout(r, 80))
   await fetch(`${t.bridge.url}/api/question-response?token=tok`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ sessionId: 's', answer: text }),
+    body: JSON.stringify({ sessionId: 'run-1', answer: text }),
   })
 }
 
-test('#184 it is registered, so --transport even-realities resolves', () => {
-  assert.ok(transportNames().includes('even-realities'))
-  const t = resolveTransport('even-realities')
-  assert.equal(t?.name, 'even-realities')
-  assert.equal(t?.limits.canReceive, true)
+test('#184 it is registered, so --transport even-realities resolves', (t2) => {
+  // Resolved against a real run, because that is the only way it resolves now (#278).
+  const root = tempDir(t2, 'conclave-er-registry')
+  execFileSync('git', ['init', '-q'], { cwd: root })
+  record(root, 'run-1')
+  const was = process.cwd()
+  process.chdir(root)
+  resetSharedHub()
+  try {
+    assert.ok(transportNames().includes('even-realities'))
+    const t = resolveTransport('even-realities', { runId: 'run-1' })
+    assert.equal(t?.name, 'even-realities')
+    assert.equal(t?.limits.canReceive, true)
+  } finally {
+    resetSharedHub()
+    process.chdir(was)
+  }
+})
+
+test('#278 resolving with --run opens that run as the session; without one, or an unreadable one, it is refused', (t2) => {
+  // The id ROUTES: it is what the glasses send back on `/question-response`. The friendly name
+  // is a label on the messages and never the id, because two runs in one directory share it.
+  // No id is minted in the absence of a run, and no run is opened whose record cannot be read:
+  // a session is a run, and its list entry is that run's record.
+  const root = tempDir(t2, 'conclave-er-registry')
+  execFileSync('git', ['init', '-q'], { cwd: root })
+  record(root, '20260911-114005-36207')
+  const was = process.cwd()
+  process.chdir(root)
+  resetSharedHub()
+  process.env['CONCLAVE_NOTIFY_NAME'] = 'shown'
+  try {
+    resolveTransport('even-realities', { runId: '20260911-114005-36207' })
+    assert.deepEqual(sharedHub().bridge.sessions(), ['20260911-114005-36207'])
+    assert.throws(() => resolveTransport('even-realities'), TransportRefused)
+    assert.throws(() => resolveTransport('even-realities', { runId: '  ' }), /needs the run/, 'blank is absent')
+    assert.throws(() => resolveTransport('even-realities', { runId: 'nope' }), /no readable record for run nope/)
+    assert.deepEqual(sharedHub().bridge.sessions(), ['20260911-114005-36207'], 'and nothing was opened for any of those')
+    assert.ok(resolveTransport('fake'), 'a transport that needs no run is untouched')
+  } finally {
+    delete process.env['CONCLAVE_NOTIFY_NAME']
+    resetSharedHub()
+    process.chdir(was)
+  }
 })
 
 test('#184 a tap on an offered option comes back as that option', async (t2) => {
@@ -40,7 +107,7 @@ test('#184 a tap on an offered option comes back as that option', async (t2) => 
   // refuses if it was never offered. Mapping one to the other here is what keeps a tap an
   // action rather than prose.
   const t = await up()
-  t2.after(() => t.close())
+  t2.after(() => t.bridge.close())
   const dir = tempDir(t2, 'conclave-er')
 
   const asking = new Broker(dir).ask(
@@ -67,7 +134,7 @@ test('#184 speech that is not an offered label comes back as text for the caller
   // The rule the whole inbound design rests on: nothing here parses English into an action. An
   // utterance is text, and the operating agent -- which has the context -- decides what it meant.
   const t = await up()
-  t2.after(() => t.close())
+  t2.after(() => t.bridge.close())
 
   const asking = new Broker(tempDir(t2, 'conclave-er')).ask(
     { kind: 'approval', headline: 'Merge?', options: [{ id: 'yes', label: 'Merge' }] },
@@ -84,14 +151,13 @@ test('#184 a tell is a notification and never opens a question', async (t2) => {
   // `tell` must not put a dialog in front of someone that nothing is waiting on. Asserted by
   // the bridge staying answerable: a question outstanding would refuse the next one.
   const t = await up()
-  t2.after(() => t.close())
+  t2.after(() => t.bridge.close())
 
   await new Broker(tempDir(t2, 'conclave-er')).tell({ kind: 'decided', headline: 'letting the advisor fix land' }, t)
 
-  const msgs = (await (await fetch(`${t.bridge.url}/api/messages?token=tok`)).json()) as {
-    type: string
-    title?: string
-  }[]
+  const { messages: msgs } = (await (await fetch(`${t.bridge.url}/api/messages?sessionId=run-1&token=tok`)).json()) as {
+    messages: { type: string; title?: string }[]
+  }
   assert.equal(msgs.length, 1)
   assert.equal(msgs[0]?.type, 'notification', 'a tell announces')
   assert.equal(msgs[0]?.title, 'Decided', 'and the kind names it')
@@ -101,7 +167,7 @@ test('#184 a veto tapped after the decision reaches the broker through poll', as
   // End to end on the real surface: a `decided` notification carrying an override, a tap that
   // arrives with nothing waiting for it, and the broker attaching it to the decision it vetoes.
   const t = await up()
-  t2.after(() => t.close())
+  t2.after(() => t.bridge.close())
   const dir = tempDir(t2, 'conclave-er')
   const b = new Broker(dir)
 
@@ -115,14 +181,16 @@ test('#184 a veto tapped after the decision reaches the broker through poll', as
   )
 
   // The notification carries the override, so a glance shows what can be done about it.
-  const msgs = (await (await fetch(`${t.bridge.url}/api/messages?token=tok`)).json()) as { message: string }[]
+  const { messages: msgs } = (await (await fetch(`${t.bridge.url}/api/messages?sessionId=run-1&token=tok`)).json()) as {
+    messages: { message: string }[]
+  }
   assert.match(msgs[0]?.message ?? '', /Cut it short/, 'the veto is on screen')
 
   // Tapped later, through the endpoint the app uses, with nothing awaiting a reply.
   await fetch(`${t.bridge.url}/api/question-response?token=tok`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ sessionId: 's', answer: 'Cut it short' }),
+    body: JSON.stringify({ sessionId: 'run-1', answer: 'Cut it short' }),
   })
 
   const taken = await b.collectVetoes(t)

@@ -1,13 +1,17 @@
 /**
- * `Transport` over the Even Realities bridge.
+ * `Transport` over the Even Realities bridge, for ONE run.
  *
  * Thin on purpose. Everything that knows the wire format is in `client.ts`, which imports
  * nothing from conclave; this file is the part that would be thrown away if the notify layer
  * were ever pointed at something else.
+ *
+ * It does not own the bridge. A session on the wire is a run (#278), and the server the glasses
+ * dial is the machine's; so this takes a bridge somebody else listens on and the id of the run
+ * it speaks for, and every call goes out under that id. `hub.ts` is where the bridge is owned.
  */
 
 import type { Inbound, Outbound, Transport, TransportLimits } from '../types.ts'
-import { EvenRealitiesBridge, type BridgeOptions } from './client.ts'
+import type { EvenRealitiesBridge } from './client.ts'
 
 /**
  * What a HUD line can carry.
@@ -22,17 +26,12 @@ export class EvenRealitiesTransport implements Transport {
   readonly name = 'even-realities'
   readonly limits: TransportLimits = { maxChars: HUD_CHARS, canReceive: true }
   readonly bridge: EvenRealitiesBridge
+  /** The session on the wire. The run's id: it routes and is never shown. */
+  readonly runId: string
 
-  constructor(opts: BridgeOptions = {}) {
-    this.bridge = new EvenRealitiesBridge(opts)
-  }
-
-  async listen(): Promise<void> {
-    await this.bridge.listen()
-  }
-
-  async close(): Promise<void> {
-    await this.bridge.close()
+  constructor(bridge: EvenRealitiesBridge, runId: string) {
+    this.bridge = bridge
+    this.runId = runId
   }
 
   async send(m: Outbound): Promise<{ id: string }> {
@@ -40,14 +39,14 @@ export class EvenRealitiesTransport implements Transport {
     // announced -- so `send` only announces, and `receive` does the asking. Splitting it that
     // way keeps `tell` from opening a dialog nobody is waiting on.
     if (!m.options || m.options.length === 0) {
-      const id = this.bridge.send({ type: 'notification', title: titleFor(m), message: m.headline })
+      const id = this.bridge.send(this.runId, { type: 'notification', title: titleFor(m), message: m.headline })
       return { id: String(id) }
     }
     // A `tell` that carries options is a decision with a veto: announced, not asked, so the
     // options travel with the notification and the tap comes back through `poll`.
     if (m.kind === 'decided' || m.kind === 'progress') {
       this.#lastOffered = m.options.map((o) => ({ id: o.id, label: o.label }))
-      const id = this.bridge.send({
+      const id = this.bridge.send(this.runId, {
         type: 'notification',
         title: titleFor(m),
         message: `${m.headline} — ${m.options.map((o) => o.label).join(' / ')}`,
@@ -55,7 +54,8 @@ export class EvenRealitiesTransport implements Transport {
       return { id: String(id) }
     }
     // Deferred to `receive`, which is where the answer is awaited. The id is the correlation the
-    // broker holds; the bridge allows one outstanding question, which is the same constraint.
+    // broker holds; the bridge allows one outstanding question per run, which is the same
+    // constraint.
     this.#pending = m
     return { id: `q-${Date.now()}` }
   }
@@ -66,12 +66,13 @@ export class EvenRealitiesTransport implements Transport {
    * Late answers, which on this surface is how a veto arrives.
    *
    * A tap on a `decided` notification reaches `/api/question-response` with nothing awaiting it.
-   * The bridge buffers those; this hands them over as inbound with no option resolution, because
-   * the broker matches them against the decision that offered them and knows the ids.
+   * The bridge buffers those per run; this hands over this run's as inbound with no option
+   * resolution, because the broker matches them against the decision that offered them and
+   * knows the ids.
    */
   async poll(): Promise<Inbound[]> {
     const from = { id: 'even-realities', kind: 'human' as const }
-    return this.bridge.takeUnsolicited().map((a) => {
+    return this.bridge.takeUnsolicited(this.runId).map((a) => {
       const chosen = this.#lastOffered.find((o) => o.label === a.answer)
       return chosen ? { option: chosen.id, from } : { text: a.answer, from }
     })
@@ -84,7 +85,7 @@ export class EvenRealitiesTransport implements Transport {
     const m = this.#pending
     this.#pending = undefined
     if (!m?.options) throw new Error('nothing was asked')
-    const { answer } = await this.bridge.ask({
+    const { answer } = await this.bridge.ask(this.runId, {
       header: titleFor(m),
       question: m.headline,
       // `description` carries the href, which is where the evidence is. The label is what a

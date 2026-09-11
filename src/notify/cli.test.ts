@@ -5,11 +5,13 @@
  */
 
 import { strict as assert } from 'node:assert'
-import { execFileSync, spawnSync } from 'node:child_process'
+import { execFileSync, spawn, spawnSync } from 'node:child_process'
+import { createServer } from 'node:net'
 import { join } from 'node:path'
 import test from 'node:test'
 import type { TestContext } from 'node:test'
 import { tempDir } from '../testkit/tempDir.ts'
+import { SessionRecorder } from '../workspace/sessionRecord.ts'
 import { FAKE_REPLY_ENV, resolveTransport, transportNames } from './registry.ts'
 
 const CLI = join(import.meta.dirname, '..', '..', 'bin', 'conclave.ts')
@@ -18,6 +20,23 @@ function repo(t: TestContext): string {
   const dir = tempDir(t, 'conclave-notify-cli')
   execFileSync('git', ['init', '-q'], { cwd: dir })
   return dir
+}
+
+/** A live run's record in `dir`, written by the real writer: what `--run` has to name (#278). */
+function record(dir: string, id: string, goal: string): SessionRecorder {
+  return new SessionRecorder(dir, {
+    id,
+    pid: process.pid,
+    cwd: dir,
+    goal,
+    front: 'session',
+    operator: 'agent',
+    state: 'running',
+    startedAt: 1_700_000_000_000,
+    messages: 0,
+    participants: [],
+    build: 'test-build',
+  })
 }
 
 function run(args: string[], cwd: string, reply?: string): { code: number; out: string } {
@@ -108,4 +127,121 @@ test('#184 the fake transport is resolvable by name, and is the reference adapte
   assert.equal(t.name, 'fake')
   assert.equal(t.limits.canReceive, true)
   assert.equal(resolveTransport('nope'), undefined)
+})
+
+/** A port nothing is on, chosen by the OS and released, so the CLI can bind it a moment later. */
+async function freePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const srv = createServer()
+    srv.once('error', reject)
+    srv.listen(0, '127.0.0.1', () => {
+      const a = srv.address()
+      const port = a !== null && typeof a === 'object' ? a.port : 0
+      srv.close(() => resolve(port))
+    })
+  })
+}
+
+test('#278 --run is the session the glasses see, and the friendly name is only its title', async (t) => {
+  // End to end through the real transport: the app lists sessions, opens the one whose `id` it
+  // read, and answers under that id. Before #278 the list had one hardcoded entry keyed
+  // `sessionId`, which the app never read, and any answer at all settled the one question.
+  const dir = repo(t)
+  const rec = record(dir, 'run-278', 'g'.repeat(100))
+  rec.event({ type: 'message', at: 1_700_000_050_000 } as never)
+  const port = await freePort()
+  const child = spawn(
+    'node',
+    [CLI, 'notify', 'ask', 'Merge?', '--options', 'yes:Merge,no:Hold', '--transport', 'even-realities', '--run', 'run-278'],
+    {
+      cwd: dir,
+      env: {
+        ...process.env,
+        CONCLAVE_EVEN_PORT: String(port),
+        CONCLAVE_EVEN_TOKEN: 'tok',
+        CONCLAVE_EVEN_QUIET: '1',
+        CONCLAVE_NOTIFY_NAME: 'glasses-name',
+      },
+    },
+  )
+  let out = ''
+  child.stdout.on('data', (c) => (out += String(c)))
+  child.stderr.on('data', (c) => (out += String(c)))
+  const exited = new Promise<number>((resolve) => child.on('exit', (code) => resolve(code ?? -1)))
+  t.after(() => child.kill())
+
+  const base = `http://127.0.0.1:${port}`
+  // The server comes up when `ask` sends; poll the list the app polls until it answers.
+  let sessions: Record<string, unknown>[] = []
+  for (let i = 0; i < 100 && sessions.length === 0; i++) {
+    try {
+      sessions = ((await (await fetch(`${base}/api/sessions?token=tok`)).json()) as { sessions: typeof sessions }).sessions
+    } catch {
+      await new Promise((r) => setTimeout(r, 50))
+    }
+  }
+  // The run id is the session, and the rest of the item is the run's record: the goal as the
+  // title, cut to the vendor's 64; the newest event as the timestamp; the working directory.
+  assert.deepEqual(sessions, [
+    {
+      id: 'run-278',
+      title: 'g'.repeat(64),
+      timestamp: new Date(1_700_000_050_000).toISOString(),
+      cwd: dir,
+      provider: 'claude',
+      status: 'awaiting',
+    },
+  ])
+  assert.equal(JSON.stringify(sessions).includes('glasses-name'), false, 'the name is a label on messages, not the session')
+
+  // The name is NOT an id. An answer routed by it is refused, and settles nothing.
+  const byName = await fetch(`${base}/api/question-response?token=tok`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ sessionId: 'glasses-name', answer: 'Merge' }),
+  })
+  assert.equal(byName.status, 404)
+
+  const byRun = await fetch(`${base}/api/question-response?token=tok`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ sessionId: 'run-278', answer: 'Merge' }),
+  })
+  assert.equal(byRun.status, 200)
+  assert.equal(await exited, 0)
+  assert.deepEqual(JSON.parse(out), { option: 'yes', by: { id: 'even-realities', kind: 'human' } })
+
+  const log = JSON.parse(run(['log', '--json'], dir).out) as { runId?: string; transport: string }[]
+  assert.equal(log[0]?.runId, 'run-278', 'and the record names the same run')
+  assert.equal(log[0]?.transport, 'even-realities')
+})
+
+test('#278 even-realities without a run is refused with exit 2, and other transports are not', (t) => {
+  // A session on the glasses is a run. Nothing is minted to stand in for one: a session the
+  // app could open that `conclave sessions` could not find would be an id nobody can act on.
+  const dir = repo(t)
+  const env = { CONCLAVE_EVEN_PORT: '0', CONCLAVE_EVEN_TOKEN: 'tok', CONCLAVE_EVEN_QUIET: '1' }
+  const refused = (args: string[]): { code: number; out: string } => {
+    const r = spawnSync('node', [CLI, 'notify', ...args], { cwd: dir, encoding: 'utf8', env: { ...process.env, ...env } })
+    return { code: r.status ?? -1, out: `${r.stdout}${r.stderr}` }
+  }
+  for (const args of [
+    ['tell', 'hi', '--transport', 'even-realities'],
+    ['ask', 'go?', '--options', 'y:Yes', '--transport', 'even-realities'],
+    ['vetoes', '--transport', 'even-realities'],
+    ['tell', 'hi', '--transport', 'even-realities', '--run', ''],
+  ]) {
+    const r = refused(args)
+    assert.equal(r.code, 2, `${args.join(' ')}: exit 2`)
+    assert.match(r.out, /even-realities needs the run it speaks for: pass --run <id>/, args.join(' '))
+    assert.doesNotMatch(r.out, /no transport named/, 'a transport that exists is not reported as missing')
+  }
+  // A run this project has no record of is refused too, in words that say where to look.
+  const unknown = refused(['tell', 'hi', '--transport', 'even-realities', '--run', 'nope'])
+  assert.equal(unknown.code, 2)
+  assert.match(unknown.out, /no readable record for run nope in this project — see conclave sessions/)
+  // The same commands on `fake` need no run and are unchanged.
+  assert.equal(refused(['tell', 'hi', '--transport', 'fake']).code, 0)
+  assert.equal(refused(['vetoes', '--transport', 'fake']).code, 0)
+  assert.equal(run(['log'], dir).out.includes('hi'), true, 'and the fake tell was recorded')
 })

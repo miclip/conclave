@@ -85,8 +85,8 @@ import { runSession } from '../src/repl/session.ts'
 import { boundOf, implementerSeatPlan, implementerSpecsFor, Relay, reviewerSpecFor, type SeatRequest } from '../src/relay/relay.ts'
 import { formatGuardReportJson, guard } from '../src/workspace/sessionLock.ts'
 import { Broker } from '../src/notify/broker.ts'
-import { resolveTransport, transportNames } from '../src/notify/registry.ts'
-import type { Outbound } from '../src/notify/types.ts'
+import { TransportRefused, resolveTransport, transportNames } from '../src/notify/registry.ts'
+import type { Outbound, Transport } from '../src/notify/types.ts'
 import {
   begin as beginMutation,
   end as endMutation,
@@ -1268,14 +1268,26 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
       const at = rest.indexOf(`--${name}`)
       return at >= 0 ? rest[at + 1] : undefined
     }
+    // The same `--run` that lands as `runId` on the message and the record. A transport on
+    // which a session is a run needs it to know WHICH session to speak on, and refuses without
+    // it (#278); a transport that needs no run ignores it. Two refusals, two messages: a name
+    // that is not a transport lists the names, a transport that cannot be used says why.
+    const transportFor = (): Transport | number => {
+      const transportName = flagOf('transport') ?? 'fake'
+      try {
+        const transport = resolveTransport(transportName, { ...(flagOf('run') ? { runId: flagOf('run')! } : {}) })
+        if (transport) return transport
+        console.error(`conclave: no transport named ${transportName} — have: ${transportNames().join(', ')}`)
+      } catch (err) {
+        if (!(err instanceof TransportRefused)) throw err
+        console.error(`conclave: ${err.message}`)
+      }
+      return 2
+    }
 
     if (verb === 'vetoes') {
-      const transportName = flagOf('transport') ?? 'fake'
-      const transport = resolveTransport(transportName)
-      if (!transport) {
-        console.error(`conclave: no transport named ${transportName} — have: ${transportNames().join(', ')}`)
-        return 2
-      }
+      const transport = transportFor()
+      if (typeof transport === 'number') return transport
       const taken = await new Broker(root).collectVetoes(transport)
       if (taken.length === 0) {
         console.log('no late answers')
@@ -1317,8 +1329,8 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
     }
 
     if (verb !== 'tell' && verb !== 'ask') {
-      console.error('usage: conclave notify tell|ask "<headline>" [--options id:Label,...] [--transport name]')
-      console.error('       conclave notify vetoes [--transport name]   late answers to a decision')
+      console.error('usage: conclave notify tell|ask "<headline>" [--options id:Label,...] [--transport name] [--run id]')
+      console.error('       conclave notify vetoes [--transport name] [--run id]   late answers to a decision')
       console.error(`       conclave notify log [--json]`)
       console.error(`  transports: ${transportNames().join(', ')}`)
       return 2
@@ -1329,12 +1341,8 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
       console.error(`conclave: notify ${verb} needs a headline`)
       return 2
     }
-    const transportName = flagOf('transport') ?? 'fake'
-    const transport = resolveTransport(transportName)
-    if (!transport) {
-      console.error(`conclave: no transport named ${transportName} — have: ${transportNames().join(', ')}`)
-      return 2
-    }
+    const transport = transportFor()
+    if (typeof transport === 'number') return transport
     // `id:Label` pairs. An action is an id that was OFFERED; free text is a message and is
     // interpreted by the operating agent, never parsed into a command here.
     const options = (flagOf('options') ?? '')
@@ -1365,7 +1373,7 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
     if (!answer) {
       // Non-zero, because the caller asked a question and did not get one answered. The pause
       // or the decision it was asking about has not gone away.
-      console.error(`conclave: ${transportName} carried no answer — see conclave notify log`)
+      console.error(`conclave: ${transport.name} carried no answer — see conclave notify log`)
       return 1
     }
     console.log(JSON.stringify(answer))
