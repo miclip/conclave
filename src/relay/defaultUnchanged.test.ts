@@ -1934,7 +1934,7 @@ const DECLARED: Record<string, string> = {
     'asserted rather than rediscovered. The stream assertions in the other two console tests ' +
     'remain a regression guard against a future re-split rather than coverage of this line. ' +
     '`sessions --json` NEEDED NO CHANGE, and #266 asking for one is the stale half of it: the ' +
-    'listing spreads the whole status document (bin/conclave.ts:1224), so an outcome written by ' +
+    'listing spreads the whole status document (bin/conclave.ts:1250), so an outcome written by ' +
     'either front-end has always appeared there. The reason was missing because no run had one ' +
     'to record, not because the listing was narrower than `status`. Same for the issue\'s second ' +
     'detail: `abandoned` is on both paths, and it is ADDED rather than spread on this one ' +
@@ -2183,7 +2183,7 @@ async function seatsFromSessionCli(t: TestContext): Promise<{ creates: CreateRec
  * The two machine-readable documents a default run actually emits.
  *
  * Both come out of one `relay --json` run in a temporary repository, through the production
- * call sites: the report is what `bin/conclave.ts:2184` prints, and the status record is what
+ * call sites: the report is what `bin/conclave.ts:2210` prints, and the status record is what
  * `recordSession` wrote during that same run, read back by `main(['status', '--json'])` --
  * which resolves the most recent session in `process.cwd()`, so the record has to have been
  * written where an operator would look for it.
@@ -2739,7 +2739,7 @@ test('default run works in the run cwd and creates no worktree', async (t) => {
     assert.equal(c.cwd, fromCli.cwd, `the session CLI must create ${c.id} in the run cwd`)
   }
 
-  // The relay CLI passes process.cwd() as the run cwd: bin/conclave.ts:2082-2084.
+  // The relay CLI passes process.cwd() as the run cwd: bin/conclave.ts:2108-2110.
   // The relay hands that same cwd to each participant adapter: src/relay/relay.ts:2643-2649.
   // The cwd getter simply returns the option: src/relay/relay.ts:2345-2347.
   assert.match(relay, /cwd:\s*process\.cwd\(\)/, 'relay block must start in process.cwd')

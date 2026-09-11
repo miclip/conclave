@@ -16,6 +16,7 @@ import {
   resolveRepoRoot,
   type AgentKind,
 } from '../src/config/install.ts'
+import { formatStale, scanStale } from '../src/config/staleScan.ts'
 import { seatWorktreeAt } from '../src/workspace/worktrees.ts'
 import {
   CONFIG_RELATIVE,
@@ -74,7 +75,7 @@ import {
 import { formatGoalFindings, lintGoal } from '../src/relay/goalLint.ts'
 import { version } from '../src/version.ts'
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, statSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { seedCodexTrust } from '../src/deployment/codexHookTrust.ts'
 import { defaultRegistry } from '../src/registry/builtin.ts'
@@ -202,6 +203,10 @@ Commands:
                                    unless you name one: pass --claude alone if both roles
                                    are Claude, and no Codex sidecar is written or trusted.
   config check   [--claude] [--codex] [--no-diagnose] [--json]
+  config check --scan [dir]       which registrations below dir still name an install path.
+                                  check answers only for the directory it is run from, so this
+                                  is the question it cannot: which of my projects are stale.
+                                  Non-zero when any are
                                    Report drift without writing. Exits non-zero if the
                                    registrations differ from the templates, and says
                                    which are merely STALE -- written by an older Conclave
@@ -1120,6 +1125,27 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
     // having two commands exit non-zero on the same condition invites gating on this one
     // by accident — which would then also fail for a permission mode somebody chose.
     return 0
+  }
+
+  if (command === 'config' && sub === 'check' && rest.includes('--scan')) {
+    // A DIFFERENT QUESTION FROM THE ONE BELOW (#275). `config check` asks whether THIS project's
+    // registration matches what the installer would write now. `--scan` asks which registrations
+    // anywhere below a directory still name an install path -- the question an operator has
+    // after a layout change, and the one nothing could answer, so every stale registration was
+    // found by somebody happening to run the check somewhere new.
+    //
+    // It reads files and applies the recogniser rather than running `installConfig` per project:
+    // the installer answers "does this match what I would write", which needs each project's
+    // context and is slow, and the question here is narrower and answerable from the text.
+    // The value is optional: `--scan` alone means here. Taken positionally rather than with
+    // `=`, matching every other valued flag this CLI takes.
+    const at = rest.indexOf('--scan')
+    const given = rest[at + 1]
+    const from = given === undefined || given.startsWith('--') ? process.cwd() : resolve(given)
+    const found = scanStale(from)
+    console.log(rest.includes('--json') ? JSON.stringify(found, null, 2) : formatStale(found, from))
+    // Non-zero when something needs doing, so this is usable as a gate like the check it sits on.
+    return found.length > 0 ? 1 : 0
   }
 
   if (command === 'config' && sub === 'check') {
