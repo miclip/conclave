@@ -62,6 +62,15 @@ export interface BridgeAnswer {
 
 const MAX_BUFFERED = 500
 
+/** The routes this server answers, named once so the refusal and the tests agree. */
+const SERVED = new Set([
+  '/api/events',
+  '/api/question-response',
+  '/api/sessions',
+  '/api/status',
+  '/api/messages',
+])
+
 export class EvenRealitiesBridge {
   readonly token: string
   readonly sessionId: string
@@ -87,7 +96,7 @@ export class EvenRealitiesBridge {
     this.token = opts.token ?? randomBytes(16).toString('hex')
     this.sessionId = opts.sessionId ?? 'conclave'
     this.#host = opts.host ?? '127.0.0.1'
-    this.#port = opts.port ?? 3457
+    this.#port = opts.port ?? 3456
   }
 
   /** The address to type into the glasses app, once listening. */
@@ -96,6 +105,9 @@ export class EvenRealitiesBridge {
     const port = a !== null && typeof a === 'object' ? a.port : this.#port
     return `http://${this.#host}:${port}`
   }
+
+  /** Every route this server answers. The refusal quotes it and `evenCompat.test.ts` pins it. */
+  static readonly SERVED = SERVED
 
   async listen(): Promise<void> {
     const server = createServer((req, res) => this.#route(req, res))
@@ -175,33 +187,71 @@ export class EvenRealitiesBridge {
     }
 
     if (req.method === 'GET' && url.pathname === '/api/events') {
+      this.#log(req, 200, url.pathname)
       this.#stream(url, res)
       return
     }
     if (req.method === 'POST' && url.pathname === '/api/question-response') {
+      this.#log(req, 200, url.pathname)
       this.#answer(req, res)
       return
     }
     if (req.method === 'GET' && url.pathname === '/api/sessions') {
+      this.#log(req, 200, url.pathname)
       res.writeHead(200, { 'content-type': 'application/json' }).end(
         JSON.stringify({ sessions: [{ sessionId: this.sessionId, provider: 'conclave' }] }),
       )
       return
     }
     if (req.method === 'GET' && url.pathname === '/api/status') {
+      this.#log(req, 200, url.pathname)
       res.writeHead(200, { 'content-type': 'application/json' }).end(
         JSON.stringify({ sessionId: this.sessionId, running: this.#pending !== undefined }),
       )
       return
     }
     if (req.method === 'GET' && url.pathname === '/api/messages') {
+      this.#log(req, 200, url.pathname)
       const after = Number(url.searchParams.get('after') ?? '0')
       res.writeHead(200, { 'content-type': 'application/json' }).end(
         JSON.stringify(this.#buffered.filter((m) => m.id > after).map((m) => ({ id: m.id, ...m.msg }))),
       )
       return
     }
-    res.writeHead(404, { 'content-type': 'application/json' }).end(JSON.stringify({ error: 'Not found' }))
+    // AN UNMATCHED ROUTE SAYS WHAT THIS SURFACE IS (#276). A bare 404 made every failure look
+    // identical: a device on the wrong port, a device speaking a newer protocol, and a person
+    // typing a message all produced the same silence, and the only way to tell them apart was
+    // to run a logging server in conclave's place and ask the operator to try again.
+    //
+    // This is a NOTIFICATION surface, not a terminal. It asks a question and waits for the tap
+    // that answers it. `even-terminal` accepts prompts because it drives a Claude session; this
+    // does not, and a free-text message arriving here has nowhere to go -- so it is refused in
+    // those words rather than dropped.
+    this.#log(req, 404, url.pathname)
+    res
+      .writeHead(404, { 'content-type': 'application/json' })
+      .end(
+        JSON.stringify({
+          error: 'Not found',
+          served: [...SERVED].sort(),
+          note:
+            'conclave notify is a notification surface, not a terminal: it asks and waits for an ' +
+            'answer to POST /api/question-response. It does not accept prompts — run even-terminal for that.',
+        }),
+      )
+  }
+
+  /**
+   * One line per request, because the alternative is inferring from absence.
+   *
+   * `even-terminal` prints these and it is how every question in this integration was answered:
+   * which address reached the port, which path, which status. Without it a request that never
+   * arrives and one that arrives and is refused look the same from here.
+   */
+  #log(req: IncomingMessage, status: number, path: string): void {
+    if (process.env['CONCLAVE_EVEN_QUIET'] === '1') return
+    const from = req.socket.remoteAddress?.replace(/^::ffff:/, '') ?? '?'
+    process.stderr.write(`[even] ${from} ${status} ${req.method} ${path}\n`)
   }
 
   #stream(url: URL, res: ServerResponse): void {

@@ -80,6 +80,18 @@ export class EvenRealitiesHub {
         return hub.transport.limits
       },
       async send(m: Outbound): Promise<{ id: string }> {
+        // LISTEN FIRST (#276). `listen()` existed on both the transport and this hub and had no
+        // caller anywhere, so the server was never started: nothing was ever bound to the port,
+        // no device could attach, and every send went into the client's buffer instead.
+        //
+        // It also made `ask` exit ZERO AND SILENT. `receive` awaits a promise only a connected
+        // device can settle, and with no server there is no handle keeping the event loop alive
+        // -- so node ran out of work and exited cleanly, past the branch that would have printed
+        // "carried no answer" and returned 1. A hang would have been the honest failure; this
+        // looked like success.
+        //
+        // Idempotent through `#listening`, so the first caller starts it and the rest await it.
+        await hub.listen()
         // The wait is HERE, not around `receive`. A question becomes outstanding the moment it
         // is put to the glasses, and `EvenRealitiesTransport` holds exactly one -- so a second
         // view sending while the first is unanswered would overwrite the question the operator

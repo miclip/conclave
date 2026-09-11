@@ -58,13 +58,22 @@ function friendlyName(): string {
 }
 
 function evenRealities(): Transport {
-  const port = Number(process.env['CONCLAVE_EVEN_PORT'] ?? '3457')
+  const port = Number(process.env['CONCLAVE_EVEN_PORT'] ?? '3456')
   const token = process.env['CONCLAVE_EVEN_TOKEN']
+  // THE DEVICE IS NOT ON LOOPBACK (#276). The bridge binds `127.0.0.1` unless told otherwise,
+  // which is the right default for something that opens a port -- but the glasses reach this
+  // across a network, so on the default nothing they can dial will ever answer. Observed with
+  // the app pointed at a Tailscale name: the address resolved, the port refused.
+  //
+  // An env var rather than a new default, because widening the bind is an exposure decision and
+  // belongs to whoever runs it. `CONCLAVE_EVEN_HOST=0.0.0.0` for any interface, or the machine's
+  // own tailnet address to keep it off the LAN.
+  const host = process.env['CONCLAVE_EVEN_HOST']
   // A VIEW of the process's one bridge, not a bridge of its own. The glasses are a device:
   // one pair, one address the operator typed, one connection. Building one per broker meant
   // the second concurrent run's `listen()` met a bound port -- and had it not, two runs
   // attached to one device would each have taken whichever answer arrived next (#184).
-  return sharedHub({ port, ...(token ? { token } : {}) }).view(friendlyName())
+  return sharedHub({ port, ...(token ? { token } : {}), ...(host ? { host } : {}) }).view(friendlyName())
 }
 
 const BUILT_IN: Record<string, () => Transport> = { fake, 'even-realities': evenRealities }
