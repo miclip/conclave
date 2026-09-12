@@ -9,25 +9,52 @@
  *
  * So the claim is pinned the way this codebase pins every claim about another program: against
  * the installed thing rather than restated from memory (`childenvClaims.test.ts`). It SKIPS when
- * the vendor package is absent, because a machine without it is not evidence of anything.
+ * the vendor package is absent, because a machine without it is not evidence of anything -- and
+ * it says so, naming where it looked, because a skip nobody can see is a pass (#281).
  */
 import { strict as assert } from 'node:assert'
 import { execFileSync } from 'node:child_process'
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
-import test from 'node:test'
+import test, { type TestContext } from 'node:test'
 
 import { EvenRealitiesBridge, type SessionMetadata } from './client.ts'
 
-/** The installed vendor package, or undefined when it is not on this machine. */
-function vendorRoot(): string | undefined {
+/**
+ * Where the vendor package is looked for: `CONCLAVE_EVEN_VENDOR` when set, else `npm root -g`.
+ *
+ * Which `npm` is first on PATH differs between an interactive shell and a script on the same
+ * machine (#281), so `npm root -g` alone decides silently whether this file checks anything.
+ * An explicit root is honoured first -- DEFINED, not truthy, so an empty value is a wrong root
+ * rather than a fall-through -- and one that does not hold the package is a FAILURE, because
+ * whoever set it meant for the pin to run.
+ */
+function vendorLookup(): { root: string; dir: string; explicit: boolean } | { root: undefined; dir: undefined; explicit: false } {
+  const explicit = process.env['CONCLAVE_EVEN_VENDOR']
+  if (explicit !== undefined) return { root: explicit, dir: join(explicit, '@evenrealities', 'even-terminal'), explicit: true }
   try {
     const root = execFileSync('npm', ['root', '-g'], { encoding: 'utf8', timeout: 30_000 }).trim()
-    const dir = join(root, '@evenrealities', 'even-terminal')
-    return existsSync(dir) ? dir : undefined
+    return { root, dir: join(root, '@evenrealities', 'even-terminal'), explicit: false }
   } catch {
-    return undefined
+    return { root: undefined, dir: undefined, explicit: false }
   }
+}
+
+/**
+ * A test that runs against the installed vendor package, or skips OUT LOUD when there is none.
+ *
+ * The skip names the root that was resolved and the directory looked for under it, so the
+ * suite output says which `npm` answered and where the package was expected -- the two facts
+ * #281 was missing.
+ */
+function vendored(name: string, fn: (dir: string, t: TestContext) => void | Promise<void>): void {
+  test(name, (t) => {
+    const { root, dir, explicit } = vendorLookup()
+    if (dir !== undefined && existsSync(dir)) return fn(dir, t)
+    if (explicit) assert.fail(`CONCLAVE_EVEN_VENDOR=${root} but ${dir} does not exist`)
+    const where = root === undefined ? '`npm root -g` failed' : `root ${root}, looked for ${dir}`
+    return t.skip(`vendor not installed: ${where}; set CONCLAVE_EVEN_VENDOR=<global node_modules> to point at it`)
+  })
 }
 
 /** Every `/api/...` path the vendor's bundle mentions. */
@@ -68,7 +95,7 @@ async function serving(describe: () => SessionMetadata | undefined = () => RUN_1
   return { b, get }
 }
 
-test('#276 every route conclave serves is one the installed even-terminal also serves', () => {
+vendored('#276 every route conclave serves is one the installed even-terminal also serves', (dir) => {
   // The direction that matters. Conclave serving something the vendor does not is conclave
   // inventing protocol, and a device built against the vendor will never call it.
   //
@@ -76,8 +103,6 @@ test('#276 every route conclave serves is one the installed even-terminal also s
   // session, and its `/prompt` starts one. This is a notification surface and deliberately
   // serves a subset (its `/prompt` only answers, #280) — that asymmetry is the design, and
   // asserting equality would fail for the right shape.
-  const dir = vendorRoot()
-  if (!dir) return // vendor not installed; see the file comment
 
   const theirs = vendorRoutes(dir)
   assert.ok(theirs.size > 5, `expected a real route table from the vendor bundle, got ${theirs.size}`)
@@ -92,15 +117,13 @@ test('#276 every route conclave serves is one the installed even-terminal also s
   )
 })
 
-test('#276 the routes the vendor has and conclave lacks are recorded, so a gap is a decision', () => {
+vendored('#276 the routes the vendor has and conclave lacks are recorded, so a gap is a decision', (dir) => {
   // Not a failure — the subset is deliberate. But an UNEXAMINED subset is how a device ends up
   // calling something that 404s, which is exactly what happened: the app called `/api/info`
   // during pairing and conclave had no such route, so the failure looked like a bad token.
   //
   // This prints rather than asserts, so a widening vendor surface is visible in the suite
   // output without failing a build for somebody else's release.
-  const dir = vendorRoot()
-  if (!dir) return
 
   const theirs = vendorRoutes(dir)
   const missing = [...theirs].filter((r) => !EvenRealitiesBridge.SERVED.has(r)).sort()
@@ -109,13 +132,11 @@ test('#276 the routes the vendor has and conclave lacks are recorded, so a gap i
   assert.ok(EvenRealitiesBridge.SERVED.has('/api/status'), 'and the probe path a device pairs against')
 })
 
-test('#278 the provider conclave claims is one the vendor whitelist admits', () => {
+vendored('#278 the provider conclave claims is one the vendor whitelist admits', (dir) => {
   // `provider: "conclave"` was rejected by their middleware, which 400s anything outside
   // `SUPPORTED_PROVIDERS`; that is why the app never opened a session (#276). The claim is a
   // lie (`CLAIMED_PROVIDER` in `client.ts` says why) and this pins that it is at least a lie
   // the validator accepts. If the whitelist changes, this is where the lie stops working.
-  const dir = vendorRoot()
-  if (!dir) return
 
   const session = vendorFile(dir, 'session.js')
   const m = /SUPPORTED_PROVIDERS\s*=\s*\[([^\]]*)\]/.exec(session)
@@ -147,9 +168,7 @@ function vendorListItem(dir: string): { keys: string[]; literal: string } {
   return { keys: [...literal.matchAll(/^\s*(\w+):/gm)].map((x) => x[1]!).sort(), literal }
 }
 
-test('#278 a session list item has exactly the vendor\'s keys, keyed the way core.js reads it', async (t) => {
-  const dir = vendorRoot()
-  if (!dir) return
+vendored('#278 a session list item has exactly the vendor\'s keys, keyed the way core.js reads it', async (dir, t) => {
   const { b, get } = await serving()
   t.after(() => b.close())
 
@@ -174,11 +193,9 @@ test('#278 a session list item has exactly the vendor\'s keys, keyed the way cor
   assert.equal(sessions[0]!['provider'], EvenRealitiesBridge.CLAIMED_PROVIDER)
 })
 
-test('#278 each field of a list item means what the vendor\'s expression for it means', async (t) => {
+vendored('#278 each field of a list item means what the vendor\'s expression for it means', async (dir, t) => {
   // The literal, expression by expression. A field with the vendor's NAME and a different
   // meaning is worse than none: the app sorts and labels by these, confidently.
-  const dir = vendorRoot()
-  if (!dir) return
   const { literal } = vendorListItem(dir)
   const expr = (key: string): string => {
     const m = new RegExp(`^\\s*${key}:\\s*(.*?),?\\s*$`, 'm').exec(literal)
@@ -222,11 +239,9 @@ test('#278 each field of a list item means what the vendor\'s expression for it 
   assert.equal(nullItem.status, null)
 })
 
-test('#278 the refusals are worded as the vendor words them, per route', async (t) => {
+vendored('#278 the refusals are worded as the vendor words them, per route', async (dir, t) => {
   // An app built against their strings gets their strings. `events.js` and `core.js` word the
   // missing-session case differently from each other, and both are served as written.
-  const dir = vendorRoot()
-  if (!dir) return
   const { b, get } = await serving()
   t.after(() => b.close())
 
@@ -254,9 +269,7 @@ test('#278 the refusals are worded as the vendor words them, per route', async (
   assert.deepEqual(await posted.json(), { error: coreMissing })
 })
 
-test('#278 the per-session buffer is as deep as the vendor keeps, and status answers with their keys', async (t) => {
-  const dir = vendorRoot()
-  if (!dir) return
+vendored('#278 the per-session buffer is as deep as the vendor keeps, and status answers with their keys', async (dir, t) => {
   const { b, get } = await serving()
   t.after(() => b.close())
 
@@ -281,14 +294,12 @@ test('#278 the per-session buffer is as deep as the vendor keeps, and status ans
   assert.deepEqual(Object.keys(listing).sort(), keysOf('/messages'))
 })
 
-test('#280 /prompt refuses missing text with the vendor\'s body, first, and accepts with the vendor\'s 202 keys', async (t) => {
+vendored('#280 /prompt refuses missing text with the vendor\'s body, first, and accepts with the vendor\'s 202 keys', async (dir, t) => {
   // The narrow prompt path serves the vendor's contract at both ends -- the 400 an app gets for
   // a body with no `text`, and the 202 it reads `sessionId` and `provider` back from -- and
   // both are read from `core.js` here rather than restated. What is deliberately NOT the
   // vendor's is in between: theirs starts a session for the text; this answers a question or
   // refuses, and `client.test.ts` pins that.
-  const dir = vendorRoot()
-  if (!dir) return
   const { b, get } = await serving()
   t.after(() => b.close())
 
