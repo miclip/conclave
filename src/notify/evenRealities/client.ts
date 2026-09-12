@@ -39,6 +39,7 @@
  *   GET  /api/sessions                       `{ sessions: [{ id, title, timestamp, cwd, provider, status }] }`
  *   GET  /api/status?sessionId=              `{ state, sessionId, provider }`
  *   GET  /api/messages?sessionId=&after=     `{ messages, state, sessionId, provider }`
+ *   GET  /api/sessions/:id/history?limit=    `{ history: [{ role, text }] }`, the last 10 at most
  *
  * Auth is a bearer token, accepted as `Authorization: Bearer <t>` or `?token=<t>`, which is
  * what lets an SSE connection carry it -- EventSource cannot set headers.
@@ -118,6 +119,20 @@ const TITLE_CHARS = 64
 const CONFIRM_CHARS = 120
 
 /**
+ * The title of the confirmation frame (#285), and so the ONE mark by which history can tell the
+ * operator's turn from conclave's: `#confirm` writes it and `historyEntry` reads it, from the
+ * same constant, so the two cannot drift. No `titleFor` in the transport produces it.
+ */
+const RECEIVED_TITLE = 'Received'
+
+/**
+ * How many history entries a request can get. Theirs is `MAX_HISTORY_ITEMS = 10` in
+ * `dist/claude/provider.js`, applied twice -- once in the route, once in the provider -- and it
+ * is applied twice here so the arithmetic matches expression for expression (#284).
+ */
+const HISTORY_ITEMS = 10
+
+/**
  * THE PROVIDER IS A LIE, AND A DELIBERATE ONE.
  *
  * `SUPPORTED_PROVIDERS = ["claude", "codex"]` in their `dist/session.js`, enforced by middleware
@@ -143,6 +158,7 @@ const SERVED = new Set([
   '/api/sessions',
   '/api/status',
   '/api/messages',
+  '/api/sessions/:id/history',
 ])
 
 /** One run, as the glasses see it. Everything routed by `sessionId` lives here and nowhere else. */
@@ -199,6 +215,9 @@ export class EvenRealitiesBridge {
 
   /** How much of an answer the confirmation echoes. Pinned equal to the transport's line by `transport.test.ts`. */
   static readonly CONFIRM_CHARS = CONFIRM_CHARS
+
+  /** How many history entries a request can get. Pinned by `evenCompat.test.ts` against their `MAX_HISTORY_ITEMS`. */
+  static readonly HISTORY_ITEMS = HISTORY_ITEMS
 
   async listen(): Promise<void> {
     // Refused rather than replaced: a second server would leak the first, still bound and still
@@ -305,7 +324,7 @@ export class EvenRealitiesBridge {
    */
   async #confirm(s: Session, pending: (a: BridgeAnswer) => void, answer: string): Promise<void> {
     const message = answer.length > CONFIRM_CHARS ? `${answer.slice(0, CONFIRM_CHARS - 1)}…` : answer
-    const msg: BridgeMessage = { type: 'notification', title: 'Received', message }
+    const msg: BridgeMessage = { type: 'notification', title: RECEIVED_TITLE, message }
     await deliver(s.clients, frame(this.#buffer(s, msg), msg))
     pending({ answer })
   }
@@ -482,6 +501,47 @@ export class EvenRealitiesBridge {
       })
       return
     }
+    const history = /^\/api\/sessions\/([^/]+)\/history$/.exec(url.pathname)
+    if (req.method === 'GET' && history) {
+      // THE APP ASKS FOR THIS WHEN IT OPENS A SESSION (#284), and what it shows as scrollback
+      // is what comes back. Served from `buffered` -- the same store `/messages` and the SSE
+      // replay read -- shaped into the vendor's entry and nothing more: `getHistory` in their
+      // `dist/claude/provider.js` pushes `{ role: msg.type, text: content.text }` per text
+      // block of a transcript message, so an entry is `{ role, text }` and `role` is the
+      // transcript's `user` or `assistant`. Nothing here is a transcript, so the mapping is
+      // `historyEntry`'s, and the exception it makes is explained there.
+      //
+      // The arithmetic is theirs, expression for expression: the route does
+      // `Math.min(parseInt(req.query.limit) || 10, 10)` and the provider then does
+      // `reduced.slice(-Math.min(limit, MAX_HISTORY_ITEMS))`. So: missing, junk and `0` are
+      // 10; anything above 10 is 10; and a NEGATIVE limit survives both `min`s and turns the
+      // tail slice into a head DROP -- `slice(-(-3))` is `slice(3)`. That last is odd, and it
+      // is served as odd, because an app built against theirs sees the same thing here.
+      const limit = Math.min(parseInt(url.searchParams.get('limit') ?? '') || HISTORY_ITEMS, HISTORY_ITEMS)
+      const id = pathSegment(history[1]!)
+      if (id === undefined) {
+        // EXPRESS'S REFUSAL, in status: their router (`router/lib/layer.js`, `decodeParam`)
+        // turns a `decodeURIComponent` failure into a `URIError` with `status = 400` and the
+        // message below, and the handler never runs. The vendor registers no error middleware,
+        // so what the app gets from theirs is Express's default 400 -- an HTML page -- and
+        // that body is not a contract anything parses. The status is theirs; the JSON around
+        // the message is this server's own convention, as on every other refusal here.
+        this.#log(req, 400, url.pathname)
+        this.#json(res, 400, { error: `Failed to decode param '${history[1]!}'` })
+        return
+      }
+      // An unknown session is `{ history: [] }` at 200, because that is what theirs serves:
+      // the SDK's `getSessionMessages` returns `[]` for an id it has no transcript for (and
+      // for any id that is not a UUID, which every conclave id is), so nothing throws and the
+      // route's `error` field never appears. Not `/messages`' decision copied across; checked.
+      // Logged HERE, after the id is known good: one line per request, with the status served.
+      this.#log(req, 200, url.pathname)
+      const s = this.#sessions.get(id)
+      this.#json(res, 200, {
+        history: s ? s.buffered.map((e) => historyEntry(e.msg)).slice(-Math.min(limit, HISTORY_ITEMS)) : [],
+      })
+      return
+    }
     // AN UNMATCHED ROUTE SAYS WHAT THIS SURFACE IS (#276). A bare 404 made every failure look
     // identical: a device on the wrong port, a device speaking a newer protocol, and a person
     // typing a message all produced the same silence, and the only way to tell them apart was
@@ -653,6 +713,46 @@ export class EvenRealitiesBridge {
 /** One SSE frame, as their `pushMessage` writes it. */
 function frame(id: number, msg: BridgeMessage): string {
   return `id: ${id}\ndata: ${JSON.stringify(msg)}\n\n`
+}
+
+/** A history entry, in the vendor's two fields and no others. */
+export interface HistoryEntry {
+  role: 'user' | 'assistant'
+  text: string
+}
+
+/**
+ * One buffered message as one history entry (#284).
+ *
+ * Everything in the buffer went TO the device, so on the face of it everything is conclave's
+ * turn and `assistant` is the only role. The exception is the confirmation (#285): a
+ * notification titled `Received` is the operator's own answer echoed back, so it is the one
+ * message that records what the OPERATOR said, and a scrollback that showed it as the
+ * assistant's would have conclave answering its own questions. It is `user`, and the mark
+ * that identifies it is the constant `#confirm` writes with.
+ *
+ * Text is the substance and not the label: a notification's `message` (its `title` is a
+ * category like `Approval`), a question's question text -- several joined by newline, so one
+ * message is one entry and the tail slice counts messages.
+ */
+function historyEntry(msg: BridgeMessage): HistoryEntry {
+  if (msg.type === 'notification') {
+    return { role: msg.title === RECEIVED_TITLE ? 'user' : 'assistant', text: msg.message }
+  }
+  return { role: 'assistant', text: msg.questions.map((q) => q.question).join('\n') }
+}
+
+/**
+ * A path segment as Express hands it to `req.params`: percent-decoded, or `undefined` when it
+ * cannot be, which is the case their router refuses with a 400 before any handler runs. Caught
+ * here rather than thrown, because a throw inside the listener would take the server down.
+ */
+function pathSegment(raw: string): string | undefined {
+  try {
+    return decodeURIComponent(raw)
+  } catch {
+    return undefined
+  }
 }
 
 /**

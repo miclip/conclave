@@ -770,3 +770,120 @@ test('#285 deliver settles on every client failure, never rejects, and drops the
 
   await deliver(new Set(), 'data: x\n\n')
 })
+
+/** `GET /api/sessions/:id/history`, as the app asks for it on opening a session. */
+async function history(b: EvenRealitiesBridge, id: string, query = ''): Promise<{ status: number; body: unknown }> {
+  const r = await fetch(`${b.url}/api/sessions/${id}/history?token=tok${query}`)
+  return { status: r.status, body: await r.json() }
+}
+
+test('#284 history is the tail of the buffer, oldest first, and the limit is clamped the way theirs is', async (t) => {
+  // Theirs: `Math.min(parseInt(req.query.limit) || 10, 10)` in the route, then
+  // `slice(-Math.min(limit, 10))` in the provider. Every case below is that arithmetic run by
+  // hand, including the one nobody would design: a negative limit is truthy, survives both
+  // `min`s, and `slice(-(-5))` drops the first five instead of keeping the last.
+  const b = await bridge()
+  t.after(() => b.close())
+  for (let i = 1; i <= 13; i++) b.send('run-1', { type: 'notification', title: 'conclave', message: `n${i}` })
+  const texts = async (query: string) => {
+    const { status, body } = await history(b, 'run-1', query)
+    assert.equal(status, 200, query || '(no limit)')
+    return (body as { history: { text: string }[] }).history.map((e) => e.text)
+  }
+  const n = (from: number, to: number) => Array.from({ length: to - from + 1 }, (_, i) => `n${from + i}`)
+
+  assert.equal(EvenRealitiesBridge.HISTORY_ITEMS, 10)
+  assert.deepEqual(await texts(''), n(4, 13), 'missing: the last ten, oldest first')
+  assert.deepEqual(await texts('&limit=abc'), n(4, 13), 'junk: NaN is falsy, so ten')
+  assert.deepEqual(await texts('&limit=0'), n(4, 13), 'zero: falsy, so ten')
+  assert.deepEqual(await texts('&limit=3'), n(11, 13), 'three: the last three')
+  assert.deepEqual(await texts('&limit=25'), n(4, 13), 'huge: capped at ten')
+  assert.deepEqual(await texts('&limit=-5'), n(6, 13), 'negative: theirs drops the head, so does this')
+  assert.deepEqual(await texts('&limit=-50'), [], 'negative past the end: nothing, as theirs')
+})
+
+test('#284 an entry is the vendor\'s `{ role, text }` and nothing else; only the echo is the user\'s', async (t) => {
+  // Their `getHistory` pushes `{ role: msg.type, text }` from a transcript, where `msg.type` is
+  // `user` or `assistant`. Nothing in this buffer is a transcript: it all went TO the device,
+  // so it is all conclave's turn -- except the #285 confirmation, which is the operator's answer
+  // echoed back. A scrollback showing that as the assistant's would have conclave answering
+  // its own question.
+  const b = await bridge()
+  t.after(() => b.close())
+  b.send('run-1', { type: 'notification', title: 'Decided', message: 'merge it — Veto' })
+  b.send('run-1', {
+    type: 'user_question',
+    questions: [
+      { question: 'first?', header: 'A', options: [] },
+      { question: 'second?', header: 'B', options: [] },
+    ],
+  })
+  const asked = b.ask('run-1', q)
+  await new Promise((r) => setTimeout(r, 50))
+  assert.equal((await respond(b, { sessionId: 'run-1', answer: 'Yes' })).status, 200)
+  assert.deepEqual(await asked, { answer: 'Yes' })
+
+  const { body } = await history(b, 'run-1')
+  const entries = (body as { history: Record<string, unknown>[] }).history
+  assert.deepEqual(entries, [
+    { role: 'assistant', text: 'merge it — Veto' },
+    { role: 'assistant', text: 'first?\nsecond?' },
+    { role: 'assistant', text: 'go?' },
+    { role: 'user', text: 'Yes' },
+  ])
+  for (const e of entries) assert.deepEqual(Object.keys(e), ['role', 'text'], 'no invented field')
+  assert.deepEqual(Object.keys(body as object), ['history'], 'and no invented field on the envelope')
+})
+
+test('#284 an unknown session is `{ history: [] }` at 200, as theirs, and the id is decoded and refused as Express does', async (t) => {
+  // Not `/messages`' choice copied across: the SDK's `getSessionMessages` returns `[]` for an
+  // id it has no transcript for, so their route answers 200 with an empty list and no `error`.
+  const b = await bridge()
+  t.after(() => b.close())
+  b.openSession('run 2', () => meta({ title: 'spaced' }))
+  b.send('run 2', { type: 'notification', title: 'conclave', message: 'here' })
+
+  assert.deepEqual(await history(b, 'run-9'), { status: 200, body: { history: [] } })
+  const decoded = await history(b, 'run%202')
+  // Only that the decoded id reached ITS session: the entry's shape is the mapping test's claim.
+  assert.deepEqual((decoded.body as { history: { text: string }[] }).history.map((e) => e.text), ['here'], 'decoded')
+  // An undecodable id is Express's 400, not a lookup: their router refuses `Failed to decode
+  // param` with `status = 400` before the handler runs (`router/lib/layer.js`, `decodeParam`).
+  // The status is theirs. The JSON body is OURS -- theirs is Express's default HTML page,
+  // which is no contract -- so only the status is held to the vendor here.
+  // Observed on the log line as well as the wire: `#log` is one line per request, with the
+  // status served, and the 400 was once written AFTER a 200 for the same request had been.
+  const quiet = process.env['CONCLAVE_EVEN_QUIET']
+  delete process.env['CONCLAVE_EVEN_QUIET']
+  const lines: string[] = []
+  // The method itself, not a bound copy: what is put back must be the very function that was
+  // there, or the test leaves `process.stderr.write` a different object than it found.
+  const originalWrite = process.stderr.write
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    if (String(chunk).startsWith('[even] ')) lines.push(String(chunk))
+    return true
+  }) as typeof process.stderr.write
+  t.after(() => {
+    process.stderr.write = originalWrite
+    if (quiet !== undefined) process.env['CONCLAVE_EVEN_QUIET'] = quiet
+  })
+  assert.equal((await history(b, '%E0%A4%A')).status, 400, 'undecodable: refused as Express refuses it')
+  process.stderr.write = originalWrite
+  if (quiet !== undefined) process.env['CONCLAVE_EVEN_QUIET'] = quiet
+  assert.equal(process.stderr.write, originalWrite, 'stderr is exactly as it was found')
+  assert.equal(lines.length, 1, `one log line for one request, got: ${JSON.stringify(lines)}`)
+  assert.match(lines[0]!, /^\[even\] \S+ 400 GET \/api\/sessions\/%E0%A4%A\/history\n$/, 'the status served, not one that was not')
+  assert.equal((await fetch(`${b.url}/api/sessions?token=tok`)).status, 200, 'and the server is still up')
+})
+
+test('#284 the history route is served, listed as served, and only as GET', async (t) => {
+  const b = await bridge()
+  t.after(() => b.close())
+  assert.ok(EvenRealitiesBridge.SERVED.has('/api/sessions/:id/history'))
+  const r = await fetch(`${b.url}/api/sessions/run-1/history?token=tok`, { method: 'POST' })
+  assert.equal(r.status, 404, 'theirs is `router.get`; a POST is unmatched')
+  const body = (await r.json()) as { served: string[] }
+  assert.deepEqual(body.served, [...EvenRealitiesBridge.SERVED].sort())
+  assert.ok(body.served.includes('/api/sessions/:id/history'), 'served, so listed')
+  assert.equal((await fetch(`${b.url}/api/sessions/run-1/history`)).status, 401, 'and behind the token like the rest')
+})
