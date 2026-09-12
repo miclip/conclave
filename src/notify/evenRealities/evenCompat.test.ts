@@ -14,9 +14,11 @@
  */
 import { strict as assert } from 'node:assert'
 import { execFileSync } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import test, { type TestContext } from 'node:test'
+import { pathToFileURL } from 'node:url'
 
 import { EvenRealitiesBridge, type SessionMetadata } from './client.ts'
 
@@ -57,21 +59,36 @@ function vendored(name: string, fn: (dir: string, t: TestContext) => void | Prom
   })
 }
 
-/** Every `/api/...` path the vendor's bundle mentions. */
-function vendorRoutes(dir: string): Set<string> {
-  const found = new Set<string>()
-  const walk = (d: string): void => {
-    for (const name of readdirSync(d)) {
-      const p = join(d, name)
-      if (statSync(p).isDirectory()) {
-        if (name !== 'node_modules') walk(p)
-        continue
-      }
-      if (!/\.(js|mjs|cjs)$/.test(name)) continue
-      for (const m of readFileSync(p, 'utf8').matchAll(/\/api\/[a-z-]+/g)) found.add(m[0])
+/**
+ * Every route the vendor REGISTERS, as `<mount><path>`, with the methods it registers it under.
+ *
+ * Read from the registrations themselves -- `router.get("/sessions/:id/history", ...)` under
+ * `dist/routes/` -- and from the mount in `dist/index.js` that puts every router under one
+ * prefix (`app.use("/api", auth, coreRouter)`). An earlier version scanned the bundle for the
+ * text `/api/[a-z-]+`, which found the eleven routes whose full path happens to be spelled out
+ * somewhere and missed the rest: `/api/events` (registered as `/events`, so the subset test had
+ * to exempt it by hand) and every route with a parameter or a second segment (#284). Reading
+ * the registration is reading what Express will actually answer to.
+ */
+function vendorRoutes(dir: string): Map<string, Set<string>> {
+  const index = vendorFile(dir, 'index.js')
+  const mounts = new Set([...index.matchAll(/app\.use\("(\/[^"]*)",[^)]*Router\)/g)].map((m) => m[1]!))
+  assert.equal(mounts.size, 1, `expected every router mounted under one prefix in index.js, got ${[...mounts].join(', ') || 'none'}`)
+  const mount = [...mounts][0]!
+
+  const found = new Map<string, Set<string>>()
+  const routes = join(dir, 'dist', 'routes')
+  assert.ok(existsSync(routes) && statSync(routes).isDirectory(), 'expected dist/routes in the vendor bundle')
+  for (const name of readdirSync(routes)) {
+    if (!/\.(js|mjs|cjs)$/.test(name)) continue
+    const src = readFileSync(join(routes, name), 'utf8')
+    for (const m of src.matchAll(/\brouter\.(get|post|put|patch|delete|all)\(\s*"(\/[^"]*)"/g)) {
+      const path = `${mount}${m[2]!}`
+      const methods = found.get(path) ?? new Set<string>()
+      methods.add(m[1]!.toUpperCase())
+      found.set(path, methods)
     }
   }
-  walk(join(dir, 'dist'))
   return found
 }
 
@@ -107,13 +124,14 @@ vendored('#276 every route conclave serves is one the installed even-terminal al
   const theirs = vendorRoutes(dir)
   assert.ok(theirs.size > 5, `expected a real route table from the vendor bundle, got ${theirs.size}`)
 
-  const ours = [...EvenRealitiesBridge.SERVED].filter((r) => r !== '/api/events')
-  const invented = ours.filter((r) => !theirs.has(r))
+  // Every route, `/api/events` included: it is registered in `events.js` as `/events` under the
+  // same mount, and is read from there now rather than exempted.
+  const invented = [...EvenRealitiesBridge.SERVED].filter((r) => !theirs.has(r))
   assert.deepEqual(
     invented,
     [],
     `conclave serves ${invented.join(', ')}, which the installed even-terminal does not — ` +
-      `either the vendor moved, or this transport invented protocol. Vendor has: ${[...theirs].sort().join(', ')}`,
+      `either the vendor moved, or this transport invented protocol. Vendor has: ${[...theirs.keys()].sort().join(', ')}`,
   )
 })
 
@@ -126,7 +144,7 @@ vendored('#276 the routes the vendor has and conclave lacks are recorded, so a g
   // output without failing a build for somebody else's release.
 
   const theirs = vendorRoutes(dir)
-  const missing = [...theirs].filter((r) => !EvenRealitiesBridge.SERVED.has(r)).sort()
+  const missing = [...theirs.keys()].filter((r) => !EvenRealitiesBridge.SERVED.has(r)).sort()
   console.log(`    [observed] vendor routes conclave does not serve: ${missing.join(', ') || '(none)'}`)
   assert.ok(EvenRealitiesBridge.SERVED.has('/api/question-response'), 'the answer path must exist')
   assert.ok(EvenRealitiesBridge.SERVED.has('/api/status'), 'and the probe path a device pairs against')
@@ -394,4 +412,116 @@ vendored('#285 the confirmation is a `notification` the vendor sends, with exact
   assert.deepEqual(Object.keys(echo).sort(), theirs[0], 'the confirmation carries the vendor\'s keys and no other')
   assert.equal(typeof echo['title'], 'string')
   assert.equal(echo['message'], 'Yes', 'the message is what was received')
+})
+
+/**
+ * The vendor's history route and the provider method it calls, as text (#284).
+ *
+ * `router.get("/sessions/:id/history", ...)` in `routes/core.js` clamps the limit and wraps the
+ * provider; `getHistory` in `claude/provider.js` shapes the entry and takes the tail. Both are
+ * read here so each claim in `client.ts` about them is checked against the expression it
+ * restates, the way the list item is (`vendorListItem`).
+ */
+function vendorHistory(dir: string): { route: string; provider: string } {
+  const core = vendorFile(dir, 'routes/core.js')
+  // Any method: which one it is registered under is the route test's claim, not this helper's.
+  const routeMatch = /router\.\w+\("\/sessions\/:id\/history",[\s\S]*?\n\}\);/.exec(core)
+  assert.ok(routeMatch, 'expected the history route handler in routes/core.js')
+  const provider = vendorFile(dir, 'claude/provider.js')
+  const providerMatch = /async function getHistory\([\s\S]*?\n {4}\}/.exec(provider)
+  assert.ok(providerMatch, 'expected `getHistory` in claude/provider.js')
+  return { route: routeMatch![0], provider: providerMatch![0] }
+}
+
+vendored('#284 the history route is theirs: GET, and the limit clamped the way their two expressions clamp it', async (dir, t) => {
+  // The route the app calls on opening a session (#284). `client.ts` restates two of the
+  // vendor's expressions -- the route's default-and-cap, the provider's cap-and-tail -- and
+  // every number in them is read from the bundle here, not from the restatement.
+  const methods = vendorRoutes(dir).get('/api/sessions/:id/history')
+  assert.deepEqual(methods && [...methods], ['GET'], 'registered once, as a GET')
+  assert.ok(EvenRealitiesBridge.SERVED.has('/api/sessions/:id/history'))
+
+  const { route, provider } = vendorHistory(dir)
+  // The route: `Math.min(parseInt(req.query.limit) || D, C)`. D is what a missing, junk or
+  // zero limit becomes; C is the ceiling. They are the same number, and it is the bridge's.
+  const clamp = /const limit = Math\.min\(parseInt\(req\.query\.limit\) \|\| (\d+), (\d+)\)/.exec(route)
+  assert.ok(clamp, `expected the limit clamp in the route: ${route}`)
+  const [fallback, ceiling] = [Number(clamp![1]), Number(clamp![2])]
+  assert.equal(fallback, ceiling, 'the vendor defaults to its own ceiling')
+  assert.equal(EvenRealitiesBridge.HISTORY_ITEMS, ceiling, 'the bridge caps where the route caps')
+
+  // The provider: `MAX_HISTORY_ITEMS = N`, then `Math.min(limit, MAX_HISTORY_ITEMS)` and a
+  // NEGATIVE slice of that -- the tail, oldest first. `client.ts` applies the same two steps.
+  const max = /const MAX_HISTORY_ITEMS = (\d+);/.exec(vendorFile(dir, 'claude/provider.js'))
+  assert.ok(max, 'expected MAX_HISTORY_ITEMS in claude/provider.js')
+  assert.equal(Number(max![1]), ceiling, 'the provider caps where the route caps')
+  const tail = /let (\w+) = Math\.min\(limit, MAX_HISTORY_ITEMS\);\s*return \w+\.slice\(-\1\);/.exec(provider)
+  assert.ok(tail, `expected the capped tail slice in getHistory: ${provider}`)
+
+  // Tied to the wire: more than the cap buffered, and the last `ceiling` come back in order.
+  const { b, get } = await serving()
+  t.after(() => b.close())
+  for (let i = 1; i <= ceiling + 3; i++) b.send('run-1', { type: 'notification', title: 'conclave', message: `n${i}` })
+  const texts = async (path: string): Promise<string[]> =>
+    ((await (await get(path)).json()) as { history: { text: string }[] }).history.map((e) => e.text)
+  const last = (k: number) => Array.from({ length: k }, (_, i) => `n${ceiling + 3 - k + 1 + i}`)
+  assert.deepEqual(await texts('/api/sessions/run-1/history'), last(ceiling), 'missing: the ceiling, oldest first')
+  assert.deepEqual(await texts('/api/sessions/run-1/history?limit=junk'), last(ceiling), 'junk: parseInt is NaN, so the default')
+  assert.deepEqual(await texts('/api/sessions/run-1/history?limit=0'), last(ceiling), 'zero: falsy, so the default')
+  assert.deepEqual(await texts(`/api/sessions/run-1/history?limit=${ceiling * 10}`), last(ceiling), 'over: the ceiling')
+  assert.deepEqual(await texts('/api/sessions/run-1/history?limit=2'), last(2), 'under: honoured, from the tail')
+})
+
+vendored('#284 a history entry has exactly the vendor\'s keys, and the envelope is `res.json` with no status', async (dir, t) => {
+  // The entry literal is `acc.push({ role: msg.type, text: content.text })` -- the keys the
+  // app reads scrollback from. The envelope is `res.json({ history })` on success and
+  // `res.json({ history: [], error: err.message })` on a throw: NEITHER sets a status, so a
+  // history the app can show and one it cannot are both 200, and only the keys differ.
+  const { route, provider } = vendorHistory(dir)
+  const entry = /acc\.push\(\{([^}]*)\}\)/.exec(provider)
+  assert.ok(entry, `expected the entry literal in getHistory: ${provider}`)
+  const keys = [...entry![1]!.matchAll(/(\w+):/g)].map((m) => m[1]!).sort()
+  assert.deepEqual(keys, ['role', 'text'], 'the vendor\'s entry, as read; if this moved, so must historyEntry')
+
+  const success = /res\.json\(\{ history \}\)/.exec(route)
+  const failure = /res\.json\(\{ history: \[\], error: err\.message \}\)/.exec(route)
+  assert.ok(success && failure, `expected both res.json envelopes in the route: ${route}`)
+  assert.doesNotMatch(route, /res\.status\(/, 'no status on either path: both are 200')
+
+  const { b, get } = await serving()
+  t.after(() => b.close())
+  b.send('run-1', { type: 'notification', title: 'Approval', message: 'merge?' })
+  b.send('run-1', { type: 'user_question', questions: [{ question: 'go?', header: 'Q', options: [] }] })
+  const r = await get('/api/sessions/run-1/history')
+  assert.equal(r.status, 200)
+  const body = (await r.json()) as Record<string, unknown>
+  assert.deepEqual(Object.keys(body), ['history'], 'the success envelope, key for key')
+  const history = body['history'] as Record<string, unknown>[]
+  assert.equal(history.length, 2)
+  for (const e of history) assert.deepEqual(Object.keys(e).sort(), keys, 'every entry carries the vendor\'s keys and no other')
+  for (const e of history) assert.ok(['user', 'assistant'].includes(String(e['role'])), 'role is a transcript role, as `msg.type` is')
+})
+
+vendored('#284 an unknown session is `200 { history: [] }`: proved on the installed provider, then held on ours', async (dir, t) => {
+  // `/api/messages` chose empty-over-404 because theirs does; #284 asked that this route be
+  // checked rather than have that decision copied across. So it is checked ON THE VENDOR'S
+  // CODE: the installed Claude provider is imported and asked for the history of an id no
+  // transcript has -- a fresh UUID, and an id spelled the way conclave spells them -- and
+  // both come back `[]` without throwing. Nothing thrown means the route's `res.json({
+  // history })` runs, not the `error` envelope, so the wire is `200 { history: [] }`.
+  //
+  // The import is the real module: it resolves the Agent SDK from the vendor's own
+  // node_modules and reads `~/.claude/projects` looking for the id. Neither id can be there.
+  const mod = (await import(pathToFileURL(join(dir, 'dist', 'claude', 'provider.js')).href)) as {
+    createClaudeProvider: (emit: () => void) => { getHistory: (id: string, limit: number) => Promise<unknown[]> }
+  }
+  const provider = mod.createClaudeProvider(() => {})
+  assert.deepEqual(await provider.getHistory(randomUUID(), EvenRealitiesBridge.HISTORY_ITEMS), [], 'a UUID no transcript has')
+  assert.deepEqual(await provider.getHistory('20260911-174920-39357', EvenRealitiesBridge.HISTORY_ITEMS), [], 'a conclave-shaped id')
+
+  const { b, get } = await serving()
+  t.after(() => b.close())
+  const r = await get(`/api/sessions/${randomUUID()}/history`)
+  assert.equal(r.status, 200, 'not 404: theirs does not know the id either, and answers 200')
+  assert.deepEqual(await r.json(), { history: [] }, 'the success envelope, empty, with no `error`')
 })
