@@ -420,3 +420,145 @@ test('#184 closing a run answers its outstanding question rather than hanging it
   assert.deepEqual(await two, { answer: 'Yes' }, "closing one run does not settle another's")
   await b.close()
 })
+
+/** `POST /api/prompt`, as the app sends the operator's message. */
+async function prompt(b: EvenRealitiesBridge, body: unknown): Promise<Response> {
+  return fetch(`${b.url}/api/prompt?token=tok`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: typeof body === 'string' ? body : JSON.stringify(body),
+  })
+}
+
+test('#280 a prompt with no text is refused in the vendor\'s words, before the session is looked at', async (t) => {
+  // Their handler reads `text` first and answers `Missing 'text' field` before it knows whether
+  // a session was named; so does this one, so an app that sends both wrongly hears what theirs
+  // would say. Empty string counts as missing, as `!text` makes it there.
+  const b = await bridge()
+  t.after(() => b.close())
+  const asked = b.ask('run-1', q)
+  await new Promise((r) => setTimeout(r, 50))
+
+  for (const body of [{}, { sessionId: 'run-1' }, { sessionId: 'run-1', text: 42 }, { sessionId: 'run-1', text: '' }, 'not json']) {
+    const r = await prompt(b, body)
+    assert.equal(r.status, 400, JSON.stringify(body))
+    assert.deepEqual(await r.json(), { error: "Missing 'text' field" }, JSON.stringify(body))
+  }
+  // Neither session error was reached: text first.
+  const neither = await prompt(b, { sessionId: 'run-9' })
+  assert.deepEqual(await neither.json(), { error: "Missing 'text' field" }, 'an unknown session with no text is still a text error')
+
+  const status = (await (await fetch(`${b.url}/api/status?sessionId=run-1&token=tok`)).json()) as { state: string }
+  assert.equal(status.state, 'awaiting', 'none of those was an answer')
+  await respond(b, { sessionId: 'run-1', answer: 'Yes' })
+  assert.deepEqual(await asked, { answer: 'Yes' })
+})
+
+test('#280 a prompt that names no session, or an unknown one, is refused as /question-response refuses it', async (t) => {
+  const b = await bridge()
+  t.after(() => b.close())
+  let settled = false
+  const asked = b.ask('run-1', q).then((a) => {
+    settled = true
+    return a
+  })
+  await new Promise((r) => setTimeout(r, 50))
+
+  const missing = await prompt(b, { text: 'go' })
+  assert.equal(missing.status, 400)
+  assert.deepEqual(await missing.json(), { error: "Missing 'sessionId'" })
+  const unknown = await prompt(b, { text: 'go', sessionId: 'run-9' })
+  assert.equal(unknown.status, 404)
+  assert.deepEqual(await unknown.json(), { error: 'Session not found' })
+
+  await new Promise((r) => setTimeout(r, 20))
+  assert.equal(settled, false, 'neither was an answer to run-1')
+  assert.deepEqual(b.sessions(), ['run-1'], 'and no session was started for run-9: theirs creates one, this does not')
+  await respond(b, { sessionId: 'run-1', answer: 'Yes' })
+  assert.deepEqual(await asked, { answer: 'Yes' })
+})
+
+test('#280 a prompt to a run with a question outstanding is that question\'s answer, and gets the vendor\'s 202', async (t) => {
+  const b = await bridge()
+  t.after(() => b.close())
+  const asked = b.ask('run-1', q)
+  await new Promise((r) => setTimeout(r, 50))
+
+  const r = await prompt(b, { sessionId: 'run-1', text: 'hold off until the advisor finishes' })
+  assert.equal(r.status, 202)
+  assert.deepEqual(await r.json(), { ok: true, sessionId: 'run-1', provider: 'claude' })
+  assert.deepEqual(await asked, { answer: 'hold off until the advisor finishes' })
+
+  // Consumed: the same prompt again has nothing to answer.
+  const again = await prompt(b, { sessionId: 'run-1', text: 'hold off until the advisor finishes' })
+  assert.equal(again.status, 409)
+  const status = (await (await fetch(`${b.url}/api/status?sessionId=run-1&token=tok`)).json()) as { state: string }
+  assert.equal(status.state, 'busy', 'the run\'s own word again, nothing awaiting')
+})
+
+test('#280 a prompt to a run with nothing outstanding is refused, explained, and leaves no trace', async (t) => {
+  // The narrowing itself. Their `/prompt` starts a session and steers it; this one answers a
+  // question or does nothing at all. Not buffered, not a late answer, not a message on the
+  // stream, and not held for the next question either.
+  const b = await bridge()
+  t.after(() => b.close())
+  b.send('run-1', { type: 'notification', title: 'n', message: 'before' })
+
+  const r = await prompt(b, { sessionId: 'run-1', text: 'merge it' })
+  assert.equal(r.status, 409, 'the session exists and the body is fine; its STATE has no question')
+  const body = (await r.json()) as { error: string; note: string }
+  assert.equal(body.error, 'No question is outstanding on this session')
+  assert.match(body.note, /accepted only as the answer to a question outstanding/)
+
+  assert.deepEqual(b.takeUnsolicited('run-1'), [], 'not a veto: nothing was decided')
+  const { messages } = (await (await fetch(`${b.url}/api/messages?sessionId=run-1&token=tok`)).json()) as {
+    messages: { message: string }[]
+  }
+  assert.deepEqual(messages.map((m) => m.message), ['before'], 'nothing pushed, nothing buffered')
+
+  // Not held either: the next question waits for its own answer.
+  const asked = b.ask('run-1', q)
+  await new Promise((r) => setTimeout(r, 50))
+  const status = (await (await fetch(`${b.url}/api/status?sessionId=run-1&token=tok`)).json()) as { state: string }
+  assert.equal(status.state, 'awaiting', 'the refused prompt did not pre-answer it')
+  await respond(b, { sessionId: 'run-1', answer: 'Yes' })
+  assert.deepEqual(await asked, { answer: 'Yes' })
+})
+
+test('#280 `cwd` and `provider` in a prompt body select nothing and change nothing', async (t) => {
+  // Theirs reads them to pick a provider and start a session in a directory. Here they are
+  // accepted, because an app sends them, and ignored: the run is the one named, the provider
+  // on the wire is the claimed one, and the run's own cwd is what the list still says.
+  const b = await bridge()
+  t.after(() => b.close())
+  const asked = b.ask('run-1', q)
+  await new Promise((r) => setTimeout(r, 50))
+
+  const r = await prompt(b, { sessionId: 'run-1', text: 'ok', provider: 'codex', cwd: '/elsewhere' })
+  assert.equal(r.status, 202)
+  assert.deepEqual(await r.json(), { ok: true, sessionId: 'run-1', provider: 'claude' }, 'not the provider the body claimed')
+  assert.deepEqual(await asked, { answer: 'ok' })
+  assert.deepEqual(b.sessions(), ['run-1'], 'no session started anywhere')
+  const { sessions } = (await (await fetch(`${b.url}/api/sessions?token=tok`)).json()) as { sessions: { cwd: string; provider: string }[] }
+  assert.deepEqual([sessions[0]?.cwd, sessions[0]?.provider], ['/w', 'claude'])
+
+  // With nothing outstanding, the same body is still refused: a provider or a cwd is not a way in.
+  const refused = await prompt(b, { sessionId: 'run-1', text: 'ok', provider: 'codex', cwd: '/elsewhere' })
+  assert.equal(refused.status, 409)
+})
+
+test('#280 the unmatched-route refusal lists /api/prompt as served and says what a prompt can be', async (t) => {
+  // The 404 body is the only thing a device on the wrong path ever sees, and it used to say
+  // this surface "does not accept prompts". That is now false in one narrow way, and the body
+  // has to be true again without becoming an invitation.
+  const b = await bridge()
+  t.after(() => b.close())
+  const r = await fetch(`${b.url}/api/interrupt?token=tok`, { method: 'POST' })
+  assert.equal(r.status, 404)
+  const body = (await r.json()) as { error: string; served: string[]; note: string }
+  assert.equal(body.error, 'Not found')
+  assert.deepEqual(body.served, [...EvenRealitiesBridge.SERVED].sort())
+  assert.ok(body.served.includes('/api/prompt'), 'served, so listed')
+  assert.match(body.note, /POST \/api\/prompt is accepted only as the answer to a question outstanding/)
+  assert.doesNotMatch(body.note, /does not accept prompts/, 'the old claim, now false')
+})

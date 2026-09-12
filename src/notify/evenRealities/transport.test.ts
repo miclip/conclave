@@ -199,3 +199,69 @@ test('#184 a veto tapped after the decision reaches the broker through poll', as
   assert.equal(all.length, 2, 'the decision, then the veto')
   assert.equal(all[1]?.answer?.by.kind, 'human')
 })
+
+/** `POST /api/prompt`, as the app sends the operator's message. */
+async function promptText(t: EvenRealitiesTransport, text: string): Promise<Response> {
+  await new Promise((r) => setTimeout(r, 80))
+  return fetch(`${t.bridge.url}/api/prompt?token=tok`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ sessionId: 'run-1', text }),
+  })
+}
+
+test('#280 a prompt reaches the broker as a MESSAGE on the free-text path, and cannot select an unoffered option', async (t2) => {
+  // THE INVARIANT THE NARROWING EXISTS TO KEEP. `/api/prompt` is served, so the operator's typed
+  // message now arrives; what must not change is what it can do. It takes exactly the path a
+  // typed `/question-response` takes: text is text for the caller to read, a label that was
+  // offered is that option, and an id -- even a plausible one, even an offered one's -- is
+  // never a way to choose. If a prompt could become an instruction, the third answer below
+  // would come back as an option.
+  const t = await up()
+  t2.after(() => t.bridge.close())
+  const dir = tempDir(t2, 'conclave-er')
+  const offer = { kind: 'approval' as const, headline: 'Merge?', options: [{ id: 'yes', label: 'Merge' }] }
+
+  // Free text is a message, recorded as one.
+  const spoken = new Broker(dir).ask(offer, t)
+  assert.equal((await promptText(t, 'hold off until the advisor finishes')).status, 202)
+  const said = await spoken
+  assert.equal(said?.option, undefined, 'a prompt must not become an option')
+  assert.equal(said?.text, 'hold off until the advisor finishes')
+  assert.equal(said?.by.kind, 'human')
+
+  // A prompt naming an option's ID is text, not that option: only the label the glasses showed
+  // was offered on the wire, and the broker never parses prose into an action.
+  const byId = new Broker(dir).ask(offer, t)
+  assert.equal((await promptText(t, 'yes')).status, 202)
+  assert.deepEqual(await byId, { text: 'yes', by: { id: 'even-realities', kind: 'human' } })
+
+  // A prompt naming an option that was NEVER offered is text too, and the record shows a
+  // message, never a refused option: nothing on this path can produce `option: 'no'`.
+  const unoffered = new Broker(dir).ask(offer, t)
+  assert.equal((await promptText(t, 'no')).status, 202)
+  assert.deepEqual(await unoffered, { text: 'no', by: { id: 'even-realities', kind: 'human' } })
+
+  // And the same path as a tap: the offered LABEL is that option, as it is on /question-response.
+  const tapped = new Broker(dir).ask(offer, t)
+  assert.equal((await promptText(t, 'Merge')).status, 202)
+  assert.deepEqual(await tapped, { option: 'yes', by: { id: 'even-realities', kind: 'human' } })
+
+  const recs = new Broker(dir).decisions()
+  assert.deepEqual(
+    recs.map((r) => [r.answer?.option, r.answer?.text, r.undelivered]),
+    [
+      [undefined, 'hold off until the advisor finishes', undefined],
+      [undefined, 'yes', undefined],
+      [undefined, 'no', undefined],
+      ['yes', undefined, undefined],
+    ],
+    'four answers, three of them messages; none an option that was not offered',
+  )
+
+  // With nothing asked, a prompt is refused and nothing reaches the broker: not as a veto, not
+  // as anything. A prompt is not a way to start.
+  assert.equal((await promptText(t, 'start the next thing')).status, 409)
+  assert.deepEqual(await t.poll(), [], 'not held as a late answer either: nothing for the broker to collect')
+  assert.equal(new Broker(dir).decisions().length, 4, 'nothing was recorded for it')
+})

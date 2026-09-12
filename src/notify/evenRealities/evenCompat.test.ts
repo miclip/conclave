@@ -72,9 +72,10 @@ test('#276 every route conclave serves is one the installed even-terminal also s
   // The direction that matters. Conclave serving something the vendor does not is conclave
   // inventing protocol, and a device built against the vendor will never call it.
   //
-  // NOT the reverse: the vendor serves prompts, interrupts and metrics because it drives a
-  // coding session. This is a notification surface and deliberately serves a subset — that
-  // asymmetry is the design, and asserting equality would fail for the right shape.
+  // NOT the reverse: the vendor serves interrupts and metrics because it drives a coding
+  // session, and its `/prompt` starts one. This is a notification surface and deliberately
+  // serves a subset (its `/prompt` only answers, #280) — that asymmetry is the design, and
+  // asserting equality would fail for the right shape.
   const dir = vendorRoot()
   if (!dir) return // vendor not installed; see the file comment
 
@@ -278,4 +279,53 @@ test('#278 the per-session buffer is as deep as the vendor keeps, and status ans
   assert.deepEqual(Object.keys(status).sort(), keysOf('/status'))
   const listing = (await (await get('/api/messages?sessionId=run-1')).json()) as Record<string, unknown>
   assert.deepEqual(Object.keys(listing).sort(), keysOf('/messages'))
+})
+
+test('#280 /prompt refuses missing text with the vendor\'s body, first, and accepts with the vendor\'s 202 keys', async (t) => {
+  // The narrow prompt path serves the vendor's contract at both ends -- the 400 an app gets for
+  // a body with no `text`, and the 202 it reads `sessionId` and `provider` back from -- and
+  // both are read from `core.js` here rather than restated. What is deliberately NOT the
+  // vendor's is in between: theirs starts a session for the text; this answers a question or
+  // refuses, and `client.test.ts` pins that.
+  const dir = vendorRoot()
+  if (!dir) return
+  const { b, get } = await serving()
+  t.after(() => b.close())
+
+  const core = vendorFile(dir, 'routes/core.js')
+  const handler = /router\.post\("\/prompt",[\s\S]*?\n\}\);/.exec(core)
+  assert.ok(handler, 'expected the /prompt handler in core.js')
+  const src = handler![0]
+
+  // THE 400, and its ORDER: theirs tests `text` before it touches a provider or a session, so a
+  // body with neither hears about text. Read from the source, not assumed.
+  const refusal = /if \(!text \|\| typeof text !== "string"\) \{[\s\S]*?res\.status\(400\)\.json\((\{ error: "[^"]+" \})\)/.exec(src)
+  assert.ok(refusal, 'expected the missing-text refusal in the /prompt handler')
+  const body400 = JSON.parse(refusal![1]!.replace(/(\w+):/, '"$1":')) as { error: string }
+  assert.ok(src.indexOf(refusal![0]) < src.indexOf('.prompt('), 'text is validated before the session is touched')
+  const post = (payload: unknown): Promise<Response> =>
+    fetch(`${b.url}/api/prompt?token=tok`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+  const noText = await post({ sessionId: 'run-9' })
+  assert.equal(noText.status, 400)
+  assert.deepEqual(await noText.json(), body400, 'the vendor\'s body, and before the unknown session was looked at')
+
+  // THE 202, key for key. `result.sessionId` and `result.provider` are the vendor's provider
+  // answering; here the id is the one named and the provider is the claimed one.
+  const accepted = /res\.status\(202\)\.json\(\{([^}]*)\}\)/.exec(src)
+  assert.ok(accepted, 'expected the 202 in the /prompt handler')
+  const keys202 = accepted![1]!.split(',').map((kv) => kv.split(':')[0]!.trim()).sort()
+  const asked = b.ask('run-1', { header: 'Approval', question: 'go?', options: [{ label: 'Yes', description: '' }] })
+  await new Promise((r) => setTimeout(r, 50))
+  const ok = await post({ sessionId: 'run-1', text: 'go on' })
+  assert.equal(ok.status, 202)
+  const reply = (await ok.json()) as Record<string, unknown>
+  assert.deepEqual(Object.keys(reply).sort(), keys202)
+  assert.equal(reply['sessionId'], 'run-1')
+  assert.equal(reply['provider'], EvenRealitiesBridge.CLAIMED_PROVIDER)
+  assert.deepEqual(await asked, { answer: 'go on' })
+  assert.equal((await get('/api/status?sessionId=run-1')).status, 200)
 })
