@@ -61,7 +61,7 @@ conclave config check       # is it present, current, and trusted
 ```
 
 The registration invokes `conclave` from PATH, so it does not name a release directory and
-does not go stale when you upgrade. A registration written before v0.5.45 does name one;
+does not go stale when you upgrade. A registration written before v0.5.46 does name one;
 `config check` reports it as `STALE` and `config install` replaces it.
 
 `config check` answers for the directory it is run from. To ask which projects are affected:
@@ -88,7 +88,7 @@ later releases render the same bytes.
 Node 24 or newer.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/miclip/conclave/v0.5.45/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/miclip/conclave/v0.5.46/scripts/install.sh | sh
 ```
 
 Clones the repository into `~/.local/share/conclave`, checks the newest tagged release out
