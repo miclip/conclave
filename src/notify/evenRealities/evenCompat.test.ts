@@ -340,3 +340,58 @@ vendored('#280 /prompt refuses missing text with the vendor\'s body, first, and 
   assert.deepEqual(await asked, { answer: 'go on' })
   assert.equal((await get('/api/status?sessionId=run-1')).status, 200)
 })
+
+vendored('#285 the confirmation is a `notification` the vendor sends, with exactly the vendor\'s keys', async (dir, t) => {
+  // The echo that closes an `ask` (#285) is the one frame this transport sends that the header
+  // of `client.ts` merely ASSERTS the app understands. So the shape is read here from where the
+  // vendor's own session sends it -- every `type: "notification"` literal in `claude/session.js`
+  // -- and the frame on conclave's wire is held to the same key set. A key the vendor never
+  // sends is protocol the app was not built against; a key the vendor sends and conclave omits
+  // is a frame the app may not render.
+  const session = vendorFile(dir, 'claude/session.js')
+  const literals = [...session.matchAll(/this\.send\(\{\s*type: "notification",([\s\S]*?)\}\)/g)]
+  assert.ok(literals.length > 0, 'expected the vendor to send a `notification` somewhere; the type is gone, and so is the confirmation\'s footing')
+  const theirs = literals.map((m) =>
+    ['type', ...[...m[1]!.matchAll(/^\s*(\w+)\s*[:,]/gm)].map((k) => k[1]!)].sort(),
+  )
+  for (const keys of theirs) assert.deepEqual(keys, theirs[0], 'every vendor site sends the same shape')
+
+  const { b } = await serving()
+  t.after(() => b.close())
+  const ac = new AbortController()
+  t.after(() => ac.abort())
+  const stream = await fetch(`${b.url}/api/events?sessionId=run-1&token=tok`, { signal: ac.signal })
+  const reader = stream.body!.getReader()
+  const frames: Record<string, unknown>[] = []
+  const reading = (async () => {
+    let buf = ''
+    while (frames.length < 2) {
+      const { value, done } = await reader.read()
+      if (done) break
+      buf += new TextDecoder().decode(value)
+      const parts = buf.split('\n\n')
+      buf = parts.pop() ?? ''
+      for (const part of parts) {
+        const line = part.split('\n').find((l) => l.startsWith('data: '))
+        if (line) frames.push(JSON.parse(line.slice(6)) as Record<string, unknown>)
+      }
+    }
+  })()
+  await new Promise((r) => setTimeout(r, 100))
+  const asked = b.ask('run-1', { header: 'Approval', question: 'go?', options: [{ label: 'Yes', description: '' }] })
+  await new Promise((r) => setTimeout(r, 50))
+  await fetch(`${b.url}/api/question-response?token=tok`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ sessionId: 'run-1', answer: 'Yes' }),
+  })
+  assert.deepEqual(await asked, { answer: 'Yes' })
+  await reading
+
+  const echo = frames[1]
+  assert.ok(echo, 'expected the confirmation as the second frame on the stream')
+  assert.equal(echo['type'], 'notification')
+  assert.deepEqual(Object.keys(echo).sort(), theirs[0], 'the confirmation carries the vendor\'s keys and no other')
+  assert.equal(typeof echo['title'], 'string')
+  assert.equal(echo['message'], 'Yes', 'the message is what was received')
+})

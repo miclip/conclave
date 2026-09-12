@@ -10,7 +10,9 @@
 
 import { strict as assert } from 'node:assert'
 import test from 'node:test'
-import { EvenRealitiesBridge, type SessionMetadata } from './client.ts'
+import { EventEmitter } from 'node:events'
+import { ServerResponse } from 'node:http'
+import { EvenRealitiesBridge, deliver, type SessionMetadata } from './client.ts'
 
 /** A run's metadata as a session would describe it; mutable so a test can advance it. */
 function meta(over: Partial<SessionMetadata> = {}): SessionMetadata {
@@ -561,4 +563,210 @@ test('#280 the unmatched-route refusal lists /api/prompt as served and says what
   assert.ok(body.served.includes('/api/prompt'), 'served, so listed')
   assert.match(body.note, /POST \/api\/prompt is accepted only as the answer to a question outstanding/)
   assert.doesNotMatch(body.note, /does not accept prompts/, 'the old claim, now false')
+})
+
+/**
+ * Attach a stream and give it time to be on the wire, so what follows is PUSHED rather than
+ * buffered for replay. `want` counts the frames the reader waits for. Wrapped, because an
+ * async function that returns a promise hands back its RESOLUTION, and awaiting that here
+ * would wait for frames that nothing has sent yet.
+ */
+async function attached(t: import('node:test').TestContext, b: EvenRealitiesBridge, want: number) {
+  const ac = new AbortController()
+  t.after(() => ac.abort())
+  const reading = frames(`${b.url}/api/events?sessionId=run-1&token=tok`, want, ac.signal)
+  await new Promise((r) => setTimeout(r, 100))
+  return { reading }
+}
+
+test('#285 a /api/question-response answer is confirmed on the stream, and the stream is closed right behind it', async (t) => {
+  // The device's report, twice: "it disconnected", immediately after an answer that had worked.
+  // `notify ask` exits on the answer and the exit ends the stream, so the last thing the
+  // glasses saw was a drop. Now the last thing is what was received -- and closing the bridge
+  // the instant `ask` resolves, as the CLI does, must not be soon enough to lose it.
+  const b = await bridge()
+  const { reading } = await attached(t, b, 2)
+  const asked = b.ask('run-1', q)
+  await new Promise((r) => setTimeout(r, 50))
+
+  const posted = await respond(b, { sessionId: 'run-1', answer: 'Yes' })
+  assert.equal(posted.status, 200, 'the vendor\'s status, unchanged')
+  assert.deepEqual(await asked, { answer: 'Yes' })
+  await b.close()
+
+  const seen = await reading
+  assert.deepEqual(seen[0]?.['type'], 'user_question')
+  assert.deepEqual(seen[1], { type: 'notification', title: 'Received', message: 'Yes' }, 'the echo, on the wire, before the close')
+})
+
+test('#285 a /api/prompt answer is confirmed the same way, echoing the text', async (t) => {
+  const b = await bridge()
+  const { reading } = await attached(t, b, 2)
+  const asked = b.ask('run-1', q)
+  await new Promise((r) => setTimeout(r, 50))
+
+  const r = await prompt(b, { sessionId: 'run-1', text: 'hold until the advisor finishes' })
+  assert.equal(r.status, 202, 'the vendor\'s status, unchanged')
+  assert.deepEqual(await asked, { answer: 'hold until the advisor finishes' })
+  await b.close()
+
+  const seen = await reading
+  assert.deepEqual(seen[1], { type: 'notification', title: 'Received', message: 'hold until the advisor finishes' })
+})
+
+test('#285 the answer is not given until the confirmation has left: the write callback gates ask', async (t) => {
+  // The receipt tests above cannot tell the two orders apart in one process: a write queued
+  // before `end()` goes out either way. What they cannot see is the CALLBACK -- the kernel
+  // taking the bytes -- and that is what `notify ask`'s exit depends on. So the callback for
+  // the confirmation frame is held back here, and `ask` must not have resolved before it fired.
+  let delivered = false
+  const write = ServerResponse.prototype.write
+  t.mock.method(ServerResponse.prototype, 'write', function (this: ServerResponse, ...args: unknown[]) {
+    const cb = args.find((a) => typeof a === 'function') as ((err?: Error | null) => void) | undefined
+    if (!cb || !String(args[0]).includes('"Received"')) return (write as Function).apply(this, args)
+    return (write as Function).call(this, args[0], (err?: Error | null) => {
+      setTimeout(() => {
+        delivered = true
+        cb(err)
+      }, 30)
+    })
+  })
+  const b = await bridge()
+  t.after(() => b.close())
+  await attached(t, b, 2)
+  const asked = b.ask('run-1', q)
+  await new Promise((r) => setTimeout(r, 50))
+
+  await respond(b, { sessionId: 'run-1', answer: 'Yes' })
+  assert.deepEqual(await asked, { answer: 'Yes' })
+  assert.equal(delivered, true, 'ask resolved before the confirmation had reached the kernel')
+})
+
+test('#285 with nobody attached the answer still lands, and the confirmation waits in the buffer', async (t) => {
+  // The glasses might be off. Nothing to write to is not a reason to hold the run's answer,
+  // and the echo is buffered like anything else so a client that reconnects with `needReplay`
+  // sees the outcome rather than a question that vanished.
+  const b = await bridge()
+  t.after(() => b.close())
+  const asked = b.ask('run-1', q)
+  await new Promise((r) => setTimeout(r, 20))
+  await respond(b, { sessionId: 'run-1', answer: 'No' })
+  assert.deepEqual(await asked, { answer: 'No' })
+
+  const ac = new AbortController()
+  t.after(() => ac.abort())
+  const seen = await frames(`${b.url}/api/events?sessionId=run-1&token=tok&needReplay=true`, 2, ac.signal)
+  assert.deepEqual(seen[1], { type: 'notification', title: 'Received', message: 'No' })
+})
+
+test('#285 a client that left before the answer does not hold it, and the next one still gets the echo', async (t) => {
+  const b = await bridge()
+  t.after(() => b.close())
+  const gone = new AbortController()
+  void frames(`${b.url}/api/events?sessionId=run-1&token=tok`, 9, gone.signal).catch(() => undefined)
+  await new Promise((r) => setTimeout(r, 100))
+  const asked = b.ask('run-1', q)
+  await new Promise((r) => setTimeout(r, 20))
+  gone.abort()
+  await new Promise((r) => setTimeout(r, 50))
+
+  await respond(b, { sessionId: 'run-1', answer: 'skip' })
+  assert.deepEqual(await asked, { answer: 'skip' }, 'a gone client is not a reason to hold the answer')
+  const { messages } = (await (await fetch(`${b.url}/api/messages?sessionId=run-1&token=tok`)).json()) as {
+    messages: { type: string; message?: string }[]
+  }
+  assert.deepEqual(messages.at(-1), { id: 2, type: 'notification', title: 'Received', message: 'skip' })
+})
+
+test('#285 the echo is cut to the line the transport can show, one short and an ellipsis', async (t) => {
+  const b = await bridge()
+  t.after(() => b.close())
+  const asked = b.ask('run-1', q)
+  await new Promise((r) => setTimeout(r, 20))
+  const long = 'x'.repeat(300)
+  await prompt(b, { sessionId: 'run-1', text: long })
+  assert.deepEqual(await asked, { answer: long }, 'the run gets all of it; only the echo is cut')
+  const { messages } = (await (await fetch(`${b.url}/api/messages?sessionId=run-1&token=tok`)).json()) as {
+    messages: { message?: string }[]
+  }
+  const echo = messages.at(-1)?.message ?? ''
+  assert.equal(EvenRealitiesBridge.CONFIRM_CHARS, 120, 'the HUD line')
+  assert.equal(echo.length, EvenRealitiesBridge.CONFIRM_CHARS)
+  assert.equal(echo, `${'x'.repeat(EvenRealitiesBridge.CONFIRM_CHARS - 1)}…`)
+})
+
+test('#285 a write that loses the race with the end of its stream does not take the process down', async (t) => {
+  // The guard in `deliver` looks before it writes, and nothing checked can change between the
+  // look and the write. This is the one that does not go through `deliver`'s guard at all: the
+  // heartbeat, and any write the guard has already passed when the stream ends underneath it.
+  // On this Node a write after end EMITS `error` on the response, and an unlistened `error`
+  // is an uncaught exception. The end is forced here between the look and the write.
+  const write = ServerResponse.prototype.write
+  t.mock.method(ServerResponse.prototype, 'write', function (this: ServerResponse, ...args: unknown[]) {
+    if (String(args[0]).includes('"Received"') && !this.writableEnded) this.end()
+    return (write as Function).apply(this, args)
+  })
+  const b = await bridge()
+  t.after(() => b.close())
+  await attached(t, b, 1)
+  const asked = b.ask('run-1', q)
+  await new Promise((r) => setTimeout(r, 50))
+  await respond(b, { sessionId: 'run-1', answer: 'Yes' })
+  assert.deepEqual(await asked, { answer: 'Yes' }, 'the answer still lands')
+  // The `error` is emitted on a later tick; a process that was going to die does so here.
+  await new Promise((r) => setTimeout(r, 50))
+})
+
+/** A client no server would hand out: an emitter with whatever `write` the case needs. */
+function fakeClient(over: Partial<Record<'write' | 'destroyed' | 'writableEnded' | 'socket', unknown>>): ServerResponse {
+  const c = Object.assign(new EventEmitter(), {
+    destroyed: false,
+    writableEnded: false,
+    socket: { writable: true },
+    write: (_d: string, cb: (err?: Error | null) => void) => {
+      cb(null)
+      return true
+    },
+    ...over,
+  })
+  return c as unknown as ServerResponse
+}
+
+test('#285 deliver settles on every client failure, never rejects, and drops the client that failed', async () => {
+  const ok = fakeClient({})
+  const throws = fakeClient({
+    write: () => {
+      throw new Error('EPIPE')
+    },
+  })
+  const errs = fakeClient({ write: (_d: string, cb: (err?: Error | null) => void) => (cb(new Error('ERR_STREAM_DESTROYED')), false) })
+  // These three must be SKIPPED, not written and caught: a write after end EMITS `error`, and
+  // one to an unwritable socket buffers its callback for ever. A write that merely threw would
+  // leave the same set behind, so each records whether it was asked at all.
+  const written: string[] = []
+  const skipped = (why: string, over: Record<string, unknown>) =>
+    fakeClient({
+      ...over,
+      write: (_d: string, cb: (err?: Error | null) => void) => {
+        written.push(why)
+        cb(null)
+        return true
+      },
+    })
+  const ended = skipped('ended', { writableEnded: true })
+  const destroyed = skipped('destroyed', { destroyed: true })
+  const unwritable = skipped('unwritable', { socket: { writable: false } })
+  // `_writeRaw` returns false and never calls back once the socket is destroyed underneath a
+  // response that has not yet heard so. `close` is what arrives; `deliver` waits on it too.
+  const silent = fakeClient({ write: () => false })
+  setTimeout(() => silent.emit('close'), 20)
+
+  const clients = new Set([ok, throws, errs, ended, destroyed, unwritable, silent])
+  await deliver(clients, 'data: x\n\n')
+  assert.deepEqual([...clients], [ok, silent], 'the two that took it stay; the five that could not are dropped')
+  assert.deepEqual(written, [], 'none of the three was written to')
+  assert.equal(silent.listenerCount('close'), 0, 'the close listener does not accumulate per write')
+  assert.equal(ok.listenerCount('close'), 0)
+
+  await deliver(new Set(), 'data: x\n\n')
 })

@@ -109,6 +109,15 @@ export interface SessionMetadata {
 const TITLE_CHARS = 64
 
 /**
+ * How much of an answer the confirmation echoes (#285).
+ *
+ * The transport's `HUD_CHARS`, which this file cannot import without importing conclave; the
+ * two are pinned equal by `transport.test.ts`. Cut the way `forTransport` cuts a headline --
+ * one short of the limit, then an ellipsis -- so the echo never exceeds what a headline may.
+ */
+const CONFIRM_CHARS = 120
+
+/**
  * THE PROVIDER IS A LIE, AND A DELIBERATE ONE.
  *
  * `SUPPORTED_PROVIDERS = ["claude", "codex"]` in their `dist/session.js`, enforced by middleware
@@ -188,6 +197,9 @@ export class EvenRealitiesBridge {
   /** How much of a title the list carries. Pinned by `evenCompat.test.ts` against their `.slice`. */
   static readonly TITLE_CHARS = TITLE_CHARS
 
+  /** How much of an answer the confirmation echoes. Pinned equal to the transport's line by `transport.test.ts`. */
+  static readonly CONFIRM_CHARS = CONFIRM_CHARS
+
   async listen(): Promise<void> {
     // Refused rather than replaced: a second server would leak the first, still bound and still
     // holding the event loop open, with nothing left that could close it.
@@ -255,18 +267,47 @@ export class EvenRealitiesBridge {
   /** Push a message to every client of one run, and buffer it for one that connects later. */
   send(sessionId: string, msg: BridgeMessage): number {
     const s = this.#must(sessionId)
+    const id = this.#buffer(s, msg)
+    // Not awaited: `send` has never waited for a client, and a `tell` should not start to.
+    void deliver(s.clients, frame(id, msg))
+    return id
+  }
+
+  /** Record a message for replay and give it the next id. The write is `deliver`'s. */
+  #buffer(s: Session, msg: BridgeMessage): number {
     const id = s.nextId++
     s.buffered.push({ id, msg })
     if (s.buffered.length > MAX_BUFFERED) s.buffered.shift()
-    const data = JSON.stringify(msg)
-    for (const res of [...s.clients]) {
-      try {
-        res.write(`id: ${id}\ndata: ${data}\n\n`)
-      } catch {
-        s.clients.delete(res)
-      }
-    }
     return id
+  }
+
+  /**
+   * Settle a question with the answer that arrived for it, AFTER telling the glasses it did (#285).
+   *
+   * `conclave notify ask` lives exactly as long as its question: the answer resolves `ask`,
+   * the caller exits, the last view is released, and `close()` ends every stream. On the
+   * device that is a dropped connection -- the same thing a crash, a wrong token or a tailnet
+   * blip shows -- and two of two operators read a working answer as a failure. So the last
+   * frame on the stream is a `notification` echoing what was received, and it is on the wire
+   * before the answer is given to anyone who could end the stream: `deliver` settles when the
+   * kernel has the bytes, and bytes the kernel has go out ahead of the FIN that follows.
+   *
+   * The echo goes TO the device, and is the one place this file repeats text it was sent.
+   * Nothing about the allow-list changes: the run still receives `{ answer }` and nothing
+   * else, the frame is a `notification` the app only displays, and it enters no run.
+   * `broker.ts`'s "an answer is not an instruction" holds because the text is going back to
+   * where it came from, capped, not forward to anything that would act on it.
+   *
+   * `pending` is cleared by the caller BEFORE this waits, so a second answer during the wait
+   * finds nothing outstanding rather than settling the same question twice. A client that
+   * cannot take the frame -- none connected, gone, throwing -- is not a reason to hold the
+   * answer: `deliver` never rejects, and the frame is buffered for a replay either way.
+   */
+  async #confirm(s: Session, pending: (a: BridgeAnswer) => void, answer: string): Promise<void> {
+    const message = answer.length > CONFIRM_CHARS ? `${answer.slice(0, CONFIRM_CHARS - 1)}…` : answer
+    const msg: BridgeMessage = { type: 'notification', title: 'Received', message }
+    await deliver(s.clients, frame(this.#buffer(s, msg), msg))
+    pending({ answer })
   }
 
   /**
@@ -488,6 +529,10 @@ export class EvenRealitiesBridge {
       for (const e of s.buffered) res.write(`id: ${e.id}\ndata: ${JSON.stringify(e.msg)}\n\n`)
     }
     s.clients.add(res)
+    // A response with no `error` listener turns a late write into an uncaught exception --
+    // `ERR_STREAM_WRITE_AFTER_END` is EMITTED, not just handed to the callback -- and a
+    // notification surface must not take the process down because the glasses left.
+    res.on('error', () => s.clients.delete(res))
     const beat = setInterval(() => {
       try {
         res.write(':heartbeat\n\n')
@@ -541,9 +586,11 @@ export class EvenRealitiesBridge {
       this.#log(req, 200, path)
       const pending = s.pending
       s.pending = undefined
-      if (pending) pending({ answer })
-      else s.unsolicited.push({ answer })
+      // The 200 first: it is the app's own request being answered, and the confirmation is a
+      // frame on another connection that the app need not wait for.
       this.#json(res, 200, { ok: true })
+      if (pending) void this.#confirm(s, pending, answer)
+      else s.unsolicited.push({ answer })
     })
   }
 
@@ -595,10 +642,63 @@ export class EvenRealitiesBridge {
         return
       }
       s.pending = undefined
-      pending({ answer: text })
       this.#log(req, 202, path)
       // Their 202 body, key for key: `{ ok: true, sessionId: result.sessionId, provider: result.provider }`.
       this.#json(res, 202, { ok: true, sessionId: s.id, provider: CLAIMED_PROVIDER })
+      void this.#confirm(s, pending, text)
     })
   }
+}
+
+/** One SSE frame, as their `pushMessage` writes it. */
+function frame(id: number, msg: BridgeMessage): string {
+  return `id: ${id}\ndata: ${JSON.stringify(msg)}\n\n`
+}
+
+/**
+ * Write one frame to every client, settling once each has TAKEN it or cannot.
+ *
+ * Taken means the write callback fired: the bytes are with the kernel, and a socket ended
+ * after that sends them ahead of its FIN. The callback alone is not enough to wait on.
+ * `_http_outgoing`'s `_writeRaw` returns `false` WITHOUT calling back when the socket is
+ * destroyed but the response has not yet heard so, and buffers the callback for ever when
+ * the socket is not writable; the response's `close` event is what arrives in both cases,
+ * so each write also waits on that, the way `process/exit.ts` waits on stdout.
+ *
+ * A client already ended, destroyed or unwritable is skipped and dropped rather than written
+ * to: on this Node a write after end EMITS `error` on the response as well as reporting it,
+ * and `#stream`'s listener is the only thing between that and an uncaught exception. A
+ * client that throws, or reports an error through the callback, is dropped the same way.
+ *
+ * Never rejects, and never waits for nobody: delivery is best effort, and what it gates --
+ * an answer reaching its run -- must not fail because a client did. Exported for the test
+ * that drives it with clients no server would hand out.
+ */
+export function deliver(clients: Set<ServerResponse>, data: string): Promise<void> {
+  const waits: Promise<void>[] = []
+  for (const res of [...clients]) {
+    if (res.destroyed || res.writableEnded || !res.socket?.writable) {
+      clients.delete(res)
+      continue
+    }
+    waits.push(
+      new Promise<void>((resolve) => {
+        let settled = false
+        const finish = (err?: Error | null) => {
+          if (settled) return
+          settled = true
+          res.off('close', finish)
+          if (err) clients.delete(res)
+          resolve()
+        }
+        res.once('close', finish)
+        try {
+          res.write(data, finish)
+        } catch {
+          finish(new Error('write threw'))
+        }
+      }),
+    )
+  }
+  return Promise.all(waits).then(() => undefined)
 }
