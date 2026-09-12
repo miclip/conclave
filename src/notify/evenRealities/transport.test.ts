@@ -265,3 +265,11 @@ test('#280 a prompt reaches the broker as a MESSAGE on the free-text path, and c
   assert.deepEqual(await t.poll(), [], 'not held as a late answer either: nothing for the broker to collect')
   assert.equal(new Broker(dir).decisions().length, 4, 'nothing was recorded for it')
 })
+
+test('#285 the echo of an answer is cut to the same line as a headline', async (t2) => {
+  // `client.ts` cannot import the transport's `HUD_CHARS` without importing conclave, so it
+  // carries its own copy; this is what keeps the two one number.
+  const t = await up()
+  t2.after(() => t.bridge.close())
+  assert.equal(EvenRealitiesBridge.CONFIRM_CHARS, t.limits.maxChars)
+})
