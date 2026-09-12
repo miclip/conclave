@@ -34,6 +34,7 @@
  *   GET  /api/events?sessionId=&needReplay=  Server-Sent Events. `id: N\ndata: {json}\n\n`,
  *                                            `:ok` on open, `:heartbeat` every 15s.
  *   POST /api/question-response              `{ sessionId, answer }`
+ *   POST /api/prompt                         `{ text, sessionId, provider, cwd }` -> 202 `{ ok, sessionId, provider }`
  *   POST /api/permission-response            `{ sessionId, decision }`
  *   GET  /api/sessions                       `{ sessions: [{ id, title, timestamp, cwd, provider, status }] }`
  *   GET  /api/status?sessionId=              `{ state, sessionId, provider }`
@@ -129,6 +130,7 @@ const MAX_BUFFERED = 500
 const SERVED = new Set([
   '/api/events',
   '/api/question-response',
+  '/api/prompt',
   '/api/sessions',
   '/api/status',
   '/api/messages',
@@ -382,6 +384,10 @@ export class EvenRealitiesBridge {
       this.#answer(req, res, url.pathname)
       return
     }
+    if (req.method === 'POST' && url.pathname === '/api/prompt') {
+      this.#prompt(req, res, url.pathname)
+      return
+    }
     if (req.method === 'GET' && url.pathname === '/api/sessions') {
       this.#log(req, 200, url.pathname)
       // THE ITEM IS THE VENDOR'S, field for field, from `listClaudeSessions` in
@@ -442,18 +448,17 @@ export class EvenRealitiesBridge {
     //
     // This is a NOTIFICATION surface, not a terminal. It asks a question and waits for the tap
     // that answers it. `even-terminal` accepts prompts because it drives a Claude session; this
-    // does not, and a free-text message arriving here has nowhere to go -- so it is refused in
-    // those words rather than dropped. `/api/prompt` is NOT implemented, and that is the decision
-    // rather than a gap (#278): accepting prompts would make this a control surface, and
-    // `broker.ts`'s allow-list and "an answer is not an instruction" exist to keep an outside
-    // voice from becoming one.
+    // does not. `/api/prompt` IS served, but only as the answer to a question already outstanding
+    // on the run it names (`#prompt` below says why that narrowly); a prompt to start or steer
+    // anything is refused there, in words, rather than dropped here in silence.
     this.#log(req, 404, url.pathname)
     this.#json(res, 404, {
       error: 'Not found',
       served: [...SERVED].sort(),
       note:
         'conclave notify is a notification surface, not a terminal: it asks and waits for an ' +
-        'answer to POST /api/question-response. It does not accept prompts — run even-terminal for that.',
+        'answer to POST /api/question-response. POST /api/prompt is accepted only as the answer to ' +
+        'a question outstanding on that session — run even-terminal to drive a session.',
     })
   }
 
@@ -499,7 +504,14 @@ export class EvenRealitiesBridge {
     })
   }
 
-  #answer(req: IncomingMessage, res: ServerResponse, path: string): void {
+  /**
+   * A POST body, parsed, or `undefined` when it could not be.
+   *
+   * Unparseable is handed over as "nothing named", never as a guess: inventing a field from a
+   * body that has none is the failure this whole area is about, and each caller refuses the
+   * absence in the vendor's own words.
+   */
+  #body(req: IncomingMessage, then: (parsed: Record<string, unknown> | undefined) => void): void {
     let body = ''
     req.on('data', (c) => {
       body += String(c)
@@ -507,17 +519,23 @@ export class EvenRealitiesBridge {
       if (body.length > 1_000_000) req.destroy()
     })
     req.on('end', () => {
-      let sessionId: string | undefined
-      let answer = 'skip'
+      let parsed: Record<string, unknown> | undefined
       try {
-        const parsed = JSON.parse(body) as { sessionId?: unknown; answer?: unknown }
-        if (typeof parsed.sessionId === 'string') sessionId = parsed.sessionId
-        if (typeof parsed.answer === 'string') answer = parsed.answer
+        const v: unknown = JSON.parse(body)
+        if (v !== null && typeof v === 'object') parsed = v as Record<string, unknown>
       } catch {
-        // Left as `skip` with no session. An unparseable body is not an answer, and inventing
-        // one from it is the failure this whole area is about; with no session named it is
-        // refused below, as theirs refuses it, and settles nothing.
+        // Left undefined. See above.
       }
+      then(parsed)
+    })
+  }
+
+  #answer(req: IncomingMessage, res: ServerResponse, path: string): void {
+    this.#body(req, (parsed) => {
+      const sessionId = typeof parsed?.['sessionId'] === 'string' ? parsed['sessionId'] : undefined
+      // `skip` when the body carries no string: an answer is not invented, and with no session
+      // named it is refused below, as theirs refuses it, and settles nothing.
+      const answer = typeof parsed?.['answer'] === 'string' ? parsed['answer'] : 'skip'
       const s = this.#named(req, res, path, sessionId)
       if (!s) return
       this.#log(req, 200, path)
@@ -526,6 +544,61 @@ export class EvenRealitiesBridge {
       if (pending) pending({ answer })
       else s.unsolicited.push({ answer })
       this.#json(res, 200, { ok: true })
+    })
+  }
+
+  /**
+   * `POST /api/prompt`, NARROWLY: a prompt is the answer to the question this run has
+   * outstanding, and is nothing else.
+   *
+   * The app never opened `/api/events` for a session it did not start; what it did on 0.5.44
+   * was list the sessions, POST the operator's message here, take the 404, and go back to
+   * polling. So this is the hop the app expects. But their `/prompt` STARTS a session and
+   * steers it, and served that way this would stop being a notification surface and become a
+   * control surface -- the thing `broker.ts`'s allow-list and "an answer is not an
+   * instruction" exist to prevent. So the text is taken only where an answer is awaited, on
+   * the exact path `/question-response` already takes: it reaches the run as a MESSAGE, and it
+   * can no more select an option that was not offered than a typed answer can.
+   *
+   * `text` is validated before the session, as theirs does it, with their body. `cwd` and
+   * `provider` are theirs to read; here they select nothing and change nothing.
+   */
+  #prompt(req: IncomingMessage, res: ServerResponse, path: string): void {
+    this.#body(req, (parsed) => {
+      const text = parsed?.['text']
+      // Their test exactly: `!text || typeof text !== "string"`, so an empty string is missing too.
+      if (!text || typeof text !== 'string') {
+        this.#log(req, 400, path)
+        this.#json(res, 400, { error: "Missing 'text' field" })
+        return
+      }
+      const sessionId = typeof parsed?.['sessionId'] === 'string' ? parsed['sessionId'] : undefined
+      const s = this.#named(req, res, path, sessionId)
+      if (!s) return
+      const pending = s.pending
+      if (!pending) {
+        // 409 CONFLICT, chosen over the others on offer. The body is well-formed (not 400), the
+        // session exists (not 404), the token was right (not 401/403): what is wrong is the
+        // STATE of the thing named -- there is no question for this to answer -- and a conflict
+        // with the current state of the resource is what 409 is for. Their own handler maps a
+        // provider's `statusCode` straight onto the response, so a status outside 200/400/404
+        // is one the app is built to show as `error`. Not buffered, not `unsolicited`, not
+        // pushed anywhere: a late answer to a decision is a veto and comes in through
+        // `/question-response`; a prompt with nothing to answer is a prompt, and refused.
+        this.#log(req, 409, path)
+        this.#json(res, 409, {
+          error: 'No question is outstanding on this session',
+          note:
+            'conclave notify is a notification surface, not a terminal: POST /api/prompt is accepted ' +
+            'only as the answer to a question outstanding on that session — run even-terminal to drive a session.',
+        })
+        return
+      }
+      s.pending = undefined
+      pending({ answer: text })
+      this.#log(req, 202, path)
+      // Their 202 body, key for key: `{ ok: true, sessionId: result.sessionId, provider: result.provider }`.
+      this.#json(res, 202, { ok: true, sessionId: s.id, provider: CLAIMED_PROVIDER })
     })
   }
 }
