@@ -417,6 +417,16 @@ conclave notify vetoes                                   # answers that arrived 
 conclave notify log                                      # what was asked, answered, by whom
 ```
 
+`--transport even-realities --run <id>` puts the question on a pair of Even Realities glasses,
+listed there as the run. The first run that needs the device starts a broker — one process that
+holds the port for every run on the machine, announced on stderr with its pid, socket, device
+address, token and stop command — and exits 60 seconds after the last run disconnects.
+`conclave notify broker status|stop` reads those facts back or ends it now. `CONCLAVE_EVEN_PORT`
+(3456), `CONCLAVE_EVEN_TOKEN`, `CONCLAVE_EVEN_HOST` (loopback unless told otherwise),
+`CONCLAVE_EVEN_SOCKET` and `CONCLAVE_EVEN_LINGER_MS` move each of those. An answered `ask` prints
+its answer and then holds the device for 300 ms (`CONCLAVE_EVEN_CONFIRM_GRACE_MS`) so the glasses
+can show the confirmation before the run lets go.
+
 Conclave never sends these by itself. It does not turn pauses into messages, because the agent
 driving the run has the context that decides whether a human is needed and conclave does not —
 so an unasked question is never asked. An allow-list decides which fields reach a transport, and

@@ -6,12 +6,39 @@
  * were ever pointed at something else.
  *
  * It does not own the bridge. A session on the wire is a run (#278), and the server the glasses
- * dial is the machine's; so this takes a bridge somebody else listens on and the id of the run
- * it speaks for, and every call goes out under that id. `hub.ts` is where the bridge is owned.
+ * dial is the machine's; so this takes a CHANNEL to the bridge -- the bridge itself, in one
+ * process, or a run's end of the broker's socket (#286) -- and the id of the run it speaks
+ * for, and every call goes out under that id. Which is why the channel is an interface: the
+ * formatting below is the same whichever is behind it, and a second copy for the socket would
+ * be a second place for it to drift.
+ *
+ * ## The name is not the id
+ *
+ * A run id is unreadable on a heads-up display. What the operator sees is a short name they
+ * already use for the thing -- the project, as tmux would name a session -- and for an
+ * unprompted notification that name is the entire context they get, because they were not
+ * looking at a terminal and may have several projects running.
+ *
+ *     [conclave]  merge fix-189? checks green
+ *     [patchnote] advisor wants a premise confirmed
+ *
+ * The id routes and never appears. The name appears and never routes. It goes on the
+ * HEADLINE, not the title: the title is a kind ("Approval"), and two runs asking for
+ * approval have identical titles. The headline is the only line guaranteed to be shown.
  */
 
 import type { Inbound, Outbound, Transport, TransportLimits } from '../types.ts'
-import type { EvenRealitiesBridge } from './client.ts'
+import type { BridgeAnswer, BridgeMessage, EvenRealitiesBridge } from './client.ts'
+
+/**
+ * What a transport needs of the bridge, and no more. `EvenRealitiesBridge` satisfies it as it
+ * stands; the broker client satisfies it with a promise where the bridge answers at once.
+ */
+export interface SessionChannel {
+  send(runId: string, msg: BridgeMessage): number | Promise<number>
+  ask(runId: string, q: Parameters<EvenRealitiesBridge['ask']>[1]): Promise<BridgeAnswer>
+  takeUnsolicited(runId: string): BridgeAnswer[] | Promise<BridgeAnswer[]>
+}
 
 /**
  * What a HUD line can carry.
@@ -22,31 +49,35 @@ import type { EvenRealitiesBridge } from './client.ts'
  */
 const HUD_CHARS = 120
 
-export class EvenRealitiesTransport implements Transport {
+export class EvenRealitiesTransport<C extends SessionChannel = SessionChannel> implements Transport {
   readonly name = 'even-realities'
   readonly limits: TransportLimits = { maxChars: HUD_CHARS, canReceive: true }
-  readonly bridge: EvenRealitiesBridge
+  readonly bridge: C
   /** The session on the wire. The run's id: it routes and is never shown. */
   readonly runId: string
+  /** What the operator reads, in front of every headline. Absent, headlines go out bare. */
+  readonly label: string | undefined
 
-  constructor(bridge: EvenRealitiesBridge, runId: string) {
+  constructor(bridge: C, runId: string, label?: string) {
     this.bridge = bridge
     this.runId = runId
+    this.label = label
   }
 
-  async send(m: Outbound): Promise<{ id: string }> {
+  async send(sent: Outbound): Promise<{ id: string }> {
+    const m = this.label === undefined ? sent : { ...sent, headline: `[${this.label}] ${sent.headline}` }
     // A message with options is a QUESTION on this surface, and questions are asked rather than
     // announced -- so `send` only announces, and `receive` does the asking. Splitting it that
     // way keeps `tell` from opening a dialog nobody is waiting on.
     if (!m.options || m.options.length === 0) {
-      const id = this.bridge.send(this.runId, { type: 'notification', title: titleFor(m), message: m.headline })
+      const id = await this.bridge.send(this.runId, { type: 'notification', title: titleFor(m), message: m.headline })
       return { id: String(id) }
     }
     // A `tell` that carries options is a decision with a veto: announced, not asked, so the
     // options travel with the notification and the tap comes back through `poll`.
     if (m.kind === 'decided' || m.kind === 'progress') {
       this.#lastOffered = m.options.map((o) => ({ id: o.id, label: o.label }))
-      const id = this.bridge.send(this.runId, {
+      const id = await this.bridge.send(this.runId, {
         type: 'notification',
         title: titleFor(m),
         message: `${m.headline} — ${m.options.map((o) => o.label).join(' / ')}`,
@@ -72,7 +103,7 @@ export class EvenRealitiesTransport implements Transport {
    */
   async poll(): Promise<Inbound[]> {
     const from = { id: 'even-realities', kind: 'human' as const }
-    return this.bridge.takeUnsolicited(this.runId).map((a) => {
+    return (await this.bridge.takeUnsolicited(this.runId)).map((a) => {
       const chosen = this.#lastOffered.find((o) => o.label === a.answer)
       return chosen ? { option: chosen.id, from } : { text: a.answer, from }
     })

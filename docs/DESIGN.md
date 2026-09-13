@@ -368,6 +368,45 @@ anything a participant flagged as unresolved. Every human-facing line moves to s
 stdout parses in full. That is the interface an agent driving Conclave needs — confirming a
 run should not mean grepping a transcript.
 
+### One device, many runs
+
+A pair of glasses is one device on one address, and a run is not. Several runs on one machine,
+each an operating agent, each needing the human at different moments, all have to reach the same
+port — and the process that holds it cannot be any of them, because it has to outlive whichever
+finishes first. So the port is held by a broker: one process, started by the first run that needs
+it, found by the rest, and gone when it is no longer needed.
+
+What the device test removed from that design is most of it. The protocol routes every answer by
+the session it names, and a session is a run, so the broker has nothing to discover and nothing
+to look up: a run **connects** to the broker's socket and writes what it is — id, goal, working
+directory, last activity — and that connection *is* its registration. There is no registry file
+to go stale, no naming convention for a second run to collide with, and no liveness check to
+write, because a run that dies takes its socket with it and leaves the list the moment the kernel
+notices. The broker holds a promise per outstanding question, resolved by the answer that names
+its run, and writes the answer to the socket that asked. That is the whole of it.
+
+The one judgement in it is how long the broker stays after the last run lets go. Zero would make
+it pointless — `conclave notify ask` lives exactly as long as its question, and a broker that
+died with it would be rebound by the next question a second later, dropping the device's
+connection between the two, which is exactly the "working answer that looks like a failure" the
+lifetime work had just removed. Forever would be a daemon nobody asked for, holding a port they
+may want back. Sixty seconds bridges consecutive questions from one run, and one run finishing
+as another starts, while bounding how long an unattended broker holds the port; and because it is
+a judgement, `CONCLAVE_EVEN_LINGER_MS` moves it. Nothing about this is quiet: the run that starts
+the broker prints what it started and how to stop it, and `conclave notify broker status` reads
+the same facts back from the broker itself rather than from anything written down.
+
+One more interval sits at the other end of a run's life. The confirmation the bridge echoes after
+an answer never reached the operator, and the surface was blamed for it — wrongly, as an
+experiment showed: it displays notifications fine. What was happening was a race. A write
+settling means the kernel has the bytes, not that the app has drawn them, and the run let go of
+its socket — and with it the device's stream — the instant it had its answer. So an answered run
+prints its answer and then holds the socket for 300 ms before letting go: several render frames
+plus scheduling margin, below what reads as a slow command, and it delays the exit rather than
+the answer. It is deliberately conditional — a `tell` closes at once, and nothing in the broker
+or the bridge waits — because it exists for a teardown that would otherwise race the render, and
+a stream that is not closing has nothing to race.
+
 ---
 
 ## How this was built

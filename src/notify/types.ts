@@ -104,6 +104,11 @@ export interface Transport {
    * Non-blocking by contract. It reports what has arrived, never waits for something to.
    */
   poll?(): Promise<Inbound[]>
+  /**
+   * Let go of whatever the transport holds -- a socket, a session on a device. Called by the
+   * CLI once its one operation is done; absent on a transport that holds nothing (#286).
+   */
+  close?(): Promise<void>
 }
 
 /** One line of the decision log. */

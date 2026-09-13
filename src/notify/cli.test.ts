@@ -146,39 +146,52 @@ test('#278 --run is the session the glasses see, and the friendly name is only i
   // End to end through the real transport: the app lists sessions, opens the one whose `id` it
   // read, and answers under that id. Before #278 the list had one hardcoded entry keyed
   // `sessionId`, which the app never read, and any answer at all settled the one question.
+  // The stop hook first: `after` hooks run in the order added, and the directory's own cleanup
+  // must not remove the socket before the broker behind it has been told to stop.
+  let stop: (() => void) | undefined
+  t.after(() => stop?.())
   const dir = repo(t)
   const rec = record(dir, 'run-278', 'g'.repeat(100))
   rec.event({ type: 'message', at: 1_700_000_050_000 } as never)
   const port = await freePort()
+  // THE RUN DOES NOT BIND THE PORT (#286): its first send starts the broker, a process of its
+  // own, and speaks to it over this socket. Pointed at the test's directory so no per-user
+  // broker is touched, and stopped after, whatever happened.
+  const env = {
+    ...process.env,
+    CONCLAVE_EVEN_PORT: String(port),
+    CONCLAVE_EVEN_TOKEN: 'tok',
+    CONCLAVE_EVEN_QUIET: '1',
+    CONCLAVE_EVEN_SOCKET: join(dir, 'even.sock'),
+    CONCLAVE_NOTIFY_NAME: 'glasses-name',
+  }
+  stop = () => spawnSync('node', [CLI, 'notify', 'broker', 'stop'], { cwd: dir, env })
   const child = spawn(
     'node',
     [CLI, 'notify', 'ask', 'Merge?', '--options', 'yes:Merge,no:Hold', '--transport', 'even-realities', '--run', 'run-278'],
-    {
-      cwd: dir,
-      env: {
-        ...process.env,
-        CONCLAVE_EVEN_PORT: String(port),
-        CONCLAVE_EVEN_TOKEN: 'tok',
-        CONCLAVE_EVEN_QUIET: '1',
-        CONCLAVE_NOTIFY_NAME: 'glasses-name',
-      },
-    },
+    { cwd: dir, env },
   )
   let out = ''
+  let err = ''
   child.stdout.on('data', (c) => (out += String(c)))
-  child.stderr.on('data', (c) => (out += String(c)))
+  child.stderr.on('data', (c) => (err += String(c)))
   const exited = new Promise<number>((resolve) => child.on('exit', (code) => resolve(code ?? -1)))
   t.after(() => child.kill())
 
   const base = `http://127.0.0.1:${port}`
-  // The server comes up when `ask` sends; poll the list the app polls until it answers.
+  // The broker comes up when `ask` sends, and the run's session lands a moment after its
+  // port answers; poll the list the app polls until the run is on it. Waited on either way --
+  // a refused connection or an empty list -- because under the broker those are two windows,
+  // not one, and a loop that only slept on the first spun through the second in a blink.
   let sessions: Record<string, unknown>[] = []
-  for (let i = 0; i < 100 && sessions.length === 0; i++) {
+  const deadline = Date.now() + 15_000
+  while (sessions.length === 0 && Date.now() < deadline) {
     try {
       sessions = ((await (await fetch(`${base}/api/sessions?token=tok`)).json()) as { sessions: typeof sessions }).sessions
     } catch {
-      await new Promise((r) => setTimeout(r, 50))
+      // Not up yet.
     }
+    if (sessions.length === 0) await new Promise((r) => setTimeout(r, 50))
   }
   // The run id is the session, and the rest of the item is the run's record: the goal as the
   // title, cut to the vendor's 64; the newest event as the timestamp; the working directory.
@@ -208,8 +221,11 @@ test('#278 --run is the session the glasses see, and the friendly name is only i
     body: JSON.stringify({ sessionId: 'run-278', answer: 'Merge' }),
   })
   assert.equal(byRun.status, 200)
-  assert.equal(await exited, 0)
+  assert.equal(await exited, 0, err)
   assert.deepEqual(JSON.parse(out), { option: 'yes', by: { id: 'even-realities', kind: 'human' } })
+  // The start was announced, on stderr, by the run that did it -- with what it started.
+  assert.match(err, /started the Even Realities broker \(pid \d+\)/)
+  assert.match(err, /conclave notify broker stop/)
 
   const log = JSON.parse(run(['log', '--json'], dir).out) as { runId?: string; transport: string }[]
   assert.equal(log[0]?.runId, 'run-278', 'and the record names the same run')

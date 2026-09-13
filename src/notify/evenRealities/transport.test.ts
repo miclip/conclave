@@ -10,7 +10,9 @@ import test from 'node:test'
 import { tempDir } from '../../testkit/tempDir.ts'
 import { Broker } from '../broker.ts'
 import { TransportRefused, transportNames, resolveTransport } from '../registry.ts'
-import { resetSharedHub, sharedHub } from './hub.ts'
+import { existsSync } from 'node:fs'
+import { join } from 'node:path'
+import { BrokerBackedTransport } from './brokerTransport.ts'
 import { EvenRealitiesBridge, type SessionMetadata } from './client.ts'
 import { SessionRecorder } from '../../workspace/sessionRecord.ts'
 
@@ -39,7 +41,7 @@ function record(root: string, id: string): SessionRecorder {
 }
 
 /** One run's transport over a bridge that is listening. */
-async function up(): Promise<EvenRealitiesTransport> {
+async function up(): Promise<EvenRealitiesTransport<EvenRealitiesBridge>> {
   const bridge = new EvenRealitiesBridge({ port: 0, token: 'tok' })
   await bridge.listen()
   bridge.openSession('run-1', () => meta())
@@ -47,7 +49,7 @@ async function up(): Promise<EvenRealitiesTransport> {
 }
 
 /** Answer whatever question is outstanding on the run, as the app would. */
-async function answer(t: EvenRealitiesTransport, text: string): Promise<void> {
+async function answer(t: EvenRealitiesTransport<EvenRealitiesBridge>, text: string): Promise<void> {
   await new Promise((r) => setTimeout(r, 80))
   await fetch(`${t.bridge.url}/api/question-response?token=tok`, {
     method: 'POST',
@@ -63,41 +65,45 @@ test('#184 it is registered, so --transport even-realities resolves', (t2) => {
   record(root, 'run-1')
   const was = process.cwd()
   process.chdir(root)
-  resetSharedHub()
   try {
     assert.ok(transportNames().includes('even-realities'))
     const t = resolveTransport('even-realities', { runId: 'run-1' })
     assert.equal(t?.name, 'even-realities')
     assert.equal(t?.limits.canReceive, true)
+    assert.ok(t instanceof BrokerBackedTransport, 'a run speaks through the broker, never a bridge of its own (#286)')
   } finally {
-    resetSharedHub()
     process.chdir(was)
   }
 })
 
-test('#278 resolving with --run opens that run as the session; without one, or an unreadable one, it is refused', (t2) => {
+test('#278 resolving with --run names that run; without one, or an unreadable one, it is refused', (t2) => {
   // The id ROUTES: it is what the glasses send back on `/question-response`. The friendly name
   // is a label on the messages and never the id, because two runs in one directory share it.
-  // No id is minted in the absence of a run, and no run is opened whose record cannot be read:
-  // a session is a run, and its list entry is that run's record.
+  // No id is minted in the absence of a run, and no run is resolved whose record cannot be
+  // read: a session is a run, and its list entry is that run's record.
+  //
+  // And resolving TOUCHES NOTHING (#286): the socket is dialled, and the broker started, on the
+  // first send. A command with nothing to send starts no daemon.
   const root = tempDir(t2, 'conclave-er-registry')
   execFileSync('git', ['init', '-q'], { cwd: root })
   record(root, '20260911-114005-36207')
   const was = process.cwd()
   process.chdir(root)
-  resetSharedHub()
   process.env['CONCLAVE_NOTIFY_NAME'] = 'shown'
+  const socket = join(root, 'even.sock')
+  process.env['CONCLAVE_EVEN_SOCKET'] = socket
   try {
-    resolveTransport('even-realities', { runId: '20260911-114005-36207' })
-    assert.deepEqual(sharedHub().bridge.sessions(), ['20260911-114005-36207'])
+    const t = resolveTransport('even-realities', { runId: '20260911-114005-36207' })
+    assert.equal((t as BrokerBackedTransport).runId, '20260911-114005-36207')
+    assert.equal((t as BrokerBackedTransport).label, 'shown', 'the name labels messages')
     assert.throws(() => resolveTransport('even-realities'), TransportRefused)
     assert.throws(() => resolveTransport('even-realities', { runId: '  ' }), /needs the run/, 'blank is absent')
     assert.throws(() => resolveTransport('even-realities', { runId: 'nope' }), /no readable record for run nope/)
-    assert.deepEqual(sharedHub().bridge.sessions(), ['20260911-114005-36207'], 'and nothing was opened for any of those')
     assert.ok(resolveTransport('fake'), 'a transport that needs no run is untouched')
+    assert.equal(existsSync(socket), false, 'nothing was dialled or started by resolving')
   } finally {
     delete process.env['CONCLAVE_NOTIFY_NAME']
-    resetSharedHub()
+    delete process.env['CONCLAVE_EVEN_SOCKET']
     process.chdir(was)
   }
 })
@@ -201,7 +207,7 @@ test('#184 a veto tapped after the decision reaches the broker through poll', as
 })
 
 /** `POST /api/prompt`, as the app sends the operator's message. */
-async function promptText(t: EvenRealitiesTransport, text: string): Promise<Response> {
+async function promptText(t: EvenRealitiesTransport<EvenRealitiesBridge>, text: string): Promise<Response> {
   await new Promise((r) => setTimeout(r, 80))
   return fetch(`${t.bridge.url}/api/prompt?token=tok`, {
     method: 'POST',

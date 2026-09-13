@@ -12,7 +12,8 @@
 import { basename } from 'node:path'
 
 import { projectRootFor } from '../workspace/sessionRecord.ts'
-import { sharedHub } from './evenRealities/hub.ts'
+import { BrokerBackedTransport } from './evenRealities/brokerTransport.ts'
+import { brokerConfigFromEnv, ensureBroker } from './evenRealities/daemon.ts'
 import { describeRun } from './evenRealities/runMetadata.ts'
 import { FakeTransport } from './fake.ts'
 import type { Inbound, Transport } from './types.ts'
@@ -78,25 +79,25 @@ export class TransportRefused extends Error {}
 /**
  * `even-realities` serves the Terminal Mode protocol rather than calling it: the glasses connect
  * to an address the operator types, so conclave being that address is what puts its questions in
- * front of them. `EVEN_PORT` and `EVEN_TOKEN` are how the operator points the app at it.
+ * front of them. `CONCLAVE_EVEN_PORT` and `CONCLAVE_EVEN_TOKEN` are how the operator points the
+ * app at it.
+ *
+ * THE RUN NEVER BINDS THE PORT (#286). The device is one pair of glasses on one address, and
+ * the process that holds that address is the broker -- started by the first run that needs it,
+ * outliving every run, found by the ones after through a socket whose path is known rather
+ * than searched for. What this returns is a run's end of that socket, connected on first use.
+ * Every other rule about the transport -- a session is a run, the name is a label and never
+ * the id, the device may be off loopback -- is unchanged and is read by the broker from the
+ * same variables.
+ *
+ * THE DEVICE IS NOT ON LOOPBACK (#276). The bridge binds `127.0.0.1` unless told otherwise,
+ * which is the right default for something that opens a port -- but the glasses reach this
+ * across a network, so on the default nothing they can dial will ever answer. An env var rather
+ * than a new default, because widening the bind is an exposure decision and belongs to whoever
+ * runs it: `CONCLAVE_EVEN_HOST=0.0.0.0` for any interface, or the machine's own tailnet address
+ * to keep it off the LAN.
  */
 function evenRealities(opts: ResolveOptions): Transport {
-  const port = Number(process.env['CONCLAVE_EVEN_PORT'] ?? '3456')
-  const token = process.env['CONCLAVE_EVEN_TOKEN']
-  // THE DEVICE IS NOT ON LOOPBACK (#276). The bridge binds `127.0.0.1` unless told otherwise,
-  // which is the right default for something that opens a port -- but the glasses reach this
-  // across a network, so on the default nothing they can dial will ever answer. Observed with
-  // the app pointed at a Tailscale name: the address resolved, the port refused.
-  //
-  // An env var rather than a new default, because widening the bind is an exposure decision and
-  // belongs to whoever runs it. `CONCLAVE_EVEN_HOST=0.0.0.0` for any interface, or the machine's
-  // own tailnet address to keep it off the LAN.
-  const host = process.env['CONCLAVE_EVEN_HOST']
-  // A VIEW of the process's one bridge, not a bridge of its own. The glasses are a device:
-  // one pair, one address the operator typed, one connection. Building one per broker meant
-  // the second concurrent run's `listen()` met a bound port -- and had it not, two runs
-  // attached to one device would each have taken whichever answer arrived next (#184).
-  //
   // A SESSION IS A RUN, so there is no session without one (#278). No synthetic id stands in:
   // a session the glasses can open must be a run the operator can find, and an id minted here
   // would be neither. `fake` needs no run and is untouched by this; it is this transport's rule.
@@ -115,7 +116,11 @@ function evenRealities(opts: ResolveOptions): Transport {
   if (!describe()) {
     throw new TransportRefused(`no readable record for run ${runId} in this project — see conclave sessions`)
   }
-  return sharedHub({ port, ...(token ? { token } : {}), ...(host ? { host } : {}) }).view(runId, friendlyName(), describe)
+  // Lazy: nothing is dialled and nothing is started until the first send. A start is announced
+  // on stderr by whichever run does it (`daemon.ts` says why loudly).
+  return new BrokerBackedTransport(runId, friendlyName(), describe, () =>
+    ensureBroker(brokerConfigFromEnv(), { stderr: (text) => process.stderr.write(`${text}\n`) }),
+  )
 }
 
 const BUILT_IN: Record<string, (opts: ResolveOptions) => Transport> = { fake, 'even-realities': evenRealities }
