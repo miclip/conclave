@@ -407,6 +407,23 @@ the answer. It is deliberately conditional — a `tell` closes at once, and noth
 or the bridge waits — because it exists for a teardown that would otherwise race the render, and
 a stream that is not closing has nothing to race.
 
+The third interval was found once the second worked. With the confirmation landing, the operator
+answered, read `Received`, and watched the thread vanish from the list: the session had been the
+socket, and the socket was gone. The app reconnects to the stream it was holding, gets 404, and
+falls back to a list the thread is no longer on. So the run leaving and the session closing are
+now two events thirty seconds apart: the session stays on the bridge, buffer and all, listed as
+`idle` — the run's last word about itself minus a status it is no longer there to have — and a
+reconnect inside that window gets its stream and its replay. It is not the confirmation grace,
+which is a transmission margin measured in render frames that holds every *run* open, and it is
+not the broker linger, which holds the *port* for the next invocation; it is how long a finished
+thread is worth a line on a display that shows a few. A retained session is not a run: it does
+not hold the broker up, and only a broker shutting down closes it at once. A run that leaves
+with a question still outstanding is retained like any other: its question is settled `skip` on
+the bridge — the run's end of it went with the socket, and a session must not read `awaiting`
+for a run that is not there — and the thread stays, question frame included, so what the
+operator was looking at does not vanish because the run did. `CONCLAVE_EVEN_SESSION_LINGER_MS`
+moves it, and zero is the old behaviour.
+
 ---
 
 ## How this was built

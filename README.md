@@ -425,7 +425,9 @@ address, token and stop command — and exits 60 seconds after the last run disc
 (3456), `CONCLAVE_EVEN_TOKEN`, `CONCLAVE_EVEN_HOST` (loopback unless told otherwise),
 `CONCLAVE_EVEN_SOCKET` and `CONCLAVE_EVEN_LINGER_MS` move each of those. An answered `ask` prints
 its answer and then holds the device for 300 ms (`CONCLAVE_EVEN_CONFIRM_GRACE_MS`) so the glasses
-can show the confirmation before the run lets go.
+can show the confirmation before the run lets go. Once it has, the thread stays listed as `idle`
+for 30 seconds (`CONCLAVE_EVEN_SESSION_LINGER_MS`; `0` removes it at once) so the app can go back
+to it, and then it is gone.
 
 Conclave never sends these by itself. It does not turn pauses into messages, because the agent
 driving the run has the context that decides whether a human is needed and conclave does not —

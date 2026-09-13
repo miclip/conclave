@@ -21,9 +21,10 @@
  * correlation: an answer for session X goes to the connection that opened X, because that
  * is where the question came from. There is no lookup a second run could collide with.
  *
- * Liveness is the socket. A connection that drops takes its session with it, so a run that
- * crashed is gone from `/api/sessions` the moment the kernel notices, and a stale entry --
- * conclave's own `state` vs `alive` split -- has no way to form.
+ * Liveness is the socket. A connection that drops takes its RUN with it: the id is free, the
+ * broker linger counts from it, and its session is `idle` from the next poll and gone after a
+ * bounded retention (#290, below) -- so a stale entry that claims a live run, conclave's own
+ * `state` vs `alive` split, still has no way to form.
  *
  * ## The wire
  *
@@ -38,7 +39,7 @@
  *   -> { type: 'stop', id }                  <- { type: 'stopping', id }, then EOF
  *                                            <- { type: 'error', id?, message }
  *
- * One connection is one session, and closing it closes the session -- there is no `close`
+ * One connection is one session, and closing it is how the run leaves -- there is no `close`
  * frame, because the socket is the liveness and a frame could be forgotten where a FIN
  * cannot. `open` sent again on the same connection with the same id refreshes `meta`, which
  * is how a run's timestamp moves while it is attached. `poll` is here because the transport's
@@ -64,6 +65,35 @@
  * runs finishing and starting -- while bounding how long an unattended broker holds the port
  * after the last run is gone. It is a judgement, so it is a number an operator can move:
  * `CONCLAVE_EVEN_LINGER_MS`.
+ *
+ * ## Why an answered session stays thirty seconds (#290)
+ *
+ * The run's socket is the session's liveness, and closing the session the instant the socket
+ * closed was the last of the disconnect symptoms: the operator answered, read `Received`, and
+ * the thread was gone from the list -- the app's reconnect to its stream got 404 and fell back
+ * to the list, where the thread it had just answered was not. So a session whose run has let
+ * go is RETAINED, buffer and all, listed as `idle`, and closed after a session linger. A
+ * reconnect inside it gets 200 and its replay; the list still has the thread to go back to.
+ * Every detach retains, a run that left mid-question included -- its question is settled
+ * `skip` on the bridge (`detachSession`) so the session reads `idle` and not `awaiting`; only
+ * the broker's own shutdown closes a session at once.
+ *
+ * This is the THIRD duration in this integration, and it is not either of the other two:
+ *
+ *   - `DEFAULT_CONFIRM_GRACE_MS` (300ms) is the run holding its SOCKET so the confirmation
+ *     frame is transmitted before the socket closes. It is a transmission margin, sized in
+ *     render frames, and it delays the run's exit. Retention starts where it ends.
+ *   - `DEFAULT_LINGER_MS` (60s) is the BROKER outliving its last run so the next one finds
+ *     the port bound. It bridges invocations; it says nothing about what the glasses list.
+ *
+ * Retention is about the operator: long enough to read a confirmation and navigate back to
+ * the thread, short enough that finished runs do not pile up on a display that shows a few
+ * lines. Thirty seconds is that judgement, and `CONCLAVE_EVEN_SESSION_LINGER_MS` moves it;
+ * zero is the old behaviour. A retained session does not hold the broker: it is not an
+ * attached run, the broker linger counts from the socket that left, and a broker shutting
+ * down closes it with everything else. Not folded into either other knob because a longer
+ * confirmation grace would hold every RUN open, and a longer broker linger would hold the
+ * PORT, and neither is what the operator was missing.
  */
 
 import { chmodSync, unlinkSync } from 'node:fs'
@@ -103,6 +133,23 @@ export function lingerMs(env: NodeJS.ProcessEnv = process.env): number {
 }
 
 /**
+ * How long a session outlives the run that opened it, unless `CONCLAVE_EVEN_SESSION_LINGER_MS`
+ * says otherwise. Why thirty seconds, and why it is not the confirmation grace or the broker
+ * linger, is in the header (#290).
+ */
+export const DEFAULT_SESSION_LINGER_MS = 30_000
+
+export const SESSION_LINGER_ENV = 'CONCLAVE_EVEN_SESSION_LINGER_MS'
+
+/** The session linger, from the environment or the default, read the way `lingerMs` reads its own. */
+export function sessionLingerMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env[SESSION_LINGER_ENV]
+  if (raw === undefined || raw.trim() === '') return DEFAULT_SESSION_LINGER_MS
+  const n = Number(raw)
+  return Number.isFinite(n) && n >= 0 ? n : DEFAULT_SESSION_LINGER_MS
+}
+
+/**
  * Where the broker is, for everything on this machine running as this user.
  *
  * Deterministic on purpose: a run finds the broker by KNOWING the path, not by searching
@@ -122,6 +169,8 @@ export function brokerSocketPath(env: NodeJS.ProcessEnv = process.env): string {
 export interface BrokerOptions extends BridgeOptions {
   socketPath?: string
   lingerMs?: number
+  /** How long a session stays listed after its run disconnects. `sessionLingerMs()` when absent. */
+  sessionLingerMs?: number
 }
 
 type Question = Parameters<EvenRealitiesBridge['ask']>[1]
@@ -144,6 +193,8 @@ export interface BrokerStatus {
   /** ISO. When the broker bound; a status older than a run means the run did not start it. */
   startedAt: string
   lingerMs: number
+  /** How long a finished run's session stays listed (#290): the policy this broker is actually running. */
+  sessionLingerMs: number
   sessions: string[]
 }
 
@@ -167,6 +218,7 @@ export class EvenRealitiesBroker {
   readonly bridge: EvenRealitiesBridge
   readonly socketPath: string
   readonly #lingerMs: number
+  readonly #sessionLingerMs: number
   #server: Server | undefined
   #linger: NodeJS.Timeout | undefined
   readonly #connections = new Set<Socket>()
@@ -176,6 +228,13 @@ export class EvenRealitiesBroker {
    */
   readonly #owners = new Map<string, Socket>()
   /**
+   * Sessions whose run has gone, kept on the bridge until their expiry (#290). Not in
+   * `#owners`: a retained session is not an attached run, so it neither refuses a reattach
+   * nor holds the broker linger. The `Attached` is the one the bridge's `describe` reads, so
+   * a reattach reuses it -- a fresh one would leave the bridge describing the old.
+   */
+  readonly #retained = new Map<string, { attached: Attached; expiry: NodeJS.Timeout }>()
+  /**
    * Settles when the broker has shut down, by `close()` or by lingering out. A caller that
    * runs the broker as a process awaits this to know when to exit.
    */
@@ -184,10 +243,11 @@ export class EvenRealitiesBroker {
   #startedAt = ''
 
   constructor(opts: BrokerOptions = {}) {
-    const { socketPath, lingerMs: linger, ...bridge } = opts
+    const { socketPath, lingerMs: linger, sessionLingerMs: sessionLinger, ...bridge } = opts
     this.bridge = new EvenRealitiesBridge(bridge)
     this.socketPath = socketPath ?? brokerSocketPath()
     this.#lingerMs = linger ?? lingerMs()
+    this.#sessionLingerMs = sessionLinger ?? sessionLingerMs()
     this.closed = new Promise<void>((resolve) => {
       this.#resolveClosed = resolve
     })
@@ -228,9 +288,13 @@ export class EvenRealitiesBroker {
     this.#armLinger(Math.max(this.#lingerMs, START_GRACE_MS))
   }
 
-  /** The sessions open on the bridge, in the order they attached. */
+  /**
+   * The runs attached now, in the order they attached. Not the bridge's list: that also has
+   * the sessions of runs that have gone (#290), and `status` answers "what is holding this
+   * broker up", which those do not.
+   */
   sessions(): string[] {
-    return this.bridge.sessions()
+    return [...this.#owners.keys()]
   }
 
   /** What `status` answers, from the live object rather than anything written down. */
@@ -242,6 +306,7 @@ export class EvenRealitiesBroker {
       token: this.bridge.token,
       startedAt: this.#startedAt,
       lingerMs: this.#lingerMs,
+      sessionLingerMs: this.#sessionLingerMs,
       sessions: this.sessions(),
     }
   }
@@ -249,6 +314,10 @@ export class EvenRealitiesBroker {
   /** Every connection ended, every session closed, the bridge and the socket down. */
   async close(): Promise<void> {
     this.#disarmLinger()
+    // Retained sessions go with the bridge, now, not at their expiry: a timer left armed here
+    // would hold the process up to a session linger after the broker was gone.
+    for (const { expiry } of this.#retained.values()) clearTimeout(expiry)
+    this.#retained.clear()
     const server = this.#server
     this.#server = undefined
     // The bridge first, so a pending `ask` is settled `skip` and the answer frame is written
@@ -280,6 +349,30 @@ export class EvenRealitiesBroker {
     this.#linger = undefined
   }
 
+  /**
+   * Keep a run's session on the bridge after the run has gone, listed `idle`, for the
+   * session linger (#290). Closed at once instead only when the linger is zero. A question
+   * the run left outstanding is settled `skip` on the bridge first -- the run's end of it was
+   * released when its socket closed, and the session must not read `awaiting` for a run that
+   * is not there -- and the session is retained like any other, question frame and all.
+   */
+  #retain(attached: Attached): void {
+    const { sessionId } = attached
+    if (this.#sessionLingerMs === 0) {
+      this.bridge.closeSession(sessionId)
+      return
+    }
+    this.bridge.detachSession(sessionId)
+    // The bridge asks `describe` on every listing and `describe` reads this, so the list says
+    // `idle` from the next poll: the run's last word about itself is kept, its status is not.
+    attached.meta = { ...attached.meta, status: 'idle' }
+    const expiry = setTimeout(() => {
+      this.#retained.delete(sessionId)
+      this.bridge.closeSession(sessionId)
+    }, this.#sessionLingerMs)
+    this.#retained.set(sessionId, { attached, expiry })
+  }
+
   #attach(socket: Socket): void {
     // CLOSING. `close()` takes the bridge down before the socket server, and a run that
     // connects in between would be opened onto a bridge with no port behind it -- handed an
@@ -299,13 +392,16 @@ export class EvenRealitiesBroker {
       if (!socket.destroyed && !socket.writableEnded) socket.write(`${JSON.stringify(r)}\n`)
     }
     // A run that hangs up, crashes, or is killed all look the same from here: the socket
-    // closes, and its session goes with it. There is no other way to leave.
+    // closes, and the run is gone. There is no other way to leave. Its SESSION stays a while
+    // (#290) -- unless the broker is closing, in which case the bridge is already taking it.
     socket.on('close', () => {
       this.#connections.delete(socket)
       if (!attached) return
       this.#owners.delete(attached.sessionId)
-      this.bridge.closeSession(attached.sessionId)
-      if (this.#server) this.#armLinger()
+      if (this.#server) {
+        this.#retain(attached)
+        this.#armLinger()
+      }
     })
     socket.on('error', () => socket.destroy())
     lines(socket, (line) => {
@@ -343,8 +439,22 @@ export class EvenRealitiesBroker {
         // out from under the other.
         throw new Error(`session ${req.sessionId} is already open from another connection`)
       }
-      const now: Attached = { sessionId: req.sessionId, meta: req.meta }
-      this.bridge.openSession(req.sessionId, () => now.meta)
+      const retained = this.#retained.get(req.sessionId)
+      let now: Attached
+      if (retained) {
+        // The same session, back inside its retention: the run reconnected, or a new one took
+        // up the id. Its expiry is disarmed BEFORE anything else -- left armed it would close
+        // the session out from under this connection -- and the retained `Attached` is
+        // reused, so the bridge's `describe` reads this connection's metadata rather than
+        // the `idle` the last one left. The buffer is kept: a reconnect gets its history.
+        clearTimeout(retained.expiry)
+        this.#retained.delete(req.sessionId)
+        now = retained.attached
+        now.meta = req.meta
+      } else {
+        now = { sessionId: req.sessionId, meta: req.meta }
+        this.bridge.openSession(req.sessionId, () => now.meta)
+      }
       this.#owners.set(req.sessionId, socket)
       // A run is attached from here: the linger, or the start grace, stands down.
       this.#disarmLinger()

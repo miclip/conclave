@@ -423,6 +423,37 @@ test('#184 closing a run answers its outstanding question rather than hanging it
   await b.close()
 })
 
+test('#290 detaching a run settles its question skip and keeps everything else: the entry, the stream, the buffer', async (t) => {
+  // The broker's hang-up path. `closeSession` ends the stream and drops the buffer; this
+  // settles only the question, so a session retained after its run has gone reads its own
+  // status rather than `awaiting`, and the app can still reconnect to it and replay it.
+  const b = await bridge()
+  t.after(() => b.close())
+  const ac = new AbortController()
+  t.after(() => ac.abort())
+  const reading = frames(`${b.url}/api/events?sessionId=run-1&token=tok`, 2, ac.signal)
+  // Let the stream attach first, so both frames below are pushed to it rather than buffered.
+  await new Promise((r) => setTimeout(r, 100))
+  const one = b.ask('run-1', q)
+  await new Promise((r) => setTimeout(r, 20))
+
+  b.detachSession('run-1')
+  // Raced, because a detach that cleared the question without settling it would hang here, not fail.
+  const settled = await Promise.race([one, new Promise<'hung'>((r) => setTimeout(() => r('hung'), 1_000))])
+  assert.deepEqual(settled, { answer: 'skip' }, 'nobody answered, and that is the truth')
+  assert.deepEqual(b.sessions(), ['run-1'], 'still open')
+  const listed = (await (await fetch(`${b.url}/api/sessions?token=tok`)).json()) as { sessions: { status: string }[] }
+  assert.equal(listed.sessions[0]?.status, 'busy', "the run's own status, not awaiting")
+  // The stream was not ended: a push after the detach still reaches the client it had.
+  b.send('run-1', { type: 'notification', title: 'after', message: 'still here' })
+  assert.deepEqual((await reading).map((f) => f['type']), ['user_question', 'notification'])
+  const buffered = (await (await fetch(`${b.url}/api/messages?token=tok&sessionId=run-1`)).json()) as { messages: unknown[] }
+  assert.equal(buffered.messages.length, 2, 'the buffer is intact')
+  // Idempotent, and harmless on an unknown id.
+  b.detachSession('run-1')
+  b.detachSession('run-9')
+})
+
 /** `POST /api/prompt`, as the app sends the operator's message. */
 async function prompt(b: EvenRealitiesBridge, body: unknown): Promise<Response> {
   return fetch(`${b.url}/api/prompt?token=tok`, {

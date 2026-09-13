@@ -1332,6 +1332,7 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
         console.log(`  socket  ${s.socketPath}`)
         console.log(`  device  ${s.url}   token ${s.token}`)
         console.log(`  linger  ${s.lingerMs}ms after the last run disconnects`)
+        console.log(`  listed  ${s.sessionLingerMs}ms after a run disconnects, its session stays on the device`)
         console.log(`  runs    ${s.sessions.length === 0 ? 'none attached' : s.sessions.join(', ')}`)
         return 0
       }
