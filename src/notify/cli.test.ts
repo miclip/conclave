@@ -222,7 +222,7 @@ test('#278 --run is the session the glasses see, and the friendly name is only i
   })
   assert.equal(byRun.status, 200)
   assert.equal(await exited, 0, err)
-  assert.deepEqual(JSON.parse(out), { option: 'yes', by: { id: 'even-realities', kind: 'human' } })
+  assert.deepEqual(JSON.parse(out), { option: 'yes', text: 'Merge', by: { id: 'even-realities', kind: 'human' } })
   // The start was announced, on stderr, by the run that did it -- with what it started.
   assert.match(err, /started the Even Realities broker \(pid \d+\)/)
   assert.match(err, /conclave notify broker stop/)

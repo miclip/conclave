@@ -9,7 +9,7 @@ import { mkdirSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import test from 'node:test'
 import { tempDir } from '../testkit/tempDir.ts'
-import { Broker, decisionsPath, forTransport } from './broker.ts'
+import { Broker, decisionsPath, forTransport, resolveLabel } from './broker.ts'
 import { FakeTransport } from './fake.ts'
 import type { Outbound } from './types.ts'
 
@@ -34,7 +34,7 @@ test('#184 nothing but the allowed fields can reach a transport', () => {
     toolOutput: 'npm test\n  1521 passing',
   } as unknown as Outbound
 
-  const carried = forTransport(smuggled, { maxChars: 200 })
+  const carried = forTransport(smuggled, { maxChars: 200, canPresentOptions: true })
   assert.deepEqual(
     Object.keys(carried).sort(),
     ['headline', 'href', 'kind', 'options'],
@@ -51,15 +51,15 @@ test('#184 the allow-list is about shape, not sanitising: prose travels as writt
   // surface that shows a notification has read it. Notifications are prose; that is the whole
   // point of them, and a third party carrying them sees what they carry.
   const leaky: Outbound = { kind: 'progress', headline: 'pushed b59eed4 — key is hunter2' }
-  assert.match(forTransport(leaky, { maxChars: 200 }).headline, /hunter2/, 'prose travels as written')
+  assert.match(forTransport(leaky, { maxChars: 200, canPresentOptions: true }).headline, /hunter2/, 'prose travels as written')
   // The cap is a rendering budget, not a redaction: it exists so a HUD gets a line it can show.
-  assert.equal(forTransport(leaky, { maxChars: 20 }).headline.length, 20)
+  assert.equal(forTransport(leaky, { maxChars: 20, canPresentOptions: true }).headline.length, 20)
 })
 
 test('#184 a headline is cut to what the surface can show, and href carries the rest', () => {
   // A HUD line and a chat message are the same message at different budgets. Truncated rather
   // than refused: a surface that cannot show the whole line should still show the line.
-  const hud = forTransport(APPROVAL, { maxChars: 20 })
+  const hud = forTransport(APPROVAL, { maxChars: 20, canPresentOptions: true })
   assert.equal(hud.headline.length, 20)
   assert.match(hud.headline, /…$/)
   assert.equal(hud.href, APPROVAL.href, 'where to read the rest is not truncated away')
@@ -298,4 +298,205 @@ test('#184 the budget never applies to a question', async (t) => {
   await b.tell({ kind: 'progress', headline: 'first' }, tx)
   const answer = await b.ask({ kind: 'approval', headline: 'Merge?', options: [{ id: 'yes', label: 'Yes' }] }, tx)
   assert.equal(answer?.option, 'yes', 'the question went through the budget that had just fired')
+})
+
+test('#292 text that is the whole label, whitespace and case aside, is that option', async (t) => {
+  // A surface that cannot render a choice still shows the question, so the operator types or
+  // says the label -- and neither reliably keeps case or whitespace. The text is kept beside
+  // the id, so the record shows what was actually said.
+  const dir = tempDir(t, 'conclave-notify')
+  const b = new Broker(dir)
+
+  const said = new FakeTransport()
+  said.reply = { text: '  merge  ', from: { id: 'mic', kind: 'human' } }
+  assert.deepEqual(await b.ask(APPROVAL, said), { option: 'yes', text: '  merge  ', by: { id: 'mic', kind: 'human' } })
+
+  const shouted = new FakeTransport()
+  shouted.reply = { text: 'DO NOT MERGE', from: { id: 'mic', kind: 'human' } }
+  assert.deepEqual(await b.ask(APPROVAL, shouted), { option: 'no', text: 'DO NOT MERGE', by: { id: 'mic', kind: 'human' } })
+
+  // The label was offered with stray whitespace of its own; the comparison trims both sides.
+  const padded = new FakeTransport()
+  padded.reply = { text: 'hold', from: { id: 'mic', kind: 'human' } }
+  const answer = await b.ask({ kind: 'approval', headline: 'Merge?', options: [{ id: 'wait', label: ' Hold ' }] }, padded)
+  assert.equal(answer?.option, 'wait')
+})
+
+test('#292 the whole label and nothing more: an extended phrase is a message', async (t) => {
+  // "merge it" is not `Merge`, and "merge, then deploy" is not either. Anything short of the
+  // full label is prose for the caller to read; a prefix match here would be the parser the
+  // inbound design refuses to have.
+  const dir = tempDir(t, 'conclave-notify')
+  const b = new Broker(dir)
+  for (const text of ['merge it', 'Merge, then deploy', 'do not', 'not merge', 'Merge Merge']) {
+    const tx = new FakeTransport()
+    tx.reply = { text, from: { id: 'mic', kind: 'human' } }
+    const answer = await b.ask(APPROVAL, tx)
+    assert.equal(answer?.option, undefined, `${JSON.stringify(text)} must stay a message`)
+    assert.equal(answer?.text, text, 'and travel as written')
+  }
+  assert.ok(b.decisions().every((d) => d.answer?.option === undefined), 'none of them is an option on the record')
+})
+
+test('#292 two options shown as one label make the text ambiguous, and it stays a message', async (t) => {
+  // Refused rather than guessed between. The caller made the text ambiguous by offering it
+  // twice; picking the first would be inventing an answer.
+  const dir = tempDir(t, 'conclave-notify')
+  const tx = new FakeTransport()
+  tx.reply = { text: 'go', from: { id: 'mic', kind: 'human' } }
+  const answer = await new Broker(dir).ask(
+    { kind: 'direction', headline: 'Which?', options: [{ id: 'a', label: 'Go' }, { id: 'b', label: 'go' }] },
+    tx,
+  )
+  assert.deepEqual(answer, { text: 'go', by: { id: 'mic', kind: 'human' } })
+  assert.equal(resolveLabel('go', [{ id: 'a', label: 'Go' }, { id: 'b', label: 'go' }]), undefined)
+  assert.equal(resolveLabel('   ', [{ id: 'a', label: ' ' }]), undefined, 'blank text matches nothing, even a blank label')
+})
+
+test('#292 a tap, a matched label and a message are three different records', async (t) => {
+  // The distinction is evidence. Six months later the record has to be able to say whether the
+  // operator pressed a button the surface rendered, or said a word that happened to be the
+  // label -- and the second is a step from prose to selection that should stay visible.
+  const dir = tempDir(t, 'conclave-notify')
+  const b = new Broker(dir)
+
+  const tapped = new FakeTransport()
+  tapped.reply = { option: 'yes', from: { id: 'mic', kind: 'human' } }
+  await b.ask(APPROVAL, tapped)
+
+  const matched = new FakeTransport()
+  matched.reply = { text: 'Merge', from: { id: 'mic', kind: 'human' } }
+  await b.ask(APPROVAL, matched)
+
+  const spoken = new FakeTransport()
+  spoken.reply = { text: 'not yet', from: { id: 'mic', kind: 'human' } }
+  await b.ask(APPROVAL, spoken)
+
+  assert.deepEqual(
+    b.decisions().map((d) => [d.answer?.option, d.answer?.text]),
+    [
+      ['yes', undefined],
+      ['yes', 'Merge'],
+      [undefined, 'not yet'],
+    ],
+    'a tap has no text, a match keeps its text, a message has no option',
+  )
+  // What was shown, by id, is on every record: `collectVetoes` reads it back in a process
+  // that never saw the question.
+  for (const d of b.decisions()) assert.deepEqual(d.labels, { yes: 'Merge', no: 'Do not merge' })
+})
+
+test('#292 a late veto typed as the label attaches as the option, from the record alone', async (t) => {
+  // `conclave notify vetoes` is its own process: nothing in memory knows what the `tell`
+  // offered. A fresh Broker over the same directory is that process, and the record is its
+  // only witness to the labels.
+  const dir = tempDir(t, 'conclave-notify')
+  const tx = new FakeTransport()
+  await new Broker(dir).tell(
+    { kind: 'decided', headline: 'letting the advisor fix land', options: [{ id: 'cut', label: 'Cut it short' }] },
+    tx,
+  )
+
+  tx.unsolicited = [{ text: 'cut it short ', from: { id: 'mic', kind: 'human' } }]
+  const taken = await new Broker(dir).collectVetoes(tx)
+  assert.deepEqual(taken, [{ headline: 'letting the advisor fix land', option: 'cut', text: 'cut it short ' }])
+  const all = new Broker(dir).decisions()
+  assert.equal(all.length, 2)
+  assert.deepEqual(all[1]?.answer, { option: 'cut', text: 'cut it short ', by: { id: 'mic', kind: 'human' } })
+  assert.deepEqual(all[1]?.labels, { cut: 'Cut it short' }, 'the veto line carries the labels forward too')
+})
+
+test('#292 a late answer that is not the label is a message, and still attaches', async (t) => {
+  const dir = tempDir(t, 'conclave-notify')
+  const tx = new FakeTransport()
+  const b = new Broker(dir)
+  await b.tell({ kind: 'decided', headline: 'letting it land', options: [{ id: 'cut', label: 'Cut it short' }] }, tx)
+
+  tx.unsolicited = [{ text: 'cut it short, and tell me why', from: { id: 'mic', kind: 'human' } }]
+  const taken = await b.collectVetoes(tx)
+  assert.deepEqual(taken, [{ headline: 'letting it land', text: 'cut it short, and tell me why' }])
+  assert.equal(b.decisions()[1]?.answer?.option, undefined)
+})
+
+test('#292 a record written before labels were kept resolves nothing: its text stays text', async (t) => {
+  // Older logs carry `offered` and no `labels`. Matching the text against an id would be the
+  // one thing this never does -- the id was never shown to anyone.
+  const dir = tempDir(t, 'conclave-notify')
+  mkdirSync(dirname(decisionsPath(dir)), { recursive: true })
+  writeFileSync(
+    decisionsPath(dir),
+    '{"at":1,"transport":"fake","kind":"decided","headline":"old","offered":["cut"]}\n',
+  )
+  const tx = new FakeTransport()
+  tx.unsolicited = [{ text: 'cut', from: { id: 'mic', kind: 'human' } }]
+  const taken = await new Broker(dir).collectVetoes(tx)
+  assert.deepEqual(taken, [{ headline: 'old', text: 'cut' }])
+})
+
+test('#292 a surface that cannot show a choice gets the labels in the headline; one that can does not', async (t) => {
+  // Declared by the transport, acted on by the broker: the operator of a HUD that renders only
+  // the question must still be able to read what is on offer. The structured options travel
+  // either way -- an answer is routed by them.
+  const dir = tempDir(t, 'conclave-notify')
+  const b = new Broker(dir)
+  const q: Outbound = { kind: 'approval', headline: 'Merge?', options: [{ id: 'y', label: 'Yes' }, { id: 'n', label: 'No' }] }
+
+  const capable = new FakeTransport({ canPresentOptions: true })
+  capable.reply = { option: 'y', from: { id: 'mic', kind: 'human' } }
+  await b.ask(q, capable)
+  assert.equal(capable.sent[0]?.headline, 'Merge?', 'buttons will show the choice; the line stays the question')
+  assert.deepEqual(capable.sent[0]?.options, q.options)
+
+  const hud = new FakeTransport({ canPresentOptions: false })
+  hud.reply = { text: 'yes', from: { id: 'mic', kind: 'human' } }
+  const answer = await b.ask(q, hud)
+  assert.equal(hud.sent[0]?.headline, 'Merge? — Yes / No', 'the choices are in the only line it shows')
+  assert.deepEqual(hud.sent[0]?.options, q.options, 'and still travel structured, for routing')
+  assert.deepEqual(answer, { option: 'y', text: 'yes', by: { id: 'mic', kind: 'human' } }, 'so the label said back resolves')
+
+  // Both verbs: a `decided` tell carries its veto the same way.
+  await b.tell({ kind: 'decided', headline: 'letting it land', options: [{ id: 'cut', label: 'Cut it short' }] }, hud)
+  assert.equal(hud.sent[1]?.headline, 'letting it land — Cut it short')
+  await b.tell({ kind: 'decided', headline: 'letting it land', options: [{ id: 'cut', label: 'Cut it short' }] }, capable)
+  assert.equal(capable.sent[1]?.headline, 'letting it land')
+
+  // A message with nothing to choose is untouched on either.
+  await b.tell({ kind: 'progress', headline: 'pushed' }, hud)
+  assert.equal(hud.sent[2]?.headline, 'pushed')
+})
+
+test('#292 the question is kept whole and only the choices are cut to the room that remains', () => {
+  // A question with its choices cut is still a question; choices with their question cut are
+  // not. The boundaries: everything fits; the suffix is cut; the question alone is exactly the
+  // limit; the question alone is over the limit.
+  const opts = [{ id: 'y', label: 'Yes' }, { id: 'n', label: 'No' }]
+  const hud = { maxChars: 20, canPresentOptions: false }
+
+  // 'Merge? — Yes / No' is 17 chars: fits in 20 untouched.
+  assert.equal(forTransport({ kind: 'approval', headline: 'Merge?', options: opts }, hud).headline, 'Merge? — Yes / No')
+  // A 12-char question leaves 8: ' — Yes / No' is cut, the question is not.
+  const cut = forTransport({ kind: 'approval', headline: 'Merge it now', options: opts }, hud).headline
+  assert.equal(cut.length, 20)
+  assert.ok(cut.startsWith('Merge it now — '), `the question survives whole: ${JSON.stringify(cut)}`)
+  assert.match(cut, /…$/)
+  // A question that is exactly the limit has no room, and loses nothing.
+  const exact = 'x'.repeat(20)
+  assert.equal(forTransport({ kind: 'approval', headline: exact, options: opts }, hud).headline, exact)
+  // A question over the limit is cut as it always was, and the choices do not fit anywhere.
+  const over = forTransport({ kind: 'approval', headline: 'x'.repeat(30), options: opts }, hud).headline
+  assert.equal(over, `${'x'.repeat(19)}…`)
+  // The same overlong question on a capable surface is the same line: the cut is not new.
+  assert.equal(forTransport({ kind: 'approval', headline: 'x'.repeat(30), options: opts }, { maxChars: 20, canPresentOptions: true }).headline, over)
+})
+
+test('#292 the rendering boundary will not take a limits object that leaves the capability unsaid', () => {
+  // Typecheck-backed: `npm test` runs `tsc --noEmit` first, and an `@ts-expect-error` that stops
+  // erroring is itself an error. A defaulted capability would render a line with the choices
+  // silently left off, which is the failure this whole change exists to end.
+  const q: Outbound = { kind: 'approval', headline: 'Merge?', options: [{ id: 'y', label: 'Yes' }] }
+  // @ts-expect-error -- `canPresentOptions` is required alongside `maxChars`
+  forTransport(q, { maxChars: 200 })
+  // @ts-expect-error -- and `maxChars` is required alongside `canPresentOptions`
+  forTransport(q, { canPresentOptions: false })
+  assert.equal(forTransport(q, { maxChars: 200, canPresentOptions: false }).headline, 'Merge? — Yes', 'with both, it renders')
 })

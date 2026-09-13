@@ -22,6 +22,13 @@
  * force it" is a message and would be delivered as one. So actions are enumerated ids chosen
  * from `options`, and everything else is prose. A transport with buttons maps a tap to an id; a
  * voice surface maps an intent to an id; nothing parses English into an instruction.
+ *
+ * One exception, and it is narrow by construction (#292): text that IS an offered label -- the
+ * whole label, trimmed, case-insensitively, matching exactly one option -- is that option. A
+ * surface that cannot render a choice can still show the question, and an operator who reads
+ * "Merge / Hold" and says "merge" has chosen; treating that as prose would lose the choice they
+ * evidently made. The resolution is the broker's, never a transport's, and the record keeps the
+ * text beside the id so a matched label and a real tap stay distinguishable afterwards.
  */
 
 /** What a surface can carry. The renderer adapts to it rather than assuming. */
@@ -30,6 +37,13 @@ export interface TransportLimits {
   maxChars: number
   /** Whether anything can come back. A write-only surface is legal and common. */
   canReceive: boolean
+  /**
+   * Whether the surface can SHOW a choice. One that cannot still gets the structured options
+   * -- an answer is routed by them -- but the broker folds the labels into the headline, so
+   * the operator can read what is on offer (#292). Declared here so `notify` knows, rather than
+   * every caller assuming: a dozen device tests went by with options offered and never shown.
+   */
+  canPresentOptions: boolean
 }
 
 /**
@@ -77,9 +91,15 @@ export interface Identity {
   kind: 'human' | 'agent'
 }
 
-/** What came back. Exactly one of `option` or `text`. */
+/**
+ * What came back. Exactly one of `option` or `text`.
+ *
+ * A TRANSPORT'S view: a tap is an id, speech is text, and a transport that cannot tell a tap
+ * from speech sends text. Whether text names an offered label is the broker's to decide, from
+ * the options it knows were offered (#292).
+ */
 export interface Inbound {
-  /** An id from the `options` that were offered. Never inferred from prose. */
+  /** An id from the `options` that were offered. Never inferred from prose by a transport. */
   option?: string
   /** Free text, which is a MESSAGE and never an instruction to conclave. */
   text?: string
@@ -120,7 +140,19 @@ export interface DecisionRecord {
   runId?: string
   href?: string
   offered?: string[]
-  /** Absent while the question stands. */
+  /**
+   * What each offered id was shown as, keyed by id. Kept so a late answer typed as the label
+   * can be resolved against the decision it answers -- `collectVetoes` runs in a process that
+   * never saw the `tell`, and the record is the only place the labels survive (#292).
+   */
+  labels?: Record<string, string>
+  /**
+   * Absent while the question stands.
+   *
+   * Three shapes, and the difference is evidence: `option` alone is a tap the transport
+   * reported as an id; `text` alone is a message; both together is text the broker resolved to
+   * an offered label, kept verbatim so the record shows what was actually said (#292).
+   */
   answer?: { option?: string; text?: string; by: Identity }
   /** Set when the send itself failed. A run never waits on a notification. */
   undelivered?: string

@@ -25,7 +25,11 @@ export class FakeTransport implements Transport {
 
   constructor(over: Partial<TransportLimits> & { name?: string } = {}) {
     this.name = over.name ?? 'fake'
-    this.limits = { maxChars: over.maxChars ?? 200, canReceive: over.canReceive ?? true }
+    this.limits = {
+      maxChars: over.maxChars ?? 200,
+      canReceive: over.canReceive ?? true,
+      canPresentOptions: over.canPresentOptions ?? true,
+    }
   }
 
   send(m: Outbound): Promise<{ id: string }> {

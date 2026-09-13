@@ -176,13 +176,13 @@ test('#286 two runs asking at once are listed together on one broker, and answer
   assert.equal(await answer(s, 'run-b', 'Hold'), 200)
   const doneB = await b
   assert.equal(doneB.code, 0, doneB.err)
-  assert.deepEqual(JSON.parse(doneB.out), { option: 'no', by: { id: 'even-realities', kind: 'human' } })
+  assert.deepEqual(JSON.parse(doneB.out), { option: 'no', text: 'Hold', by: { id: 'even-realities', kind: 'human' } })
   assert.equal((await sessions(s)).find((x) => x.id === 'run-a')?.status, 'awaiting', 'run-a is still waiting')
 
   assert.equal(await answer(s, 'run-a', 'Merge'), 200)
   const doneA = await a
   assert.equal(doneA.code, 0, doneA.err)
-  assert.deepEqual(JSON.parse(doneA.out), { option: 'yes', by: { id: 'even-realities', kind: 'human' } })
+  assert.deepEqual(JSON.parse(doneA.out), { option: 'yes', text: 'Merge', by: { id: 'even-realities', kind: 'human' } })
 
   // Exactly one of them started the broker, or one started it and the other joined it, or
   // one found it already up; none failed to start it. And there is one broker.
@@ -235,7 +235,7 @@ test('#285 the answer is on stdout before the run lets go of the device', async 
   assert.equal(await answer(s, 'run-a', 'Merge'), 200)
   await printed
   const printedAt = Date.now()
-  assert.deepEqual(JSON.parse(out), { option: 'yes', by: { id: 'even-realities', kind: 'human' } })
+  assert.deepEqual(JSON.parse(out), { option: 'yes', text: 'Merge', by: { id: 'even-realities', kind: 'human' } })
   // WITH THE CLOCK, not a glance: "still busy right after stdout" is true for a few
   // milliseconds even with no grace at all, because the broker has not yet seen the FIN. What
   // proves the answer came first and the socket was held after is WHEN the run lets go --

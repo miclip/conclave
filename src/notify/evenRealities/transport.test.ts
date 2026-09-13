@@ -108,10 +108,11 @@ test('#278 resolving with --run names that run; without one, or an unreadable on
   }
 })
 
-test('#184 a tap on an offered option comes back as that option', async (t2) => {
+test('#184 an answer that is an offered label comes back as that option, with the text kept', async (t2) => {
   // The label is what the glasses show and what the answer carries; the id is what the broker
-  // refuses if it was never offered. Mapping one to the other here is what keeps a tap an
-  // action rather than prose.
+  // refuses if it was never offered. The glasses cannot tap (#292), so the transport hands the
+  // text over and the BROKER maps label to id -- and keeps the text, so the record can tell
+  // this from a tap.
   const t = await up()
   t2.after(() => t.bridge.close())
   const dir = tempDir(t2, 'conclave-er')
@@ -130,9 +131,10 @@ test('#184 a tap on an offered option comes back as that option', async (t2) => 
   )
   await answer(t, 'Merge')
 
-  assert.deepEqual(await asking, { option: 'yes', by: { id: 'even-realities', kind: 'human' } })
+  assert.deepEqual(await asking, { option: 'yes', text: 'Merge', by: { id: 'even-realities', kind: 'human' } })
   const [rec] = new Broker(dir).decisions()
   assert.equal(rec?.answer?.by.kind, 'human', 'a human answered, and the record says so')
+  assert.equal(rec?.answer?.text, 'Merge', 'and that it was the label, said, not a tap')
   assert.equal(rec?.transport, 'even-realities')
 })
 
@@ -200,7 +202,7 @@ test('#184 a veto tapped after the decision reaches the broker through poll', as
   })
 
   const taken = await b.collectVetoes(t)
-  assert.deepEqual(taken, [{ headline: 'letting the advisor fix land rather than cutting short', option: 'cut' }])
+  assert.deepEqual(taken, [{ headline: 'letting the advisor fix land rather than cutting short', option: 'cut', text: 'Cut it short' }])
   const all = b.decisions()
   assert.equal(all.length, 2, 'the decision, then the veto')
   assert.equal(all[1]?.answer?.by.kind, 'human')
@@ -248,10 +250,11 @@ test('#280 a prompt reaches the broker as a MESSAGE on the free-text path, and c
   assert.equal((await promptText(t, 'no')).status, 202)
   assert.deepEqual(await unoffered, { text: 'no', by: { id: 'even-realities', kind: 'human' } })
 
-  // And the same path as a tap: the offered LABEL is that option, as it is on /question-response.
+  // And the same path as /question-response: the offered LABEL is that option, resolved by the
+  // broker with the text kept beside it (#292).
   const tapped = new Broker(dir).ask(offer, t)
   assert.equal((await promptText(t, 'Merge')).status, 202)
-  assert.deepEqual(await tapped, { option: 'yes', by: { id: 'even-realities', kind: 'human' } })
+  assert.deepEqual(await tapped, { option: 'yes', text: 'Merge', by: { id: 'even-realities', kind: 'human' } })
 
   const recs = new Broker(dir).decisions()
   assert.deepEqual(
@@ -260,7 +263,7 @@ test('#280 a prompt reaches the broker as a MESSAGE on the free-text path, and c
       [undefined, 'hold off until the advisor finishes', undefined],
       [undefined, 'yes', undefined],
       [undefined, 'no', undefined],
-      ['yes', undefined, undefined],
+      ['yes', 'Merge', undefined],
     ],
     'four answers, three of them messages; none an option that was not offered',
   )
@@ -270,6 +273,31 @@ test('#280 a prompt reaches the broker as a MESSAGE on the free-text path, and c
   assert.equal((await promptText(t, 'start the next thing')).status, 409)
   assert.deepEqual(await t.poll(), [], 'not held as a late answer either: nothing for the broker to collect')
   assert.equal(new Broker(dir).decisions().length, 4, 'nothing was recorded for it')
+})
+
+test('#292 the glasses declare they cannot show a choice, and the choices reach the wire once', async (t2) => {
+  // A device finding, not a guess: three frame shapes and the vendor's own harness, none
+  // tappable. So the broker folds the labels into the headline, and the transport -- which used
+  // to join them itself for a veto -- must not print them twice.
+  const t = await up()
+  t2.after(() => t.bridge.close())
+  assert.equal(t.limits.canPresentOptions, false)
+  const dir = tempDir(t2, 'conclave-er')
+  const b = new Broker(dir)
+
+  await b.tell({ kind: 'decided', headline: 'letting it land', options: [{ id: 'cut', label: 'Cut it short' }] }, t)
+  const asking = b.ask({ kind: 'approval', headline: 'Merge?', options: [{ id: 'y', label: 'Yes' }, { id: 'n', label: 'No' }] }, t)
+  await answer(t, 'no')
+  assert.deepEqual(await asking, { option: 'n', text: 'no', by: { id: 'even-realities', kind: 'human' } })
+
+  const { messages: msgs } = (await (await fetch(`${t.bridge.url}/api/messages?sessionId=run-1&token=tok`)).json()) as {
+    messages: { type: string; message?: string; questions?: { question: string; options: { label: string }[] }[] }[]
+  }
+  const veto = msgs.find((m) => m.type === 'notification')
+  assert.equal(veto?.message, 'letting it land — Cut it short', 'once, not twice')
+  const q = msgs.find((m) => m.type === 'user_question')?.questions?.[0]
+  assert.equal(q?.question, 'Merge? — Yes / No', 'the question says what is on offer')
+  assert.deepEqual(q?.options.map((o) => o.label), ['Yes', 'No'], 'and the frame still carries the options, unchanged in shape')
 })
 
 test('#285 the echo of an answer is cut to the same line as a headline', async (t2) => {

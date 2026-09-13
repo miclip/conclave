@@ -14,7 +14,7 @@
 
 import { appendFileSync, mkdirSync, readFileSync, existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import type { DecisionRecord, Identity, Inbound, Outbound, Transport } from './types.ts'
+import type { DecisionRecord, Identity, Inbound, Outbound, Transport, TransportLimits } from './types.ts'
 
 export const DECISIONS_RELATIVE = '.conclave/decisions.ndjson'
 
@@ -36,15 +36,74 @@ export function decisionsPath(repoRoot: string): string {
  */
 const ALLOWED = new Set(['kind', 'headline', 'options', 'href', 'runId'])
 
-/** Strip anything not on the allow-list, and hold the headline to what the surface can show. */
-export function forTransport(m: Outbound, limits: { maxChars: number }): Outbound {
+/**
+ * Strip anything not on the allow-list, and hold the headline to what the surface can show.
+ *
+ * A surface that cannot present a choice gets the labels folded into the headline --
+ * `Merge? — Yes / No` -- so the operator can read what is on offer (#292). The structured
+ * options still travel: an answer is routed by them, and the broker resolves a label said
+ * back against them. The question comes first and is kept whole whenever it fits; only the
+ * choices are cut to the room that remains, because a question with its choices cut is still
+ * a question and choices with their question cut are not.
+ */
+// Both facts are REQUIRED, not defaulted: a caller that forgot to say whether the surface can
+// show a choice would otherwise get a line with the choices silently left off, which is the
+// exact failure this exists to end.
+export function forTransport(m: Outbound, limits: Pick<TransportLimits, 'maxChars' | 'canPresentOptions'>): Outbound {
   const out: Record<string, unknown> = {}
   for (const [k, v] of Object.entries(m)) if (ALLOWED.has(k) && v !== undefined) out[k] = v
   const headline = String(out['headline'] ?? '')
   // Truncated rather than refused: a surface that cannot show the whole line should still show
   // the line. The evidence was never in here anyway -- `href` is what carries the rest.
-  if (headline.length > limits.maxChars) out['headline'] = `${headline.slice(0, limits.maxChars - 1)}…`
+  if (headline.length >= limits.maxChars) {
+    if (headline.length > limits.maxChars) out['headline'] = `${headline.slice(0, limits.maxChars - 1)}…`
+    return out as unknown as Outbound
+  }
+  const options = limits.canPresentOptions === false ? m.options ?? [] : []
+  if (options.length === 0) return out as unknown as Outbound
+  const shown = `${headline} — ${options.map((o) => o.label).join(' / ')}`
+  out['headline'] = shown.length > limits.maxChars ? `${shown.slice(0, limits.maxChars - 1)}…` : shown
   return out as unknown as Outbound
+}
+
+/**
+ * The one offered option whose label is this text, or nothing.
+ *
+ * Strict on purpose, because this is the only place prose becomes an action (#292). The whole
+ * label and nothing more -- "merge it" is not `Merge`, and neither is "merge, then deploy" --
+ * trimmed and compared case-insensitively, because a surface that cannot render a choice
+ * leaves the operator to type or say the label, and neither reliably preserves case or
+ * whitespace. Two options shown as the same label are refused rather than guessed between: a
+ * caller that offered them made the text ambiguous, and the text stays a message.
+ */
+export function resolveLabel(text: string, options: { id: string; label: string }[]): string | undefined {
+  const said = text.trim().toLowerCase()
+  if (said === '') return undefined
+  const hits = options.filter((o) => o.label.trim().toLowerCase() === said)
+  return hits.length === 1 ? hits[0]!.id : undefined
+}
+
+/**
+ * The answer as the record and the caller see it: a tap's id alone, a message's text alone, or
+ * -- when `text` is exactly an offered label -- the resolved id WITH the text kept beside it,
+ * so a reader can tell a match from a tap.
+ */
+function resolveAnswer(
+  reply: Inbound,
+  options: { id: string; label: string }[] | undefined,
+): { option?: string; text?: string; by: Identity } {
+  const matched = reply.option === undefined && reply.text !== undefined && options ? resolveLabel(reply.text, options) : undefined
+  return {
+    ...(reply.option !== undefined ? { option: reply.option } : matched !== undefined ? { option: matched } : {}),
+    ...(reply.text === undefined ? {} : { text: reply.text }),
+    by: reply.from,
+  }
+}
+
+/** `offered` and `labels` for a record, from the options a message carried. */
+function offeredOf(m: Outbound): { offered?: string[]; labels?: Record<string, string> } {
+  if (!m.options) return {}
+  return { offered: m.options.map((o) => o.id), labels: Object.fromEntries(m.options.map((o) => [o.id, o.label])) }
 }
 
 export class Broker {
@@ -142,6 +201,12 @@ export class Broker {
       // An option that was never offered is refused here as it is in `ask`: a surface that
       // invents one would otherwise widen the choice the caller enumerated.
       if (reply.option !== undefined && !target.offered?.includes(reply.option)) continue
+      // Text that is exactly an offered label is that option, resolved against what the RECORD
+      // says was shown -- this runs in a process that never saw the `tell`, so the record is
+      // the only witness to the labels (#292). Older records carry no labels, and their text
+      // stays text.
+      const options = target.offered?.map((id) => ({ id, label: target.labels?.[id] ?? '' })).filter((o) => o.label !== '')
+      const answer = resolveAnswer(reply, options)
       this.#record({
         at: Date.now(),
         transport: transport.name,
@@ -149,17 +214,11 @@ export class Broker {
         headline: target.headline,
         ...(target.runId ? { runId: target.runId } : {}),
         ...(target.offered ? { offered: target.offered } : {}),
-        answer: {
-          ...(reply.option === undefined ? {} : { option: reply.option }),
-          ...(reply.text === undefined ? {} : { text: reply.text }),
-          by: reply.from,
-        },
+        ...(target.labels ? { labels: target.labels } : {}),
+        answer,
       })
-      attached.push({
-        headline: target.headline,
-        ...(reply.option === undefined ? {} : { option: reply.option }),
-        ...(reply.text === undefined ? {} : { text: reply.text }),
-      })
+      const { by: _by, ...said } = answer
+      attached.push({ headline: target.headline, ...said })
     }
     return attached
   }
@@ -170,14 +229,13 @@ export class Broker {
     // override the human was given, and a record that dropped it could not later answer "were
     // they offered the chance to stop this?" -- which is the only interesting question about a
     // decision somebody did not veto.
-    const offered = m.options?.map((o) => o.id)
     const base = {
       at: Date.now(),
       transport: transport.name,
       kind: m.kind,
       headline: m.headline,
       ...(m.href ? { href: m.href } : {}),
-      ...(offered ? { offered } : {}),
+      ...offeredOf(m),
     }
     // Budgeted only for a human operator, and never for a question -- `ask` is someone waiting
     // on an answer, and dropping it would hang the caller rather than quieten the channel.
@@ -212,7 +270,6 @@ export class Broker {
    * from "nobody was asked".
    */
   async ask(m: Outbound, transport: Transport): Promise<{ option?: string; text?: string; by: Identity } | undefined> {
-    const offered = m.options?.map((o) => o.id)
     const base = {
       at: Date.now(),
       transport: transport.name,
@@ -220,7 +277,7 @@ export class Broker {
       headline: m.headline,
       ...(m.runId ? { runId: m.runId } : {}),
       ...(m.href ? { href: m.href } : {}),
-      ...(offered ? { offered } : {}),
+      ...offeredOf(m),
     }
     if (!transport.limits.canReceive || !transport.receive) {
       this.#record({ ...base, undelivered: `${transport.name} cannot receive` })
@@ -237,15 +294,13 @@ export class Broker {
     // An option that was never offered is refused rather than passed through. A transport that
     // invents one is malfunctioning, and accepting it would let a surface widen the choice the
     // caller enumerated.
-    if (reply.option !== undefined && !offered?.includes(reply.option)) {
+    if (reply.option !== undefined && !base.offered?.includes(reply.option)) {
       this.#record({ ...base, undelivered: `answered with an option that was not offered: ${reply.option}` })
       return undefined
     }
-    const answer = {
-      ...(reply.option === undefined ? {} : { option: reply.option }),
-      ...(reply.text === undefined ? {} : { text: reply.text }),
-      by: reply.from,
-    }
+    // Text that is exactly an offered label is that option, and the text is kept beside the id
+    // (#292). Anything else is a message for the caller to read.
+    const answer = resolveAnswer(reply, m.options)
     this.#record({ ...base, answer })
     return answer
   }
