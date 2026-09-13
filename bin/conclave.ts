@@ -85,6 +85,7 @@ import { runSession } from '../src/repl/session.ts'
 import { boundOf, implementerSeatPlan, implementerSpecsFor, Relay, reviewerSpecFor, type SeatRequest } from '../src/relay/relay.ts'
 import { formatGuardReportJson, guard } from '../src/workspace/sessionLock.ts'
 import { Broker } from '../src/notify/broker.ts'
+import { brokerConfigFromEnv, brokerStatus, ensureBroker, serveBroker, stopBroker } from '../src/notify/evenRealities/daemon.ts'
 import { TransportRefused, resolveTransport, transportNames } from '../src/notify/registry.ts'
 import type { Outbound, Transport } from '../src/notify/types.ts'
 import {
@@ -238,11 +239,17 @@ Commands:
   notify         tell|ask "<headline>" [--options id:Label,...] [--kind ...]
                  [--href URL] [--run <id>] [--transport <name>] [--operator human]
                  vetoes [--transport <name>] | log [--json]
+                 broker start|status|stop [--json]
                                    Reach a human when an agent is operating. "tell" is one way
                                    and never waits; "ask" waits and prints the answer as JSON.
                                    An action is an id that was offered; free text comes back as
                                    text for the caller to interpret. "log" is what was asked and
-                                   who answered.
+                                   who answered. "broker" is the process that holds the Even
+                                   Realities device for every run on the machine: started by
+                                   the first run that needs it (announced on stderr), it exits
+                                   60s after the last run disconnects. "status" reads pid,
+                                   socket, device address and token from the live broker;
+                                   "stop" ends it now.
   skill          [install] [--force]
                                    The operator skill: how to start a run, read it without
                                    scraping the console, answer a pause, and act on how it
@@ -1285,10 +1292,62 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
       return 2
     }
 
+    if (verb === 'broker') {
+      // THE DEVICE'S PROCESS (#286). A run never binds the port; this does, in a process of
+      // its own, started by the first run that needs it and found by the rest through a socket
+      // at a known path. Nothing here is silent: a start says what it started and how to stop
+      // it, and `status` reads the same facts back from the broker itself.
+      const action = rest[0] ?? ''
+      const config = brokerConfigFromEnv()
+      const json = rest.includes('--json')
+      if (action === 'serve') {
+        // Internal: what `start` spawns. One JSON line on stdout for the spawner, then the
+        // request log on stderr until the broker ends.
+        return serveBroker(config, {
+          stdout: (line) => process.stdout.write(`${line}\n`),
+          stderr: (line) => process.stderr.write(`${line}\n`),
+        })
+      }
+      if (action === 'start') {
+        const before = await brokerStatus(config.socketPath)
+        if (before) {
+          console.error(`conclave: the Even Realities broker is already running (pid ${before.pid}) — conclave notify broker status`)
+          return 0
+        }
+        await ensureBroker(config, { stderr: (text) => console.error(text) })
+        return 0
+      }
+      if (action === 'status') {
+        const s = await brokerStatus(config.socketPath)
+        if (!s) {
+          if (json) console.log(JSON.stringify({ running: false, socketPath: config.socketPath }))
+          else console.log(`no Even Realities broker at ${config.socketPath}`)
+          return 1
+        }
+        if (json) {
+          console.log(JSON.stringify({ running: true, ...s }))
+          return 0
+        }
+        console.log(`Even Realities broker: pid ${s.pid}, since ${s.startedAt}`)
+        console.log(`  socket  ${s.socketPath}`)
+        console.log(`  device  ${s.url}   token ${s.token}`)
+        console.log(`  linger  ${s.lingerMs}ms after the last run disconnects`)
+        console.log(`  runs    ${s.sessions.length === 0 ? 'none attached' : s.sessions.join(', ')}`)
+        return 0
+      }
+      if (action === 'stop') {
+        const stopped = await stopBroker(config.socketPath)
+        console.log(stopped ? 'conclave: the Even Realities broker has stopped' : `conclave: no Even Realities broker at ${config.socketPath}`)
+        return 0
+      }
+      console.error('usage: conclave notify broker start|status|stop [--json]')
+      return 2
+    }
+
     if (verb === 'vetoes') {
       const transport = transportFor()
       if (typeof transport === 'number') return transport
-      const taken = await new Broker(root).collectVetoes(transport)
+      const taken = await new Broker(root).collectVetoes(transport).finally(() => transport.close?.())
       if (taken.length === 0) {
         console.log('no late answers')
         return 0
@@ -1332,6 +1391,7 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
       console.error('usage: conclave notify tell|ask "<headline>" [--options id:Label,...] [--transport name] [--run id]')
       console.error('       conclave notify vetoes [--transport name] [--run id]   late answers to a decision')
       console.error(`       conclave notify log [--json]`)
+      console.error(`       conclave notify broker start|status|stop [--json]      the Even Realities device's process`)
       console.error(`  transports: ${transportNames().join(', ')}`)
       return 2
     }
@@ -1363,20 +1423,28 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
 
     const operator = flagOf('operator') === 'human' ? 'human' : 'agent'
     const broker = new Broker(root, { operator })
+    // `close` when the operation is done, whichever way it ended: a `conclave notify ask` lives
+    // exactly as long as its question, and on a transport where the connection IS the
+    // registration (#286) the run leaves the device's list the moment this lets go.
     if (verb === 'tell') {
-      await broker.tell(message, transport)
+      await broker.tell(message, transport).finally(() => transport.close?.())
       // Silent on success by design: a `tell` that printed would make a notification into
       // output the caller has to read, and the caller is an agent with a transcript to spend.
       return 0
     }
     const answer = await broker.ask(message, transport)
+    // ON STDOUT BEFORE THE CLOSE. On the glasses the transport's `close` waits a moment after an
+    // answer so the device can render the confirmation (#285, `DEFAULT_CONFIRM_GRACE_MS`); the
+    // caller must not wait with it. The answer is recorded by `ask` and printed here, and only
+    // then is the connection let go -- a slow close delays the exit, never the answer.
+    if (answer) console.log(JSON.stringify(answer))
+    await transport.close?.()
     if (!answer) {
       // Non-zero, because the caller asked a question and did not get one answered. The pause
       // or the decision it was asking about has not gone away.
       console.error(`conclave: ${transport.name} carried no answer — see conclave notify log`)
       return 1
     }
-    console.log(JSON.stringify(answer))
     return 0
   }
 

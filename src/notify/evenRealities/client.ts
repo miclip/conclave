@@ -321,6 +321,14 @@ export class EvenRealitiesBridge {
    * finds nothing outstanding rather than settling the same question twice. A client that
    * cannot take the frame -- none connected, gone, throwing -- is not a reason to hold the
    * answer: `deliver` never rejects, and the frame is buffered for a replay either way.
+   *
+   * AND `deliver` SETTLING IS NOT THE FRAME BEING SEEN. It means the kernel has the bytes:
+   * transmission, not rendering. A run that ends its session the instant it has the answer
+   * tears the stream down before the app has drawn the frame, and the operator sees a dropped
+   * connection after all -- which is what happened on the device. Nothing is waited for HERE,
+   * because this must not hold an answer the run is owed; the wait is at the one place that
+   * closes an answered run's session, `brokerTransport.ts`'s `close`, and it is conditional
+   * for reasons written beside `DEFAULT_CONFIRM_GRACE_MS` there.
    */
   async #confirm(s: Session, pending: (a: BridgeAnswer) => void, answer: string): Promise<void> {
     const message = answer.length > CONFIRM_CHARS ? `${answer.slice(0, CONFIRM_CHARS - 1)}…` : answer
