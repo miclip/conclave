@@ -435,7 +435,13 @@ so an unasked question is never asked. An allow-list decides which fields reach 
 the headline is cut to what the surface can show: no file contents, no diffs, no tool output.
 Write it as a pointer rather than a summary someone might approve on instead of looking. An
 option that was not offered is refused rather than passed through, and free text comes back as a
-message, never as a command.
+message, never as a command — with one exception: text that is exactly an offered label (the
+whole label, trimmed, case-insensitively, matching one option) is that option. The answer then
+carries both `option` and `text`, so a said label and a tapped button stay distinguishable in
+the log; a phrase that only starts with a label, or a label two options share, stays a message.
+The glasses cannot render options at all and say so (`canPresentOptions: false`): the labels are
+folded into the headline for them — `Merge? — Yes / No`, the choices cut before the question is —
+and every answer from that transport arrives as text for the broker to resolve.
 
 Commands arrive on stdin as lines: `/continue`, `/rotate`, `/abort`, `/checkpoint`, `/allow`,
 `/deny`, or a message addressed with `>advisor` / `>implementer`. Nothing needs scraping off the

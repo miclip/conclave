@@ -155,8 +155,16 @@ might approve on instead of looking.
 
 **An answer is not an instruction.** An option you did not offer is refused rather than passed
 through, and free text comes back as a MESSAGE — so "continue, force it" said out loud reaches
-you as words, never as `/continue force`. The log records who answered and through which
-transport, and a human answer and an agent's are distinguishable in it afterwards.
+you as words, never as `/continue force`. The one thing conclave will resolve for you is text
+that IS an offered label — the whole label, trimmed, case-insensitively, matching exactly one
+option — because a surface that cannot show buttons leaves the operator to say the label. That
+answer has both `option` and `text`; a tap has `option` alone; anything else has `text` alone,
+and "merge it" or a label two options share is anything else. The log records who answered and
+through which transport, and a human answer and an agent's are distinguishable in it afterwards.
+
+A transport that cannot show a choice — the glasses render the question and nothing else —
+declares it, and the labels are folded into the headline for it (`Merge? — Yes / No`), cut
+before the question is. Nothing to do on your side; keep the labels short.
 
 ## Restricting a message, and the pause it can raise
 

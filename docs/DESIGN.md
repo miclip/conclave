@@ -424,6 +424,37 @@ for a run that is not there — and the thread stays, question frame included, s
 operator was looking at does not vanish because the run did. `CONCLAVE_EVEN_SESSION_LINGER_MS`
 moves it, and zero is the old behaviour.
 
+### When saying the label is choosing it
+
+The glasses do not render options. Three frame shapes were tried, then the vendor's own harness
+emitting its own native frame, and none produced a tappable choice; so on that surface every
+answer is text, and a dozen device tests went by with `--options` offered and never once
+presented. The inbound design's rule is that prose is a message and only a tap is an action,
+and the rule exists for a reason — a transcription of "continue, force it" must not become
+`/continue force`. Reading "Merge / Hold" and saying "merge" is not that case. The operator was
+shown a choice and named one side of it; calling that a message loses the choice they evidently
+made, and the record would show a question asked and never answered.
+
+So the broker resolves it, and the resolution is narrow by construction: the whole label and
+nothing more, trimmed and compared without case, matching exactly one option. "Merge it" is a
+message; "go" against two options both shown as `Go` is a message; only the label itself is the
+option. It is the broker's to do and not a transport's, because a transport that maps labels in
+memory forgets them the moment its process ends — which is every `conclave notify vetoes`,
+since the late-answer check is its own invocation and never saw the `tell`. The record is the
+only witness to what was shown, so it now keeps the labels beside the ids, and a veto typed as
+the label attaches to its decision from the record alone. And because this is a step from prose
+to selection, it stays visible: a resolved label keeps the text beside the id, a tap has the id
+alone, and six months later the log can still say which happened.
+
+Two smaller things fell out of the same finding. A transport now declares whether it can show a
+choice at all, next to how many characters it can show and whether anything can come back — so
+`notify` knows rather than every caller assuming, which is how a dozen tests went by unnoticed.
+And for a surface that cannot, the broker folds the labels into the headline, `Merge? — Yes /
+No`, so the operator is told what they are choosing between; the question is kept whole and the
+choices are cut to whatever room remains, because a question with its choices cut is still a
+question and choices with their question cut are not. The structured options travel regardless,
+since an answer is routed by them.
+
 ---
 
 ## How this was built

@@ -95,7 +95,8 @@ test('#286 the transport dials on the first send, speaks under its label, and it
   })
   assert.deepEqual(await tr.poll(), [{ text: 'hold on', from: { id: 'even-realities', kind: 'human' } }])
 
-  // A question, answered by label, comes back as the option id.
+  // A question, answered by label, comes back as the TEXT of the label: the device cannot tap,
+  // so the transport cannot tell a choice from speech, and the broker resolves it (#292).
   await tr.send({ kind: 'approval', headline: 'merge?', options: [{ id: 'yes', label: 'Merge' }] })
   const asked = tr.receive()
   // Answered once the list says the question is outstanding, not after a guess at how long
@@ -106,7 +107,7 @@ test('#286 the transport dials on the first send, speaks under its label, and it
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ sessionId: 'run-a', answer: 'Merge' }),
   })
-  assert.deepEqual(await asked, { option: 'yes', from: { id: 'even-realities', kind: 'human' } })
+  assert.deepEqual(await asked, { text: 'Merge', from: { id: 'even-realities', kind: 'human' } })
 
   // THE RUN IS THE SOCKET. Closing the transport is what detaches the run: the session stays
   // listed for a while (#290), reading `idle` because nothing is behind it any more.
@@ -195,7 +196,7 @@ test('#285 the confirmation is on the stream, and the stream stays up long enoug
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ sessionId: 'run-a', answer: 'Merge' }),
   })
-  assert.deepEqual(await asked, { option: 'yes', from: { id: 'even-realities', kind: 'human' } })
+  assert.deepEqual(await asked, { text: 'Merge', from: { id: 'even-realities', kind: 'human' } })
   // The run has its answer and lets go at once, as the CLI does after printing it.
   const closeAt = Date.now()
   const closing = tr.close()

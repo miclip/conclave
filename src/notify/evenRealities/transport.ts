@@ -51,7 +51,9 @@ const HUD_CHARS = 120
 
 export class EvenRealitiesTransport<C extends SessionChannel = SessionChannel> implements Transport {
   readonly name = 'even-realities'
-  readonly limits: TransportLimits = { maxChars: HUD_CHARS, canReceive: true }
+  // `canPresentOptions: false` is a device finding, not a guess (#292): three frame shapes and
+  // the vendor's own harness, none tappable. The broker folds the labels into the headline.
+  readonly limits: TransportLimits = { maxChars: HUD_CHARS, canReceive: true, canPresentOptions: false }
   readonly bridge: C
   /** The session on the wire. The run's id: it routes and is never shown. */
   readonly runId: string
@@ -74,14 +76,11 @@ export class EvenRealitiesTransport<C extends SessionChannel = SessionChannel> i
       return { id: String(id) }
     }
     // A `tell` that carries options is a decision with a veto: announced, not asked, so the
-    // options travel with the notification and the tap comes back through `poll`.
+    // options travel with the notification and the answer comes back through `poll`. The labels
+    // are already in the headline: the broker put them there, because this surface declares it
+    // cannot show a choice, and joining them again here would print them twice.
     if (m.kind === 'decided' || m.kind === 'progress') {
-      this.#lastOffered = m.options.map((o) => ({ id: o.id, label: o.label }))
-      const id = await this.bridge.send(this.runId, {
-        type: 'notification',
-        title: titleFor(m),
-        message: `${m.headline} — ${m.options.map((o) => o.label).join(' / ')}`,
-      })
+      const id = await this.bridge.send(this.runId, { type: 'notification', title: titleFor(m), message: m.headline })
       return { id: String(id) }
     }
     // Deferred to `receive`, which is where the answer is awaited. The id is the correlation the
@@ -96,21 +95,16 @@ export class EvenRealitiesTransport<C extends SessionChannel = SessionChannel> i
   /**
    * Late answers, which on this surface is how a veto arrives.
    *
-   * A tap on a `decided` notification reaches `/api/question-response` with nothing awaiting it.
-   * The bridge buffers those per run; this hands over this run's as inbound with no option
-   * resolution, because the broker matches them against the decision that offered them and
-   * knows the ids.
+   * An answer to a `decided` notification reaches `/api/question-response` with nothing awaiting
+   * it. The bridge buffers those per run; this hands over this run's as TEXT, and the broker
+   * resolves each against the decision it answers. It has to be the broker: `conclave notify
+   * vetoes` is its own process and never saw the `tell`, so nothing here knows what was
+   * offered -- the record does.
    */
   async poll(): Promise<Inbound[]> {
     const from = { id: 'even-realities', kind: 'human' as const }
-    return (await this.bridge.takeUnsolicited(this.runId)).map((a) => {
-      const chosen = this.#lastOffered.find((o) => o.label === a.answer)
-      return chosen ? { option: chosen.id, from } : { text: a.answer, from }
-    })
+    return (await this.bridge.takeUnsolicited(this.runId)).map((a) => ({ text: a.answer, from }))
   }
-
-  /** The options most recently announced, so a late tap on a label resolves to its id. */
-  #lastOffered: { id: string; label: string }[] = []
 
   async receive(): Promise<Inbound> {
     const m = this.#pending
@@ -123,12 +117,11 @@ export class EvenRealitiesTransport<C extends SessionChannel = SessionChannel> i
       // glance has to be enough to choose from.
       options: m.options.map((o) => ({ label: o.label, description: m.href ?? '' })),
     })
-    // An answer that matches an offered LABEL is that option; anything else is speech, and the
-    // caller interprets it. The broker refuses an id that was never offered, so mapping label to
-    // id here is what keeps a tap an action rather than prose.
-    const chosen = m.options.find((o) => o.label === answer)
-    const from = { id: 'even-realities', kind: 'human' as const }
-    return chosen ? { option: chosen.id, from } : { text: answer, from }
+    // TEXT, always. The device does not render options (#292: three frame shapes and the
+    // vendor's own harness, none tappable), so every answer is something the operator typed or
+    // said and nothing here can tell a choice from speech. The broker can -- it knows what was
+    // offered -- and resolving there rather than here keeps one rule for every transport.
+    return { text: answer, from: { id: 'even-realities', kind: 'human' } }
   }
 }
 
