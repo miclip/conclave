@@ -2183,7 +2183,7 @@ async function seatsFromSessionCli(t: TestContext): Promise<{ creates: CreateRec
  * The two machine-readable documents a default run actually emits.
  *
  * Both come out of one `relay --json` run in a temporary repository, through the production
- * call sites: the report is what `bin/conclave.ts:2286` prints, and the status record is what
+ * call sites: the report is what `bin/conclave.ts:2287` prints, and the status record is what
  * `recordSession` wrote during that same run, read back by `main(['status', '--json'])` --
  * which resolves the most recent session in `process.cwd()`, so the record has to have been
  * written where an operator would look for it.
@@ -2739,7 +2739,7 @@ test('default run works in the run cwd and creates no worktree', async (t) => {
     assert.equal(c.cwd, fromCli.cwd, `the session CLI must create ${c.id} in the run cwd`)
   }
 
-  // The relay CLI passes process.cwd() as the run cwd: bin/conclave.ts:2184-2186.
+  // The relay CLI passes process.cwd() as the run cwd: bin/conclave.ts:2185-2187.
   // The relay hands that same cwd to each participant adapter: src/relay/relay.ts:2643-2649.
   // The cwd getter simply returns the option: src/relay/relay.ts:2345-2347.
   assert.match(relay, /cwd:\s*process\.cwd\(\)/, 'relay block must start in process.cwd')

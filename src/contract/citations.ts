@@ -96,8 +96,8 @@ export const CITED: Record<string, string> = {
   // The three below moved twice over, once for #81 and once for #80's integration work in the
   // same file, and are pinned against the merged tree rather than against either side of it.
   'bin/conclave.ts:1257': '{ ...s.status, alive: s.alive, abandoned: s.abandoned }',
-  'bin/conclave.ts:2184-2186': "    const relay = await Relay.start({\n      registry,\n      cwd: process.cwd(),",
-  'bin/conclave.ts:2286': 'runReport(relay, { goal, outcome, startedAt: runStartedAt, build })',
+  'bin/conclave.ts:2185-2187': "    const relay = await Relay.start({\n      registry,\n      cwd: process.cwd(),",
+  'bin/conclave.ts:2287': 'runReport(relay, { goal, outcome, startedAt: runStartedAt, build })',
   // One flag for every implementer seat, which is the RUN-WIDE half of the launch args. The
   // per-seat half is no longer missing (#77): it rides inside each `--implementers` entry and
   // is appended after this, so a seat's own spelling wins. This citation still pins what it

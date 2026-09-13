@@ -40,6 +40,11 @@ async function status(b: EvenRealitiesBroker): Promise<string | null | undefined
   return body.sessions[0]?.status
 }
 
+/** Whether the broker has seen `run-a` let go, by either tell: off the attached list, or its session reading `idle` (#290). */
+async function letGo(b: EvenRealitiesBroker): Promise<boolean> {
+  return !b.status().sessions.includes('run-a') || (await status(b)) === 'idle'
+}
+
 async function until(cond: () => Promise<boolean>, ms = 5_000): Promise<boolean> {
   const end = Date.now() + ms
   while (Date.now() < end) {
@@ -103,9 +108,10 @@ test('#286 the transport dials on the first send, speaks under its label, and it
   })
   assert.deepEqual(await asked, { option: 'yes', from: { id: 'even-realities', kind: 'human' } })
 
-  // THE SESSION IS THE SOCKET. Closing the transport is what takes the run off the list.
+  // THE RUN IS THE SOCKET. Closing the transport is what detaches the run: the session stays
+  // listed for a while (#290), reading `idle` because nothing is behind it any more.
   await tr.close()
-  assert.equal(await until(async () => (await listed(b)).length === 0), true, 'closed: the run left the list')
+  assert.equal(await until(() => letGo(b)), true, 'closed: the run let go')
   await tr.close()
 })
 
@@ -217,7 +223,7 @@ test('#285 a run that only told closes at once: the grace is for an answered que
   // Not awaited before looking: a `close` that waited would keep this from looking until it
   // was over, and a grace wrongly applied here would go unseen.
   const closing = tr.close()
-  assert.equal(await until(async () => (await listed(b)).length === 0, 1_000), true, 'gone well inside the grace')
+  assert.equal(await until(() => letGo(b), 1_000), true, 'let go well inside the grace')
   await closing
 })
 

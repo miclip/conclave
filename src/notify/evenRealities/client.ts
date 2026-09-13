@@ -278,6 +278,21 @@ export class EvenRealitiesBridge {
     s.pending = undefined
   }
 
+  /**
+   * The run has gone; the session has not (#290). Its outstanding question, if any, is settled
+   * `skip` for the same reason `closeSession` settles it -- nobody answered, and the asker must
+   * not hang -- and cleared, so the session reads its own status rather than `awaiting` for a
+   * run that is not there to wait. Everything else stays: the stream's clients, the buffer,
+   * the entry in the list. `closeSession`, later, is what ends those.
+   */
+  detachSession(id: string): void {
+    const s = this.#sessions.get(id)
+    if (!s) return
+    const pending = s.pending
+    s.pending = undefined
+    pending?.({ answer: 'skip' })
+  }
+
   /** The runs currently open, in the order they opened. */
   sessions(): string[] {
     return [...this.#sessions.keys()]

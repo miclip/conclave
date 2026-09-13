@@ -109,6 +109,14 @@ interface Listed {
   status: string | null
 }
 
+/**
+ * Whether the broker has seen its one run let go, by either tell: the session reading `idle`
+ * (#290), or the run off `status`'s attached list. The list first, because `status` is a spawn.
+ */
+async function letGo(s: Site): Promise<boolean> {
+  return (await sessions(s))[0]?.status === 'idle' || status(s).sessions?.length === 0
+}
+
 async function sessions(s: Site): Promise<Listed[]> {
   try {
     return ((await (await fetch(`${s.base}/api/sessions?token=tok`)).json()) as { sessions: Listed[] }).sessions
@@ -135,7 +143,15 @@ async function answer(s: Site, sessionId: string, text: string): Promise<number>
   return r.status
 }
 
-function status(s: Site): { running: boolean; pid?: number; sessions?: string[]; url?: string; token?: string; socketPath?: string } {
+function status(s: Site): {
+  running: boolean
+  pid?: number
+  sessions?: string[]
+  url?: string
+  token?: string
+  socketPath?: string
+  sessionLingerMs?: number
+} {
   return JSON.parse(notifySync(s, ['broker', 'status', '--json']).out) as ReturnType<typeof status>
 }
 
@@ -190,12 +206,13 @@ test('#286 the broker outlives the run whose question it answered', async (t) =>
   assert.equal(done.code, 0, done.err)
   assert.match(done.err, new RegExp(`started the Even Realities broker \\(pid ${pid}\\)`), 'this run started it')
 
-  // The run is gone from the list -- its socket closed with it -- and the broker is not.
-  assert.equal(await until(async () => (await sessions(s)).length === 0), true, 'the run left the list')
+  // The run is gone -- its socket closed with it, and its session reads `idle` while it is
+  // retained (#290) -- and the broker is not.
+  assert.equal(await until(() => letGo(s)), true, 'the run let go')
   const after = status(s)
   assert.equal(after.running, true, 'still serving, inside the linger')
   assert.equal(after.pid, pid, 'the same process')
-  assert.deepEqual(after.sessions, [])
+  assert.deepEqual(after.sessions, [], 'no run attached: the retained session is not one')
 })
 
 test('#285 the answer is on stdout before the run lets go of the device', async (t) => {
@@ -219,17 +236,18 @@ test('#285 the answer is on stdout before the run lets go of the device', async 
   await printed
   const printedAt = Date.now()
   assert.deepEqual(JSON.parse(out), { option: 'yes', by: { id: 'even-realities', kind: 'human' } })
-  // WITH THE CLOCK, not a glance: "still listed right after stdout" is true for a few
+  // WITH THE CLOCK, not a glance: "still busy right after stdout" is true for a few
   // milliseconds even with no grace at all, because the broker has not yet seen the FIN. What
-  // proves the answer came first and the socket was held after is WHEN the run leaves.
-  assert.equal(await until(async () => (await sessions(s)).length === 0, 10_000), true, 'the run left the list')
+  // proves the answer came first and the socket was held after is WHEN the run lets go --
+  // which the list shows as the session turning `idle` (#290), not as its removal.
+  assert.equal(await until(() => letGo(s), 10_000), true, 'the run let go')
   const goneAt = Date.now()
-  assert.ok(goneAt - printedAt >= 1_500, `left ${goneAt - printedAt}ms after the answer was printed: the socket was not held`)
+  assert.ok(goneAt - printedAt >= 1_500, `let go ${goneAt - printedAt}ms after the answer was printed: the socket was not held`)
   assert.equal(await exited, 0, err)
 })
 
 test('#286 status reads the facts back from the live broker, and stop ends it', async (t) => {
-  const s = await site(t, [])
+  const s = await site(t, [], { CONCLAVE_EVEN_SESSION_LINGER_MS: '4500' })
   assert.equal(notifySync(s, ['broker', 'status']).code, 1, 'nothing running: exit 1')
   assert.deepEqual(status(s), { running: false, socketPath: s.env['CONCLAVE_EVEN_SOCKET'] })
 
@@ -244,10 +262,12 @@ test('#286 status reads the facts back from the live broker, and stop ends it', 
   assert.equal(st.socketPath, s.env['CONCLAVE_EVEN_SOCKET'])
   assert.equal(st.url, s.base)
   assert.equal(st.token, 'tok')
+  assert.equal(st.sessionLingerMs, 4500, 'the retention policy the broker is running (#290)')
   const prose = notifySync(s, ['broker', 'status'])
   assert.equal(prose.code, 0)
   assert.match(prose.out, new RegExp(`pid ${pid}`))
   assert.ok(prose.out.includes(`device  ${s.base}   token tok`))
+  assert.match(prose.out, /listed {2}4500ms after a run disconnects/)
   assert.match(prose.out, /runs {4}none attached/)
 
   const again = notifySync(s, ['broker', 'start'])

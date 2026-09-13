@@ -30,9 +30,11 @@ import {
   brokerAlive,
   brokerSocketPath,
   DEFAULT_LINGER_MS,
+  DEFAULT_SESSION_LINGER_MS,
   EvenRealitiesBroker,
   EvenRealitiesBrokerClient,
   lingerMs,
+  sessionLingerMs,
   START_GRACE_MS,
 } from './broker.ts'
 
@@ -52,9 +54,19 @@ const question = (text: string) => ({
   ],
 })
 
-/** A broker on a socket of its own, on port 0, torn down after the test whatever happened. */
-async function broker(t: TestContext, lingerMs = 60_000) {
-  const b = new EvenRealitiesBroker({ socketPath: join(tempDir(t, 'broker'), 'even.sock'), port: 0, token: 'tok', lingerMs })
+/**
+ * A broker on a socket of its own, on port 0, torn down after the test whatever happened.
+ * The session linger is the default unless a test's claim is about it: `close()` disarms
+ * every retention, so a thirty-second one costs an uninterested test nothing.
+ */
+async function broker(t: TestContext, lingerMs = 60_000, sessionLingerMs?: number) {
+  const b = new EvenRealitiesBroker({
+    socketPath: join(tempDir(t, 'broker'), 'even.sock'),
+    port: 0,
+    token: 'tok',
+    lingerMs,
+    ...(sessionLingerMs === undefined ? {} : { sessionLingerMs }),
+  })
   await b.start()
   t.after(() => b.close())
   return b
@@ -102,6 +114,50 @@ async function until(cond: () => Promise<boolean>, ms = 2_000): Promise<boolean>
 /** `p`, or a rejection after `ms`: for awaiting a shutdown that a mutation could make never come. */
 function within<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
   return Promise.race([p, new Promise<T>((_, reject) => setTimeout(() => reject(new Error(what)), ms))])
+}
+
+/**
+ * Until the broker has seen `sessionId`'s run hang up, by whichever of its two tells shows
+ * first: the run off the attached list, or its session reading `idle`. Disconnection is
+ * asynchronous; a test that asserts on either tell waits here on the other, so a mutation of
+ * the one it asserts cannot stall it into failing for a reason that is not its claim.
+ */
+async function detached(b: EvenRealitiesBroker, sessionId: string): Promise<void> {
+  await until(
+    async () =>
+      !b.status().sessions.includes(sessionId) || (await sessions(b)).find((s) => s.id === sessionId)?.status === 'idle',
+  )
+}
+
+/** The event stream for one session, as the app holds it: what has arrived, and whether it has ended. */
+async function stream(t: TestContext, b: EvenRealitiesBroker, sessionId: string) {
+  const ac = new AbortController()
+  t.after(() => ac.abort())
+  const res = await fetch(`${b.bridge.url}/api/events?token=tok&sessionId=${sessionId}&needReplay=true`, { signal: ac.signal })
+  const state = { status: res.status, text: '', ended: false }
+  // A stream still open when the test ends is aborted by the hook above; that is the test
+  // finishing, not the stream ending, so it is neither `ended` nor a rejection.
+  const pump =
+    res.status === 200
+      ? (async () => {
+          const reader = res.body!.getReader()
+          for (;;) {
+            const { value, done } = await reader.read()
+            if (done) break
+            state.text += new TextDecoder().decode(value)
+          }
+          state.ended = true
+        })().catch(() => {})
+      : Promise.resolve()
+  return { state, pump }
+}
+
+/** What `/api/messages` holds for one session: the replay buffer, as the app reads it. */
+async function messages(b: EvenRealitiesBroker, sessionId: string): Promise<{ id: number; title?: string }[]> {
+  const body = (await (await fetch(`${b.bridge.url}/api/messages?token=tok&sessionId=${sessionId}`)).json()) as {
+    messages: { id: number; title?: string }[]
+  }
+  return body.messages
 }
 
 test('#286 two independent socket clients appear together in /api/sessions, on one bridge', async (t) => {
@@ -166,17 +222,166 @@ test('#286 a tell goes out under the session that sent it, and a veto comes back
   assert.deepEqual(await c.poll(), [{ answer: 'Cut it short' }])
 })
 
-test('#286 hanging up removes the session, and only that session', async (t) => {
+test('#290 hanging up detaches the run: its session stays listed as idle, and only that session changes', async (t) => {
+  // Before #290 the session left the list with the socket, and the thread the operator had
+  // just answered was gone from the app before it could go back to it. Now the run leaves and
+  // the session stays, reading `idle` -- the run's last word about itself, minus a status it
+  // is no longer there to have.
   const b = await broker(t)
   const { c: a } = await client(t, b, 'run-a')
   await client(t, b, 'run-b')
-  assert.deepEqual((await sessions(b)).map((s) => s.id), ['run-a', 'run-b'])
+  assert.deepEqual((await sessions(b)).map((s) => [s.id, s.status]), [['run-a', 'busy'], ['run-b', 'busy']])
 
   // No `close` frame: the socket is the liveness. A run that crashed would look exactly like this.
   a.close()
-  assert.equal(await until(async () => (await sessions(b)).length === 1), true, 'run-a left the list')
-  assert.deepEqual((await sessions(b)).map((s) => s.id), ['run-b'], 'and run-b did not')
+  assert.equal(await until(async () => (await sessions(b))[0]?.status === 'idle'), true, 'run-a reads idle once the broker sees the hang-up')
+  assert.deepEqual((await sessions(b)).map((s) => [s.id, s.status]), [['run-a', 'idle'], ['run-b', 'busy']], 'still listed, and run-b untouched')
   assert.equal(await brokerAlive(b.socketPath), true, 'the broker is still serving')
+})
+
+test('#290 a reconnect inside the retention gets 200 and the replay, and /api/prompt is still refused', async (t) => {
+  // The app's move after an answer: reconnect the event stream with `needReplay`. Against a
+  // closed session that was 404 and a fall back to the list; against a retained one it is the
+  // stream, with everything the run sent. Nothing is outstanding on it, so a prompt is the
+  // same 409 it always was -- retention lists the thread, it does not reopen it to input.
+  const b = await broker(t)
+  const { c: a } = await client(t, b, 'run-a')
+  await a.tell({ type: 'notification', title: 'Decided', message: 'letting it land' })
+  a.close()
+  await detached(b, 'run-a')
+
+  const { state } = await stream(t, b, 'run-a')
+  assert.equal(state.status, 200, 'the reconnect finds the session')
+  assert.equal(await until(async () => state.text.includes('"Decided"')), true, 'and the replay carries what the run sent')
+  assert.deepEqual((await messages(b, 'run-a')).map((m) => m.title), ['Decided'], 'the buffer is the same one /api/messages reads')
+
+  const refused = await fetch(`${b.bridge.url}/api/prompt?token=tok`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ text: 'do the other thing', sessionId: 'run-a' }),
+  })
+  assert.equal(refused.status, 409, 'a prompt with nothing to answer is refused, retained or not')
+})
+
+test('#290 a retained session expires: the stream ends and the id is gone, at the session linger and not before', async (t) => {
+  const LINGER = 400
+  const b = await broker(t, 60_000, LINGER)
+  const { c: a } = await client(t, b, 'run-a')
+  const { state, pump } = await stream(t, b, 'run-a')
+  const left = Date.now()
+  a.close()
+  await detached(b, 'run-a')
+  assert.equal(state.ended, false, 'the stream the app holds survives the run letting go')
+
+  await within(pump, LINGER + 2_000, 'the stream never ended')
+  const gone = Date.now() - left
+  assert.ok(gone >= LINGER, `the stream ended ${gone}ms after the hang-up: before the session linger`)
+  assert.deepEqual(await sessions(b), [], 'and the session is off the list')
+  assert.equal((await stream(t, b, 'run-a')).state.status, 404, 'a reconnect after the retention is the 404 it should be')
+})
+
+test('#290 the same session id reattaching inside its retention takes the session back, buffer and all, and outlives the old expiry', async (t) => {
+  // The run reconnected, or a new invocation took up the id, before the retention ran out.
+  // Three things could go wrong, and each is a distinct line: the bridge could keep
+  // describing the old attachment (a list that still says `idle` with a stale timestamp),
+  // the old expiry could fire and close the session under the new connection, or the buffer
+  // could be reset as though this were a fresh open.
+  const LINGER = 300
+  const b = await broker(t, 60_000, LINGER)
+  const { c: first } = await client(t, b, 'run-a', meta({ timestamp: '2026-09-11T12:00:00.000Z' }))
+  await first.tell({ type: 'notification', title: 'Decided', message: 'letting it land' })
+  first.close()
+  await detached(b, 'run-a')
+
+  const { c: second } = await client(t, b, 'run-a', meta({ timestamp: '2026-09-11T13:00:00.000Z', status: 'busy' }))
+  assert.deepEqual(
+    (await sessions(b)).map((s) => [s.id, s.status, s.timestamp]),
+    [['run-a', 'busy', '2026-09-11T13:00:00.000Z']],
+    'the list describes the new attachment, not the idle one it replaced',
+  )
+  assert.deepEqual((await messages(b, 'run-a')).map((m) => m.title), ['Decided'], 'the buffer came with it')
+
+  // Past the point the first retention would have expired: the session is still the second run's.
+  await new Promise((r) => setTimeout(r, LINGER + 200))
+  assert.deepEqual((await sessions(b)).map((s) => [s.id, s.status]), [['run-a', 'busy']], 'the old expiry did not close the new attachment')
+  assert.equal(await second.tell({ type: 'notification', title: 't', message: 'still here' }), 2, 'and the id sequence continued')
+})
+
+test('#290 a run that leaves mid-question is retained too: its question is settled, and the session reads idle', async (t) => {
+  // Every detach retains; only the broker's shutdown closes at once. The run's end of the
+  // question was released when its socket closed; the bridge's end is settled `skip` by the
+  // detach, so the list does not say `awaiting` of a run that is not there -- and the
+  // session, stream and replay stay, question frame included, like any other retained run.
+  const b = await broker(t)
+  const { c: a } = await client(t, b, 'run-a')
+  const asked = a.ask(question('merge?'))
+  await until(async () => (await sessions(b))[0]?.status === 'awaiting')
+  a.close()
+  await assert.rejects(asked, /the broker connection closed/, 'the socket side of the ask is released')
+
+  assert.equal(await until(async () => (await sessions(b))[0]?.status === 'idle'), true, 'idle, not awaiting: the bridge side is settled')
+  const { state } = await stream(t, b, 'run-a')
+  assert.equal(state.status, 200, 'the stream is still served')
+  assert.equal(await until(async () => state.text.includes('"user_question"')), true, 'and replays the question the run left')
+  assert.deepEqual((await messages(b, 'run-a')).map((m) => m.id), [1], 'the buffer is intact')
+  // A late answer is a veto now -- nothing is pending -- and it does not revive `awaiting`.
+  await answer(b, 'run-a', 'Yes')
+  assert.equal((await sessions(b))[0]?.status, 'idle', 'still idle after a late answer')
+})
+
+test('#290 a retained session is not an attached run: it holds neither the status list nor the broker linger', async (t) => {
+  // The broker's lifetime counts runs, and a run that has gone is gone whatever its session
+  // is doing. A retained session counted as attached would keep the broker up for the
+  // session linger -- thirty seconds by default -- on top of its own; and `status` would
+  // name a run that is not there to be stopped.
+  const LINGER = 300
+  const b = await broker(t, LINGER, 30_000)
+  const { c: a } = await client(t, b, 'run-a')
+  const { state, pump } = await stream(t, b, 'run-a')
+  const left = Date.now()
+  a.close()
+  await detached(b, 'run-a')
+  assert.deepEqual(b.status().sessions, [], 'no run attached, whatever the glasses list')
+
+  // The broker lingers out on ITS clock; the retained session goes with it, not after it.
+  await within(b.closed, LINGER + 2_000, 'the retained session held the broker up')
+  const shut = Date.now() - left
+  assert.ok(shut >= LINGER, `shut down ${shut}ms after the hang-up: before the broker linger`)
+  await within(pump, 1_000, 'the retained stream outlived the broker')
+  assert.equal(state.ended, true)
+})
+
+test('#290 close() takes a retained session down at once, and leaves no expiry armed behind it', async (t) => {
+  // Shutdown is immediate whatever is retained: `bridge.close()` closes every session, and
+  // the expiry that would have closed this one is disarmed rather than left to fire into a
+  // bridge that is gone -- a timer that is not unref'd holds the process open until it fires,
+  // and the default one is thirty seconds. Observed by counting the bridge's `closeSession`
+  // calls past the linger: a leftover expiry is one more.
+  //
+  // Two runs, in the two states a shutdown meets: run-a already gone and retained, and run-b
+  // still attached -- whose hang-up, when `close()` ends its connection, must not retain it
+  // onto a bridge that is going down either.
+  const LINGER = 300
+  const b = await broker(t, 60_000, LINGER)
+  const { c: a } = await client(t, b, 'run-a')
+  const { c: held } = await client(t, b, 'run-b')
+  const { state, pump } = await stream(t, b, 'run-a')
+  a.close()
+  await detached(b, 'run-a')
+  let closes = 0
+  const real = b.bridge.closeSession.bind(b.bridge)
+  b.bridge.closeSession = (id) => {
+    closes++
+    real(id)
+  }
+
+  await within(b.close(), 2_000, 'close() waited on the retention')
+  await within(pump, 1_000, 'the retained stream outlived the broker')
+  assert.equal(state.ended, true)
+  assert.equal(await until(async () => held.closed), true, 'the attached run was disconnected')
+  assert.equal(closes, 2, 'each closed once, by the bridge going down')
+  await new Promise((r) => setTimeout(r, LINGER + 200))
+  assert.equal(closes, 2, 'and neither again by an expiry the shutdown should have disarmed')
 })
 
 test('#286 a session is one connection: a second claim is refused while the first holds it', async (t) => {
@@ -294,7 +499,7 @@ test('#286 close() answers a pending question skip, and the frame is on the wire
 })
 
 test('#286 status and stop need no session, and neither touches the linger', async (t) => {
-  const b = await broker(t, 200)
+  const b = await broker(t, 200, 7_000)
   const { c: a } = await client(t, b, 'run-a')
   const asker = await EvenRealitiesBrokerClient.connect(b.socketPath)
   t.after(() => asker.close())
@@ -306,6 +511,7 @@ test('#286 status and stop need no session, and neither touches the linger', asy
     token: 'tok',
     startedAt: s.startedAt,
     lingerMs: 200,
+    sessionLingerMs: 7_000,
     sessions: ['run-a'],
   })
   assert.ok(Date.parse(s.startedAt) <= Date.now(), 'startedAt is when it bound')
@@ -334,32 +540,20 @@ test('#286 an answered question does not end the stream: the glasses stay attach
   const asked = a.ask(question('merge?'))
   await until(async () => (await sessions(b))[0]?.status === 'awaiting')
 
-  const ac = new AbortController()
-  t.after(() => ac.abort())
-  const res = await fetch(`${b.bridge.url}/api/events?token=tok&sessionId=run-a&needReplay=true`, { signal: ac.signal })
-  const reader = res.body!.getReader()
-  let text = ''
-  let ended = false
-  const pump = (async () => {
-    for (;;) {
-      const { value, done } = await reader.read()
-      if (done) break
-      text += new TextDecoder().decode(value)
-    }
-    ended = true
-  })()
+  const { state } = await stream(t, b, 'run-a')
 
   await answer(b, 'run-a', 'Yes')
   assert.deepEqual(await asked, { answer: 'Yes' })
-  assert.equal(await until(async () => text.includes('"Received"')), true, 'the confirmation went out on the stream')
+  assert.equal(await until(async () => state.text.includes('"Received"')), true, 'the confirmation went out on the stream')
   await new Promise((r) => setTimeout(r, 200))
-  assert.equal(ended, false, 'and the stream is still open after the answer')
+  assert.equal(state.ended, false, 'and the stream is still open after the answer')
   assert.deepEqual((await sessions(b)).map((x) => [x.id, x.status]), [['run-a', 'busy']], 'the run is still listed, no longer awaiting')
 
-  // The run lets go: now, and only now, the stream ends.
+  // The run lets go, and the stream is still open: the session outlives the run (#290), and
+  // when the stream ends is the retention's claim, not this one's.
   a.close()
-  await within(pump, 2_000, 'the stream did not end with the run')
-  assert.equal(ended, true)
+  await detached(b, 'run-a')
+  assert.equal(state.ended, false, 'the run letting go did not end it either')
 })
 
 test('#286 a frame the broker cannot use is refused in words, and the connection goes on', async (t) => {
@@ -467,6 +661,19 @@ test('#286 the linger is sixty seconds unless CONCLAVE_EVEN_LINGER_MS says other
   // A typo is the default, not a broker that never exits or exits at once.
   assert.equal(lingerMs({ CONCLAVE_EVEN_LINGER_MS: 'soon' }), 60_000)
   assert.equal(lingerMs({ CONCLAVE_EVEN_LINGER_MS: '-1' }), 60_000)
+})
+
+test('#290 a session stays thirty seconds unless CONCLAVE_EVEN_SESSION_LINGER_MS says otherwise', () => {
+  assert.equal(DEFAULT_SESSION_LINGER_MS, 30_000)
+  assert.equal(sessionLingerMs({}), 30_000)
+  assert.equal(sessionLingerMs({ CONCLAVE_EVEN_SESSION_LINGER_MS: '5000' }), 5_000)
+  assert.equal(sessionLingerMs({ CONCLAVE_EVEN_SESSION_LINGER_MS: '0' }), 0, 'zero is a choice: the session goes with the run')
+  // A typo is the default, not a session that vanishes at once or never.
+  assert.equal(sessionLingerMs({ CONCLAVE_EVEN_SESSION_LINGER_MS: 'soon' }), 30_000)
+  assert.equal(sessionLingerMs({ CONCLAVE_EVEN_SESSION_LINGER_MS: '-1' }), 30_000)
+  // Its own variable: the broker linger does not set it, and it does not set the broker linger.
+  assert.equal(sessionLingerMs({ CONCLAVE_EVEN_LINGER_MS: '5000' }), 30_000)
+  assert.equal(lingerMs({ CONCLAVE_EVEN_SESSION_LINGER_MS: '5000' }), 60_000)
 })
 
 test('#286 the socket path is deterministic per user, and the override wins', () => {

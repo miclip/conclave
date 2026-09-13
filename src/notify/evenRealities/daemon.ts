@@ -41,6 +41,7 @@ import {
   EvenRealitiesBroker,
   EvenRealitiesBrokerClient,
   lingerMs,
+  sessionLingerMs,
   type BrokerStatus,
 } from './broker.ts'
 
@@ -51,6 +52,7 @@ export interface BrokerConfig {
   token?: string
   host?: string
   lingerMs: number
+  sessionLingerMs: number
 }
 
 export function brokerConfigFromEnv(env: NodeJS.ProcessEnv = process.env): BrokerConfig {
@@ -62,6 +64,7 @@ export function brokerConfigFromEnv(env: NodeJS.ProcessEnv = process.env): Broke
     ...(token ? { token } : {}),
     ...(host ? { host } : {}),
     lingerMs: lingerMs(env),
+    sessionLingerMs: sessionLingerMs(env),
   }
 }
 
@@ -101,6 +104,9 @@ export const spawnServe: Spawner = (config) =>
         ...(config.token ? { CONCLAVE_EVEN_TOKEN: config.token } : {}),
         ...(config.host ? { CONCLAVE_EVEN_HOST: config.host } : {}),
         CONCLAVE_EVEN_LINGER_MS: String(config.lingerMs),
+        // Explicit, like the rest: a config built from another env, or injected, must reach
+        // the broker as it was built, not as this process's environment happens to say.
+        CONCLAVE_EVEN_SESSION_LINGER_MS: String(config.sessionLingerMs),
       },
     })
     closeSync(log)
@@ -187,6 +193,7 @@ export function startNotice(s: BrokerStatus): string {
     `  log     ${brokerLogPath(s.socketPath)}`,
     `  device  ${s.url}   token ${s.token}`,
     `  it exits ${s.lingerMs / 1000}s after the last run disconnects; CONCLAVE_EVEN_LINGER_MS moves that`,
+    `  a finished run stays listed ${s.sessionLingerMs / 1000}s; CONCLAVE_EVEN_SESSION_LINGER_MS moves that`,
     `  stop it now:  conclave notify broker stop`,
   ].join('\n')
 }
@@ -267,7 +274,7 @@ export async function serveBroker(
   }
   const status = broker.status()
   io.stdout(JSON.stringify({ ready: status } satisfies ServeOutcome))
-  io.stderr(`[broker] serving ${status.url} for ${status.socketPath}, linger ${status.lingerMs}ms`)
+  io.stderr(`[broker] serving ${status.url} for ${status.socketPath}, linger ${status.lingerMs}ms, session linger ${status.sessionLingerMs}ms`)
   const onSignal = (): void => void broker.close()
   process.once('SIGTERM', onSignal)
   process.once('SIGINT', onSignal)

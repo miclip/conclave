@@ -14,12 +14,12 @@ import test, { type TestContext } from 'node:test'
 
 import { tempDir } from '../../testkit/tempDir.ts'
 import { EvenRealitiesBroker } from './broker.ts'
-import { brokerConfigFromEnv, brokerLogPath, brokerStatus, ensureBroker, startNotice, stopBroker, type BrokerConfig } from './daemon.ts'
+import { brokerConfigFromEnv, brokerLogPath, brokerStatus, ensureBroker, spawnServe, startNotice, stopBroker, type BrokerConfig } from './daemon.ts'
 
 process.env['CONCLAVE_EVEN_QUIET'] = '1'
 
 function config(t: TestContext): BrokerConfig {
-  return { socketPath: join(tempDir(t, 'daemon'), 'even.sock'), port: 0, token: 'tok', lingerMs: 60_000 }
+  return { socketPath: join(tempDir(t, 'daemon'), 'even.sock'), port: 0, token: 'tok', lingerMs: 60_000, sessionLingerMs: 30_000 }
 }
 
 test('#286 a run that loses the start race joins the winner rather than failing', async (t) => {
@@ -149,7 +149,25 @@ test('#286 a fresh start is announced with everything needed to find or stop the
   assert.ok(notice.includes(`log     ${brokerLogPath(c.socketPath)}`))
   assert.ok(notice.includes(`device  ${started.bridge.url}   token tok`))
   assert.match(notice, /it exits 60s after the last run disconnects; CONCLAVE_EVEN_LINGER_MS moves that/)
+  assert.match(notice, /a finished run stays listed 30s; CONCLAVE_EVEN_SESSION_LINGER_MS moves that/)
   assert.match(notice, /stop it now:  conclave notify broker stop/)
+})
+
+test('#290 the session linger reaches the serve process from the CONFIG, not from whatever this environment says', async (t) => {
+  // The real spawner, with a config that disagrees with the environment: a serve that read
+  // the ambient variable, or the default, would report 30000 here. Stopped through the
+  // socket after, because the process is detached and unref'd and would otherwise live on.
+  const c = { ...config(t), sessionLingerMs: 4_321 }
+  t.after(() => stopBroker(c.socketPath))
+  const saved = process.env['CONCLAVE_EVEN_SESSION_LINGER_MS']
+  delete process.env['CONCLAVE_EVEN_SESSION_LINGER_MS']
+  t.after(() => {
+    if (saved !== undefined) process.env['CONCLAVE_EVEN_SESSION_LINGER_MS'] = saved
+  })
+  const outcome = await spawnServe(c)
+  assert.ok('ready' in outcome, JSON.stringify(outcome))
+  assert.equal(outcome.ready.sessionLingerMs, 4_321, 'announced as configured')
+  assert.equal((await brokerStatus(c.socketPath))?.sessionLingerMs, 4_321, 'and running that way')
 })
 
 test('#286 status and stop speak to the live broker; with none there, they say so', async (t) => {
@@ -170,6 +188,7 @@ test('#286 the config is read from the same variables the transport always read'
     socketPath: '/s.sock',
     port: 3456,
     lingerMs: 60_000,
+    sessionLingerMs: 30_000,
   })
   assert.deepEqual(
     brokerConfigFromEnv({
@@ -178,8 +197,9 @@ test('#286 the config is read from the same variables the transport always read'
       CONCLAVE_EVEN_TOKEN: 't',
       CONCLAVE_EVEN_HOST: '0.0.0.0',
       CONCLAVE_EVEN_LINGER_MS: '5',
+      CONCLAVE_EVEN_SESSION_LINGER_MS: '7',
     }),
-    { socketPath: '/s.sock', port: 4000, token: 't', host: '0.0.0.0', lingerMs: 5 },
+    { socketPath: '/s.sock', port: 4000, token: 't', host: '0.0.0.0', lingerMs: 5, sessionLingerMs: 7 },
   )
   assert.equal(brokerLogPath('/x/even.sock'), '/x/even.log')
 })
