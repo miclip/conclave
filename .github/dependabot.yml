@@ -1,0 +1,36 @@
+# Dependabot UPDATE PRs. This file cannot enable Dependabot ALERTS: that is a repository
+# setting, and a repo with alerts off is told about nothing regardless of what is here.
+version: 2
+updates:
+  # Two direct dependencies and one runtime one (node-pty, a native module). Weekly rather
+  # than daily: on a repo this small, daily would mostly be noise, and a security bot that
+  # produces noise is a security bot somebody mutes.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      # One PR, not one per package. TypeScript and its types move together, and a grouped
+      # update is a single suite run rather than several.
+      dev-dependencies:
+        dependency-type: development
+      production-dependencies:
+        dependency-type: production
+    commit-message:
+      prefix: deps
+
+  # The workflows pin five actions by major tag. A major tag moves under you, so these are
+  # updated deliberately rather than silently -- and an action's supply chain is the one that
+  # runs with a token.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      actions:
+        patterns: ['*']
+    commit-message:
+      prefix: ci

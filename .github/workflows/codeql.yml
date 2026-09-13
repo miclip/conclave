@@ -1,0 +1,41 @@
+name: codeql
+
+# Free on public repositories. Runs on the default branch, on pull requests into it, and
+# weekly -- the schedule matters because an advisory published after a merge is the case a
+# push-triggered scan never sees.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Monday, off the hour: a scheduled job on the hour queues behind everyone else's.
+    - cron: '17 6 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: analyze
+    runs-on: ubuntu-latest
+    permissions:
+      # The scan's findings go to the security tab, which needs more than `contents: read`.
+      security-events: write
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Initialise CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: javascript-typescript
+          queries: security-and-quality
+
+      # No build step. This is a TypeScript project run through tsx rather than compiled, so
+      # there is no artefact to produce and autobuild would have nothing to do.
+      - name: Analyse
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: /language:javascript-typescript
