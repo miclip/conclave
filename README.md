@@ -61,7 +61,9 @@ conclave config check       # is it present, current, and trusted
 ```
 
 The registration invokes `conclave` from PATH, so it does not name a release directory and
-does not go stale when you upgrade. A registration written before v0.5.50 does name one;
+does not go stale when you upgrade. A Claude seat inside a run does not use it: the seat's
+hooks come from the generated `--settings`, pinned to the run's release, and the project
+registration stands aside for that seat so no event is delivered twice. A registration written before v0.5.50 does name one;
 `config check` reports it as `STALE` and `config install` replaces it.
 
 `config check` answers for the directory it is run from. To ask which projects are affected:
@@ -306,7 +308,7 @@ of its own. What a Claude seat allows by default:
 | command | what it costs |
 | --- | --- |
 | `/compact` | nothing the run depends on: the conversation is summarised, not dropped |
-| `/goal [<condition> \| clear]` | turn duration. The seat keeps working on the turn it is already running, so the count stays right and `deadlines` still bounds it |
+| `/goal [<condition> \| clear]` | one uncounted turn, and its report. The seat opens a turn of its own on the condition and works until it holds; the relay waits for that turn to end before sending anything else, does not count it against `--max-turns`, and collects no report from it. `deadlines` still bounds it |
 | `/loop [interval] [prompt]` | **the record.** The seat drives its own subsequent turns. They count against `--max-turns` and `--rounds` like any other, but nothing collects their reports, so what they did is not in the run record |
 
 A Codex seat allows `/compact` and `/review`.

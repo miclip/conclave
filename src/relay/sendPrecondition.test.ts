@@ -141,12 +141,14 @@ class TurnSession implements AgentSession {
   /**
    * A `turn_end` for the PREVIOUS turn, emitted while the current one is still open.
    *
-   * This is how a relay comes to send into a live child, and as far as the events go it is the
-   * only way. `Relay#exchangeTurn` waits for the first `turn_end` it sees after its send and
-   * never checks the key, so a late end belonging to an earlier prompt releases it: the relay
-   * believes the turn is over, reads a report, routes it, and comes back to send again while the
-   * child is still working. Everything the operator then sees — the missing hook, the
-   * `transport_failed`, the child that keeps writing files — follows from this one event.
+   * This WAS how a relay came to send into a live child: `Relay#exchangeTurn` took the first
+   * `turn_end` after its send with no key check, so a late end belonging to an earlier prompt
+   * released it -- the relay read a report, routed it, and came back to send while the child was
+   * still working. #300 closed that route: the exchange now waits for the end carrying the key
+   * its own `send` returned, and this event is what the test of that sends.
+   *
+   * The tests of the send precondition itself used to reach a busy seat this way. They now use
+   * `startOwnTurn` below, which is the route that remains open.
    */
   emitStaleEnd(): void {
     const previous = this.#turns.at(-2)
@@ -159,6 +161,30 @@ class TurnSession implements AgentSession {
       seq: ++this.#seq,
       at: Date.now(),
       provisional: false,
+    })
+  }
+
+  /**
+   * A turn the seat starts for ITSELF, between exchanges, and does not end until told to.
+   *
+   * The way a seat is busy when the relay next has something to send, now that a stale end
+   * cannot make the relay believe a dispatched turn ended early (#300): a `/loop` iteration,
+   * a queued prompt, a human typing into the seat's own pane. Unsolicited, so the relay charges
+   * it (#208), and `#open` is set so a send into it is counted as the fatal case it is.
+   */
+  startOwnTurn(): void {
+    if (this.#open) throw new Error(`${this.sessionId} already has a turn open`)
+    const key = turnKey(`${this.sessionId}-own-${this.#seq}`)
+    this.#turns.push({ key, prose: '(a turn nobody dispatched)' })
+    this.#open = key
+    this.#emit({
+      type: 'turn_start',
+      prompt: 'a turn the seat began on its own',
+      turnKey: key,
+      seq: ++this.#seq,
+      at: Date.now(),
+      provisional: false,
+      unsolicited: true,
     })
   }
 
@@ -381,23 +407,64 @@ test('a transcript still catching up after turn_end does not hold up the next se
   }
 })
 
+test('#300 a late turn_end for an earlier turn does not release the exchange', async (t) => {
+  // The route the four tests below used to travel, closed. A `turn_end` carrying the briefing
+  // turn's key arrives while the work turn is open; the exchange must go on waiting for the
+  // work turn's own end, route THAT report, and never come back to send while the seat is busy.
+  // Before #300 the stale end released it at 50ms, the relay routed whatever the snapshot held,
+  // and the send precondition was all that stood between it and a send into a live child.
+  const repo = tempRepo(t)
+  const impl = new TurnSession('implementer', 'impl-1', [...IMPL_REPLIES])
+  impl.holdFrom = 1
+  impl.onSend = (_message, index) => {
+    if (index !== 1) return
+    setTimeout(() => impl.emitStaleEnd(), 50).unref()
+    // Well past the relay's 250ms end-poll plus its settle window, so an exchange released by
+    // the stale end has visibly read the turn while it was still running. At 400ms the two
+    // coincided and the mutation that drops the key check passed this test.
+    setTimeout(() => {
+      impl.holdFrom = undefined
+      impl.endTurn()
+    }, 900).unref()
+  }
+  const advisor = new TurnSession('advisor', 'advisor-1', [...ADVISOR_REPLIES])
+  const relay = await twoParty(repo, impl, advisor, { sendPreconditionMs: 10_000 })
+  try {
+    const outcome = await relay.run('Keep the work moving.')
+    assert.equal(impl.sentWhileBusy, 0, 'nothing may be sent while a turn is open')
+    assert.equal(outcome.reason, 'done', JSON.stringify(outcome))
+    assert.ok(
+      relay.log.some((m) => m.kind === 'report' && m.text.includes('Did the work.')),
+      'the work turn’s own report is what gets routed',
+    )
+    assert.deepEqual(
+      preconditionNotes(relay),
+      [],
+      'and the precondition never had to catch anything: the exchange itself waited for the right end',
+    )
+    // The tell of an early release: an exchange released at 50ms reads a snapshot of a turn
+    // still in progress, waits out the settle window, and records that the report may be short.
+    assert.ok(
+      !relay.log.some((m) => m.kind === 'note' && m.text.includes('the report below may be incomplete')),
+      'nothing was read before the work turn had ended',
+    )
+  } finally {
+    await relay.stop()
+  }
+})
+
 test('a peer send waits for a live turn instead of ending the run', async (t) => {
   // A turn that is genuinely open — `turn_start` with no `turn_end` — and stays that way for
   // longer than any poll interval, so a relay that got lucky on timing cannot pass.
   const repo = tempRepo(t)
   const impl = new TurnSession('implementer', 'impl-1', [...IMPL_REPLIES])
-  // The work turn stays open; a stale end for the BRIEFING turn releases the relay's own wait,
-  // which is how it comes to be holding the next instruction while the child is still working.
-  // 700ms later the turn really ends, so the wait is longer than any poll interval and shorter
-  // than the bound.
-  impl.holdFrom = 1
+  // The work turn ends, and the seat at once begins a turn of its own -- which is what the
+  // relay finds open when it comes back with the next instruction. 700ms later that turn
+  // really ends, so the wait is longer than any poll interval and shorter than the bound.
   impl.onSend = (_message, index) => {
     if (index !== 1) return
-    setTimeout(() => impl.emitStaleEnd(), 50).unref()
-    setTimeout(() => {
-      impl.holdFrom = undefined
-      impl.endTurn()
-    }, 700).unref()
+    setTimeout(() => impl.startOwnTurn(), 0).unref()
+    setTimeout(() => impl.endTurn(), 700).unref()
   }
   const advisor = new TurnSession('advisor', 'advisor-1', [...ADVISOR_REPLIES])
   const relay = await twoParty(repo, impl, advisor, { sendPreconditionMs: 10_000 })
@@ -423,15 +490,14 @@ test('a child mid-turn is refused however idle its CPU reads, and the transport 
   const repo = tempRepo(t)
   const impl = new TurnSession('implementer', 'impl-1', [...IMPL_REPLIES])
   impl.childPid = 4242
-  // Open from the work turn on, and never closed. The briefing completes normally, so the run
-  // reaches the point where a seat is asked to do something with a turn already in flight.
-  impl.holdFrom = 1
+  // The work turn completes normally and the seat then opens a turn of its own that is never
+  // closed, so the run reaches the point where a seat is asked to do something with a turn
+  // already in flight.
   impl.onSend = (_message, index) => {
     if (index !== 1) return
-    // The turn is doing something, and reading near-zero while it does. The stale end releases
-    // the relay's wait; the turn itself never ends.
+    setTimeout(() => impl.startOwnTurn(), 0).unref()
+    // The turn is doing something, and reading near-zero while it does.
     setTimeout(() => impl.useTool('Bash'), 30).unref()
-    setTimeout(() => impl.emitStaleEnd(), 60).unref()
   }
   const advisor = new TurnSession('advisor', 'advisor-1', [...ADVISOR_REPLIES])
   const relay = await twoParty(repo, impl, advisor, {
@@ -485,9 +551,8 @@ test('the busy target is cancelled and closed rather than left running', async (
   // the transport had failed and nothing more.
   const repo = tempRepo(t)
   const impl = new TurnSession('implementer', 'impl-1', [...IMPL_REPLIES])
-  impl.holdFrom = 1
   impl.onSend = (_message, index) => {
-    if (index === 1) setTimeout(() => impl.emitStaleEnd(), 50).unref()
+    if (index === 1) setTimeout(() => impl.startOwnTurn(), 0).unref()
   }
   const advisor = new TurnSession('advisor', 'advisor-1', [...ADVISOR_REPLIES])
   const relay = await twoParty(repo, impl, advisor, { sendPreconditionMs: 400 })
@@ -518,9 +583,8 @@ test('the precondition is read on the target, not carried over from the previous
   // that was never busy.
   const repo = tempRepo(t)
   const impl = new TurnSession('implementer', 'impl-1', [...IMPL_REPLIES])
-  impl.holdFrom = 1
   impl.onSend = (_message, index) => {
-    if (index === 1) setTimeout(() => impl.emitStaleEnd(), 50).unref()
+    if (index === 1) setTimeout(() => impl.startOwnTurn(), 0).unref()
   }
   const advisor = new TurnSession('advisor', 'advisor-1', [...ADVISOR_REPLIES])
   const relay = await twoParty(repo, impl, advisor, { sendPreconditionMs: 400 })

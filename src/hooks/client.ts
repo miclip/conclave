@@ -44,6 +44,27 @@ import { HookJournal, mintDeliveryId } from './journal.ts'
 const RUN_MARKERS = ['ORCH_HOOK_ATTEMPT_JOURNAL', 'ORCH_HOOK_TIMEOUT_MS'] as const
 
 /**
+ * Set by an adapter on its child when the seat carries its OWN hook registration (#302).
+ *
+ * The value is the agent it was set for, and that is not decoration: `ORCH_*` passes through
+ * `sanitizedCopy` to every process a seat spawns, so a Claude seat that runs a nested
+ * `conclave session` hands this to that run's Codex child -- whose project sidecar is its
+ * only registration. Matched against the agent a hook fires for, the marker says nothing to
+ * a Codex hook and the nested seat keeps its events.
+ */
+export const PINNED_HOOKS_VAR = 'ORCH_PINNED_HOOKS'
+
+/**
+ * Which registration invoked the client (#302).
+ *
+ *   `seat`     the adapter's own, written per run and pinned to the release the run started
+ *              on (`node <release>/src/hooks/client.ts <agent>`, #250).
+ *   `project`  the project's, rendered by `config install` and resolved through PATH at
+ *              every firing (`conclave hook <agent>`, #258).
+ */
+export type HookRegistration = 'seat' | 'project'
+
+/**
  * The whole client, as a function, so `conclave hook <agent>` executes it rather than
  * reimplementing it.
  *
@@ -55,8 +76,31 @@ const RUN_MARKERS = ['ORCH_HOOK_ATTEMPT_JOURNAL', 'ORCH_HOOK_TIMEOUT_MS'] as con
  * Returns the exit code rather than exiting. Non-zero on a lost delivery is the contract
  * spike 2 paid for, and it has to survive being called from inside another program.
  */
-export async function runHookClient(agent: string): Promise<number> {
+export async function runHookClient(agent: string, opts: { source?: HookRegistration } = {}): Promise<number> {
   const firedAt = Date.now() / 1000
+
+  // A PROJECT registration firing inside a seat that registered itself stands aside (#302).
+  //
+  // Claude Code runs the hooks of every settings layer it loads, and a live Claude seat had
+  // two: the project's `.claude/settings.json`, which `config install` and every session
+  // start write, and the run's own `--settings` file. Both posted, every event, for the whole
+  // run -- measured as every implementer turn arriving twice on both #300 runs. The seat's own
+  // registration is the one that carries every event the adapter depends on and is pinned to
+  // the run's release; the project's exists for `config check`, for Codex (where it is the
+  // only mechanism), and as the install a human asked for -- and none of those is served by
+  // it also posting from inside a seat. So it is the project one that yields, and only for
+  // the agent whose adapter said so. Before the journal, deliberately: a `fired` entry with no
+  // delivery behind it would tell `SEND_HOOK_TIMEOUT`'s reader the handler ran when the one
+  // that mattered may not have.
+  //
+  // This runs in whichever `conclave` the project's PATH resolves (#258), so it takes effect
+  // for a project only once that is a release carrying it. Until then the project's hook posts
+  // alongside the seat's, and `ClaudePtyHookAdapter.#onHook` absorbs the duplicate -- a belt
+  // that reads nothing of this and must stay that way.
+  if (opts.source === 'project' && process.env[PINNED_HOOKS_VAR] === agent) {
+    process.stderr.write(`[orch-hook] ${agent}: this seat carries its own hook registration; the project's stands aside\n`)
+    return 0
+  }
 
   let raw = ''
   try {
@@ -169,7 +213,7 @@ function invokedDirectly(): boolean {
 }
 
 if (invokedDirectly()) {
-  runHookClient(process.argv[2] ?? 'unknown').then(
+  runHookClient(process.argv[2] ?? 'unknown', { source: 'seat' }).then(
     (code) => exitAfterFlush(code),
     (err) => {
       process.stderr.write(`[orch-hook] fatal: ${String(err)}\n`)

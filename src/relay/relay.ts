@@ -376,6 +376,24 @@ const DEFAULT_SALVAGE_MS = 90_000
 const DEFAULT_SEND_PRECONDITION_MS = 300_000
 
 /**
+ * How long a submitted command is given to open a turn before the relay stops expecting one
+ * (#300).
+ *
+ * A slash command is typed into the composer and the CLI dispatches `UserPromptSubmit` for it
+ * like any prompt (#207), so its `turn_start` arrives on the seat's event stream -- about 100 ms
+ * after the submission on both #300 runs. Until it does, `activeTurn` reads the seat as idle,
+ * and a send made in that gap goes into a composer whose turn is about to open, which is the
+ * mid-turn send #117 exists to prevent, arrived at from the relay's own keystroke.
+ *
+ * Not every command opens a turn: `/compact` with nothing to compact dispatched no hook at all
+ * (measured on 2.1.270), and a command the CLI has disabled cannot be told apart from one it
+ * ran. So the wait is bounded, and the bound is what such a command costs: paid in full, once,
+ * every time. It is set from the observed latency with room for a loaded machine, not from
+ * what a hook is allowed to take.
+ */
+const DEFAULT_COMMAND_TURN_OPEN_MS = 5_000
+
+/**
  * How often `#exchangeTurn` looks for the `turn_end` it is waiting on.
  *
  * A cadence and nothing else: nothing counts these, no ending depends on how many have gone by,
@@ -615,6 +633,11 @@ export interface RelayOptions {
    * `DEFAULT_SEND_PRECONDITION_MS` for why it is much the largest of the three.
    */
   sendPreconditionMs?: number
+  /**
+   * How long a submitted command is given to open a turn before the relay stops expecting
+   * one (#300). Default 5s -- see `DEFAULT_COMMAND_TURN_OPEN_MS`.
+   */
+  commandTurnOpenMs?: number
   /**
    * Routing-log entries as they are recorded. Kept for callers that only want the log and
    * only want it pushed at them; `observe()` is the fuller surface, and carries the
@@ -1897,6 +1920,16 @@ export class Relay {
    * hundred copies of itself.
    */
   #unsolicitedBreachNoted = false
+  /**
+   * Turns the seat opened for a command this relay typed, by key (#300).
+   *
+   * A command's turn is the relay's own doing, so it is waited for the way a dispatched turn is
+   * -- until its `turn_end`, governed by the adapter's watchdog -- and never under the send
+   * precondition's bound: a `/goal` turn is a WORKING turn that can outlast five minutes, and
+   * ending the run `peer_busy` for it would end the run for doing what the advisor asked. The
+   * key is removed once its end has been seen, so the set holds at most the turns in flight.
+   */
+  readonly #commandTurns = new Set<string>()
   #participants = new Map<string, RelayParticipant>()
   #seq = 0
   #opts: RelayOptions
@@ -4247,6 +4280,7 @@ export class Relay {
     if (closed.done) {
       throw new TurnAbandonedError(p.id, `${p.id}'s session was closed before this turn could be sent`)
     }
+    await this.#awaitCommandTurns(p, closed)
     if (!activeTurn(p.events)) {
       this.#handle?.noteForceSend(p.id, 'sent', 0)
       return
@@ -4336,6 +4370,101 @@ export class Relay {
   }
 
   /**
+   * Wait for every turn this relay's own commands opened on `p` to end (#300).
+   *
+   * The half of the send precondition that has no bound, and the reason is who started the
+   * turn. `#awaitSendable`'s five minutes is a limit on how long the relay will wait for a turn
+   * it did not ask for; a command's turn it DID ask for, by proxy, and a `/goal` turn does the
+   * work the advisor set it -- measured on 2.1.270, the CLI tells the model to treat the
+   * condition as its directive and `Stop` fires when it is met. So this waits the way
+   * `#exchangeTurn` waits: for the turn's own `turn_end`, with the adapter's watchdog as the
+   * only clock, and the session closing under it as the only other exit.
+   *
+   * On the END EVENT rather than on `activeTurn` clearing, deliberately. A `timed_out` verdict
+   * the adapter could not confirm leaves `activeTurn` reading the turn as open, and a loop on
+   * that would never return; once the end has been seen, whatever remains is handed to the
+   * bounded precondition below, which treats an uncertain timeout on a command's turn exactly
+   * as it treats one on a dispatched turn.
+   */
+  async #awaitCommandTurns(p: RelayParticipant, closed: { done: boolean; promise: Promise<void> }): Promise<void> {
+    if (this.#commandTurns.size === 0) return
+    const unended = (): string | undefined => {
+      let open: string | undefined
+      for (const e of p.events) {
+        if (e.type === 'turn_start' && this.#commandTurns.has(String(e.turnKey))) open = String(e.turnKey)
+        else if (e.type === 'turn_end' && open !== undefined && (e.turnKey === undefined || String(e.turnKey) === open)) {
+          this.#commandTurns.delete(open)
+          open = undefined
+        }
+      }
+      return open
+    }
+    const startedAt = Date.now()
+    let key = unended()
+    if (key === undefined) return
+    while (key !== undefined && !closed.done) {
+      await Promise.race([new Promise((r) => setTimeout(r, TURN_POLL_MS)), closed.promise])
+      key = unended()
+    }
+    if (key !== undefined) {
+      throw new TurnAbandonedError(p.id, `${p.id}'s session was closed while the turn its command opened was still running`)
+    }
+    const elapsed = Date.now() - startedAt
+    const waited = elapsed < 1000 ? `${elapsed}ms` : `${Math.round(elapsed / 1000)}s`
+    this.#record({
+      from: 'orchestrator',
+      fromRank: 'human',
+      to: [],
+      kind: 'note',
+      text:
+        `${p.id} was still on the turn its command opened, so the relay waited ${waited} for it ` +
+        `to end before sending; a command's turn is the relay's own and is waited for without ` +
+        `the send precondition's bound`,
+    })
+  }
+
+  /**
+   * Watch for the turn a just-submitted command opens, and remember it (#300).
+   *
+   * `before` is the seat's event count at the moment of submission, so only a `turn_start`
+   * that arrived AFTER the keystrokes can be taken for the command's -- and only one carrying
+   * the command's own text, exact on the trimmed line, which is the same test the adapters
+   * apply to its echo (`#takeRawEcho`). A turn the seat began for some other reason in the
+   * same window is not the command's, and is left to the bounded precondition like any other
+   * unsolicited turn rather than waited on as if the relay had asked for it. A replayed start
+   * is history and is skipped. The wait is bounded by `commandTurnOpenMs`, and the bound running
+   * out is the ordinary outcome for a command that opened nothing -- recorded as exactly that,
+   * not as a failure, because the seam says the outcome is unobserved and this is the one
+   * observation that IS available.
+   */
+  async #observeCommandTurn(p: RelayParticipant, before: number, line: string): Promise<void> {
+    const bound = this.#opts.commandTurnOpenMs ?? DEFAULT_COMMAND_TURN_OPEN_MS
+    const startedAt = Date.now()
+    const closed = this.#closeSignal(p.id)
+    const opened = (): AgentEvent | undefined =>
+      p.events
+        .slice(before)
+        .find((e) => e.type === 'turn_start' && e.replay !== true && e.prompt.trim() === line.trim())
+    let start = opened()
+    while (!start && Date.now() - startedAt < bound && !closed.done) {
+      await Promise.race([new Promise((r) => setTimeout(r, 50)), closed.promise])
+      start = opened()
+    }
+    if (!start || start.type !== 'turn_start') return
+    this.#commandTurns.add(String(start.turnKey))
+    this.#record({
+      from: 'orchestrator',
+      fromRank: 'human',
+      to: [p.id],
+      kind: 'note',
+      text:
+        `${p.id} opened a turn for \`${line}\` (${String(start.turnKey).slice(0, 8)}). The relay ` +
+        `will wait for that turn to end before sending anything else to ${p.id}; it is not counted ` +
+        `against the turn ceilings and its report is not collected.`,
+    })
+  }
+
+  /**
    * The close signal for one participant, created on first use by whichever side asks first.
    *
    * Both sides need it and neither can be relied on to run first: a turn can be in flight long
@@ -4386,7 +4515,7 @@ export class Relay {
     const treeBeforeTurn = new Set(dirtyPaths(turnRoot))
     // The turn's own budget when the advisor asked for one (#193). Passed rather than set on the
     // seat: it applies to this turn and is gone when it ends.
-    await p.session.send(text, { kind: 'peer_relay' }, budget)
+    const key = await p.session.send(text, { kind: 'peer_relay' }, budget)
 
     // No timeout of its own. The adapter's watchdog guarantees a terminal verdict for a
     // hung turn -- that is what it is for -- so a deadline here would be a second clock
@@ -4401,8 +4530,18 @@ export class Relay {
     // same thing as a deadline, and deliberately not `#stopped` either -- see `#closed` for why
     // the line is drawn at the close returning rather than at the request to stop. Until someone
     // closes this session, this loop is exactly the loop it has always been.
+    // THIS turn's end, by the key `send` handed back (#300). The first `turn_end` after the send
+    // was taken before, on the reasoning that nothing else could end in the gap -- and a turn
+    // the relay's own command opened does exactly that: it starts after `before` and can end
+    // while this send is still being typed. Taking its end here reads the command's turn as
+    // the reply to the instruction. The other case is the adapter's own retry: a corrupted
+    // first attempt is cancelled and re-sent (#174), and its `cancelled` end would be taken
+    // as the outcome of the attempt that succeeded. An absent key on the event closes
+    // anything, as in `activeTurn`, so a transport that mints none cannot hang here.
     const terminal = (): TurnEndEvent | undefined =>
-      p.events.slice(before).find((e) => e.type === 'turn_end') as TurnEndEvent | undefined
+      p.events
+        .slice(before)
+        .find((e) => e.type === 'turn_end' && (e.turnKey === undefined || e.turnKey === key)) as TurnEndEvent | undefined
     const closed = this.#closeSignal(p.id)
     let end: TurnEndEvent | undefined
     for (;;) {
@@ -4438,16 +4577,28 @@ export class Relay {
     // the record of a turn that has already ended. When the bound is hit the prose is used
     // anyway and the shortfall is recorded, because a truncated report the log explains is
     // recoverable and a silent one is not.
+    // THIS turn in the snapshot, by the same key (#300). The last turn was read before, which
+    // is the same assumption `terminal()` made and fails the same way: a turn the relay's own
+    // command opened can sit after this one in the record, and its prose would then be routed
+    // to the advisor as the reply to an instruction it never answered. The last turn remains
+    // the fallback, for a transport whose snapshot keys are not the keys its `send` returns --
+    // which is no adapter today, and which then behaves exactly as before.
+    //
+    // The LAST match, not the first. Claude Code 2.1.270 gives the prompt sent after a `/goal`
+    // the goal's own `prompt_id` -- measured live: `/goal ...` then a send, one key for both
+    // turns, where two plain sends get two. With `find`, the exchange after a goal would read
+    // the goal turn's report, which is the fault this line exists to close.
+    const turnOf = (s: SessionSnapshot) => s.turns.findLast((t) => t.key === key) ?? s.turns.at(-1)
     const settleBy = Date.now() + (this.#opts.transcriptSettleMs ?? 15_000)
     let snap = await p.session.snapshot()
-    while (snap.turns.at(-1)?.state === 'in_progress' && Date.now() < settleBy) {
+    while (turnOf(snap)?.state === 'in_progress' && Date.now() < settleBy) {
       await new Promise((r) => setTimeout(r, 150))
       snap = await p.session.snapshot()
     }
     // Returned as well as noted. The note is for a human reading the console; the flag is
     // for everything else, and it is the part that was missing — a caller consuming the
     // routing log saw an ordinary report and had no way to know it was captured early.
-    const unsettled = snap.turns.at(-1)?.state === 'in_progress'
+    const unsettled = turnOf(snap)?.state === 'in_progress'
     if (unsettled) {
       this.#record({
         from: 'orchestrator',
@@ -4464,7 +4615,7 @@ export class Relay {
     // ends up re-asking for work already done. The narration reaches the human live, as
     // `message` events; see repl/session.ts.
     const proseOf = (s: SessionSnapshot) => {
-      const t = s.turns.at(-1)
+      const t = turnOf(s)
       return t?.report ?? t?.assistantText ?? ''
     }
 
@@ -6795,14 +6946,24 @@ export class Relay {
    *   THE SUBMISSION IS RECORDED; THE OUTCOME IS NOT. No adapter reads the composer's reply, so
    *   whether the CLI ran the command, refused it, or has it disabled is unknown here and is
    *   written down as unknown. A log that said "compacted" would be inventing the half nobody
-   *   checked, and this is the one place in the run where an orchestrator action has no
-   *   verdict to pair with it.
+   *   checked. What IS observable, and is now watched for, is whether the seat opened a turn
+   *   for it -- see `#observeCommandTurn`.
    *
-   * NOT A TURN, anywhere. `session.submitRaw` bypasses `#exchange` entirely: no `TurnKey`, no
+   * NOT AN EXCHANGE, but it can be a turn (#300). `session.submitRaw` bypasses `#exchange`: no
    * `#turnsTaken` increment, no participant turn synthesized, nothing for the reconciler to
-   * find. A command is the orchestrator operating the seat, not the seat doing work, and
-   * counting it against `--max-turns` would charge the operator's allowance for a housekeeping
-   * keystroke.
+   * find, and no report collected. That used to be stated as "NOT A TURN, anywhere", and both
+   * #300 runs are what that sentence cost: the PTY adapters' CLIs dispatch `UserPromptSubmit`
+   * for a command (#207), so the seat opens a turn for it and emits `turn_start` about 100 ms
+   * after the keystrokes. `/goal`'s is a working turn -- the CLI hands the model the condition
+   * as its directive. A relay that did not know the turn existed sent the advisor's next
+   * instruction into it 4 ms after the command, and `#exchangeTurn` took the command's end for
+   * the instruction's. So the command's turn is tracked in `#commandTurns`: the next send waits
+   * for it to end, without the send precondition's bound (`#awaitCommandTurns`), and every
+   * exchange resolves on the `turn_end` carrying its own key. What is still true is the
+   * accounting: the turn is not charged to `--max-turns`, because the adapter does not mark a
+   * command's turn `unsolicited` (#207) and nothing here counts it -- a decision this doc
+   * records rather than argues, since a `/goal` turn is work and a `/compact` turn is not, and
+   * the relay cannot tell which it observed.
    *
    * ONE SEAT. Commands go to the configured lead implementer -- `#implementers()[0]` -- because
    * a mode is a property of a seat and the advisor's line names no seat. At N>1 the other seats
@@ -6846,11 +7007,13 @@ export class Relay {
         continue
       }
 
+      let before = impl.events.length
       try {
         // The same wait, and the same consequences, as any other send. If the bound expires
         // this cancels and closes the seat and throws, exactly as it would for an instruction:
         // a command is input, and a seat that cannot take input cannot take this either.
         await this.#awaitSendable(impl)
+        before = impl.events.length
         await impl.session.submitRaw(ruling.line, `advisor command via ${lead.id}`)
       } catch (e) {
         // Caught rather than propagated, and only here. `#awaitSendable`'s give-up path has
@@ -6875,6 +7038,9 @@ export class Relay {
           `unenveloped and between turns. Outcome UNOBSERVED: no adapter reads the composer's ` +
           `reply, so whether ${impl.agent} ran it, rejected it or has it disabled is not known here.`,
       })
+      // Then the one thing about it that CAN be observed: whether the seat opened a turn for it.
+      // Tracked so the next send waits for that turn rather than landing inside it (#300).
+      await this.#observeCommandTurn(impl, before, ruling.line)
     }
   }
 

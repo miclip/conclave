@@ -187,6 +187,17 @@ let turns = 0
 // order is the entire defect. Held rather than dropped, chained ahead of the next echo for the
 // same reason ORCH_FAKE_HARNESS_BLOCK chains its own.
 let deferredSlash = null
+// ORCH_FAKE_DOUBLE_HOOKS: every prompt hook delivered TWICE, same id, same text (#302). Not a
+// CLI re-sending -- two registrations of the same hook, one in the project's settings and one
+// in the --settings file the adapter writes, and Claude Code runs both. Measured on every
+// implementer turn of both #300 runs, 65-94 ms apart. Chained rather than parallel so the
+// second always lands after the first, which is the order that matters: the first consumes
+// whatever the adapter was holding for this prompt, and the second finds it gone.
+function postPrompt(payload) {
+  return post('UserPromptSubmit', payload).then(function () {
+    if (process.env.ORCH_FAKE_DOUBLE_HOOKS) return post('UserPromptSubmit', payload)
+  })
+}
 onComposerSubmit(function (prompt) {
   if (!prompt.trim()) return
   // The prompt goes in the transcript too, or the marker below has no turn to close and the
@@ -230,11 +241,11 @@ onComposerSubmit(function (prompt) {
   } else if (deferredSlash) {
     const held = deferredSlash
     deferredSlash = null
-    post('UserPromptSubmit', { prompt_id: held.id, turn_id: held.id, prompt: held.prompt }).then(function () {
-      post('UserPromptSubmit', { prompt_id: id, turn_id: id, prompt: asReceived(prompt, turns) })
+    postPrompt({ prompt_id: held.id, turn_id: held.id, prompt: held.prompt }).then(function () {
+      postPrompt({ prompt_id: id, turn_id: id, prompt: asReceived(prompt, turns) })
     })
   } else {
-    post('UserPromptSubmit', { prompt_id: id, turn_id: id, prompt: asReceived(prompt, turns) })
+    postPrompt({ prompt_id: id, turn_id: id, prompt: asReceived(prompt, turns) })
   }
   // ORCH_FAKE_SPEAK: say ONE thing and then go quiet, which is a turn that stopped rather than
   // a child that never started. A PermissionRequest is used because it is the only child-sourced

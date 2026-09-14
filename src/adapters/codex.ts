@@ -690,6 +690,21 @@ export class CodexPtyHookAdapter implements AgentSession {
 
       case 'UserPromptSubmit': {
         const key = turnKey(String(d.turnKey ?? `unkeyed-${this.#order.length}`))
+        // THE SAME PROMPT DELIVERED TWICE IS ONE PROMPT. The same rule as the Claude adapter's
+        // (#300, #302), for the same reason: the key is the CLI's own `turn_id`, minted once per
+        // submission, so a second hook carrying a known key and the text it was opened with is
+        // the same hook again, not a new turn. Below, this case builds a fresh `TurnState` and
+        // overwrites the open one, so a redelivery would discard the turn's accumulated tools
+        // and re-arm the watchdog as well as emitting a second `turn_start`.
+        //
+        // No instance has been observed on Codex -- its hooks are registered once, through the
+        // project sidecar -- so this is the invariant stated, not a measurement. Exact on the
+        // text, so a different prompt under a known key still falls through and is reported.
+        const known = this.#turns.get(String(key))
+        if (known && known.prompt === String(d.payload['prompt'] ?? '')) {
+          if (known.endSeq === undefined) known.tracker.observeHook('UserPromptSubmit', d.payload)
+          return
+        }
         const tracker = this.#newTracker()
         tracker.observeHook('UserPromptSubmit', d.payload)
         const turn: TurnState = {
@@ -1228,7 +1243,11 @@ export class CodexPtyHookAdapter implements AgentSession {
   }
 
   /**
-   * A slash command, typed and submitted, with no turn started (#200).
+   * A slash command, typed and submitted, with no turn CLAIMED (#200).
+   *
+   * Not "no turn started", which is what this said first: the CLI dispatches its prompt hook
+   * for a command (#216), so the command opens a turn that this adapter observes and the relay
+   * tracks like any other (#300). What this method does not do is wait for it or hand it back.
    *
    * Deliberately NOT `send`, and the list of what it skips is the specification. It takes no
    * `PendingPrompt` claim, so it neither waits for a `UserPromptSubmit` hook nor blocks the

@@ -34,6 +34,21 @@ import type { RelayMessage } from './message.ts'
 import type { OperatorDenials } from '../registry/operatorDenied.ts'
 import { Relay } from './relay.ts'
 
+/**
+ * What the seat does with a command, as the real PTY adapters observe it (#300).
+ *
+ * The composer takes the keystrokes and the seat is busy from that instant; the hook that
+ * makes the turn VISIBLE lands later -- about 100 ms on both #300 runs -- and the turn ends
+ * later still. Modelled with three moments rather than one, because the gap between the first
+ * two is where the relay used to send. `undefined` for a seat whose commands open no turn.
+ */
+interface CommandTurn {
+  /** Delay from the keystrokes to the `turn_start` the relay can see. */
+  openAfterMs: number
+  /** Delay from the keystrokes to the turn's `turn_end`. */
+  endAfterMs: number
+}
+
 /** What a raw submission looked like from the seat's side. */
 interface RawSubmit {
   text: string
@@ -51,6 +66,13 @@ interface RawSubmit {
 class CommandSession implements AgentSession {
   readonly guarantees = guaranteesFor('mediated')
   readonly received: string[] = []
+  /**
+   * Whether a turn was open when each `send` was typed, in `received` order.
+   *
+   * The same measurement `RawSubmit.whileBusy` makes for a command, taken for the instruction
+   * that follows one: the #300 hazard is the instruction going into the command's live turn.
+   */
+  readonly sentWhileBusy: boolean[] = []
   readonly rawSubmits: RawSubmit[] = []
   readonly agent: string
   readonly sessionId: string
@@ -58,8 +80,14 @@ class CommandSession implements AgentSession {
   closedAs: CloseMode | undefined
   /** Turns from this index on stay open until `endTurn()` is called. */
   holdFrom: number | undefined
-  /** Called as each turn begins, so a test can make something happen during it. */
-  onSend: ((message: string, index: number) => void) | undefined
+  /**
+   * Called as each turn begins, so a test can make something happen during it.
+   *
+   * Returning `true` HOLDS the turn: it stays open until `endTurn()` is called. Without that,
+   * `send` ends the turn before it returns, and a timer that calls `endTurn()` later finds
+   * nothing open -- a test that believed it was holding a turn was holding nothing.
+   */
+  onSend: ((message: string, index: number) => void | boolean) | undefined
 
   /**
    * Assigned in the constructor rather than declared as a method, so a seat can be built
@@ -73,14 +101,48 @@ class CommandSession implements AgentSession {
   #events = new AsyncQueue<AgentEvent>()
   #seq = 0
   #open: TurnKey | undefined
+  #commandTurn: CommandTurn | undefined
+  /** Turns whose `turn_end` has been emitted, so the snapshot can say which are still running. */
+  readonly #ended = new Set<TurnKey>()
 
-  constructor(agent: string, sessionId: string, replies: string[], opts: { composer?: boolean } = {}) {
+  constructor(
+    agent: string,
+    sessionId: string,
+    replies: string[],
+    opts: { composer?: boolean; commandTurn?: CommandTurn | undefined } = {},
+  ) {
     this.agent = agent
     this.sessionId = sessionId
     this.#replies = [...replies]
+    this.#commandTurn = opts.commandTurn
     if (opts.composer !== false) {
       this.submitRaw = async (text: string, detail?: string) => {
         this.rawSubmits.push({ text, detail, whileBusy: this.#open !== undefined })
+        const shape = this.#commandTurn
+        if (!shape) return
+        // Busy NOW: the composer has the command. Visible LATER: the hook is what tells the
+        // relay, and it has not fired yet. That ordering is the defect, so it is the model.
+        const key = turnKey(`${this.sessionId}-command-${this.rawSubmits.length}`)
+        this.#open = key
+        setTimeout(() => {
+          // The seat's transcript gets a turn for the command, with prose of its own: what a
+          // relay reading the wrong turn's report would route as the reply to the instruction.
+          this.#turns.push({ key, prose: `(the seat working on ${text}, which nobody asked it to report)` })
+          this.#emit({ type: 'turn_start', prompt: text, turnKey: key, seq: ++this.#seq, at: Date.now(), provisional: false })
+        }, shape.openAfterMs).unref()
+        setTimeout(() => {
+          if (this.#open === key) this.#open = undefined
+          this.#ended.add(key)
+          this.#emit({
+            type: 'turn_end',
+            verdict: { outcome: 'completed', confidence: 'proven', provenance: [{ source: 'hook', detail: 'Stop' }] },
+            synthesized: false,
+            turnKey: key,
+            seq: ++this.#seq,
+            at: Date.now(),
+            provisional: false,
+          })
+        }, shape.endAfterMs).unref()
       }
     }
   }
@@ -96,7 +158,7 @@ class CommandSession implements AgentSession {
    * and the relay charges it, because a ceiling that counts only what the orchestrator
    * dispatched is counting instructions rather than work.
    */
-  selfDispatch(prompt: string, opts: { replay?: boolean } = {}): void {
+  selfDispatch(prompt: string, opts: { replay?: boolean; runsForMs?: number } = {}): void {
     const key = turnKey(`${this.sessionId}-self-${this.#seq}`)
     this.#emit({
       type: 'turn_start',
@@ -111,27 +173,38 @@ class CommandSession implements AgentSession {
     // A COMPLETE turn, start and end. A looped turn runs and finishes like any other; a start
     // with no end is a dangling turn rather than a self-dispatched one, and modelling it that
     // way tests the relay's handling of a malformed stream instead of the thing this is about.
-    // It also does not touch `#open`, because this turn is not the one `send` is holding.
-    this.#emit({
-      type: 'turn_end',
-      verdict: { outcome: 'completed', confidence: 'proven', provenance: [{ source: 'hook', detail: 'Stop' }] },
-      synthesized: false,
-      turnKey: key,
-      seq: ++this.#seq,
-      at: Date.now(),
-      provisional: false,
-    })
+    //
+    // `runsForMs` keeps it open that long first, and marks the seat busy meanwhile: the case
+    // where the relay has something to type and the seat is mid-turn on its own account, which
+    // is the only way a seat can be busy at the moment an advisor reply is acted on.
+    const end = () => {
+      if (this.#open === key) this.#open = undefined
+      this.#ended.add(key)
+      this.#emit({
+        type: 'turn_end',
+        verdict: { outcome: 'completed', confidence: 'proven', provenance: [{ source: 'hook', detail: 'Stop' }] },
+        synthesized: false,
+        turnKey: key,
+        seq: ++this.#seq,
+        at: Date.now(),
+        provisional: false,
+      })
+    }
+    if (opts.runsForMs === undefined) return end()
+    this.#open = key
+    setTimeout(end, opts.runsForMs).unref()
   }
 
   async send(message: string): Promise<TurnKey> {
     this.received.push(message)
-    const index = this.#turns.length
+    this.sentWhileBusy.push(this.#open !== undefined)
+    const index = this.received.length - 1
     const key = turnKey(`${this.sessionId}-turn-${index}`)
     this.#turns.push({ key, prose: this.#replies.shift() ?? '(no further scripted reply)' })
     this.#open = key
     this.#emit({ type: 'turn_start', prompt: message, turnKey: key, seq: ++this.#seq, at: Date.now(), provisional: false })
-    this.onSend?.(message, index)
-    if (this.holdFrom !== undefined && index >= this.holdFrom) return key
+    const held = this.onSend?.(message, index) === true
+    if (held || (this.holdFrom !== undefined && index >= this.holdFrom)) return key
     this.endTurn()
     return key
   }
@@ -140,6 +213,7 @@ class CommandSession implements AgentSession {
     const key = this.#open
     if (!key) return
     this.#open = undefined
+    this.#ended.add(key)
     this.#emit({
       type: 'turn_end',
       verdict: { outcome: 'completed', confidence: 'proven', provenance: [{ source: 'hook', detail: 'Stop' }] },
@@ -164,16 +238,20 @@ class CommandSession implements AgentSession {
       sessionId: this.sessionId,
       agent: this.agent,
       cwd: '/tmp',
-      turns: this.#turns.map((t, i) => ({
-        key: t.key,
-        prompt: '',
-        state: (this.#open === t.key && i === this.#turns.length - 1 ? 'in_progress' : 'completed') as
-          | 'in_progress'
-          | 'completed',
-        assistantText: t.prose,
-        report: t.prose,
-        toolCalls: [],
-      })),
+      // A turn that has not ended has no report yet, as in a real transcript: the prose is
+      // what the seat says when it stops. A relay that resolves an exchange on the wrong
+      // `turn_end` therefore reads a blank here, rather than a report that is not there yet.
+      turns: this.#turns.map((t) => {
+        const running = !this.#ended.has(t.key)
+        return {
+          key: t.key,
+          prompt: '',
+          state: (running ? 'in_progress' : 'completed') as 'in_progress' | 'completed',
+          assistantText: running ? '' : t.prose,
+          report: running ? undefined : t.prose,
+          toolCalls: [],
+        }
+      }),
       guarantees: this.guarantees,
       compactionGeneration: 0,
       builtAt: Date.now(),
@@ -268,16 +346,29 @@ async function run(
     denied?: OperatorDenials | undefined
     composer?: boolean
     implReplies?: string[]
-    onImplSend?: (impl: CommandSession) => (message: string, index: number) => void
+    onImplSend?: (impl: CommandSession) => (message: string, index: number) => void | boolean
+    /** As each ADVISOR turn begins, with the implementer seat in hand: the moment to make it busy. */
+    onLeadSend?: (impl: CommandSession) => (message: string, index: number) => void | boolean
     /** What bounds the run, for the tests about when a ceiling is passed as against acted on. */
     ceilings?: { maxTurns?: number | undefined } | undefined
+    /** The turn the seat opens for a command, as the PTY adapters observe one (#300). */
+    commandTurn?: CommandTurn | undefined
+    /** How long the relay expects a command's turn to take to appear; see `commandTurnOpenMs`. */
+    commandTurnOpenMs?: number | undefined
+    /** The bound on waiting for a turn the relay did not ask for; see `sendPreconditionMs`. */
+    sendPreconditionMs?: number | undefined
+    /** The post-turn windows, for the test about an exchange resolved on the wrong turn's end. */
+    transcriptSettleMs?: number | undefined
+    transcriptSalvageMs?: number | undefined
   } = {},
 ) {
   const lead = new CommandSession('fake-lead', 'lead-1', leadReplies)
   const impl = new CommandSession('fake-impl', 'impl-1', opts.implReplies ?? [], {
     ...(opts.composer === false ? { composer: false } : {}),
+    ...(opts.commandTurn ? { commandTurn: opts.commandTurn } : {}),
   })
   if (opts.onImplSend) impl.onSend = opts.onImplSend(impl)
+  if (opts.onLeadSend) lead.onSend = opts.onLeadSend(impl)
   const log: RelayMessage[] = []
   const relay = await Relay.start({
     // `'policy' in opts` rather than `??`: a test that passes `policy: undefined` is asking for
@@ -291,13 +382,19 @@ async function run(
     lead: { id: 'advisor', agent: 'fake-lead', role: 'advisor' },
     implementer: { id: 'implementer', agent: 'fake-impl', role: 'implementer' },
     maxAdvisorTurns: 4,
+    // Small by default: a command that opens no turn costs the whole open-wait, and most of
+    // this file's seats open none. The production default is 5s and is not what is under test.
+    commandTurnOpenMs: opts.commandTurnOpenMs ?? 100,
+    ...(opts.sendPreconditionMs !== undefined ? { sendPreconditionMs: opts.sendPreconditionMs } : {}),
+    ...(opts.transcriptSettleMs !== undefined ? { transcriptSettleMs: opts.transcriptSettleMs } : {}),
+    ...(opts.transcriptSalvageMs !== undefined ? { transcriptSalvageMs: opts.transcriptSalvageMs } : {}),
     ...(opts.ceilings ? { ceilings: opts.ceilings } : {}),
     ...(opts.denied ? { denied: opts.denied } : {}),
     onLog: (m) => log.push(m),
   })
-  await relay.run('do the thing')
+  const outcome = await relay.run('do the thing')
   await relay.stop()
-  return { relay, lead, impl, log }
+  return { relay, lead, impl, log, outcome }
 }
 
 /** Every note the orchestrator wrote, which is where a command's record lands. */
@@ -385,13 +482,23 @@ test('an agent nobody has read refuses every command, and says that rather than 
 })
 
 test('a command waits for the turn boundary and is never typed into a live turn', async () => {
-  // The measurement, not an inference. The seat holds its first turn open and the relay's
-  // command must not land until it closes; a send into a live pty is #117, which ends runs.
+  // The measurement, not an inference. The seat is mid-turn when the advisor's reply is acted
+  // on, and the relay's command must not land until that turn closes; a send into a live pty
+  // is #117, which ends runs.
+  //
+  // MID-TURN ON ITS OWN ACCOUNT, which is the only way it can be. This used to hold the
+  // briefing turn open with a timer, and the briefing exchange does not return until that
+  // turn ends -- so by the time the advisor replied the seat was idle, the command was always
+  // typed at a boundary, and removing the wait from the relay did not fail this test. Found
+  // while mutating the #300 fix next door. A turn the seat starts for itself while the advisor
+  // is composing is the one thing that is still open when the command arrives.
   const { impl } = await run(['COMMAND: /compact\nCarry on.', 'DONE'], {
     implReplies: ['working'],
-    onImplSend: (session) => (_message, index) => {
-      // Hold the briefing turn open briefly, so a command that did not wait would land inside it.
-      if (index === 0) setTimeout(() => session.endTurn(), 60).unref()
+    onLeadSend: (session) => (_message, index) => {
+      // Longer than the relay takes to get from the advisor's reply to the keystrokes, which
+      // measured ~270 ms here and is mostly the 250 ms `turn_end` poll. A hold that a slow
+      // runner could outlast would make this test pass for the old reason again.
+      if (index === 0) session.selfDispatch('a turn nobody sent, still running when the reply lands', { runsForMs: 1500 })
     },
   })
   assert.deepEqual(impl.rawSubmits.map((r) => r.text), ['/compact'])
@@ -400,6 +507,132 @@ test('a command waits for the turn boundary and is never typed into a live turn'
     [false],
     'nothing may be typed while a turn is open: neither CLI queues it, and the run then reports a transport it never lost',
   )
+})
+
+test('#300 a command that opens a turn: the instruction behind it waits for that turn, and is answered by its own', async () => {
+  // Both #300 runs, in miniature. The advisor sends `COMMAND: /goal ...` and an instruction in
+  // one reply; the relay types the command, and 4 ms later sends the instruction -- into a
+  // composer whose turn the hook has not yet announced. Two things then go wrong, and the
+  // test measures both rather than the order of the keystrokes: the instruction lands inside
+  // the command's live turn (#117's hazard, from the relay's own keystroke), and the exchange
+  // takes the command turn's `turn_end` as the instruction's, routing the command turn's
+  // report to the advisor as the reply to something it never answered.
+  //
+  // The timings are chosen so an unfixed relay fails BOTH: the command's turn becomes visible
+  // after the instruction would have been sent, and ends before the instruction's turn does.
+  const { impl, lead, log } = await run(['COMMAND: /focus on the parser\nCarry on.', 'DONE'], {
+    implReplies: ['briefed', 'carried on'],
+    commandTurn: { openAfterMs: 30, endAfterMs: 150 },
+    onImplSend: (session) => (_message, index) => {
+      // The instruction's turn outlives the command's, so a relay waiting for "the first
+      // turn_end after the send" gets the wrong one.
+      if (index !== 1) return
+      setTimeout(() => session.endTurn(), 200).unref()
+      return true
+    },
+  })
+
+  assert.deepEqual(impl.rawSubmits.map((r) => r.text), ['/focus on the parser'])
+  // (1) Not sent into the command's turn. The seat was busy from the keystroke; the relay must
+  // have waited for the turn it could not yet see, and then for it to end.
+  assert.deepEqual(
+    impl.sentWhileBusy,
+    impl.received.map(() => false),
+    `no instruction may be typed while the command's turn is open: ${JSON.stringify(impl.sentWhileBusy)}`,
+  )
+  // (2) Answered by its own turn. What the advisor receives after its instruction is the
+  // instruction's report, not the command turn's -- the relay associated each with its own.
+  const reply = lead.received[1] ?? ''
+  assert.match(reply, /carried on/, 'the advisor must get the reply to the instruction it sent')
+  assert.doesNotMatch(
+    reply,
+    /nobody asked it to report/,
+    'the command turn’s prose must not be routed as the reply to the instruction',
+  )
+  // (3) And the record says what happened: the turn was seen, and waited for.
+  const notes = orchestratorNotes(log)
+  assert.ok(
+    notes.some((t) => t.includes('opened a turn for `/focus on the parser`')),
+    'the command’s turn is the one outcome of a submission that IS observable, and it is recorded',
+  )
+  assert.ok(
+    notes.some((t) => t.includes('was still on the turn its command opened')),
+    'the wait is recorded, so a run that pauses for a /goal turn does not read as one that hung',
+  )
+})
+
+test('#300 a command’s turn is waited for past the send precondition’s bound, because the relay asked for it', async () => {
+  // A `/goal` turn is a working turn: the CLI hands the model the condition as its directive
+  // and `Stop` fires when it is met, which can be well past five minutes. The send precondition
+  // is a bound on waiting for a turn the relay did NOT ask for; expiring it here would cancel
+  // and close the seat for doing what the advisor told it to. So a turn the relay's own command
+  // opened is tracked, and tracked turns are waited for on the adapter's clock instead.
+  const { impl, lead, log, outcome } = await run(['COMMAND: /focus on the parser\nCarry on.', 'DONE'], {
+    implReplies: ['briefed', 'carried on'],
+    // The command's turn outlives the precondition by a wide margin.
+    commandTurn: { openAfterMs: 30, endAfterMs: 600 },
+    sendPreconditionMs: 150,
+  })
+  assert.equal(outcome.reason, 'done', `the run must not end for a command turn that was merely long: ${JSON.stringify(outcome)}`)
+  assert.ok(
+    !orchestratorNotes(log).some((t) => t.includes('so nothing was sent to it')),
+    'and the precondition’s give-up path -- cancel the turn, close the seat -- must not have run',
+  )
+  assert.deepEqual(impl.sentWhileBusy, impl.received.map(() => false), 'the instruction still waited for the turn to end')
+  assert.match(lead.received[1] ?? '', /carried on/, 'and was answered')
+})
+
+test('#300 a command’s turn seen only after the open-wait still ends its own turn, never the instruction’s', async () => {
+  // The open-wait is a bound, and a hook slower than it means the instruction goes out before
+  // the command's turn is visible -- the mid-turn send the bound exists to prevent, and what
+  // it costs when it is too short. What must hold even then is the association: the command
+  // turn's `turn_end`, arriving after the send and before the instruction's own end, is not
+  // the end of the exchange. Taking it was the second half of #300 -- the command turn's report
+  // routed to the advisor as the reply to an instruction it never answered.
+  //
+  // The instruction's turn outlives the settle and salvage windows that follow a resolution,
+  // so a relay that resolved on the command turn's end cannot recover by waiting for the
+  // record: it routes a blank, with a note that the report may be incomplete. That is the
+  // shape #300 would have had if the recovery had not ended the run first.
+  const { impl, lead, log } = await run(['COMMAND: /focus on the parser\nCarry on.', 'DONE'], {
+    implReplies: ['briefed', 'carried on'],
+    commandTurn: { openAfterMs: 200, endAfterMs: 300 },
+    commandTurnOpenMs: 40,
+    transcriptSettleMs: 100,
+    transcriptSalvageMs: 100,
+    onImplSend: (session) => (_message, index) => {
+      if (index !== 1) return
+      setTimeout(() => session.endTurn(), 900).unref()
+      return true
+    },
+  })
+  assert.equal(impl.sentWhileBusy[1], true, 'the premise: the instruction went out inside the not-yet-visible command turn')
+  const reply = lead.received[1] ?? ''
+  assert.match(reply, /carried on/, 'the exchange resolved on the instruction’s own turn_end, and routed its report')
+  assert.doesNotMatch(reply, /nobody asked it to report/, 'not on the command turn’s')
+  assert.ok(
+    !orchestratorNotes(log).some((t) => t.includes('the report below may be incomplete')),
+    'and nothing was read before the instruction’s turn had ended',
+  )
+})
+
+test('#300 a command that opens no turn costs the open-wait and nothing else', async () => {
+  // `/compact` with nothing to compact dispatched no hook at all on 2.1.270. The relay must
+  // not read that as a failure, and must not wait for a turn that is never coming past the
+  // bound it set for it.
+  const startedAt = Date.now()
+  const { impl, lead, log } = await run(['COMMAND: /compact\nCarry on.', 'DONE'], {
+    implReplies: ['briefed', 'carried on'],
+    commandTurnOpenMs: 80,
+  })
+  assert.ok(Date.now() - startedAt >= 80, 'and the bound was actually waited out, not skipped')
+  assert.deepEqual(impl.rawSubmits.map((r) => r.text), ['/compact'])
+  assert.match(lead.received[1] ?? '', /carried on/, 'the instruction was delivered and answered')
+  assert.ok(
+    !orchestratorNotes(log).some((t) => t.includes('opened a turn for')),
+    'nothing may be recorded as observed when nothing was',
+  )
+  assert.ok(Date.now() - startedAt < 5_000, 'the default bound must not be what a test with a smaller one paid')
 })
 
 test('what reaches the composer is the command alone, with no envelope around it', async () => {

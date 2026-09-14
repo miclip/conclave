@@ -58,20 +58,28 @@ export const CLAUDE_COMMAND_POLICY: CommandPolicy = {
     {
       command: '/goal',
       description:
-        'Sets a condition the seat checks before it stops, so it keeps working until the condition holds. Reach for it when the work has a finish line the seat might stop short of.',
+        'Sets a condition the seat keeps working toward before it stops. The seat starts a turn of its own on the condition the moment it is typed, and anything else in the same reply is delivered only after that turn ends -- so state the work in the condition, not beside it. Reach for it when the work has a finish line the seat might stop short of.',
       disposition: 'allowed',
       // Verbatim `argumentHint` from the same declaration. The only command on either agent
       // that takes one, and the briefing renders it for that reason.
       argumentHint: '[<condition> | clear]',
       // ALLOWED WHERE `/loop` IS REFUSED, and the difference is turn accounting rather than
-      // ambition. `/loop` has the seat dispatch its own SUBSEQUENT turns, which land after
-      // `#exchangeTurn` has returned and are charged to neither `--max-turns` nor `--rounds`.
-      // A goal extends the turn already running: the seat keeps working before it stops, so
-      // the relay still takes exactly one `turn_end` per exchange and every ceiling it counts
-      // stays true. What a goal costs is turn DURATION, which `deadlines` already governs and
-      // which the operator already chooses.
+      // ambition. `/loop` has the seat dispatch its own SUBSEQUENT turns, indefinitely. A goal
+      // opens ONE turn, and the relay knows which: it is typed at a boundary, the seat opens a
+      // turn for it, and the relay tracks that turn and waits for it to end before its next
+      // send (#300).
+      //
+      // This used to say a goal "extends the turn already running", and both #300 runs are
+      // what that cost. It cannot: commands are typed between turns, so there is no turn
+      // running to extend. Measured on 2.1.270 -- `/goal <condition>` dispatches
+      // `UserPromptSubmit` with its own `prompt_id`, the CLI tells the model to "treat the
+      // condition itself as your directive and immediately start working toward it", and
+      // `Stop` fires when it is met. A goal turn is therefore a WORKING turn the relay did not
+      // dispatch: it is not charged to `--max-turns`, and nothing collects its report -- the
+      // `/loop` caveat, for one turn. What it costs beyond that is duration, which the run's
+      // deadlines already bound.
       reason:
-        'Sets a condition the seat checks before it stops, so it keeps working on the turn it is already running rather than dispatching another. Turn accounting is unaffected -- the relay still takes one `turn_end` per exchange -- and the cost is turn duration, which the run’s deadlines already bound.',
+        'Sets a condition the seat keeps working toward before it stops. Typed at a turn boundary, it opens a working turn of its own, which the relay tracks and waits out before its next send (#300); that turn is not charged to `--max-turns` and its report is not collected. The remaining cost is duration, which the run’s deadlines already bound.',
       // `supportsNonInteractive:!0` in the same declaration: it is built to be dispatched
       // without a human at the composer, which is how every command here is delivered.
       //
