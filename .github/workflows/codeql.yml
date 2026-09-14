@@ -31,7 +31,20 @@ jobs:
         uses: github/codeql-action/init@v3
         with:
           languages: javascript-typescript
-          queries: security-and-quality
+          # SECURITY QUERIES ONLY, and the reason is the `pull_request` trigger above.
+          #
+          # That trigger publishes a check that FAILS on any alert this branch adds -- which is
+          # not the same as reporting one. So the query suite decides what can block a merge,
+          # and `security-and-quality` adds queries that have plenty to say about a codebase and
+          # nothing to say about whether a merge is safe: of the 26 alerts on the first real
+          # analysis, 12 were quality (10 of them `js/useless-assignment-to-local`). An unused
+          # variable stopping a green PR is how a security gate becomes one people route around.
+          #
+          # `security-extended` keeps every security query -- the 7 `js/file-system-race`, the
+          # `js/insecure-temporary-file`, the injection and sanitization rules are all still
+          # reported and still gate -- and drops the style ones. There is no API to set a
+          # failure threshold on a workflow-based setup, so the suite IS the threshold.
+          queries: security-extended
 
       # No build step. This is a TypeScript project run through tsx rather than compiled, so
       # there is no artefact to produce and autobuild would have nothing to do.
