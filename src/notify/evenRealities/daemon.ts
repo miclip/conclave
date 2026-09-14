@@ -39,15 +39,23 @@ import {
   brokerAlive,
   brokerSocketPath,
   EvenRealitiesBroker,
+  legacyBrokerSocketPath,
   EvenRealitiesBrokerClient,
   lingerMs,
   sessionLingerMs,
+  SOCKET_ENV,
   type BrokerStatus,
 } from './broker.ts'
 
 /** Everything a broker is configured with, read from the same variables the transport reads. */
 export interface BrokerConfig {
   socketPath: string
+  /**
+   * Where a broker from before 0.5.53 would be, when `socketPath` is the default and so
+   * may have moved out from under one (#307). Absent under `CONCLAVE_EVEN_SOCKET`: an
+   * operator's own path did not move. Named in the `EADDRINUSE` failure, and nowhere else.
+   */
+  legacySocketPath?: string
   port: number
   token?: string
   host?: string
@@ -58,8 +66,10 @@ export interface BrokerConfig {
 export function brokerConfigFromEnv(env: NodeJS.ProcessEnv = process.env): BrokerConfig {
   const token = env['CONCLAVE_EVEN_TOKEN']
   const host = env['CONCLAVE_EVEN_HOST']
+  const overridden = (env[SOCKET_ENV]?.trim() ?? '') !== ''
   return {
     socketPath: brokerSocketPath(env),
+    ...(overridden ? {} : { legacySocketPath: legacyBrokerSocketPath(env) }),
     port: Number(env['CONCLAVE_EVEN_PORT'] ?? '3456'),
     ...(token ? { token } : {}),
     ...(host ? { host } : {}),
@@ -247,10 +257,19 @@ export async function ensureBroker(
   // Said on stderr as well as thrown: the throw lands in the notify record as `undelivered`,
   // which a `tell` never prints, and a broker that could not start is not something to find
   // out about later from a log.
+  // The 0.5.52 → 0.5.53 case: the socket moved (#307), so a broker from before is at the
+  // old path, invisible to this run, and still holding the port. It exits on its own once its
+  // linger runs out; the hint is for the operator who would rather not wait.
+  const legacy =
+    outcome.code === 'EADDRINUSE' && config.legacySocketPath
+      ? `\n  a broker from before 0.5.53 may still hold the port; it normally exits 60s after its last run, or now with\n` +
+        `  CONCLAVE_EVEN_SOCKET=${config.legacySocketPath} conclave notify broker stop\n` +
+        `  and then retry`
+      : ''
   const message =
     `could not start the Even Realities broker: ${outcome.error}\n` +
     `  socket ${config.socketPath}, port ${config.port} — conclave notify broker status; ` +
-    `CONCLAVE_EVEN_PORT or CONCLAVE_EVEN_SOCKET to move it`
+    `CONCLAVE_EVEN_PORT or CONCLAVE_EVEN_SOCKET to move it${legacy}`
   io.stderr(`conclave: ${message}`)
   throw new Error(message)
 }

@@ -19,7 +19,7 @@
  */
 
 import { strict as assert } from 'node:assert'
-import { existsSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { connect } from 'node:net'
 import { join } from 'node:path'
 import test, { type TestContext } from 'node:test'
@@ -29,6 +29,7 @@ import type { SessionMetadata } from './client.ts'
 import {
   brokerAlive,
   brokerSocketPath,
+  ensurePrivateDir,
   DEFAULT_LINGER_MS,
   DEFAULT_SESSION_LINGER_MS,
   EvenRealitiesBroker,
@@ -706,12 +707,69 @@ test('#290 a session stays thirty seconds unless CONCLAVE_EVEN_SESSION_LINGER_MS
   assert.equal(lingerMs({ CONCLAVE_EVEN_SESSION_LINGER_MS: '5000' }), 60_000)
 })
 
-test('#286 the socket path is deterministic per user, and the override wins', () => {
+test('#286 the socket path is deterministic per user, and the override wins', (t) => {
   const a = brokerSocketPath({})
   assert.equal(a, brokerSocketPath({}), 'the same answer twice: a run finds the broker by knowing the path')
-  assert.match(a, /conclave-even-[^/]+\.sock$/)
-  assert.equal(brokerSocketPath({ XDG_RUNTIME_DIR: '/run/user/1000' }), '/run/user/1000/' + a.split('/').pop())
+  const uid = process.getuid!()
+  assert.match(a, new RegExp(`/conclave-${uid}/even\\.sock$`))
+  const runtime = tempDir(t, 'runtime')
+  assert.equal(brokerSocketPath({ XDG_RUNTIME_DIR: runtime }), join(runtime, `conclave-${uid}`, 'even.sock'))
   assert.equal(brokerSocketPath({ CONCLAVE_EVEN_SOCKET: '/x/y.sock' }), '/x/y.sock')
+})
+
+test('#307 the default lives in a per-user directory made 0700, and the override is left alone', (t) => {
+  // A per-user FILENAME in a shared /tmp is a name anyone can plant first; a per-user
+  // DIRECTORY that nobody else can enter is not. The log goes beside the socket, inside it.
+  const runtime = tempDir(t, 'runtime')
+  const dir = join(runtime, `conclave-${process.getuid!()}`)
+  assert.ok(!existsSync(dir), 'the directory is made by asking for the path, not before')
+  const path = brokerSocketPath({ XDG_RUNTIME_DIR: runtime })
+  assert.equal(path, join(dir, 'even.sock'))
+  assert.equal((statSync(dir).mode & 0o777).toString(8), '700')
+  // The operator's own path is theirs: nothing is made around it.
+  const own = join(runtime, 'elsewhere', 'mine.sock')
+  assert.equal(brokerSocketPath({ XDG_RUNTIME_DIR: runtime, CONCLAVE_EVEN_SOCKET: own }), own)
+  assert.ok(!existsSync(join(runtime, 'elsewhere')))
+})
+
+test('#307 a runtime directory that is not ours, not 0700, or not a directory is refused', (t) => {
+  const uid = process.getuid!()
+  const runtime = tempDir(t, 'runtime')
+  // A symlink to a directory that would pass every other check is still another user's
+  // name for the place; lstat sees the link, not what it points at.
+  const real = join(runtime, 'real')
+  mkdirSync(real, { mode: 0o700 })
+  const link = join(runtime, 'link')
+  symlinkSync(real, link)
+  assert.ok(lstatSync(link).isSymbolicLink())
+  assert.throws(() => ensurePrivateDir(link, uid), /refusing to use .*link: it is a symlink/)
+  // Not ours. No root in the test, so the "current uid" is the parameter and the directory
+  // is really ours: the check is the comparison, and that is what is pinned.
+  assert.throws(() => ensurePrivateDir(real, uid + 1), new RegExp(`owned by uid ${uid}, not ${uid + 1}`))
+  // Wider than 0700: refused, not repaired.
+  const wide = join(runtime, 'wide')
+  mkdirSync(wide, { mode: 0o755 })
+  assert.throws(() => ensurePrivateDir(wide, uid), /its mode is 755, not 700/)
+  assert.equal((statSync(wide).mode & 0o777).toString(8), '755', 'left as found')
+  // A plain file in the way.
+  const file = join(runtime, 'file')
+  writeFileSync(file, '')
+  assert.throws(() => ensurePrivateDir(file, uid), /it is not a directory/)
+  // The mode comes from the one mkdir, not a chmod after it: a umask that strips owner bits
+  // leaves a directory this refuses, loudly, rather than one it quietly widens.
+  const masked = join(runtime, 'masked')
+  const umask = process.umask(0o177)
+  try {
+    assert.throws(() => ensurePrivateDir(masked, uid), /its mode is 600, not 700/)
+  } finally {
+    process.umask(umask)
+  }
+  assert.equal((statSync(masked).mode & 0o777).toString(8), '600', 'left as made')
+  // And the good case, twice: made the first time, accepted the second.
+  const fresh = join(runtime, 'fresh')
+  ensurePrivateDir(fresh, uid)
+  assert.equal((statSync(fresh).mode & 0o777).toString(8), '700')
+  ensurePrivateDir(fresh, uid)
 })
 
 test('#286 a socket file left by a dead broker is taken over; a live one is refused', async (t) => {

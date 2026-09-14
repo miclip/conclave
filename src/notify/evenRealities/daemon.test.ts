@@ -8,6 +8,7 @@
  */
 
 import { strict as assert } from 'node:assert'
+import { existsSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { join } from 'node:path'
 import test, { type TestContext } from 'node:test'
@@ -99,6 +100,38 @@ test('#286 a port held by something that is not a broker is reported, not waited
     /could not start the Even Realities broker: listen EADDRINUSE.*\n.*CONCLAVE_EVEN_PORT or CONCLAVE_EVEN_SOCKET to move it/,
   )
   assert.match(said.join('\n'), /could not start the Even Realities broker/, 'said on stderr, not only thrown')
+})
+
+test('#307 a port held on the default socket names the broker from before 0.5.53 that may hold it', async (t) => {
+  // The socket moved into a per-user directory. A broker started by 0.5.52 is at the old
+  // path, which this run does not look at, and it has the port until its linger runs out.
+  const c = { ...config(t), legacySocketPath: '/run/user/1000/conclave-even-1000.sock' }
+  const said: string[] = []
+  await assert.rejects(
+    () =>
+      ensureBroker(c, {
+        stderr: (text) => said.push(text),
+        joinTimeoutMs: 300,
+        spawnServe: async () => ({ error: 'listen EADDRINUSE: address already in use 127.0.0.1:3456', code: 'EADDRINUSE' }),
+      }),
+    /a broker from before 0\.5\.53 may still hold the port; it normally exits 60s after its last run, or now with\n {2}CONCLAVE_EVEN_SOCKET=\/run\/user\/1000\/conclave-even-1000\.sock conclave notify broker stop\n {2}and then retry$/,
+  )
+  assert.match(said.join('\n'), /conclave-even-1000\.sock conclave notify broker stop/, 'on stderr too')
+})
+
+test('#307 the hint is not given for an explicit socket, nor for a failure that is not the port', async (t) => {
+  // An operator's own path did not move; and a serve that died for another reason is not a
+  // port held by anyone.
+  const spawn = async () => ({ error: 'listen EADDRINUSE: address already in use 127.0.0.1:3456', code: 'EADDRINUSE' })
+  await assert.rejects(
+    () => ensureBroker(config(t), { stderr: () => {}, joinTimeoutMs: 300, spawnServe: spawn }),
+    (err: Error) => !/before 0\.5\.53|broker stop/.test(err.message) && /EADDRINUSE/.test(err.message),
+  )
+  const c = { ...config(t), legacySocketPath: '/run/user/1000/conclave-even-1000.sock' }
+  await assert.rejects(
+    () => ensureBroker(c, { stderr: () => {}, spawnServe: async () => ({ error: 'the broker exited (1) before saying it was ready' }) }),
+    (err: Error) => !/before 0\.5\.53|broker stop/.test(err.message) && /exited \(1\)/.test(err.message),
+  )
 })
 
 test('#286 a serve that fails for any other reason is reported in its own words at once', async (t) => {
@@ -202,4 +235,15 @@ test('#286 the config is read from the same variables the transport always read'
     { socketPath: '/s.sock', port: 4000, token: 't', host: '0.0.0.0', lingerMs: 5, sessionLingerMs: 7 },
   )
   assert.equal(brokerLogPath('/x/even.sock'), '/x/even.log')
+})
+
+test('#307 the config names the socket from before 0.5.53 only when the default is in use', (t) => {
+  const runtime = tempDir(t, 'runtime')
+  const uid = process.getuid!()
+  const c = brokerConfigFromEnv({ XDG_RUNTIME_DIR: runtime })
+  assert.equal(c.socketPath, join(runtime, `conclave-${uid}`, 'even.sock'))
+  assert.equal(c.legacySocketPath, join(runtime, `conclave-even-${uid}.sock`))
+  assert.ok(!existsSync(c.legacySocketPath!), 'named, not made')
+  const own = brokerConfigFromEnv({ XDG_RUNTIME_DIR: runtime, CONCLAVE_EVEN_SOCKET: '/s.sock' })
+  assert.ok(!('legacySocketPath' in own), 'an explicit socket did not move')
 })

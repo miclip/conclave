@@ -96,7 +96,7 @@
  * PORT, and neither is what the operator was missing.
  */
 
-import { chmodSync, unlinkSync } from 'node:fs'
+import { chmodSync, lstatSync, mkdirSync, unlinkSync } from 'node:fs'
 import { connect, createServer, type Server, type Socket } from 'node:net'
 import { tmpdir, userInfo } from 'node:os'
 import { join } from 'node:path'
@@ -156,14 +156,61 @@ export function sessionLingerMs(env: NodeJS.ProcessEnv = process.env): number {
  * for it. Per user, because a Unix socket is a file and a shared `/tmp` would have one user's
  * runs dialling another's device. `XDG_RUNTIME_DIR` is the right place where it exists
  * (Linux, per-user, cleared at logout); `tmpdir()` elsewhere, which on macOS is per-user
- * already. The uid is in the name either way, so the answer is the same shape everywhere.
+ * already -- but on Linux without `XDG_RUNTIME_DIR` it is `/tmp`, shared and world-writable,
+ * and a per-user FILENAME in a shared directory is a name anyone can plant first (#307: the
+ * log beside the socket is opened for append, and `open` follows a symlink). So the answer
+ * is a per-user DIRECTORY, `conclave-<uid>`, made `0700` here and refused if it is anything
+ * else, with the socket and the log inside it. Made here, in the function that hands the
+ * path out, so that nothing can hold the default path without the directory having been
+ * checked. `CONCLAVE_EVEN_SOCKET` is the operator's own choice and is not touched.
  */
 export function brokerSocketPath(env: NodeJS.ProcessEnv = process.env): string {
   const given = env[SOCKET_ENV]
   if (given !== undefined && given.trim() !== '') return given.trim()
-  const dir = env['XDG_RUNTIME_DIR']?.trim() || tmpdir()
+  const uid = process.getuid?.()
+  const dir = join(env['XDG_RUNTIME_DIR']?.trim() || tmpdir(), `conclave-${uid ?? userInfo().username}`)
+  ensurePrivateDir(dir, uid)
+  return join(dir, 'even.sock')
+}
+
+/**
+ * Where a broker from before 0.5.53 is: the same directory, a per-user FILENAME rather than a
+ * per-user directory (#307). Pure -- nothing is made or checked -- because it is only ever
+ * named, in the hint a run gets when the port is held and the holder may be that broker.
+ */
+export function legacyBrokerSocketPath(env: NodeJS.ProcessEnv = process.env): string {
   const who = process.getuid?.() ?? userInfo().username
-  return join(dir, `conclave-even-${who}.sock`)
+  return join(env['XDG_RUNTIME_DIR']?.trim() || tmpdir(), `conclave-even-${who}.sock`)
+}
+
+/**
+ * `dir` exists, is a real directory, is `uid`'s, and is `0700` -- or this throws. Created
+ * with that mode when absent, in the one call: `mkdir` is atomic, so a name planted between
+ * the check and the creation is `EEXIST` and gets checked like any other, and there is no
+ * chmod afterwards, because create-then-fix is the pattern this replaces. The mode `mkdir`
+ * gives is subject to the umask, so a umask that strips owner bits produces a directory this
+ * refuses; that is loud, and the operator's to change. Checked with `lstat`, which does not
+ * follow a symlink: a link to a directory that passes every other test is still someone
+ * else's name for the place. A wrong owner or a wrong mode is refused rather than repaired,
+ * because repairing something another user made is exactly the write this exists to avoid.
+ * Where there is no uid (Windows) only the shape is checked.
+ */
+export function ensurePrivateDir(dir: string, uid: number | undefined = process.getuid?.()): void {
+  try {
+    mkdirSync(dir, { mode: 0o700 })
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err
+  }
+  const st = lstatSync(dir)
+  const refuse = (what: string): never => {
+    throw new Error(`refusing to use ${dir}: ${what}. Remove it, or set ${SOCKET_ENV} to a socket path of your own.`)
+  }
+  if (st.isSymbolicLink()) refuse('it is a symlink, and the broker will not follow one to its socket')
+  if (!st.isDirectory()) refuse('it is not a directory')
+  if (uid !== undefined && st.uid !== uid) refuse(`it is owned by uid ${st.uid}, not ${uid}`)
+  if (uid !== undefined && (st.mode & 0o777) !== 0o700) {
+    refuse(`its mode is ${(st.mode & 0o777).toString(8)}, not 700`)
+  }
 }
 
 export interface BrokerOptions extends BridgeOptions {
