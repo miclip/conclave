@@ -45,7 +45,14 @@ async function letGo(b: EvenRealitiesBroker): Promise<boolean> {
   return !b.status().sessions.includes('run-a') || (await status(b)) === 'idle'
 }
 
-async function until(cond: () => Promise<boolean>, ms = 5_000): Promise<boolean> {
+/**
+ * Poll until `cond` holds or `ms` elapse. The default is a liveness ceiling, not a speed
+ * claim: every caller waits on a state, and the bound only turns "never" into a failure.
+ * Generous because a loaded runner has taken seconds where a quiet one takes milliseconds,
+ * and a ceiling that fires there reports a timing fault the code does not have (#294). A
+ * caller that means the bound as a claim passes its own, and says so.
+ */
+async function until(cond: () => Promise<boolean>, ms = 20_000): Promise<boolean> {
   const end = Date.now() + ms
   while (Date.now() < end) {
     if (await cond()) return true
@@ -217,14 +224,21 @@ test('#285 the confirmation is on the stream, and the stream stays up long enoug
 test('#285 a run that only told closes at once: the grace is for an answered question, nothing else', async (t) => {
   // The conditional half of the claim. A grace applied to every close would hold this session
   // for the whole (deliberately long) grace; a `tell` confirms nothing and has nothing to render.
+  // This bound IS a timing claim, unlike `until`'s default: the let-go must be seen before a
+  // wrongly applied grace would allow it. So the injected grace is far longer than the bound
+  // -- a 20s gap -- which keeps the claim effective while leaving a loaded runner seconds to
+  // observe a close that in fact took milliseconds (#294). A failing run pays the whole grace
+  // at `await closing`; a passing one pays nothing, because the close is not waiting.
+  const GRACE = 30_000
+  const BOUND = 10_000
   const b = await broker(t)
-  const tr = new BrokerBackedTransport('run-a', 'x', meta, async () => ({ socketPath: b.socketPath }), { confirmGraceMs: 3_000 })
+  const tr = new BrokerBackedTransport('run-a', 'x', meta, async () => ({ socketPath: b.socketPath }), { confirmGraceMs: GRACE })
   await tr.send({ kind: 'progress', headline: 'checks green' })
   assert.deepEqual(await listed(b), ['run-a'])
   // Not awaited before looking: a `close` that waited would keep this from looking until it
   // was over, and a grace wrongly applied here would go unseen.
   const closing = tr.close()
-  assert.equal(await until(() => letGo(b), 1_000), true, 'let go well inside the grace')
+  assert.equal(await until(() => letGo(b), BOUND), true, 'let go well inside the grace')
   await closing
 })
 
