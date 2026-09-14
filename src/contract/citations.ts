@@ -199,8 +199,8 @@ export const CITED: Record<string, string> = {
   // Live-claim section in docs/NOTES.md: #156's premise and the unverified-generation guards.
   // These citations assert current fact in a section marked `## LIVE:`, so they are checked even
   // though the rest of docs/** is frozen design record.
-  'src/adapters/claude.ts:2549-2562': 'containedFallback: true,',
-  'src/adapters/codex.ts:1676-1689': 'containedFallback: true,',
+  'src/adapters/claude.ts:2584-2597': 'containedFallback: true,',
+  'src/adapters/codex.ts:1711-1724': 'containedFallback: true,',
   'src/rotation/rotate.ts:484':
     'const generation = snap.containedFallback ? UNKNOWN_GENERATION : snap.compactionGeneration',
   'src/relay/relay.ts:5545': 'async #considerRotation(',
@@ -236,8 +236,8 @@ export const CITED: Record<string, string> = {
     "    return halted ?? this.#acknowledge(impl, (await impl.session.snapshot()).compactionGeneration)",
   'src/relay/relay.ts:8862':
     'const rotated = await this.#considerRotation(seat, report.prose, handle)',
-  'src/adapters/codex.ts:677-683': 'this.#view = new TranscriptSessionView({',
-  'src/adapters/claude.ts:1438-1442': 'this.#view = new TranscriptSessionView({',
+  'src/adapters/codex.ts:712-718': 'this.#view = new TranscriptSessionView({',
+  'src/adapters/claude.ts:1473-1477': 'this.#view = new TranscriptSessionView({',
   'src/relay/relay.ts:2685':
     'const p: RelayParticipant = { id: spec.id, agent: spec.agent, rank, role: spec.role, launch, session, events: [], baselineGeneration: 0, degradationCursor: 0 }',
   'src/relay/report.ts:311-321': 'const snap = await p.session.snapshot()',
@@ -248,8 +248,8 @@ export const CITED: Record<string, string> = {
   'src/repl/session.ts:2819': 'inject(rest, { only: who })',
   'src/adapters/kimi.ts:763': 'compactionGeneration: 0,',
   'src/rotation/rotate.ts:412': 'export async function rotate(',
-  'src/adapters/claude.ts:2094': "#state: SessionState = 'running'",
-  'src/adapters/codex.ts:1213': "#state: SessionState = 'running'",
+  'src/adapters/claude.ts:2130': "#state: SessionState = 'running'",
+  'src/adapters/codex.ts:1249': "#state: SessionState = 'running'",
   'src/rotation/handoff.ts:79': 'compactionGeneration: CompactionGeneration',
   'src/workspace/sessionRecord.ts:1794': 'snap.turns.map(',
   // Re-pinned on #300's spelling: the read moved from the LAST turn to the exchange's OWN

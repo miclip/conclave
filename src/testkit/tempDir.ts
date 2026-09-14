@@ -163,10 +163,11 @@ export function suiteTempDir(label = ''): string {
  * Contain every run directory the adapters booted by THIS FILE make for themselves (#211).
  *
  * An adapter takes a `mkdtemp` under `os.tmpdir()` at boot. Since #203 it gives that back on
- * close, so this is no longer the only thing standing between the suite and a scattered
- * `$TMPDIR` -- but it is still what covers the cases close does not: a boot that throws before
- * anything can call close, and the one run that deliberately KEEPS its directory because its
- * attempts journal was named to the operator.
+ * close -- in a `finally`, so a teardown that fails elsewhere still gives it back -- and since
+ * #303 a boot that fails gives it back too. So this is no longer the only thing standing
+ * between the suite and a scattered `$TMPDIR`, but it is still what covers the two cases
+ * neither path does: a directory whose removal itself failed, and the one run that
+ * deliberately KEEPS its directory because its attempts journal was named to the operator.
  *
  * `tmpdir()` re-reads `TMPDIR` on every call, so pointing it at a directory the testkit issued
  * puts everything booted here inside something whose lifetime the helper already owns.

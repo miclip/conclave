@@ -1026,8 +1026,44 @@ export class ClaudePtyHookAdapter implements AgentSession {
 
   static async start(opts: ClaudeAdapterOptions): Promise<ClaudePtyHookAdapter> {
     const self = new ClaudePtyHookAdapter(opts)
-    await self.#boot()
+    try {
+      await self.#boot()
+    } catch (err) {
+      // A BOOT THAT FAILS LEAVES NOTHING BEHIND (#303). Measured: with the seat's hook
+      // registration removed, `#boot` threw at the readiness window as designed, and the
+      // process that called it then sat for 466s with the child still alive under it and the
+      // receiver's TCP server still open, until killed by hand. The caller gets an error and
+      // no handle, so nothing outside this method can close what was opened.
+      //
+      // Whatever the teardown throws is swallowed on purpose: the boot failure is the diagnosis
+      // the operator needs, and a teardown that also failed must not replace it.
+      await self.#abandonFailedBoot().catch(() => {})
+      throw err
+    }
     return self
+  }
+
+  /**
+   * Undo what a failed `#boot` had done by the time it threw. See `start`.
+   *
+   * With a child, `close('abandoned')` is already the right teardown -- terminate it, stop the
+   * receiver, give back the run directory unless it was named to the operator -- and it
+   * tolerates the rest of the partial state: a child that is dead or never became ready, a
+   * view never attached, no turns. It does assume the child EXISTS, and a boot that failed
+   * before `spawn` returned has none, so that case closes the two things such a boot had
+   * opened -- the receiver and the run directory -- directly, rather than teaching `close()`
+   * about a state no caller of it can otherwise reach.
+   */
+  async #abandonFailedBoot(): Promise<void> {
+    if (this.#pty) {
+      await this.close('abandoned')
+      return
+    }
+    try {
+      await this.#receiver?.stop()
+    } finally {
+      this.#removeRunDir()
+    }
   }
 
   async #boot(): Promise<void> {
