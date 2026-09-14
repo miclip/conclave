@@ -23,8 +23,22 @@ function meta(): SessionMetadata {
   return { title: 'fix the thing', timestamp: '2026-09-11T12:00:00.000Z', cwd: '/w', status: 'busy' }
 }
 
+/**
+ * The session linger is short here: the #285 stream test waits for the stream's EOF, and since
+ * #290 that comes at the linger, not when the run lets go -- the product's thirty seconds is
+ * not what that test is about (#299). Shorter than the confirmation grace, so that dropping
+ * the grace still moves the EOF inside the test's floor.
+ */
+const SESSION_LINGER_MS = 100
+
 async function broker(t: TestContext): Promise<EvenRealitiesBroker> {
-  const b = new EvenRealitiesBroker({ socketPath: join(tempDir(t, 'bt'), 'even.sock'), port: 0, token: 'tok', lingerMs: 60_000 })
+  const b = new EvenRealitiesBroker({
+    socketPath: join(tempDir(t, 'bt'), 'even.sock'),
+    port: 0,
+    token: 'tok',
+    lingerMs: 60_000,
+    sessionLingerMs: SESSION_LINGER_MS,
+  })
   await b.start()
   t.after(() => b.close())
   return b
@@ -191,7 +205,13 @@ test('#285 the confirmation is on the stream, and the stream stays up long enoug
   // which the stream is still open, then EOF -- and EOF no sooner than the grace after the run
   // called `close()`. A timer being set is not asserted anywhere; only what arrived and when.
   const b = await broker(t)
-  const GRACE = DEFAULT_CONFIRM_GRACE_MS
+  // AN EXPLICIT GRACE, not `DEFAULT_CONFIRM_GRACE_MS`. Reading the constant made this test
+  // follow it: mutate the default to 0 and `>= GRACE` becomes `>= 0`, which is true of every
+  // run, so the test proved nothing about the mechanism it is named for. It survived that
+  // only while `device.pump` waited out the 30s session linger and the race caught it by
+  // accident (#299). What it asserts now is the mechanism -- a grace of N delays EOF by at
+  // least N -- and the default's VALUE is a separate test's job.
+  const GRACE = 200
   const tr = new BrokerBackedTransport('run-a', 'x', meta, async () => ({ socketPath: b.socketPath }), { confirmGraceMs: GRACE })
   await tr.send({ kind: 'approval', headline: 'merge?', options: [{ id: 'yes', label: 'Merge' }] })
   const asked = tr.receive()
