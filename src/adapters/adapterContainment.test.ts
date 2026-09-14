@@ -2,9 +2,10 @@
  * Every test file that boots an adapter contains the run directories it makes (#211).
  *
  * An adapter takes a `mkdtemp` under `os.tmpdir()` at boot. Since #203 it gives that back on
- * close, which covers the ordinary path and not the two that matter here: a boot that throws
- * before anything can call close, and the run that deliberately KEEPS its directory because its
- * attempts journal was named to the operator.
+ * close, in a `finally` that a failing teardown still reaches, and since #303 a failed boot
+ * gives it back too. That leaves the two cases that matter here: a directory whose removal
+ * itself failed, and the run that deliberately KEEPS its directory because its attempts journal
+ * was named to the operator.
  *
  * So a file that boots an adapter and forgets `containAdapterRunDirs()` scatters `orch-*`
  * directories into the developer's real `$TMPDIR`, and NOTHING NOTICES: the file compiles, its
