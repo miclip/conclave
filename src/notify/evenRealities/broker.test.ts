@@ -111,9 +111,29 @@ async function until(cond: () => Promise<boolean>, ms = 2_000): Promise<boolean>
   return cond()
 }
 
-/** `p`, or a rejection after `ms`: for awaiting a shutdown that a mutation could make never come. */
+/**
+ * The slack every `within` ceiling gets on top of whatever the product waits for. A ceiling is
+ * there to turn "never" -- a shutdown or stream end a mutation could stop from coming -- into a
+ * failure with a name, not to assert how fast the broker is: the speed claims are the separate
+ * `>= LINGER` / `>= START_GRACE_MS` floors. So it is generous on purpose. A loaded runner (CI
+ * with the suite at concurrency 4, a laptop under a build) has taken seconds where a quiet one
+ * takes milliseconds, and a ceiling that fires there reports a timing fault the code does not
+ * have (#294). Twenty seconds is far past anything the product does and costs nothing on a
+ * passing run, because the promise settles as soon as the thing happens.
+ */
+const CEILING_MS = 20_000
+
+/**
+ * `p`, or a rejection after `ms`: for awaiting a shutdown that a mutation could make never come.
+ * The timer is cleared once `p` settles: left armed it holds the process open for the whole
+ * ceiling after the last test, which at `CEILING_MS` turned an 8s file into a 26s one.
+ */
 function within<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
-  return Promise.race([p, new Promise<T>((_, reject) => setTimeout(() => reject(new Error(what)), ms))])
+  let timer: NodeJS.Timeout | undefined
+  const ceiling = new Promise<T>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(what)), ms)
+  })
+  return Promise.race([p, ceiling]).finally(() => clearTimeout(timer))
 }
 
 /**
@@ -273,7 +293,8 @@ test('#290 a retained session expires: the stream ends and the id is gone, at th
   await detached(b, 'run-a')
   assert.equal(state.ended, false, 'the stream the app holds survives the run letting go')
 
-  await within(pump, LINGER + 2_000, 'the stream never ended')
+  // Ceiling, not a speed claim: the session linger plus `CEILING_MS` for a loaded runner.
+  await within(pump, LINGER + CEILING_MS, 'the stream never ended')
   const gone = Date.now() - left
   assert.ok(gone >= LINGER, `the stream ended ${gone}ms after the hang-up: before the session linger`)
   assert.deepEqual(await sessions(b), [], 'and the session is off the list')
@@ -344,10 +365,12 @@ test('#290 a retained session is not an attached run: it holds neither the statu
   assert.deepEqual(b.status().sessions, [], 'no run attached, whatever the glasses list')
 
   // The broker lingers out on ITS clock; the retained session goes with it, not after it.
-  await within(b.closed, LINGER + 2_000, 'the retained session held the broker up')
+  // Ceiling, not a speed claim: the broker linger plus `CEILING_MS` for a loaded runner.
+  await within(b.closed, LINGER + CEILING_MS, 'the retained session held the broker up')
   const shut = Date.now() - left
   assert.ok(shut >= LINGER, `shut down ${shut}ms after the hang-up: before the broker linger`)
-  await within(pump, 1_000, 'the retained stream outlived the broker')
+  // Ceiling: the broker is already down, so the stream ends now or never.
+  await within(pump, CEILING_MS, 'the retained stream outlived the broker')
   assert.equal(state.ended, true)
 })
 
@@ -375,8 +398,11 @@ test('#290 close() takes a retained session down at once, and leaves no expiry a
     real(id)
   }
 
-  await within(b.close(), 2_000, 'close() waited on the retention')
-  await within(pump, 1_000, 'the retained stream outlived the broker')
+  // Ceiling: `close()` must settle rather than hang. Nothing about what it waited on is claimed
+  // here; the retention's expiry being disarmed is the `closes` count below.
+  await within(b.close(), CEILING_MS, 'close() waited on the retention')
+  // Ceiling: the broker is already down, so the stream ends now or never.
+  await within(pump, CEILING_MS, 'the retained stream outlived the broker')
   assert.equal(state.ended, true)
   assert.equal(await until(async () => held.closed), true, 'the attached run was disconnected')
   assert.equal(closes, 2, 'each closed once, by the bridge going down')
@@ -439,7 +465,8 @@ test('#286 the broker lingers after its last run disconnects, then shuts itself 
   c.close()
   await new Promise((r) => setTimeout(r, 40))
   assert.equal(await brokerAlive(b.socketPath), true, 'still up just after the last disconnect')
-  await within(b.closed, LINGER + 3_000, 'did not linger out')
+  // Ceiling, not a speed claim: the linger plus `CEILING_MS` for a loaded runner. The floor is the next line.
+  await within(b.closed, LINGER + CEILING_MS, 'did not linger out')
   assert.ok(Date.now() - left >= LINGER, `shut down ${Date.now() - left}ms after the last disconnect: before the linger`)
   assert.equal(await brokerAlive(b.socketPath), false, 'nothing is serving the socket')
   assert.equal(existsSync(b.socketPath), false, 'and the file is gone')
@@ -459,7 +486,8 @@ test('#286 a broker nobody ever attached to lingers out, but not before its firs
   assert.equal(await brokerAlive(b.socketPath), true, 'a zero linger still gives the first run time to connect')
   await new Promise((r) => setTimeout(r, 100))
   assert.equal(await brokerAlive(b.socketPath), true, 'and a probe hanging up did not shorten the window')
-  await within(b.closed, 3_000, 'did not linger out')
+  // Ceiling, not a speed claim: the grace plus `CEILING_MS` for a loaded runner. The floor is the next line.
+  await within(b.closed, START_GRACE_MS + CEILING_MS, 'did not linger out')
   assert.ok(Date.now() - started >= START_GRACE_MS, 'not before the grace')
   assert.equal(await brokerAlive(b.socketPath), false)
 })
@@ -524,7 +552,8 @@ test('#286 status and stop need no session, and neither touches the linger', asy
   // `stop` is acknowledged, then everything ends: the run's socket, the bridge, the file.
   const stopper = await EvenRealitiesBrokerClient.connect(b.socketPath)
   await stopper.stop()
-  await within(b.closed, 2_000, 'did not stop')
+  // Ceiling: `stop` is acknowledged before the shutdown, so the broker is down soon or never.
+  await within(b.closed, CEILING_MS, 'did not stop')
   assert.equal(await until(async () => a.closed), true, 'the attached run was disconnected')
   assert.equal(await brokerAlive(b.socketPath), false)
 })
@@ -643,7 +672,8 @@ test('#286 a line that never ends is not a frame: the connection is destroyed, n
   const closed = new Promise<void>((resolve) => socket.once('close', () => resolve()))
   socket.on('error', () => {})
   socket.write('x'.repeat(1_100_000))
-  await within(closed, 2_000, 'the broker kept buffering')
+  // Ceiling: the broker cuts the socket at the cap or keeps buffering forever.
+  await within(closed, CEILING_MS, 'the broker kept buffering')
 })
 
 test('#286 the socket is owner-only', async (t) => {

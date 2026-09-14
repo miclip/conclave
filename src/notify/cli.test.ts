@@ -184,7 +184,11 @@ test('#278 --run is the session the glasses see, and the friendly name is only i
   // a refused connection or an empty list -- because under the broker those are two windows,
   // not one, and a loop that only slept on the first spun through the second in a blink.
   let sessions: Record<string, unknown>[] = []
-  const deadline = Date.now() + 15_000
+  // A liveness ceiling, not a speed claim: the loop waits on a state, and the deadline only
+  // turns "never" into a failure. Generous because a loaded runner has taken seconds to get
+  // here where a quiet one takes milliseconds, and a ceiling that fires there reports a
+  // timing fault the code does not have (#294).
+  const deadline = Date.now() + 20_000
   // WAIT FOR THE STATE, NOT THE ENTRY. The session is listed the moment it opens, and only
   // reads `awaiting` once the question is actually outstanding -- two events, with a window
   // between them that a loaded runner opens wide enough to see. Waiting on the entry alone
