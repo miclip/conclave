@@ -569,14 +569,21 @@ export interface AgentSession {
   send(message: string, provenance: SendProvenance, budget?: TurnBudget): Promise<TurnKey>
 
   /**
-   * Type a raw line at the seat's composer and press Enter, WITHOUT starting a turn (#200).
+   * Type a raw line at the seat's composer and press Enter, without CLAIMING a turn (#200).
    *
    * The one thing on this seam that is write-only, and the return type is the whole point.
    * `send` hands back a `TurnKey` because a prompt begins a turn the orchestrator will wait
-   * for, count against `--max-turns`, and reconcile a report out of. A slash command begins
+   * for, count against `--max-turns`, and reconcile a report out of. A slash command is owed
    * none of that: it is an instruction to the CLI rather than work for the model, so there is
    * no key to give back and nothing to await. Returning `void` is what stops a caller treating
-   * it as a turn, because it has nothing it could treat as one.
+   * it as an exchange, because it has nothing it could treat as one.
+   *
+   * NOT "without starting a turn", which is what this said until #300. Both PTY CLIs dispatch
+   * their prompt hook for a command, so the seat opens a turn for it and emits `turn_start`
+   * like any other -- and `/goal`'s is a working turn, with the condition as the seat's
+   * directive. The caller sees that turn on `events()`, not here, and is responsible for
+   * waiting it out before its next `send`; `Relay#observeCommandTurn` is the one caller and
+   * does exactly that.
    *
    * WHAT IT CANNOT TELL YOU, stated here because the omission is permanent rather than
    * pending. It resolves when THIS PROCESS TYPED -- the same limit `InputQueue.submit` has

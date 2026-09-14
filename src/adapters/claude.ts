@@ -40,6 +40,7 @@ import { sanitizedCopy } from '../process/childenv.ts'
 import { PtyProcess } from '../process/pty.ts'
 import { InputQueue } from '../process/input.ts'
 import { describeListenerFailure, HookReceiver } from '../hooks/receiver.ts'
+import { PINNED_HOOKS_VAR } from '../hooks/client.ts'
 import type { HookDelivery } from '../hooks/journal.ts'
 import { TranscriptSessionView } from '../transcript/reconcile.ts'
 import { AsyncQueue } from './asyncQueue.ts'
@@ -1064,6 +1065,44 @@ export class ClaudePtyHookAdapter implements AgentSession {
 
     // A dedicated settings file rather than editing the project's: the adapter must not
     // mutate a user's configuration to do its job.
+    //
+    // THIS IS THE SEAT'S REGISTRATION, and it is the one that stays (#302). A live seat had
+    // two, because Claude Code runs the hooks of every settings layer it loads: this file,
+    // and the project's `.claude/settings.json` that `config install` renders and every
+    // session start re-renders. Both fired on every event for the whole run -- every
+    // implementer turn arrived twice on both #300 runs. They are not interchangeable:
+    //
+    //   - This one registers every event in `HOOK_EVENTS`: thirteen, including the tool,
+    //     subagent and model-switch hooks that #193, #202 and the subagent pairing depend
+    //     on. The project template registers six, and one of those (`Notification`) this
+    //     adapter does not consume. A seat that had only the project's would be deaf to eight.
+    //   - This one runs `node <release>/src/hooks/client.ts`, pinned to the release the run
+    //     started on (#250). The project's runs `conclave hook claude`, resolved through
+    //     PATH at every firing (#258) -- which can change mid-run, and which is absent or
+    //     too old in a dev checkout that has no release installed.
+    //   - This one dies with the run. The project's is the file `config check` reports on,
+    //     the install a human asked for, and Codex's only mechanism; it is not this run's to
+    //     remove, and it is left exactly as it was.
+    //
+    // So the project's registration keeps existing and stops POSTING from inside a seat that
+    // has this one: the child is marked with `PINNED_HOOKS_VAR`, and the project entry
+    // (`conclave hook claude`) exits without delivering when it sees the mark for its own
+    // agent. `#onHook`'s redelivery dedup stays beneath this as the belt: it tolerates a
+    // double from any cause, this removes the one cause that was measured.
+    //
+    // THE UPGRADE WINDOW. The stand-aside is code in `conclave hook`, and the project
+    // registration runs whatever `conclave` is on the project's PATH when the hook fires
+    // (#258) -- so this seat can be marked and the project's hook still post, if that PATH
+    // resolves a release from before the fix. Nothing here can tell, and nothing here needs
+    // to: the duplicates that arrive during that window are the ones the dedup in `#onHook`
+    // absorbs, and it does so without reading this mark or knowing this file exists.
+    //
+    // Not `--setting-sources user,local`, which would also stop the project layer firing.
+    // Measured on 2.1.270: a project whose `.claude/settings.json` denies `Bash(echo *)` had
+    // the denied tool RUN under that flag. It selects whole files, so it cannot say "this
+    // seat's hooks only" -- it says "not this project's permissions, env or hooks either", and
+    // a seat that quietly stops honouring a project's rules while a human's session in the
+    // same directory still does is a worse defect than a hook that fires twice.
     const settingsPath = join(runDir, 'settings.json')
     writeFileSync(settingsPath, JSON.stringify(this.#hookSettings(), null, 2))
 
@@ -1073,6 +1112,8 @@ export class ClaudePtyHookAdapter implements AgentSession {
         ORCH_HOOK_ATTEMPT_JOURNAL: join(runDir, 'attempts.ndjson'),
         // Recorded on the instance so the diagnostic can name it (#41).
         ORCH_HOOK_TIMEOUT_MS: '5000',
+        // The seat registers its own hooks; the project's stand aside for it. See above.
+        [PINNED_HOOKS_VAR]: this.agent,
       },
     })
 
@@ -1432,6 +1473,51 @@ export class ClaudePtyHookAdapter implements AgentSession {
         // (0 of 8), so this suppresses interruptions and never a turn's opening.
         if (isHarnessBlock(String(d.payload.prompt ?? '')) && this.#turns.has(String(key))) {
           this.#turns.get(String(key))!.tracker.observeHook('UserPromptSubmit', d.payload)
+          return
+        }
+        // THE SAME PROMPT DELIVERED TWICE IS ONE PROMPT (#300, #302).
+        //
+        // The key is the CLI's own `prompt_id`, minted once per submission, so a second
+        // `UserPromptSubmit` carrying a key this adapter has already opened AND the text it
+        // opened it with is not a new turn and not a different event: it is the same hook
+        // reaching us again. Measured on both #300 runs: every implementer turn arrived twice,
+        // same key, byte-identical prompt, 65-94 ms apart -- two hook registrations, one from
+        // the project's `.claude/settings.json` and one from the `--settings` file this adapter
+        // writes, and Claude Code runs both (#302 has the reproduction).
+        //
+        // What the second delivery did before this: on an ordinary send it found the pending
+        // claim already resolved by the first, classified itself `unsolicited`, and was charged
+        // to `--max-turns` by the relay (#208) -- one phantom turn per real one. On a command it
+        // found `#rawSubmissions` already consumed by the first, compared the command against
+        // the instruction in flight, and refused the send as corrupt; the ESC that followed
+        // then waited on a `Stop` that the command's turn was never going to give it. That is
+        // #300, both times. And either way it rebuilt `TurnState` mid-turn, which is #255's
+        // silent half again.
+        //
+        // Still not a general dedup on the key: the text must match exactly. A different prompt
+        // under a known key is not something the CLI does, and if it ever did, hiding it would
+        // hide a fault -- so it falls through and is reported as it always was.
+        //
+        // Observed only while the turn is open. A late redelivery for a turn that has already
+        // ended has nothing left to inform and must not reopen anything.
+        //
+        // NOT REDUNDANT NOW THAT THE DOUBLE REGISTRATION IS FIXED, and do not delete it on that
+        // reading. The fix is the stand-aside in `#boot` (the project's `conclave hook claude`
+        // exits without posting inside a seat that carries its own registration), and it runs
+        // in whatever `conclave` the project's PATH resolves at each firing (#258). A project
+        // whose PATH still holds a release older than that fix has a project hook that does not
+        // know to stand aside: both registrations post, and every prompt arrives here twice
+        // exactly as it did on #300 -- for as long as the upgrade window lasts, which is until
+        // someone upgrades the release on PATH, and is not a thing this process can shorten.
+        // This is what absorbs it in the meantime. And it is independent of the stand-aside by
+        // construction: it reads `#turns` and the payload, nothing about how the hook was
+        // registered or delivered, so a redelivery from any cause -- the upgrade window, a
+        // future CLI that re-sends, a cause nobody has seen yet -- lands here the same.
+        // `hookRedelivery.test.ts` drives it through a stand-in that posts twice with no
+        // settings layer, no project hook and no PATH involved at all.
+        const known = this.#turns.get(String(key))
+        if (known && known.prompt === String(d.payload.prompt ?? '')) {
+          if (known.endSeq === undefined) known.tracker.observeHook('UserPromptSubmit', d.payload)
           return
         }
         const tracker = new TurnVerdictTracker({
@@ -2038,7 +2124,14 @@ export class ClaudePtyHookAdapter implements AgentSession {
   }
 
   /**
-   * A slash command, typed and submitted, with no turn started (#200).
+   * A slash command, typed and submitted, with no turn CLAIMED (#200).
+   *
+   * Not "no turn started": that was the first version of this sentence, and it was false. The
+   * CLI dispatches `UserPromptSubmit` for a command like any prompt (#207), and for `/goal` the
+   * turn it opens is a working one -- measured on 2.1.270, the CLI tells the model to treat the
+   * condition as its directive and start on it, and `Stop` fires when it is met. What this
+   * method does not do is WAIT for that turn or hand it back: the turn is the seat's, observed
+   * through `turn_start` like any other, and the relay tracks it from there (#300).
    *
    * Deliberately NOT `send`, and the list of what it skips is the specification. It takes no
    * `PendingPrompt` claim, so it neither waits for a `UserPromptSubmit` hook nor blocks the

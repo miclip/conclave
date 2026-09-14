@@ -1118,7 +1118,9 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
       console.error('conclave: hook needs the agent it is firing for, e.g. `conclave hook claude`')
       return 1
     }
-    return runHookClient(sub)
+    // The PROJECT registration's entry, and the client is told so: inside a seat whose
+    // adapter registered its own hooks this one stands aside (#302). See `runHookClient`.
+    return runHookClient(sub, { source: 'project' })
   }
 
   if (command === 'config' && sub === 'show') {
