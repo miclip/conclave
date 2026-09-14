@@ -40,7 +40,7 @@
     "conclave": "bin/conclave.ts"
   },
   "devDependencies": {
-    "@types/node": "^26.1.2",
+    "@types/node": "^26.5.1",
     "typescript": "^7.0.2"
   }
 }
