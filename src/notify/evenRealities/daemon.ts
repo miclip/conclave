@@ -103,7 +103,13 @@ const CLI = join(import.meta.dirname, '..', '..', '..', 'bin', 'conclave.ts')
  */
 export const spawnServe: Spawner = (config) =>
   new Promise((resolve) => {
-    const log = openSync(brokerLogPath(config.socketPath), 'a')
+    // 0600 EXPLICITLY, though the directory already guarantees it (#307). `ensurePrivateDir`
+    // has verified the parent is ours and 0700 before this runs, so nobody else can reach this
+    // file whatever its own mode is -- but a mode argument costs nothing, keeps the guarantee
+    // true if that directory check is ever weakened, and is what a reader of THIS line expects
+    // to see. It does not make the path unpredictable, which is what the scanner objects to;
+    // the directory is what answers that, and the alert is dismissed on those grounds.
+    const log = openSync(brokerLogPath(config.socketPath), 'a', 0o600)
     const child = spawn(process.execPath, [CLI, 'notify', 'broker', 'serve'], {
       detached: true,
       stdio: ['ignore', 'pipe', log],
