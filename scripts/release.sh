@@ -362,7 +362,7 @@ in_use() {
     # sources these functions into an interactive zsh to try them gets an empty result and a
     # guard that appears to find nothing. This script runs under /bin/sh, where the splitting
     # below is correct; the name avoids handing someone a silent failure at the prompt.
-    cmdline=$(ps -o command= -p "$pid" 2>/dev/null) || continue
+    cmdline=$(ps -ww -o command= -p "$pid" 2>/dev/null) || continue
     # The token that IS the program: `node /path/to/conclave session ...`. Taken from argv
     # rather than from `comm`, which reports `node` -- the shebang resolves before exec, so the
     # interpreter is what the kernel records and the script is only ever an argument.
@@ -414,7 +414,14 @@ conclave_runs() {
   # question. That is what made a wait loop in this project's own history spin for thirty-two
   # minutes against nothing, and requiring an invocation rather than a mention is what keeps a
   # command line that merely discusses conclave from counting as one.
-  ps -eo pid=,command= 2>/dev/null | awk '$0 ~ /\/conclave(\.ts)? (session|relay)([ ]|$)/ { print $1 }'
+  #
+  # `-ww`, here and on every other `ps` in this file, because procps cuts `command` at
+  # `$COLUMNS` whenever that variable is exported -- even with stdout a pipe -- and an
+  # interactive shell exports it. A run whose path is longer than the terminal is wide then
+  # loses the `session` the pattern needs and the guard finds no run, which is a fail-OPEN in
+  # front of `--prune-install` (#314). Measured on procps-ng 4.0.4: 120 columns without it,
+  # 1157 with. BSD ps takes the same flag, so there is no branch on platform.
+  ps -ww -eo pid=,command= 2>/dev/null | awk '$0 ~ /\/conclave(\.ts)? (session|relay)([ ]|$)/ { print $1 }'
 }
 
 # The one refusal left, and it belongs to the MIGRATION -- the name says so, because the general
@@ -483,7 +490,7 @@ remove_migrated_from() {
     say "keeping $legacy — a run started in it while the migration was running."
     say "  Nothing retires it later; remove it by hand once these are done: git worktree remove $legacy"
     for p in $pids; do
-      echo "    pid $p: $(ps -o command= -p "$p" 2>/dev/null | cut -c1-100)"
+      echo "    pid $p: $(ps -ww -o command= -p "$p" 2>/dev/null | cut -c1-100)"
     done
     return 0
   fi
@@ -654,7 +661,7 @@ update_install() {
   # PATH, because PATH still resolves to the old version at this point -- which is exactly the
   # property that makes a failure here harmless.
   if [ "$DRY" = 0 ]; then
-    built=$(node "$new/bin/conclave.ts" --version 2>/dev/null | head -1 || echo "(no answer)")
+    built=$(node --disable-warning=ExperimentalWarning "$new/bin/conclave.ts" --version 2>/dev/null | head -1 || echo "(no answer)")
     case "$built" in
       *"${tag#v}"*) say "$new reports $built" ;;
       *)
@@ -793,7 +800,7 @@ prune_install() {
     if [ -n "$pids" ]; then
       say "  keeping $name — processes are running from it:"
       for p in $pids; do
-        echo "    pid $p: $(ps -o command= -p "$p" 2>/dev/null | cut -c1-100)"
+        echo "    pid $p: $(ps -ww -o command= -p "$p" 2>/dev/null | cut -c1-100)"
       done
       continue
     fi
@@ -906,7 +913,7 @@ runs_here() {
 if [ "$DRY" = 0 ] && [ -n "$(runs_here)" ]; then
   say "refusing: a run is in flight in this repository — wait for it to finish and merge"
   for p in $(runs_here); do
-    echo "    pid $p: $(ps -o command= -p "$p" 2>/dev/null | cut -c1-100)" >&2
+    echo "    pid $p: $(ps -ww -o command= -p "$p" 2>/dev/null | cut -c1-100)" >&2
   done
   exit 1
 fi
