@@ -338,6 +338,43 @@ test('#292 the whole label and nothing more: an extended phrase is a message', a
   assert.ok(b.decisions().every((d) => d.answer?.option === undefined), 'none of them is an option on the record')
 })
 
+/**
+ * Measured on the glasses, which take voice and nothing else: `Yes` was offered and "Yes."
+ * was recorded, so the match failed on a full stop. Dictation ends a sentence; the operator
+ * did not choose to, which makes it an artefact of the channel exactly as case and whitespace
+ * are. The cases below are the two real readings from that test and the boundary between them.
+ */
+test('#292 terminal punctuation is the channel, not the answer: "Yes." is Yes', () => {
+  const opts = [
+    { id: 'a', label: 'Yes' },
+    { id: 'b', label: 'No' },
+  ]
+  // Both readings from the device, verbatim.
+  assert.equal(resolveLabel('Yes.', opts), 'a')
+  assert.equal(resolveLabel('No.', opts), 'b')
+  // The rest of what a dictating surface produces.
+  assert.equal(resolveLabel('yes!', opts), 'a')
+  assert.equal(resolveLabel('  No?  ', opts), 'b')
+  assert.equal(resolveLabel('Yes,', opts), 'a')
+  // AND THE LINE HOLDS WHERE IT WAS. Words the operator actually said stay a message, comma
+  // or no comma, because they carry intent past the choice.
+  assert.equal(resolveLabel('Yes, go ahead', opts), undefined)
+  assert.equal(resolveLabel('No, not yet', opts), undefined)
+  // Still no prefixes, initials or synonyms.
+  assert.equal(resolveLabel('y', opts), undefined)
+  assert.equal(resolveLabel('yep', opts), undefined)
+  // A label that itself ends in punctuation is normalised on both sides, not just the answer.
+  assert.equal(resolveLabel('ship it', [{ id: 'a', label: 'Ship it!' }]), 'a')
+  // Punctuation alone is not an answer.
+  assert.equal(resolveLabel('...', opts), undefined)
+  // TERMINAL, AND ONLY TERMINAL. Interior punctuation is part of the label and part of what
+  // was said, so it still has to match: a rule that stripped punctuation anywhere would let
+  // these two through, and it would be guessing rather than normalising a channel. Found by
+  // mutation -- every other case above passes under the wider rule.
+  assert.equal(resolveLabel('Yes really', [{ id: 'a', label: 'Yes, really' }]), undefined)
+  assert.equal(resolveLabel('Yes, really', [{ id: 'a', label: 'Yes, really' }]), 'a')
+})
+
 test('#292 two options shown as one label make the text ambiguous, and it stays a message', async (t) => {
   // Refused rather than guessed between. The caller made the text ambiguous by offering it
   // twice; picking the first would be inventing an answer.

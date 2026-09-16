@@ -75,11 +75,25 @@ export function forTransport(m: Outbound, limits: Pick<TransportLimits, 'maxChar
  * leaves the operator to type or say the label, and neither reliably preserves case or
  * whitespace. Two options shown as the same label are refused rather than guessed between: a
  * caller that offered them made the text ambiguous, and the text stays a message.
+ *
+ * AND TERMINAL PUNCTUATION GOES THE SAME WAY, for the same reason. Measured on the glasses,
+ * which take voice and nothing else: `Yes` offered, "Yes." recorded, no match -- a full stop
+ * is neither whitespace nor case, so the rule could essentially never fire on the one surface
+ * it was written for. Dictation ends a sentence; the operator did not choose to. That is an
+ * artefact of the channel exactly as case and whitespace are, and normalising it is not a
+ * step towards guessing.
+ *
+ * The line is still the same line: only a trailing run of `.`, `!`, `?` and `,` is cut, and
+ * only from the end. "Yes, go ahead" keeps its comma because the words after it are the
+ * operator's own, and it stays a message. Nothing here forgives a prefix, an initial, a
+ * synonym or a word the operator did not say.
  */
+const TERMINAL = /[.!?,]+$/
+
 export function resolveLabel(text: string, options: { id: string; label: string }[]): string | undefined {
-  const said = text.trim().toLowerCase()
+  const said = text.trim().toLowerCase().replace(TERMINAL, '').trim()
   if (said === '') return undefined
-  const hits = options.filter((o) => o.label.trim().toLowerCase() === said)
+  const hits = options.filter((o) => o.label.trim().toLowerCase().replace(TERMINAL, '').trim() === said)
   return hits.length === 1 ? hits[0]!.id : undefined
 }
 
