@@ -66,12 +66,47 @@ export interface Abandonment {
   readonly whenAbandoned: Promise<void>
 }
 
+/**
+ * The clock this class reads and the timer it arms, as one dependency, because they are one
+ * model of time: `abandoned` is a reading of `now()` against a deadline, and the timer is what
+ * frees the callers at that same deadline. A manual pair can then say precisely what the real
+ * pair does under a blocked loop -- the clock moves, the due timer has not yet run -- which is
+ * the state the note above is about, and which nothing but a clock in hand can hold still.
+ *
+ * Injected for one reason, and it is not convenience. The bound's behaviour at its EDGES --
+ * one millisecond inside it, the instant itself, a corpse landing inside its successor's bound
+ * -- is what this class exists to get right, and a test against the real clock can reach
+ * those edges only by racing the machine it runs on. The eviction test did, and lost on a
+ * loaded CI runner while passing on two idle ones in the same run (#311). Production never
+ * passes this; both adapters take the default.
+ */
+export interface TimeSource {
+  /** Milliseconds since the epoch. The deadline is captured from this and read against it. */
+  now(): number
+  /**
+   * Arm `fn` to run once `ms` has passed, and return what disarms it. The real one is
+   * unref'd: a bound on a job must not keep the process alive on its own.
+   */
+  after(ms: number, fn: () => void): () => void
+}
+
+export const realTime: TimeSource = {
+  now: () => Date.now(),
+  after(ms, fn) {
+    const timer = setTimeout(fn, ms)
+    timer.unref?.()
+    return () => clearTimeout(timer)
+  },
+}
+
 export class BoundedSingleFlight {
   readonly #boundMs: number
+  readonly #time: TimeSource
   #inFlight: { done: Promise<void>; token: Abandonment } | undefined
 
-  constructor(boundMs: number) {
+  constructor(boundMs: number, time: TimeSource = realTime) {
     this.#boundMs = boundMs
+    this.#time = time
   }
 
   /** True while a run is admitted and not yet finished or abandoned. Diagnostic. */
@@ -111,12 +146,13 @@ export class BoundedSingleFlight {
   run(job: (token: Abandonment) => Promise<void>): Promise<void> {
     const existing = this.#inFlight
     if (existing) return existing.done
+    const time = this.#time
 
     // Captured once, and the authority on whether this run is still wanted. `released` is ORed
     // in so that the instant the timer hands the callers back and frees the slot, the token
     // agrees -- a timer firing a hair early must not leave a window where the slot is gone and
     // the job still believes it may act.
-    const deadlineAt = Date.now() + this.#boundMs
+    const deadlineAt = this.#time.now() + this.#boundMs
     let released = false
     let announce!: () => void
     const whenAbandoned = new Promise<void>((resolve) => {
@@ -124,7 +160,7 @@ export class BoundedSingleFlight {
     })
     const token: Abandonment = {
       get abandoned(): boolean {
-        return released || Date.now() >= deadlineAt
+        return released || time.now() >= deadlineAt
       },
       whenAbandoned,
     }
@@ -139,22 +175,21 @@ export class BoundedSingleFlight {
       if (this.#inFlight?.token === token) this.#inFlight = undefined
     }
 
-    const timer = setTimeout(() => {
+    const disarm = this.#time.after(this.#boundMs, () => {
       released = true
       release()
       settle()
       // Last, and after the slot is free: whatever this run is stuck behind hears about it
       // only now, and the point of telling it is that the NEXT run can get through.
       announce()
-    }, this.#boundMs)
-    timer.unref?.()
+    })
 
     this.#inFlight = { done, token }
 
     void job(token)
       .catch(() => undefined)
       .then(() => {
-        clearTimeout(timer)
+        disarm()
         release()
         settle()
       })
