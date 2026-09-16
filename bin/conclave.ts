@@ -1,7 +1,12 @@
-#!/usr/bin/env node
+#!/usr/bin/env -S node --disable-warning=ExperimentalWarning
 /**
  * Conclave CLI. Currently one subcommand; the shape is here so `config install` does not
  * end up as an ad-hoc script that only its author knows to run.
+ *
+ * The shebang carries `--disable-warning=ExperimentalWarning` (#313) because node runs this
+ * TypeScript source as-is and v24 says so on stderr every time. `env -S` is what lets a
+ * shebang pass an argument at all; a bare `node bin/conclave.ts` skips the shebang and is a
+ * developer spelling that is allowed to warn. Children get the same flag via `nodeArgv`.
  */
 
 import {
@@ -73,6 +78,7 @@ import {
   formatSessionLine,
 } from '../src/workspace/sessionView.ts'
 import { formatGoalFindings, lintGoal } from '../src/relay/goalLint.ts'
+import { nodeArgv } from '../src/nodeArgv.ts'
 import { version } from '../src/version.ts'
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, statSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
@@ -1840,7 +1846,7 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
       // which turns a window nobody could realistically hit into one a release opens on
       // purpose. Passing the file this process actually loaded closes it: the child runs the
       // version its parent is running, whatever PATH means by then.
-      const child = spawn(process.execPath, [selfEntry(), ...argvOut], {
+      const child = spawn(process.execPath, nodeArgv(selfEntry(), argvOut), {
         cwd: process.cwd(),
         detached: true,
         stdio: ['ignore', fd, fd],

@@ -35,6 +35,7 @@ import { spawn } from 'node:child_process'
 import { closeSync, openSync } from 'node:fs'
 import { join } from 'node:path'
 
+import { nodeArgv } from '../../nodeArgv.ts'
 import {
   brokerAlive,
   brokerSocketPath,
@@ -110,7 +111,7 @@ export const spawnServe: Spawner = (config) =>
     // to see. It does not make the path unpredictable, which is what the scanner objects to;
     // the directory is what answers that, and the alert is dismissed on those grounds.
     const log = openSync(brokerLogPath(config.socketPath), 'a', 0o600)
-    const child = spawn(process.execPath, [CLI, 'notify', 'broker', 'serve'], {
+    const child = spawn(process.execPath, nodeArgv(CLI, ['notify', 'broker', 'serve']), {
       detached: true,
       stdio: ['ignore', 'pipe', log],
       env: {
