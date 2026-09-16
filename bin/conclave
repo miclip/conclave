@@ -46,4 +46,7 @@ dir=$(cd "$(dirname "$self")" && pwd -P) || {
   exit 1
 }
 
-exec node "$dir/conclave.ts" "$@"
+# `--disable-warning=ExperimentalWarning` (#313): node executes the TypeScript source directly,
+# and v24 announces its type stripping on stderr at every invocation. The flag is the narrow
+# switch for that one warning class; NODE_OPTIONS would leak it into every node the CLI spawns.
+exec node --disable-warning=ExperimentalWarning "$dir/conclave.ts" "$@"
