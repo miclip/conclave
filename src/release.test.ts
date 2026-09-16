@@ -155,10 +155,34 @@ interface Machine {
 
 function machine(
   t: TestContext,
-  opts: { migrated: boolean; lockA?: string; lockB?: string; brokenNew?: boolean },
+  opts: {
+    migrated: boolean
+    lockA?: string
+    lockB?: string
+    brokenNew?: boolean
+    /**
+     * Nest the releases root deep enough that a run's command line -- `node <version
+     * dir>/bin/conclave.ts` -- is wider than this many columns BEFORE the subcommand. A
+     * terminal that narrow is what #314 is about: procps cuts `ps` output at `$COLUMNS`, and
+     * the run has to be long enough for the cut to land in front of ` session`.
+     */
+    commandWiderThan?: number
+  },
 ): Machine {
   const base = tempDir(t, 'conclave-install')
-  const repo = join(base, 'repo')
+  // Where the operator keeps checkouts. The script puts version directories BESIDE the
+  // repository, so a deep home is what makes a deep install; the padding is measured against
+  // the prefix the launcher execs, `node <dir>/conclave.ts`, rather than against the base alone,
+  // because a macOS temp root is already ninety characters and a Linux one forty, and what
+  // matters is where ` session` lands, not how deep `/tmp` is.
+  let home = base
+  if (opts.commandWiderThan !== undefined) {
+    let segment = 'a-home-deep-enough-that-a-narrow-terminal-cuts-the-run'
+    const prefix = () => `node ${join(base, segment, 'conclave-releases', 'v9.9.9', 'bin', 'conclave.ts')}`
+    while (prefix().length <= opts.commandWiderThan) segment += '-and-deeper'
+    home = join(base, segment)
+  }
+  const repo = join(home, 'repo')
   const origin = join(base, 'origin')
   mkdirSync(repo, { recursive: true })
   execFileSync('git', ['init', '-q', '--bare', origin])
@@ -223,8 +247,8 @@ function machine(
   git('push', '-q', 'origin', 'main', '--tags')
 
   // The install is its own worktree at the OLD tag, which is the state a release has to move.
-  const root = join(base, 'conclave-releases')
-  const dir = opts.migrated ? join(root, 'v9.9.9') : join(base, 'conclave-stable')
+  const root = join(home, 'conclave-releases')
+  const dir = opts.migrated ? join(root, 'v9.9.9') : join(home, 'conclave-stable')
   git('worktree', 'add', '--detach', '-q', dir, 'v9.9.9')
   // What the new version directory is supposed to CLONE rather than reinstall. A marker file
   // rather than a real install: what is under test is which directory the tree came from.
@@ -273,12 +297,19 @@ function liveRunViaPath(env: NodeJS.ProcessEnv): ChildProcess {
   return spawn('conclave', ['session', 'probe'], { env, stdio: 'ignore' })
 }
 
-/** Whether the script's own matcher would see this pid as a live run. */
+/**
+ * Whether the script's own matcher would see this pid as a live run.
+ *
+ * BOTH halves are read out of the script: the `ps` invocation and the awk program it feeds.
+ * The `ps` half used to be restated here without `-ww`, which is the flag #314 is about, so
+ * under an exported `COLUMNS` this helper could disagree with the guard it claims to speak
+ * for -- in either direction.
+ */
 function guardSees(pid: number): boolean {
-  const program = readFileSync(SCRIPT, 'utf8').match(/awk '(\$0 ~ .*?)'/)
-  assert.ok(program, 'release.sh must still select runs with an awk program')
-  const ps = execFileSync('sh', ['-c', 'ps -eo pid=,command='], { encoding: 'utf8' })
-  const out = execFileSync('awk', [program[1]!], { input: ps, encoding: 'utf8' })
+  const m = readFileSync(SCRIPT, 'utf8').match(/^\s*(ps [^|\n]*?-eo pid=,command=)[^|\n]*\| awk '(\$0 ~ .*?)'/m)
+  assert.ok(m, 'release.sh must still select runs by piping `ps -eo pid=,command=` into an awk program')
+  const ps = execFileSync('sh', ['-c', m[1]!], { encoding: 'utf8' })
+  const out = execFileSync('awk', [m[2]!], { input: ps, encoding: 'utf8' })
   return out.trim().split('\n').includes(String(pid))
 }
 
@@ -646,16 +677,47 @@ test('#250 a run started off PATH is still found in its own version after the li
   //
   // Measured before it was written: the same live pid resolved to v1 before a swap and v2 after
   // it, while still executing out of v1.
-  const m = machine(t, { migrated: true })
+  //
+  // AND THE SECOND WAY THE SAME RUN GOES INVISIBLE (#314). The operator's shell exports
+  // `COLUMNS`, and procps cuts `ps` output at that width even into a pipe. A version directory
+  // deeper than the terminal is wide then loses ` session` off the end of its line, the matcher
+  // finds nothing, and the prune runs unguarded. So this machine is a narrow terminal -- the
+  // width is exported to everything it starts, the run and the release script alike, exactly
+  // as an interactive zsh does it -- and its install lives deep enough for the cut to matter.
+  const COLUMNS = 120
+  const m = machine(t, { migrated: true, commandWiderThan: COLUMNS })
+  m.env.COLUMNS = String(COLUMNS)
   const child = liveRunViaPath(m.env)
   try {
     await settle(600)
     assert.ok(guardSees(child.pid!), 'the run must be one the script would recognise')
 
+    // THE PLATFORM PRECONDITION, probed rather than assumed. On procps the un-widened read is
+    // cut and the rest of this test discriminates `-ww`; on BSD `ps` (macOS) nothing is cut
+    // when stdout is a pipe, and this test cannot tell a widened guard from an un-widened one
+    // -- which it says out loud, because a skip nobody can see is a pass (#281). Only the
+    // probe skips: the symlink half above is still a real regression on every platform.
+    const psLine = (flags: string[]) =>
+      execFileSync('ps', [...flags, '-o', 'command=', '-p', String(child.pid)], { encoding: 'utf8', env: m.env }).trimEnd()
+    await t.test('#314 the un-widened read loses the subcommand at $COLUMNS, and -ww reads past it', (tt) => {
+      const narrow = psLine([])
+      const wide = psLine(['-ww'])
+      assert.ok(wide.length > COLUMNS, `the fixture's command line must be wider than the terminal, got ${wide.length}: ${wide}`)
+      assert.ok(wide.endsWith(' session probe'), `and -ww must read all of it, got: ${wide}`)
+      if (narrow === wide) {
+        return tt.skip(
+          `this ps does not truncate at COLUMNS when stdout is a pipe (${process.platform}, ` +
+            `${narrow.length} columns read under COLUMNS=${COLUMNS}); the width half of #314 cannot be exercised here`,
+        )
+      }
+      assert.equal(narrow.length, COLUMNS, `the un-widened read is cut at the terminal's width, got ${narrow.length}: ${narrow}`)
+      assert.ok(!narrow.includes(' session'), `and the cut takes the subcommand the guard matches on, got: ${narrow}`)
+    })
+
     // THE PREMISE, asserted rather than assumed: the command line names the version directory
     // it is actually executing out of, and not the symlink it was reached through. Without this
     // the assertions below would be about a run nobody could have attributed.
-    const cmd = execFileSync('ps', ['-o', 'command=', '-p', String(child.pid)], { encoding: 'utf8' })
+    const cmd = psLine(['-ww'])
     // Containment rather than a regex: these are filesystem paths full of dots, and escaping
     // them into a pattern is a second thing to get wrong in an assertion about a first.
     assert.ok(
