@@ -112,6 +112,51 @@ async function relayOf(
   })
 }
 
+/**
+ * The same relay with a replacement queued behind the first implementer, so a rotation has a
+ * session to swap in. Mirrors `rotation.test.ts`; the checks are `exit 0` because what is under
+ * test here is the ledger, not the audition.
+ */
+async function rotatableRelayOf(
+  cwd: string,
+  advisor: FakeRotationSession,
+  impls: FakeRotationSession[],
+  over: Partial<RelayOptions> = {},
+): Promise<Relay> {
+  return Relay.start({
+    registry: registryOf({ codex: [advisor], claude: impls }),
+    cwd,
+    lead: { id: 'advisor', agent: 'codex', role: 'advisor' },
+    implementer: { id: 'implementer', agent: 'claude', role: 'implementer' },
+    maxAdvisorTurns: 5,
+    rotation: { checks: ['exit 0'], checkTimeoutMs: 30_000, onDegradation: 'candidate' },
+    ...over,
+  })
+}
+
+/** The handoff and acceptance a rotation audition is scripted with. As in `rotation.test.ts`. */
+const HANDOFF = `## BRIEF
+Keep the work moving.
+
+## STATE
+Half done.
+
+## DECISIONS
+- none
+
+## EVIDENCE
+The implementer says the check passes.
+
+## FILES
+- work.ts
+
+## DISAGREEMENT
+- none
+
+## NEXT
+Carry on.`
+const ACCEPTED = 'CHECK 1: exit 0\n\nRead work.ts and ran the check. It matches.'
+
 /** Enough scripted turns that only a ceiling can end the run. */
 function endlessly(prefix: string): string[] {
   return Array.from({ length: 60 }, (_, i) => `${prefix} ${i + 1}.`)
@@ -379,6 +424,51 @@ test('a prompt answered in the child rather than here is released by the turn en
   assert.equal(relay.pausedMs, 3 * MINUTE, 'the hold ended with the turn, not with the run')
   const { reason } = await finish(run)
   assert.equal(reason, 'done')
+})
+
+test('a prompt the retired session was standing at leaves with it when the seat is rotated', async (t) => {
+  // The third exit from a prompt, after the answer and the turn ending: the session is rotated
+  // out from under it. The retired child never sends a `turn_end` -- it is gone -- and the
+  // replacement's first `turn_end` would release a hold that is not its own only by the
+  // accident of sharing the seat id. So the rotation path releases it explicitly, and this
+  // pins that line by holding the replacement's first turn open: with nothing else able to
+  // close the interval, `pausedMs` growing after `/continue` is the retired seat's prompt
+  // still charged to a run that is working.
+  const dir = repo(t)
+  const clock = clockFrom()
+  const advisor = new FakeRotationSession('advisor', 'codex', ['Do the first thing.', HANDOFF, 'Do the second thing.', 'DONE'])
+  const old = new FakeRotationSession('old', 'claude', ['ack', 'Did the first thing.'])
+  const fresh = new FakeRotationSession('fresh', 'claude', [ACCEPTED, 'Second.', 'NONE'])
+  old.compactOnTurn = 1
+  // Index 0 is the audition; 1 is the first turn of real work after promotion.
+  fresh.holdTurn = 1
+  const relay = await rotatableRelayOf(dir, advisor, [old, fresh], { now: clock.now })
+  t.after(() => relay.stop())
+
+  const run = relay.start('Keep the work moving.')
+  const settled = await run.settled()
+  assert.ok(settled.kind === 'paused' && settled.pause.reason === 'rotation_candidate', 'the compaction raised a candidate')
+
+  // A late `PermissionRequest` from the child about to be retired, arriving while the run is
+  // paused about it. Two reasons now hold the run: the pause, and this seat's prompt.
+  prompt(old, 'Bash', { command: 'git stash' }, 905)
+  await until(() => relay.permissionsPending().length === 1, 'the relay has seen the prompt')
+  clock.advance(5 * MINUTE)
+  assert.equal(relay.pausedMs, 5 * MINUTE, 'one interval for both reasons')
+
+  assert.equal((await run.rotateImplementer()).status, 'rotated')
+  assert.deepEqual(relay.permissionsPending(), [], 'the prompt went with the session that was standing at it')
+  await run.continue()
+  await until(() => fresh.holding, 'the replacement was sent work and is holding its turn')
+
+  // Working, with no prompt up and no pause: this must be the run's own time.
+  clock.advance(10 * MINUTE)
+  assert.equal(relay.pausedMs, 5 * MINUTE, 'the retired seat\'s prompt is not still holding the clock')
+
+  fresh.releaseTurn()
+  const { reason, detail } = await finish(run)
+  assert.equal(reason, 'done', detail)
+  assert.equal(relay.pausedMs, 5 * MINUTE)
 })
 
 // ---------------------------------------------------------------------------------------
