@@ -376,6 +376,19 @@ async function twoParty(
     transcriptSettleMs: 50,
     ...(opts.sendPreconditionMs === undefined ? {} : { sendPreconditionMs: opts.sendPreconditionMs }),
     ...(opts.liveness ? { liveness: opts.liveness } : {}),
+    // The turn-boundary reading (#322) has its own seam; stubbed to "gone" so the fake pid is
+    // never handed to a real `ps` and the reading above stays the precondition's alone.
+    turnBoundaryLiveness: async (pid) => ({
+      pid,
+      alive: false,
+      samples: [],
+      selfSamples: [],
+      busiestDescendant: [],
+      descendants: 0,
+      workingDescendants: 0,
+      idle: false,
+      measuredAt: Date.now(),
+    }),
   })
 }
 

@@ -196,6 +196,10 @@ async function relayOf(
     lead: { id: 'advisor', agent: 'codex', role: 'advisor' },
     implementer: { id: 'implementer', agent: 'claude', role: 'implementer' },
     maxAdvisorTurns: 8,
+    // The turn-boundary reading (#322) has its own seam and is not what this file is about:
+    // stubbed to "gone", which records nothing, so the `readings(...)` scripts below stay the
+    // pause's alone and the fake pid is never handed to a real `ps`.
+    turnBoundaryLiveness: async () => ({ ...GONE, measuredAt: Date.now() }),
     // No refresher. Every one of these tests is about the reading a pause was RAISED on and the
     // reading the next one is raised on; a refresh loop rewriting the first while the test
     // resolves it would make which sample armed the latch a matter of timing.
