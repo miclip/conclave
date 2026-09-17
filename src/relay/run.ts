@@ -580,6 +580,12 @@ export interface RunHandleOptions {
   now?: (() => number) | undefined
 }
 
+/**
+ * The `RunHandle.hold` reason a pause holds the run under. Exported so a test can name it
+ * beside the relay's `permission:<seat>` holds; nothing outside this file opens one.
+ */
+export const PAUSE_HOLD = 'pause'
+
 export class RunHandle {
   #control: RunControl
   #now: () => number
@@ -587,12 +593,15 @@ export class RunHandle {
   #pause: RunPause | undefined
   #outcome: RunOutcome | undefined
   /**
-   * How long this run has spent SUSPENDED at a pause, waiting for a human to decide.
+   * How long this run has spent SUSPENDED, waiting for a human to decide: at a pause, or with a
+   * seat stopped at a permission prompt (#315).
    *
    * Kept here because this class is the only thing that knows: `pauseAt` opens the interval and
    * every way out of a pause -- `continue`, `rotate`-then-`continue`, `abort`, and a `settle`
    * that ends the run while it is still paused -- closes it. A ledger kept beside the halt site
-   * instead would have to be closed in four places and would miss the fourth.
+   * instead would have to be closed in four places and would miss the fourth. The permission
+   * holds come in through `hold`/`releaseHold` from the relay, which is the one thing that sees
+   * the prompt raised and the prompt answered, and `settle` closes those the same way.
    *
    * It exists because `--max-minutes` was measuring two different things with one number (#112).
    * A run suspended here is not running away: nothing is dispatched, no child is spending quota,
@@ -600,8 +609,20 @@ export class RunHandle {
    * `Relay#pausedMs` for what is done with it and why that cannot unbound a stuck run.
    */
   #suspendedMs = 0
-  /** When the current suspension began, or `undefined` while the run is not paused. */
+  /** When the current suspension began, or `undefined` while nothing is holding the run. */
   #suspendedSince: number | undefined
+  /**
+   * What is holding the run right now: `pause` while the operator is deciding one, and
+   * `permission:<seat>` while that seat stands at a permission prompt (#315).
+   *
+   * A set rather than a flag because the reasons overlap. A seat can be at a prompt when a
+   * pause is raised about another seat, and the pause can be answered while the prompt is
+   * still up -- or the other way round. One interval, opened when the first reason arrives and
+   * closed when the last one leaves, is the only reading that charges that stretch once: two
+   * ledgers would count it twice, and a flag closed by whichever reason ended first would
+   * charge the remainder to the run as if it were working.
+   */
+  #suspendedFor = new Set<string>()
 
   /**
    * Resolves the loop's `pauseAt()` once the operator decides — or with `undefined` if the run
@@ -653,7 +674,7 @@ export class RunHandle {
   }
 
   /**
-   * Total time suspended at pauses, INCLUDING the pause currently in front of the operator.
+   * Total time suspended, INCLUDING the pause or prompt currently in front of the operator.
    *
    * Reads live rather than only on release, because the ceiling that consults it is checked
    * while the run is going and a pause that has not been answered yet is the longest one there
@@ -664,8 +685,40 @@ export class RunHandle {
     return this.#suspendedMs + open
   }
 
-  /** Close the open suspension, if there is one. Idempotent; every exit from a pause calls it. */
+  /**
+   * Hold the run for `reason`, opening the interval if nothing else is already holding it.
+   *
+   * The pause path calls this from `pauseAt`; the relay calls it for a seat stopped at a
+   * permission prompt (#315). Idempotent per reason: a second request from a seat already at a
+   * prompt replaces the first and does not restart the clock.
+   *
+   * A no-op once the run has ended, for the reason `pauseAt` gives at length: a permission event
+   * can arrive from a reader still draining after `settle()`, and reopening the ledger then
+   * would have `suspendedMs` grow for the life of the object (#142).
+   */
+  hold(reason: string): void {
+    if (this.#state === 'ended') return
+    if (this.#suspendedFor.size === 0) this.#suspendedSince = this.#now()
+    this.#suspendedFor.add(reason)
+  }
+
+  /**
+   * Release `reason`'s hold. The interval closes only when the LAST reason is released; a
+   * reason that was never holding the run changes nothing.
+   */
+  releaseHold(reason: string): void {
+    if (!this.#suspendedFor.delete(reason)) return
+    if (this.#suspendedFor.size > 0) return
+    this.#closeInterval()
+  }
+
+  /** Close the open interval whatever is holding it. Every ending of the run calls this. */
   #resumeClock(): void {
+    this.#suspendedFor.clear()
+    this.#closeInterval()
+  }
+
+  #closeInterval(): void {
     if (this.#suspendedSince === undefined) return
     this.#suspendedMs += this.#now() - this.#suspendedSince
     this.#suspendedSince = undefined
@@ -958,8 +1011,9 @@ export class RunHandle {
     this.#pause = undefined
     this.#state = 'running'
     // Before the loop is let go, so no part of the interval that follows can be charged to the
-    // suspension. `abort` comes through here too and closes the ledger the same way.
-    this.#resumeClock()
+    // suspension. `abort` comes through here too and releases the hold the same way. Only the
+    // pause's own hold: a seat still at a permission prompt keeps the interval open (#315).
+    this.releaseHold(PAUSE_HOLD)
     decide(d)
   }
 
@@ -1024,7 +1078,7 @@ export class RunHandle {
     // it, and the two only have to agree in production. Nothing between this line and the
     // `await` the caller does can run for long, but the interval is opened first anyway: the
     // reading that matters is taken by whoever asks while the run is parked.
-    this.#suspendedSince = this.#now()
+    this.hold(PAUSE_HOLD)
     // A later pause for the same turn inherits an unexpired wait decision so the operator
     // is not asked again until their stated deadline. Different turns or expired waits do not.
     if (full.verdictOf) {

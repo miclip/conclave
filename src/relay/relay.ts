@@ -131,6 +131,7 @@ import {
   type TargetingWatch,
 } from './targeting.ts'
 import { isSubagentTool, worktreePaths } from './subagents.ts'
+import { permissionDetail } from './permissionDetail.ts'
 import { resolveDeadlines, type RunDeadlines } from './deadlines.ts'
 
 export type {
@@ -504,6 +505,20 @@ export interface RelayOptions {
    * declarations and may never widen them.
    */
   denied?: OperatorDenials | undefined
+  /**
+   * Seat ids whose agent is launched with `permissions: bypass` (#320).
+   *
+   * A bypassed child can still fire its `PermissionRequest` hook (#177), and the adapters emit
+   * that as `permission_requested` like any other -- the event says something reached the
+   * permission path, which is worth recording. What it is NOT is a prompt: nothing is waiting
+   * and nobody is asked. Without this the relay read every such event as a seat stopped at a
+   * dialog, so `status` reported the run blocked and, once #315 charged prompts to the
+   * suspension clock, the seat's working time was deducted from `--max-minutes` for the rest of
+   * its turn. The front end already knows which seats these are; it is told here rather than
+   * re-derived, so the console's `auto-allowed (bypass)` line and the relay's bookkeeping key
+   * off one fact. Absent stays byte-identical: spread in only when a seat is bypassed.
+   */
+  bypassed?: readonly string[] | undefined
   /** The advisor. Steers, and cannot see the implementer's tools. */
   lead: ParticipantSpec
   /**
@@ -653,7 +668,7 @@ export interface RelayOptions {
    * this seam the whole of #101 -- the measurement, its timestamp, and the re-measurement that
    * makes the timestamp move -- is unreachable from any test that does not spawn a real CLI.
    * The console already carries the identical seam for its `/continue` guard
-   * (`src/repl/session.ts:376`), and the two are deliberately the same shape.
+   * (`src/repl/session.ts:377`), and the two are deliberately the same shape.
    */
   liveness?: ((pid: number) => Promise<ChildLiveness>) | undefined
   /**
@@ -1858,6 +1873,14 @@ interface VerdictPause {
   withdrawn: boolean
 }
 
+/**
+ * The `RunHandle.hold` reason a seat's permission prompt holds the run under (#315). Per seat,
+ * because two seats can be at prompts at once and the hold must last until the LAST is answered.
+ */
+export function permissionHold(seat: string): string {
+  return `permission:${seat}`
+}
+
 export class Relay {
   readonly log: RelayMessage[] = []
   /**
@@ -2583,6 +2606,24 @@ export class Relay {
    * suspended at a pause. A suspended run dispatches nothing, sends nothing and spends no
    * quota; there is no runaway to bound, and the clock it was on was measuring the operator.
    *
+   * ## A permission prompt is the same situation (#315)
+   *
+   * A seat stopped at a permission prompt is blocked, dispatches nothing, and is waiting on the
+   * operator -- the #112 argument word for word, and it was not being applied: `RunHandle` opened
+   * a suspension for a pause and for nothing else, so a prompt was charged as if the seat were
+   * working. Under `--operator agent` this was the common case, not the edge: the operator is a
+   * process polling status, and a Codex advisor prompts for every shell command, so one slow
+   * answer -- 29 minutes, on the run that reported this -- burned most of a 45-minute ceiling
+   * before the first instruction was issued. The run then ended `budget` at the next turn
+   * boundary: the correct enforcement of the wrong number.
+   *
+   * So the handle now holds the clock for a prompt as well, from `permission_requested` until the
+   * prompt is answered here, the turn ends, or the session is rotated out from under it. The
+   * #112 caveat holds unchanged: a seat at a prompt spends nothing, so nothing becomes unbounded
+   * that was bounded before. Overlaps are charged once -- a prompt up across a pause, or a pause
+   * raised while a seat is prompting, is one interval on the ledger, opened by the first reason
+   * and closed by the last (`RunHandle#suspendedFor`).
+   *
    * ## What still stops a run that never makes progress
    *
    * This is the constraint the change had to hold, because trading a bounded failure for an
@@ -2597,10 +2638,13 @@ export class Relay {
    *   - The time such a run spends is active time -- the watchdog runs while the child runs --
    *     so `--max-minutes` still accrues through every one of those turns and still fires.
    *
-   * What is subtracted is only the interval where a human holds the run and nothing is running.
-   * A run parked at a pause forever is parked by a person, spends nothing, and would never have
-   * been ended by a ceiling anyway: an unattended run has no handle, and `#halt` with no handle
-   * ends the run rather than pausing it.
+   * What is subtracted is only the interval where a human holds the run and nothing is running:
+   * a pause, or a seat at a prompt. A run parked at a pause forever is parked by a person,
+   * spends nothing, and would never have been ended by a ceiling anyway: an unattended run has
+   * no handle, and `#halt` with no handle ends the run rather than pausing it. A seat parked at
+   * a prompt forever is the same, and is still bounded the way it always was -- the watchdog's
+   * absolute deadline runs while the child stands there, and a `timed_out` turn costs what it
+   * cost before.
    *
    * Zero for an unattended run, and zero before the window opens, so `run()` behaves exactly as
    * it did.
@@ -2844,8 +2888,47 @@ export class Relay {
   }
 
   #trackPermission(p: RelayParticipant, e: AgentEvent): void {
-    if (e.type === 'permission_requested') this.#awaitingPermission.set(p.id, { tool: e.tool })
-    else if (e.type === 'turn_end') this.#awaitingPermission.delete(p.id)
+    if (e.type === 'permission_requested') {
+      if (this.#opts.bypassed?.includes(p.id)) {
+        // Not a prompt: the child's harness answered it before anyone could be asked (#320).
+        // Noted so the record still says the permission path was reached, and nothing else --
+        // no pending request, no hold on the clock. The seat is working.
+        this.#record({
+          from: 'orchestrator',
+          fromRank: 'human',
+          to: [],
+          kind: 'note',
+          text: `${p.id} permission auto-allowed (bypass) for ${e.tool}${permissionDetail(e.input)}`,
+        })
+        return
+      }
+      this.#awaitingPermission.set(p.id, { tool: e.tool })
+      // The seat is blocked and a human (or an agent operator) is being waited on: the same
+      // situation as a pause, charged the same way (#315). See `pausedMs`.
+      this.#handle?.hold(permissionHold(p.id))
+      // Recorded, because the answer already was and the question was not. `status --json`
+      // showed `awaitingPermission.since` live, but once answered nothing in the record said
+      // the run had spent 29 of its 45 minutes at a prompt; a reader saw a run that ended
+      // `budget` after two advisor turns and could not tell why.
+      this.#record({
+        from: 'orchestrator',
+        fromRank: 'human',
+        to: [],
+        kind: 'note',
+        text: `${p.id} requested permission for ${e.tool}${permissionDetail(e.input)}`,
+      })
+    } else if (e.type === 'turn_end') {
+      this.#permissionOver(p.id)
+    }
+  }
+
+  /**
+   * The seat is no longer at its prompt -- answered here, ended with the turn, or retired with
+   * the session. Releases the hold only when a request was actually outstanding, so a `turn_end`
+   * on a seat that never prompted cannot touch the ledger.
+   */
+  #permissionOver(id: string): void {
+    if (this.#awaitingPermission.delete(id)) this.#handle?.releaseHold(permissionHold(id))
   }
 
   /** Participants stopped at a permission prompt right now, with the tool each named. */
@@ -2869,7 +2952,7 @@ export class Relay {
     const pending = this.#awaitingPermission.get(participantId)
     if (!pending) throw new Error(`${participantId} is not waiting on a permission decision`)
     await p.session.decidePermission(decision)
-    this.#awaitingPermission.delete(participantId)
+    this.#permissionOver(participantId)
     this.#record({
       from: 'orchestrator',
       fromRank: 'human',
@@ -5248,7 +5331,7 @@ export class Relay {
    * writing down because it points at a different mechanism: the loop is suspended at `await
    * deciding` above for the whole pause, so `#halt` cannot run again, and a watchdog `revision`
    * or replacement `turn_end` arriving meanwhile goes to `#trackSupersession`, which amends THE
-   * SAME `RunPause` in place (`src/relay/run.ts:1091`). There was one pause, read twice. The
+   * SAME `RunPause` in place (`src/relay/run.ts:1145`). There was one pause, read twice. The
    * evidence was not re-derived because nothing had re-derived it since it was captured -- which
    * is the same defect, reached by a shorter path than the report proposed.
    *
@@ -5367,7 +5450,7 @@ export class Relay {
       else if (!shouldWait && offered !== -1) pause.options.splice(offered, 1)
       // The status file is written from the LIVE pause object on any event, so an in-place
       // change reaches disk on the next one -- and a pause is precisely when nothing else is
-      // flowing. Same reasoning as `/wait` in the console (`src/repl/session.ts:2701`), and the
+      // flowing. Same reasoning as `/wait` in the console (`src/repl/session.ts:2688`), and the
       // reader who needs it most is the one polling from outside.
       this.#stream.emit({ type: 'liveness', pause })
       if (last) return stop()
@@ -9367,6 +9450,9 @@ export class Relay {
       // so the note on the far side of a rotation is not still counting its predecessor's.
       this.#incompleteAnswers.delete(impl.id)
       this.#suppressedIncompletes.delete(impl.id)
+      // And a prompt the retired session was standing at: it left with the session, and the
+      // hold it had on the run's clock must not outlive it (#315).
+      this.#permissionOver(impl.id)
       this.complaints.progressed(impl.id)
       // Counted HERE, where a replacement has been accepted -- not where one was proposed.
       //

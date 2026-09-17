@@ -25,6 +25,7 @@
  */
 
 import { describeSubagentWork } from '../relay/subagents.ts'
+import { permissionDetail } from '../relay/permissionDetail.ts'
 import { formatGoalFindings, lintGoal } from '../relay/goalLint.ts'
 import {
   type Ceilings,
@@ -598,23 +599,6 @@ export const HELP = `
   /exit                  leave, stopping the run and the participants (or Ctrl-C)
 `
 
-/**
- * What the request was FOR, when the tool's input says so plainly.
- *
- * The bare notice named the tool and nothing else, and #177 reports that as the one detail
- * that would most have narrowed it: `Bash` is every command a seat runs, so a line naming only
- * `Bash` cannot be matched to anything that happened. The shapes handled here are the ones the
- * adapters actually send; anything else adds nothing and is left off rather than guessed at.
- */
-function permissionDetail(input: unknown): string {
-  if (typeof input !== 'object' || input === null) return ''
-  const i = input as { command?: unknown; file_path?: unknown; path?: unknown }
-  const what = [i.command, i.file_path, i.path].find((v) => typeof v === 'string' && v.length > 0)
-  if (typeof what !== 'string') return ''
-  const one = what.replace(/\s+/g, ' ').trim()
-  return `: ${one.length > 60 ? `${one.slice(0, 59)}…` : one}`
-}
-
 /** One line per event. Verbose enough to see progress, quiet enough to read the prose. */
 function renderActivity(participant: string, e: AgentEvent, bypassed: boolean): string | undefined {
   switch (e.type) {
@@ -725,7 +709,7 @@ function renderPause(p: RunPause, width: number): string {
  *
  * This used to read `pause.verdictOf.participant` instead, and that field is narrower than it
  * looks: it is set at exactly two halt sites, both `turn_incomplete`
-  * (`src/relay/relay.ts:8118` and `src/relay/relay.ts:8838`). So FOUR of the five seat-scoped
+  * (`src/relay/relay.ts:8201` and `src/relay/relay.ts:8921`). So FOUR of the five seat-scoped
  * reasons -- `rotation_candidate`, `implementer_unanswered`, `merge_blocked`, `review_blocked`
  * -- named a seat in their scope and were sampled by rank anyway, because the field the guard
  * read was empty. The scope is the field that is always populated, which is the other half of
@@ -739,16 +723,16 @@ function renderPause(p: RunPause, width: number): string {
  * pause never mentioned. The rank fallback's own comment argued it was right "only because
  * there is one of them", which is an argument for deriving the seat from the pause instead of
  * from a rank. Worse than useless on one of them: resuming an `advisor_escalated` pause sends
-  * to the ADVISOR (`src/relay/relay.ts:8423`), so the fallback measured children that were not
+  * to the ADVISOR (`src/relay/relay.ts:8506`), so the fallback measured children that were not
  * about to be sent to at all.
  *
  * What that gives up, stated rather than discovered: the `advisor_escalated` halt raised when a
-  * seat's turn completed and its report could not be read (`src/relay/relay.ts:8756`) is
+  * seat's turn completed and its report could not be read (`src/relay/relay.ts:8839`) is
  * conclave-scoped by design -- "the reason names who is being asked to take it, and the scope
  * follows the reason" -- yet the thing an operator wants to know there is whether THAT seat's
  * child is still writing. Under the rank fallback that seat was sampled at N=1 by coincidence
  * of being the only implementer. It is not sampled now. The pause still carries its own
-  * liveness EVIDENCE from the halt site (`src/relay/relay.ts:8767`), which is what the operator
+  * liveness EVIDENCE from the halt site (`src/relay/relay.ts:8850`), which is what the operator
  * reads;
  * what is gone is a refusal derived from a rank scan. Narrowing that halt's scope, if the
  * refusal is wanted back, is a change to the halt site rather than to this guard.
@@ -1299,6 +1283,9 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     // file edited between two reads would deny the briefing one set and delivery another.
     // Spread in only when something is denied, so absence stays byte-identical.
     ...((d) => (d ? { denied: d } : {}))(denialsFrom(projectConfig)),
+    // The same set the activity line reads, so a request the console shows as auto-allowed is
+    // one the relay never counts as a prompt (#320). Spread in only when non-empty, like `denied`.
+    ...(bypassedSeats.size > 0 ? { bypassed: [...bypassedSeats] } : {}),
     // The object that was resolved above, so the seat validated and the seat launched cannot
     // be two different descriptions that merely agree today.
     lead: leadSpec,
@@ -2670,7 +2657,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
       // FALSIFIER, stated because it is the strongest argument against this shape: the
       // console has no general "trailing text is a message" rule and does not gain one here.
       // `/rotate <text>` and `/abort <text>` consume their text as a REASON
-      // (`src/repl/session.ts:2723`, `src/repl/session.ts:2756`) and `/pause`, `/queue`, `/audit` ignore
+      // (`src/repl/session.ts:2710`, `src/repl/session.ts:2743`) and `/pause`, `/queue`, `/audit` ignore
       // whatever follows them. So an operator who learns this from `/continue` and carries
       // it to `/pause I'll be back` still loses the sentence. That inconsistency is not
       // repaired by making `/continue` a third behaviour; it is narrowed by it, and the
