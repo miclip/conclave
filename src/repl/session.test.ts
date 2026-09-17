@@ -587,6 +587,64 @@ test('#177 a bypassed seat reports the permission as taken, not as one to answer
   assert.match(out.text(), /npm run verify/)
 })
 
+test('#320 the console tells the relay which seats are bypassed, and the record shows it', async (t) => {
+  // The line above proves the CONSOLE knows: its activity line keys off `bypassedSeats`. This
+  // one proves the RELAY was told, which is a separate fact carried by one spread in
+  // `runSession` -- and the console line cannot catch that spread going missing, because it
+  // prints `auto-allowed` from its own set either way. The relay's note in the routing log can:
+  // told, it records the request as auto-allowed and nothing else; not told, it records a
+  // prompt it thinks is waiting on somebody, holds the run's clock for it (#315), and reports
+  // the run blocked. So the record is what is asserted, and the console line only as a check
+  // that the seat did fire.
+  const dir = repo(t)
+  mkdirSync(join(dir, '.conclave'), { recursive: true })
+  writeFileSync(join(dir, '.conclave', 'config.json'), '{"permissions":"bypass"}')
+  const log = join(dir, 'bypassed.ndjson')
+
+  const impl = slow('impl', 'claude', ['ack'])
+  impl.onSend = () => {
+    impl.emit({
+      type: 'permission_requested',
+      tool: 'Bash',
+      input: { command: 'npm run verify' },
+      seq: 9002,
+      at: Date.now(),
+      provisional: false,
+    })
+  }
+
+  const out = collect()
+  const code = await runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'claude',
+    rounds: 2,
+    checks: [],
+    runLog: log,
+    registry: registryOf({ codex: [slow('advisor', 'codex', ['DONE'])], claude: [impl] }),
+    input: script([]),
+    output: out.stream,
+  })
+  assert.equal(code, 0)
+  assert.match(out.text(), /permission auto-allowed \(bypass\)/, 'the seat fired and the console saw it')
+
+  const notes = readFileSync(log, 'utf8')
+    .trim()
+    .split('\n')
+    .map((l) => JSON.parse(l) as { kind: string; text: string })
+    .filter((m) => m.kind === 'note' && m.text.includes('permission'))
+  // One per send the seat answered with the hook -- the fixture fires it on every prompt, and
+  // how many is the fixture's business. What matters is that every one of them is the bypass
+  // note and none is a request.
+  assert.ok(notes.length > 0, 'the relay recorded the permission path being reached')
+  assert.deepEqual(
+    [...new Set(notes.map((m) => m.text))],
+    ['implementer permission auto-allowed (bypass) for Bash: npm run verify'],
+    'the relay recorded the request as one nobody was asked, so it was told the seat is bypassed',
+  )
+})
+
 test('#6 /allow at the console reaches the participant', async (t) => {
   // `decidePermission` was covered at the relay and not at the console -- and both it and
   // `relay.ask` passed their tests and then failed in a real terminal. A console test is the
@@ -4537,7 +4595,7 @@ test('a participant-scoped pause samples that seat and no other, at every reason
   assert.deepEqual(sampled(pauseFor({ reason: 'rotation_candidate', participant: 'implementer-2' })), ['implementer-2'])
   assert.deepEqual(sampled(pauseFor({ reason: 'implementer_unanswered', participant: 'implementer-2' })), ['implementer-2'])
   // The ADVISOR is a participant like any other, and its own bad turn pauses the run
-  // (src/relay/relay.ts:8118). A rank scan for implementers sampled the wrong child here too.
+  // (src/relay/relay.ts:8201). A rank scan for implementers sampled the wrong child here too.
   assert.deepEqual(
     sampled(pauseFor({ reason: 'turn_incomplete', participant: 'advisor' }, { participant: 'advisor', endSeq: 2 })),
     ['advisor'],
@@ -4546,13 +4604,13 @@ test('a participant-scoped pause samples that seat and no other, at every reason
 
 test('a conclave- or workstream-scoped pause samples nobody, with no fall back to rank', () => {
   // Both conclave-scoped reasons. Resuming an `advisor_escalated` pause sends to the ADVISOR
-  // (src/relay/relay.ts:8423), so measuring implementer children was never the question; and
+  // (src/relay/relay.ts:8506), so measuring implementer children was never the question; and
   // `operator_requested` is consumed at an advisor-turn boundary that states no turn is in
   // flight. Neither has anything for this guard to sample.
   assert.deepEqual(sampled(pauseFor({ reason: 'advisor_escalated' })), [])
   assert.deepEqual(sampled(pauseFor({ reason: 'operator_requested' })), [])
   // Workstream scope, and the id deliberately COLLIDES with a seat id -- at N=1 the workstream
-  // is named after the seat carrying the instruction (src/relay/relay.ts:8590), which is exactly
+  // is named after the seat carrying the instruction (src/relay/relay.ts:8673), which is exactly
   // the coincidence a guard could read as "so sample that seat". A workstream is not a seat.
   assert.deepEqual(sampled(pauseFor({ reason: 'authority_conflict', workstream: 'implementer' })), [])
 })
@@ -4568,7 +4626,7 @@ test('a scope naming a seat that is gone samples nobody rather than falling back
 test('a rotation_candidate pause on one seat resumes while the OTHER seat is genuinely mid-turn', async (t) => {
   // The production shape of the N>1 case the rank scan got wrong, and the reason it has to be
   // this shape: `rotation_candidate` carries NO `verdictOf` -- that field is set at two halt
-  // sites, both turn_incomplete (src/relay/relay.ts:8122, src/relay/relay.ts:8842) -- so under
+  // sites, both turn_incomplete (src/relay/relay.ts:8205, src/relay/relay.ts:8925) -- so under
   // the old expression this pause fell through to the rank scan and sampled EVERY implementer.
   // A simpler `turn_incomplete` fixture cannot show that: it populates the field, takes the
   // named-seat branch, and passes against the code being replaced.
@@ -4620,7 +4678,7 @@ test('a rotation_candidate pause on one seat resumes while the OTHER seat is gen
     ],
     rounds: 6,
     // ARMS ROTATION, which is what makes degradation a pause instead of an ended run
-    // (src/relay/relay.ts:5726). A command that exits 0 immediately: what the checks DO is
+    // (src/relay/relay.ts:5809). A command that exits 0 immediately: what the checks DO is
     // not what this test is about, only that a replacement would have something to reproduce.
     checks: ['true'],
     registry: registryOf({
