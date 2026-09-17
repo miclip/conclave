@@ -405,6 +405,27 @@ const DEFAULT_COMMAND_TURN_OPEN_MS = 5_000
 const TURN_POLL_MS = 250
 
 /**
+ * How long `#observeTurnBoundary` will wait for one liveness reading before giving up on it.
+ *
+ * A ceiling and not a cadence. The real sampler is three `ps` snapshots 400ms apart, so it
+ * answers in under a second on every table it has been measured on. Past this the reading is
+ * dropped, nothing is recorded, and the exchange proceeds exactly as if the sample had not
+ * been asked for.
+ *
+ * What this ceiling CAN and CANNOT cut off, because the first version got it wrong. It is a
+ * `Promise.race` against a timer, and a timer needs the event loop; the real sampler's `ps`
+ * reads are `execFileSync`, which holds the loop, so a `ps` that hung would have hung this
+ * race with it and the ceiling would never have fired. The bound on a hung `ps` is therefore
+ * INSIDE the read -- `PS_TIMEOUT_MS`, on every call, with the one residual its docblock names
+ * -- and the sum of every read a reading can make is `SAMPLE_WORST_CASE_MS`, which this must
+ * exceed for the race to mean anything. It does (3.8s against 5s), and
+ * `turnBoundaryLiveness.test.ts` pins the inequality so the two cannot drift apart in
+ * separate files. What the race itself bounds is the rest: an injected sampler that never
+ * settles, and any async sampler a future adapter supplies.
+ */
+export const TURN_BOUNDARY_LIVENESS_MS = 5_000
+
+/**
  * The target was still mid-turn when the send precondition's bound expired, so nothing was
  * sent (#117).
  *
@@ -681,6 +702,28 @@ export interface RelayOptions {
   livenessRefreshMs?: number | undefined
   /** How many re-measurements at most. Default `LIVENESS_REFRESH_LIMIT`. */
   livenessRefreshLimit?: number | undefined
+  /**
+   * The turn-boundary reading's own seam (#322). Production samples the real child, as
+   * `liveness` does; the two are the same `sampleLiveness` on every run.
+   *
+   * A SEPARATE seam, deliberately, and not a fallback to `liveness`. That one is scripted by
+   * every pause and latch test as a SEQUENCE -- "raised on this reading, refreshed to that one,
+   * then gone" -- and a second reader drawing from the same script would shift every entry in
+   * it by however many turn boundaries preceded the pause, silently. One seam per consumer is
+   * the shape the console already uses for its `/continue` guard (`src/repl/session.ts:377`),
+   * and a test that scripts the pause's readings should not have to know how many turns ended
+   * before it.
+   */
+  turnBoundaryLiveness?: ((pid: number) => Promise<ChildLiveness>) | undefined
+  /**
+   * The ceiling on the turn-boundary reading (#322). Default `TURN_BOUNDARY_LIVENESS_MS`.
+   *
+   * Overridable for the one thing about it that needs proving: that a reading which never
+   * comes back does not hold the exchange. A test cannot wait five real seconds to see that,
+   * and the reading it waits on is the injected `turnBoundaryLiveness` above, which can be
+   * made to hang.
+   */
+  turnBoundaryLivenessMs?: number | undefined
   /**
    * The clock the DURATION CEILING is measured on, and nothing else. Defaults to `Date.now`.
    *
@@ -1531,7 +1574,11 @@ Another AI model — the advisor — is steering. It cannot see your tool calls 
 only what you write, so your prose is the entire report. Say what you did, what you found,
 and anything you are unsure about.
 
-It outranks you on process, but you are not required to agree with it. If an instruction
+Do not end a turn while work you started is still running. A turn that ends with "still
+running, I'll wait" is read as a finished report and spends a round on nothing; block on the
+work in the foreground and report its result in that same turn.
+
+The advisor outranks you on process, but you are not required to agree with it. If an instruction
 is wrong, say so plainly and say why, then proceed unless a human overrules. Silent
 compliance is worse than disagreement.
 
@@ -4646,6 +4693,13 @@ export class Relay {
       await Promise.race([new Promise((r) => setTimeout(r, TURN_POLL_MS)), closed.promise])
     }
 
+    // The turn has ended; before the transcript is read, the seat's process tree is measured
+    // from now (under a second as measured; `SAMPLE_WORST_CASE_MS` at worst), and where
+    // something under it is still working that is put on the record (#322). Recorded and not
+    // acted on -- see the method for why that is the most this reading can support -- and the
+    // report is routed as soon as the reading is in: it costs the routing that, the turn nothing.
+    await this.#observeTurnBoundary(p)
+
     // The transcript can lag the hook. `Stop` fires when the turn ends; the final assistant
     // message may not have been flushed yet, so reading the snapshot the instant `turn_end`
     // arrives can return a turn holding only its interstitial narration.
@@ -4954,6 +5008,109 @@ export class Relay {
    * Still coarse, and still never asserts intent. It claims the participant touched the
    * path, not that it meant to, and not that the aside is why.
    */
+  /**
+   * What the seat's process tree was doing as its turn ended (#322).
+   *
+   * The case: a seat whose harness lets it defer work past the turn -- a Claude Code background
+   * task -- started a twenty-minute suite, went idle to wait for the notification, and idling is
+   * `Stop`. Twice in a row the turn was graded `completed (proven)`, its "still running, I'll
+   * wait" was forwarded to the advisor as the report, and an advisor round was spent on it. The
+   * grade was RIGHT: `Stop` evidences that the turn reached a boundary, and it had. What nothing
+   * in the record said was that the seat's WORK had not, and the one fact that could have said
+   * so -- a `node --test` at 90% under the seat's pid -- was a `ps` away, as it was in #43.
+   *
+   * So this takes that reading, once, beginning at the boundary -- three snapshots over about
+   * a second, not an instant -- and writes it down when it is not zero.
+   *
+   * ## Why it records and does nothing else
+   *
+   * A working descendant at `Stop` is consistent with three things, and the process table
+   * cannot tell them apart:
+   *
+   *   - the deferred suite of #322, which the seat meant to wait for and did not
+   *   - a watcher or dev server the seat started ON PURPOSE and correctly left running -- a
+   *     `tsc --watch`, a `vite` serving the app it is about to screenshot -- which is work that
+   *     is SUPPOSED to outlive the turn, and which a re-prompt would tell the seat to wait for
+   *     forever
+   *   - the seat's own `Stop` hook. It is `node <client.ts>`, a descendant of the seat, alive
+   *     at the instant the event it delivered arrives here, and a node process milliseconds old
+   *     reads startup-hot: measured on the machine this was written on, a fresh `node -e` shows
+   *     4.2% in its first sample and `workingDescendants` is the max over three. So this note
+   *     WILL fire on a share of ordinary turns, and every one of those is a true statement about
+   *     a process that was computing
+   *
+   * Holding the turn open on that reading would hold the second case indefinitely; re-prompting
+   * on it would send "wait for your dev server" to a seat that did the right thing;
+   * reclassifying would put a `ps` sample above a hook the design ranks as proof. Recording is
+   * the one action that is correct for all three: the deferred case gets the evidence the
+   * operator had to go and gather by hand, the other two get a sentence the reader can dismiss,
+   * and nothing that was true before -- the grade, the report, the round -- is changed. The
+   * note says all this in its own words, so a reader meeting it in the log is not left to
+   * guess what it wants.
+   *
+   * What it deliberately does not do: read the report. "Still running, I'll wait" in the prose
+   * is a stronger signal than any %cpu, and a later change may pair the two; parsing prose for
+   * intent is its own design question and not this one.
+   *
+   * ## Bounded, and best effort
+   *
+   * The reading does delay the report's routing: by the sampling time, under a second on any
+   * table measured so far, and by `SAMPLE_WORST_CASE_MS` at the outside, because every `ps` in
+   * it carries `PS_TIMEOUT_MS`. Above that sits `turnBoundaryLivenessMs`, raced against the
+   * whole reading -- see `TURN_BOUNDARY_LIVENESS_MS` for what that race can and cannot bound.
+   * What it never does is hold the TURN: the turn ended before this began, its verdict is
+   * already on the record, and its report is read the moment this returns. Past the ceiling,
+   * and on any sampling error, nothing is recorded and the exchange continues as before --
+   * silence here means "could not measure", which is the same thing it means at the
+   * `/continue` guard above. A seat with no `childPid` is the same silence.
+   */
+  async #observeTurnBoundary(p: RelayParticipant): Promise<void> {
+    const pid = p.session.childPid
+    if (pid === undefined) return
+    const ceilingMs = this.#opts.turnBoundaryLivenessMs ?? TURN_BOUNDARY_LIVENESS_MS
+    let sample: ChildLiveness | undefined
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      // `undefined` from the timer, a reading from the sampler; whichever is first wins and the
+      // other is dropped. The timer is cleared either way so a fast reading does not leave a
+      // five-second handle behind on every turn.
+      sample = await Promise.race([
+        (this.#opts.turnBoundaryLiveness ?? sampleLiveness)(pid),
+        new Promise<undefined>((r) => {
+          timer = setTimeout(() => r(undefined), ceilingMs)
+        }),
+      ])
+    } catch {
+      // Not measured. Not a fault of the turn, which has ended; see the docblock.
+      return
+    } finally {
+      if (timer !== undefined) clearTimeout(timer)
+    }
+    // The threshold is `workingDescendants`, the per-process count `IDLE_CPU_PERCENT` was
+    // calibrated for, and not the aggregate: ten idle helpers sum past the line on count alone
+    // (see `activitySamples`). The seat's OWN cpu is not the question either -- a seat still
+    // computing itself has not ended its turn, and if it has, that is the transcript's problem.
+    // No `alive` check: a gone pid has no snapshots and so no descendants counted, and a guard
+    // that cannot be reached is a guard no test can be shown to protect.
+    if (sample === undefined || sample.workingDescendants < 1) return
+    const percents = (xs: number[]): string => xs.map((c) => `${c.toFixed(1)}%`).join(', ')
+    this.#record({
+      from: 'orchestrator',
+      fromRank: 'human',
+      to: [],
+      kind: 'note',
+      text:
+        `${p.id}'s turn ended with ${sample.workingDescendants} of ${sample.descendants} process(es) ` +
+        `under its child (pid ${pid}) still working: the child itself read ${percents(sample.selfSamples)}, ` +
+        `the whole tree ${percents(sample.samples)}, the busiest descendant ` +
+        `${percents(sample.busiestDescendant)}, measured ${new Date(sample.measuredAt).toISOString()}. ` +
+        `This may be work the seat started and deferred past its turn, or something legitimately ` +
+        `still running -- a watcher, a dev server, the hook that reported this turn -- and the ` +
+        `process table cannot say which. The observation did not hold the turn open, and did not ` +
+        `alter, re-prompt, or reclassify it; the turn stands as it was graded (#322).`,
+    })
+  }
+
   /**
    * The evidence line that says whether a quiet child is working or idle.
    *

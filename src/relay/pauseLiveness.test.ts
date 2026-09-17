@@ -73,6 +73,23 @@ const QUIET: ChildLiveness = {
   measuredAt: 0,
 }
 
+/**
+ * What the turn-boundary reading (#322) is told at every turn end here. Its own seam, so the
+ * `liveness` scripts above stay the pause's alone; "gone" records nothing and keeps the fake
+ * pid away from a real `ps`.
+ */
+const GONE: ChildLiveness = {
+  pid: CHILD_PID,
+  alive: false,
+  samples: [],
+  selfSamples: [],
+  busiestDescendant: [],
+  descendants: 0,
+  workingDescendants: 0,
+  idle: false,
+  measuredAt: 0,
+}
+
 function repo(t: TestContext): string {
   const dir = tempDir(t, 'conclave-pause-liveness')
   execFileSync('git', ['init', '-q'], { cwd: dir })
@@ -129,6 +146,7 @@ async function relayOf(
     lead: { id: 'advisor', agent: 'codex', role: 'advisor' },
     implementer: { id: 'implementer', agent: 'claude', role: 'implementer' },
     maxAdvisorTurns: 4,
+    turnBoundaryLiveness: async () => ({ ...GONE, measuredAt: Date.now() }),
     ...over,
   })
 }

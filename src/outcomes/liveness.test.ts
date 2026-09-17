@@ -5,10 +5,15 @@
  */
 
 import { strict as assert } from 'node:assert'
-import { spawn } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
+import { chmodSync, readFileSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import test from 'node:test'
+import { tempDir } from '../testkit/tempDir.ts'
 import {
   IDLE_CPU_PERCENT,
+  PS_TIMEOUT_MS,
+  SAMPLE_WORST_CASE_MS,
   activitySamples,
   describeLiveness,
   parseProcessTable,
@@ -488,4 +493,74 @@ test('one busy descendant is still working, which is the case the count-based ru
   })
   assert.equal(readingOf(intermittent), 'mixed')
   assert.match(describeLiveness(intermittent, 2), /2 below 3% and 1 at or above/)
+})
+
+test('a `ps` that hangs is killed at its timeout, and a whole reading stays under its worst case', (t) => {
+  // In its own process, on purpose. The reads are `execFileSync`, which holds the event loop of
+  // whatever process makes them; a hang in THIS process would hang the test runner rather than
+  // fail a test, and the bound under test is exactly the one that decides which of those
+  // happens. The child does the reading with a fake `ps` first on PATH that ignores SIGTERM and
+  // outlives every bound here -- so the only way it returns in time is `SIGKILL` at
+  // `PS_TIMEOUT_MS` -- and prints what it measured; this process holds a hard timeout on the
+  // child and reads the numbers back.
+  const dir = tempDir(t, 'conclave-hung-ps')
+  const bin = join(dir, 'bin')
+  execFileSync('mkdir', ['-p', bin])
+  // ONE process, owning no child. The first fixture was `sh` running `sleep 60`: `SIGKILL` took
+  // the shell and left the sleep orphaned on init with the ignored-TERM disposition it had
+  // inherited across exec, so every run of this test left four `sleep 60` behind (the advisor
+  // caught one live). So the fake is a node script that ignores SIGTERM itself and spawns
+  // nothing, reached through `exec` so the wrapper shell is replaced rather than parenting it,
+  // and it records its pid so the assertion at the end can say every one of them is gone.
+  const pids = join(dir, 'pids')
+  const fake = join(dir, 'fake-ps.cjs')
+  writeFileSync(
+    fake,
+    `process.on('SIGTERM', () => {})\n` +
+      `require('node:fs').appendFileSync(${JSON.stringify(pids)}, process.pid + '\\n')\n` +
+      // Exits on its own after this, ignoring only TERM. Longer than the parent's 15s bound
+      // below, so a build with the kill mutated out still fails rather than squeaks through;
+      // short, so what such a build leaves behind is gone in half a minute.
+      `setTimeout(() => {}, 30_000)\n`,
+  )
+  writeFileSync(join(bin, 'ps'), `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(fake)}\n`)
+  chmodSync(join(bin, 'ps'), 0o755)
+  const script = join(dir, 'read.ts')
+  writeFileSync(
+    script,
+    `import { sampleLiveness } from '${new URL('./liveness.ts', import.meta.url).href}'\n` +
+      `const began = Date.now()\n` +
+      `const l = await sampleLiveness(process.pid, { samples: 2, everyMs: 50 })\n` +
+      `console.log(JSON.stringify({ elapsed: Date.now() - began, alive: l.alive, samples: l.samples }))\n`,
+  )
+  const out = execFileSync(process.execPath, [script], {
+    encoding: 'utf8',
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ''}` },
+    // Well above the reading's worst case and well below forever: with the per-read timeout
+    // gone the child never returns, and this is what turns that into a failure.
+    timeout: 15_000,
+  })
+  const r = JSON.parse(out.trim()) as { elapsed: number; alive: boolean; samples: number[] }
+  // Two snapshots, each making both reads (the table, then the self-only fallback when it
+  // failed), each killed at the timeout: the floor is what proves the reads were attempted and
+  // cut off, rather than skipped.
+  const floor = 2 * (2 * PS_TIMEOUT_MS)
+  assert.ok(r.elapsed >= floor - 100, `the reads must have run to their timeouts; ${r.elapsed}ms < ${floor}ms`)
+  // And the ceiling on the whole: the same arithmetic as `SAMPLE_WORST_CASE_MS`, for this
+  // sample count and gap, plus process slack. The default-shape constant is checked against
+  // the relay's ceiling in `src/relay/turnBoundaryLiveness.test.ts`.
+  const worst = 2 * (2 * PS_TIMEOUT_MS) + 1 * 50
+  assert.ok(r.elapsed < worst + 1_500, `a reading took ${r.elapsed}ms against a ${worst}ms worst case`)
+  assert.ok(worst <= SAMPLE_WORST_CASE_MS, 'the smaller shape is inside the published worst case')
+  // No reading is the honest outcome of no `ps`: nothing was measured, so nothing is claimed.
+  assert.equal(r.alive, false)
+  assert.deepEqual(r.samples, [])
+  // Every fake `ps` that ran is dead. Four of them -- both reads, both snapshots -- and each
+  // was killed rather than left; `kill(pid, 0)` throws ESRCH for a pid that is gone, and a
+  // fixture that leaked would fail here rather than on the next `pgrep` somebody runs by hand.
+  const ran = readFileSync(pids, 'utf8').trim().split('\n').map(Number)
+  assert.equal(ran.length, 4, `four reads, four fake ps processes; saw ${ran.length}`)
+  for (const pid of ran) {
+    assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' }, `fake ps ${pid} is still running`)
+  }
 })

@@ -435,6 +435,43 @@ export function treeSnapshotOf(rows: ProcessRow[], pid: number): TreeSnapshot | 
 }
 
 /**
+ * How long one `ps` is allowed to take before it is killed and read as "no snapshot".
+ *
+ * The reads below are SYNCHRONOUS -- `execFileSync`, which blocks the event loop -- so nothing
+ * outside them can bound them. A `Promise.race` around `sampleLiveness` cannot fire its timer
+ * while the loop is held (#322 found this the hard way: a ceiling on the relay's turn-boundary
+ * read that could not, in fact, cut off a hung `ps`). The only bound that reaches a sync read
+ * is the one inside it, so each `ps` carries its own, and the arithmetic of a whole reading is
+ * `SAMPLE_WORST_CASE_MS` below.
+ *
+ * Twenty-five times the slowest measurement on record (~0.03s for a 506-process table, in the
+ * #111 report) and still under half a second, so an ordinary table never meets it and a hung
+ * one costs a bounded pause of the loop rather than an unbounded one.
+ *
+ * `SIGKILL`, not the default `SIGTERM`, and what that does and does not buy. It cannot be
+ * caught, blocked or ignored, so a `ps` that is slow, wedged in userspace, or under a wrapper
+ * that swallows TERM is gone at the timeout -- that much is a guarantee. What it is NOT is a
+ * bound on a process in uninterruptible kernel sleep: a `D`-state `ps` takes the signal when
+ * the kernel returns it to userspace and not before, `execFileSync` waits on it until then, and
+ * no signal from here can shorten that. That case is left as the residual it is, named rather
+ * than claimed away; on the platforms this runs on `ps` reads procfs or the kernel's process
+ * list, and a hang there is a machine that is failing in ways a liveness reading will not be
+ * the first to notice.
+ */
+export const PS_TIMEOUT_MS = 500
+
+/**
+ * The longest one `sampleLiveness(pid)` can take with its defaults, in milliseconds.
+ *
+ * Three snapshots, each of which may make BOTH reads -- the table, then the self-only fallback
+ * when the table read failed -- at `PS_TIMEOUT_MS` apiece, plus the two gaps between them. A
+ * caller that puts a ceiling around a whole reading (the relay's turn-boundary read) must set
+ * it above this, and `src/relay/turnBoundaryLiveness.test.ts` pins that it does; a ceiling
+ * below this number is one that can never be the thing that fires.
+ */
+export const SAMPLE_WORST_CASE_MS = 3 * (2 * PS_TIMEOUT_MS) + 2 * 400
+
+/**
  * One snapshot of the whole process table, or undefined if `ps` would not give us one.
  *
  * The whole table rather than a filtered one: descendants are not knowable from a pid list you
@@ -450,6 +487,8 @@ function processTable(): ProcessRow[] | undefined {
       // row means this covers a few hundred thousand processes; the default 1MB covers ~50k.
       maxBuffer: 8 * 1024 * 1024,
       env: { ...process.env, LC_ALL: 'C' },
+      timeout: PS_TIMEOUT_MS,
+      killSignal: 'SIGKILL',
     })
     const rows = parseProcessTable(out)
     return rows.length > 0 ? rows : undefined
@@ -472,6 +511,10 @@ function selfOnlySnapshot(pid: number): TreeSnapshot | undefined {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
       env: { ...process.env, LC_ALL: 'C' },
+      // Bounded like the table read, and for the same reason: this is the read that runs when
+      // that one failed, and a hang there is the likeliest reason it did.
+      timeout: PS_TIMEOUT_MS,
+      killSignal: 'SIGKILL',
     }).trim()
     if (!out) return undefined
     const n = Number(out.split('\n')[0]?.trim())
