@@ -39,13 +39,25 @@ function record(dir: string, id: string, goal: string): SessionRecorder {
   })
 }
 
-function run(args: string[], cwd: string, reply?: string): { code: number; out: string } {
+/**
+ * THE TWO STREAMS STAY APART (#317). These spawn `node <cli>` directly -- the developer
+ * spelling, which #313 deliberately left warning -- and Node emits an `ExperimentalWarning`
+ * about type stripping on stderr on some supported versions and not others. Concatenating the
+ * streams put that warning in front of the JSON these tests parse, so four of them failed on
+ * Node 24.0.2 and passed on 24.13: a version-dependent break in tests that are about neither
+ * version nor stderr.
+ *
+ * `out` is stdout and answers "what did the command print"; `err` is stderr and is asserted
+ * only where a test means it -- the broker announces its start there, deliberately. `said` is
+ * both, for the assertions that do not care which stream carried the sentence.
+ */
+function run(args: string[], cwd: string, reply?: string): { code: number; out: string; err: string; said: string } {
   const r = spawnSync('node', [CLI, 'notify', ...args], {
     cwd,
     encoding: 'utf8',
     env: { ...process.env, ...(reply === undefined ? {} : { [FAKE_REPLY_ENV]: reply }) },
   })
-  return { code: r.status ?? -1, out: `${r.stdout}${r.stderr}` }
+  return { code: r.status ?? -1, out: r.stdout, err: r.stderr, said: `${r.stdout}${r.stderr}` }
 }
 
 test('#184 a name that is not a transport says what the names are', (t) => {
@@ -53,8 +65,8 @@ test('#184 a name that is not a transport says what the names are', (t) => {
   // an adapter nobody has written yet.
   const r = run(['tell', 'x', '--transport', 'glasses'], repo(t))
   assert.equal(r.code, 2)
-  assert.match(r.out, /no transport named glasses/)
-  for (const n of transportNames()) assert.ok(r.out.includes(n), `it must list ${n}`)
+  assert.match(r.said, /no transport named glasses/)
+  for (const n of transportNames()) assert.ok(r.said.includes(n), `it must list ${n}`)
 })
 
 test('#184 a tap comes back as an option, and speech comes back as text', (t) => {
@@ -87,7 +99,7 @@ test('#184 a question that carried no answer exits non-zero', (t) => {
   // away, so success would be a lie an unattended caller acts on.
   const r = run(['ask', 'Merge?', '--options', 'yes:Merge'], repo(t))
   assert.equal(r.code, 1)
-  assert.match(r.out, /carried no answer/)
+  assert.match(r.said, /carried no answer/)
 })
 
 test('#184 a tell never waits, says nothing, and is not recorded as unanswered', (t) => {
@@ -99,8 +111,8 @@ test('#184 a tell never waits, says nothing, and is not recorded as unanswered',
   assert.equal(told.out.trim(), '', 'a delivered notification says nothing')
 
   const log = run(['log'], dir)
-  assert.match(log.out, /delivered/, 'and the log calls it delivered')
-  assert.doesNotMatch(log.out, /unanswered/, 'nothing asked it anything, so it is not unanswered')
+  assert.match(log.said, /delivered/, 'and the log calls it delivered')
+  assert.doesNotMatch(log.said, /unanswered/, 'nothing asked it anything, so it is not unanswered')
 })
 
 test('#184 the log distinguishes answered, unanswered and undelivered', (t) => {
@@ -118,7 +130,7 @@ test('#184 a malformed scripted reply produces no answer rather than an invented
   // An answer nobody gave is the one output this must never produce.
   const r = run(['ask', 'Merge?', '--options', 'y:Yes'], repo(t), 'not json at all')
   assert.equal(r.code, 1)
-  assert.match(r.out, /carried no answer/)
+  assert.match(r.said, /carried no answer/)
 })
 
 test('#184 the fake transport is resolvable by name, and is the reference adapter', () => {
@@ -246,9 +258,10 @@ test('#278 even-realities without a run is refused with exit 2, and other transp
   // app could open that `conclave sessions` could not find would be an id nobody can act on.
   const dir = repo(t)
   const env = { CONCLAVE_EVEN_PORT: '0', CONCLAVE_EVEN_TOKEN: 'tok', CONCLAVE_EVEN_QUIET: '1' }
-  const refused = (args: string[]): { code: number; out: string } => {
+  const refused = (args: string[]): { code: number; out: string; err: string; said: string } => {
     const r = spawnSync('node', [CLI, 'notify', ...args], { cwd: dir, encoding: 'utf8', env: { ...process.env, ...env } })
-    return { code: r.status ?? -1, out: `${r.stdout}${r.stderr}` }
+    // Separate streams, for the reason the top-level `run` gives (#317).
+    return { code: r.status ?? -1, out: r.stdout, err: r.stderr, said: `${r.stdout}${r.stderr}` }
   }
   for (const args of [
     ['tell', 'hi', '--transport', 'even-realities'],
@@ -258,13 +271,13 @@ test('#278 even-realities without a run is refused with exit 2, and other transp
   ]) {
     const r = refused(args)
     assert.equal(r.code, 2, `${args.join(' ')}: exit 2`)
-    assert.match(r.out, /even-realities needs the run it speaks for: pass --run <id>/, args.join(' '))
-    assert.doesNotMatch(r.out, /no transport named/, 'a transport that exists is not reported as missing')
+    assert.match(r.said, /even-realities needs the run it speaks for: pass --run <id>/, args.join(' '))
+    assert.doesNotMatch(r.said, /no transport named/, 'a transport that exists is not reported as missing')
   }
   // A run this project has no record of is refused too, in words that say where to look.
   const unknown = refused(['tell', 'hi', '--transport', 'even-realities', '--run', 'nope'])
   assert.equal(unknown.code, 2)
-  assert.match(unknown.out, /no readable record for run nope in this project — see conclave sessions/)
+  assert.match(unknown.said, /no readable record for run nope in this project — see conclave sessions/)
   // The same commands on `fake` need no run and are unchanged.
   assert.equal(refused(['tell', 'hi', '--transport', 'fake']).code, 0)
   assert.equal(refused(['vetoes', '--transport', 'fake']).code, 0)
