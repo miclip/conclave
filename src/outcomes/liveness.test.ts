@@ -48,9 +48,9 @@ test('a process doing nothing reads as idle, and a busy one does not', async () 
       sampleLiveness(idle.pid!, { samples: 3, everyMs: 250 }),
       sampleLiveness(busy.pid!, { samples: 3, everyMs: 250 }),
     ])
-    assert.equal(i.alive, true)
+    assert.equal(i.presence, 'present')
     assert.equal(i.idle, true, `a sleeping process must read idle; saw ${i.samples}`)
-    assert.equal(b.alive, true)
+    assert.equal(b.presence, 'present')
     assert.equal(b.idle, false, `a spinning process must not read idle; saw ${b.samples}`)
   } finally {
     idle.kill('SIGKILL')
@@ -66,7 +66,7 @@ test('a process that is gone is reported as gone, not as idle', async () => {
   p.kill('SIGKILL')
   await new Promise((r) => setTimeout(r, 300))
   const l = await sampleLiveness(pid, { samples: 2, everyMs: 50 })
-  assert.equal(l.alive, false)
+  assert.equal(l.presence, 'gone')
   assert.equal(l.idle, false, 'a dead process is not idle')
   assert.match(describeLiveness(l, 0), /is gone/)
 })
@@ -98,7 +98,7 @@ test('the evidence line says what was measured, never what it means', async () =
 const reading = (samples: number[], over: Partial<ChildLiveness> = {}): ChildLiveness => {
   const base: ChildLiveness = {
     pid: 18255,
-    alive: true,
+    presence: 'present',
     samples,
     selfSamples: samples,
     busiestDescendant: [],
@@ -113,11 +113,11 @@ const reading = (samples: number[], over: Partial<ChildLiveness> = {}): ChildLiv
   // place these tests exist to catch a disagreement.
   return over.idle !== undefined
     ? base
-    : { ...base, idle: base.alive && activitySamples(base).every((c) => c < IDLE_CPU_PERCENT) }
+    : { ...base, idle: base.presence === 'present' && activitySamples(base).every((c) => c < IDLE_CPU_PERCENT) }
 }
 
 /** A child that is not there. Every field a gone reading has, in one place. */
-const GONE: ChildLiveness = reading([], { pid: 1, alive: false })
+const GONE: ChildLiveness = reading([], { pid: 1, presence: 'gone' })
 
 test('the conservative idle rule is unchanged: one sample above the line is not idle', () => {
   // The asymmetry #83 explicitly keeps. A process between bursts of real work must not be
@@ -291,7 +291,7 @@ test('a quiet parent with a working descendant is reported as working, not as id
     // Aged before measuring, for the reason the first test in this file explains at length.
     await new Promise((r) => setTimeout(r, 1_500))
     const l = await sampleLiveness(pid, { samples: 3, everyMs: 250 })
-    assert.equal(l.alive, true)
+    assert.equal(l.presence, 'present')
     assert.ok(
       l.selfSamples.every((c) => c < 3),
       `the parent itself must read quiet, which is the premise of the bug; saw ${l.selfSamples}`,
@@ -495,7 +495,7 @@ test('one busy descendant is still working, which is the case the count-based ru
   assert.match(describeLiveness(intermittent, 2), /2 below 3% and 1 at or above/)
 })
 
-test('a `ps` that hangs is killed at its timeout, and a whole reading stays under its worst case', (t) => {
+test('a `ps` that hangs is killed at its timeout, and a whole reading stays under its worst case', async (t) => {
   // In its own process, on purpose. The reads are `execFileSync`, which holds the event loop of
   // whatever process makes them; a hang in THIS process would hang the test runner rather than
   // fail a test, and the bound under test is exactly the one that decides which of those
@@ -531,7 +531,7 @@ test('a `ps` that hangs is killed at its timeout, and a whole reading stays unde
     `import { sampleLiveness } from '${new URL('./liveness.ts', import.meta.url).href}'\n` +
       `const began = Date.now()\n` +
       `const l = await sampleLiveness(process.pid, { samples: 2, everyMs: 50 })\n` +
-      `console.log(JSON.stringify({ elapsed: Date.now() - began, alive: l.alive, samples: l.samples }))\n`,
+      `console.log(JSON.stringify({ elapsed: Date.now() - began, reading: l }))\n`,
   )
   const out = execFileSync(process.execPath, [script], {
     encoding: 'utf8',
@@ -540,7 +540,7 @@ test('a `ps` that hangs is killed at its timeout, and a whole reading stays unde
     // gone the child never returns, and this is what turns that into a failure.
     timeout: 15_000,
   })
-  const r = JSON.parse(out.trim()) as { elapsed: number; alive: boolean; samples: number[] }
+  const r = JSON.parse(out.trim()) as { elapsed: number; reading: ChildLiveness }
   // Two snapshots, each making both reads (the table, then the self-only fallback when it
   // failed), each killed at the timeout: the floor is what proves the reads were attempted and
   // cut off, rather than skipped.
@@ -552,9 +552,42 @@ test('a `ps` that hangs is killed at its timeout, and a whole reading stays unde
   const worst = 2 * (2 * PS_TIMEOUT_MS) + 1 * 50
   assert.ok(r.elapsed < worst + 1_500, `a reading took ${r.elapsed}ms against a ${worst}ms worst case`)
   assert.ok(worst <= SAMPLE_WORST_CASE_MS, 'the smaller shape is inside the published worst case')
-  // No reading is the honest outcome of no `ps`: nothing was measured, so nothing is claimed.
-  assert.equal(r.alive, false)
-  assert.deepEqual(r.samples, [])
+  // No reading is the honest outcome of no `ps`: nothing was measured, so nothing is claimed --
+  // and in particular the child is NOT called gone (#323). The pid under measurement was the
+  // reading process itself, which was demonstrably running; "gone" would have been a confident
+  // claim about a live child on the strength of a `ps` that never answered.
+  const unmeasured = r.reading
+  assert.equal(unmeasured.presence, 'unmeasured')
+  assert.deepEqual(unmeasured.samples, [])
+  assert.equal(unmeasured.idle, false, 'nothing was measured, so nothing is idle')
+  assert.equal(readingOf(unmeasured), 'unmeasured')
+  const unmeasuredLine = describeLiveness(unmeasured, 0)
+  assert.match(unmeasuredLine, /could not be measured; the process table could not be read/)
+  assert.doesNotMatch(unmeasuredLine, /is gone/)
+  assert.doesNotMatch(unmeasuredLine, /exited without a terminal signal/)
+  assert.equal(reportsChildOnCpu(unmeasuredLine), false, 'no CPU was seen, so none is reported')
+  // Against a pid that really is gone, read with the real `ps` in THIS process: the same shape
+  // of record -- no samples, not idle -- and every observable that distinguishes the two says
+  // so. This is the pair the boolean collapsed, and it is asserted as a pair so that collapsing
+  // it again fails here rather than in a pause.
+  const dead = spawn('sleep', ['30'], { stdio: 'ignore' })
+  const deadPid = dead.pid!
+  dead.kill('SIGKILL')
+  await new Promise((r) => setTimeout(r, 300))
+  const gone = await sampleLiveness(deadPid, { samples: 2, everyMs: 50 })
+  assert.equal(gone.presence, 'gone')
+  assert.deepEqual(gone.samples, [])
+  assert.equal(readingOf(gone), 'gone')
+  const goneLine = describeLiveness(gone, 0)
+  assert.match(goneLine, /is gone; the CLI exited without a terminal signal/)
+  assert.doesNotMatch(goneLine, /could not be measured/)
+  assert.notEqual(unmeasured.presence, gone.presence, 'the fact itself must differ')
+  assert.notEqual(readingOf(unmeasured), readingOf(gone), 'and the reading built from it')
+  assert.notEqual(
+    unmeasuredLine.replace(/child pid \d+/, 'child pid N'),
+    goneLine.replace(/child pid \d+/, 'child pid N'),
+    'and the sentence the operator reads, beyond the pid in it',
+  )
   // Every fake `ps` that ran is dead. Four of them -- both reads, both snapshots -- and each
   // was killed rather than left; `kill(pid, 0)` throws ESRCH for a pid that is gone, and a
   // fixture that leaked would fail here rather than on the next `pgrep` somebody runs by hand.

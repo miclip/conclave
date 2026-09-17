@@ -5090,8 +5090,9 @@ export class Relay {
     // calibrated for, and not the aggregate: ten idle helpers sum past the line on count alone
     // (see `activitySamples`). The seat's OWN cpu is not the question either -- a seat still
     // computing itself has not ended its turn, and if it has, that is the transcript's problem.
-    // No `alive` check: a gone pid has no snapshots and so no descendants counted, and a guard
-    // that cannot be reached is a guard no test can be shown to protect.
+    // No presence check: a pid that is gone, or that no `ps` could read (#323), has no snapshots
+    // and so no descendants counted, and a guard that cannot be reached is a guard no test can
+    // be shown to protect. `src/relay/turnBoundaryLiveness.test.ts` pins that both stay silent.
     if (sample === undefined || sample.workingDescendants < 1) return
     const percents = (xs: number[]): string => xs.map((c) => `${c.toFixed(1)}%`).join(', ')
     this.#record({
@@ -5320,7 +5321,10 @@ export class Relay {
       // being asked about LESS rather than more.
       //
       // An unmeasurable child lands here too, and belongs here: "the character has not changed"
-      // is a claim, and a run that cannot take a reading cannot make it.
+      // is a claim, and a run that cannot take a reading cannot make it. That is both shapes of
+      // unmeasurable -- a sampler that threw (`measured` undefined) and a reading whose every
+      // `ps` failed (`reading === 'unmeasured'`, #323), which reaches the match above and never
+      // matches, because nothing arms on it.
       this.#forgetIncompleteAnswer(p.latch)
     }
     this.#record({ from: 'orchestrator', fromRank: 'human', to: [], kind: 'note', text: `paused (${reason}): ${p.detail}` })
@@ -5577,7 +5581,10 @@ export class Relay {
       const measured = replaced ? undefined : await this.#measureLiveness(participant, emittedBefore, state)
       if (over()) return stop()
       // A sampling failure keeps the previous READING rather than blanking it: a pause a human
-      // is deciding at is not improved by losing the line it was deciding on. The line is still
+      // is deciding at is not improved by losing the line it was deciding on. A failure is the
+      // sampler THROWING. A reading whose every `ps` failed is not one -- it comes back as
+      // `unmeasured` (#323), a measurement in its own right that replaces the line, dated to
+      // when it was taken, and takes any `wait` the old line justified with it (below). The line is still
       // rewritten, from that same unchanged sample, so its refresh state stays true -- the first
       // version only rewrote on success, which meant a `ps` that failed every time walked to the
       // bound with `final` set in the JSON and a line still promising updates. That is #101 with
@@ -6294,8 +6301,10 @@ export class Relay {
    * the readings that offer `wait`, and the ones where "the child is fine, carry on" is an answer
    * that stays true while nothing changes. `not_computing` and `gone` are not: they are the
    * readings a pause exists for, and an operator who saw one and continued has not agreed to be
-   * told nothing next time. Those, and a seat with no measurable child, leave the seat with no
-   * remembered answer -- which is where the observation above has already put it.
+   * told nothing next time. Nor is `unmeasured` (#323): an answer given about a child nothing
+   * could see is not an answer about the child. Those, and a seat with no measurable child,
+   * leave the seat with no remembered answer -- which is where the observation above has
+   * already put it.
    *
    * Remembers and never forgets, deliberately: forgetting belongs to the observation, and an
    * invariant with two owners is one a later edit can leave half-applied.

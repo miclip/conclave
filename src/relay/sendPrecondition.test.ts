@@ -334,7 +334,7 @@ function tempRepo(t: TestContext): string {
 /** Every sample under the line: what a child blocked in `sleep` inside a Bash call reads. */
 const NEAR_IDLE: ChildLiveness = {
   pid: 4242,
-  alive: true,
+  presence: 'present',
   samples: [0.4, 0.2, 0.3],
   selfSamples: [0.4, 0.2, 0.3],
   busiestDescendant: [],
@@ -346,9 +346,22 @@ const NEAR_IDLE: ChildLiveness = {
 /** A finished child that twitched: the reading that held a run paused for an hour. */
 const TWITCHED: ChildLiveness = {
   pid: 4242,
-  alive: true,
+  presence: 'present',
   samples: [0.3, 0.2, 7.2],
   selfSamples: [0.3, 0.2, 7.2],
+  busiestDescendant: [],
+  descendants: 0,
+  workingDescendants: 0,
+  idle: false,
+  measuredAt: 0,
+}
+
+/** Every `ps` in the reading failed or timed out (#323): no fact about the child at all. */
+const UNMEASURED: ChildLiveness = {
+  pid: 4242,
+  presence: 'unmeasured',
+  samples: [],
+  selfSamples: [],
   busiestDescendant: [],
   descendants: 0,
   workingDescendants: 0,
@@ -380,7 +393,7 @@ async function twoParty(
     // never handed to a real `ps` and the reading above stays the precondition's alone.
     turnBoundaryLiveness: async (pid) => ({
       pid,
-      alive: false,
+      presence: 'gone',
       samples: [],
       selfSamples: [],
       busiestDescendant: [],
@@ -527,6 +540,37 @@ test('a child mid-turn is refused however idle its CPU reads, and the transport 
     assert.match(outcome.detail ?? '', /last tool call was Bash/, 'and what the child was doing is on the record')
     // The reading that would have waved this through, kept as colour and labelled as such.
     assert.match(outcome.detail ?? '', /reads not_computing, which decided nothing here/)
+  } finally {
+    await relay.stop()
+  }
+})
+
+test('a child mid-turn whose process table could not be read is refused on the turn, and the reading is only colour', async (t) => {
+  // The same path with the #323 reading. Nothing here may treat `unmeasured` as evidence of
+  // anything -- not of a dead child, which would be the collapse the issue is about, and not of
+  // a live one. The turn is what refuses; the reading is a labelled sentence beside it, in the
+  // word the reading actually has rather than "gone".
+  const repo = tempRepo(t)
+  const impl = new TurnSession('implementer', 'impl-1', [...IMPL_REPLIES])
+  impl.childPid = 4242
+  impl.onSend = (_message, index) => {
+    if (index !== 1) return
+    setTimeout(() => impl.startOwnTurn(), 0).unref()
+    setTimeout(() => impl.useTool('Bash'), 30).unref()
+  }
+  const advisor = new TurnSession('advisor', 'advisor-1', [...ADVISOR_REPLIES])
+  const relay = await twoParty(repo, impl, advisor, {
+    sendPreconditionMs: 400,
+    liveness: async (pid) => ({ ...UNMEASURED, pid, measuredAt: Date.now() }),
+  })
+  try {
+    const outcome = await relay.run('Keep the work moving.')
+
+    assert.equal(impl.sentWhileBusy, 0, 'an unreadable table is not a licence to send')
+    assert.equal(outcome.reason, 'peer_busy', `the ending must name the condition: ${JSON.stringify(outcome)}`)
+    assert.match(outcome.detail ?? '', /implementer: its turn has been running/, 'the turn is what it refused on')
+    assert.match(outcome.detail ?? '', /reads unmeasured, which decided nothing here/)
+    assert.doesNotMatch(outcome.detail ?? '', /reads gone/, 'the collapse #323 is about')
   } finally {
     await relay.stop()
   }

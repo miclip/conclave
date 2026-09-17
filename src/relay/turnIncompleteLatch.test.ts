@@ -66,7 +66,7 @@ const CHILD_PID = 66247
 /** A child doing real work: every sample above the line, which reads `working`. */
 const WORKING: ChildLiveness = {
   pid: CHILD_PID,
-  alive: true,
+  presence: 'present',
   samples: [12.3, 15.1, 13.5],
   selfSamples: [12.3, 15.1, 13.5],
   busiestDescendant: [],
@@ -79,7 +79,7 @@ const WORKING: ChildLiveness = {
 /** The same child, later: every sample below the line, which reads `not_computing`. */
 const QUIET: ChildLiveness = {
   pid: CHILD_PID,
-  alive: true,
+  presence: 'present',
   samples: [0.2, 0.7, 0.2],
   selfSamples: [0.2, 0.7, 0.2],
   busiestDescendant: [],
@@ -92,7 +92,7 @@ const QUIET: ChildLiveness = {
 /** The #83 shape: two samples below the line and one above, which reads `mixed`. */
 const BARELY: ChildLiveness = {
   pid: CHILD_PID,
-  alive: true,
+  presence: 'present',
   samples: [0.3, 0.2, 7.2],
   selfSamples: [0.3, 0.2, 7.2],
   busiestDescendant: [],
@@ -105,7 +105,7 @@ const BARELY: ChildLiveness = {
 /** No process at all. `gone` — the reading the operator most needs to be told about. */
 const GONE: ChildLiveness = {
   pid: CHILD_PID,
-  alive: false,
+  presence: 'gone',
   samples: [],
   selfSamples: [],
   busiestDescendant: [],
@@ -114,6 +114,9 @@ const GONE: ChildLiveness = {
   idle: false,
   measuredAt: 0,
 }
+
+/** No reading at all: every `ps` failed or timed out (#323). The same shape as `GONE`, a different fact. */
+const UNMEASURED: ChildLiveness = { ...GONE, presence: 'unmeasured' }
 
 /** What the advisor writes when a rotation asks it to brief the incoming session. */
 const HANDOFF = `## BRIEF
@@ -412,6 +415,50 @@ test('a reading that could not be taken forgets the answer rather than assuming 
   assert.equal(seen[1]!.liveness, undefined, 'the middle pause could take no reading at all')
   assert.equal(seen[2]!.liveness?.reading, 'working', 'and the third reads exactly as the first did')
   assert.deepEqual(suppressions(relay), [])
+})
+
+test('an unmeasurable child is never silenced, and is not a character an answer can be given about', async (t) => {
+  // The #323 reading at the latch, in both directions the latch has. A `ps` that fails on every
+  // read is a real reading (`unmeasured`), unlike the throwing sampler above, so it reaches the
+  // latch rather than skipping it -- and it must be treated as the "could not take a reading"
+  // case is: never matched against a remembered `working` answer, and never remembered as one.
+  //
+  //   1  working      asked; the operator's answer is remembered
+  //   2  unmeasured   asked: not the character answered about, and the answer is VOIDED here
+  //   3  unmeasured   asked again: an unmeasured pause arms nothing, so there is nothing to match
+  //   4  working      asked: the answer from 1 was forgotten at 2, not merely not matched
+  //
+  // Three separate lines in the relay hold those three properties (`#incompleteAnswered`,
+  // `#armIncomplete`, and the forget at the observation), and each of the last three pauses
+  // is the one that fails if its line stops holding for this reading.
+  const dir = repo(t)
+  const impl = new FakeRotationSession('impl', 'claude', ['ack', 'still going', 'still going', 'still going', 'still going'])
+  impl.childPid = CHILD_PID
+  verdictsPerTurn(impl, { 1: TIMED_OUT, 2: TIMED_OUT, 3: TIMED_OUT, 4: TIMED_OUT })
+  const advisor = new FakeRotationSession('advisor', 'codex', ['Do it.', 'Keep going.', 'Keep going.', 'Keep going.', 'DONE'])
+  const relay = await relayOf(dir, advisor, [impl], { liveness: readings(WORKING, UNMEASURED, UNMEASURED, WORKING) })
+  t.after(() => relay.stop())
+
+  const run = relay.start('Keep the work moving.')
+  const seen = await pausesThrough(run)
+
+  assert.equal(seen.length, 4, `an unmeasurable child is not a child that has stayed the same:\n${seen.map((p) => p.detail).join('\n')}`)
+  assert.deepEqual(
+    seen.map((p) => p.liveness?.reading),
+    ['working', 'unmeasured', 'unmeasured', 'working'],
+  )
+  assert.deepEqual(suppressions(relay), [])
+  // The unmeasured pauses carry a block -- there WAS a reading, and it says what it could not
+  // see -- and offer no `wait`, exactly as every reading with no CPU on it does (#83). Not a
+  // verdict of death: the line says the table could not be read, and nothing else.
+  for (const p of [seen[1]!, seen[2]!]) {
+    assert.equal(p.liveness?.sample.presence, 'unmeasured')
+    const line = p.evidence.find((e) => e.startsWith(`child pid ${CHILD_PID} `))!
+    assert.match(line, /could not be measured; the process table could not be read/)
+    assert.doesNotMatch(line, /is gone/)
+    assert.ok(!p.options.includes('wait'), 'nothing measured is nothing to wait for')
+  }
+  assert.equal((await run.result()).reason, 'done')
 })
 
 test('the suppression count is cumulative for the session, across a latch that re-arms', async (t) => {
