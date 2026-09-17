@@ -348,7 +348,7 @@ const DECLARED: Record<string, string> = {
     'Authority routing (#56, D2) sends implementer_unanswered to the advisor before the operator, ' +
     'so a default run interrupts the human less than today. Real change at N=1, an improvement, ' +
     'declared rather than discovered. The pause reason exists at src/relay/run.ts:52 and the halt ' +
-    'that raises it is at src/relay/relay.ts:8945.',
+    'that raises it is at src/relay/relay.ts:8954.',
   'status.pause.resolution':
     'Classifying unresolved conditions on both axes (#56, D2) added `resolution` to every RunPause ' +
     '(src/relay/run.ts:430), so `conclave status --json` on a paused default run now carries ' +
@@ -630,7 +630,7 @@ const DECLARED: Record<string, string> = {
     'participant and nobody else, and a conclave or workstream scope samples NOBODY. It used to ' +
     'read pause.verdictOf.participant and fall back to scanning participants by rank for ' +
     'implementers — and verdictOf is set at exactly two halt sites, both turn_incomplete ' +
-    '(src/relay/relay.ts:8362, src/relay/relay.ts:9082), so every other pause reached that rank ' +
+    '(src/relay/relay.ts:8371, src/relay/relay.ts:9091), so every other pause reached that rank ' +
     'scan. WHAT CHANGES AT N=1: on the three pauses whose scope names no participant — ' +
     'operator_requested (/pause), advisor_escalated, authority_conflict — the lone implementer ' +
     'child used to be sampled, so a child that measured busy REFUSED the resume and wrote ' +
@@ -639,15 +639,15 @@ const DECLARED: Record<string, string> = {
     'safety guard rather than presented as a pure N>1 fix. The reason it is the right narrowing: ' +
     'the guard exists because continuing SENDS into a child that cannot accept input mid-turn, ' +
     'and on those three pauses the child it measured is not the child being sent to — resuming ' +
-    'advisor_escalated sends to the ADVISOR (src/relay/relay.ts:8663), resuming ' +
+    'advisor_escalated sends to the ADVISOR (src/relay/relay.ts:8672), resuming ' +
     'authority_conflict queues a constraint that is delivered by the dispatcher on the next ' +
     'dispatch to a free seat, and operator_requested is consumed at an advisor-turn boundary ' +
     'whose own evidence line says no turn is in flight. WHAT IS GIVEN UP, named rather than ' +
     'discovered: the advisor_escalated halt raised when a seat’s turn completed and its report ' +
-    'could not be read (src/relay/relay.ts:8996) is conclave-scoped by design, yet the useful ' +
+    'could not be read (src/relay/relay.ts:9005) is conclave-scoped by design, yet the useful ' +
     'question there is whether THAT seat is still writing; at N=1 the rank scan sampled it by ' +
     'coincidence of it being the only implementer, and now nothing does. The pause still carries ' +
-    'that seat’s liveness evidence from the halt site (src/relay/relay.ts:9007), which is what ' +
+    'that seat’s liveness evidence from the halt site (src/relay/relay.ts:9016), which is what ' +
     'the operator actually reads; restoring a refusal there is a change to that halt’s scope, ' +
     'not to the guard. AT N>1 the old behaviour was unsafe in the other direction: a pause about ' +
     'one seat could be refused because a DIFFERENT seat was mid-turn, and the operator was told ' +
@@ -1950,9 +1950,47 @@ const DECLARED: Record<string, string> = {
     'records, with the presentation assertions kept separate from the forensic ones) and ' +
     'src/workspace/controlStdin.test.ts (the live `stdin` field, which answers a different ' +
     'question and could not answer this one). No assertion in this file was relaxed.',
+  'a child no `ps` could read is `unmeasured`, not `gone`, and the record says which (#323)':
+    'THE REASON, in one sentence: since #322 every `ps` in a liveness reading carries a timeout, ' +
+    'and a reading whose every read timed out came back with no samples — exactly what a pid ' +
+    'that is not in the table comes back with — so `alive: false` rendered both as "child pid N ' +
+    'is gone; the CLI exited without a terminal signal", a confident claim about a child that ' +
+    'was very probably fine. ONE KEY IS RENAMED AND RE-TYPED on ChildLiveness, which is why this ' +
+    'is declared rather than assumed invisible: `alive: boolean` is replaced by `presence: ' +
+    "'present' | 'gone' | 'unmeasured'` (src/outcomes/liveness.ts, ChildPresence), and it is " +
+    'carried wherever a ChildLiveness is — pause.liveness.sample and pause.refusal.liveness in ' +
+    'status --json, and the liveness on a force record — on a DEFAULT run at N=1 whenever one of ' +
+    'those is written. A reader of `alive` must read `presence === \'present\'` instead. One ' +
+    'tri-state fact rather than the boolean plus a flag, because two fields that can disagree ' +
+    'are the shape this file keeps finding. `gone` KEEPS ITS EXACT MEANING: a table that was ' +
+    'read and did not contain the pid. `unmeasured` is a reading in which the table read and the ' +
+    'self-only fallback both failed on every snapshot; one honestly-read table lacking the pid ' +
+    'beside timed-out reads is still `gone`, because that is positive evidence. Named rather than ' +
+    'hidden: the fallback cannot tell a dead pid from a `ps` that will not answer, so a child that ' +
+    'really is dead while the table read fails reads `unmeasured`, which is the true statement. ' +
+    'LivenessReading gains `unmeasured` and readingOf returns it, so pause.liveness.reading can ' +
+    "carry it too. THE EVIDENCE PROSE gains one sentence for that reading — \"child pid N could " +
+    'not be measured; the process table could not be read (every `ps` in this reading failed or ' +
+    'timed out), so nothing here says whether the child is running\" — and the gone sentence is ' +
+    'byte-for-byte unchanged. NO PAUSE TIMING AND NO `wait` RULE CHANGES; what changed is which ' +
+    'reading a hung `ps` produces, and every consumer was audited for what it does with the new ' +
+    'one: the pause menu offers no `wait` (reportsChildOnCpu over a line with no CPU, as for ' +
+    'gone and not_computing — not because the child is dead, but because nothing was measured ' +
+    'to be worth waiting for); a refresh from working to unmeasured REPLACES the line and ' +
+    'withdraws `wait`, because it is a measurement and not a sampler failure (which still keeps ' +
+    'the old line); the turn_incomplete latch never arms on it, never matches it against an armed ' +
+    'answer, and voids a remembered answer at the observation; the turn-boundary descendant ' +
+    'check is silent on it (no snapshots, no descendants); the send precondition and the ' +
+    "console's /continue guard refuse on the turn and print the reading as colour, in the word " +
+    '`unmeasured`. Covered in src/outcomes/liveness.test.ts (a hung fake `ps` against a genuinely ' +
+    'dead pid, in one test, asserting the fact, the reading and the sentence all differ), ' +
+    'src/relay/pauseLiveness.test.ts, src/relay/turnIncompleteLatch.test.ts, ' +
+    'src/relay/turnBoundaryLiveness.test.ts, src/relay/sendPrecondition.test.ts and ' +
+    'src/repl/session.test.ts; each consumer claim was mutation-checked. No assertion in this ' +
+    'file was relaxed.',
 }
 
-test('DECLARED contains exactly the routing, pause-resolution, attribution, ceiling-flag, seat-flag, seat-status, launch-record, flag-reader, integration-check, per-seat-rotation, reviewer, resume-guard, mixed-liveness, timestamped-liveness, model-validation, executable-preflight, compaction-survival, rotation-reporting, send-precondition, process-tree-liveness, ceiling-reporting, record-heartbeat, rotation-intent, console-dry-run, flag-reconciliation, paused-time, advisor-targeting, silence-timeout, launch-bounds, origin-reconciliation, capability-briefing, candidate-class, run-progress, blocked-rollup, goal-file, checkpoint and control-channel-ending entries', () => {
+test('DECLARED contains exactly the routing, pause-resolution, attribution, ceiling-flag, seat-flag, seat-status, launch-record, flag-reader, integration-check, per-seat-rotation, reviewer, resume-guard, mixed-liveness, timestamped-liveness, model-validation, executable-preflight, compaction-survival, rotation-reporting, send-precondition, process-tree-liveness, ceiling-reporting, record-heartbeat, rotation-intent, console-dry-run, flag-reconciliation, paused-time, advisor-targeting, silence-timeout, launch-bounds, origin-reconciliation, capability-briefing, candidate-class, run-progress, blocked-rollup, goal-file, checkpoint, control-channel-ending and unmeasured-liveness entries', () => {
   assert.deepEqual(Object.keys(DECLARED), [
     'deny-only project configuration for capabilities and commands',
     'implementer_unanswered -> advisor',
@@ -1994,6 +2032,7 @@ test('DECLARED contains exactly the routing, pause-resolution, attribution, ceil
     '--goal-file on both front-ends',
     '--checkpoint arms a decision point, which relay cannot hold',
     'status.outcome.reason gains the two control-channel endings (#266)',
+    'a child no `ps` could read is `unmeasured`, not `gone`, and the record says which (#323)',
   ])
 })
 
@@ -2435,7 +2474,7 @@ async function provokeReviewBlocked(repo: string): Promise<{ relay: Relay; run: 
  * Drive a real relay into one condition and return the pause it raised.
  *
  * The provocations are the ones `resolution.test.ts`'s own `provoke` already uses, deliberately:
- * the same triggers reaching the same single halt site (src/relay/relay.ts:5267), where the
+ * the same triggers reaching the same single halt site (src/relay/relay.ts:5268), where the
  * classification is computed by production `resolutionFor` from the subject the caller passed.
  * Nothing here writes a `RunPause`.
  *
@@ -2791,7 +2830,7 @@ test('default run works in the run cwd and creates no worktree', async (t) => {
 
   // A default run with no subagents must not create any git worktree. The relay only samples
   // the worktree list for its subagent-use report: src/relay/subagents.ts:113 defines
-  // worktreePaths, and src/relay/relay.ts:3914-3915, :4634 and :7468 read it.
+  // worktreePaths, and src/relay/relay.ts:3914-3915, :4634 and :7477 read it.
   // Prove it by exercising the run in a real temporary repository.
   const repo = tempDir(t, 'conclave-default')
   execFileSync('git', ['init', '--quiet'], { cwd: repo })

@@ -39,7 +39,7 @@ const CHILD_PID = 41007
 /** The shape from the issue: a quiet CLI with a test runner saturating a core underneath it. */
 const DEFERRED_SUITE: ChildLiveness = {
   pid: CHILD_PID,
-  alive: true,
+  presence: 'present',
   selfSamples: [0.4, 0.2, 0.3],
   samples: [91.2, 88.7, 93.0],
   busiestDescendant: [90.8, 88.5, 92.7],
@@ -52,7 +52,7 @@ const DEFERRED_SUITE: ChildLiveness = {
 /** The falsifier from `liveness.ts`: a shelf of idle MCP helpers is descendants and no work. */
 const IDLE_HELPERS: ChildLiveness = {
   pid: CHILD_PID,
-  alive: true,
+  presence: 'present',
   selfSamples: [0.3, 0.2, 0.2],
   samples: [1.9, 2.1, 1.8],
   busiestDescendant: [0.4, 0.5, 0.4],
@@ -198,6 +198,35 @@ test('idle descendants, or none, produce no note', async (t) => {
   })
   assert.equal(reads, 3, 'the reading was taken; silence is the reading, not a skipped read')
   assert.deepEqual(boundaryNotes(log), [], 'no working descendant, no note')
+  assert.equal(reason, 'done')
+})
+
+test('a child that is gone, or could not be measured, produces no note either', async (t) => {
+  // Neither of the two no-sample readings has a descendant to report, and the check is on the
+  // count alone -- there is no presence branch, and this is the assertion that keeps it that way.
+  // `unmeasured` (#323) in particular must not be read as anything: a `ps` that timed out at the
+  // boundary says nothing about the seat's tree, and a note here would be a claim about it.
+  const none: ChildLiveness = {
+    pid: CHILD_PID,
+    presence: 'gone',
+    selfSamples: [],
+    samples: [],
+    busiestDescendant: [],
+    descendants: 0,
+    workingDescendants: 0,
+    idle: false,
+    measuredAt: 0,
+  }
+  let reads = 0
+  const { log, reason } = await runOnce(t, {
+    turnBoundaryLiveness: async () => ({ ...none, presence: ++reads === 1 ? 'gone' : 'unmeasured', measuredAt: Date.now() }),
+  })
+  assert.equal(reads, 3, 'the reading was taken at every boundary')
+  assert.deepEqual(boundaryNotes(log), [], 'nothing measured under the seat, nothing recorded')
+  assert.ok(
+    !log.some((m) => /could not be measured|process table could not be read/.test(m.text)),
+    'and no other note was invented for the unmeasured reading: silence is the reading',
+  )
   assert.equal(reason, 'done')
 })
 

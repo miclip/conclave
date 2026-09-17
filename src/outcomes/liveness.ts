@@ -249,12 +249,26 @@ export const LIVENESS_REFRESH_EVERY_MS = 30_000
  */
 export const LIVENESS_REFRESH_LIMIT = 60
 
+/**
+ * Whether the process exists -- or whether that could be known.
+ *
+ * Three values and not a boolean, because a boolean has nowhere to put the third case and so
+ * put it in the wrong one (#323): a `ps` that timed out on every read produced no snapshot,
+ * exactly as a pid that is not in the table does, and `alive: false` rendered both as "the CLI
+ * exited without a terminal signal" -- a confident claim about a child that was very probably
+ * fine. `gone` is reserved for the one honest meaning: a table that WAS read and did not contain
+ * the pid. `unmeasured` is a reading whose every read failed, which says something about `ps`
+ * and nothing about the child.
+ */
+export type ChildPresence = 'present' | 'gone' | 'unmeasured'
+
 export interface ChildLiveness {
   pid: number
-  /** Whether the process still exists at all. */
-  alive: boolean
+  /** Whether the process still exists, or `unmeasured` where no read could say. */
+  presence: ChildPresence
   /**
-   * CPU percentages, in sample order. Empty when the process was gone throughout.
+   * CPU percentages, in sample order. Empty when the process was gone, or unmeasurable,
+   * throughout.
    *
    * The AGGREGATE over the pid and every descendant of it, since #111 -- how much of the machine
    * this seat is using, which is what every existing consumer of this field was reading it as.
@@ -301,7 +315,8 @@ export interface ChildLiveness {
    * True when every sample was effectively zero.
    *
    * "Not computing", never "dead" — a process blocked on a socket reads the same way, and
-   * that is exactly what a provider that stopped answering looks like from out here.
+   * that is exactly what a provider that stopped answering looks like from out here. False
+   * for a child that is gone or unmeasured: neither has samples to be idle over.
    *
    * Over `activitySamples` since #111, which is where the change lands: a parent idling in front
    * of a busy grandchild is NOT idle any more, and that is the fix -- a reading that was idle can
@@ -502,8 +517,10 @@ function processTable(): ProcessRow[] | undefined {
  *
  * This is what every reading was before #111. It is kept as the fallback because the failure it
  * covers -- a `ps` that will not enumerate, on some platform or sandbox nobody has tried yet --
- * would otherwise turn into "the CLI exited without a terminal signal", which is a confident
- * claim about a child that is very probably fine.
+ * used to turn into "the CLI exited without a terminal signal", a confident claim about a child
+ * that is very probably fine. Since #323 that collapse cannot happen (a reading with no
+ * successful read is `unmeasured`, not `gone`); the fallback is kept because a reading beats
+ * no reading, and this is the one route to a reading on such a platform.
  */
 function selfOnlySnapshot(pid: number): TreeSnapshot | undefined {
   try {
@@ -527,13 +544,22 @@ function selfOnlySnapshot(pid: number): TreeSnapshot | undefined {
   }
 }
 
-/** One reading of the tree, by whichever route works. */
-function sampleOnce(pid: number): TreeSnapshot | undefined {
+/**
+ * One reading of the tree, by whichever route works -- or which of the two ways it did not.
+ *
+ * `gone` and `unmeasured` are kept apart here, at the only point that can tell them apart: a
+ * readable table that does not contain the pid is the one honest "gone", and the fallback is
+ * for a table that could not be read, not for a process that is not in it. When the fallback
+ * fails too, nothing was measured -- the pid may be dead, or `ps` may be hung, sandboxed or
+ * absent -- and the snapshot says so rather than picking the more alarming of the two (#323).
+ * The fallback cannot itself distinguish a dead pid from a `ps` that will not answer, so a
+ * reading that reaches it and fails is `unmeasured` even when the child really is dead: the
+ * cost of that is a pause that says "could not be read" about a dead child, which is true.
+ */
+function sampleOnce(pid: number): TreeSnapshot | 'gone' | 'unmeasured' {
   const rows = processTable()
-  // A readable table that does not contain the pid is the one honest "gone": the fallback is
-  // for a table that could not be read, not for a process that is not in it.
-  if (rows) return treeSnapshotOf(rows, pid)
-  return selfOnlySnapshot(pid)
+  if (rows) return treeSnapshotOf(rows, pid) ?? 'gone'
+  return selfOnlySnapshot(pid) ?? 'unmeasured'
 }
 
 /**
@@ -555,9 +581,14 @@ export async function sampleLiveness(
   const busiestDescendant: number[] = []
   let descendants = 0
   let workingDescendants = 0
+  let sawGone = false
   for (let i = 0; i < count; i++) {
     const snap = sampleOnce(pid)
-    if (snap) {
+    if (snap === 'gone') {
+      sawGone = true
+    } else if (snap === 'unmeasured') {
+      // Nothing to record: the snapshot says nothing about the child.
+    } else {
       samples.push(snap.tree)
       selfSamples.push(snap.self)
       busiestDescendant.push(snap.busiest)
@@ -569,10 +600,15 @@ export async function sampleLiveness(
     }
     if (i < count - 1) await new Promise((r) => setTimeout(r, everyMs))
   }
-  const alive = samples.length > 0
+  // Any snapshot that found the pid makes it present, as before. Failing that, ONE table that
+  // was read and lacked the pid is enough to call it gone: that is positive evidence, and a
+  // timed-out read beside it does not weaken it. Only a reading in which nothing was ever read
+  // is unmeasured.
+  const presence: ChildPresence = samples.length > 0 ? 'present' : sawGone ? 'gone' : 'unmeasured'
+  const alive = presence === 'present'
   return {
     pid,
-    alive,
+    presence,
     samples,
     selfSamples,
     busiestDescendant,
@@ -595,8 +631,15 @@ export async function sampleLiveness(
  * process between bursts and a process that twitched once look identical from three readings.
  * Naming it is the whole of #83, because the alternative was to fold it into `working` and
  * announce a live turn on the strength of one sample.
+ *
+ * `unmeasured` is the other one that had no name (#323), and the reason is the same shape: a
+ * reading with no samples was folded into `gone`, and a `ps` that timed out announced a dead
+ * child on the strength of no sample at all. It is `presence` restated, so a reader with only
+ * the reading still has the distinction. Every consumer that gates on the reading treats it as
+ * it treats `gone` and `not_computing` -- no `wait`, no remembered answer -- because those
+ * gates ask "was CPU seen", and none was; none of them treats it as a dead child.
  */
-export type LivenessReading = 'gone' | 'not_computing' | 'working' | 'mixed'
+export type LivenessReading = 'gone' | 'unmeasured' | 'not_computing' | 'working' | 'mixed'
 
 /**
  * The busiest single process in the tree, per snapshot. What the reading is classified on.
@@ -631,9 +674,10 @@ export function activitySamples(
 }
 
 /**
- * Which of the three a reading is.
+ * Which reading a measurement is.
  *
- * Restated from the samples rather than read off `idle`, so the reading cannot contradict the
+ * The two no-sample cases come straight off `presence`, which is the only place they were ever
+ * told apart. The three live ones are restated from the samples rather than read off `idle`, so the reading cannot contradict the
  * numbers printed beside it. It is the same rule: `not_computing` is every sample below the
  * line, which is exactly what `sampleLiveness` set `idle` on.
  *
@@ -642,7 +686,7 @@ export function activitySamples(
  * to hold a handle to, and not of a sum whose size depends on how many helpers are asleep.
  */
 export function readingOf(l: ChildLiveness): LivenessReading {
-  if (!l.alive) return 'gone'
+  if (l.presence !== 'present') return l.presence
   const activity = activitySamples(l)
   if (activity.every((c) => c < IDLE_CPU_PERCENT)) return 'not_computing'
   if (activity.every((c) => c >= IDLE_CPU_PERCENT)) return 'working'
@@ -706,8 +750,9 @@ export function reportsChildOnCpu(evidence: string): boolean {
 /**
  * The evidence line an operator reads at a pause.
  *
- * Phrased as a measurement, not a verdict. The three readings are what was seen; what to do
- * about it stays the operator's call, which is the whole point of a pause.
+ * Phrased as a measurement, not a verdict. The readings are what was seen -- or, for
+ * `unmeasured`, that nothing was; what to do about it stays the operator's call, which is the
+ * whole point of a pause.
  *
  * `emittedSinceSend` is `undefined` where no count was taken alongside the sample. That is
  * not the same as zero, and it used to be spelled as zero by the `/continue` guard, which
@@ -729,8 +774,28 @@ export function describeLiveness(
   emittedSinceSend: number | undefined,
   refresh?: LivenessRefreshState,
 ): string {
-  if (!l.alive) {
+  if (l.presence === 'gone') {
     return `child pid ${l.pid} is gone; the CLI exited without a terminal signal${provenance(l, refresh)}`
+  }
+  if (l.presence === 'unmeasured') {
+    // CONSUMERS OF THIS SENTENCE, and what each does with it, so the next reading added here
+    // can be checked against the same list (#323):
+    //   - `reportsChildOnCpu` (the pause menu's `wait`, at raise and at every refresh) -- false,
+    //     as for every line with no `(cpu ...)` clause: nothing measured is nothing to wait for.
+    //   - the `turn_incomplete` latch -- `readingOf` says `unmeasured`, which is never armed and
+    //     never matches an armed `working`/`mixed`, and voids one at the observation.
+    //   - the console's `/continue` guard and the relay's send precondition -- colour only, the
+    //     turn decides; both print this sentence and neither reads it.
+    //   - the turn-boundary descendant check -- counts `workingDescendants`, which is zero here.
+    // Pinned in src/relay/pauseLiveness.test.ts, turnIncompleteLatch.test.ts,
+    // turnBoundaryLiveness.test.ts, sendPrecondition.test.ts and src/repl/session.test.ts.
+    // Not "gone". Nothing here was read, so the sentence is about the instrument and not the
+    // child, and it says which: every `ps` in the reading failed or hit `PS_TIMEOUT_MS`.
+    return (
+      `child pid ${l.pid} could not be measured; the process table could not be read ` +
+      `(every \`ps\` in this reading failed or timed out), so nothing here says whether the ` +
+      `child is running${provenance(l, refresh)}`
+    )
   }
   const percents = (xs: number[]): string => xs.map((c) => `${c.toFixed(1)}%`).join(', ')
   // Both halves only where there are two halves. With no descendants the tree IS the pid, and

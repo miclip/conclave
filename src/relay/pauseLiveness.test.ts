@@ -48,7 +48,7 @@ const CHILD_PID = 66247
 /** The reading from the issue, verbatim: the line that told an operator not to continue. */
 const WORKING: ChildLiveness = {
   pid: CHILD_PID,
-  alive: true,
+  presence: 'present',
   samples: [3.3, 5.1, 3.5],
   // The pid alone, and no descendants: the child in the report was a CLI doing its own work,
   // and the tree aggregate #111 added is the same three numbers where nothing hangs off it.
@@ -63,7 +63,7 @@ const WORKING: ChildLiveness = {
 /** What the same child was actually doing seconds later, also from the issue. */
 const QUIET: ChildLiveness = {
   pid: CHILD_PID,
-  alive: true,
+  presence: 'present',
   samples: [0.2, 0.7, 0.2],
   selfSamples: [0.2, 0.7, 0.2],
   busiestDescendant: [],
@@ -80,7 +80,7 @@ const QUIET: ChildLiveness = {
  */
 const GONE: ChildLiveness = {
   pid: CHILD_PID,
-  alive: false,
+  presence: 'gone',
   samples: [],
   selfSamples: [],
   busiestDescendant: [],
@@ -89,6 +89,12 @@ const GONE: ChildLiveness = {
   idle: false,
   measuredAt: 0,
 }
+
+/**
+ * Every `ps` in the reading failed or timed out (#323). The same record shape as `GONE` -- no
+ * samples, not idle -- and a different fact: nothing here says whether the child is running.
+ */
+const UNMEASURED: ChildLiveness = { ...GONE, presence: 'unmeasured' }
 
 function repo(t: TestContext): string {
   const dir = tempDir(t, 'conclave-pause-liveness')
@@ -279,6 +285,126 @@ test('the evidence a paused run publishes changes when the child does', async (t
     // them existed, and node:test runs `after` hooks in registration order -- so a `t.after`
     // teardown fires after the directory is gone and writes into a path that no longer exists.
     // Production order is preserved: the relay stops, then the recorder closes.
+    await relay.stop()
+    await recording.close()
+  }
+})
+
+test('a pause raised on an unmeasurable child says so, publishes the fact, and offers no wait', async (t) => {
+  // The #323 case at the surface an operator reads. A `ps` that timed out on every read used to
+  // reach this pause as "gone; the CLI exited without a terminal signal" -- a confident claim
+  // about a child that was very probably fine. Now the line says the table could not be read,
+  // the status file carries `presence: 'unmeasured'` beside it for an agent operator, and the
+  // menu is exactly what the existing CPU-evidence rule gives a reading with no CPU on it: no
+  // `wait`. Not because the child is dead -- nothing here knows that -- but because `wait` is
+  // offered only where something was MEASURED to be worth waiting for, and nothing was.
+  const dir = repo(t)
+  const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it, slowly.'])
+  impl.endTurn = { index: 1, verdict: TIMED_OUT }
+  impl.childPid = CHILD_PID
+  const relay = await relayOf(dir, new FakeRotationSession('advisor', 'codex', ['Do it.', 'DONE']), [impl], {
+    liveness: async () => ({ ...UNMEASURED, measuredAt: Date.now() }),
+    livenessRefreshLimit: 0,
+  })
+
+  const id = newSessionId(Date.now(), process.pid)
+  const recording = recordSession(relay, {
+    repoRoot: dir,
+    id,
+    goal: 'Keep the work moving.',
+    front: 'session',
+    startedAt: Date.now(),
+    build: 'test',
+  })
+  try {
+    const run = relay.start('Keep the work moving.')
+    const pause = await run.untilPause()
+    assert.ok(pause)
+    assert.equal(pause.reason, 'turn_incomplete')
+    recording.set('paused', { pause })
+
+    const recorded = recordedPause(dir, id)
+    const line = livenessLine(recorded)
+    assert.ok(line, `no liveness line in ${JSON.stringify(recorded?.evidence)}`)
+    assert.match(line, /could not be measured; the process table could not be read/)
+    assert.doesNotMatch(line, /is gone/, 'the collapse #323 is about')
+    assert.doesNotMatch(line, /exited without a terminal signal/)
+    assert.match(line, /Measured \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ/)
+    // The fact, serialised for the reader who cannot parse prose: the reading and the sample's
+    // own presence, both `unmeasured`, read back from disk.
+    assert.equal(recorded?.liveness?.reading, 'unmeasured')
+    assert.equal(recorded?.liveness?.sample.presence, 'unmeasured')
+    assert.deepEqual(recorded?.liveness?.sample.samples, [])
+    assert.ok(!recorded!.options.includes('wait'), 'nothing was measured, so nothing is worth waiting for')
+    assert.equal(run.state, 'paused', 'and the pause is an ordinary pause: nothing about the reading resolved it')
+
+    await run.abort()
+  } finally {
+    await relay.stop()
+    await recording.close()
+  }
+})
+
+test('a refresh that finds the child unmeasurable replaces the working reading and withdraws wait', async (t) => {
+  // The other direction of the same rule. A pause raised on a working child offers `wait`; a
+  // refresh whose every `ps` then times out is a REAL reading, not a sampling failure -- it
+  // replaces the line rather than being kept behind it (compare the throwing sampler below) --
+  // and the `wait` the working line justified goes with it. The stale "is still working" claim
+  // must not survive a measurement that could no longer see the child, and neither must an
+  // option that rested on it.
+  const dir = repo(t)
+  const impl = new FakeRotationSession('impl', 'claude', ['ack', 'Did it, slowly.'])
+  impl.endTurn = { index: 1, verdict: TIMED_OUT }
+  impl.childPid = CHILD_PID
+  let reads = 0
+  const relay = await relayOf(dir, new FakeRotationSession('advisor', 'codex', ['Do it.', 'DONE']), [impl], {
+    liveness: async () => ({ ...(++reads === 1 ? WORKING : UNMEASURED), measuredAt: Date.now() }),
+    livenessRefreshMs: 30,
+    livenessRefreshLimit: 2,
+  })
+
+  const id = newSessionId(Date.now(), process.pid)
+  const recording = recordSession(relay, {
+    repoRoot: dir,
+    id,
+    goal: 'Keep the work moving.',
+    front: 'session',
+    startedAt: Date.now(),
+    build: 'test',
+  })
+  try {
+    const run = relay.start('Keep the work moving.')
+    const pause = await run.untilPause()
+    assert.ok(pause)
+    recording.set('paused', { pause })
+    const first = recordedPause(dir, id)!
+    assert.match(livenessLine(first)!, /is still working/)
+    assert.equal(first.liveness!.reading, 'working')
+    assert.ok(first.options.includes('wait'), 'the premise: a working child is worth waiting for')
+
+    const after = await until('the refresh to reach the record', () => {
+      const p = recordedPause(dir, id)
+      return p?.liveness && p.liveness.refreshes > 0 ? p : undefined
+    })
+    const line = livenessLine(after)!
+    assert.match(line, /could not be measured; the process table could not be read/)
+    assert.doesNotMatch(line, /is still working/, 'the stale claim is replaced, not kept')
+    assert.doesNotMatch(line, /is gone/)
+    assert.equal(after.liveness!.reading, 'unmeasured')
+    assert.equal(after.liveness!.sample.presence, 'unmeasured')
+    assert.ok(
+      after.liveness!.sample.measuredAt > first.liveness!.sample.measuredAt,
+      'the unmeasured reading is a new measurement, dated as one',
+    )
+    assert.ok(!after.options.includes('wait'), 'the wait the working line justified goes with it')
+    assert.deepEqual(
+      after.options.filter((o) => o !== 'wait'),
+      first.options.filter((o) => o !== 'wait'),
+      'and nothing else about the menu moves',
+    )
+
+    await run.abort()
+  } finally {
     await relay.stop()
     await recording.close()
   }
