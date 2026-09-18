@@ -63,10 +63,15 @@ test('#233 the exit code still says the condition, so a script gating on it stil
 test('#233 under --json the message goes to stdout as data, not to stderr as prose', (t) => {
   // Both streams asserted, because the original defect was precisely that the message existed
   // and was on the wrong one. stdout carried nothing a parser could use.
+  //
+  // NOT `stderr === ''`: the runtime owns that stream too, and Node 24.0.2 -- the floor CI runs
+  // -- prints an ExperimentalWarning about type stripping on it for every `.ts` entry point.
+  // What this test guards is that OUR message is not there, not that nobody's is (#317).
   const dir = emptyProject(t)
   const r = status(dir, '--json')
-  assert.equal(r.stderr, '', 'nothing on stderr when JSON was asked for')
+  assert.doesNotMatch(r.stderr, /no sessions have been recorded/, 'the message is not prose on stderr')
   assert.ok(r.stdout.length > 0, 'and the answer is on stdout')
+  assert.match(String(JSON.parse(r.stdout).error), /no sessions have been recorded/, 'as data')
 })
 
 test('#233 without --json the human message is unchanged, on stderr', (t) => {

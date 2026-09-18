@@ -24,12 +24,27 @@ jobs:
         # macos-arm64 both passed, the package job failed, and the gated release job never ran
         # (#169). Keep this list equal to that matrix.
         os: [ubuntu-latest, macos-latest, macos-15-intel]
+        node: ['24']
+        include:
+          # THE SUPPORTED FLOOR, tested rather than assumed (#317). `engines.node` is
+          # `>=24.0.0`, but `node-version: '24'` resolves to the LATEST 24.x -- 24.20.0 on the
+          # run that found this -- so the floor was exercised by nothing anyone ran. Four
+          # `notify` tests failed on 24.0.2 and passed on 24.13 because Node emitted a type
+          # stripping `ExperimentalWarning` on the older one and not the newer, and the tests
+          # read stderr as output. A version-dependent break, invisible to a matrix that only
+          # ever takes the newest.
+          #
+          # One platform, not three: what this covers is the RUNTIME's floor, which does not
+          # vary by operating system, and three more full suites is a real cost for a second
+          # reading of the same fact.
+          - os: ubuntu-latest
+            node: '24.0.2'
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
-          node-version: '24'
+          node-version: ${{ matrix.node }}
       - run: npm ci
       # A fresh checkout has no rendered hook registrations, and one test compares the
       # templates against what is installed. Rendering them first makes that test mean what
