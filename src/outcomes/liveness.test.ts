@@ -6,6 +6,7 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync, spawn } from 'node:child_process'
+import { once } from 'node:events'
 import { chmodSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -510,20 +511,26 @@ test('a `ps` that hangs is killed at its timeout, and a whole reading stays unde
   // the shell and left the sleep orphaned on init with the ignored-TERM disposition it had
   // inherited across exec, so every run of this test left four `sleep 60` behind (the advisor
   // caught one live). So the fake is a node script that ignores SIGTERM itself and spawns
-  // nothing, reached through `exec` so the wrapper shell is replaced rather than parenting it,
-  // and it records its pid so the assertion at the end can say every one of them is gone.
+  // nothing, reached through `exec` so the wrapper shell is replaced rather than parenting it.
+  // The wrapper records `$$` before the `exec` -- the same pid the node process inherits --
+  // so the assertion at the end can say every one of them is gone, and the count is taken
+  // the moment `ps` is invoked rather than after node has booted.
   const pids = join(dir, 'pids')
   const fake = join(dir, 'fake-ps.cjs')
   writeFileSync(
     fake,
     `process.on('SIGTERM', () => {})\n` +
-      `require('node:fs').appendFileSync(${JSON.stringify(pids)}, process.pid + '\\n')\n` +
       // Exits on its own after this, ignoring only TERM. Longer than the parent's 15s bound
       // below, so a build with the kill mutated out still fails rather than squeaks through;
       // short, so what such a build leaves behind is gone in half a minute.
       `setTimeout(() => {}, 30_000)\n`,
   )
-  writeFileSync(join(bin, 'ps'), `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(fake)}\n`)
+  writeFileSync(
+    join(bin, 'ps'),
+    `#!/bin/sh\n` +
+      `echo $$ >> ${JSON.stringify(pids)}\n` +
+      `exec ${JSON.stringify(process.execPath)} ${JSON.stringify(fake)}\n`,
+  )
   chmodSync(join(bin, 'ps'), 0o755)
   const script = join(dir, 'read.ts')
   writeFileSync(
@@ -573,7 +580,14 @@ test('a `ps` that hangs is killed at its timeout, and a whole reading stays unde
   const dead = spawn('sleep', ['30'], { stdio: 'ignore' })
   const deadPid = dead.pid!
   dead.kill('SIGKILL')
-  await new Promise((r) => setTimeout(r, 300))
+  // The exit EVENT, not a wait long enough to hope for one. `processTable` reads `ps -Ao`, which
+  // lists zombies: a killed child that has not been reaped yet is still in the table, so the
+  // reading is `present` and this block fails. Node reaps before it emits `exit`, so awaiting it
+  // puts "out of the table" under the assertion by construction rather than by a duration. The
+  // 300ms sleep this replaces was the whole of #334. Note what it is NOT sensitive to: with the
+  // kill removed this still passes, 30s later, because the assertion is about how a gone pid
+  // reads and not about what made it gone.
+  await once(dead, 'exit')
   const gone = await sampleLiveness(deadPid, { samples: 2, everyMs: 50 })
   assert.equal(gone.presence, 'gone')
   assert.deepEqual(gone.samples, [])
