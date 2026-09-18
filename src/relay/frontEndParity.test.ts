@@ -1075,6 +1075,44 @@ test('the agent instructions name only things that exist', () => {
   assert.match(section, /alive false is a crashed run/)
 })
 
+test('#316 session --help says an unattended run expects --bypass, with a remedy the flag accepts', () => {
+  // The run that filed #316 drove `--operator agent` with a Codex advisor that asked before
+  // every shell command, and its first `cat` waited 29 minutes. `--bypass` already existed;
+  // the help never said it was needed for this. The 0.5.56 answer changed the launch
+  // arguments instead and stopped Codex starting, so this is documentation and a warning, and
+  // the test pins that the launch arguments the help describes are still the ones in use.
+  const cli = readFileSync(join(import.meta.dirname, '..', '..', 'bin', 'conclave.ts'), 'utf8')
+  // The session block is the last in USAGE, so it runs to the template literal's close.
+  const start = cli.indexOf('\n  session ["<goal>"]')
+  const end = cli.indexOf('\n`', start)
+  assert.ok(start > 0 && end > start, 'the session block must be present in USAGE')
+  const section = cli.slice(start, end)
+
+  // The claim, and its condition. This repository has measured Codex's defaults
+  // auto-approving (`CODEX_PROMPT_ON_APPROVAL_ARGS` in `src/registry/builtin.ts` exists to
+  // force a dialog), so the help must not say Codex asks by default or before every command
+  // -- the issue said so, and it was the reporting operator's own approval_policy.
+  assert.match(section, /Unattended, a seat that asks is a seat that stalls/)
+  assert.match(section, /stops wherever its CLI's\s+permission configuration asks/)
+  assert.match(section, /Codex's defaults auto-approve/)
+  assert.ok(!/asks before every shell command|Codex asks by default/.test(section), 'no default-asks claim')
+  assert.match(section, /--operator agent each ask is a\s+pause/)
+  // The remedy persists, and a reader following the help must be told so where it is named.
+  assert.match(section, /both WRITE "permissions": "bypass" into\s+\.conclave\/config\.json for this run and future ones/)
+
+  // The remedy it names must be one the flag ACCEPTS. The issue's own suggestion was
+  // `--bypass advisor`, and `advisor` is not an agent: the flag would leave it as a bare token
+  // and the goal would be "advisor". Every `--bypass <x>` in the section is checked against
+  // the values the flag takes, so the help cannot recommend a spelling that does not work.
+  const remedies = [...section.matchAll(/--bypass (\w+)/g)].map((m) => m[1]!)
+  assert.ok(remedies.includes('codex'), 'the Codex remedy must be spelled out')
+  assert.ok(remedies.includes('claude'), 'and the Claude one')
+  const accepted = FLAG_SURFACE.session.optionalValues?.['bypass'] ?? []
+  for (const r of remedies) {
+    assert.ok(accepted.includes(r), `--help recommends --bypass ${r}, which --bypass does not accept`)
+  }
+})
+
 test('both front-ends get Codex to trust the hooks they register', () => {
   // Registration is not enough -- Codex silently executes nothing in a directory it does not
   // trust -- and `relay` registered the sidecar, never trusted it, and never even checked.

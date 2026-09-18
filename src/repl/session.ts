@@ -1246,6 +1246,47 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     write(yellow(`  permission prompts bypassed for ${bypassing.join(' and ')} — per ${CONFIG_RELATIVE}`))
   }
 
+  // The inverse, and only when a machine is driving (#316). A seat whose configuration asks is
+  // unremarkable at a console: the person reads the prompt and answers it. Under `--operator
+  // agent` the same prompt is a pause held open until a poller notices, and the first one on
+  // the run that filed #316 went unanswered for 29 minutes of a 45-minute ceiling -- for
+  // `cat`. The remedy existed; the operator did not know it was needed. Said here, where the
+  // banner would have said the opposite.
+  //
+  // WORDED AS A POSSIBILITY, because that is all this can observe. The issue said Codex asks
+  // before every shell command by default, and this repository has measured otherwise: with
+  // default settings Codex auto-approved an out-of-workspace write and no dialog appeared, which
+  // is why `CODEX_PROMPT_ON_APPROVAL_ARGS` exists (`src/registry/builtin.ts`). What stalled
+  // the reporting run was its own `approval_policy`, most likely in `~/.codex/config.toml`.
+  // Reading that effective policy here is not cheap or reliable -- user TOML, profiles and
+  // per-seat `-c` overrides all compose -- so the notice fires on the combination that CAN
+  // stall regardless of cause: an agent operator, a Codex seat, no bypass.
+  //
+  // Codex only. OpenCode's HTTP adapter acts without prompting, Kimi's `--print` auto-approves,
+  // and Claude's effective mode is whatever this machine's settings say -- the help describes
+  // that conditionally; a launch line about it would be a guess. One line for every such seat,
+  // like the banner, and it says what `--bypass codex` WRITES: a permission mode into
+  // `.conclave/config.json` that outlives this run. A remedy that reads like a per-run flag
+  // would be the next surprise.
+  if (opts.operator === 'agent' && permissionModeFor(projectConfig, 'codex') !== 'bypass') {
+    const mayPause = [
+      opts.lead === 'codex' ? `advisor (${opts.lead})` : '',
+      ...[...new Set(implementerAgents)].map((a) => (a === 'codex' ? `implementer (${a})` : '')),
+      reviewerSpec?.agent === 'codex' ? `reviewer (${reviewerSpec.agent})` : '',
+    ].filter(Boolean)
+    if (mayPause.length > 0) {
+      write(
+        yellow(
+          `  ${mayPause.join(' and ')} may pause under --operator agent: a Codex seat that is not ` +
+            `bypassed stops wherever its own approval configuration asks, and each such pause waits ` +
+            `for the driver to answer. --bypass codex prevents that, and writes "permissions": ` +
+            `"bypass" into ${CONFIG_RELATIVE} for this run and future ones; Codex's own approval ` +
+            `config is the other lever`,
+        ),
+      )
+    }
+  }
+
   // By SEAT id, not by agent name, because that is what an event carries. The banner above
   // names agents because a bypass is configured per agent; the activity line has a participant
   // and has to answer "can this seat be waiting?" without re-deriving the mapping each time.
@@ -2657,7 +2698,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
       // FALSIFIER, stated because it is the strongest argument against this shape: the
       // console has no general "trailing text is a message" rule and does not gain one here.
       // `/rotate <text>` and `/abort <text>` consume their text as a REASON
-      // (`src/repl/session.ts:2710`, `src/repl/session.ts:2743`) and `/pause`, `/queue`, `/audit` ignore
+      // (`src/repl/session.ts:2751`, `src/repl/session.ts:2784`) and `/pause`, `/queue`, `/audit` ignore
       // whatever follows them. So an operator who learns this from `/continue` and carries
       // it to `/pause I'll be back` still loses the sentence. That inconsistency is not
       // repaired by making `/continue` a third behaviour; it is narrowed by it, and the

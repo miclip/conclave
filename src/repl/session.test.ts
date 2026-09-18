@@ -539,6 +539,122 @@ test('a bypass config reaches the launch, and the console says so', async (t) =>
   assert.match(out.text(), /permission prompts bypassed for advisor \(codex\) and implementer \(claude\)/)
 })
 
+test('#316 an agent operator is told a non-bypassed Codex seat may pause, and what the remedy writes', async (t) => {
+  // The run that filed #316 drove `--operator agent` with a Codex advisor whose own
+  // approval_policy asked, and its first read-only `cat` waited 29 minutes for a poller to
+  // notice. The remedy already existed; the operator did not know it was needed.
+  const dir = repo(t)
+  // Wrapped, because "launched with no arguments" is `args: undefined` and has to be told
+  // apart from "never launched", which would leave the key absent.
+  const launched: Record<string, { args: string[] | undefined }> = {}
+  const out = collect()
+  const code = await runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'claude',
+    operator: 'agent',
+    rounds: 2,
+    checks: [],
+    registry: registryOf(
+      {
+        codex: [slow('advisor', 'codex', ['DONE'])],
+        claude: [slow('impl', 'claude', ['ack'])],
+      },
+      (agent, args) => {
+        launched[agent] = { args }
+      },
+    ),
+    input: script([]),
+    output: out.stream,
+  })
+  assert.equal(code, 0)
+  const text = out.text()
+  const lines = text.split('\n').filter((l) => /may pause under --operator agent/.test(l))
+  assert.equal(lines.length, 1, `one notice, aggregated, not one per seat:\n${text}`)
+  const notice = lines[0]!
+  // The seat the prompt would name, and a remedy the flag ACCEPTS: `--bypass` takes an agent,
+  // not a role, so `--bypass advisor` would have been a goal token rather than a remedy.
+  assert.match(notice, /^\s*advisor \(codex\) may pause/)
+  assert.match(notice, /--bypass codex/)
+  // Conditional, because that is all the launch can observe. This repository measured Codex's
+  // DEFAULTS auto-approving (`CODEX_PROMPT_ON_APPROVAL_ARGS` exists to force a dialog), so a
+  // notice that said Codex asks by default would assert what the suite has shown false.
+  assert.match(notice, /wherever its own approval configuration asks/)
+  assert.ok(!/by default|before every|always asks/.test(notice), `no default-asks claim: ${notice}`)
+  // The remedy is not a per-run flag, and a notice recommending it must not read like one.
+  assert.match(notice, /writes "permissions": "bypass" into \.conclave\/config\.json for this run and future ones/)
+  // Codex-specific: Claude's effective mode is whatever the machine's settings say, and the
+  // help describes that conditionally. A launch line about it would be a guess.
+  assert.ok(!/implementer \(claude\)/.test(notice), `Codex only: ${notice}`)
+  // A warning, not a change of policy: the seats launch exactly as they did before, with no
+  // sandbox or approval flag added on the operator's behalf. That was 0.5.56, and it stopped
+  // Codex starting.
+  assert.deepEqual(launched['codex'], { args: undefined })
+  assert.deepEqual(launched['claude'], { args: undefined })
+})
+
+test('#316 two Codex seats share one notice line', async (t) => {
+  const dir = repo(t)
+  const out = collect()
+  const code = await runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'codex',
+    operator: 'agent',
+    rounds: 2,
+    checks: [],
+    registry: registryOf({
+      codex: [slow('advisor', 'codex', ['DONE']), slow('impl', 'codex', ['ack'])],
+    }),
+    input: script([]),
+    output: out.stream,
+  })
+  assert.equal(code, 0)
+  const lines = out.text().split('\n').filter((l) => /may pause under --operator agent/.test(l))
+  assert.equal(lines.length, 1, `aggregated, like the bypass banner:\n${out.text()}`)
+  assert.match(lines[0]!, /advisor \(codex\) and implementer \(codex\) may pause/)
+})
+
+test('#316 the notice is silent for a bypassed Codex seat, and for a human operator', async (t) => {
+  // Scoped bypass: Codex is bypassed, Claude is not. A notice here would contradict the banner
+  // that says Codex's prompts are bypassed, and Claude gets no launch line either way.
+  const dir = repo(t)
+  mkdirSync(join(dir, '.conclave'), { recursive: true })
+  writeFileSync(join(dir, '.conclave', 'config.json'), '{"agents":{"codex":{"permissions":"bypass"}}}')
+
+  const run = async (operator: 'human' | 'agent', config?: string) => {
+    if (config !== undefined) writeFileSync(join(dir, '.conclave', 'config.json'), config)
+    const out = collect()
+    const code = await runSession({
+      cwd: dir,
+      goal: 'Keep the work moving.',
+      lead: 'codex',
+      implementer: 'claude',
+      operator,
+      rounds: 2,
+      checks: [],
+      registry: registryOf({
+        codex: [slow('advisor', 'codex', ['DONE'])],
+        claude: [slow('impl', 'claude', ['ack'])],
+      }),
+      input: script([]),
+      output: out.stream,
+    })
+    assert.equal(code, 0)
+    return out.text()
+  }
+
+  const bypassed = await run('agent')
+  assert.match(bypassed, /permission prompts bypassed for advisor \(codex\)/, 'the banner still names the bypass')
+  assert.ok(!/may pause/.test(bypassed), `a bypassed seat gets no notice:\n${bypassed}`)
+
+  // At a console the person answers the prompt. Nothing to warn about, even with no bypass.
+  const human = await run('human', '{}')
+  assert.ok(!/may pause/.test(human), `a human operator is not warned:\n${human}`)
+})
+
 test('#177 a bypassed seat reports the permission as taken, not as one to answer', async (t) => {
   // The banner says prompts are bypassed and then the log asked for a decision anyway. Nothing
   // was blocked -- the seat carried on within seconds -- so it was a contradiction rather than
