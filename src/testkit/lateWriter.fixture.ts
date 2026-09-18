@@ -28,7 +28,6 @@
  */
 
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
-import { randomBytes } from 'node:crypto'
 import { join } from 'node:path'
 
 const CHAIN_DEPTH = 300
@@ -45,7 +44,13 @@ if (!dir) {
 const NAMES = 'abcdefghijklmnopqrstuvwxyz0123456789'
 process.chdir(dir)
 for (let level = 0; level < CHAIN_DEPTH; level++) {
-  const name = NAMES[randomBytes(1)[0]! % NAMES.length]!
+  // `Math.random`, deliberately, and not `randomBytes`. What the comment above asks of this
+  // draw is VARIETY -- a different interleaving of siblings and chain at each level, so the
+  // unwind is a sum of independent amounts. It asks nothing of unpredictability, and nothing
+  // here is a secret. Cryptographic bytes taken modulo 36 are also BIASED, because 256 is not
+  // a multiple of 36, which CodeQL flags as `js/biased-cryptographic-random` -- correctly, as
+  // a misuse: the bias is harmless here and the crypto was never the right tool.
+  const name = NAMES[Math.floor(Math.random() * NAMES.length)]!
   mkdirSync(name)
   for (let s = 0; s < SIBLINGS_PER_LEVEL; s++) writeFileSync(`s${s}`, '')
   process.chdir(name)
