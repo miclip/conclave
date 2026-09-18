@@ -15,7 +15,7 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync, spawnSync } from 'node:child_process'
-import { mkdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
+import { lstatSync, mkdirSync, readFileSync, realpathSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -134,6 +134,15 @@ test('a checkout reached through a symlink still reports its own commit', (t) =>
   const dir = checkout(t, '7.8.9')
   const link = join(tmpdir(), `conclave-version-link-${Date.now()}`)
   symlinkSync(dir, link)
+  // The link lives in `tmpdir()` itself, outside anything `tempDir` issued, so nothing else
+  // removes it: this test once left one dangling per run, 356 of them on one machine (#331).
+  t.after(() => unlinkSync(link))
+  // Registered after the unlink, so it runs after it. `lstatSync`, not `existsSync`: once
+  // `dir` has gone the link dangles, and `existsSync` follows it and says false for a link
+  // that is still there, which would make this a check that could not fail.
+  t.after(() => {
+    assert.throws(() => lstatSync(link), { code: 'ENOENT' }, `${link} survived cleanup`)
+  })
   const v = versionIn(link)
 
   const commit = execFileSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: dir, encoding: 'utf8' }).trim()

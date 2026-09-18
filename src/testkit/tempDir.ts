@@ -64,12 +64,18 @@ export function canonicalTempTarget(dir: string, root: string): string {
 /**
  * How hard cleanup tries before a failure is real (#222).
  *
- * Five linear-backoff retries is roughly a second in total, which is far longer than a process
- * takes to finish flushing and far shorter than anyone waits for a suite. The number is not
+ * Retries, not a delay. Node's `rmSync` on POSIX truncates `retryDelay` to whole seconds
+ * (#328), so any sub-second value is a sleep of zero and the retries run back-to-back; the
+ * smallest delay it honours costs a second per attempt, which is too slow for a suite that
+ * cleans up 150 directories. Measured on 24.0.2 and 24.13.1 against the staged race in
+ * `tempDir.test.ts`: a delay of 0 and of 20ms both finish in about 50ms, and 1000ms adds a
+ * second. What covers the race is that each retry re-walks the tree and removes whatever
+ * landed since the last listing, so a child that finishes its burst before the fifth walk is
+ * covered; `retryDelay` is left at Node's default because no value under a second changes
+ * anything and the first that does is not worth paying. The number of retries is not
  * load-bearing: what matters is that the first ENOTEMPTY is not the answer.
  */
 const CLEANUP_RETRIES = 5
-const CLEANUP_RETRY_MS = 20
 
 /**
  * Remove a directory this module issued. Private, and both arguments come from the closure
@@ -105,11 +111,11 @@ function cleanup(issued: string, root: string): void {
       // RETRIED, because `force` does not cover this and cannot (#222). It suppresses ENOENT;
       // ENOTEMPTY means the directory gained an entry BETWEEN the walk that listed it and the
       // rmdir that removed it, which is a child still writing on its way out. Node retries
-      // exactly this set -- EBUSY, EMFILE, ENFILE, ENOTEMPTY, EPERM -- with a linear backoff,
-      // so the standard mechanism is the whole fix and a hand-rolled loop would only be a
-      // second thing to get wrong.
+      // exactly this set -- EBUSY, EMFILE, ENFILE, ENOTEMPTY, EPERM -- by walking the tree
+      // again, immediately (see CLEANUP_RETRIES for why there is no delay), so the standard
+      // mechanism is the whole fix and a hand-rolled loop would only be a second thing to
+      // get wrong.
       maxRetries: CLEANUP_RETRIES,
-      retryDelay: CLEANUP_RETRY_MS,
     })
   } catch (err) {
     // NAMED AS CLEANUP. Thrown bare from inside `t.after`, an ENOTEMPTY is attributed to the
