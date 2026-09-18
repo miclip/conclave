@@ -25,7 +25,7 @@
  */
 
 import { strict as assert } from 'node:assert'
-import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { execFileSync as run } from 'node:child_process'
 import { delimiter, join } from 'node:path'
 import { PassThrough, Writable } from 'node:stream'
@@ -641,13 +641,20 @@ test('#194 a command that names a relative path depends on where it is resolved 
   assert.equal(commandDependsOnCwd('bin\\agent', 'linux'), false, 'a backslash is a filename character on POSIX')
 })
 
-test('#194 the same relative command passes in one directory and is refused in another', () => {
+test('#194 the same relative command passes in one directory and is refused in another', (t) => {
   // THE DEFECT, reduced to the two calls the relay makes. A worktree is cut from a COMMIT, so a
   // tracked `./bin/agent` exists in both directories and the preflight accidentally agrees with
   // exec. An UNTRACKED one -- a locally built wrapper, a gitignored shim -- exists only where
   // the operator built it, and the check that ran in the run root said the seat could start.
-  const root = tempDir({ after: () => {} } as unknown as TestContext, 'root')
-  const worktree = tempDir({ after: () => {} } as unknown as TestContext, 'worktree')
+  const root = tempDir(t, 'root')
+  const worktree = tempDir(t, 'worktree')
+  // Registered AFTER the two `tempDir` calls, so it runs after their cleanups (#330): this test
+  // once handed `tempDir` a fake context whose `after` swallowed the registration, and every
+  // run of the suite left this pair behind -- 310 of each on one machine.
+  t.after(() => {
+    assert.equal(existsSync(root), false, `${root} survived cleanup`)
+    assert.equal(existsSync(worktree), false, `${worktree} survived cleanup`)
+  })
   mkdirSync(join(root, 'bin'), { recursive: true })
   writeFileSync(join(root, 'bin', 'agent'), '#!/bin/sh\nexit 0\n')
   chmodSync(join(root, 'bin', 'agent'), 0o755)
