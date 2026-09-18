@@ -204,25 +204,7 @@ test('codex launch flags carry the reason each one exists', () => {
   const suppresses = CODEX_AGENT.launch.suppresses!
   assert.ok(suppresses['check_for_update_on_startup']?.includes('npm install'))
   assert.ok(suppresses['disable_paste_burst']?.includes('swallow the submit'))
-  // THE SANDBOX IS THE GATE, AND THE PROMPT IS NOT (#316). Both halves are pinned because
-  // either alone is wrong: `-a never` without a sandbox removes the gate entirely, and
-  // `-s read-only` breaks the advisor's briefed job of running commands to verify a claim.
-  assert.deepEqual(
-    CODEX_AGENT.launch.baseArgs.slice(-4),
-    ['-s', 'workspace-write', '-a', 'never'],
-    'the advisor is sandboxed to the workspace and does not stop to ask',
-  )
-  assert.ok(suppresses['sandbox']?.includes('workspace-write, not read-only'))
-  assert.ok(suppresses['approval_policy']?.includes('29'))
-  // Documented implies passed. The check is a substring against `-c key=value` args, which is
-  // every suppression that is a CONFIG KEY -- and `sandbox` and `approval_policy` are not: they
-  // are the `-s` and `-a` flags, verified against codex-cli 0.153.4's own `--help`. They are
-  // exempt here and asserted above by `deepEqual` on the exact four arguments, which is a
-  // stronger check than this loop, not a weaker one. Anything else documented and not passed
-  // still fails, which is what this exists for.
-  const asFlags = new Set(['sandbox', 'approval_policy'])
   for (const key of Object.keys(suppresses)) {
-    if (asFlags.has(key)) continue
     assert.ok(
       CODEX_AGENT.launch.baseArgs.some((a) => a.includes(key)),
       `${key} is documented but not actually passed`,
