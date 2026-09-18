@@ -528,6 +528,22 @@ Commands:
                                    Commands arrive on stdin as lines, and conclave status
                                    reports the pause with its evidence and options as data,
                                    so nothing has to be scraped off the console.
+                                   Unattended, a seat that asks is a seat that stalls. A
+                                   seat that is not bypassed stops wherever its CLI's
+                                   permission configuration asks it to:
+                                   for Codex that is approval_policy, most likely in
+                                   ~/.codex/config.toml (Codex's defaults auto-approve; a
+                                   policy that asks is the operator's own); for Claude it is
+                                   the permission mode, and "default" asks before edits. At
+                                   a console you answer; under --operator agent each ask is a
+                                   pause held until the driving agent notices it, with the
+                                   ceiling clock running (#316). --bypass codex prevents it
+                                   for a Codex seat and --bypass claude for a Claude one, and
+                                   both WRITE "permissions": "bypass" into
+                                   .conclave/config.json for this run and future ones; the
+                                   CLI's own approval config is the other lever. The launch
+                                   warns when it starts an agent operator with a Codex seat
+                                   that is not bypassed.
                                    Refuses to start outside a git repository unless --force,
                                    as relay does: attribution and rotation both diff the
                                    tree, and so does undo. More than one seat additionally
