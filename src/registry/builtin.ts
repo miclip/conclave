@@ -212,6 +212,10 @@ export const CODEX_AGENT: AgentDefinition = {
     baseArgs: [
       '-c', 'check_for_update_on_startup=false',
       '-c', 'disable_paste_burst=true',
+      // A SANDBOX RATHER THAN A PROMPT (#316). Verified against codex-cli 0.153.4:
+      // `-s <read-only|workspace-write|danger-full-access>` and `-a <on-request|never|...>`.
+      '-s', 'workspace-write',
+      '-a', 'never',
     ],
     suppresses: {
       check_for_update_on_startup:
@@ -220,6 +224,20 @@ export const CODEX_AGENT: AgentDefinition = {
       disable_paste_burst:
         'Paste-burst coalescing can swallow the submit when text and Enter arrive close ' +
         'together.',
+      sandbox:
+        'workspace-write, not read-only. The advisor is briefed to "read files and run ' +
+        'commands yourself to check any claim it makes", and verifying a claim writes: ' +
+        '`npm test` alone leaves test-results.xml. A read-only sandbox would not stop the ' +
+        'prompts, it would turn them into failures, which is worse -- a stall an operator ' +
+        'can see becomes a check that silently cannot run. workspace-write bounds it to the ' +
+        'directory the implementer already writes to and the advisor already shares.',
+      approval_policy:
+        'never, because conclave surfaces each of codex\'s approval prompts as a pause the ' +
+        'operator must answer, and its default policy asks before every command -- `pwd` and ' +
+        '`cat` included. Under --operator agent one such prompt went unanswered for 29 ' +
+        'minutes and burned most of a 45-minute ceiling before the first instruction was ' +
+        'issued (#315, #316). What gates the seat is the sandbox above, which is enforcement ' +
+        'rather than a question nobody is at the console to answer.',
     },
     deploymentState: [
       'Directory trust: `[projects."<cwd>"] trust_level` in ~/.codex/config.toml.',
