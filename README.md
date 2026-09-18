@@ -63,7 +63,7 @@ conclave config check       # is it present, current, and trusted
 The registration invokes `conclave` from PATH, so it does not name a release directory and
 does not go stale when you upgrade. A Claude seat inside a run does not use it: the seat's
 hooks come from the generated `--settings`, pinned to the run's release, and the project
-registration stands aside for that seat so no event is delivered twice. A registration written before v0.5.58 does name one;
+registration stands aside for that seat so no event is delivered twice. A registration written before v0.5.59 does name one;
 `config check` reports it as `STALE` and `config install` replaces it.
 
 `config check` answers for the directory it is run from. To ask which projects are affected:
@@ -90,7 +90,7 @@ later releases render the same bytes.
 Node 24 or newer.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/miclip/conclave/v0.5.58/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/miclip/conclave/v0.5.59/scripts/install.sh | sh
 ```
 
 Clones the repository into `~/.local/share/conclave`, checks the newest tagged release out
