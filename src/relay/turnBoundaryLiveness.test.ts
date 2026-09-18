@@ -250,9 +250,17 @@ test('a reading that never arrives is dropped at the ceiling and the turn procee
   assert.equal(started, 3, 'the reading was asked for at every boundary')
   assert.deepEqual(boundaryNotes(log), [], 'nothing measured, nothing recorded')
   assert.equal(reason, 'done')
-  // Three boundaries at 40ms each is well inside this; three at the 5s default would not be,
-  // and an unbounded wait would not return at all.
-  assert.ok(elapsed < 3_000, `the run took ${elapsed}ms against three 40ms ceilings`)
+  // WHAT THIS SEPARATES, and what it must not try to. Three boundaries at the 5s DEFAULT would
+  // take fifteen seconds; unbounded they would never return. Either is far outside the test's
+  // own 10s timeout, so the bound here only has to sit between "the injected ceiling was used"
+  // and "the default was", and everything below fifteen seconds does that.
+  //
+  // It used to assert `< 3_000`, which is a claim about the HARNESS rather than the ceiling: on
+  // Node 24.0.2 under `--test-concurrency=4` the same run took 3495ms and failed, while passing
+  // three times out of three alone on that same Node. The overhead was the machine's; the
+  // ceiling had worked. A bound sized on an idle laptop is the defect #294 swept out of this
+  // suite, and this is the same one written fresh.
+  assert.ok(elapsed < 12_000, `the run took ${elapsed}ms, which is the 5s default rather than the 40ms ceiling`)
 })
 
 test('the ceiling sits above the longest reading the real sampler can take', () => {

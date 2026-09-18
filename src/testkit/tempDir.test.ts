@@ -41,23 +41,42 @@ test('nothing exported can delete a caller-supplied path', () => {
   ])
 })
 
+/**
+ * Every "gone once its test finished" claim below is made from the PARENT's `t.after`, not from
+ * the line after `await t.test(...)`. Node 24.0.2 -- the floor CI runs -- made `t.test()` return
+ * `undefined` (upstream #56664; later 24.x restored the promise), so on that runtime the await is
+ * a no-op and the child's cleanup has not run yet when the next line executes. A parent's `after`
+ * hooks run once its subtests have completed and run their own hooks, on both semantics, so that
+ * is the one place the claim is true everywhere. The `await` stays because it is still right
+ * where it means something; it is just not what the assertion rests on.
+ *
+ * Each hook also checks the child actually ran: with `taken` still `''`, `existsSync('')` is
+ * `false` and the test would pass having tested nothing. That is exactly how the async twin
+ * passed on 24.0.2 before this was written.
+ */
 test('the directory is deleted when the test that took it finishes', async (t) => {
   let taken = ''
+  t.after(() => {
+    assert.notEqual(taken, '', 'the child test ran')
+    assert.equal(existsSync(taken), false, `${taken} should be gone once its test finished`)
+  })
   await t.test('inner', (inner) => {
     taken = tempDir(inner, 'ok')
     writeFileSync(join(taken, 'file.txt'), 'contents')
     assert.ok(existsSync(taken), 'the directory should exist while the test is running')
   })
-  assert.equal(existsSync(taken), false, `${taken} should be gone once its test finished`)
 })
 
 test('the async twin cleans up the same way', async (t) => {
   let taken = ''
+  t.after(() => {
+    assert.notEqual(taken, '', 'the child test ran')
+    assert.equal(existsSync(taken), false, `${taken} should be gone once its test finished`)
+  })
   await t.test('inner', async (inner) => {
     taken = await tempDirAsync(inner, 'ok-async')
     assert.ok(existsSync(taken))
   })
-  assert.equal(existsSync(taken), false, `${taken} should be gone once its test finished`)
 })
 
 test('the name carries the prefix and the label, under the canonical temp root', (t) => {
@@ -127,29 +146,37 @@ test('a test that deleted its own directory is not an error', async (t) => {
  * would have ACCEPTED, so a resolving cleanup really would destroy it.
  */
 test('an issued path replaced by a symlink is unlinked, and its target survives', async (t) => {
-  const keep = tempDir(t, 'keep')
+  let keep = ''
+  let issued = ''
+  // Registered BEFORE `keep` is taken. `after` hooks run in registration order, and `tempDir`
+  // registers `keep`'s own deletion; this has to look at the evidence while it is still there.
+  t.after(() => {
+    assert.notEqual(issued, '', 'the child test ran')
+    assert.ok(existsSync(join(keep, 'evidence.txt')), 'the link target must not have been followed')
+    assert.throws(() => lstatSync(issued), { code: 'ENOENT' }, 'the link itself should be gone')
+  })
+
+  keep = tempDir(t, 'keep')
   writeFileSync(join(keep, 'evidence.txt'), 'still here')
 
-  let issued = ''
   await t.test('inner', (inner) => {
     issued = tempDir(inner, 'swapped')
     rmdirSync(issued)
     symlinkSync(keep, issued)
   })
-
-  assert.ok(existsSync(join(keep, 'evidence.txt')), 'the link target must not have been followed')
-  assert.throws(() => lstatSync(issued), { code: 'ENOENT' }, 'the link itself should be gone')
 })
 
 test('an issued path replaced by a dangling symlink does not leak', async (t) => {
   let issued = ''
+  t.after(() => {
+    assert.notEqual(issued, '', 'the child test ran')
+    assert.throws(() => lstatSync(issued), { code: 'ENOENT' }, 'the dangling link should be gone')
+  })
   await t.test('inner', (inner) => {
     issued = tempDir(inner, 'dangling')
     rmdirSync(issued)
     symlinkSync(join(issued, 'never-existed'), issued)
   })
-
-  assert.throws(() => lstatSync(issued), { code: 'ENOENT' }, 'the dangling link should be gone')
 })
 
 test('the gate refuses anything that is not under the root it is given', (t) => {
@@ -222,6 +249,11 @@ test('the temp root is pinned at creation, so a test may move TMPDIR', async (t)
   })
 
   let taken = ''
+  // After the restore above, in registration order; the claim does not depend on TMPDIR either way.
+  t.after(() => {
+    assert.notEqual(taken, '', 'the child test ran')
+    assert.equal(existsSync(taken), false, `${taken} should be gone despite TMPDIR having moved`)
+  })
   await t.test('inner', (inner) => {
     taken = tempDir(inner, 'pinned')
     const elsewhere = join(taken, 'nested')
@@ -229,8 +261,6 @@ test('the temp root is pinned at creation, so a test may move TMPDIR', async (t)
     process.env.TMPDIR = elsewhere
     assert.notEqual(realpathSync(tmpdir()), ROOT, 'the move should have taken effect')
   })
-
-  assert.equal(existsSync(taken), false, `${taken} should be gone despite TMPDIR having moved`)
 })
 
 /**
