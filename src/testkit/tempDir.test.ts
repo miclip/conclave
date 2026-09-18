@@ -9,7 +9,7 @@
  */
 
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import { existsSync, lstatSync, mkdirSync, realpathSync, rmdirSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -264,23 +264,95 @@ test('the temp root is pinned at creation, so a test may move TMPDIR', async (t)
 })
 
 /**
- * NOT TESTED HERE, and the gap is deliberate rather than an omission (#222).
+ * The #222 race, staged (#327). Cleanup's recursive walk lists the directory, unlinks what it
+ * found, and calls `rmdir`; a child that writes a file between the listing and the `rmdir`
+ * earns an ENOTEMPTY, and `maxRetries: 0` would make that the end of it. The fixture arranges
+ * to be that child on purpose -- how is documented at the top of it -- and this test only has
+ * to line the two up.
  *
- * The failure is a race between the recursive walk and a child process still writing, and it
- * cannot be staged from inside the suite: `node:test` runs `after` hooks LIFO, so any hook that
- * stops the child runs BEFORE the cleanup registered by `tempDir`, and the race never happens.
- * A first attempt at this test passed with `maxRetries` mutated to 0 -- it proved nothing, which
- * is the one outcome worse than having no test.
+ * The lining up is the hook order. `tempDir` registers cleanup FIRST; the hook below, which
+ * waits for the child, is registered second and so runs second, after cleanup has already
+ * raced the still-live child. (A comment here once claimed the opposite, that `after` hooks
+ * ran LIFO and the race was therefore unstageable. It was wrong, and the test two below pins
+ * the order it actually is.)
  *
- * What the fix rests on instead: Node documents `rmSync` retrying exactly EBUSY, EMFILE, ENFILE,
- * ENOTEMPTY and EPERM under `recursive`, and the CI failure in #222 is the observation. The test
- * below pins the part that IS reachable -- that the options do not break ordinary cleanup.
+ * What passing proves: cleanup did not throw, so the retry covered the ENOTEMPTY -- with
+ * `maxRetries` mutated to 0 this fails on both Node versions CI runs, every time. The `WROTE`
+ * check is what keeps it from being vacuous: a child that wrote nothing before the directory
+ * went never overlapped the walk, and a green from that would be a green for nothing -- so
+ * that outcome is reported as a SKIP with the reason, not as a pass.
+ *
+ * What it does not prove: that the retry is well-timed. Node's `rmSync` on POSIX truncates
+ * `retryDelay` to whole seconds (#328), so the five retries here run back-to-back; the test
+ * passes because the child's burst is over before the walk reaches the top, which the chain's
+ * depth arranges. A slower child on a loaded runner narrows that margin -- measured at
+ * 25ms+ on APFS and 10ms+ on ext4 against a burst of about 1ms.
  */
+test('#222 cleanup outlives a child still writing when the walk reaches the top', async (t) => {
+  const dir = tempDir(t, 'late-writer')
 
+  let stdout = ''
+  let stderr = ''
+  const child = spawn(process.execPath, [join(HERE, 'lateWriter.fixture.ts'), dir], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  child.stdout.on('data', (chunk: Buffer) => (stdout += chunk))
+  child.stderr.on('data', (chunk: Buffer) => (stderr += chunk))
+  const closed = new Promise<number | null>((resolve) => child.on('close', resolve))
+
+  // Registered AFTER cleanup, so it runs after cleanup: by the time this looks, the walk and
+  // the child have already met.
+  t.after(async () => {
+    const code = await closed
+    const report = /^WROTE (\d+)( then (\w+))?$/m.exec(stdout)
+    assert.ok(report, `the child never reported. exit ${code}; stdout:\n${stdout}\nstderr:\n${stderr}`)
+    assert.equal(existsSync(dir), false, `${dir} survived cleanup`)
+    const [line, written, , stoppedBy] = report
+    if (written === '0' && stoppedBy) {
+      // The walk finished before the child's first write landed. Nothing went wrong, and
+      // nothing was proved either: a pass here would be a pass for a race that never ran.
+      // Seen on tmpfs, where the unwind is a millisecond and one scheduling hiccup is enough.
+      t.skip(`the walk finished first (${line.trim()}): the race was not staged this run`)
+      return
+    }
+    assert.ok(Number(written) >= 1, `the child wrote nothing (${line.trim()}), so the race was not staged`)
+  })
+
+  await new Promise<void>((resolve, reject) => {
+    const check = () => {
+      if (stdout.includes('LISTENING\n')) resolve()
+    }
+    child.stdout.on('data', check)
+    child.on('close', (code) => reject(new Error(`the fixture exited (${code}) before it was listening:\n${stderr}`)))
+    check()
+  })
+})
+
+/**
+ * The part that WAS reachable before the race was, kept because it is cheap and independent:
+ * the retry options do not break ordinary cleanup of a directory with something in it.
+ */
 test('#222 a populated directory is still removed, retries and all', (t) => {
   const dir = tempDir(t, 'populated')
   mkdirSync(join(dir, 'nested', 'deeper'), { recursive: true })
   writeFileSync(join(dir, 'nested', 'deeper', 'file.txt'), 'content')
   // Cleanup runs in t.after; a throw there fails this test, so passing IS the assertion.
   assert.ok(existsSync(join(dir, 'nested', 'deeper', 'file.txt')))
+})
+
+/**
+ * What the symlink test, the TMPDIR test and the #222 test above all rest on, pinned where it
+ * can fail (#327): `after` hooks run in the order they were registered. A comment in this file
+ * said LIFO, and a test was written off on the strength of it. Node's `test.md` for 24.13.1
+ * does not state the order either way, which is exactly why this is a test and not a comment.
+ */
+test('`after` hooks run in registration order', (t) => {
+  const ran: string[] = []
+  t.after(() => {
+    ran.push('registered first')
+  })
+  t.after(() => {
+    ran.push('registered second')
+    assert.deepEqual(ran, ['registered first', 'registered second'])
+  })
 })
