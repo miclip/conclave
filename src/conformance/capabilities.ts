@@ -105,26 +105,13 @@ export const CODEX_CAPABILITIES: AdapterCapabilities = {
 }
 
 /**
- * opencode 1.18.15, via `run --format json`.
- *
- * The first adapter whose terminal signal is announced by the child in a documented output
- * mode rather than recovered from a hook we had to register or a transcript we had to
- * parse. `step_finish` carries `reason: "stop"` on the final step and `reason: "tool-calls"`
- * on every intermediate one; a real 3-step, 2-tool, file-writing turn is captured in
- * `spikes/opencode/fixtures/edit-turn.ndjson`.
- *
- * `permission_refused` is `unsupported`, which is a stronger statement than the
- * `reasoned_but_unverified` used elsewhere and is meant to be. `run` has no permission
- * dialog at all: approval is settled by configuration before the process starts, so there
- * is no request to refuse and `decidePermission` throws rather than pretending. This is a
- * genuine capability gap rather than an untested claim, and grading it as merely unverified
- * would imply a fixture could someday close it.
- */
-/**
  * The same agent over its HTTP API rather than one process per turn (#217).
  *
- * A SECOND DECLARATION FOR ONE AGENT, because these are claims about a TRANSPORT and the two
- * transports answer differently. Sharing one would make every answer below true of neither.
+ * THESE ARE CLAIMS ABOUT A TRANSPORT, not about an agent. The same agent was also driven one
+ * process per turn, and that seat answered differently enough that the two could not share a
+ * declaration -- every answer below would have been true of neither. That entry was removed in
+ * df906b7 once this transport replaced it, so this is now the only opencode declaration and the
+ * grades below describe the HTTP API alone.
  *
  * Everything here is graded `inferred_from_documented_event` and that is deliberate. Each event
  * named is declared in the installed bundle AND was seen firing against a live 1.18.27 server

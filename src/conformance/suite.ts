@@ -303,7 +303,10 @@ function codexFixtureOutcomes(): Map<Outcome, FixtureEvidence> {
  * Simpler than the other two by a wide margin, and the simplicity is the finding rather
  * than a gap: there is no journal to correlate and no transcript to reconcile, because the
  * agent states its own terminal condition in the stream. A `step_finish` carrying
- * `reason: "stop"` IS the completion record.
+ * `reason: "stop"` IS the completion record; every intermediate step carries
+ * `reason: "tool-calls"` instead, which is why keying on `stop` finds the last step rather
+ * than all of them. (Kept from the run-per-turn docblock removed in #339, which was the only
+ * record of the discriminator this reader depends on.)
  *
  * Only `completed` can be witnessed this way today. The other outcomes need a run that was
  * killed, timed out or lost, and none has been captured -- so they stay claimed at
