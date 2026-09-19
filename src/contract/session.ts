@@ -679,4 +679,23 @@ export interface AdapterCapabilities {
   /** `run_invocation`: the agent has no per-turn id, so the adapter mints one. */
   turnKeySource: 'prompt_id' | 'turn_id' | 'run_invocation'
   outcomes: Record<Outcome, import('./outcome.ts').EvidenceLevel>
+  /**
+   * Upgrade recommendations a human has considered and declined, with the reason (#338).
+   *
+   * The suite never upgrades a claim on its own; finding a fixture produces a recommendation.
+   * This is the other half: the record that someone looked at that fixture and said no, so
+   * the recommendation stops being reported as live and the next reader does not have to
+   * re-derive the decision from a source comment.
+   *
+   * Each entry is pinned to the fixture it was decided against. A decline is a judgement
+   * about one recording, not a standing waiver: different evidence for the outcome is a live
+   * recommendation again, as if nothing had been declined; and a decline with nothing left
+   * to decline -- no fixture, or a claim already upgraded -- is stale, and fails until it is
+   * removed.
+   *
+   * `fixture` is the fixture's `where` as the suite reports it, verbatim; the decline covers
+   * that recording only. `why` is the reason the recording does not prove the claim, in
+   * enough detail that nobody has to re-derive it.
+   */
+  declinedUpgrades?: Partial<Record<Outcome, { fixture: string; why: string }>>
 }
