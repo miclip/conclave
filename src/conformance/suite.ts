@@ -15,6 +15,12 @@
  * It never upgrades a claim on its own. Finding evidence produces a recommendation,
  * because deciding that a fixture really demonstrates an outcome is a judgement about
  * the fixture, not a property of the file's existence.
+ *
+ * A recommendation that has been considered and turned down is recorded on the claim as a
+ * declined upgrade, pinned to the fixture it was decided against (#338). Declined ones are
+ * reported apart from live ones, so the live count means what it says. A different fixture
+ * is a live recommendation again -- the decision on file was about another recording -- and
+ * a decline with nothing left to decline is a failure until it is removed.
  */
 
 import { execFileSync } from 'node:child_process'
@@ -31,6 +37,9 @@ const ROOT = join(import.meta.dirname, '..', '..')
 const JOURNAL = join(ROOT, 'spikes', 'hooks', 'journal', 'hook-journal.ndjson')
 const RESULTS = join(ROOT, 'spikes', 'hooks', 'results.ndjson')
 
+/** One entry of `AdapterCapabilities.declinedUpgrades`: a recommendation considered and turned down. */
+type DeclinedUpgrade = NonNullable<NonNullable<AdapterCapabilities['declinedUpgrades']>[Outcome]>
+
 export interface FixtureEvidence {
   found: boolean
   where?: string | undefined
@@ -45,14 +54,26 @@ export interface ConformanceRow {
   outcome: Outcome
   claimed: EvidenceLevel
   fixture: FixtureEvidence
-  verdict: 'ok' | 'unsupported_claim' | 'upgrade_available' | 'contradiction'
+  verdict:
+    | 'ok'
+    | 'unsupported_claim'
+    | 'upgrade_available'
+    | 'upgrade_declined'
+    | 'stale_decline'
+    | 'contradiction'
   note?: string | undefined
+  /** Present on `upgrade_declined` rows: the decision, carried into the report with its reason. */
+  declined?: DeclinedUpgrade | undefined
 }
 
 export interface ConformanceReport {
   rows: ConformanceRow[]
+  /** `unsupported_claim`, `contradiction` and `stale_decline`: each needs a person to act. */
   failures: ConformanceRow[]
+  /** Live `upgrade_available` rows only. A declined one is not a recommendation. */
   recommendations: ConformanceRow[]
+  /** `upgrade_declined` rows: considered, turned down, reason attached. */
+  declined: ConformanceRow[]
 }
 
 /**
@@ -456,18 +477,81 @@ export function checkAdapter(caps: AdapterCapabilities): ConformanceRow[] {
         : 'a recording produces this; review the fixture and consider claiming observed'
     }
 
-    rows.push({ agent: caps.agent, outcome, claimed, fixture, verdict, note })
+    const declined = caps.declinedUpgrades?.[outcome]
+    let row: ConformanceRow = { agent: caps.agent, outcome, claimed, fixture, verdict, note }
+    if (declined) row = applyDecline(row, declined)
+    rows.push(row)
   }
   return rows
+}
+
+/**
+ * A decline is a judgement about ONE recording. It covers the row only while the suite would
+ * otherwise recommend upgrading on exactly that recording.
+ *
+ * A different recording is a live recommendation again: the decision on file was not about
+ * it, so it fires normally, with the older decline named in the note so whoever decides next
+ * knows one exists. A decline with nothing left to decline -- no fixture any more, or a claim
+ * already upgraded past it -- is stale, and fails until it is removed. When the row is
+ * already failing for its own reasons that failure is kept and the stale decline is noted
+ * beside it, so the count is right and neither problem hides the other.
+ */
+function applyDecline(row: ConformanceRow, declined: DeclinedUpgrade): ConformanceRow {
+  if (row.verdict === 'upgrade_available') {
+    if (row.fixture.where === declined.fixture) {
+      return {
+        ...row,
+        verdict: 'upgrade_declined',
+        note: 'a recording produces this; the upgrade was considered and declined (reason below)',
+        declined,
+      }
+    }
+    return {
+      ...row,
+      note:
+        `${row.note}; an earlier decline is pinned to "${declined.fixture}", ` +
+        `not to this recording, and does not cover it`,
+    }
+  }
+  const why = !row.fixture.found
+    ? `the decline was made against "${declined.fixture}" but no recording produces ` +
+      `this outcome now; remove the decline`
+    : `the decline was made against "${declined.fixture}" but the claim is ` +
+      `${row.claimed} and there is nothing to decline; remove the decline`
+  if (row.verdict === 'unsupported_claim' || row.verdict === 'contradiction') {
+    return { ...row, note: `${row.note}; also a stale decline: ${why}` }
+  }
+  return { ...row, verdict: 'stale_decline', note: `stale decline: ${why}` }
 }
 
 export function runConformance(all: AdapterCapabilities[]): ConformanceReport {
   const rows = all.flatMap(checkAdapter)
   return {
     rows,
-    failures: rows.filter((r) => r.verdict === 'unsupported_claim' || r.verdict === 'contradiction'),
+    failures: rows.filter(
+      (r) =>
+        r.verdict === 'unsupported_claim' ||
+        r.verdict === 'contradiction' ||
+        r.verdict === 'stale_decline',
+    ),
     recommendations: rows.filter((r) => r.verdict === 'upgrade_available'),
+    declined: rows.filter((r) => r.verdict === 'upgrade_declined'),
   }
+}
+
+/** Wrap prose at a column, preserving the indent on every line. Reasons are paragraphs. */
+export function wrapIndented(text: string, indent: string, width = 96): string[] {
+  const lines: string[] = []
+  let line = indent
+  for (const word of text.split(/\s+/).filter(Boolean)) {
+    if (line.length > indent.length && line.length + 1 + word.length > width) {
+      lines.push(line)
+      line = indent
+    }
+    line += (line.length > indent.length ? ' ' : '') + word
+  }
+  if (line.length > indent.length) lines.push(line)
+  return lines
 }
 
 export function formatReport(report: ConformanceReport): string {
@@ -487,10 +571,17 @@ export function formatReport(report: ConformanceReport): string {
   }
   lines.push('')
   lines.push(`${report.rows.length} claims, ${report.failures.length} failing`)
-  if (report.recommendations.length) {
-    lines.push(`${report.recommendations.length} claim(s) could be upgraded:`)
-    for (const r of report.recommendations) {
+  // Always printed, zero included: the point of #338 is that this number means something,
+  // and a line that appears only when non-zero cannot be read as "nothing is waiting".
+  lines.push(`${report.recommendations.length} claim(s) could be upgraded:`)
+  for (const r of report.recommendations) {
+    lines.push(`  ${r.agent}/${r.outcome}: ${r.fixture.where}`)
+  }
+  if (report.declined.length) {
+    lines.push(`${report.declined.length} upgrade(s) considered and declined:`)
+    for (const r of report.declined) {
       lines.push(`  ${r.agent}/${r.outcome}: ${r.fixture.where}`)
+      lines.push(...wrapIndented(r.declined!.why, '    '))
     }
   }
   return lines.join('\n')

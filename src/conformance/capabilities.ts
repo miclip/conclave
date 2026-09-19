@@ -145,12 +145,8 @@ export const OPENCODE_CAPABILITIES: AdapterCapabilities = {
     // `session.idle`, which is the server stating the session stopped working. Not an inference
     // from a process going away, which is what the run-per-turn adapter had to settle for.
     //
-    // DO NOT UPGRADE THIS ON `edit-turn.ndjson`. The suite reports `upgrade_available` against
-    // that recording, and the recording is real -- but it was captured from the RUN-PER-TURN
-    // adapter this replaced (#217), whose completion signal was `step_finish reason=stop` parsed
-    // out of stdout. This transport has no such record; it learns a turn ended from `session.idle`
-    // on an event stream. Upgrading to `observed` on that fixture would claim a recording proves
-    // a code path that never runs.
+    // The suite finds a recording for this and the upgrade is DECLINED; see `declinedUpgrades`
+    // below for why, where the report can show it (#338).
     completed: 'inferred_from_documented_event',
     // `POST /session/{id}/abort` and nothing is killed. Attributable because THIS adapter asked:
     // there is no signal to interpret and no child whose death has to be explained.
@@ -169,6 +165,19 @@ export const OPENCODE_CAPABILITIES: AdapterCapabilities = {
     // forbids.
     transport_lost: 'inferred_from_documented_event',
     unknown_abnormal_end: 'reasoned_but_unverified',
+  },
+  declinedUpgrades: {
+    completed: {
+      fixture: 'step_finish reason=stop in edit-turn.ndjson',
+      why:
+        'The recording is real, but it was captured from the RUN-PER-TURN adapter this ' +
+        'transport replaced (#217), whose completion signal was `step_finish reason=stop` ' +
+        'parsed out of stdout. This transport has no such record; it learns a turn ended from ' +
+        '`session.idle` on an event stream. Upgrading to `observed` on that fixture would claim ' +
+        'a recording proves a code path that never runs. Pinned to that fixture: a recording of ' +
+        'THIS transport reaching `session.idle` would be different evidence, and this decline ' +
+        'says nothing about it.',
+    },
   },
 }
 
