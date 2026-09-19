@@ -130,14 +130,28 @@ When a run is `--operator agent`, **you** are the operator, and the seats escala
 you do not get by default is a way to reach the person whose project this is — so a question only
 they can answer has nowhere to go, and the run stalls on it or the seat gives up and flags it.
 
-`conclave notify` is that channel:
+`conclave notify` is that channel **if one is configured**, and usually one is not. Read the
+next paragraph before you plan around it.
 
 ```
-conclave notify tell "<headline>"                        say something; expect no answer
-conclave notify ask  "<headline>" --options a:Yes,b:No   ask, and wait for one of those
+conclave notify tell "<headline>" --transport <name>     say something; expect no answer
+conclave notify ask  "<headline>" --transport <name> --options a:Yes,b:No
+                                                         ask, and wait for one of those
 conclave notify vetoes                                   collect answers that arrived late
 conclave notify log                                      what was asked, answered, and by whom
 ```
+
+**`--transport` is required and there is no default.** With none, `conclave notify` refuses and
+lists the names. One of those names is `fake`, which is test plumbing: it accepts a question and
+answers nothing, and it is offered so a demo or a test can name it deliberately. The only
+transport that reaches a person is `even-realities`, and it needs a paired device and a running
+broker — so a name in that list is not the same thing as a channel.
+
+**So assume you have no human channel unless you have checked.** `conclave notify tell
+"probe" --transport <name>` at the START of a run costs one line and tells you what is true;
+finding out when you are stuck tells you the same thing far too late. If there is no channel,
+that is not a blocker — it means an escalation stops at you, and the run should be driven on
+your own judgement rather than waiting for an answer nobody will send.
 
 **Conclave never sends these for you.** It does not turn pauses into messages, deliberately: you
 have the context that decides whether a human is needed, and it does not. The cost of that design

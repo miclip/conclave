@@ -413,11 +413,16 @@ The seats escalate to the driving agent. When that agent needs the human whose p
 is, `conclave notify` is the only channel to them:
 
 ```sh
-conclave notify tell "<headline>"                        # say it; no answer expected
-conclave notify ask  "<headline>" --options a:Yes,b:No   # ask, and wait for one of those
+conclave notify tell "<headline>" --transport <name>     # say it; no answer expected
+conclave notify ask  "<headline>" --transport <name> --options a:Yes,b:No
 conclave notify vetoes                                   # answers that arrived late
 conclave notify log                                      # what was asked, answered, by whom
 ```
+
+`--transport` is required and has no default: with none, `notify` refuses and lists the names.
+`fake` is among them and is test plumbing — it takes a question and answers nothing — so a name
+in that list is not the same thing as a channel to a person. `even-realities` is the one that
+reaches one.
 
 `--transport even-realities --run <id>` puts the question on a pair of Even Realities glasses,
 listed there as the run. The first run that needs the device starts a broker — one process that

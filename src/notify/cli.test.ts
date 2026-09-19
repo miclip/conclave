@@ -52,7 +52,13 @@ function record(dir: string, id: string, goal: string): SessionRecorder {
  * both, for the assertions that do not care which stream carried the sentence.
  */
 function run(args: string[], cwd: string, reply?: string): { code: number; out: string; err: string; said: string } {
-  const r = spawnSync('node', [CLI, 'notify', ...args], {
+  // `--transport fake` is NAMED, not inherited (#351). It used to be the default, which is how
+  // an agent operator following the skill reached a stub and learned there was no human channel
+  // at the moment it needed one. These tests are about the fake transport, so saying so is the
+  // honest spelling -- and a helper that silently supplied the default would be the only place
+  // in the suite still relying on the behaviour that was removed.
+  const named = args.some((a) => a === '--transport') || args[0] === 'log' || args[0] === 'broker'
+  const r = spawnSync('node', [CLI, 'notify', ...args, ...(named ? [] : ['--transport', 'fake'])], {
     cwd,
     encoding: 'utf8',
     env: { ...process.env, ...(reply === undefined ? {} : { [FAKE_REPLY_ENV]: reply }) },
@@ -94,12 +100,44 @@ test('#184 a tap comes back as an option, and speech comes back as text', (t) =>
   assert.equal(answer.text, 'hold off until the advisor finishes')
 })
 
+test('#351 notify with no transport refuses instead of inheriting test plumbing', (t) => {
+  // The default was `fake`. An agent operator that followed the skill to `notify ask` reached a
+  // scripted stub, saw "fake carried no answer", and read it as a delivery failure -- so it
+  // discovered there was no human channel at the moment it had a question it could not answer,
+  // which for an unattended run is also the moment nobody is coming.
+  const dir = repo(t)
+  for (const args of [
+    ['ask', 'Merge?', '--options', 'yes:Merge'],
+    ['tell', 'run started'],
+  ]) {
+    const r = spawnSync('node', [CLI, 'notify', ...args], { cwd: dir, encoding: 'utf8' })
+    assert.equal(r.status, 2, `${args[0]} must refuse rather than pick one`)
+    const said = `${r.stdout}${r.stderr}`
+    assert.match(said, /notify needs --transport/)
+    assert.match(said, /no human channel is configured by default/)
+    // The names, so the refusal is actionable in the same breath -- the same rule the unknown
+    // transport refusal already follows.
+    for (const n of transportNames()) assert.ok(said.includes(n), `it must list ${n}`)
+    // And it must say what `fake` is, because that is the one an agent would otherwise reach
+    // for on seeing the list.
+    assert.match(said, /test plumbing/)
+  }
+
+  // Named, it is still available: this is a removed DEFAULT, not a removed transport.
+  const named = run(['tell', 'run started', '--transport', 'fake'], dir)
+  assert.equal(named.code, 0, 'naming the stub is a choice the CLI honours')
+})
+
 test('#184 a question that carried no answer exits non-zero', (t) => {
   // The caller asked and did not get an answer. The decision it was asking about has not gone
   // away, so success would be a lie an unattended caller acts on.
   const r = run(['ask', 'Merge?', '--options', 'yes:Merge'], repo(t))
   assert.equal(r.code, 1)
-  assert.match(r.said, /carried no answer/)
+  // And it says WHY, which for the stub is not a delivery failure (#351): "carried no answer"
+  // alone sent an operator to `notify log` and the broker before they read the source.
+  assert.match(r.said, /fake is test plumbing and answers nothing/)
+  assert.match(r.said, /no human was asked/)
+  assert.doesNotMatch(r.said, /carried no answer/, 'a stub answering nothing is not a transport failing')
 })
 
 test('#184 a tell never waits, says nothing, and is not recorded as unanswered', (t) => {
@@ -130,7 +168,7 @@ test('#184 a malformed scripted reply produces no answer rather than an invented
   // An answer nobody gave is the one output this must never produce.
   const r = run(['ask', 'Merge?', '--options', 'y:Yes'], repo(t), 'not json at all')
   assert.equal(r.code, 1)
-  assert.match(r.said, /carried no answer/)
+  assert.match(r.said, /answers nothing|carried no answer/, 'no answer, however the reply was malformed')
 })
 
 test('#184 the fake transport is resolvable by name, and is the reference adapter', () => {
