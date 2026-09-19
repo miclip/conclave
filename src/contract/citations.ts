@@ -199,8 +199,8 @@ export const CITED: Record<string, string> = {
   // Live-claim section in docs/NOTES.md: #156's premise and the unverified-generation guards.
   // These citations assert current fact in a section marked `## LIVE:`, so they are checked even
   // though the rest of docs/** is frozen design record.
-  'src/adapters/claude.ts:2584-2597': 'containedFallback: true,',
-  'src/adapters/codex.ts:1711-1724': 'containedFallback: true,',
+  'src/adapters/claude.ts:2587-2600': 'containedFallback: true,',
+  'src/adapters/codex.ts:1714-1727': 'containedFallback: true,',
   'src/rotation/rotate.ts:484':
     'const generation = snap.containedFallback ? UNKNOWN_GENERATION : snap.compactionGeneration',
   'src/relay/relay.ts:5792': 'async #considerRotation(',
@@ -236,7 +236,7 @@ export const CITED: Record<string, string> = {
     "    return halted ?? this.#acknowledge(impl, (await impl.session.snapshot()).compactionGeneration)",
   'src/relay/relay.ts:9111':
     'const rotated = await this.#considerRotation(seat, report.prose, handle)',
-  'src/adapters/codex.ts:712-718': 'this.#view = new TranscriptSessionView({',
+  'src/adapters/codex.ts:709-715': 'this.#view = new TranscriptSessionView({',
   'src/adapters/claude.ts:1473-1477': 'this.#view = new TranscriptSessionView({',
   'src/relay/relay.ts:2776':
     'const p: RelayParticipant = { id: spec.id, agent: spec.agent, rank, role: spec.role, launch, session, events: [], baselineGeneration: 0, degradationCursor: 0 }',

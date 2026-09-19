@@ -23,6 +23,7 @@
  */
 
 import { hookTimeoutSeconds } from './hookTimeout.ts'
+import { sendHookTimeoutDiagnostic } from './sendHookTimeout.ts'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -390,22 +391,20 @@ export interface ClaudeAdapterOptions {
  * The bare condition named an internal fact with no action attached, and it was the
  * last line a 12-turn run ever printed (issue #32). A diagnostic that ends a run
  * should say what to do about it.
+ *
+ * The opening sentence is this adapter's: by the time the timeout fires, `#submit` has checked
+ * the transcript and knows the text is there, and that is all it claims -- not that the prompt
+ * became a turn, which is what the child-ended reading (#352) denies. Everything after it -- the
+ * four states, and the reading of the attempts journal that says which one this was -- is shared
+ * with the Codex adapter in `sendHookTimeout.ts`.
  */
-const SEND_HOOK_TIMEOUT = (journal: string): string =>
-  `no UserPromptSubmit hook after send, and the prompt IS in the child's transcript -- so the text was accepted and the hook is what did not arrive. Most often the previous turn had not finished -- neither CLI accepts input mid-turn -- so try a longer --settle. If it recurs at the first turn, the hooks are not firing.
-
-Three states produce this, and only one is transient:
-
-  - the hooks are not registered, or registered but untrusted. 'conclave config check'
-    distinguishes those two and says so plainly
-  - the handler was killed before it could run. Under load a cold 'node' start can exceed the
-    hook's own timeout and the CLI kills it. 'config check' reports registration and trust; it
-    cannot see this, and will report that everything is fine
-
-${journal} tells them apart. If that file EXISTS the handler ran and could not deliver, which is
-a delivery problem. If it is ABSENT the handler never executed, which under load is the timeout
--- and the same command succeeds on a quiet machine, which is why this presents as flakiness
-rather than as a resource problem.`
+const SEND_HOOK_TIMEOUT = (journal: string, sentAt: number): string =>
+  sendHookTimeoutDiagnostic(
+    "no UserPromptSubmit hook after send, and the prompt IS in the child's transcript -- so the text was accepted and the hook is what did not arrive.",
+    'transcript',
+    journal,
+    sentAt,
+  )
 
 /**
  * The other half of the send failure, and the half that used to be reported as the one above.
@@ -971,11 +970,12 @@ export class ClaudePtyHookAdapter implements AgentSession {
    * Set when the operator has been told to inspect the attempts journal, which lives in
    * `#runDir` (#203).
    *
-   * `SEND_HOOK_TIMEOUT` says: "if that file EXISTS the handler ran and could not deliver... if
-   * it is ABSENT the handler never executed". Deleting the directory on close would make it
-   * absent every time and turn a delivery problem into a misdiagnosed timeout -- a worse defect
-   * than the leak, because it is a wrong answer rather than a full disk. So the one run whose
-   * evidence was named to a human is the one run that keeps it.
+   * `SEND_HOOK_TIMEOUT` reads that file to say whether the handler ran and could not deliver,
+   * never executed, or saw the child leave (#352), and names it so the operator can read it
+   * too. Deleting the directory on close would make it absent every time and turn a delivery
+   * problem into a misdiagnosed timeout -- a worse defect than the leak, because it is a wrong
+   * answer rather than a full disk. So the one run whose evidence was named to a human is the
+   * one run that keeps it.
    */
   #keepRunDir = false
   #watchdog: TurnWatchdog<TurnState>
@@ -2419,6 +2419,9 @@ export class ClaudePtyHookAdapter implements AgentSession {
   async #submit(message: string, keyed: Promise<TurnKey>): Promise<TurnKey> {
     // Serialized against cancel() and decidePermission() by the shared queue.
     const before = await this.#promptOccurrences(message)
+    // In the hook client's unit, so the timeout diagnostic can tell this send's journal entries
+    // from the ones earlier turns left (#352).
+    const sentAt = Date.now() / 1000
     await this.#input.submit(message)
 
     // Did it actually arrive? `submit()` resolving means this process TYPED -- the pty took the
@@ -2483,7 +2486,7 @@ export class ClaudePtyHookAdapter implements AgentSession {
         // The operator is about to be pointed at the attempts journal, so this run keeps its
         // directory. See `#keepRunDir`.
         this.preserveRunDir()
-        reject(new Error(SEND_HOOK_TIMEOUT(this.#attemptJournal)))
+        reject(new Error(SEND_HOOK_TIMEOUT(this.#attemptJournal, sentAt)))
       }, 30_000)
     })
     try {
@@ -2635,12 +2638,13 @@ export class ClaudePtyHookAdapter implements AgentSession {
    * completed turn whose Stop was lost is recovered rather than reported as a death.
    */
   /**
-   * Where the hook client records an attempt it could not deliver (#41).
+   * Where the hook client records every attempt before it tries to deliver (#41).
    *
-   * Held so the send-timeout diagnostic can name it by path. Its ABSENCE is the finding: the
-   * handler never ran, which under load is the hook's own timeout killing a cold `node` start.
-   * Its presence means the handler ran and could not POST, which is a different fault with a
-   * different remedy.
+   * Held so the send-timeout diagnostic can read it and name it by path. Its ABSENCE is a
+   * finding: the handler never ran, which under load is the hook's own timeout killing a cold
+   * `node` start. Its contents are the rest of them -- a `UserPromptSubmit` that could not
+   * POST is a delivery fault, a `SessionEnd` is the child leaving (#352) -- which is why it is
+   * read rather than merely tested for (`sendHookTimeout.ts`).
    */
   #attemptJournal = ''
 
