@@ -200,6 +200,36 @@ const JOIN_TIMEOUT_MS = 5_000
 const DEAD_GRACE_MS = 500
 
 /**
+ * Whether the address in `url` is one only this machine can dial: `127.0.0.0/8`, `::1`, or
+ * `localhost`. `0.0.0.0` is NOT loopback -- it is every interface, and the glasses can reach
+ * one of them -- and neither is a specific interface address. Something that does not parse
+ * as a URL is not called loopback either; the notice then just says what it was given.
+ */
+export function isLoopbackUrl(url: string): boolean {
+  let hostname: string
+  try {
+    hostname = new URL(url).hostname
+  } catch {
+    return false
+  }
+  if (hostname === 'localhost' || hostname === '[::1]') return true
+  return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(hostname)
+}
+
+/**
+ * The `device` line of a notice, and the qualification it needs when the address is one the
+ * device cannot reach (#345). The bind is loopback by default and that default is right --
+ * `registry.ts` argues it -- but this line is labelled as the address to type into the
+ * glasses, and on the default it is an address they can never dial. Both notices print it
+ * through here so they cannot disagree about when to say so.
+ */
+export function deviceLines(s: BrokerStatus): string[] {
+  const lines = [`  device  ${s.url}   token ${s.token}`]
+  if (isLoopbackUrl(s.url)) lines.push('          the glasses cannot reach this address; CONCLAVE_EVEN_HOST moves that')
+  return lines
+}
+
+/**
  * The start notice: everything an operator needs to find the broker again or be rid of it.
  * On stderr, because a `tell` is silent on stdout by design and this must not change that.
  */
@@ -208,7 +238,7 @@ export function startNotice(s: BrokerStatus): string {
     `conclave: started the Even Realities broker (pid ${s.pid})`,
     `  socket  ${s.socketPath}`,
     `  log     ${brokerLogPath(s.socketPath)}`,
-    `  device  ${s.url}   token ${s.token}`,
+    ...deviceLines(s),
     `  it exits ${s.lingerMs / 1000}s after the last run disconnects; CONCLAVE_EVEN_LINGER_MS moves that`,
     `  a finished run stays listed ${s.sessionLingerMs / 1000}s; CONCLAVE_EVEN_SESSION_LINGER_MS moves that`,
     `  stop it now:  conclave notify broker stop`,

@@ -267,6 +267,9 @@ test('#286 status reads the facts back from the live broker, and stop ends it', 
   assert.equal(prose.code, 0)
   assert.match(prose.out, new RegExp(`pid ${pid}`))
   assert.ok(prose.out.includes(`device  ${s.base}   token tok`))
+  // #345: bound to loopback, so the device line is qualified, directly under it.
+  assert.ok(prose.out.includes(`device  ${s.base}   token tok\n          the glasses cannot reach this address; CONCLAVE_EVEN_HOST moves that\n`), prose.out)
+  assert.match(started.err, /device  .*\n          the glasses cannot reach this address; CONCLAVE_EVEN_HOST moves that\n/, started.err)
   assert.match(prose.out, /listed {2}4500ms after a run disconnects/)
   assert.match(prose.out, /runs {4}none attached/)
 
@@ -283,6 +286,22 @@ test('#286 status reads the facts back from the live broker, and stop ends it', 
   const nothing = notifySync(s, ['broker', 'stop'])
   assert.equal(nothing.code, 0)
   assert.match(nothing.out, /no Even Realities broker at/)
+})
+
+test('#345 bound where the glasses can reach it, neither start nor status warns', async (t) => {
+  // `0.0.0.0` is every interface; the notice must not read that as loopback. `--json` is
+  // unchanged either way: the fact is derivable from `url`, and a field would be a contract.
+  const s = await site(t, [], { CONCLAVE_EVEN_HOST: '0.0.0.0' })
+  const started = notifySync(s, ['broker', 'start'])
+  assert.equal(started.code, 0, started.err)
+  assert.match(started.err, /device  http:\/\/0\.0\.0\.0:\d+   token tok\n  it exits/, started.err)
+  assert.ok(!started.err.includes('CONCLAVE_EVEN_HOST'), started.err)
+  const prose = notifySync(s, ['broker', 'status'])
+  assert.equal(prose.code, 0)
+  assert.match(prose.out, /device  http:\/\/0\.0\.0\.0:\d+   token tok\n  linger/, prose.out)
+  assert.ok(!prose.out.includes('CONCLAVE_EVEN_HOST'), prose.out)
+  const json = notifySync(s, ['broker', 'status', '--json']).out
+  assert.deepEqual(Object.keys(JSON.parse(json) as object).sort(), ['lingerMs', 'pid', 'running', 'sessionLingerMs', 'sessions', 'socketPath', 'startedAt', 'token', 'url'])
 })
 
 function alive(pid: number): boolean {

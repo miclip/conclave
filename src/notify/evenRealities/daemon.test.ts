@@ -15,7 +15,7 @@ import test, { type TestContext } from 'node:test'
 
 import { tempDir } from '../../testkit/tempDir.ts'
 import { EvenRealitiesBroker } from './broker.ts'
-import { brokerConfigFromEnv, brokerLogPath, brokerStatus, ensureBroker, spawnServe, startNotice, stopBroker, type BrokerConfig } from './daemon.ts'
+import { brokerConfigFromEnv, brokerLogPath, brokerStatus, deviceLines, ensureBroker, isLoopbackUrl, spawnServe, startNotice, stopBroker, type BrokerConfig } from './daemon.ts'
 
 process.env['CONCLAVE_EVEN_QUIET'] = '1'
 
@@ -184,6 +184,32 @@ test('#286 a fresh start is announced with everything needed to find or stop the
   assert.match(notice, /it exits 60s after the last run disconnects; CONCLAVE_EVEN_LINGER_MS moves that/)
   assert.match(notice, /a finished run stays listed 30s; CONCLAVE_EVEN_SESSION_LINGER_MS moves that/)
   assert.match(notice, /stop it now:  conclave notify broker stop/)
+  // #345: the default bind is loopback, and the line labelled `device` is one the device
+  // cannot dial. Said directly under it, before anything else, naming the variable.
+  const lines = notice.split('\n')
+  const device = lines.findIndex((l) => l.startsWith('  device  '))
+  assert.ok(device > 0)
+  assert.equal(lines[device + 1], '          the glasses cannot reach this address; CONCLAVE_EVEN_HOST moves that')
+})
+
+test('#345 loopback is 127/8, ::1 and localhost; every interface and a specific one are not', () => {
+  for (const url of ['http://127.0.0.1:3456', 'http://127.1.2.3:80', 'http://[::1]:3456', 'http://localhost:3456']) {
+    assert.equal(isLoopbackUrl(url), true, url)
+  }
+  for (const url of ['http://0.0.0.0:3456', 'http://100.95.159.49:3456', 'http://[::]:3456', 'http://192.168.1.10:3456', 'http://1270.0.0.1:1', 'not a url']) {
+    assert.equal(isLoopbackUrl(url), false, url)
+  }
+})
+
+test('#345 the device lines carry the loopback warning only when the address is loopback', () => {
+  const base = { pid: 1, startedAt: 'now', socketPath: '/s', token: 'tok', lingerMs: 1, sessionLingerMs: 1, sessions: [] }
+  assert.deepEqual(deviceLines({ ...base, url: 'http://127.0.0.1:3456' }), [
+    '  device  http://127.0.0.1:3456   token tok',
+    '          the glasses cannot reach this address; CONCLAVE_EVEN_HOST moves that',
+  ])
+  assert.deepEqual(deviceLines({ ...base, url: 'http://0.0.0.0:3456' }), ['  device  http://0.0.0.0:3456   token tok'])
+  assert.deepEqual(deviceLines({ ...base, url: 'http://100.95.159.49:3456' }), ['  device  http://100.95.159.49:3456   token tok'])
+  assert.ok(!startNotice({ ...base, url: 'http://0.0.0.0:3456' }).includes('CONCLAVE_EVEN_HOST'))
 })
 
 test('#290 the session linger reaches the serve process from the CONFIG, not from whatever this environment says', async (t) => {
