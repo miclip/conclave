@@ -11,6 +11,12 @@
  * the installed thing rather than restated from memory (`childenvClaims.test.ts`). It SKIPS when
  * the vendor package is absent, because a machine without it is not evidence of anything -- and
  * it says so, naming where it looked, because a skip nobody can see is a pass (#281).
+ *
+ * And it says which vendor it checked against. Pinning against the installed thing catches
+ * drift only from the version that happens to be installed; nothing here makes that version
+ * current, and a green suite meant "still matches 0.8.1" for as long as 0.10.4 had been out
+ * (#346). `VERIFIED_VENDOR_VERSION` records what the claims below were last read from, and the
+ * first test opens by naming the gap when the installed copy is something else.
  */
 import { strict as assert } from 'node:assert'
 import { execFileSync } from 'node:child_process'
@@ -57,6 +63,49 @@ function vendored(name: string, fn: (dir: string, t: TestContext) => void | Prom
     const where = root === undefined ? '`npm root -g` failed' : `root ${root}, looked for ${dir}`
     return t.skip(`vendor not installed: ${where}; set CONCLAVE_EVEN_VENDOR=<global node_modules> to point at it`)
   })
+}
+
+/**
+ * The vendor version every claim in this file was last verified against (#346).
+ *
+ * Bump it when the claims have been re-read from a newer bundle and the suite ends green under
+ * `CONCLAVE_EVEN_VENDOR` pointed at that bundle -- not when a newer version is published, which
+ * this file does not check: no network call, so the record can only be compared with what is
+ * installed, and "installed but older than this" is the drift it can name.
+ *
+ * A mismatch is a NOTICE, not a failure, and that is a tradeoff rather than a soft option. To
+ * fail, the record would have to name the version installed on the machine the suite must pass
+ * on today (0.8.1), so that whoever upgrades sees red; then the record says nothing about what
+ * the code was actually verified against, and it is red for exactly the person who did the
+ * right thing. Recording the verified version and failing instead would fail every machine that
+ * has not upgraded -- the same suite that is required green here. So the record names the
+ * verified version, and a machine behind it is told, once and by name, that its green is
+ * evidence about an older vendor than the code was written to. The notice opens the first test
+ * in the file rather than having one of its own, so the suite stays the twelve tests it is
+ * counted as; it is emitted before that test's first assertion, so a failing route check does
+ * not swallow it.
+ */
+const VERIFIED_VENDOR_VERSION = '0.10.4'
+
+/**
+ * One diagnostic naming the installed vendor version against the recorded one (#346).
+ *
+ * The installed copy's own `package.json`, not `npm view`: the record is compared with what the
+ * claims are about to be read from, and nothing else is reachable without the network.
+ */
+function noteVendorVersion(dir: string, t: TestContext): void {
+  const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')) as { version?: unknown }
+  assert.equal(typeof pkg.version, 'string', `expected a version in ${join(dir, 'package.json')}`)
+  const installed = pkg.version as string
+  if (installed === VERIFIED_VENDOR_VERSION) {
+    t.diagnostic(`checked against @evenrealities/even-terminal ${installed}, the recorded verified version`)
+    return
+  }
+  t.diagnostic(
+    `VENDOR DRIFT: installed @evenrealities/even-terminal is ${installed}; this file was verified against ` +
+      `${VERIFIED_VENDOR_VERSION}. Every green in this file is evidence about ${installed}, not ${VERIFIED_VENDOR_VERSION}. ` +
+      `Re-verify against the current vendor (CONCLAVE_EVEN_VENDOR=<its node_modules>) and update VERIFIED_VENDOR_VERSION.`,
+  )
 }
 
 /**
@@ -112,7 +161,40 @@ async function serving(describe: () => SessionMetadata | undefined = () => RUN_1
   return { b, get }
 }
 
-vendored('#276 every route conclave serves is one the installed even-terminal also serves', (dir) => {
+test('#346 the key extractor sees shorthand, which is how the pin went blind', () => {
+  // NOT `vendored`. This is a fixture, on purpose: the bug it guards was that the extractor read
+  // whichever spelling the INSTALLED bundle happened to use, so a test that only ever runs
+  // against the installed bundle is the thing that failed. 0.8.1 writes every key `name: value`
+  // and would pass a colon-only extractor forever.
+  const named = `
+            id: info.sessionId,
+            title: (info.customTitle || "").slice(0, 64),
+            cwd: info.cwd || "",
+            provider: "claude",
+            status: null,
+  `
+  assert.deepEqual(listItemKeys(named), ['cwd', 'id', 'provider', 'status', 'title'])
+
+  // The 0.10.4 spelling. A colon-only extractor returns this list without `provider`, which is
+  // exactly how conclave sending a field the vendor DOES send read as conclave inventing one.
+  const shorthand = named.replace('provider: "claude",', 'provider,')
+  assert.deepEqual(listItemKeys(shorthand), ['cwd', 'id', 'provider', 'status', 'title'], 'a shorthand key is a key')
+  assert.deepEqual(listItemKeys(shorthand), listItemKeys(named), 'the two spellings describe the same item')
+
+  // And it must not invent keys out of a multi-line value's continuation lines, which is the
+  // failure mode of loosening this too far.
+  const wrapped = `
+            id: info.sessionId,
+            timestamp: new Date(info.lastModified).toISOString(),
+            provider,
+  `
+  assert.deepEqual(listItemKeys(wrapped), ['id', 'provider', 'timestamp'])
+})
+
+vendored('#276 every route conclave serves is one the installed even-terminal also serves', (dir, t) => {
+  // First in the file, so first: which vendor the rest of this run is evidence about (#346).
+  noteVendorVersion(dir, t)
+
   // The direction that matters. Conclave serving something the vendor does not is conclave
   // inventing protocol, and a device built against the vendor will never call it.
   //
@@ -183,7 +265,27 @@ function vendorListItem(dir: string): { keys: string[]; literal: string } {
   const m = /return infos\.map\(\(info\) => \(\{([\s\S]*?)\}\)\)/.exec(provider)
   assert.ok(m, 'expected the session list item literal in claude/provider.js')
   const literal = m![1]!
-  return { keys: [...literal.matchAll(/^\s*(\w+):/gm)].map((x) => x[1]!).sort(), literal }
+  // BOTH SPELLINGS OF A KEY. `/^\s*(\w+):/` alone reads only `key: value`, and 0.10.4 writes
+  // `provider,` -- ES6 shorthand for a variable of that name. The colon-only extractor did not
+  // see it, reported the vendor's item as one key short, and turned conclave sending a field the
+  // vendor DOES send into two failures that read like vendor drift (#346).
+  //
+  // That is this pin's own blind spot, and worse in the other direction: a key the vendor ADDS in
+  // shorthand is invisible here, so conclave could omit a field the app requires while this file
+  // reports the item matches. `listItemKeys` is exercised on a fixture below so the rule holds
+  // whatever the installed vendor happens to be written like.
+  return { keys: listItemKeys(literal), literal }
+}
+
+/**
+ * The property names of an object literal, named or shorthand.
+ *
+ * One property per line, which is what the vendor's compiled bundle emits. A line is a key when
+ * it is an identifier followed by `:`, or an identifier alone before the line's comma -- the two
+ * ways `{ provider }` and `{ provider: "claude" }` are written.
+ */
+export function listItemKeys(literal: string): string[] {
+  return [...literal.matchAll(/^\s*(\w+)\s*(?::|,\s*$)/gm)].map((x) => x[1]!).sort()
 }
 
 vendored('#278 a session list item has exactly the vendor\'s keys, keyed the way core.js reads it', async (dir, t) => {
@@ -214,16 +316,26 @@ vendored('#278 a session list item has exactly the vendor\'s keys, keyed the way
 vendored('#278 each field of a list item means what the vendor\'s expression for it means', async (dir, t) => {
   // The literal, expression by expression. A field with the vendor's NAME and a different
   // meaning is worse than none: the app sorts and labels by these, confidently.
-  const { literal } = vendorListItem(dir)
-  const expr = (key: string): string => {
+  const { literal, keys } = vendorListItem(dir)
+  // `undefined` for a key the vendor writes as SHORTHAND: there is no expression to read,
+  // because the value is whatever the variable of that name holds at runtime. Distinct from a
+  // key that is absent, which still fails -- the caller asks for keys it has already proved are
+  // in the literal.
+  const expr = (key: string): string | undefined => {
     const m = new RegExp(`^\\s*${key}:\\s*(.*?),?\\s*$`, 'm').exec(literal)
-    assert.ok(m, `expected \`${key}:\` in the vendor literal`)
-    return m![1]!
+    if (m) return m[1]!
+    assert.ok(keys.includes(key), `expected \`${key}\` in the vendor literal`)
+    return undefined
+  }
+  const exprOf = (key: string): string => {
+    const e = expr(key)
+    assert.ok(e !== undefined, `expected \`${key}:\` in the vendor literal`)
+    return e!
   }
 
   // `title` is a string cut to a length. The length is theirs; the bridge cuts to it.
-  const cut = /\.slice\(0,\s*(\d+)\)/.exec(expr('title'))
-  assert.ok(cut, `expected title to be sliced: ${expr('title')}`)
+  const cut = /\.slice\(0,\s*(\d+)\)/.exec(exprOf('title'))
+  assert.ok(cut, `expected title to be sliced: ${exprOf('title')}`)
   const chars = Number(cut![1])
   assert.equal(EvenRealitiesBridge.TITLE_CHARS, chars, 'the bridge cuts titles to the vendor\'s length')
   const long = await serving(() => ({ ...RUN_1, title: 'z'.repeat(chars * 2) }))
@@ -234,23 +346,34 @@ vendored('#278 each field of a list item means what the vendor\'s expression for
   // `timestamp` is `new Date(info.lastModified).toISOString()`: the transcript's mtime, which
   // moves only when something is appended -- LAST ACTIVITY, not liveness. `runMetadata.ts`
   // sources it from the newest event and never from the heartbeat, for that reason.
-  assert.match(expr('timestamp'), /new Date\(info\.lastModified\)\.toISOString\(\)/)
+  assert.match(exprOf('timestamp'), /new Date\(info\.lastModified\)\.toISOString\(\)/)
   const { b, get } = await serving()
   t.after(() => b.close())
   const item = ((await (await get('/api/sessions')).json()) as { sessions: Record<string, unknown>[] }).sessions[0]!
   assert.match(String(item['timestamp']), /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/, 'an ISO string, as toISOString gives')
 
   // `cwd` is the session's working directory, a string.
-  assert.match(expr('cwd'), /info\.cwd/)
+  assert.match(exprOf('cwd'), /info\.cwd/)
   assert.equal(typeof item['cwd'], 'string')
 
-  // `provider` is the literal string the whitelist admits.
-  assert.equal(expr('provider'), `"${EvenRealitiesBridge.CLAIMED_PROVIDER}"`)
+  // `provider` is a key the vendor sends in BOTH versions, spelled two ways: 0.8.1 wrote
+  // `provider: "claude"`, a hardcoded string; 0.10.4 writes `provider,`, shorthand for the
+  // variable `createClaudeSdkProvider(emit, provider, ...)` was called with. So on the newer
+  // bundle there is no expression to compare against, and comparing against the OLDER bundle's
+  // quoted literal would have pinned a coincidence -- the string happened to equal what conclave
+  // claims, and stopped being a string at all.
+  //
+  // What stays true and checkable is that the vendor sends the key. That conclave's value is an
+  // admitted one is the whitelist's own test, which does not read this literal.
+  const providerExpr = expr('provider')
+  if (providerExpr !== undefined) {
+    assert.equal(providerExpr, `"${EvenRealitiesBridge.CLAIMED_PROVIDER}"`, 'a bundle that hardcodes it must hardcode what conclave claims')
+  }
 
   // `status` starts `null` and is filled in separately by `getSessionStatus`. So `null` is a
   // value the app is built to see, and a run whose state is not known serves it rather than
   // a guess.
-  assert.equal(expr('status'), 'null')
+  assert.equal(exprOf('status'), 'null')
   const unknown = await serving(() => ({ ...RUN_1, status: null }))
   t.after(() => unknown.b.close())
   const nullItem = ((await (await unknown.get('/api/sessions')).json()) as { sessions: { status: unknown }[] }).sessions[0]!

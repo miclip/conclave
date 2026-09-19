@@ -110,6 +110,15 @@ export interface SessionMetadata {
 const TITLE_CHARS = 64
 
 /**
+ * How many sessions `/api/sessions` returns when the caller asks for no limit (#346).
+ *
+ * The vendor's `Number(req.query.limit) || 10` in `dist/routes/core.js`. Ten, because that is
+ * what an app built against the vendor gets when it asks for nothing, and a list that is longer
+ * than the one it was written for is a difference it never had to handle.
+ */
+const SESSION_LIST_LIMIT = 10
+
+/**
  * How much of an answer the confirmation echoes (#285).
  *
  * The transport's `HUD_CHARS`, which this file cannot import without importing conclave; the
@@ -483,18 +492,35 @@ export class EvenRealitiesBridge {
       // Nothing that is not in that literal is served: what the app does with a field the
       // vendor never sends is unverified, and an invented one is protocol the app was not
       // built against.
+      //
+      // `cwd` and `limit` ARE READ, because the vendor reads them (#346). `core.js` takes both
+      // off the query and hands them down -- `listSessions(cwd ? { dir: cwd, limit } : { limit })`
+      // -- so an app that filters by directory or asks for a page gets neither from a server that
+      // ignores them. It gets a longer list of the wrong runs, which is a wrong answer rather
+      // than an error and is the kind nobody notices from a HUD.
+      //
+      // `provider` is NOT read, deliberately. The vendor resolves it to one of its own
+      // implementations and lists that implementation's sessions; conclave has one kind of
+      // session, its own runs, and serving an empty list for `?provider=codex` would claim it
+      // had looked and found none. Everything it has is what it returns.
+      const wantCwd = url.searchParams.get('cwd')
+      const asked = Number(url.searchParams.get('limit'))
+      // `Number(req.query.limit) || 10` is the vendor's own expression: NaN, 0 and a negative
+      // all fall through to the default there, and so must here.
+      const limit = asked > 0 ? asked : SESSION_LIST_LIMIT
+      const listed = [...this.#sessions.values()]
+        .map((s) => ({ s, meta: this.#refresh(s) }))
+        .filter(({ meta }) => wantCwd === null || meta.cwd === wantCwd)
+        .slice(0, limit)
       this.#json(res, 200, {
-        sessions: [...this.#sessions.values()].map((s) => {
-          const meta = this.#refresh(s)
-          return {
-            id: s.id,
-            title: meta.title.slice(0, TITLE_CHARS),
-            timestamp: meta.timestamp,
-            cwd: meta.cwd,
-            provider: CLAIMED_PROVIDER,
-            status: this.#stateOf(s, meta),
-          }
-        }),
+        sessions: listed.map(({ s, meta }) => ({
+          id: s.id,
+          title: meta.title.slice(0, TITLE_CHARS),
+          timestamp: meta.timestamp,
+          cwd: meta.cwd,
+          provider: CLAIMED_PROVIDER,
+          status: this.#stateOf(s, meta),
+        })),
       })
       return
     }
