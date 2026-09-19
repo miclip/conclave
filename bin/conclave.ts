@@ -91,7 +91,7 @@ import { runSession } from '../src/repl/session.ts'
 import { boundOf, implementerSeatPlan, implementerSpecsFor, Relay, reviewerSpecFor, type SeatRequest } from '../src/relay/relay.ts'
 import { formatGuardReportJson, guard } from '../src/workspace/sessionLock.ts'
 import { Broker } from '../src/notify/broker.ts'
-import { brokerConfigFromEnv, brokerStatus, ensureBroker, serveBroker, stopBroker } from '../src/notify/evenRealities/daemon.ts'
+import { brokerConfigFromEnv, brokerStatus, deviceLines, ensureBroker, serveBroker, stopBroker } from '../src/notify/evenRealities/daemon.ts'
 import { TransportRefused, resolveTransport, transportNames } from '../src/notify/registry.ts'
 import type { Outbound, Transport } from '../src/notify/types.ts'
 import {
@@ -1377,12 +1377,14 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
           return 1
         }
         if (json) {
+          // The loopback qualification below is NOT a field here (#345): a consumer can
+          // derive it from `url`, and a new key would change this output's contract.
           console.log(JSON.stringify({ running: true, ...s }))
           return 0
         }
         console.log(`Even Realities broker: pid ${s.pid}, since ${s.startedAt}`)
         console.log(`  socket  ${s.socketPath}`)
-        console.log(`  device  ${s.url}   token ${s.token}`)
+        for (const line of deviceLines(s)) console.log(line)
         console.log(`  linger  ${s.lingerMs}ms after the last run disconnects`)
         console.log(`  listed  ${s.sessionLingerMs}ms after a run disconnects, its session stays on the device`)
         console.log(`  runs    ${s.sessions.length === 0 ? 'none attached' : s.sessions.join(', ')}`)
