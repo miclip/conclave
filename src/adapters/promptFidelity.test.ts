@@ -283,6 +283,38 @@ async function attempt(
 // The classifier, on its own. Cheap, exhaustive, and it is what the diagnostics are made of.
 // ----------------------------------------------------------------------------------------
 
+test('a send the child bracketed as a paste arrived intact, and raises no fault', () => {
+  // #341. Six runs across two sessions died at the handshake on this. The briefing is a fixed
+  // 3472 bytes -- three different goals reported the same count, which is how it was established
+  // that the goal is not in this send at all -- and a write that large comes back bracketed.
+  const sent = 'You are the IMPLEMENTER on a two-agent coding session.'
+  // The closing tag carries the id too. Captured from a live seat -- the first cut of the fix
+  // matched a bare `</pasted_content>`, passed a test written to that guess, and did not fix
+  // the live handshake at all.
+  const wrapped = (id: string, body: string) =>
+    `\n\n<pasted_content id="${id}">\n${body}\n</pasted_content id="${id}">\n`
+
+  assert.equal(describePromptMismatch(sent, wrapped('6b2b', sent)), undefined, 'the send arrived whole; there is nothing to report')
+  // The id is minted per paste, so it differs every run and cannot be matched on.
+  assert.equal(describePromptMismatch(sent, wrapped('7b50', sent)), undefined, 'and again with the id the next run mints')
+
+  // The guard is NOT weakened: damage inside the wrapper is still damage, and what is counted
+  // is the content rather than the packaging.
+  const damaged = describePromptMismatch(sent, wrapped('0063', sent.slice(0, 20)))!
+  assert.equal(damaged.shape, 'prefix', 'the content inside was truncated, and that is still a prefix loss')
+  assert.equal(damaged.sentBytes, 54)
+  assert.equal(damaged.receivedBytes, 20, 'the wrapper is not counted as bytes the child received')
+  assert.equal(damaged.lostBytes, 34)
+
+  // And a message that really is unrelated is still unrelated. Unwrapping must not become a way
+  // of forgiving the correlation fault this check exists to catch.
+  assert.equal(describePromptMismatch(sent, 'a completely different message')!.shape, 'unrelated')
+
+  // Anchored at both ends: an opener with no close is not a wrapper, and is compared as sent.
+  // Otherwise a truncated send that happened to begin with the tag would be silently unwrapped.
+  assert.notEqual(describePromptMismatch(sent, `<pasted_content id="x">\n${sent}`), undefined)
+})
+
 test('describePromptMismatch names the shape and counts UTF-8 bytes', () => {
   assert.equal(describePromptMismatch('same', 'same'), undefined, 'an exact match is not a mismatch')
   assert.equal(describePromptMismatch('', ''), undefined, 'and neither is an empty one')
