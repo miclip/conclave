@@ -27,6 +27,7 @@
  */
 
 import { TurnTools } from './claude.ts'
+import { sendHookTimeoutDiagnostic } from './sendHookTimeout.ts'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -187,22 +188,21 @@ export interface CodexAdapterOptions {
  * The bare condition named an internal fact with no action attached, and it was the
  * last line a 12-turn run ever printed (issue #32). A diagnostic that ends a run
  * should say what to do about it.
+ *
+ * The opening sentence is this adapter's: unlike Claude's, it has not checked the transcript
+ * when the timeout fires, so it claims only what it knows -- the text was typed. It used to say
+ * "the child accepted the text", which nothing here had established and which the journal can
+ * flatly contradict: the child-ended reading (#352) is precisely that the prompt never became a
+ * turn. Everything after the opening -- the four states, and the reading of the attempts journal
+ * that says which one this was -- is shared with the Claude adapter in `sendHookTimeout.ts`.
  */
-const SEND_HOOK_TIMEOUT = (journal: string): string =>
-  `no UserPromptSubmit hook after send. The child accepted the text but no hook fired, so this turn could not be observed. Most often the previous turn had not finished -- neither CLI accepts input mid-turn -- so try a longer --settle. If it recurs at the first turn, the hooks are not firing.
-
-Three states produce this, and only one is transient:
-
-  - the hooks are not registered, or registered but untrusted. 'conclave config check'
-    distinguishes those two and says so plainly
-  - the handler was killed before it could run. Under load a cold 'node' start can exceed the
-    hook's own timeout and the CLI kills it. 'config check' reports registration and trust; it
-    cannot see this, and will report that everything is fine
-
-${journal} tells them apart. If that file EXISTS the handler ran and could not deliver, which is
-a delivery problem. If it is ABSENT the handler never executed, which under load is the timeout
--- and the same command succeeds on a quiet machine, which is why this presents as flakiness
-rather than as a resource problem.`
+const SEND_HOOK_TIMEOUT = (journal: string, sentAt: number): string =>
+  sendHookTimeoutDiagnostic(
+    'no UserPromptSubmit hook after send. The text was typed, and no hook said the child took it as a prompt, so this turn could not be observed.',
+    'typed',
+    journal,
+    sentAt,
+  )
 
 /**
  * A second `send()` while the first has not yet become a turn.
@@ -1393,6 +1393,9 @@ export class CodexPtyHookAdapter implements AgentSession {
 
   /** One attempt: type the message, then wait for the hook that says what the child took. */
   async #submitOnce(message: string, keyed: Promise<TurnKey>): Promise<TurnKey> {
+    // In the hook client's unit, so the timeout diagnostic can tell this send's journal entries
+    // from the ones earlier turns left (#352).
+    const sentAt = Date.now() / 1000
     // Cleared on the way out: the loser of the race is a live 60s timer, and leaving it
     // pending keeps the event loop alive long after the send resolved.
     let timer: NodeJS.Timeout | undefined
@@ -1401,7 +1404,7 @@ export class CodexPtyHookAdapter implements AgentSession {
         // The operator is about to be pointed at the attempts journal, so this run keeps its
         // directory. See `#keepRunDir`.
         this.preserveRunDir()
-        reject(new Error(SEND_HOOK_TIMEOUT(this.#attemptJournal)))
+        reject(new Error(SEND_HOOK_TIMEOUT(this.#attemptJournal, sentAt)))
       }, 60_000)
     })
     try {
@@ -1774,12 +1777,13 @@ export class CodexPtyHookAdapter implements AgentSession {
   }
 
   /**
-   * Where the hook client records an attempt it could not deliver (#41).
+   * Where the hook client records every attempt before it tries to deliver (#41).
    *
-   * Held so the send-timeout diagnostic can name it by path. Its ABSENCE is the finding: the
-   * handler never ran, which under load is the hook's own timeout killing a cold `node` start.
-   * Its presence means the handler ran and could not POST, which is a different fault with a
-   * different remedy.
+   * Held so the send-timeout diagnostic can read it and name it by path. Its ABSENCE is a
+   * finding: the handler never ran, which under load is the hook's own timeout killing a cold
+   * `node` start. Its contents are the rest of them -- a `UserPromptSubmit` that could not
+   * POST is a delivery fault, a `SessionEnd` is the child leaving (#352) -- which is why it is
+   * read rather than merely tested for (`sendHookTimeout.ts`).
    */
   #attemptJournal = ''
   /** The per-session scratch directory, kept so it can be given back (#203). */
@@ -1796,10 +1800,11 @@ export class CodexPtyHookAdapter implements AgentSession {
    * Set when the operator has been told to inspect the attempts journal, which lives in
    * `#runDir` (#203).
    *
-   * `SEND_HOOK_TIMEOUT` distinguishes "the handler ran and could not deliver" from "the handler
-   * never executed" by whether that file EXISTS. Deleting the directory would make it absent
-   * every time and answer that question wrongly, which is worse than the leak: a full disk is
-   * noticed, a wrong diagnosis is acted on.
+   * `SEND_HOOK_TIMEOUT` reads that file to say whether the handler ran and could not deliver,
+   * never executed, or saw the child leave (#352), and names it so the operator can read it
+   * too. Deleting the directory would make it absent every time and answer that question
+   * wrongly, which is worse than the leak: a full disk is noticed, a wrong diagnosis is acted
+   * on.
    */
   #keepRunDir = false
 
