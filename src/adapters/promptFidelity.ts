@@ -45,6 +45,29 @@
 const HARNESS_TAGS = ['<task-notification>', '<system-reminder>']
 
 /**
+ * A paste wrapper the CHILD's own terminal puts around a send that arrived as one burst.
+ *
+ * NOT a harness block: `isHarnessBlock` asks whether the harness is talking to the child, and
+ * this is the child bracketing OUR OWN bytes. The text inside is the send, whole. So it is not
+ * on that list -- the answer there would be wrong even though the required action is the same.
+ *
+ * Anchored at BOTH ends and requiring the close, so a message that merely opens with the tag,
+ * or quotes one, is not silently unwrapped and compared as something else.
+ *
+ * THE CLOSING TAG CARRIES THE ID TOO, which is why the close is `[^>]*` rather than a bare
+ * `</pasted_content>`. Captured from a live seat rather than assumed -- the first cut of this
+ * matched only the bare form, passed its unit test, and did not fix the live handshake:
+ *
+ *   head  '\n\n<pasted_content id="a065">\nYou are the IMPLEMENTER on a two-agent...'
+ *   tail  '...do not start work yet.\n</pasted_content id="a065">\n'
+ *
+ * That is not well-formed XML and there is no reason to expect it to stay this shape, so it is
+ * matched loosely at both ends and the id is never compared -- it is minted per paste and
+ * differs every run.
+ */
+const PASTE_WRAPPER = /^\s*<pasted_content\b[^>]*>\r?\n([\s\S]*)\r?\n<\/pasted_content\b[^>]*>\s*$/
+
+/**
  * Is this text the harness talking to the child, rather than the echo of a send?
  *
  * #185: when a background task completed while an advisor send was in flight, the block's
@@ -135,6 +158,23 @@ function bytes(s: string): number {
  * a difference the child made.
  */
 export function describePromptMismatch(sent: string, received: string): PromptMismatch | undefined {
+  // THE CHILD'S TERMINAL BRACKETS A BURST AS A PASTE, and that is packaging rather than
+  // corruption (#341). A briefing large enough to arrive in one write comes back as
+  // `<pasted_content id="...">\n<the send>\n</pasted_content>`: the id is minted per paste, so
+  // it differs every run, and the bytes between the tags are the send, whole.
+  //
+  // Compared as-is it shares no prefix and no suffix with what was sent -- the wrapper is at
+  // both ends -- so it was classified `unrelated` and reported as a DIFFERENT message reaching
+  // the child in a correlation race. It is not a different message. The adapter then typed ESC
+  // and waited for a `Stop` that was never coming, which is #185's failure exactly, and six
+  // runs across two sessions died at the handshake having done no work.
+  //
+  // Unwrapped HERE rather than exempted like a harness block: after this the two texts are
+  // equal and there is no fault to raise, and if the content inside really is damaged the
+  // shapes below still describe the damage rather than the packaging.
+  const inner = PASTE_WRAPPER.exec(received)?.[1]
+  if (inner !== undefined) received = inner
+
   if (received === sent) return undefined
 
   // THE CHILD'S COMPOSER TRIMS TRAILING WHITESPACE, and that is not corruption (#225).
