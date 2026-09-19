@@ -840,6 +840,47 @@ test('#177 a seat that is NOT bypassed still asks, and now says what for', async
   assert.doesNotMatch(out.text(), /auto-allowed/)
 })
 
+test('#347 a block opening on a piped console says so, because there is no hint row', async (t) => {
+  // The hint row names an open block on every draw, and `screen` -- which owns it -- exists
+  // only when stdin is a TTY. So the driver of an `--operator agent` run, the whole reason this
+  // channel is piped, was the one party told nothing.
+  //
+  // What that cost: a driver whose closing tag never arrived had `/continue` and `/exit` taken
+  // as content, the run sat paused, `conclave status` called it healthy, and it was read as a
+  // broken control channel. The run was killed on that reading.
+  const dir = repo(t)
+  const out = collect()
+  const input = new PassThrough()
+  const running = runSession({
+    cwd: dir,
+    goal: 'Keep the work moving.',
+    lead: 'codex',
+    implementer: 'claude',
+    rounds: 2,
+    checks: [],
+    registry: registryOf({
+      codex: [slow('advisor', 'codex', ['Do it.', 'DONE'])],
+      claude: [slow('impl', 'claude', ['ack', 'Did it.'])],
+    }),
+    input,
+    output: out.stream,
+  })
+  await untilText('the console to be up', out.text, /Keep the work moving|conclave/)
+
+  input.write('<<MSG\n')
+  await untilText('the announcement', out.text, /collecting a message/)
+  assert.match(out.text(), /close it with a line reading exactly MSG/, 'and it names the tag, which is the only way out')
+
+  // The guarantee that makes an announcement the right fix rather than an escape hatch: a
+  // command inside a block is still CONTENT. That is what a block is for, and it is why the
+  // answer here is being told the state rather than being given a way out of it.
+  input.write('/exit\n')
+  input.write('MSG\n')
+  await untilText('the block to close', out.text, /queued|→/)
+  input.end()
+  assert.equal(await running, 0)
+})
+
 test('#173 a command handed only a heredoc opener is refused, and the body is not leaked', async (t) => {
   // Hit while operating a live run. `/continue <<TAG` made `<<TAG` the ANSWER, and the 19 body
   // lines then arrived as 19 separate unaddressed messages at human rank -- every line looking

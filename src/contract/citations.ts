@@ -188,13 +188,13 @@ export const CITED: Record<string, string> = {
   // #101's refresh -- the module that explains the mechanism and the loop that uses it --
   // because the argument was already written here, for `/wait`, and restating it in two more
   // places is how three copies of a reason drift apart.
-  'src/repl/session.ts:2729': 'so an in-place change like `superseded` reaches the file on the next one',
+  'src/repl/session.ts:2747': 'so an in-place change like `superseded` reaches the file on the next one',
   // The falsifier `/continue <message>` is argued against: two commands that already give
   // their trailing text a meaning, so the new rule is narrow by intent rather than by
   // accident. Pinned to the dispatch lines, which is what makes "these are unchanged"
   // checkable rather than a claim about code nobody re-reads.
-  "src/repl/session.ts:2751": "if (word === '/rotate') {",
-  "src/repl/session.ts:2784": "if (word === '/abort') {",
+  "src/repl/session.ts:2769": "if (word === '/rotate') {",
+  "src/repl/session.ts:2802": "if (word === '/abort') {",
 
   // Live-claim section in docs/NOTES.md: #156's premise and the unverified-generation guards.
   // These citations assert current fact in a section marked `## LIVE:`, so they are checked even
@@ -245,7 +245,7 @@ export const CITED: Record<string, string> = {
   // reply at a pause, and `>advisor <text>`. The claim they support is that the test drives the
   // same call the front end makes, so a pin on the call itself is the whole point.
   'src/repl/session.ts:1831': "inject(text, 'all')",
-  'src/repl/session.ts:2847': 'inject(rest, { only: who })',
+  'src/repl/session.ts:2865': 'inject(rest, { only: who })',
   'src/adapters/kimi.ts:763': 'compactionGeneration: 0,',
   'src/rotation/rotate.ts:412': 'export async function rotate(',
   'src/adapters/claude.ts:2130': "#state: SessionState = 'running'",
