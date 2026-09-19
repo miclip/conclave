@@ -558,6 +558,42 @@ test('#280 a prompt to a run with nothing outstanding is refused, explained, and
   assert.deepEqual(await asked, { answer: 'Yes' })
 })
 
+test('#346 the session list honours `cwd` and `limit`, and ignores `provider`', async (t) => {
+  // `core.js` reads all three off the query and hands cwd+limit down --
+  // `listSessions(cwd ? { dir: cwd, limit } : { limit })`. Serving every run whatever was asked
+  // is a WRONG ANSWER rather than an error: a longer list of the wrong runs, which is the kind
+  // nobody notices from a HUD. Measured against a live broker before this was fixed:
+  // `?cwd=/nonexistent` still returned the session.
+  const b = new EvenRealitiesBridge({ port: 0, token: 'tok' })
+  await b.listen()
+  t.after(() => b.close())
+  b.openSession('run-1', () => meta({ cwd: '/w' }))
+  b.openSession('run-2', () => meta({ cwd: '/elsewhere' }))
+
+  const list = async (q: string): Promise<string[]> => {
+    const { sessions } = (await (await fetch(`${b.url}/api/sessions?token=tok${q}`)).json()) as {
+      sessions: { id: string }[]
+    }
+    return sessions.map((x) => x.id)
+  }
+
+  assert.deepEqual(await list(''), ['run-1', 'run-2'], 'no filter is every run')
+  assert.deepEqual(await list('&cwd=/w'), ['run-1'], 'a cwd filter is honoured')
+  assert.deepEqual(await list('&cwd=/nonexistent'), [], 'and a cwd nothing matches is empty, not everything')
+  assert.deepEqual(await list('&limit=1'), ['run-1'], 'a limit is honoured')
+
+  // The vendor's own expression is `Number(req.query.limit) || 10`, so every falsy parse --
+  // absent, zero, negative, not a number -- takes the default rather than returning nothing.
+  for (const bad of ['&limit=0', '&limit=-3', '&limit=abc', '']) {
+    assert.deepEqual(await list(bad), ['run-1', 'run-2'], `\`${bad}\` falls through to the default`)
+  }
+
+  // `provider` is accepted and ignored, which is a decision rather than an oversight: conclave
+  // has one kind of session, and an empty list for `?provider=codex` would claim it had looked
+  // among others and found none.
+  assert.deepEqual(await list('&provider=codex'), ['run-1', 'run-2'], 'provider selects nothing')
+})
+
 test('#280 `cwd` and `provider` in a prompt body select nothing and change nothing', async (t) => {
   // Theirs reads them to pick a provider and start a session in a directory. Here they are
   // accepted, because an app sends them, and ignored: the run is the one named, the provider
