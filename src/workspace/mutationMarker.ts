@@ -114,17 +114,31 @@ export function begin(
 }
 
 /**
+ * What `end` found. The three cases are different answers and must not print the same.
+ *
+ * `checked: false` means there was no marker, so NOTHING was compared. #343 was this case being
+ * returned as a verified restore: `begin`, mutate, `restore`, mutate AGAIN without a new
+ * `begin`, then `end` -- which found no marker, said "back to its original", and exited 0 over
+ * a file still holding the second mutation. "Nothing to check" and "checked and correct" have
+ * to be distinguishable by the caller, so the absence is its own shape rather than a
+ * `restored: true` with empty hashes.
+ */
+export type EndResult =
+  | { checked: false }
+  | { checked: true; restored: boolean; expected: string; actual: string }
+
+/**
  * Close the marker for `filePath`, reporting whether the file really is back to its original.
  *
  * The verification is the point, and it is why this returns a result rather than throwing. A
  * caller that restored from its own copy and got it wrong wants to be TOLD, with both hashes,
  * not to have the marker silently removed as though the restore had been checked.
  */
-export function end(repoRoot: string, filePath: string): { restored: boolean; expected: string; actual: string } {
+export function end(repoRoot: string, filePath: string): EndResult {
   const abs = resolve(repoRoot, filePath)
   const rel = relative(repoRoot, abs)
   const mp = markerPathFor(repoRoot, rel)
-  if (!existsSync(mp)) return { restored: true, expected: '', actual: '' }
+  if (!existsSync(mp)) return { checked: false }
   const marker: MutationMarker = JSON.parse(readFileSync(mp, 'utf8'))
   const actual = existsSync(abs) ? sha256Of(abs) : ''
   const restored = actual === marker.sha256
@@ -134,10 +148,17 @@ export function end(repoRoot: string, filePath: string): { restored: boolean; ex
     rmSync(mp, { force: true })
     rmSync(join(repoRoot, marker.backup), { force: true })
   }
-  return { restored, expected: marker.sha256, actual }
+  return { checked: true, restored, expected: marker.sha256, actual }
 }
 
-/** Put the original back from the stored copy, then clear the marker. */
+/**
+ * Put the original back from the stored copy, then clear the marker.
+ *
+ * Clearing the marker here is what leaves a later `begin`-less mutation unprotected (#343's
+ * second half). Whether `restore` should keep the marker so that `end` still has a hash to
+ * check is a design question outside that issue and unchanged here; #343 fixed the reporting,
+ * which stands either way.
+ */
 export function restore(repoRoot: string, filePath: string): boolean {
   const abs = resolve(repoRoot, filePath)
   const rel = relative(repoRoot, abs)

@@ -1536,6 +1536,16 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
         return ok ? 0 : 1
       }
       const r = endMutation(root, target)
+      if (!r.checked) {
+        // Nothing was compared, so nothing can be reported as verified. Saying "back to its
+        // original" here is what #343 was: a second mutation after a `restore`, with no new
+        // `begin`, got a green `end` and a clean `mutations` listing over a still-broken file.
+        console.error(
+          `conclave: no marker for ${target} — nothing was checked\n` +
+            `  the file may or may not be back to its original; compare its sha256 yourself`,
+        )
+        return 1
+      }
       if (r.restored) {
         console.log(`conclave: ${target} is back to its original; marker cleared`)
         return 0
