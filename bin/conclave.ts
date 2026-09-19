@@ -242,11 +242,17 @@ Commands:
                                    live, so it can gate a commit helper. --json prints the
                                    report as JSON on stdout instead of prose; the exit
                                    code is unchanged.
-  notify         tell|ask "<headline>" [--options id:Label,...] [--kind ...]
-                 [--href URL] [--run <id>] [--transport <name>] [--operator human]
+  notify         tell|ask "<headline>" --transport <name> [--options id:Label,...]
+                 [--kind ...] [--href URL] [--run <id>] [--operator human]
                  vetoes [--transport <name>] | log [--json]
                  broker start|status|stop [--json]
-                                   Reach a human when an agent is operating. "tell" is one way
+                                   Reach a human when an agent is operating -- IF a transport is
+                                   configured, which by default none is. --transport is REQUIRED
+                                   and has no default: the only candidate was "fake", which is
+                                   test plumbing and answers nothing, and inheriting it meant
+                                   discovering there was no channel at the moment one was needed.
+                                   "even-realities" is the only one that reaches a person, and it
+                                   needs a paired device and a running broker. "tell" is one way
                                    and never waits; "ask" waits and prints the answer as JSON.
                                    An action is an id that was offered; free text comes back as
                                    text for the caller to interpret. "log" is what was asked and
@@ -1304,7 +1310,29 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
     // it (#278); a transport that needs no run ignores it. Two refusals, two messages: a name
     // that is not a transport lists the names, a transport that cannot be used says why.
     const transportFor = (): Transport | number => {
-      const transportName = flagOf('transport') ?? 'fake'
+      // NO DEFAULT. `fake` used to be it, and `fake` is test plumbing -- the registry says so in
+      // as many words. So an agent operator that followed the skill to `notify ask` reached a
+      // scripted stub, got `fake carried no answer`, and read that as a delivery failure: the
+      // message named a transport rather than saying there was none (#351).
+      //
+      // The worst part was WHEN it was learned. An agent reads the skill at planning time, sees
+      // a channel to a human, and discovers at the moment it has a question it cannot answer
+      // that there was never one -- which for an unattended run is also the moment nobody is
+      // coming. Refusing here moves that discovery to the first call, and the first call is
+      // usually made while somebody is still watching.
+      //
+      // `fake` is still reachable, by name. Naming it is a statement that a stub is what you
+      // want; inheriting it by saying nothing never was.
+      const named = flagOf('transport')
+      if (named === undefined) {
+        console.error(
+          `conclave: notify needs --transport — no human channel is configured by default\n` +
+            `  have: ${transportNames().join(', ')}\n` +
+            `  \`fake\` is test plumbing and answers nothing; naming it is a choice, not a fallback`,
+        )
+        return 2
+      }
+      const transportName = named
       try {
         const transport = resolveTransport(transportName, { ...(flagOf('run') ? { runId: flagOf('run')! } : {}) })
         if (transport) return transport
@@ -1467,7 +1495,15 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
     if (!answer) {
       // Non-zero, because the caller asked a question and did not get one answered. The pause
       // or the decision it was asking about has not gone away.
-      console.error(`conclave: ${transport.name} carried no answer — see conclave notify log`)
+      // A STUB THAT ANSWERED NOTHING IS NOT A DELIVERY FAILURE, and saying only that it
+      // "carried no answer" sent an operator to `notify log` and the broker before they read
+      // the source (#351). Named apart, because the two have nothing in common to do next.
+      console.error(
+        transport.name === 'fake'
+          ? `conclave: fake is test plumbing and answers nothing — no human was asked\n` +
+              `  --transport ${transportNames().filter((n) => n !== 'fake').join(' or ')} reaches one`
+          : `conclave: ${transport.name} carried no answer — see conclave notify log`,
+      )
       return 1
     }
     return 0
