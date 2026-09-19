@@ -210,6 +210,7 @@ test('#345 the device lines carry the loopback warning only when the address is 
   assert.deepEqual(deviceLines({ ...base, url: 'http://0.0.0.0:3456' }), ['  device  http://0.0.0.0:3456   token tok'])
   assert.deepEqual(deviceLines({ ...base, url: 'http://100.95.159.49:3456' }), ['  device  http://100.95.159.49:3456   token tok'])
   assert.ok(!startNotice({ ...base, url: 'http://0.0.0.0:3456' }).includes('CONCLAVE_EVEN_HOST'))
+  assert.ok(!startNotice({ ...base, url: 'http://100.95.159.49:3456' }).includes('CONCLAVE_EVEN_HOST'))
 })
 
 test('#290 the session linger reaches the serve process from the CONFIG, not from whatever this environment says', async (t) => {
