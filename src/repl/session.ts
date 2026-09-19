@@ -2443,6 +2443,24 @@ export async function runSession(opts: SessionOptions): Promise<number> {
     const opened = heredocOpen(body)
     if (opened) {
       block = { head: opened.head, tag: opened.tag, lines: [] }
+      // SAID OUT LOUD WHERE THERE IS NO HINT ROW (#347). `hint()` names an open block on every
+      // draw, and its reason applies here word for word: nothing inside one is echoed and the
+      // transcript stays still, so a console collecting a block is indistinguishable from one
+      // that has stopped responding. But `hint` belongs to `screen`, and `screen` exists only
+      // when stdin is a TTY -- so the driver of an `--operator agent` run, which is the whole
+      // reason this channel is piped, was the one party told nothing.
+      //
+      // What that cost: a driver whose closing tag never arrived (a mangled heredoc) had every
+      // later line taken as content, `/continue` and `/exit` among them. The run sat paused,
+      // `conclave status` reported it healthy, and the commands were silently becoming message
+      // text. It was read as a broken control channel and the run was killed.
+      //
+      // ONCE, on open, rather than per line: the body of a block is the operator's and a line
+      // of commentary per line of theirs is the noise-per-fragment the piped path is written to
+      // avoid. Not an escape hatch either -- a block MUST be able to carry `/continue` as
+      // literal text, and that guarantee is worth more than a way out. Being told which state
+      // you are in is the part that was missing.
+      if (!screen) write(dim(`  collecting a message — close it with a line reading exactly ${opened.tag}`))
       screen?.draw()
       return
     }
@@ -2698,7 +2716,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
       // FALSIFIER, stated because it is the strongest argument against this shape: the
       // console has no general "trailing text is a message" rule and does not gain one here.
       // `/rotate <text>` and `/abort <text>` consume their text as a REASON
-      // (`src/repl/session.ts:2751`, `src/repl/session.ts:2784`) and `/pause`, `/queue`, `/audit` ignore
+      // (`src/repl/session.ts:2769`, `src/repl/session.ts:2802`) and `/pause`, `/queue`, `/audit` ignore
       // whatever follows them. So an operator who learns this from `/continue` and carries
       // it to `/pause I'll be back` still loses the sentence. That inconsistency is not
       // repaired by making `/continue` a third behaviour; it is narrowed by it, and the

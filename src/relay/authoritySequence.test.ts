@@ -342,7 +342,7 @@ test('handing the aside to the advisor alone settles it, and arms nothing new (#
   assert.equal(first.pause.conflict!.origin.seq, asideMsg.seq)
 
   // To the advisor alone. This is `>advisor <text>` at the prompt, which is `inject(rest,
-  // { only: who })` (src/repl/session.ts:2847).
+  // { only: who })` (src/repl/session.ts:2865).
   const delivery = run.injectConstraint(BROADCAST, { only: 'advisor' })
   assert.equal(delivery.visibility, 'restricted', 'a human message to one seat is restricted')
   assert.deepEqual(delivery.excluded, ['implementer'], 'and the implementer is the one left out of it')
