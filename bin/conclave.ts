@@ -457,6 +457,12 @@ Commands:
   events [<id>]  [--follow]        The session's event stream as NDJSON: every routed
                                    message and every adapter event, in relay order.
                                    --follow tails it and stops when the session does.
+                                   With no id, --follow waits for a session to be
+                                   recorded rather than exiting, so it can be started
+                                   alongside conclave session and survive the startup
+                                   window; an id that names no session is refused at
+                                   once. Either way it then waits for the session's
+                                   first event rather than refusing an empty stream.
                                    Includes pause and resume, so a driver is woken at a
                                    decision point rather than polling status for it.
                                    New event types are added over time: ignore any
@@ -1030,6 +1036,13 @@ function prune(root: string, flags: string[]): number {
 }
 
 /**
+ * How long `events --follow` waits between looks while there is nothing to follow yet: for
+ * the first session to be recorded, then for its events file, then for its next line. One
+ * cadence for the three, so a follower is one rhythm rather than three.
+ */
+const FOLLOW_WAIT_MS = 250
+
+/**
  * Print a session's event stream, optionally following it.
  *
  * Reads the file rather than attaching to the process, for the reason `sessionRecord`
@@ -1043,9 +1056,39 @@ function prune(root: string, flags: string[]): number {
  */
 async function streamEvents(found: ReadSession, follow: boolean): Promise<number> {
   const path = found.status.eventsPath
+  const root = projectRootFor(process.cwd())
+  const gone = () => {
+    const now = readSession(root, found.status.id)
+    return !now || now.status.state === 'ended' || now.abandoned
+  }
   if (!existsSync(path)) {
-    console.error(`conclave: no events recorded for ${found.status.id}`)
-    return 1
+    if (!follow) {
+      console.error(`conclave: no events recorded for ${found.status.id}`)
+      return 1
+    }
+    // The second startup wait (#350; the first is `awaitFirstSession`). The record is written
+    // when the run registers and the events file when the first event is appended, and a
+    // follower attaching between the two used to take the refusal above for a session that
+    // was seconds from its first line. Bounded the way the tail below is bounded and by
+    // nothing else: a record exists, so every look can ask whether the run is still there,
+    // and a run that ended without an event gets the answer the non-follow form gives,
+    // because that is what happened.
+    //
+    // Whether or not an id was named. The first wait is refused for a named id because a
+    // typo must not hang; this one is reached only through `resolveSession`, so `found` IS a
+    // session, however it was asked for. An id that resolved is a real session; an id that
+    // did not resolve never becomes one by waiting. It is also what the `--detach` next-step
+    // line, `conclave events <id> --follow`, needs: it is printed in exactly this window.
+    console.error(
+      `conclave: ${found.status.id} has recorded no events yet — waiting for its first. Ctrl-C to stop`,
+    )
+    while (!existsSync(path)) {
+      await new Promise((r) => setTimeout(r, FOLLOW_WAIT_MS))
+      if (gone() && !existsSync(path)) {
+        console.error(`conclave: no events recorded for ${found.status.id}`)
+        return 1
+      }
+    }
   }
   let offset = 0
   const drain = () => {
@@ -1072,13 +1115,57 @@ async function streamEvents(found: ReadSession, follow: boolean): Promise<number
   // Stops when the session does, so `--follow` terminates on its own rather than requiring
   // a Ctrl-C -- which a script driving this cannot send.
   for (;;) {
-    await new Promise((r) => setTimeout(r, 250))
+    await new Promise((r) => setTimeout(r, FOLLOW_WAIT_MS))
     drain()
-    const now = readSession(projectRootFor(process.cwd()), found.status.id)
-    if (!now || now.status.state === 'ended' || now.abandoned) {
+    if (gone()) {
       drain()
       return 0
     }
+  }
+}
+
+/**
+ * Block until this project has a session to follow, and hand back the newest.
+ *
+ * `events --follow` with no id, started alongside `session` as the help and the skill
+ * teach, loses the race with startup: a first run in a project spends ten seconds or more
+ * registering hooks and clearing trust prompts before it records anything, and a follower
+ * that answered "no sessions have been recorded" and exited in that window left the
+ * operator tailing a file that would never grow, with nothing to say the stream had ended
+ * (#350). Following is an interest in what has not happened yet, so nothing recorded yet
+ * is a reason to wait, not to stop.
+ *
+ * NO TIMEOUT, on purpose. The wait this covers is the one the issue measured, and it is
+ * unbounded at the far end: a first run's trust prompts stay up until a human answers them.
+ * Any ceiling would re-open the race at a different threshold, and the threshold would be
+ * wrong on exactly the cold, first-time machine the issue was filed from. What bounds the
+ * wait instead is the operator: the state is on stderr with the way out named, and a driver
+ * that put this in the background has the `session` exit code to say whether anything will
+ * ever arrive. The second wait, for the events file, IS bounded -- by the run ending, which
+ * only a run that has a record can be seen to do.
+ *
+ * ONLY when no id was given. `events --follow <id>` names a session, and a session that does
+ * not exist is a typo rather than a run that has yet to start: waiting on it would turn a
+ * wrong character into a process that never ends. So an explicit id resolves once and fails
+ * at once, and the parser recognises it on either side of `--follow` -- it used to see one
+ * only BEFORE the flag, which made `events --follow <typo>` follow the newest session
+ * instead, and would have made it wait forever here. The rule is resolved against
+ * unresolvable, not named against unnamed: an id that resolved is a real session, and the
+ * wait for ITS events file in `streamEvents` applies to it like any other; an id that did
+ * not resolve never becomes one by waiting.
+ */
+async function awaitFirstSession(root: string): Promise<ReadSession> {
+  let announced = false
+  for (;;) {
+    const found = resolveSession(root, undefined)
+    if ('session' in found) return found.session
+    if (!announced) {
+      console.error(
+        'conclave: no sessions have been recorded in this project yet — waiting for one. Ctrl-C to stop',
+      )
+      announced = true
+    }
+    await new Promise((r) => setTimeout(r, FOLLOW_WAIT_MS))
   }
 }
 
@@ -1663,14 +1750,18 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
 
   if (command === 'events') {
     const root = projectRootFor(process.cwd())
-    const wanted = sub && !sub.startsWith('--') ? sub : undefined
-    const found = resolveSession(root, wanted)
+    const tokens = [sub, ...rest].filter((t): t is string => t !== undefined)
+    // The id is whichever token is not a flag, on either side of `--follow`. Reading only
+    // `sub` made `events --follow <id>` drop the id and follow the newest session -- and now
+    // that no id means "wait for one", a dropped id would mean waiting on a typo.
+    const wanted = tokens.find((t) => !t.startsWith('-'))
+    const follow = tokens.includes('--follow') || tokens.includes('-f')
+    const found = follow && !wanted ? { session: await awaitFirstSession(root) } : resolveSession(root, wanted)
     if ('error' in found) {
       console.error(`conclave: ${found.error}`)
       return 1
     }
-    const flags = [sub, ...rest]
-    return await streamEvents(found.session, flags.includes('--follow') || flags.includes('-f'))
+    return await streamEvents(found.session, follow)
   }
 
   if (command === 'relay') {
