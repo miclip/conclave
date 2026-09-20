@@ -13,6 +13,12 @@
  * a busy run. There are two gaps, not one: the record lands when the run registers and the
  * events file when the first event is appended, and a follower can attach between them too.
  *
+ * And the other half (#360): in a project that already HAS sessions, "the newest" during
+ * the startup window is the previous run, which has ended. The follower drained its stream,
+ * saw `ended`, and exited 0 -- the same dead follower, with a plausible-looking file full of
+ * the last run's events as the only clue. So no id under --follow is the newest session that
+ * is still going, and the wait covers an all-ended project as well as an empty one.
+ *
  * Driven as a child process, because the point is what the process DOES while nothing is
  * there yet: the test writes the record underneath a follower that is already waiting.
  * The record is written by the real writer, so what the follower finds is what a run leaves.
@@ -44,10 +50,15 @@ function emptyProject(t: TestContext): string {
  * as alive for as long as the test does -- an abandoned record ends a follow on its own,
  * which is the right behaviour and not the one under test.
  */
-function record(dir: string, id: string, startedAt = 1_700_000_000_000): SessionRecorder {
+function record(
+  dir: string,
+  id: string,
+  startedAt = 1_700_000_000_000,
+  { pid = process.pid }: { pid?: number } = {},
+): SessionRecorder {
   return new SessionRecorder(dir, {
     id,
-    pid: process.pid,
+    pid,
     cwd: dir,
     goal: 'follow me',
     front: 'session',
@@ -115,7 +126,7 @@ test('#350 events --follow with no id waits for the first session instead of exi
   // The old behaviour was exit 1 inside a few hundred milliseconds. A full second with the
   // process still there is the wait.
   await stillRunning(f)
-  assert.match(f.err(), /no sessions have been recorded in this project yet — waiting for one\. Ctrl-C to stop/)
+  assert.match(f.err(), /no session is under way in this project — waiting for one to start\. Ctrl-C to stop/)
   assert.equal(f.out(), '', 'nothing on stdout while there is nothing to stream')
 
   // The run registers underneath the waiting follower, then writes its first event.
@@ -136,7 +147,7 @@ test('#350 the waiting state is said once, not every poll', async (t) => {
   await stillRunning(f, 1_200)
   // Four polls' worth of quiet at least. A line per look would have made the stderr a
   // second stream to drown in.
-  assert.equal(f.err().match(/waiting for one/g)?.length, 1, f.err())
+  assert.equal(f.err().match(/waiting for one to start/g)?.length, 1, f.err())
 })
 
 test('#350 events --follow waits for the events file once the record exists', async (t) => {
@@ -150,7 +161,7 @@ test('#350 events --follow waits for the events file once the record exists', as
 
   await stillRunning(f)
   assert.match(f.err(), /registered has recorded no events yet — waiting for its first\. Ctrl-C to stop/)
-  assert.doesNotMatch(f.err(), /no sessions have been recorded/, 'the record was found; only the file is awaited')
+  assert.doesNotMatch(f.err(), /no session is under way/, 'the record was found; only the file is awaited')
 
   const line = event(rec, 1)
   await until(() => f.out().includes(line), 'the first event to reach the follower')
@@ -266,4 +277,113 @@ test('#350 without --follow nothing waits: the refusals are unchanged', async (t
   assert.equal(await noEvents.exit, 1)
   assert.match(noEvents.err(), /conclave: no events recorded for quiet/)
   assert.doesNotMatch(noEvents.err(), /waiting/)
+})
+
+/** A pid that cannot be running: a record still saying `running` whose process is gone. */
+const DEAD_PID = 2 ** 30
+
+test('#360 events --follow with no id skips an ended previous run and waits for the next', async (t) => {
+  // The documented two-line start, in a project that has run before. The newest record is
+  // the previous run, ended; the follower used to drain it and exit 0 inside a few hundred
+  // milliseconds, with the old run's events on stdout as if they were the new run's.
+  const dir = emptyProject(t)
+  const previous = record(dir, 'previous-run', 1_700_000_000_000)
+  const stale = event(previous, 1)
+  previous.update({ state: 'ended' })
+
+  const f = events(dir, '--follow')
+  t.after(() => f.child.kill())
+  await stillRunning(f)
+  assert.equal(f.out(), '', 'the ended run is not what was asked for: nothing of it is streamed')
+  // The same notice an empty project gets: what is awaited is the same thing in both.
+  assert.match(f.err(), /no session is under way in this project — waiting for one to start\. Ctrl-C to stop/)
+  assert.doesNotMatch(f.err(), /no sessions have been recorded/, 'a project with an ended run is not empty, and is not told it is')
+
+  // The new run registers underneath the waiting follower. Its startedAt is later, as a real
+  // run's would be, so it is the newest as well as the only one still going.
+  const next = record(dir, 'next-run', 1_700_000_100_000)
+  const line = event(next, 1)
+  await until(() => f.out().includes(line), 'the new run\'s first event to reach the follower')
+  next.update({ state: 'ended' })
+  assert.equal(await f.exit, 0)
+  assert.deepEqual(f.out().trim().split('\n'), [line])
+  assert.ok(!f.out().includes(stale), 'the previous run\'s stream never appears')
+})
+
+test('#360 an abandoned previous run is skipped too: a follow of it would end at its first look', async (t) => {
+  // `running` with nobody home is what `streamEvents` stops on, so attaching to it is the
+  // same exit 0 by another door. Not ended and not abandoned is the condition, and it is
+  // the one the tail itself uses.
+  const dir = emptyProject(t)
+  const crashed = record(dir, 'crashed-run', 1_700_000_000_000, { pid: DEAD_PID })
+  const stale = event(crashed, 1)
+
+  const f = events(dir, '--follow')
+  t.after(() => f.child.kill())
+  await stillRunning(f)
+  assert.equal(f.out(), '')
+  assert.match(f.err(), /no session is under way in this project — waiting for one to start/)
+
+  const next = record(dir, 'next-run', 1_700_000_100_000)
+  const line = event(next, 1)
+  await until(() => f.out().includes(line), 'the new run\'s first event to reach the follower')
+  f.child.kill()
+  assert.ok(!f.out().includes(stale))
+})
+
+test('#360 with no id the newest session still going is chosen, even when an ended one is newer', async (t) => {
+  // Two records: a going run, and a NEWER one that has ended. "Newest" alone picks the ended
+  // one; "newest still going" picks the run. The shape is a quick second run that finished
+  // while a longer first one is still up.
+  const dir = emptyProject(t)
+  const going = record(dir, 'long-run', 1_700_000_000_000)
+  const wanted = event(going, 1)
+  const quick = record(dir, 'quick-run', 1_700_000_100_000)
+  const notWanted = event(quick, 1)
+  quick.update({ state: 'ended' })
+
+  const f = events(dir, '--follow')
+  t.after(() => f.child.kill())
+  await until(() => f.out().includes(wanted), 'the going run\'s event to reach the follower')
+  await stillRunning(f)
+  assert.doesNotMatch(f.err(), /waiting for one to start/, 'a session is under way; nothing was waited for')
+  assert.ok(!f.out().includes(notWanted), 'the ended run, though newer, is not the one followed')
+  going.update({ state: 'ended' })
+  assert.equal(await f.exit, 0)
+})
+
+test('#360 an explicit id still follows an ended session: the operator named it', async (t) => {
+  // Preserved. The still-going rule is for what NO id means; a named session is what was
+  // asked for whatever its state, and following an ended one is the one-shot read it
+  // always was, exit 0.
+  const dir = emptyProject(t)
+  const done = record(dir, 'done-run')
+  const line = event(done, 1)
+  done.update({ state: 'ended' })
+  for (const args of [
+    ['--follow', 'done-run'],
+    ['done-run', '--follow'],
+  ]) {
+    const f = events(dir, ...args)
+    t.after(() => f.child.kill())
+    assert.equal(await f.exit, 0, `events ${args.join(' ')}: ${f.err()}`)
+    assert.equal(f.out().trim(), line, `events ${args.join(' ')} streams the named session`)
+    assert.doesNotMatch(f.err(), /waiting for one to start/, `events ${args.join(' ')} must not wait`)
+  }
+})
+
+test('#360 one-shot events with no id still reads the newest session, ended or not', async (t) => {
+  // Preserved. Without --follow a poll of an ended run is a poll of an ended run: the
+  // still-going rule belongs to following alone, where an ended run is a dead follower.
+  const dir = emptyProject(t)
+  const older = record(dir, 'older-run', 1_700_000_000_000)
+  event(older, 1)
+  const newest = record(dir, 'newest-run', 1_700_000_100_000)
+  const line = event(newest, 1)
+  newest.update({ state: 'ended' })
+  const f = events(dir)
+  t.after(() => f.child.kill())
+  assert.equal(await f.exit, 0, f.err())
+  assert.equal(f.out().trim(), line, 'the newest, though ended, is what a one-shot read describes')
+  assert.doesNotMatch(f.err(), /waiting/)
 })
