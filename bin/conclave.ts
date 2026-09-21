@@ -242,15 +242,22 @@ Commands:
                                    live, so it can gate a commit helper. --json prints the
                                    report as JSON on stdout instead of prose; the exit
                                    code is unchanged.
-  notify         tell|ask "<headline>" --transport <name> [--options id:Label,...]
+  notify         tell|ask "<headline>" [--transport <name>] [--options id:Label,...]
                  [--kind ...] [--href URL] [--run <id>] [--operator human]
                  vetoes [--transport <name>] | log [--json]
                  broker start|status|stop [--json]
                                    Reach a human when an agent is operating -- IF a transport is
-                                   configured, which by default none is. --transport is REQUIRED
-                                   and has no default: the only candidate was "fake", which is
-                                   test plumbing and answers nothing, and inheriting it meant
-                                   discovering there was no channel at the moment one was needed.
+                                   configured, which by default none is. There is no default:
+                                   --transport names one for the call, or .conclave/config.json
+                                   names one for the project ({"notify":{"transport":"<name>"}});
+                                   the flag wins over the file, and with neither, notify refuses
+                                   and lists the names. The only candidate for a default was
+                                   "fake", which is test plumbing and answers nothing, and
+                                   inheriting it meant discovering there was no channel at the
+                                   moment one was needed. It may still be named, on the call or
+                                   in the file, as a choice. The broker's port, host and token
+                                   stay environment variables: they describe the machine, not
+                                   the project.
                                    "even-realities" is the only one that reaches a person, and it
                                    needs a paired device and a running broker. "tell" is one way
                                    and never waits; "ask" waits and prints the answer as JSON.
@@ -1440,7 +1447,17 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
       //
       // `fake` is still reachable, by name. Naming it is a statement that a stub is what you
       // want; inheriting it by saying nothing never was.
-      const named = flagOf('transport')
+      //
+      // THE FLAG, THEN THE FILE, THEN THE REFUSAL (#353). `.conclave/config.json` may name the
+      // transport once, so the answer to the refusal below has somewhere to be written down
+      // other than on every call. The name in the file was checked against the registry when
+      // the file was read, so a typo there is refused before this runs, in the same words as a
+      // typo on the flag. Read whether or not the flag is present: a file that is only checked
+      // on the calls that need it is a file that is half-validated, and the flag call an
+      // operator makes by hand is exactly the one that would hide the typo their unattended run
+      // then hits. With neither, the refusal is unchanged, byte for byte.
+      const configured = readProjectConfig(root).notify?.transport
+      const named = flagOf('transport') ?? configured
       if (named === undefined) {
         console.error(
           `conclave: notify needs --transport — no human channel is configured by default\n` +

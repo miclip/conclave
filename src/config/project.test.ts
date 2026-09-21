@@ -12,6 +12,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 import type { TestContext } from 'node:test'
 import { tempDir } from '../testkit/tempDir.ts'
+import { transportNames } from '../notify/registry.ts'
 import { DENIABLE_CAPABILITIES } from '../registry/operatorDenied.ts'
 import {
   BYPASS_ARGS,
@@ -231,6 +232,66 @@ test('a value that is neither true nor false is refused as not-false', (t) => {
   assert.throws(
     () => readProjectConfig(projectWith(t, '{"commands":{"/compact":"no"}}')),
     /must be false, not "no"/,
+  )
+})
+
+test('#353 a configured notify transport is read back, and `fake` is a name like any other', (t) => {
+  // `fake` is exactly the state #351 removed as a DEFAULT. Written here it is a choice, the
+  // same one naming it on the call is, and the reader has no business second-guessing it.
+  const config = readProjectConfig(projectWith(t, '{"notify":{"transport":"fake"}}'))
+  assert.equal(config.notify?.transport, 'fake')
+  // And a file with no `notify` key reads back without one, not with an invented empty block:
+  // `notify`'s own absence is what makes the CLI refuse in #351's words.
+  assert.equal('notify' in readProjectConfig(projectWith(t, '{"permissions":"ask"}')), false)
+})
+
+test('#353 a transport name nothing resolves is refused at read, listing every name that does', (t) => {
+  // At READ rather than at the first `notify` call, because the operator who writes this key is
+  // doing so precisely so that an unattended run can reach them -- and a typo that surfaced only
+  // when that run had a question would surface at the moment nobody was there to read it.
+  assert.throws(
+    () => readProjectConfig(projectWith(t, '{"notify":{"transport":"glasses"}}')),
+    (err: Error) => {
+      assert.match(err.message, /config\.json: unknown transport 'glasses'\. Known: /)
+      for (const n of transportNames()) assert.ok(err.message.includes(n), `it must list ${n}`)
+      return true
+    },
+  )
+})
+
+test('#353 a notify block that is not the shape of one is refused, not read as absent', (t) => {
+  // Read as absent, a malformed block would mean the refusal the operator wrote this to avoid.
+  assert.throws(() => readProjectConfig(projectWith(t, '{"notify":"fake"}')), /notify must be an object, not "fake"/)
+  assert.throws(() => readProjectConfig(projectWith(t, '{"notify":["fake"]}')), /notify must be an object/)
+  assert.throws(
+    () => readProjectConfig(projectWith(t, '{"notify":{"transport":1}}')),
+    /notify\.transport must be a transport name, not 1/,
+  )
+  // An empty block names nothing and is not an error: it is the same as no block.
+  assert.equal(readProjectConfig(projectWith(t, '{"notify":{}}')).notify?.transport, undefined)
+})
+
+test('#353 the README says the transport can be configured, and says which of flag and file wins', () => {
+  // The refusal at runtime is #351's, unchanged, and says only that a flag is needed. So the
+  // README is the one place an operator learns the answer can be written down -- and the place
+  // that used to state the opposite. Guarded as wording, because a sentence saying `--transport`
+  // is required would be true again the moment someone tidied this paragraph.
+  const readme = readFileSync(join(import.meta.dirname, '..', '..', 'README.md'), 'utf8')
+  const flat = readme.replace(/\s+/g, ' ')
+  assert.doesNotMatch(flat, /`--transport` is required/, 'the README must not claim the flag is always required')
+  assert.match(flat, /\{ "notify": \{ "transport": "even-realities" \} \}/, 'the config key, as JSON an operator can copy')
+  assert.match(
+    flat,
+    /The flag wins over the file, the file stands in when the flag is absent, and with neither `notify` refuses and lists the names/,
+    'precedence stated, in one sentence, in this order',
+  )
+  assert.match(flat, /checked when the file is read/, 'and that a typo in the file is caught at read')
+  assert.match(flat, /`fake` is among the names and is test plumbing .* It may be configured/, 'a configured `fake` is allowed and said to be')
+  assert.match(flat, /# valid only because the file names one/, 'the example that omits the flag says why that is valid')
+  assert.match(
+    flat,
+    /environment variables and not keys in `\.conclave\/config\.json` on purpose/,
+    'the broker settings are stated to be machine-global, not project config',
   )
 })
 
