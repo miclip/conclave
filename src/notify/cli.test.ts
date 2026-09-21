@@ -6,10 +6,12 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync, spawn, spawnSync } from 'node:child_process'
+import { mkdirSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { join } from 'node:path'
 import test from 'node:test'
 import type { TestContext } from 'node:test'
+import { CONFIG_RELATIVE } from '../config/project.ts'
 import { tempDir } from '../testkit/tempDir.ts'
 import { SessionRecorder } from '../workspace/sessionRecord.ts'
 import { FAKE_REPLY_ENV, resolveTransport, transportNames } from './registry.ts'
@@ -51,6 +53,21 @@ function record(dir: string, id: string, goal: string): SessionRecorder {
  * only where a test means it -- the broker announces its start there, deliberately. `said` is
  * both, for the assertions that do not care which stream carried the sentence.
  */
+/**
+ * stderr with Node's own warnings removed, for comparisons between two invocations.
+ *
+ * `(node:<pid>) ExperimentalWarning: Type Stripping` carries a PID, so it is never equal across
+ * runs, and its follow-on `(Use \`node --trace-warnings ...\`)` comes with it. Neither is
+ * conclave speaking. The shebang suppresses them in normal use; a test that spawns `node`
+ * directly skips the shebang and sees them on whichever versions still emit the warning.
+ */
+function withoutHarnessNoise(err: string): string {
+  return err
+    .split('\n')
+    .filter((l) => !/^\(node:\d+\) \w*Warning:/.test(l) && !/^\(Use `node --trace-warnings/.test(l))
+    .join('\n')
+}
+
 function run(args: string[], cwd: string, reply?: string): { code: number; out: string; err: string; said: string } {
   // `--transport fake` is NAMED, not inherited (#351). It used to be the default, which is how
   // an agent operator following the skill reached a stub and learned there was no human channel
@@ -126,6 +143,103 @@ test('#351 notify with no transport refuses instead of inheriting test plumbing'
   // Named, it is still available: this is a removed DEFAULT, not a removed transport.
   const named = run(['tell', 'run started', '--transport', 'fake'], dir)
   assert.equal(named.code, 0, 'naming the stub is a choice the CLI honours')
+})
+
+/** `.conclave/config.json` in `dir`, written as the operator would write it. */
+function configure(dir: string, json: string): void {
+  mkdirSync(join(dir, '.conclave'), { recursive: true })
+  writeFileSync(join(dir, CONFIG_RELATIVE), json)
+}
+
+/** `conclave notify <args>` exactly as typed: no `--transport` is supplied for the caller. */
+function bare(args: string[], cwd: string): { code: number; out: string; err: string; said: string } {
+  const r = spawnSync('node', [CLI, 'notify', ...args], { cwd, encoding: 'utf8' })
+  return { code: r.status ?? -1, out: r.stdout, err: r.stderr, said: `${r.stdout}${r.stderr}` }
+}
+
+test('#353 a transport configured for the project is used when the call names none', (t) => {
+  // The answer to #351's refusal, written down once. `fake` is what is configured here because
+  // it is the transport a test can drive; that it is also the stub #351 stopped defaulting to is
+  // the point of the second assertion -- configured, it is a choice, and the CLI honours it.
+  const dir = repo(t)
+  configure(dir, '{"notify":{"transport":"fake"}}')
+  const told = bare(['tell', 'run started'], dir)
+  assert.equal(told.code, 0, told.said)
+  assert.equal(told.out.trim(), '', 'a delivered notification says nothing')
+  assert.doesNotMatch(told.said, /notify needs --transport/)
+  const log = JSON.parse(run(['log', '--json'], dir).out) as { transport: string }[]
+  assert.equal(log[0]?.transport, 'fake', 'and the record names the transport the file chose')
+  // `vetoes` resolves its transport the same way.
+  assert.equal(bare(['vetoes'], dir).code, 0)
+})
+
+test('#353 --transport on the call beats the configured one, in both directions', (t) => {
+  // Precedence stated rather than assumed. Each direction is proved by a transport that would
+  // have behaved differently: `even-realities` refuses without `--run`, `fake` needs nothing.
+  const dir = repo(t)
+  configure(dir, '{"notify":{"transport":"even-realities"}}')
+  const flagWins = bare(['tell', 'hi', '--transport', 'fake'], dir)
+  assert.equal(flagWins.code, 0, flagWins.said)
+  assert.doesNotMatch(flagWins.said, /even-realities needs the run/)
+
+  configure(dir, '{"notify":{"transport":"fake"}}')
+  const flagStillWins = bare(['tell', 'hi', '--transport', 'even-realities'], dir)
+  assert.equal(flagStillWins.code, 2)
+  assert.match(flagStillWins.said, /even-realities needs the run it speaks for/)
+})
+
+test('#353 a configured name nothing resolves is refused when the file is read, with the names', (t) => {
+  // Refused by the config reader, so the words are the reader's and the failure is at the first
+  // command that reads the file -- not at the first `notify ask` of an unattended run.
+  const dir = repo(t)
+  configure(dir, '{"notify":{"transport":"glasses"}}')
+  for (const args of [['tell', 'hi'], ['tell', 'hi', '--transport', 'fake']]) {
+    const r = bare(args, dir)
+    assert.notEqual(r.code, 0, `${args.join(' ')} must not succeed on a file that names nothing`)
+    assert.match(r.said, /config\.json: unknown transport 'glasses'\. Known: /)
+    for (const n of transportNames()) assert.ok(r.said.includes(n), `it must list ${n}`)
+    assert.doesNotMatch(r.said, /no transport named/, 'the file is refused as a file, not the name as a flag')
+  }
+})
+
+test('#353 a config with no notify key refuses exactly as no config does', (t) => {
+  // Byte for byte on both streams and the exit code. This is #351's refusal, and #353 added a
+  // place to answer it, not a new sentence: the two runs differ only in whether a config file
+  // exists, and a file that says nothing about notify must not change a character of it.
+  const withoutFile = bare(['ask', 'Merge?', '--options', 'yes:Merge'], repo(t))
+  const dir = repo(t)
+  configure(dir, '{"permissions":"ask"}')
+  const withFile = bare(['ask', 'Merge?', '--options', 'yes:Merge'], dir)
+  assert.equal(withoutFile.code, 2)
+  assert.equal(withFile.code, withoutFile.code)
+  assert.equal(withFile.out, withoutFile.out)
+  // WITHOUT THE HARNESS'S OWN NOISE. Node prints `(node:<pid>) ExperimentalWarning: Type
+  // Stripping` when it runs this source directly, and the PID in it differs between two runs --
+  // so comparing raw stderr asserts that two processes had the same pid, which they never do.
+  // It passed everywhere the warning does not fire and failed on the Node floor, where it does:
+  // a test that could only hold on the platforms that happened not to produce the line.
+  assert.equal(withoutHarnessNoise(withFile.err), withoutHarnessNoise(withoutFile.err))
+  // And the sentence itself is pinned, so the identity above cannot be two copies of a new one.
+  const refusal =
+    `conclave: notify needs --transport — no human channel is configured by default\n` +
+    `  have: ${transportNames().join(', ')}\n` +
+    `  \`fake\` is test plumbing and answers nothing; naming it is a choice, not a fallback\n`
+  assert.ok(withFile.err.includes(refusal), `stderr must carry the #351 refusal verbatim:\n${withFile.err}`)
+  assert.equal(withFile.out, '')
+})
+
+test('#353 the top-level help says the transport can be configured, and which of flag and file wins', (t) => {
+  // `conclave --help` is what an agent reads before the skill, and it used to say `--transport`
+  // is REQUIRED -- true at the refusal, false as a description of the surface once the file can
+  // name one. The runtime refusal is deliberately unchanged, so the help is where this is said.
+  const r = spawnSync('node', [CLI, '--help'], { cwd: repo(t), encoding: 'utf8' })
+  assert.equal(r.status, 0)
+  const help = r.stdout.replace(/\s+/g, ' ')
+  assert.doesNotMatch(help, /--transport is REQUIRED/)
+  assert.match(help, /\.conclave\/config\.json names one for the project \(\{"notify":\{"transport":"<name>"\}\}\)/)
+  assert.match(help, /the flag wins over the file, and with neither, notify refuses and lists the names/)
+  assert.match(help, /It may still be named, on the call or in the file, as a choice/, 'a configured `fake` is a choice, and the help says so')
+  assert.match(help, /port, host and token stay environment variables: they describe the machine, not the project/)
 })
 
 test('#184 a question that carried no answer exits non-zero', (t) => {

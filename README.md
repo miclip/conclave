@@ -251,6 +251,15 @@ Per agent:
 `--bypass` on `relay` or `session` writes it for you, and `--bypass claude` scopes it to one
 agent. It merges rather than replaces. Set `"permissions": "ask"` to undo.
 
+The same file names the transport `conclave notify` uses when a call does not say:
+
+```json
+{ "notify": { "transport": "even-realities" } }
+```
+
+`--transport` on the call still wins; see [Driving it as an agent](#driving-it-as-an-agent) for
+the precedence and what may go there.
+
 ### Roles
 
 A role is a job a seat does, defined once and referenced by name:
@@ -415,14 +424,28 @@ is, `conclave notify` is the only channel to them:
 ```sh
 conclave notify tell "<headline>" --transport <name>     # say it; no answer expected
 conclave notify ask  "<headline>" --transport <name> --options a:Yes,b:No
-conclave notify vetoes                                   # answers that arrived late
+conclave notify vetoes --transport <name>                # answers that arrived late
 conclave notify log                                      # what was asked, answered, by whom
 ```
 
-`--transport` is required and has no default: with none, `notify` refuses and lists the names.
-`fake` is among them and is test plumbing — it takes a question and answers nothing — so a name
-in that list is not the same thing as a channel to a person. `even-realities` is the one that
-reaches one.
+There is no default transport. A call names one with `--transport`, or the project names one
+once in `.conclave/config.json`:
+
+```json
+{ "notify": { "transport": "even-realities" } }
+```
+
+```sh
+conclave notify ask "<headline>" --options a:Yes,b:No    # valid only because the file names one
+```
+
+The flag wins over the file, the file stands in when the flag is absent, and with neither
+`notify` refuses and lists the names. A name in the file is checked when the file is read, so a
+typo is refused with the names by the first command that opens it, not by an unattended run's
+first question. `fake` is among the names and is test plumbing — it takes a question and answers
+nothing — so a name in that list is not the same thing as a channel to a person. It may be
+configured, and that means what naming it on the call means: a stub is what you want.
+`even-realities` is the one that reaches a person.
 
 `--transport even-realities --run <id>` puts the question on a pair of Even Realities glasses,
 listed there as the run. The first run that needs the device starts a broker — one process that
@@ -430,7 +453,10 @@ holds the port for every run on the machine, announced on stderr with its pid, s
 address, token and stop command — and exits 60 seconds after the last run disconnects.
 `conclave notify broker status|stop` reads those facts back or ends it now. `CONCLAVE_EVEN_PORT`
 (3456), `CONCLAVE_EVEN_TOKEN`, `CONCLAVE_EVEN_HOST` (loopback unless told otherwise),
-`CONCLAVE_EVEN_SOCKET` and `CONCLAVE_EVEN_LINGER_MS` move each of those. An answered `ask` prints
+`CONCLAVE_EVEN_SOCKET` and `CONCLAVE_EVEN_LINGER_MS` move each of those. They are environment
+variables and not keys in `.conclave/config.json` on purpose: the device's address and token are
+facts about the machine, shared by every project that reaches the same glasses, and that file is
+per project. An answered `ask` prints
 its answer and then holds the device for 300 ms (`CONCLAVE_EVEN_CONFIRM_GRACE_MS`) so the glasses
 can show the confirmation before the run lets go. Once it has, the thread stays listed as `idle`
 for 30 seconds (`CONCLAVE_EVEN_SESSION_LINGER_MS`; `0` removes it at once) so the app can go back

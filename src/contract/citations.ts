@@ -95,15 +95,15 @@ export const CITED: Record<string, string> = {
   //
   // The three below moved twice over, once for #81 and once for #80's integration work in the
   // same file, and are pinned against the merged tree rather than against either side of it.
-  'bin/conclave.ts:1404': '{ ...s.status, alive: s.alive, abandoned: s.abandoned }',
-  'bin/conclave.ts:2382-2384': "    const relay = await Relay.start({\n      registry,\n      cwd: process.cwd(),",
-  'bin/conclave.ts:2484': 'runReport(relay, { goal, outcome, startedAt: runStartedAt, build })',
+  'bin/conclave.ts:1411': '{ ...s.status, alive: s.alive, abandoned: s.abandoned }',
+  'bin/conclave.ts:2399-2401': "    const relay = await Relay.start({\n      registry,\n      cwd: process.cwd(),",
+  'bin/conclave.ts:2501': 'runReport(relay, { goal, outcome, startedAt: runStartedAt, build })',
   // One flag for every implementer seat, which is the RUN-WIDE half of the launch args. The
   // per-seat half is no longer missing (#77): it rides inside each `--implementers` entry and
   // is appended after this, so a seat's own spelling wins. This citation still pins what it
   // always pinned -- the flag that applies to all of them.
-  'bin/conclave.ts:2167-2170': "...extraArgs(flag('implementer-args', ''))",
-  'src/config/project.ts:370-373': 'export function launchArgsFor',
+  'bin/conclave.ts:2184-2187': "...extraArgs(flag('implementer-args', ''))",
+  'src/config/project.ts:425-428': 'export function launchArgsFor',
   'src/registry/roles.ts:15': 'export type RoleId = string',
   // The relay.ts citations below moved together when `launch` was added to RelayParticipant
   // and `#join` (#71). Repaired rather than deleted: each still points at the thing it was

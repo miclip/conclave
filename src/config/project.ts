@@ -44,6 +44,7 @@ import {
   type OperatorDenials,
 } from '../registry/operatorDenied.ts'
 import { dirname, join } from 'node:path'
+import { transportNames } from '../notify/registry.ts'
 import type { AgentKind } from './install.ts'
 import {  } from './install.ts'
 
@@ -121,6 +122,30 @@ export interface ProjectConfig {
    * than accepted and quietly dropped.
    */
   commands?: Record<string, false>
+  /**
+   * How `conclave notify` reaches a human when the call does not say (#353).
+   *
+   * `--transport` on the call wins; this is consulted only when the flag is absent; and with
+   * neither, `notify` still refuses in the words #351 chose. What this changes is WHERE the
+   * answer can be written down once, which used to be nowhere -- the only remedy was a flag
+   * on every call, forever, including inside whatever agent was driving the run.
+   *
+   * `fake` may be configured. It is the state #351 removed as a DEFAULT, and naming it here is
+   * the same statement as naming it on the call: a stub is what you want. `notify ask` still
+   * says what `fake` is when it answers nothing.
+   *
+   * The broker's host and token are NOT here, and that is a boundary rather than an omission.
+   * A transport name is a property of this checkout; the device's address and token are
+   * properties of the MACHINE, shared by every project that reaches the same glasses, and a
+   * per-project copy would be the value most likely to be stale when the device moves.
+   * Where they belong is #356.
+   */
+  notify?: NotifyConfig
+}
+
+export interface NotifyConfig {
+  /** A name `transportNames()` lists. Refused at read otherwise, the way the flag is refused. */
+  transport?: string
 }
 
 /**
@@ -304,6 +329,35 @@ export function validateDenials(config: ProjectConfig, path: string): void {
 }
 
 /**
+ * Refuse a `notify` block that is malformed or names a transport nothing resolves.
+ *
+ * AT READ, for the reason the other validators give, and here it is sharper: the operator who
+ * writes this key is doing so precisely so that an UNATTENDED run can reach them, and a typo
+ * that surfaced only at the first `notify` call would surface at the moment nobody is there to
+ * read it. The names are listed, as the flag's own refusal lists them, so the repair is in the
+ * same breath as the complaint.
+ */
+export function validateNotify(config: ProjectConfig, path: string): void {
+  const notify = config.notify as unknown
+  if (notify === undefined) return
+  if (typeof notify !== 'object' || notify === null || Array.isArray(notify)) {
+    throw new Error(`${path}: notify must be an object, not ${JSON.stringify(notify)}`)
+  }
+  const transport = (notify as { transport?: unknown }).transport
+  if (transport === undefined) return
+  if (typeof transport !== 'string') {
+    throw new Error(
+      `${path}: notify.transport must be a transport name, not ${JSON.stringify(transport)}`,
+    )
+  }
+  if (!transportNames().includes(transport)) {
+    throw new Error(
+      `${path}: unknown transport '${transport}'. Known: ${transportNames().join(', ')}`,
+    )
+  }
+}
+
+/**
  * What one project denies, or `undefined` when it denies nothing.
  *
  * `undefined` rather than a pair of empty arrays, and the distinction is the identity rule:
@@ -344,6 +398,7 @@ export function readProjectConfig(projectRoot: string): ProjectConfig {
   check(config.permissions, 'permissions')
   validateRoles(config, path)
   validateDenials(config, path)
+  validateNotify(config, path)
   for (const [agent, entry] of Object.entries(config.agents ?? {})) {
     if (!(CONFIGURABLE_AGENTS as readonly string[]).includes(agent)) {
       throw new Error(
