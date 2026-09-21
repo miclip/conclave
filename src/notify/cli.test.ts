@@ -53,6 +53,21 @@ function record(dir: string, id: string, goal: string): SessionRecorder {
  * only where a test means it -- the broker announces its start there, deliberately. `said` is
  * both, for the assertions that do not care which stream carried the sentence.
  */
+/**
+ * stderr with Node's own warnings removed, for comparisons between two invocations.
+ *
+ * `(node:<pid>) ExperimentalWarning: Type Stripping` carries a PID, so it is never equal across
+ * runs, and its follow-on `(Use \`node --trace-warnings ...\`)` comes with it. Neither is
+ * conclave speaking. The shebang suppresses them in normal use; a test that spawns `node`
+ * directly skips the shebang and sees them on whichever versions still emit the warning.
+ */
+function withoutHarnessNoise(err: string): string {
+  return err
+    .split('\n')
+    .filter((l) => !/^\(node:\d+\) \w*Warning:/.test(l) && !/^\(Use `node --trace-warnings/.test(l))
+    .join('\n')
+}
+
 function run(args: string[], cwd: string, reply?: string): { code: number; out: string; err: string; said: string } {
   // `--transport fake` is NAMED, not inherited (#351). It used to be the default, which is how
   // an agent operator following the skill reached a stub and learned there was no human channel
@@ -198,7 +213,12 @@ test('#353 a config with no notify key refuses exactly as no config does', (t) =
   assert.equal(withoutFile.code, 2)
   assert.equal(withFile.code, withoutFile.code)
   assert.equal(withFile.out, withoutFile.out)
-  assert.equal(withFile.err, withoutFile.err)
+  // WITHOUT THE HARNESS'S OWN NOISE. Node prints `(node:<pid>) ExperimentalWarning: Type
+  // Stripping` when it runs this source directly, and the PID in it differs between two runs --
+  // so comparing raw stderr asserts that two processes had the same pid, which they never do.
+  // It passed everywhere the warning does not fire and failed on the Node floor, where it does:
+  // a test that could only hold on the platforms that happened not to produce the line.
+  assert.equal(withoutHarnessNoise(withFile.err), withoutHarnessNoise(withoutFile.err))
   // And the sentence itself is pinned, so the identity above cannot be two copies of a new one.
   const refusal =
     `conclave: notify needs --transport — no human channel is configured by default\n` +

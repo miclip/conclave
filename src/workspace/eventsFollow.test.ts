@@ -113,6 +113,27 @@ async function until(cond: () => boolean, what: string, ms = 10_000): Promise<vo
 }
 
 /** A follower still going after a real pause -- a definite claim, not the absence of an exit. */
+/**
+ * Wait until the follower has SAID something, rather than looking once and hoping.
+ *
+ * `stillRunning` proves the process did not exit; it says nothing about whether the process has
+ * got round to writing yet. Asserting on `err()` straight after it read an empty string on a
+ * loaded runner and passed everywhere faster -- a test of the machine, not of the message. The
+ * timeout is generous because it bounds a FAILURE: when the line is coming this returns as soon
+ * as it arrives, and when it is not coming the test should fail slowly rather than flakily.
+ */
+async function said(f: Follower, re: RegExp, ms = 10_000): Promise<void> {
+  const until = Date.now() + ms
+  for (;;) {
+    if (re.test(f.err())) return
+    if (Date.now() > until) {
+      assert.match(f.err(), re)
+      return
+    }
+    await sleep(50)
+  }
+}
+
 async function stillRunning(f: Follower, ms = 1_000): Promise<void> {
   const raced = await Promise.race([f.exit.then(() => 'exited' as const), sleep(ms).then(() => 'running' as const)])
   assert.equal(raced, 'running', `the follower exited early: ${f.err()}`)
@@ -126,7 +147,7 @@ test('#350 events --follow with no id waits for the first session instead of exi
   // The old behaviour was exit 1 inside a few hundred milliseconds. A full second with the
   // process still there is the wait.
   await stillRunning(f)
-  assert.match(f.err(), /no session is under way in this project — waiting for one to start\. Ctrl-C to stop/)
+  await said(f, /no session is under way in this project — waiting for one to start\. Ctrl-C to stop/)
   assert.equal(f.out(), '', 'nothing on stdout while there is nothing to stream')
 
   // The run registers underneath the waiting follower, then writes its first event.
@@ -160,7 +181,7 @@ test('#350 events --follow waits for the events file once the record exists', as
   t.after(() => f.child.kill())
 
   await stillRunning(f)
-  assert.match(f.err(), /registered has recorded no events yet — waiting for its first\. Ctrl-C to stop/)
+  await said(f, /registered has recorded no events yet — waiting for its first\. Ctrl-C to stop/)
   assert.doesNotMatch(f.err(), /no session is under way/, 'the record was found; only the file is awaited')
 
   const line = event(rec, 1)
@@ -180,7 +201,7 @@ test('#350 a run that ends before its first event gets the non-follow answer, ex
   await until(() => /waiting for its first/.test(f.err()), 'the follower to start waiting')
   rec.update({ state: 'ended' })
   assert.equal(await f.exit, 1)
-  assert.match(f.err(), /conclave: no events recorded for stillborn/)
+  await said(f, /conclave: no events recorded for stillborn/)
   assert.equal(f.out(), '')
 })
 
@@ -199,7 +220,7 @@ test('#350 an explicit id that names no session fails at once, on either side of
     const f = events(dir, ...args)
     t.after(() => f.child.kill())
     assert.equal(await f.exit, 1, `events ${args.join(' ')} must refuse`)
-    assert.match(f.err(), /conclave: no session "nope" in this project/, `events ${args.join(' ')}`)
+    await said(f, /conclave: no session "nope" in this project/)
     assert.doesNotMatch(f.err(), /waiting/, `events ${args.join(' ')} must not wait`)
   }
 })
@@ -220,7 +241,7 @@ test('#350 events --follow <id> for a resolved session waits for its events file
     const f = events(dir, ...args)
     t.after(() => f.child.kill())
     await stillRunning(f)
-    assert.match(f.err(), new RegExp(`${id} has recorded no events yet — waiting for its first\\. Ctrl-C to stop`))
+    await said(f, new RegExp(`${id} has recorded no events yet — waiting for its first\\. Ctrl-C to stop`))
     assert.equal(f.out(), '', `events ${args.join(' ')}: nothing on stdout while there is nothing to stream`)
     const line = event(rec, 1)
     await until(() => f.out().includes(line), 'the first event to reach the follower')
@@ -235,7 +256,7 @@ test('#350 an explicit id in an empty project fails at once too', async (t) => {
   const f = events(dir, '--follow', 'nope')
   t.after(() => f.child.kill())
   assert.equal(await f.exit, 1)
-  assert.match(f.err(), /conclave: no sessions have been recorded in this project/)
+  await said(f, /conclave: no sessions have been recorded in this project/)
   assert.doesNotMatch(f.err(), /waiting/)
 })
 
@@ -268,14 +289,14 @@ test('#350 without --follow nothing waits: the refusals are unchanged', async (t
   const empty = events(dir)
   t.after(() => empty.child.kill())
   assert.equal(await empty.exit, 1)
-  assert.match(empty.err(), /conclave: no sessions have been recorded in this project/)
+  await said(empty, /conclave: no sessions have been recorded in this project/)
   assert.doesNotMatch(empty.err(), /waiting/)
 
   record(dir, 'quiet')
   const noEvents = events(dir)
   t.after(() => noEvents.child.kill())
   assert.equal(await noEvents.exit, 1)
-  assert.match(noEvents.err(), /conclave: no events recorded for quiet/)
+  await said(noEvents, /conclave: no events recorded for quiet/)
   assert.doesNotMatch(noEvents.err(), /waiting/)
 })
 
@@ -296,7 +317,7 @@ test('#360 events --follow with no id skips an ended previous run and waits for 
   await stillRunning(f)
   assert.equal(f.out(), '', 'the ended run is not what was asked for: nothing of it is streamed')
   // The same notice an empty project gets: what is awaited is the same thing in both.
-  assert.match(f.err(), /no session is under way in this project — waiting for one to start\. Ctrl-C to stop/)
+  await said(f, /no session is under way in this project — waiting for one to start\. Ctrl-C to stop/)
   assert.doesNotMatch(f.err(), /no sessions have been recorded/, 'a project with an ended run is not empty, and is not told it is')
 
   // The new run registers underneath the waiting follower. Its startedAt is later, as a real
@@ -322,7 +343,7 @@ test('#360 an abandoned previous run is skipped too: a follow of it would end at
   t.after(() => f.child.kill())
   await stillRunning(f)
   assert.equal(f.out(), '')
-  assert.match(f.err(), /no session is under way in this project — waiting for one to start/)
+  await said(f, /no session is under way in this project — waiting for one to start/)
 
   const next = record(dir, 'next-run', 1_700_000_100_000)
   const line = event(next, 1)
