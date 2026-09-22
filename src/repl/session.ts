@@ -122,6 +122,7 @@ export async function withHeartbeat<T>(
 import { activeTurn, describeActiveTurn } from '../outcomes/activeTurn.ts'
 import { describeLiveness, sampleLiveness, type ChildLiveness } from '../outcomes/liveness.ts'
 import { version } from '../version.ts'
+import { installLaunchNotice, type InstallLaunch } from '../workspace/installLaunch.ts'
 import { guard } from '../workspace/sessionLock.ts'
 import { newSessionId, projectRootFor, recordSession } from '../workspace/sessionRecord.ts'
 import { RunLogWriter, readRunLog, runLogExists } from '../relay/resume.ts'
@@ -377,6 +378,21 @@ export interface SessionOptions {
   liveness?: (pid: number) => Promise<ChildLiveness>
   /** Shown in the banner. */
   version?: string
+  /**
+   * What this launch says about the install it came from (#356), asked for immediately
+   * before the banner and nowhere else.
+   *
+   * A THUNK rather than a result, because asking is not free: `noteInstallLaunch` reads and
+   * REWRITES a per-user record, and a launch that is refused below -- a live session in this
+   * project, a seat whose command is missing -- must not consume it, or the next launch that
+   * does start loses the notice this one was owed. Every refusal in this function is above
+   * the call; the dry run returns above it too.
+   *
+   * Optional and absent by default, which is what keeps the console's hundred-odd direct
+   * callers in the test suite away from the real record: only the CLI block hands one over,
+   * with the process's own entry file and environment.
+   */
+  installLaunch?: (() => InstallLaunch) | undefined
   /** How often to print a progress line per participant. Default 10s. */
   progressEveryMs?: number
   /**
@@ -1135,6 +1151,17 @@ export async function runSession(opts: SessionOptions): Promise<number> {
   refuseMissingCommands(
     seats.map((resolved) => ({ participant: resolved.spec.id, agent: resolved.agent, cwd: opts.cwd })),
   )
+
+  // After every refusal above and before the banner: the install notice (#356). The banner
+  // names this build in dim; this says, when it is true, that it is not the build the last
+  // launch on this machine ran -- which is the one fact a fresh project cannot learn from its
+  // own records. `changed` is yellow because it is a warning about what the operator is about
+  // to attribute to their own work; `first` is dim because it is context, not a concern.
+  if (opts.installLaunch) {
+    const launch = opts.installLaunch()
+    const paint = launch.kind === 'changed' ? yellow : dim
+    for (const line of installLaunchNotice(launch)) write(paint(line))
+  }
 
   write(
     banner({
@@ -2716,7 +2743,7 @@ export async function runSession(opts: SessionOptions): Promise<number> {
       // FALSIFIER, stated because it is the strongest argument against this shape: the
       // console has no general "trailing text is a message" rule and does not gain one here.
       // `/rotate <text>` and `/abort <text>` consume their text as a REASON
-      // (`src/repl/session.ts:2769`, `src/repl/session.ts:2802`) and `/pause`, `/queue`, `/audit` ignore
+      // (`src/repl/session.ts:2796`, `src/repl/session.ts:2829`) and `/pause`, `/queue`, `/audit` ignore
       // whatever follows them. So an operator who learns this from `/continue` and carries
       // it to `/pause I'll be back` still loses the sentence. That inconsistency is not
       // repaired by making `/continue` a third behaviour; it is narrowed by it, and the
