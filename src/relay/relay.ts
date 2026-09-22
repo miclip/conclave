@@ -689,7 +689,7 @@ export interface RelayOptions {
    * this seam the whole of #101 -- the measurement, its timestamp, and the re-measurement that
    * makes the timestamp move -- is unreachable from any test that does not spawn a real CLI.
    * The console already carries the identical seam for its `/continue` guard
-   * (`src/repl/session.ts:377`), and the two are deliberately the same shape.
+   * (`src/repl/session.ts:378`), and the two are deliberately the same shape.
    */
   liveness?: ((pid: number) => Promise<ChildLiveness>) | undefined
   /**
@@ -710,7 +710,7 @@ export interface RelayOptions {
    * every pause and latch test as a SEQUENCE -- "raised on this reading, refreshed to that one,
    * then gone" -- and a second reader drawing from the same script would shift every entry in
    * it by however many turn boundaries preceded the pause, silently. One seam per consumer is
-   * the shape the console already uses for its `/continue` guard (`src/repl/session.ts:377`),
+   * the shape the console already uses for its `/continue` guard (`src/repl/session.ts:378`),
    * and a test that scripts the pause's readings should not have to know how many turns ended
    * before it.
    */
@@ -5614,7 +5614,7 @@ export class Relay {
       else if (!shouldWait && offered !== -1) pause.options.splice(offered, 1)
       // The status file is written from the LIVE pause object on any event, so an in-place
       // change reaches disk on the next one -- and a pause is precisely when nothing else is
-      // flowing. Same reasoning as `/wait` in the console (`src/repl/session.ts:2747`), and the
+      // flowing. Same reasoning as `/wait` in the console (`src/repl/session.ts:2774`), and the
       // reader who needs it most is the one polling from outside.
       this.#stream.emit({ type: 'liveness', pause })
       if (last) return stop()

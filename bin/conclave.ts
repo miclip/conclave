@@ -90,6 +90,7 @@ import type { AgentRegistry } from '../src/registry/registry.ts'
 import { runSession } from '../src/repl/session.ts'
 import { boundOf, implementerSeatPlan, implementerSpecsFor, Relay, reviewerSpecFor, type SeatRequest } from '../src/relay/relay.ts'
 import { formatGuardReportJson, guard } from '../src/workspace/sessionLock.ts'
+import { installLaunchNotice, noteInstallLaunch, type InstallLaunchNoter } from '../src/workspace/installLaunch.ts'
 import { Broker } from '../src/notify/broker.ts'
 import { brokerConfigFromEnv, brokerStatus, deviceLines, ensureBroker, serveBroker, stopBroker } from '../src/notify/evenRealities/daemon.ts'
 import { TransportRefused, resolveTransport, transportNames } from '../src/notify/registry.ts'
@@ -1236,6 +1237,16 @@ export interface MainOverrides {
    */
   input?: NodeJS.ReadableStream
   output?: NodeJS.WritableStream
+  /**
+   * Replaces `noteInstallLaunch` for BOTH front-ends (#356).
+   *
+   * The real one reads and rewrites a per-user record outside every project, which is the
+   * one piece of state an in-process `main(['relay' | 'session', ...])` would otherwise
+   * reach on a machine whose PATH `conclave` is this checkout. A test that drives a launch
+   * passes a stand-in, and the notice it renders is then the notice under test rather than
+   * whatever the developer's machine last recorded.
+   */
+  installLaunch?: InstallLaunchNoter
 }
 
 export async function main(argv: string[], overrides: MainOverrides = {}): Promise<number> {
@@ -2246,6 +2257,17 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
     //
     // A REAL LAUNCH KEEPS THEM. It prints no plan, so these lines are the only place any of it
     // appears, and they are the reading #119 is about: told before there is work to lose.
+    // The install notice (#356), first of the launch lines and printed under the same rule
+    // as the rest of them: not on a dry run, which starts nothing and so is not a launch to
+    // record. Below every refusal this block makes, because the record is REWRITTEN when it is
+    // read and a refused launch that consumed it would rob the next real one of its notice.
+    // Below the detach branch too, and that is the one that matters: the detached parent
+    // returns above this line, so the CHILD -- the process that is the run -- is the one that
+    // reads the record and prints the sole notice, into its stdio log where the run's account is.
+    if (!isDryRun) {
+      const launch = (overrides.installLaunch ?? noteInstallLaunch)({ build, entry: selfEntry(), env: process.env })
+      for (const line of installLaunchNotice(launch)) say(line)
+    }
     if (!isDryRun) say(`  ceilings: ${ceilingSummary(runCeilings)}`)
 
     // Beside the ceilings line, above rotation, for the reason the ceilings line gives: these
@@ -2743,6 +2765,7 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
     // so the point of no return is here. A dry run never reaches it -- it is refused above with
     // `--bypass`, and without one there is nothing to apply.
     if (!applyBypassFlag(flagArgv, (l) => console.log(l))) return 1
+    const build = version()
     return runSession({
       cwd: process.cwd(),
       ...(operator ? { operator } : {}),
@@ -2770,7 +2793,11 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
       ...(implementerArgs.length > 0 ? { implementerArgs } : {}),
       ...(reviewer ? { reviewer } : {}),
       ...(reviewerArgs.length > 0 ? { reviewerArgs } : {}),
-      version: version(),
+      version: build,
+      // A thunk, consumed by `runSession` after its own refusals and before its banner; see
+      // `SessionOptions.installLaunch` for why it is not the result. The relay block above
+      // makes the same call at the same point of its own launch, with the same three inputs.
+      installLaunch: () => (overrides.installLaunch ?? noteInstallLaunch)({ build, entry: selfEntry(), env: process.env }),
       ...(turnTimeout ? { turnWatchdogMs: Number(turnTimeout) * 1000 } : {}),
       ...(flag('ready-timeout', '') ? { readyTimeoutMs: Number(flag('ready-timeout', '')) * 1000 } : {}),
       ...(silenceTimeout ? { silenceWatchdogMs: Number(silenceTimeout) * 1000 } : {}),

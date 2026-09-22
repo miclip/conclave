@@ -23,6 +23,7 @@ import { AsyncQueue } from '../adapters/asyncQueue.ts'
 import { FLAG_SURFACE, main } from '../../bin/conclave.ts'
 import { flagReader } from '../config/cliFlags.ts'
 import { newSessionId, recordSession } from '../workspace/sessionRecord.ts'
+import type { InstallLaunchNoter } from '../workspace/installLaunch.ts'
 import type { Verdict } from '../contract/outcome.ts'
 import { FakeRotationSession } from '../rotation/fakeSession.ts'
 import { tempDir } from '../testkit/tempDir.ts'
@@ -37,6 +38,23 @@ import { worktreePaths } from './subagents.ts'
 
 const CLI = readFileSync(join(import.meta.dirname, '..', '..', 'bin', 'conclave.ts'), 'utf8')
 const RELAY = readFileSync(join(import.meta.dirname, 'relay.ts'), 'utf8')
+
+/**
+ * The install record's answer for every launch this file drives: unchanged (#356).
+ *
+ * Unchanged is the identity case -- the notice prints nothing -- and it is the case a default
+ * run on a machine whose install did not move is in. It is a stand-in rather than the real
+ * `noteInstallLaunch` because the real one reads and rewrites a per-user file outside every
+ * project, which a guard over the DEFAULT RUN's surface must not depend on: what the
+ * developer's machine last recorded is not part of that surface. Passed at every `main()`
+ * call below that launches a run; the `status` reads need none, they launch nothing.
+ */
+const UNCHANGED_INSTALL: InstallLaunchNoter = ({ build }) => ({
+  kind: 'unchanged',
+  build,
+  previous: { build, root: '/an/install' },
+  recorded: true,
+})
 
 /** Minimal in-memory agent for the dynamic default-run guard. */
 class DefaultRunFakeSession implements AgentSession {
@@ -698,7 +716,7 @@ const DECLARED: Record<string, string> = {
     'The sentence is repaired rather than left standing, on this entry’s own rule. Everything ' +
     'else above is still true: the three readings, the wording, the event count as an input, and ' +
     'the pause menu’s `wait` option, which still asks reportsChildOnCpu. No assertion in this ' +
-    'file was relaxed; one citation moved with the code it pins (src/repl/session.ts:1798). ' +
+    'file was relaxed; one citation moved with the code it pins (src/repl/session.ts:1825). ' +
     'Covered in src/outcomes/liveness.test.ts on the reported numbers, and end to end through ' +
     'the console’s refusal path in src/repl/session.test.ts.',
   'a paused run keeps measuring the child, and its evidence says when it was measured (#101)':
@@ -742,7 +760,7 @@ const DECLARED: Record<string, string> = {
     'not idle, because continuing SENDS and a reading up to 30s old is not a reading of now. It ' +
     'does not read pause.liveness, and that is stated at both ends. ' +
     'TWO RELAY OPTIONS ARE ADDED FOR TESTS ONLY — liveness (the same seam the console already ' +
-    'has at src/repl/session.ts:377) and livenessRefreshMs/livenessRefreshLimit. No CLI flag ' +
+    'has at src/repl/session.ts:378) and livenessRefreshMs/livenessRefreshLimit. No CLI flag ' +
     'exposes them; a default run reads the constants. ' +
     'ONE CLAIM IN THE ISSUE IS FALSIFIED and recorded here because it points at the mechanism: ' +
     'the reporter saw a byte-identical evidence line on what looked like two consecutive pauses ' +
@@ -1934,7 +1952,7 @@ const DECLARED: Record<string, string> = {
     'asserted rather than rediscovered. The stream assertions in the other two console tests ' +
     'remain a regression guard against a future re-split rather than coverage of this line. ' +
     '`sessions --json` NEEDED NO CHANGE, and #266 asking for one is the stale half of it: the ' +
-    'listing spreads the whole status document (bin/conclave.ts:1411), so an outcome written by ' +
+    'listing spreads the whole status document (bin/conclave.ts:1422), so an outcome written by ' +
     'either front-end has always appeared there. The reason was missing because no run had one ' +
     'to record, not because the listing was narrower than `status`. Same for the issue\'s second ' +
     'detail: `abandoned` is on both paths, and it is ADDED rather than spread on this one ' +
@@ -1988,9 +2006,31 @@ const DECLARED: Record<string, string> = {
     'src/relay/turnBoundaryLiveness.test.ts, src/relay/sendPrecondition.test.ts and ' +
     'src/repl/session.test.ts; each consumer claim was mutation-checked. No assertion in this ' +
     'file was relaxed.',
+  'the launch says when the shared install moved under it, and which build a fresh machine is on (#356)':
+    'Both front-ends now print, immediately before their launch lines, what the per-user record ' +
+    'of the last installed launch on this machine says (src/workspace/installLaunch.ts). Two ' +
+    'lines when the install on PATH resolves somewhere else than it did last time -- both builds, ' +
+    'and that the install is SHARED by every project on the machine and can move for reasons ' +
+    'outside this project -- and one line when the machine has no record, naming this build. THE ' +
+    'DEFAULT RUN DOES NOT CHANGE where the install did not move: `unchanged` renders nothing, and ' +
+    'so does a launch that did not come through the install on PATH -- `node bin/conclave.ts` in ' +
+    'a checkout, which is every run this suite makes. It is declared because the OUTPUT of a ' +
+    'default run gains lines in two states that were silent before, on purpose: the fresh-machine ' +
+    'case is the one an earlier per-project design lost (a first run has nothing to compare ' +
+    'against and is the run least able to tolerate silence), and the moved case is the whole of ' +
+    '#356. What did NOT change, and is pinned rather than assumed: the record is consulted ' +
+    'only for a launch that happens -- below every refusal, not on a dry run, and never by the ' +
+    'parent of a detached relay, whose child is the run -- and it is consulted through a seam ' +
+    '(`MainOverrides.installLaunch`, `SessionOptions.installLaunch`) so no test in this file reads ' +
+    'or writes the developer’s own record; every launch here answers `unchanged`. The `relay ' +
+    '--json` report and every status document are untouched: the notice is prose, on the human ' +
+    'channel, and no key was added anywhere. No assertion in this file was relaxed. That the ' +
+    'lines say what this entry claims, on both front-ends, is proved in ' +
+    'src/workspace/installLaunchNotice.test.ts; what the record does is proved in ' +
+    'src/workspace/installLaunch.test.ts.',
 }
 
-test('DECLARED contains exactly the routing, pause-resolution, attribution, ceiling-flag, seat-flag, seat-status, launch-record, flag-reader, integration-check, per-seat-rotation, reviewer, resume-guard, mixed-liveness, timestamped-liveness, model-validation, executable-preflight, compaction-survival, rotation-reporting, send-precondition, process-tree-liveness, ceiling-reporting, record-heartbeat, rotation-intent, console-dry-run, flag-reconciliation, paused-time, advisor-targeting, silence-timeout, launch-bounds, origin-reconciliation, capability-briefing, candidate-class, run-progress, blocked-rollup, goal-file, checkpoint, control-channel-ending and unmeasured-liveness entries', () => {
+test('DECLARED contains exactly the routing, pause-resolution, attribution, ceiling-flag, seat-flag, seat-status, launch-record, flag-reader, integration-check, per-seat-rotation, reviewer, resume-guard, mixed-liveness, timestamped-liveness, model-validation, executable-preflight, compaction-survival, rotation-reporting, send-precondition, process-tree-liveness, ceiling-reporting, record-heartbeat, rotation-intent, console-dry-run, flag-reconciliation, paused-time, advisor-targeting, silence-timeout, launch-bounds, origin-reconciliation, capability-briefing, candidate-class, run-progress, blocked-rollup, goal-file, checkpoint, control-channel-ending, unmeasured-liveness and install-notice entries', () => {
   assert.deepEqual(Object.keys(DECLARED), [
     'deny-only project configuration for capabilities and commands',
     'implementer_unanswered -> advisor',
@@ -2033,6 +2073,7 @@ test('DECLARED contains exactly the routing, pause-resolution, attribution, ceil
     '--checkpoint arms a decision point, which relay cannot hold',
     'status.outcome.reason gains the two control-channel endings (#266)',
     'a child no `ps` could read is `unmeasured`, not `gone`, and the record says which (#323)',
+    'the launch says when the shared install moved under it, and which build a fresh machine is on (#356)',
   ])
 })
 
@@ -2064,7 +2105,9 @@ async function createsFromBothClis(t: TestContext, extra: string[]): Promise<Rec
       const code = await quietly(() =>
         main(
           [front, 'a default goal', '--advisor', 'fake-lead', '--implementer', 'fake-impl', '--rounds', '2', ...extra],
-          front === 'relay' ? { registry } : { registry, input: idleInput(), output: sink() },
+          front === 'relay'
+            ? { registry, installLaunch: UNCHANGED_INSTALL }
+            : { registry, input: idleInput(), output: sink(), installLaunch: UNCHANGED_INSTALL },
         ),
       )
       assert.equal(code, 0, `a ${front} run must succeed`)
@@ -2163,6 +2206,7 @@ async function seatIdsFromRelayCli(t: TestContext): Promise<string[]> {
     const code = await quietly(() =>
       main(['relay', 'a default goal', '--advisor', 'fake-lead', '--implementer', 'fake-impl', '--rounds', '2'], {
         registry,
+        installLaunch: UNCHANGED_INSTALL,
       }),
     )
     assert.equal(code, 0, 'a default relay run must succeed')
@@ -2209,6 +2253,7 @@ async function seatsFromSessionCli(t: TestContext): Promise<{ creates: CreateRec
         registry,
         input: idleInput(),
         output: sink(),
+        installLaunch: UNCHANGED_INSTALL,
       }),
     )
     assert.equal(code, 0, 'a default console run must succeed')
@@ -2222,7 +2267,7 @@ async function seatsFromSessionCli(t: TestContext): Promise<{ creates: CreateRec
  * The two machine-readable documents a default run actually emits.
  *
  * Both come out of one `relay --json` run in a temporary repository, through the production
- * call sites: the report is what `bin/conclave.ts:2501` prints, and the status record is what
+ * call sites: the report is what `bin/conclave.ts:2523` prints, and the status record is what
  * `recordSession` wrote during that same run, read back by `main(['status', '--json'])` --
  * which resolves the most recent session in `process.cwd()`, so the record has to have been
  * written where an operator would look for it.
@@ -2246,7 +2291,7 @@ async function defaultRunDocuments(t: TestContext): Promise<{ report: unknown; s
     const report = await stdoutOf(() =>
       main(
         ['relay', 'a default goal', '--advisor', 'fake-lead', '--implementer', 'fake-impl', '--rounds', '2', '--json'],
-        { registry },
+        { registry, installLaunch: UNCHANGED_INSTALL },
       ),
     )
     // No id: `status` with no argument means the most recent session, which is the run above.
@@ -2266,7 +2311,7 @@ async function defaultRunDocuments(t: TestContext): Promise<{ report: unknown; s
  * blind to that subtree is claiming more than it checks.
  *
  * Built through the real recorder: `recordSession` is what both front-ends call, and
- * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:1798
+ * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:1825
  * with the same object -- a `RunPause` the run handle raised, not one written here. Read back
  * through `main(['status', '--json'])`, so the serialisation and the reconciliation against
  * the pid are the production ones.
@@ -2577,7 +2622,7 @@ async function provoke(
  * The status document of a run paused for one given reason.
  *
  * Built through the real recorder: `recordSession` is what both front-ends call, and
- * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:1798
+ * `set('paused', { pause })` is the same call the console makes at src/repl/session.ts:1825
  * with the same object -- a `RunPause` the relay raised, not one written here. Read back
  * through `main(['status', '--json'])`, so the serialisation and the reconciliation against
  * the pid are the production ones.
@@ -2597,7 +2642,7 @@ async function pausedStatusDocument(t: TestContext, reason: PauseReason): Promis
     goal: 'a default goal',
     front: 'session',
     startedAt: Date.now(),
-    // Passed because the console always passes one (src/repl/session.ts:1375), so the status
+    // Passed because the console always passes one (src/repl/session.ts:1402), so the status
     // documents this file pins differ only in what a pause actually changes.
     logPath: join(repo, '.conclave', 'runs', 'session-test.ndjson'),
     build: 'test',
@@ -2778,7 +2823,7 @@ test('default run works in the run cwd and creates no worktree', async (t) => {
     assert.equal(c.cwd, fromCli.cwd, `the session CLI must create ${c.id} in the run cwd`)
   }
 
-  // The relay CLI passes process.cwd() as the run cwd: bin/conclave.ts:2399-2401.
+  // The relay CLI passes process.cwd() as the run cwd: bin/conclave.ts:2421-2423.
   // The relay hands that same cwd to each participant adapter: src/relay/relay.ts:2767-2773.
   // The cwd getter simply returns the option: src/relay/relay.ts:2448-2450.
   assert.match(relay, /cwd:\s*process\.cwd\(\)/, 'relay block must start in process.cwd')
