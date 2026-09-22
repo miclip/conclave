@@ -152,25 +152,56 @@ export function end(repoRoot: string, filePath: string): EndResult {
 }
 
 /**
- * Put the original back from the stored copy, then clear the marker.
+ * What `restore` found. The same shape as `EndResult`, and that is the point.
  *
- * Clearing the marker here is what leaves a later `begin`-less mutation unprotected (#343's
- * second half). Whether `restore` should keep the marker so that `end` still has a hash to
- * check is a design question outside that issue and unchanged here; #343 fixed the reporting,
- * which stands either way.
+ * #363: `restore` cleared the marker without ever checking the file it had just written, so
+ * the only way to learn whether the tree was really back was to run `end` afterwards -- which
+ * by then had no marker left and answered "nothing was checked" over a tree that was fine.
+ * "restore, then verify" is the natural thing to script, and it read as a failed restore.
+ *
+ * Two verbs that both put a question to the same hash should answer it in the same words, so
+ * the results they return are the same shape. `checked: false` carries a reason because the
+ * two ways `restore` can decline -- no marker, or a marker whose backup is gone -- are
+ * different situations for whoever is reading, and a single "no marker" for both was a lie in
+ * the second case.
  */
-export function restore(repoRoot: string, filePath: string): boolean {
+export type RestoreResult =
+  | { checked: false; reason: 'no-marker' | 'no-backup' }
+  | { checked: true; restored: boolean; expected: string; actual: string }
+
+/**
+ * Put the original back from the stored copy, verify it, then clear the marker.
+ *
+ * The verification is not ceremony. The stored copy is an ordinary file in an ordinary
+ * directory: it can be truncated by the same full volume that motivated all of this, edited by
+ * someone tidying `.conclave`, or written short by a crash mid-`begin`. A `restore` from a
+ * damaged backup leaves a file that is neither the mutation nor the original, and clearing the
+ * marker at that moment destroys the only record of what it should have been.
+ *
+ * So the rule is `end`'s rule, for `end`'s reason: the marker and the backup are cleared ONLY
+ * when the file on disk hashes to what `begin` recorded. On a mismatch both are kept, because
+ * the backup is now the evidence -- it is the thing that did not restore, and deleting it
+ * would leave a broken file and nothing to compare it against.
+ *
+ * Clearing the marker on success is still what leaves a later `begin`-less mutation
+ * unprotected (#343's second half); that is unchanged, and #343 fixed the reporting for it.
+ */
+export function restore(repoRoot: string, filePath: string): RestoreResult {
   const abs = resolve(repoRoot, filePath)
   const rel = relative(repoRoot, abs)
   const mp = markerPathFor(repoRoot, rel)
-  if (!existsSync(mp)) return false
+  if (!existsSync(mp)) return { checked: false, reason: 'no-marker' }
   const marker: MutationMarker = JSON.parse(readFileSync(mp, 'utf8'))
   const backupAbs = join(repoRoot, marker.backup)
-  if (!existsSync(backupAbs)) return false
+  if (!existsSync(backupAbs)) return { checked: false, reason: 'no-backup' }
   copyFileSync(backupAbs, abs)
-  rmSync(mp, { force: true })
-  rmSync(backupAbs, { force: true })
-  return true
+  const actual = existsSync(abs) ? sha256Of(abs) : ''
+  const restored = actual === marker.sha256
+  if (restored) {
+    rmSync(mp, { force: true })
+    rmSync(backupAbs, { force: true })
+  }
+  return { checked: true, restored, expected: marker.sha256, actual }
 }
 
 /**

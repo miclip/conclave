@@ -281,9 +281,12 @@ Commands:
                                    it leaves a record instead of a diff that looks like
                                    work in progress (#181). Bare, it lists what is
                                    outstanding and exits non-zero if the tree is holding a
-                                   mutation right now. "end" verifies the restore against
-                                   the sha256 taken by "begin" and keeps the marker if it
-                                   does not match.
+                                   mutation right now. "restore" is the recovery path: it
+                                   puts the stored original back, verifies it against the
+                                   sha256 taken by "begin", and clears the marker only if
+                                   it matches. "end" is the check for a restore you did
+                                   yourself — it verifies against that same sha256 and
+                                   keeps the marker if it does not match.
   relay "<goal>" [--goal-file <path>] [--advisor codex] [--implementer claude]
                  [--implementers "claude --model opus-5, claude --model sonnet-5"]
                  [--reviewer claude] [--reviewer-args "..."]
@@ -1714,9 +1717,34 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
         return 0
       }
       if (action === 'restore') {
-        const ok = restoreMutation(root, target)
-        console.log(ok ? `conclave: restored ${target} from its stored original` : `conclave: no marker for ${target}`)
-        return ok ? 0 : 1
+        const rr = restoreMutation(root, target)
+        if (!rr.checked) {
+          console.error(
+            rr.reason === 'no-marker'
+              ? `conclave: no marker for ${target}`
+              : `conclave: marker for ${target} has no stored original — nothing to restore from`,
+          )
+          return 1
+        }
+        if (rr.restored) {
+          // The same sentence `end` prints for the same fact, deliberately (#363). "restore,
+          // then verify" is the natural thing to script, and it used to read as a failure
+          // because the second half found the marker already gone.
+          console.log(`conclave: restored ${target} from its stored original`)
+          console.log(`conclave: ${target} is back to its original; marker cleared`)
+          return 0
+        }
+        // Symmetrical with `end`'s mismatch: the file is not what `begin` recorded, so the
+        // marker and the backup are KEPT and this is non-zero. The difference is whose fault
+        // it is -- `end` is told about a restore the caller performed, so it points at this
+        // command; here the stored original is itself the suspect, so pointing back at
+        // `restore` would be advice to re-run what just failed.
+        console.error(
+          `conclave: ${target} is NOT back to its original — marker kept\n` +
+            `  expected sha256 ${rr.expected.slice(0, 12)}, found ${rr.actual.slice(0, 12) || '(missing)'}\n` +
+            `  the stored original under .conclave/mutations did not restore cleanly; it is kept for you to inspect`,
+        )
+        return 1
       }
       const r = endMutation(root, target)
       if (!r.checked) {

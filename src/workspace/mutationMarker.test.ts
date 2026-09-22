@@ -7,7 +7,7 @@
 import { strict as assert } from 'node:assert'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
 import type { TestContext } from 'node:test'
@@ -88,7 +88,8 @@ test('#343 end with no marker says nothing was checked, not that the file is bac
   const dir = repo(t)
   begin(dir, 'f.ts')
   writeFileSync(join(dir, 'f.ts'), 'MUTATED\n')
-  assert.equal(restore(dir, 'f.ts'), true)
+  const rr = restore(dir, 'f.ts')
+  assert.equal(rr.checked && rr.restored, true)
   writeFileSync(join(dir, 'f.ts'), 'MUTATED SECOND TIME\n')
 
   const r = end(dir, 'f.ts')
@@ -167,17 +168,135 @@ test('restore puts the original back byte for byte, from the copy rather than a 
   // A hash proves a restore was correct; it cannot perform one. The copy is what makes the
   // report actionable instead of a puzzle.
   const dir = repo(t, 'exact\ncontents\twith  spacing\n')
-  begin(dir, 'f.ts')
+  const marker = begin(dir, 'f.ts')
   writeFileSync(join(dir, 'f.ts'), 'destroyed\n')
 
-  assert.equal(restore(dir, 'f.ts'), true)
+  const r = restore(dir, 'f.ts')
+  assert.equal(r.checked, true, 'it checked the file it had just written')
+  assert.equal(r.checked && r.restored, true)
+  assert.equal(r.checked && r.expected, marker.sha256, 'against the hash `begin` took')
   assert.equal(readFileSync(join(dir, 'f.ts'), 'utf8'), 'exact\ncontents\twith  spacing\n')
   assert.deepEqual(outstanding(dir), [], 'restoring closes the marker')
+  assert.equal(existsSync(join(dir, marker.backup)), false, 'and takes the stored copy with it')
 })
 
 test('restoring something with no marker says so rather than pretending it worked', (t) => {
   const dir = repo(t)
-  assert.equal(restore(dir, 'f.ts'), false)
+  const r = restore(dir, 'f.ts')
+  assert.equal(r.checked, false)
+  assert.equal(r.checked === false && r.reason, 'no-marker')
+})
+
+test('#363 a restore from a damaged stored original is refused, and keeps both halves', (t) => {
+  // The stored copy is an ordinary file: a full volume, a crash mid-`begin`, or someone
+  // tidying `.conclave` can leave it short. Restoring from it produces a file that is neither
+  // the mutation nor the original, and clearing the marker THERE deletes the only record of
+  // what it should have been. So the marker and the backup are kept, exactly as `end` keeps
+  // them when the caller's own restore was wrong.
+  const dir = repo(t)
+  const marker = begin(dir, 'f.ts')
+  writeFileSync(join(dir, 'f.ts'), 'mutated\n')
+  writeFileSync(join(dir, marker.backup), 'a truncated backu')
+
+  const r = restore(dir, 'f.ts')
+  assert.equal(r.checked, true, 'it looked, which is the whole change')
+  assert.equal(r.checked && r.restored, false, 'and the answer is no')
+  assert.equal(r.checked && r.expected, marker.sha256)
+  assert.notEqual(r.checked && r.actual, marker.sha256, 'it reports what is actually on disk now')
+  assert.equal(outstanding(dir).length, 1, 'the marker is KEPT -- it is the record of what was wanted')
+  assert.equal(existsSync(join(dir, marker.backup)), true, 'and so is the backup, which is now the evidence')
+})
+
+test('#363 a marker whose stored original has vanished is a different answer from no marker', (t) => {
+  // One message for both was a lie in this case: there IS a marker, so the file is known to be
+  // deliberately broken, and the thing that would fix it is what is missing.
+  const dir = repo(t)
+  const marker = begin(dir, 'f.ts')
+  writeFileSync(join(dir, 'f.ts'), 'mutated\n')
+  rmSync(join(dir, marker.backup), { force: true })
+
+  const r = restore(dir, 'f.ts')
+  assert.equal(r.checked, false)
+  assert.equal(r.checked === false && r.reason, 'no-backup')
+  assert.equal(outstanding(dir).length, 1, 'and the marker stays, because the file is still broken')
+})
+
+test('#363 `mutations restore` verifies what it wrote and says it in `end`\'s words', (t) => {
+  // The issue: `restore` then `end` -- the natural reading of "restore, then verify" -- exited
+  // 1 with "the file may or may not be back to its original" over a tree that was fine, because
+  // `restore` had cleared the marker `end` needed. Now `restore` answers that question itself,
+  // in the sentence `end` uses for the same fact.
+  const { dir, run, sha } = cliRepo(t)
+  const original = sha()
+  assert.equal(run('begin', 'f.ts').status, 0)
+  writeFileSync(join(dir, 'f.ts'), 'MUTATED\n')
+
+  const r = run('restore', 'f.ts')
+  assert.equal(r.status, 0)
+  assert.match(r.stdout, /conclave: restored f\.ts from its stored original/)
+  assert.match(r.stdout, /conclave: f\.ts is back to its original; marker cleared/, "`end`'s sentence, verbatim")
+  assert.equal(sha(), original, 'and it is true')
+  assert.deepEqual(outstanding(dir), [], 'marker and backup cleared on the match')
+})
+
+test('#363 `mutations restore` from a damaged backup is loud, non-zero, and keeps the marker', (t) => {
+  // Symmetrical with `end`'s mismatch, down to the sentence and both hashes -- but it does not
+  // tell you to run `restore`, which is what just failed.
+  const { dir, run, sha } = cliRepo(t)
+  const original = sha()
+  assert.equal(run('begin', 'f.ts').status, 0)
+  writeFileSync(join(dir, 'f.ts'), 'MUTATED\n')
+  const backup = join(dir, outstanding(dir)[0]!.marker.backup)
+  writeFileSync(backup, 'a truncated backu')
+
+  const r = run('restore', 'f.ts')
+  assert.equal(r.status, 1)
+  assert.match(r.stderr, /f\.ts is NOT back to its original — marker kept/, "`end`'s mismatch sentence")
+  assert.ok(r.stderr.includes(`expected sha256 ${original.slice(0, 12)}`), 'says what it should have been')
+  assert.ok(r.stderr.includes(`found ${sha().slice(0, 12)}`), 'and what it found')
+  assert.doesNotMatch(r.stderr, /conclave mutations restore f\.ts/, 'no advice to re-run what just failed')
+  assert.equal(outstanding(dir).length, 1, 'the marker is KEPT')
+  assert.equal(existsSync(backup), true, 'and the backup, which is the evidence')
+  assert.equal(run().status, 1, 'and the bare listing still refuses')
+})
+
+test('#363 `mutations restore` with no marker still says so and exits 1', (t) => {
+  const { run } = cliRepo(t)
+  const r = run('restore', 'f.ts')
+  assert.equal(r.status, 1)
+  assert.match(r.stderr, /conclave: no marker for f\.ts/)
+})
+
+test('#363 `mutations restore` with a marker but no stored original says which is missing', (t) => {
+  // Not the same situation as no marker, and it used to print the same sentence. Here the file
+  // IS known to be deliberately broken; what is gone is the thing that would fix it, and an
+  // operator told "no marker" would go looking for the wrong problem.
+  const { dir, run } = cliRepo(t)
+  assert.equal(run('begin', 'f.ts').status, 0)
+  writeFileSync(join(dir, 'f.ts'), 'MUTATED\n')
+  rmSync(join(dir, outstanding(dir)[0]!.marker.backup), { force: true })
+
+  const r = run('restore', 'f.ts')
+  assert.equal(r.status, 1)
+  assert.match(r.stderr, /marker for f\.ts has no stored original — nothing to restore from/)
+  assert.doesNotMatch(r.stderr, /no marker for f\.ts/, 'it does not send them looking for the wrong thing')
+  assert.equal(outstanding(dir).length, 1, 'the marker stays, because the file is still broken')
+})
+
+test('#363 `conclave --help` describes all three mutation verbs, not two', (t) => {
+  // The issue as filed: the help described `begin` and `end` and said nothing about `restore`,
+  // so an operator could not tell which verb was the recovery path and which was the check.
+  const { dir } = cliRepo(t)
+  const cli = join(import.meta.dirname, '..', '..', 'bin', 'conclave.ts')
+  const usage = spawnSync(process.execPath, [cli, '--help'], { cwd: dir, encoding: 'utf8', timeout: 60_000 })
+  assert.equal(usage.status, 0)
+  const block = usage.stdout.slice(usage.stdout.indexOf('  mutations '))
+  const mutations = block.slice(0, block.indexOf('\n  relay '))
+  assert.ok(mutations.length > 0 && mutations.length < 2000, 'found the mutations entry and nothing else')
+  for (const verb of ['begin', 'end', 'restore']) {
+    assert.match(mutations, new RegExp(`"${verb}"`), `the help describes "${verb}"`)
+  }
+  assert.match(mutations, /"restore"[\s\S]*recovery path/, 'and says which one is the recovery path')
 })
 
 test('a corrupt marker is skipped, because a guard must not become the outage', (t) => {
