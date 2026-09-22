@@ -256,6 +256,34 @@ export const CITED: Record<string, string> = {
   // turn (`turnOf`), and still consumes only `snap.turns`, which is what NOTES cites it for.
   'src/relay/relay.ts:4738':
     "const unsettled = turnOf(snap)?.state === 'in_progress'",
+
+  // Live-claim section in docs/design/concurrent-implementers.md: the note's `rotateImplementer`
+  // section, which argued the method "cannot survive" and was wrong (#367). The rest of that
+  // document is frozen design record; this one section asserts current fact, so it is marked
+  // `## LIVE:` and every line it cites is pinned here. The old bullets rotted precisely because
+  // they were bare `:NNNN` shorthand outside a live section, which nothing checked.
+  //
+  // The two filters are pinned on tokens that tell them apart: `#dispatchSeats` is a strict
+  // prefix of `#implementers` once you drop the role test, and `p.rank === 'implementer')` also
+  // appears in the docstring at :2476 -- so the narrower `filter((p) => ...` spelling is the pin.
+  "src/relay/relay.ts:2476": "The replacement for `participants.find((p) => p.rank === 'implementer')`",
+  'src/relay/relay.ts:2508': "p.rank === 'implementer' && p.role !== 'reviewer')",
+  'src/relay/relay.ts:2520': "filter((p) => p.rank === 'implementer')",
+  // The one place the two rotation entry points are chosen between, pinned as a range because
+  // the claim is about the CHOICE and neither arm states it alone.
+  'src/relay/relay.ts:5686-5687':
+    "? this.rotateImplementer(reason)\n" +
+    "            : this.rotateSeat(this.#rotationSeat, reason),",
+  // The refusal contract, and the delegation it refuses in favour of at N=1.
+  'src/relay/relay.ts:9228': 'At N>1 it still REFUSES rather than picking.',
+  'src/relay/relay.ts:9244': 'return this.rotateSeat(this.#leadImplementer().id, reason)',
+  // The four seat-scoped reads that answer the four hazards the old section listed: the seat's
+  // policy, its spec, its tree, and the tree the replacement is launched in.
+  'src/relay/relay.ts:9420': 'const cfg = rotationFor(this.#opts.rotation, seatId)',
+  'src/relay/relay.ts:9472': 'const spec = implementerSeats(this.#opts).find((s) => s.id === seatId)!',
+  'src/relay/relay.ts:9479': 'const root = this.#rootOf(seatId)',
+  'src/relay/relay.ts:9517': 'const ctx = { cwd: root, watchdogMs:',
+  'src/relay/relay.ts:9524': 'audition = { id: `${spec.id}~replacement`',
 }
 
 /**

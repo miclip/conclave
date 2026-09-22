@@ -739,36 +739,52 @@ specifically about it not being derivable from what happened during the run. The
 move per seat, and the aggregate is derived from them for the summary line, so the existing
 one-line report survives while the per-seat detail becomes reachable.
 
-### `rotateImplementer()` cannot survive
+## LIVE: `rotateImplementer()` survived — unnamed at N=1, refusing at N>1
 
-`rotateImplementer(reason)` (`src/relay/relay.ts:2186`) is singular in its signature and in
-its body, and the body is the part that cannot be patched around:
+**This section predicted that `rotateImplementer()` "cannot survive". That was wrong**, and it
+is corrected here rather than deleted: the arbitrary pick did not survive; the entry point did.
 
-- `this.participants.find((p) => p.rank === 'implementer')!` (`:2195`) — picks *the*
-  implementer by rank. With several seats this returns an arbitrary one, and the `!` means
-  it never complains.
-- `const spec = this.#opts.implementer` (`:2196`) — the one spec from `RelayOptions`, which
-  is where the fixed-seat problem started.
-- `root: this.#opts.cwd` (`:2207`) — captures against the integration checkout, not a seat
-  tree.
-- `cwd: this.#opts.cwd` in `startReplacement` (`:2218`) — starts the replacement in the
-  integration checkout, which would put two sessions in one directory: the precise hazard
-  the worktree lifecycle exists to prevent.
+Unlike the rest of this note, which is frozen design record and which the preamble's "Nothing
+here is built" still covers, the claims below are about the tree as it stands. That is what
+`## LIVE:` means here — `src/contract/citations.test.ts` pins every line cited below in both
+directions, which the bare `:NNNN` bullets this replaces were never subject to (#367).
 
-It becomes **`rotateSeat(seatId, reason)`**, which resolves the named seat from the seat
-table rather than by rank, passes **that seat's worktree as `deps.root`**, starts the
-replacement with **that seat's worktree as `cwd`**, and uses **that seat's spec and
-checks** rather than the run-level ones. The `reason` parameter and the "callable by the
-human as well as by the run loop" property both survive; the docstring's promise that an
-operator need not wait for the orchestrator to notice is *more* useful with several seats,
-not less.
+### The decision that replaced the pick
 
-The audition path needs one change beyond the root: the temporary participant is
-constructed as `${spec.id}~replacement` (`:2221`) and `#attach`ed, and with concurrent
-seats that id must be unique per seat, not per run, or two simultaneous auditions collide
-in the participant lookup. Serializing candidate decisions makes that collision unlikely
-rather than impossible, and an id that is only unique when a policy holds is the kind of
-thing that breaks the first time the policy is relaxed.
+There are two entry points, and which one a caller gets turns on whether a seat is named:
+
+- **`rotateImplementer(reason)` — the unnamed form**, kept because it is what every existing
+  caller has: an operator, a console, an embedder. At N=1 it delegates to `rotateSeat` for
+  the lead (`src/relay/relay.ts:9244`). At N>1 it throws rather than choosing
+  (`src/relay/relay.ts:9228`), because "the implementer" names nothing there.
+- **`rotateSeat(seatId, reason)` — the named form**, and the only one that can act at N>1.
+
+The run handle picks between them on `#rotationSeat`, the seat the current pause is about
+(`src/relay/relay.ts:5686-5687`). No pause in front of the operator means no seat is named,
+and the unnamed form's own rule then applies.
+
+The singular lookup is gone from the relay, surviving only as the predecessor named in the
+docstring of what replaced it (`src/relay/relay.ts:2476`). Two filters replaced it:
+`#implementers()` (`src/relay/relay.ts:2508`) and `#dispatchSeats()`
+(`src/relay/relay.ts:2520`). Both identify an implementer seat by **rank** rather than by
+requiring the literal `implementer` role, which is what lets a seat be rank `implementer` in
+a role an operator named. `#implementers()` then subtracts the reviewer by name;
+`#dispatchSeats()` keeps it, because a review task is dispatched like any other.
+
+### The five hazards listed here, and where each is answered
+
+| what this section named | where it is answered now |
+| --- | --- |
+| `this.participants.find((p) => p.rank === 'implementer')!` picks an arbitrary seat | `src/relay/relay.ts:2508`, `src/relay/relay.ts:2520` |
+| `const spec = this.#opts.implementer` is the one run-level spec | `src/relay/relay.ts:9472` |
+| `root: this.#opts.cwd` captures against the integration checkout | `src/relay/relay.ts:9479` |
+| `cwd: this.#opts.cwd` starts the replacement in the integration checkout | `src/relay/relay.ts:9517` |
+| the audition id must be unique per seat, not per run | `src/relay/relay.ts:9524` |
+
+Each is resolved the same way: by the seat, not by the run. `spec` is the seat's own, which
+is also what makes the audition id unique per seat without resting on candidate decisions
+being serialized. The rotation policy went the same way and was not on the list
+(`src/relay/relay.ts:9420`) — the run's, as amended by that seat's own entry (D7).
 
 ---
 
@@ -1120,7 +1136,7 @@ implementers is this". Neither question is served by making one field try to do 
 | `#considerRotation` (`:1629`) | **changes** | Takes one `impl` and mutates global counters. Becomes per-seat, feeding the per-seat rotation map. |
 | `rotationWatch` (`:1011`) | **changes** | Flat run-wide counters. Becomes a per-seat map; `armed` stays run-wide (issue #31 — it is a property of the options, set at construction). |
 | `rotationSummary()` (`:1167`) | **changes** | Renders the flat counters into one line. Keeps the one-line output, derived from the per-seat map, so the summary survives as a reader-facing surface. |
-| `rotateImplementer()` (`:2186`) | **replaced** | Four singular sites: rank `find` (`:2195`), `#opts.implementer` (`:2196`), `root: #opts.cwd` (`:2207`), `cwd: #opts.cwd` (`:2218`). Becomes `rotateSeat(seatId, reason)`. |
+| `rotateImplementer()` | **kept, narrowed** | This row said **replaced**, and the section above records why that was wrong: `rotateSeat(seatId, reason)` was ADDED beside it, and `rotateImplementer` survived as the unnamed form — the lead at N=1, refusing at N>1 rather than picking one of them. See `## LIVE: rotateImplementer() survived` above for the citations; they are pinned there and were not here, which is how this row outlived the change it describes. |
 | `#attributeArtifacts()` (`:1493`) | **changes** | An earlier draft of this note called it survives-unchanged and had it backwards. `#treeAtOrigin` (`:1400`) snapshots `dirtyPaths(this.#opts.cwd)` once, and `#attributeArtifacts` diffs `dirtyPaths(this.#opts.cwd)` against it — both read the **integration** checkout. A seat writing inside `.conclave/worktrees/…` is in a separate working tree *and* an ignored path, so its writes produce **no candidates at all** and attribution silently returns nothing until merge. Origin snapshots and evidence cursors must become seat-scoped, and the diff must run against the informed seat's own worktree. |
 | `subagentUse()` (`:1144`) | **changes** | Already scans all participants, but collapses to a single `delegated` boolean with no seat attribution. Becomes per-seat, or keeps the boolean and adds the seat list. |
 | `stop()` (`:2280`) | **changes** | Closing every session and releasing the claim is no longer the whole of teardown. It must first **stop dispatch**, then **drain or retain each seat worktree through the manifest** — merged-and-clean trees removed, blocked/dirty/unmerged retained with recovery commands — and only then release the integration claim. Releasing the claim while seat worktrees still hold uncommitted work would report the run as cleanly finished with work stranded outside the integration checkout. |
