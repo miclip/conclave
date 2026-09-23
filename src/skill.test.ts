@@ -283,3 +283,34 @@ test('#183 the skill teaches current behaviour, not issue lore', () => {
   assert.match(SKILL, /authority_conflict/, 'the pause an operator will meet must be described')
   assert.match(SKILL, /still\W{0,2}\s*withheld from/, 'and the repair that clears it')
 })
+
+test('an agent operator is told to assume no human channel, and to check before probing', () => {
+  // The planning-time default. An agent reads this section when it plans a run, and what it
+  // plans around is whatever the section presents first -- so the commands must not come
+  // before the checks, and notify must not be described as THE channel.
+  const at = SKILL.indexOf('## Reaching a human when you are the operator')
+  assert.ok(at >= 0, 'the section must exist')
+  const section = SKILL.slice(at, SKILL.indexOf('\n## ', at + 1))
+  const flat = section.replace(/\s+/g, ' ')
+  assert.doesNotMatch(flat, /only channel|is that channel/, 'notify is not presented as the channel')
+  assert.match(flat, /\*\*Assume you have no human channel\.\*\* `conclave notify` is EXPERIMENTAL and off unless the project has opted in/)
+  // The opt-in, as JSON a reader can check a config file against.
+  assert.ok(section.includes('{"notify":{"experimental":true,"transport":"even-realities"}}'), 'the opt-in, as it is written')
+  assert.match(flat, /notify is EXPERIMENTAL and is not enabled in this project/, 'the refusal it will meet')
+  assert.match(flat, /do not turn it on yourself/, 'enabling it is not the operator agent\'s call')
+  assert.match(flat, /`conclave notify broker status` answers whether or not the project has opted in/)
+  assert.match(flat, /`log` and `vetoes` read what already happened and work without the opt-in too/)
+  assert.match(flat, /a third-party app that may change without notice/)
+  // ORDER. The checks, then the probe, then the commands: a `tell` or `ask` shown before the
+  // checks is a command to try, and trying it is the planning-around this section exists to stop.
+  const checks = section.indexOf('Check these before you plan')
+  const probe = section.indexOf('Only when all three hold is a probe worth sending')
+  const firstSend = Math.min(
+    ...['conclave notify tell', 'conclave notify ask'].map((c) => section.indexOf(c)).filter((i) => i >= 0),
+  )
+  assert.ok(checks >= 0 && probe > checks, 'the checks come before the probe')
+  assert.ok(firstSend > probe, 'and no tell or ask appears before the probe')
+  // And the fallback is still there: no channel is a reason to use judgement, not to stop.
+  assert.match(flat, /that is not a blocker/)
+  assert.match(flat, /driven on your own judgement rather than waiting for an answer nobody will send/)
+})

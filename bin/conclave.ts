@@ -247,8 +247,13 @@ Commands:
                  [--kind ...] [--href URL] [--run <id>] [--operator human]
                  vetoes [--transport <name>] | log [--json]
                  broker start|status|stop [--json]
-                                   Reach a human when an agent is operating -- IF a transport is
-                                   configured, which by default none is. There is no default:
+                                   EXPERIMENTAL, and off unless the project opts in with
+                                   {"notify":{"experimental":true}} in .conclave/config.json.
+                                   Without it, tell and ask refuse with "notify is EXPERIMENTAL
+                                   and is not enabled in this project"; broker, log and vetoes
+                                   answer either way. Opted in, it reaches a human when an agent
+                                   is operating -- IF a transport is named, and by default none
+                                   is; that is a different refusal. There is no default:
                                    --transport names one for the call, or .conclave/config.json
                                    names one for the project ({"notify":{"transport":"<name>"}});
                                    the flag wins over the file, and with neither, notify refuses
@@ -260,7 +265,8 @@ Commands:
                                    stay environment variables: they describe the machine, not
                                    the project.
                                    "even-realities" is the only one that reaches a person, and it
-                                   needs a paired device and a running broker. "tell" is one way
+                                   needs a paired device and a running broker, over a protocol a
+                                   third-party app owns and may change without notice. "tell" is one way
                                    and never waits; "ask" waits and prints the answer as JSON.
                                    An action is an id that was offered; free text comes back as
                                    text for the caller to interpret. "log" is what was asked and
@@ -1493,6 +1499,12 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
     }
 
     if (verb === 'broker') {
+      // NOT GATED ON `notify.experimental` (#374), and that is deliberate. This is the diagnostic
+      // surface: someone working out why notify will not work needs `broker status` to answer
+      // rather than refuse, and a gate on the thing that tells you what is wrong is its own trap.
+      // `stop` especially must work in a project that has opted out, or a broker started before
+      // the opt-out could not be put down from there.
+      //
       // THE DEVICE'S PROCESS (#286). A run never binds the port; this does, in a process of
       // its own, started by the first run that needs it and found by the rest through a socket
       // at a known path. Nothing here is silent: a start says what it started and how to stop
@@ -1547,6 +1559,10 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
       return 2
     }
 
+    // `vetoes` and `log` are NOT GATED either (#374). They read what already happened -- late
+    // answers to decisions already asked, and the record of them -- and a project that opts out
+    // after using notify still has that history to account for. The gate is on SENDING, at
+    // `tell` and `ask` below; widening it to the reads would hide a veto nobody has collected.
     if (verb === 'vetoes') {
       const transport = transportFor()
       if (typeof transport === 'number') return transport
@@ -1596,6 +1612,20 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
       console.error(`       conclave notify log [--json]`)
       console.error(`       conclave notify broker start|status|stop [--json]      the Even Realities device's process`)
       console.error(`  transports: ${transportNames().join(', ')}`)
+      return 2
+    }
+
+    // THE OPT-IN (#374), before anything about the transport is resolved. `tell` and `ask` are the
+    // two verbs that reach a human, and they are what the skill tells an agent to plan around;
+    // the refusal says what notify is, that it is off HERE, and the exact JSON that turns it on,
+    // because an opt-in that failed as "no transport" would rebuild #351 with a new sentence.
+    // Distinct from the no-transport refusal in `transportFor`, which still speaks when this is on.
+    if (readProjectConfig(root).notify?.experimental !== true) {
+      console.error(
+        `conclave: notify is EXPERIMENTAL and is not enabled in this project\n` +
+          `  enable it in ${CONFIG_RELATIVE}: {"notify":{"experimental":true}}\n` +
+          `  one transport reaches a person, over a protocol conclave does not own; \`conclave notify broker status\` works without this`,
+      )
       return 2
     }
 

@@ -8,10 +8,12 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync, spawn, spawnSync } from 'node:child_process'
+import { mkdirSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { join } from 'node:path'
 import test, { type TestContext } from 'node:test'
 
+import { CONFIG_RELATIVE } from '../../config/project.ts'
 import { tempDir } from '../../testkit/tempDir.ts'
 import { SessionRecorder } from '../../workspace/sessionRecord.ts'
 
@@ -32,6 +34,9 @@ async function site(t: TestContext, runs: string[], extra: Record<string, string
   t.after(() => stop?.())
   const dir = tempDir(t, 'broker-cli')
   execFileSync('git', ['init', '-q'], { cwd: dir })
+  // Opted in (#374): these are about the broker behind `tell` and `ask`, not about the gate.
+  mkdirSync(join(dir, '.conclave'), { recursive: true })
+  writeFileSync(join(dir, CONFIG_RELATIVE), '{"notify":{"experimental":true}}')
   for (const id of runs) {
     new SessionRecorder(dir, {
       id,
