@@ -6,7 +6,7 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync, spawn, spawnSync } from 'node:child_process'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -18,11 +18,25 @@ import { FAKE_REPLY_ENV, resolveTransport, transportNames } from './registry.ts'
 
 const CLI = join(import.meta.dirname, '..', '..', 'bin', 'conclave.ts')
 
+/**
+ * A project that has OPTED IN to notify (#374), which is what every test about notify's own
+ * behaviour needs. The ones about the gate use `optedOut`, and say so.
+ */
 function repo(t: TestContext): string {
+  const dir = optedOut(t)
+  configure(dir, ENABLED)
+  return dir
+}
+
+/** A project with no `.conclave/config.json` at all: notify has not been switched on. */
+function optedOut(t: TestContext): string {
   const dir = tempDir(t, 'conclave-notify-cli')
   execFileSync('git', ['init', '-q'], { cwd: dir })
   return dir
 }
+
+/** The opt-in, exactly as the refusal tells an operator to write it. */
+const ENABLED = '{"notify":{"experimental":true}}'
 
 /** A live run's record in `dir`, written by the real writer: what `--run` has to name (#278). */
 function record(dir: string, id: string, goal: string): SessionRecorder {
@@ -162,7 +176,7 @@ test('#353 a transport configured for the project is used when the call names no
   // it is the transport a test can drive; that it is also the stub #351 stopped defaulting to is
   // the point of the second assertion -- configured, it is a choice, and the CLI honours it.
   const dir = repo(t)
-  configure(dir, '{"notify":{"transport":"fake"}}')
+  configure(dir, '{"notify":{"experimental":true,"transport":"fake"}}')
   const told = bare(['tell', 'run started'], dir)
   assert.equal(told.code, 0, told.said)
   assert.equal(told.out.trim(), '', 'a delivered notification says nothing')
@@ -177,12 +191,12 @@ test('#353 --transport on the call beats the configured one, in both directions'
   // Precedence stated rather than assumed. Each direction is proved by a transport that would
   // have behaved differently: `even-realities` refuses without `--run`, `fake` needs nothing.
   const dir = repo(t)
-  configure(dir, '{"notify":{"transport":"even-realities"}}')
+  configure(dir, '{"notify":{"experimental":true,"transport":"even-realities"}}')
   const flagWins = bare(['tell', 'hi', '--transport', 'fake'], dir)
   assert.equal(flagWins.code, 0, flagWins.said)
   assert.doesNotMatch(flagWins.said, /even-realities needs the run/)
 
-  configure(dir, '{"notify":{"transport":"fake"}}')
+  configure(dir, '{"notify":{"experimental":true,"transport":"fake"}}')
   const flagStillWins = bare(['tell', 'hi', '--transport', 'even-realities'], dir)
   assert.equal(flagStillWins.code, 2)
   assert.match(flagStillWins.said, /even-realities needs the run it speaks for/)
@@ -192,7 +206,7 @@ test('#353 a configured name nothing resolves is refused when the file is read, 
   // Refused by the config reader, so the words are the reader's and the failure is at the first
   // command that reads the file -- not at the first `notify ask` of an unattended run.
   const dir = repo(t)
-  configure(dir, '{"notify":{"transport":"glasses"}}')
+  configure(dir, '{"notify":{"experimental":true,"transport":"glasses"}}')
   for (const args of [['tell', 'hi'], ['tell', 'hi', '--transport', 'fake']]) {
     const r = bare(args, dir)
     assert.notEqual(r.code, 0, `${args.join(' ')} must not succeed on a file that names nothing`)
@@ -202,13 +216,15 @@ test('#353 a configured name nothing resolves is refused when the file is read, 
   }
 })
 
-test('#353 a config with no notify key refuses exactly as no config does', (t) => {
+test('#353 #374 enabled with no transport named refuses in #351 words, whatever else the file says', (t) => {
   // Byte for byte on both streams and the exit code. This is #351's refusal, and #353 added a
-  // place to answer it, not a new sentence: the two runs differ only in whether a config file
-  // exists, and a file that says nothing about notify must not change a character of it.
+  // place to answer it, not a new sentence: the two runs differ only in whether the config file
+  // says anything besides the opt-in, and a file that names no transport must not change a
+  // character of it. Before #374 the first run had no file at all; with the gate, no file is
+  // the opted-out refusal, which is pinned in its own test below.
   const withoutFile = bare(['ask', 'Merge?', '--options', 'yes:Merge'], repo(t))
   const dir = repo(t)
-  configure(dir, '{"permissions":"ask"}')
+  configure(dir, '{"permissions":"ask","notify":{"experimental":true}}')
   const withFile = bare(['ask', 'Merge?', '--options', 'yes:Merge'], dir)
   assert.equal(withoutFile.code, 2)
   assert.equal(withFile.code, withoutFile.code)
@@ -226,6 +242,99 @@ test('#353 a config with no notify key refuses exactly as no config does', (t) =
     `  \`fake\` is test plumbing and answers nothing; naming it is a choice, not a fallback\n`
   assert.ok(withFile.err.includes(refusal), `stderr must carry the #351 refusal verbatim:\n${withFile.err}`)
   assert.equal(withFile.out, '')
+  // Enabled, so the opt-in refusal is not what speaks: the two are different sentences for
+  // different repairs, and the no-transport one must not be reached through the gate's words.
+  assert.doesNotMatch(withFile.err, /EXPERIMENTAL/)
+})
+
+/** The #374 refusal, verbatim: what an opted-out project hears from `tell` and `ask`. */
+const NOT_ENABLED =
+  `conclave: notify is EXPERIMENTAL and is not enabled in this project\n` +
+  `  enable it in .conclave/config.json: {"notify":{"experimental":true}}\n` +
+  `  one transport reaches a person, over a protocol conclave does not own; \`conclave notify broker status\` works without this\n`
+
+test('#374 no file, an empty notify block and experimental:false are the same opted-out project', (t) => {
+  // Three spellings of "not switched on", and a transport configured WITHOUT the opt-in, which
+  // is the one most likely to be written by someone who read #353 and not #374. All refuse
+  // identically, and before the transport is resolved: a named transport on the call, or in the
+  // file, does not get past the gate.
+  const spellings: (string | undefined)[] = [
+    undefined,
+    '{}',
+    '{"notify":{}}',
+    '{"notify":{"experimental":false}}',
+    '{"notify":{"transport":"fake"}}',
+  ]
+  for (const args of [
+    ['tell', 'run started'],
+    ['ask', 'Merge?', '--options', 'yes:Merge'],
+    ['tell', 'run started', '--transport', 'fake'],
+    ['ask', 'Merge?', '--transport', 'even-realities'],
+  ]) {
+    const heard = spellings.map((json) => {
+      const dir = optedOut(t)
+      if (json !== undefined) configure(dir, json)
+      const r = bare(args, dir)
+      return { json, code: r.code, out: r.out, err: withoutHarnessNoise(r.err) }
+    })
+    for (const h of heard) {
+      const where = `${args.join(' ')} with ${h.json ?? 'no config file'}`
+      assert.equal(h.code, 2, where)
+      assert.equal(h.out, '', where)
+      assert.equal(h.err, NOT_ENABLED, `${where}: the refusal, and nothing else`)
+    }
+  }
+})
+
+test('#374 the opt-in refusal and the no-transport refusal are different sentences', (t) => {
+  // An opt-in that failed as "no transport" would send an operator to name one, and they would
+  // hit the gate again: the repair has to be in the refusal that actually fired.
+  const off = bare(['tell', 'hi'], optedOut(t))
+  const on = bare(['tell', 'hi'], repo(t))
+  assert.equal(off.code, 2)
+  assert.equal(on.code, 2)
+  assert.match(off.err, /notify is EXPERIMENTAL and is not enabled in this project/)
+  assert.doesNotMatch(off.err, /notify needs --transport/)
+  assert.match(on.err, /notify needs --transport/)
+  assert.doesNotMatch(on.err, /not enabled in this project/)
+})
+
+test('#374 the design records why the gate exists, where it stops, and why its refusal is its own', () => {
+  // The rationale is what keeps the next change honest: widen the gate to `broker` and the
+  // diagnostic surface refuses; fold its refusal into "no transport" and #351 is rebuilt. One
+  // assertion per load-bearing clause, each written as the section states it.
+  const design = readFileSync(join(import.meta.dirname, '..', '..', 'docs', 'DESIGN.md'), 'utf8')
+  const at = design.indexOf('### Notify is experimental and opt-in')
+  assert.ok(at >= 0, 'the section must exist')
+  assert.ok(at < design.indexOf('### One device, many runs'), 'and sit before the broker section it motivates')
+  const flat = design.slice(at, design.indexOf('### One device, many runs')).replace(/\s+/g, ' ')
+  assert.match(flat, /#351 made the choice of transport honest/)
+  assert.match(flat, /#353 made that choice configurable/)
+  assert.match(flat, /But neither makes the channel dependable/)
+  assert.match(flat, /a protocol owned by a third-party app that can change without notice/)
+  assert.match(flat, /The gate covers `tell` and `ask` only, because they are the verbs that reach a person/)
+  assert.match(flat, /a different sentence from the one an opted-in project with no transport gets/)
+  assert.match(flat, /`broker`, `log` and `vetoes` stay ungated because they are diagnostics and history/)
+})
+
+test('#374 broker, log and vetoes answer in a project that has not opted in', (t) => {
+  // The diagnostic surface. Someone working out why notify will not work needs `broker status`
+  // to answer rather than refuse, and a project that opted out after using notify still has its
+  // record and any late answers to account for.
+  const dir = optedOut(t)
+  const env = { ...process.env, CONCLAVE_EVEN_SOCKET: join(dir, 'even.sock') }
+  const status = spawnSync('node', [CLI, 'notify', 'broker', 'status'], { cwd: dir, encoding: 'utf8', env })
+  assert.equal(status.status, 1, 'no broker is running, which is an answer rather than a refusal')
+  assert.match(status.stdout, /no Even Realities broker at /)
+  const stop = spawnSync('node', [CLI, 'notify', 'broker', 'stop'], { cwd: dir, encoding: 'utf8', env })
+  assert.equal(stop.status, 0)
+  const log = bare(['log'], dir)
+  assert.equal(log.code, 0)
+  assert.match(log.out, /no decisions recorded/)
+  const vetoes = bare(['vetoes', '--transport', 'fake'], dir)
+  assert.equal(vetoes.code, 0, vetoes.said)
+  for (const r of [status, stop]) assert.doesNotMatch(`${r.stdout}${r.stderr}`, /EXPERIMENTAL/)
+  for (const r of [log, vetoes]) assert.doesNotMatch(r.said, /EXPERIMENTAL/)
 })
 
 test('#353 the top-level help says the transport can be configured, and which of flag and file wins', (t) => {
@@ -240,6 +349,22 @@ test('#353 the top-level help says the transport can be configured, and which of
   assert.match(help, /the flag wins over the file, and with neither, notify refuses and lists the names/)
   assert.match(help, /It may still be named, on the call or in the file, as a choice/, 'a configured `fake` is a choice, and the help says so')
   assert.match(help, /port, host and token stay environment variables: they describe the machine, not the project/)
+})
+
+test('#374 the top-level help says notify is experimental, how to opt in, and that the two refusals differ', (t) => {
+  // An agent reads `--help` before it reads the skill, so this is the earliest place the opt-in
+  // can be learned. The JSON must be the exact thing to write, and the refusal quoted must be
+  // the one the gate actually prints.
+  const r = spawnSync('node', [CLI, '--help'], { cwd: repo(t), encoding: 'utf8' })
+  assert.equal(r.status, 0)
+  const help = r.stdout.replace(/\s+/g, ' ')
+  assert.match(help, /EXPERIMENTAL, and off unless the project opts in with \{"notify":\{"experimental":true\}\} in \.conclave\/config\.json/)
+  assert.ok(help.includes('"notify is EXPERIMENTAL and is not enabled in this project"'), 'the refusal, quoted as the gate prints it')
+  assert.ok(NOT_ENABLED.startsWith('conclave: notify is EXPERIMENTAL and is not enabled in this project\n'), 'and that is the sentence the gate prints')
+  assert.match(help, /broker, log and vetoes answer either way/)
+  assert.match(help, /IF a transport is named, and by default none is; that is a different refusal/)
+  assert.match(help, /a third-party app owns and may change without notice/)
+  assert.doesNotMatch(help, /only channel/)
 })
 
 test('#184 a question that carried no answer exits non-zero', (t) => {

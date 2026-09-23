@@ -259,6 +259,20 @@ test('#353 a transport name nothing resolves is refused at read, listing every n
   )
 })
 
+test('#374 notify.experimental is a boolean, read back as written, and refused as anything else', (t) => {
+  assert.equal(readProjectConfig(projectWith(t, '{"notify":{"experimental":true}}')).notify?.experimental, true)
+  assert.equal(readProjectConfig(projectWith(t, '{"notify":{"experimental":false}}')).notify?.experimental, false)
+  // Refused rather than coerced: `"true"` read as on switches on a broker nobody chose, and read
+  // as off is an opt-in that fails quietly.
+  for (const bad of ['"true"', '1', 'null', '"yes"']) {
+    assert.throws(
+      () => readProjectConfig(projectWith(t, `{"notify":{"experimental":${bad}}}`)),
+      new RegExp(`notify\\.experimental must be true or false, not ${bad.replace(/"/g, '"')}`),
+      bad,
+    )
+  }
+})
+
 test('#353 a notify block that is not the shape of one is refused, not read as absent', (t) => {
   // Read as absent, a malformed block would mean the refusal the operator wrote this to avoid.
   assert.throws(() => readProjectConfig(projectWith(t, '{"notify":"fake"}')), /notify must be an object, not "fake"/)
@@ -279,7 +293,11 @@ test('#353 the README says the transport can be configured, and says which of fl
   const readme = readFileSync(join(import.meta.dirname, '..', '..', 'README.md'), 'utf8')
   const flat = readme.replace(/\s+/g, ' ')
   assert.doesNotMatch(flat, /`--transport` is required/, 'the README must not claim the flag is always required')
-  assert.match(flat, /\{ "notify": \{ "transport": "even-realities" \} \}/, 'the config key, as JSON an operator can copy')
+  assert.match(
+    flat,
+    /\{ "notify": \{ "experimental": true, "transport": "even-realities" \} \}/,
+    'the config keys, as JSON an operator can copy -- the opt-in included, or the copy does nothing (#374)',
+  )
   assert.match(
     flat,
     /The flag wins over the file, the file stands in when the flag is absent, and with neither `notify` refuses and lists the names/,
@@ -293,6 +311,24 @@ test('#353 the README says the transport can be configured, and says which of fl
     /environment variables and not keys in `\.conclave\/config\.json` on purpose/,
     'the broker settings are stated to be machine-global, not project config',
   )
+})
+
+test('#374 the README calls notify experimental and opt-in, and states the four prerequisites', () => {
+  // "the only channel to them" was what the README said, and it is what an agent plans around.
+  // Pinned as wording because the prerequisites are the planning-critical part: each is a
+  // separate way for the channel not to exist, and dropping one from the list is how the next
+  // operator finds out at the moment of need.
+  const readme = readFileSync(join(import.meta.dirname, '..', '..', 'README.md'), 'utf8')
+  const flat = readme.replace(/\s+/g, ' ')
+  assert.doesNotMatch(flat, /only channel/, 'notify is not the only channel, or a channel at all until checked')
+  assert.match(flat, /`conclave notify` is an EXPERIMENTAL channel to them, and it is off unless the project opts in/)
+  assert.match(flat, /\*\*The project has opted in\*\* with `"experimental": true`/)
+  assert.match(flat, /\*\*The transport is `even-realities`\*\*, the only one that reaches a person/)
+  assert.match(flat, /\*\*An Even Realities device is paired\*\*/)
+  assert.match(flat, /\*\*A broker is running\*\*, speaking a protocol owned by a third-party app that may change without notice/)
+  assert.match(flat, /`notify is EXPERIMENTAL and is not enabled in this project`/, 'the refusal an operator will see')
+  assert.match(flat, /`broker status\|stop`, `log` and `vetoes` work whether or not the project has opted in/)
+  assert.match(flat, /`experimental` must be `true` or `false`; absent is `false`/)
 })
 
 test('the README documents the deny-only maps, and names exactly the capabilities that exist', () => {

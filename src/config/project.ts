@@ -146,6 +146,17 @@ export interface ProjectConfig {
 export interface NotifyConfig {
   /** A name `transportNames()` lists. Refused at read otherwise, the way the flag is refused. */
   transport?: string
+  /**
+   * The opt-in for `notify tell` and `notify ask` (#374). Only `true` enables them; absent and
+   * `false` are the same statement, and anything else is refused at read.
+   *
+   * A gate rather than a default because the feature is not ready to be planned around: one
+   * transport reaches a person, over a protocol a third party owns, through a broker with
+   * machine-global state. An agent that reads the skill and plans on a human channel should
+   * find out it has to be switched on at its first call, in words that say so -- not at the
+   * moment it has a question, which is how #351 was found.
+   */
+  experimental?: boolean
 }
 
 /**
@@ -342,6 +353,15 @@ export function validateNotify(config: ProjectConfig, path: string): void {
   if (notify === undefined) return
   if (typeof notify !== 'object' || notify === null || Array.isArray(notify)) {
     throw new Error(`${path}: notify must be an object, not ${JSON.stringify(notify)}`)
+  }
+  // A boolean, strictly. `"true"` or `1` read as enabled would be the typo that switches on a
+  // machine-global broker nobody chose; read as disabled, it is an opt-in that fails quietly,
+  // which is the #351 shape this key exists to prevent (#374).
+  const experimental = (notify as { experimental?: unknown }).experimental
+  if (experimental !== undefined && typeof experimental !== 'boolean') {
+    throw new Error(
+      `${path}: notify.experimental must be true or false, not ${JSON.stringify(experimental)}`,
+    )
   }
   const transport = (notify as { transport?: unknown }).transport
   if (transport === undefined) return

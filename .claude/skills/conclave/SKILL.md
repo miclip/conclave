@@ -130,8 +130,31 @@ When a run is `--operator agent`, **you** are the operator, and the seats escala
 you do not get by default is a way to reach the person whose project this is — so a question only
 they can answer has nowhere to go, and the run stalls on it or the seat gives up and flags it.
 
-`conclave notify` is that channel **if one is configured**, and usually one is not. Read the
-next paragraph before you plan around it.
+**Assume you have no human channel.** `conclave notify` is EXPERIMENTAL and off unless the
+project has opted in, and in most projects it has not. Do not plan a run around reaching a person
+until you have checked the three things below. An operator that plans around a channel it has not
+checked finds out it never had one at the moment it has a question, which in an unattended run is
+also when nobody is there to answer.
+
+Check these before you plan, in this order:
+
+1. **The project has opted in.** `.conclave/config.json` has `"experimental": true` under
+   `notify`, as in `{"notify":{"experimental":true,"transport":"even-realities"}}`. Without
+   it, `tell` and `ask` refuse with "notify is EXPERIMENTAL and is not enabled in this
+   project". Turning it on is the project owner's decision; do not turn it on yourself.
+2. **A transport that reaches a person is named**, in that file or with `--transport`.
+   `even-realities` is the only one. `fake` is test plumbing: it accepts a question and answers
+   nothing. An opted-in project that names no transport gets a different refusal, "notify needs
+   --transport", which has a different fix.
+3. **The broker is up and the device can reach it.** `conclave notify broker status` answers
+   whether or not the project has opted in. It prints the broker's pid and the device address,
+   and says so if that address is loopback, which the glasses cannot reach. The broker speaks a
+   protocol owned by a third-party app that may change without notice. Whether a device is
+   actually paired is not something conclave can see.
+
+Only when all three hold is a probe worth sending: `conclave notify tell "probe" --transport
+even-realities --run <id>` at the START of a run is what shows the device is really there. Once
+it has worked, these are the commands:
 
 ```
 conclave notify tell "<headline>" --transport <name>     say something; expect no answer
@@ -141,17 +164,10 @@ conclave notify vetoes                                   collect answers that ar
 conclave notify log                                      what was asked, answered, and by whom
 ```
 
-**`--transport` is required and there is no default.** With none, `conclave notify` refuses and
-lists the names. One of those names is `fake`, which is test plumbing: it accepts a question and
-answers nothing, and it is offered so a demo or a test can name it deliberately. The only
-transport that reaches a person is `even-realities`, and it needs a paired device and a running
-broker — so a name in that list is not the same thing as a channel.
+`log` and `vetoes` read what already happened and work without the opt-in too.
 
-**So assume you have no human channel unless you have checked.** `conclave notify tell
-"probe" --transport <name>` at the START of a run costs one line and tells you what is true;
-finding out when you are stuck tells you the same thing far too late. If there is no channel,
-that is not a blocker — it means an escalation stops at you, and the run should be driven on
-your own judgement rather than waiting for an answer nobody will send.
+If any check fails, that is not a blocker. It means an escalation stops at you, and the run
+should be driven on your own judgement rather than waiting for an answer nobody will send.
 
 **Conclave never sends these for you.** It does not turn pauses into messages, deliberately: you
 have the context that decides whether a human is needed, and it does not. The cost of that design

@@ -251,14 +251,16 @@ Per agent:
 `--bypass` on `relay` or `session` writes it for you, and `--bypass claude` scopes it to one
 agent. It merges rather than replaces. Set `"permissions": "ask"` to undo.
 
-The same file names the transport `conclave notify` uses when a call does not say:
+The same file opts the project in to `conclave notify`, which is EXPERIMENTAL and off without
+it, and names the transport it uses when a call does not say:
 
 ```json
-{ "notify": { "transport": "even-realities" } }
+{ "notify": { "experimental": true, "transport": "even-realities" } }
 ```
 
-`--transport` on the call still wins; see [Driving it as an agent](#driving-it-as-an-agent) for
-the precedence and what may go there.
+`experimental` must be `true` or `false`; absent is `false`. `--transport` on the call still
+wins; see [Driving it as an agent](#driving-it-as-an-agent) for the precedence, the
+prerequisites and what may go there.
 
 ### Roles
 
@@ -419,7 +421,22 @@ readily about premises and ambiguous criteria, never about permission — and is
 the run report.
 
 The seats escalate to the driving agent. When that agent needs the human whose project this
-is, `conclave notify` is the only channel to them:
+is, `conclave notify` is an EXPERIMENTAL channel to them, and it is off unless the project opts
+in. It reaches a person only when all four of these hold:
+
+1. **The project has opted in** with `"experimental": true` under `notify` in
+   `.conclave/config.json`.
+2. **The transport is `even-realities`**, the only one that reaches a person.
+3. **An Even Realities device is paired** with this machine.
+4. **A broker is running**, speaking a protocol owned by a third-party app that may change
+   without notice.
+
+Without the opt-in, `tell` and `ask` refuse with `notify is EXPERIMENTAL and is not enabled in
+this project` and print the JSON that enables it. That refusal is different from the one an
+opted-in project with no transport gets (`notify needs --transport`), because the two have
+different fixes. `broker status|stop`, `log` and `vetoes` work whether or not the project has
+opted in. The broker commands are how you find out why notify is not working, and a project that
+opted out still has its record and any late answers.
 
 ```sh
 conclave notify tell "<headline>" --transport <name>     # say it; no answer expected
@@ -428,11 +445,11 @@ conclave notify vetoes --transport <name>                # answers that arrived 
 conclave notify log                                      # what was asked, answered, by whom
 ```
 
-There is no default transport. A call names one with `--transport`, or the project names one
-once in `.conclave/config.json`:
+Even when opted in, there is no default transport. A call names one with `--transport`, or the
+project names one once in `.conclave/config.json`:
 
 ```json
-{ "notify": { "transport": "even-realities" } }
+{ "notify": { "experimental": true, "transport": "even-realities" } }
 ```
 
 ```sh

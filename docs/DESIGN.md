@@ -368,6 +368,31 @@ anything a participant flagged as unresolved. Every human-facing line moves to s
 stdout parses in full. That is the interface an agent driving Conclave needs — confirming a
 run should not mean grepping a transcript.
 
+### Notify is experimental and opt-in
+
+The tension first, because the gate partly reverses recent work. #351 made the choice of
+transport honest: there is no default, so an agent can no longer reach test plumbing without
+meaning to. #353 made that choice configurable, so it is written down once rather than on every
+call. Both fixed real defects in how notify fails, and neither is wasted. But neither makes the
+channel dependable. The one transport that reaches a person still needs a paired device, a
+running broker with machine-global state, and a protocol owned by a third-party app that can
+change without notice. So the gate is "we learned more since", not the next step of a plan those
+fixes were part of.
+
+The gate covers `tell` and `ask` only, because they are the verbs that reach a person, and they
+are what an agent plans around. An agent that reads that a channel exists will plan on it, so the
+thing to stop is planning on a channel nobody switched on. The refusal says what notify is, that
+it is off in this project, and the JSON that switches it on, and it is a different sentence from
+the one an opted-in project with no transport gets. If the opt-in failed as "no transport", the
+fix it suggested would be to name one, that would hit the gate again, and the operator would be
+back to finding out at the moment of need, which is exactly the #351 failure.
+
+`broker`, `log` and `vetoes` stay ungated because they are diagnostics and history, not ways of
+sending. `broker status` is what someone uses to find out why notify does not work, and gating
+the tool that tells you what is wrong is its own trap. `broker stop` has to be able to put down a
+broker started before a project opted out. `log` and `vetoes` read what already happened: a
+project that stops using notify still has its record and any late answers to account for.
+
 ### One device, many runs
 
 A pair of glasses is one device on one address, and a run is not. Several runs on one machine,
