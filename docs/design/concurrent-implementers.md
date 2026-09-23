@@ -1,9 +1,15 @@
 # Concurrent implementers
 
-A design note for running more than one implementer at a time. Nothing here is built. This
-records what the constraint actually is, what an earlier reading of it got wrong, the task
-model that would replace the round loop, and the worktree and integration lifecycle the
-seats would run under.
+A design note for running more than one implementer at a time. It records what the
+constraint actually is, what an earlier reading of it got wrong, the task model that would
+replace the round loop, and the worktree and integration lifecycle the seats would run under.
+
+Most of it is frozen design record: true of the tree it was written against, written in the
+tense of a proposal, and not updated as the work landed. The exception is any section whose
+heading begins `## LIVE:`. Those describe the tree as it stands, and every `path:line` they
+cite is checked by `src/contract/citations.test.ts`: the path must exist and the cited line
+must still hold the text declared for it. That keeps the pointers honest. It does not prove
+that every surrounding sentence is still true.
 
 ---
 
@@ -697,57 +703,81 @@ question rotation asks is whether the replacement reproduces the state it was ha
 whether the tree is green. A seat handed a red test suite must be able to demonstrate it
 inherited the same red suite.
 
-### Rotation is seat-local
+## LIVE: Rotation is seat-local
 
-A degradation candidate affects **one seat**:
+**This section was written as a proposal, and most of it has since been built.** It is kept
+where it was and separated here into what the tree now shows, where the build differs from
+what was proposed, and what is still only proposal.
 
-- That seat moves to `rotation_pending` and **redispatch to it stops.** It is not free for
-  ordinary work, in the same way a `merge_blocked` seat is not.
-- **Every other implementer continues.** A candidate on one seat says nothing about the
-  others, and stopping the run to consider one would be lockstep re-entering through the
-  rotation path.
-- **Candidate decisions are serialized through the single advisor/operator.** There is one
-  advisor and one operator; concurrent rotations would have them authoring two narrative
-  handoffs at once, against two moving trees, with the human adjudicating both. One at a
-  time. A second candidate raised while one is pending waits its turn — its seat sits in
-  `rotation_pending` and stops redispatching, which is the correct thing to do anyway.
+### What is built
 
-**The replacement starts in the same seat worktree.** On success the swap is narrow: only
-that seat's *session* changes. Its **id, role, branch, task history, and worktree** all
-survive. This is the same guarantee the current code already provides for the single
-implementer — the session is swapped in place so id, rank and routing history survive —
-extended to the fields a seat has that a lone implementer did not. On rollback, only that
-original session is restored; no other seat's state is touched, and the seat's branch and
-worktree were never candidates for cleanup because they are neither merged nor clean.
+- **A rotation replaces one seat's session, in that seat's own tree, and leaves its siblings
+  alone.** The seat keeps its id and gets a new session. Both of its sessions, the original and
+  the replacement, are created in the seat's worktree (`src/relay/seatRotation.test.ts:239`),
+  and the other seat is not quiesced, not spoken to and not counted
+  (`src/relay/seatRotation.test.ts:252`). The seat-scoped reads that make this so are listed in
+  the `rotateImplementer()` section below.
+- **`rotation_pending` is a real scheduler state.** It is a member of `SchedulerState`
+  (`src/relay/dispatch.ts:277`). `#rotating` sets it for the length of the transfer
+  (`src/relay/relay.ts:9732`) and then restores the state the seat had before, rather than
+  assuming one (`src/relay/relay.ts:9736`). `src/relay/seatRotation.test.ts:373` reads the seat
+  table from inside the transaction and asserts `{ state: 'rotation_pending', graded: true }`.
+- **`baselineGeneration` and `degradationCursor` live on the seat, not the session.** Both are
+  fields of `RelayParticipant` (`src/relay/relay.ts:189`, `src/relay/relay.ts:197`), which
+  rotation keeps while it swaps the session inside it. An accepted rotation does not carry
+  them across unchanged. At the swap it resets `baselineGeneration` to `0` and advances
+  `degradationCursor` to the end of the seat's event list (`src/relay/relay.ts:9599-9600`).
+  That is what stops a replacement being judged against its predecessor's compaction events.
 
-`baselineGeneration` and `degradationCursor` (`src/relay/relay.ts:75`) already follow the
-seat rather than the session, which is what stops a replacement being judged against its
-predecessor's compaction events. Per-seat rotation needs them per seat, which is where they
-already are.
+### Where the build differs from the proposal
+
+The proposal had a degradation **candidate** move its seat to `rotation_pending`. The build
+enters that state only while a rotation is actually running: `#rotating` is the one place the
+relay assigns it (`src/relay/relay.ts:9732`). A candidate that is only recorded, or declined,
+does not change the seat's state. At the loop's own rotation point the seat is already
+undispatchable (`integrating`, with its task graded), which `#rotating`'s docblock records as
+measured rather than assumed.
+
+### Still proposal, or not checked against the tree
+
+These parts of the original section are not claimed as built here:
+
+- that every other seat keeps being dispatched to while one seat's candidate is waiting for
+  the operator;
+- that candidate decisions for different seats are serialized through the one advisor and the
+  one operator;
+- that a rollback restores the original session and touches no other seat.
+
+The tests above prove that a rotation does not touch the seat beside it. They do not prove any
+of these three.
 
 ### `rotationWatch` becomes per-seat
 
-`rotationWatch` (`src/relay/relay.ts:1011`) is a single flat object — `armed`, plus
-run-wide counters for assessments, degradations, complaints and peak generation. With one
-implementer that is unambiguous. With several it silently answers a different question than
-the reader thinks: "three degradations seen" could be one seat degrading three times or
-three seats degrading once, and those call for opposite responses.
+**Not built.** `rotationWatch` (`src/relay/relay.ts:3546`) is still one flat run-wide object:
+`armed`, plus run-wide counters for assessments, degradations, candidates, complaints, peak
+generation and rotations. There is no per-seat map and no aggregate derived from one.
 
-Conceptually it becomes a **per-seat map plus an aggregate summary.** `armed` stays
-run-wide — it is a property of the options, set once at construction, and issue #31 is
-specifically about it not being derivable from what happened during the run. The counters
-move per seat, and the aggregate is derived from them for the summary line, so the existing
-one-line report survives while the per-seat detail becomes reachable.
+One piece of per-seat detail is already reachable by another route. Each accepted rotation's
+record names the seat it replaced (`src/relay/rotationIntent.ts:75`), so *which seat was
+rotated* can be recovered. *Which seat degraded, or raised a candidate*, cannot.
+
+The proposal, unchanged in substance: with one implementer the flat object is unambiguous.
+With several it silently answers a different question than the reader thinks. "Three
+degradations seen" could be one seat degrading three times or three seats degrading once, and
+those call for opposite responses. So it would become a **per-seat map plus an aggregate
+summary.** `armed` stays run-wide: it is a property of the options, set once at construction,
+and issue #31 is specifically about it not being derivable from what happened during the run.
+The counters would move per seat, and the aggregate would be derived from them for the summary
+line, so the existing one-line report survives while the per-seat detail becomes reachable.
 
 ## LIVE: `rotateImplementer()` survived — unnamed at N=1, refusing at N>1
 
 **This section predicted that `rotateImplementer()` "cannot survive". That was wrong**, and it
 is corrected here rather than deleted: the arbitrary pick did not survive; the entry point did.
 
-Unlike the rest of this note, which is frozen design record and which the preamble's "Nothing
-here is built" still covers, the claims below are about the tree as it stands. That is what
-`## LIVE:` means here — `src/contract/citations.test.ts` pins every line cited below in both
-directions, which the bare `:NNNN` bullets this replaces were never subject to (#367).
+As the preamble says of every `## LIVE:` section, the claims below are about the tree as it
+stands, and `src/contract/citations.test.ts` pins every line cited below in both directions.
+The bare `:NNNN` bullets this replaces were never subject to that check (#367).
 
 ### The decision that replaced the pick
 
@@ -755,18 +785,18 @@ There are two entry points, and which one a caller gets turns on whether a seat 
 
 - **`rotateImplementer(reason)` — the unnamed form**, kept because it is what every existing
   caller has: an operator, a console, an embedder. At N=1 it delegates to `rotateSeat` for
-  the lead (`src/relay/relay.ts:9244`). At N>1 it throws rather than choosing
-  (`src/relay/relay.ts:9228`), because "the implementer" names nothing there.
+  the lead (`src/relay/relay.ts:9236`). At N>1 it throws rather than choosing
+  (`src/relay/relay.ts:9220`), because "the implementer" names nothing there.
 - **`rotateSeat(seatId, reason)` — the named form**, and the only one that can act at N>1.
 
 The run handle picks between them on `#rotationSeat`, the seat the current pause is about
-(`src/relay/relay.ts:5686-5687`). No pause in front of the operator means no seat is named,
+(`src/relay/relay.ts:5678-5679`). No pause in front of the operator means no seat is named,
 and the unnamed form's own rule then applies.
 
 The singular lookup is gone from the relay, surviving only as the predecessor named in the
-docstring of what replaced it (`src/relay/relay.ts:2476`). Two filters replaced it:
-`#implementers()` (`src/relay/relay.ts:2508`) and `#dispatchSeats()`
-(`src/relay/relay.ts:2520`). Both identify an implementer seat by **rank** rather than by
+docstring of what replaced it (`src/relay/relay.ts:2481`). Two filters replaced it:
+`#implementers()` (`src/relay/relay.ts:2500`) and `#dispatchSeats()`
+(`src/relay/relay.ts:2512`). Both identify an implementer seat by **rank** rather than by
 requiring the literal `implementer` role, which is what lets a seat be rank `implementer` in
 a role an operator named. `#implementers()` then subtracts the reviewer by name;
 `#dispatchSeats()` keeps it, because a review task is dispatched like any other.
@@ -775,16 +805,16 @@ a role an operator named. `#implementers()` then subtracts the reviewer by name;
 
 | what this section named | where it is answered now |
 | --- | --- |
-| `this.participants.find((p) => p.rank === 'implementer')!` picks an arbitrary seat | `src/relay/relay.ts:2508`, `src/relay/relay.ts:2520` |
-| `const spec = this.#opts.implementer` is the one run-level spec | `src/relay/relay.ts:9472` |
-| `root: this.#opts.cwd` captures against the integration checkout | `src/relay/relay.ts:9479` |
-| `cwd: this.#opts.cwd` starts the replacement in the integration checkout | `src/relay/relay.ts:9517` |
-| the audition id must be unique per seat, not per run | `src/relay/relay.ts:9524` |
+| `this.participants.find((p) => p.rank === 'implementer')!` picks an arbitrary seat | `src/relay/relay.ts:2500`, `src/relay/relay.ts:2512` |
+| `const spec = this.#opts.implementer` is the one run-level spec | `src/relay/relay.ts:9464` |
+| `root: this.#opts.cwd` captures against the integration checkout | `src/relay/relay.ts:9471` |
+| `cwd: this.#opts.cwd` starts the replacement in the integration checkout | `src/relay/relay.ts:9509` |
+| the audition id must be unique per seat, not per run | `src/relay/relay.ts:9516` |
 
 Each is resolved the same way: by the seat, not by the run. `spec` is the seat's own, which
 is also what makes the audition id unique per seat without resting on candidate decisions
 being serialized. The rotation policy went the same way and was not on the list
-(`src/relay/relay.ts:9420`) — the run's, as amended by that seat's own entry (D7).
+(`src/relay/relay.ts:9412`) — the run's, as amended by that seat's own entry (D7).
 
 ---
 

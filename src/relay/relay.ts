@@ -2470,8 +2470,13 @@ export class Relay {
     return [...this.#participants.values()]
   }
 
+  /** What a defined role is FOR, or `undefined` for a built-in one nobody described (#89). */
+  #roleDescription(role: string): string | undefined {
+    return this.#opts.roleDescriptions?.[role]
+  }
+
   /**
-   * Every implementer seat, in join order.
+   * Every implementer seat that WRITES, in join order: rank `implementer`, less the reviewer.
    *
    * The replacement for `participants.find((p) => p.rank === 'implementer')`, which was correct
    * only because there was one. A `find` over a rank does not fail at N>1 -- it returns the
@@ -2479,31 +2484,18 @@ export class Relay {
    * only one this class offers, and the two operations that genuinely need a single seat name
    * one explicitly below.
    *
-   * Filtered on ROLE rather than rank (#72). The two used to coincide -- every rank
-   * `implementer` seat did implementer work -- but a reviewer is rank `implementer` with a
-   * different job (D5), and every caller of this method means the job: rotation eligibility,
-   * the opening `IMPLEMENTER_BRIEFING` loop, and the closing question all mean "a seat that
-   * writes code", none of them "a seat that shares implementer's authority". `#dispatchSeats`
-   * below is the rank-based answer, for the one caller that needs it.
-   */
-  /**
-   * The seats that WRITE: rank `implementer`, less the reviewer.
-   *
-   * This used to ask `role === 'implementer'`, which answered the same question only because
-   * every writing seat had that exact role. Once an operator can name a role (#89) a seat can
-   * be rank `implementer` in role `frontend`, and a role test silently drops it -- out of the
-   * seat count, out of the multi-seat briefing, out of rotation.
+   * This used to ask `role === 'implementer'` (#72), which answered the same question only
+   * because every writing seat had that exact role. Once an operator can name a role (#89) a
+   * seat can be rank `implementer` in role `frontend`, and a role test silently drops it -- out
+   * of the seat count, out of the multi-seat briefing, out of rotation.
    *
    * So the test is the one that was always meant: rank says what a seat IS, role says what it
    * is FOR. The reviewer is the one seat where those diverge in the other direction -- rank
    * `implementer` because it is dispatched to like any other, role `reviewer` because it does
    * not write -- so it stays excluded by name. At N=1 this returns exactly what it always did.
+   * `#dispatchSeats` below is the rank-based answer, for the one caller that needs the reviewer
+   * included.
    */
-  /** What a defined role is FOR, or `undefined` for a built-in one nobody described (#89). */
-  #roleDescription(role: string): string | undefined {
-    return this.#opts.roleDescriptions?.[role]
-  }
-
   #implementers(): RelayParticipant[] {
     return this.participants.filter((p) => p.rank === 'implementer' && p.role !== 'reviewer')
   }
