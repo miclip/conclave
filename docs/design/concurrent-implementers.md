@@ -719,21 +719,21 @@ what was proposed, and what is still only proposal.
   the `rotateImplementer()` section below.
 - **`rotation_pending` is a real scheduler state.** It is a member of `SchedulerState`
   (`src/relay/dispatch.ts:277`). `#rotating` sets it for the length of the transfer
-  (`src/relay/relay.ts:9732`) and then restores the state the seat had before, rather than
-  assuming one (`src/relay/relay.ts:9736`). `src/relay/seatRotation.test.ts:373` reads the seat
+  (`src/relay/relay.ts:9738`) and then restores the state the seat had before, rather than
+  assuming one (`src/relay/relay.ts:9742`). `src/relay/seatRotation.test.ts:373` reads the seat
   table from inside the transaction and asserts `{ state: 'rotation_pending', graded: true }`.
 - **`baselineGeneration` and `degradationCursor` live on the seat, not the session.** Both are
   fields of `RelayParticipant` (`src/relay/relay.ts:189`, `src/relay/relay.ts:197`), which
   rotation keeps while it swaps the session inside it. An accepted rotation does not carry
   them across unchanged. At the swap it resets `baselineGeneration` to `0` and advances
-  `degradationCursor` to the end of the seat's event list (`src/relay/relay.ts:9599-9600`).
+  `degradationCursor` to the end of the seat's event list (`src/relay/relay.ts:9605-9606`).
   That is what stops a replacement being judged against its predecessor's compaction events.
 
 ### Where the build differs from the proposal
 
 The proposal had a degradation **candidate** move its seat to `rotation_pending`. The build
 enters that state only while a rotation is actually running: `#rotating` is the one place the
-relay assigns it (`src/relay/relay.ts:9732`). A candidate that is only recorded, or declined,
+relay assigns it (`src/relay/relay.ts:9738`). A candidate that is only recorded, or declined,
 does not change the seat's state. At the loop's own rotation point the seat is already
 undispatchable (`integrating`, with its task graded), which `#rotating`'s docblock records as
 measured rather than assumed.
@@ -785,8 +785,8 @@ There are two entry points, and which one a caller gets turns on whether a seat 
 
 - **`rotateImplementer(reason)` — the unnamed form**, kept because it is what every existing
   caller has: an operator, a console, an embedder. At N=1 it delegates to `rotateSeat` for
-  the lead (`src/relay/relay.ts:9236`). At N>1 it throws rather than choosing
-  (`src/relay/relay.ts:9220`), because "the implementer" names nothing there.
+  the lead (`src/relay/relay.ts:9242`). At N>1 it throws rather than choosing
+  (`src/relay/relay.ts:9226`), because "the implementer" names nothing there.
 - **`rotateSeat(seatId, reason)` — the named form**, and the only one that can act at N>1.
 
 The run handle picks between them on `#rotationSeat`, the seat the current pause is about
@@ -806,15 +806,15 @@ a role an operator named. `#implementers()` then subtracts the reviewer by name;
 | what this section named | where it is answered now |
 | --- | --- |
 | `this.participants.find((p) => p.rank === 'implementer')!` picks an arbitrary seat | `src/relay/relay.ts:2500`, `src/relay/relay.ts:2512` |
-| `const spec = this.#opts.implementer` is the one run-level spec | `src/relay/relay.ts:9464` |
-| `root: this.#opts.cwd` captures against the integration checkout | `src/relay/relay.ts:9471` |
-| `cwd: this.#opts.cwd` starts the replacement in the integration checkout | `src/relay/relay.ts:9509` |
-| the audition id must be unique per seat, not per run | `src/relay/relay.ts:9516` |
+| `const spec = this.#opts.implementer` is the one run-level spec | `src/relay/relay.ts:9470` |
+| `root: this.#opts.cwd` captures against the integration checkout | `src/relay/relay.ts:9477` |
+| `cwd: this.#opts.cwd` starts the replacement in the integration checkout | `src/relay/relay.ts:9515` |
+| the audition id must be unique per seat, not per run | `src/relay/relay.ts:9522` |
 
 Each is resolved the same way: by the seat, not by the run. `spec` is the seat's own, which
 is also what makes the audition id unique per seat without resting on candidate decisions
 being serialized. The rotation policy went the same way and was not on the list
-(`src/relay/relay.ts:9412`) — the run's, as amended by that seat's own entry (D7).
+(`src/relay/relay.ts:9418`) — the run's, as amended by that seat's own entry (D7).
 
 ---
 
