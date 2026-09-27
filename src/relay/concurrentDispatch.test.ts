@@ -668,6 +668,63 @@ test('the advisor-turn budget says work was in flight when the seat it drained w
 })
 
 /**
+ * An operator pause names the turns still outstanding when it is taken (#377).
+ *
+ * The pause is honoured at the dispatch boundary, the same place the budget branch above asks
+ * `outstanding()` -- and for the same reason: at N>1 a sibling seat can still be mid-turn there.
+ * The evidence is what the operator reads when deciding how to answer, so a fixed "no turn is in
+ * flight" tells them nothing is running while a seat is typing. The pause is requested at the
+ * moment the quick seat's report is handed to the advisor, while the slow seat is still working,
+ * so it is consumed after advisor turn 2 with exactly one implementer turn outstanding.
+ */
+test('an operator pause taken while a sibling seat is mid-turn counts the turn in flight', async (t) => {
+  const repo = tempRepo(t)
+  const { relay, lead, alpha } = await twoSeatRun(repo, ['@seat seat-alpha: Slow work.\n@seat seat-beta: Quick work.', 'Noted.', 'DONE', 'DONE'], 8, {
+    seatReplies: { alpha: ['ack', 'ALPHA FINISHED', 'NONE', 'NONE'] },
+  })
+  try {
+    alpha.delayMs = 1500
+    const run = relay.start('Keep the work moving.')
+
+    /** Requested once, from inside the advisor's send, so the timing is the dispatcher's own. */
+    let paused: ReturnType<typeof run.requestPause> | undefined
+    let stateAtRequest: Record<string, string> | undefined
+    lead.onSend = () => {
+      if (paused) return
+      const states = Object.fromEntries(relay.tasks().map((e) => [e.runtime.seat ?? e.task.id, e.runtime.state]))
+      if (states['seat-beta'] !== 'reported' || states['seat-alpha'] !== 'running') return
+      stateAtRequest = states
+      paused = run.requestPause('the operator asked to pause')
+    }
+
+    // Bounded, so a fixture that never reaches the request fails here rather than hanging.
+    const deadline = Date.now() + 10_000
+    while (!paused && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20))
+    assert.ok(paused, 'the pause must have been requested while alpha was still running')
+    assert.deepEqual(stateAtRequest, { 'seat-alpha': 'running', 'seat-beta': 'reported' })
+
+    const pause = await paused
+    assert.ok(pause, 'requesting a pause must produce one')
+    // Alpha is still working when the pause is in front of the operator, which is what makes
+    // the count below a claim about THIS moment rather than one that happens to be true later.
+    assert.equal(
+      relay.tasks().find((e) => e.runtime.seat === 'seat-alpha')?.runtime.state,
+      'running',
+      'the slow seat must still be mid-turn while the pause is held',
+    )
+
+    assert.deepEqual(
+      pause.evidence,
+      ['advisor turn 2 of 8; 1 turn is in flight'],
+      'the pause must keep its advisor-turn ordinal and count the implementer turn still outstanding',
+    )
+    await run.abort()
+  } finally {
+    await relay.stop()
+  }
+})
+
+/**
  * A run that has decided to end does not offer the advisor turns it will never get (#190).
  *
  * The hand-back that routes a drained report goes through the same line as every other one, so

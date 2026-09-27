@@ -8045,10 +8045,16 @@ export class Relay {
         if (this.#pauseRequested) {
           const reason = this.#pauseRequested
           this.#pauseRequested = undefined
+          // Read here for the reason the budget branch above gives: at N>1 a sibling seat can
+          // still be mid-turn at this boundary, and the operator deciding how to answer the pause
+          // is owed the count rather than a fixed "nothing is running" (#377).
+          const inFlight = outstanding()
+          const flight =
+            inFlight === 0 ? 'no turn is in flight' : `${inFlight} ${inFlight === 1 ? 'turn is' : 'turns are'} in flight`
           const halted = await this.#halt(handle, {
             subject: { reason: 'operator_requested' },
             detail: reason,
-            evidence: [`advisor turn ${advisorTurn} of ${maxAdvisorTurns}; no turn is in flight`],
+            evidence: [`advisor turn ${advisorTurn} of ${maxAdvisorTurns}; ${flight}`],
           })
           if (halted) {
             closing ??= { kind: 'outcome', outcome: halted }

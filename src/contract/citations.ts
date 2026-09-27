@@ -123,7 +123,7 @@ export const CITED: Record<string, string> = {
   // `/continue` both send on is no longer the thing the operator is watching.
   'src/repl/session.ts:1518': 'progress.note(e.participant, () => labelFor(e.participant) ?? ev.tool)',
   'src/relay/relay.ts:7469': 'this.#worktreesAtStart = worktreePaths(this.#opts.cwd)',
-  'src/relay/relay.ts:8359': "subject: { reason: 'turn_incomplete', participant: lead.id }",
+  'src/relay/relay.ts:8365': "subject: { reason: 'turn_incomplete', participant: lead.id }",
   // The five below are what the console's `/continue` liveness guard cites for reading a
   // pause's SCOPE rather than `verdictOf` or a rank scan (`seatsToSampleAtPause` in
   // src/repl/session.ts). Two of them pin the ONLY sites that populate `verdictOf` -- the
@@ -137,13 +137,13 @@ export const CITED: Record<string, string> = {
   // below always has, so both sites quote the SAME resolved end. The claim this pin supports is
   // untouched -- these are still the only two that populate `verdictOf`, both `turn_incomplete`
   // -- and the token moved with the thing it points at rather than the pin being dropped.
-  'src/relay/relay.ts:8363': 'verdictOf: { participant: lead.id, endSeq: current.seq },',
-  'src/relay/relay.ts:8664': 'The human has seen your escalation and asked you to continue.',
+  'src/relay/relay.ts:8369': 'verdictOf: { participant: lead.id, endSeq: current.seq },',
+  'src/relay/relay.ts:8670': 'The human has seen your escalation and asked you to continue.',
   // The workstream a conflicted instruction belongs to, named after the seat when exactly one
   // seat could take it -- the N=1 coincidence a scope reader must not mistake for a seat.
-  'src/relay/relay.ts:8831': "reason: 'authority_conflict', workstream:",
-  'src/relay/relay.ts:8946': "subject: { reason: 'implementer_unanswered', participant: seat.id }",
-  'src/relay/relay.ts:8997': "its report could not be read, so there is",
+  'src/relay/relay.ts:8837': "reason: 'authority_conflict', workstream:",
+  'src/relay/relay.ts:8952': "subject: { reason: 'implementer_unanswered', participant: seat.id }",
+  'src/relay/relay.ts:9003': "its report could not be read, so there is",
   // Repaired rather than deleted, and it now pins a DESCRIPTOR rather than a call: #101 moved
   // the measurement inside `#halt`, so the halt site says which seat to measure and no longer
   // builds the sentence itself. The claim the citation supports is unchanged -- this halt does
@@ -153,9 +153,9 @@ export const CITED: Record<string, string> = {
   // `turn_incomplete` halt below, so only a shift of exactly the distance between the two would
   // slip past. There is nothing unique on the line to pin instead. It is also why this entry
   // is never auto-relocated -- two matches is not a pin, and `planRepairs` refuses it by rule.
-  'src/relay/relay.ts:9008': "knowing whether the child is still writing changes what the operator does.",
-  'src/relay/relay.ts:9079': "subject: { reason: 'turn_incomplete', participant: seat.id }",
-  'src/relay/relay.ts:9083': 'verdictOf: { participant: seat.id, endSeq: current.seq },',
+  'src/relay/relay.ts:9014': "knowing whether the child is still writing changes what the operator does.",
+  'src/relay/relay.ts:9085': "subject: { reason: 'turn_incomplete', participant: seat.id }",
+  'src/relay/relay.ts:9089': 'verdictOf: { participant: seat.id, endSeq: current.seq },',
   // The one sentence #66's bypass rests on: a verdict withdrawn with no replacement can come
   // from nowhere but `resetTranscript`, so the open turn the console stops refusing on is a
   // deleted record rather than an observed one. If that ever stops being true, the guard's
@@ -234,7 +234,7 @@ export const CITED: Record<string, string> = {
     "      evidence: [...verdict.evidence, 'the original implementer is back in service'],\n" +
     "    })\n" +
     "    return halted ?? this.#acknowledge(impl, (await impl.session.snapshot()).compactionGeneration)",
-  'src/relay/relay.ts:9103':
+  'src/relay/relay.ts:9109':
     'const rotated = await this.#considerRotation(seat, report.prose, handle)',
   'src/adapters/codex.ts:709-715': 'this.#view = new TranscriptSessionView({',
   'src/adapters/claude.ts:1473-1477': 'this.#view = new TranscriptSessionView({',
@@ -276,15 +276,15 @@ export const CITED: Record<string, string> = {
     "? this.rotateImplementer(reason)\n" +
     "            : this.rotateSeat(this.#rotationSeat, reason),",
   // The refusal contract, and the delegation it refuses in favour of at N=1.
-  'src/relay/relay.ts:9220': 'At N>1 it still REFUSES rather than picking.',
-  'src/relay/relay.ts:9236': 'return this.rotateSeat(this.#leadImplementer().id, reason)',
+  'src/relay/relay.ts:9226': 'At N>1 it still REFUSES rather than picking.',
+  'src/relay/relay.ts:9242': 'return this.rotateSeat(this.#leadImplementer().id, reason)',
   // The four seat-scoped reads that answer the four hazards the old section listed: the seat's
   // policy, its spec, its tree, and the tree the replacement is launched in.
-  'src/relay/relay.ts:9412': 'const cfg = rotationFor(this.#opts.rotation, seatId)',
-  'src/relay/relay.ts:9464': 'const spec = implementerSeats(this.#opts).find((s) => s.id === seatId)!',
-  'src/relay/relay.ts:9471': 'const root = this.#rootOf(seatId)',
-  'src/relay/relay.ts:9509': 'const ctx = { cwd: root, watchdogMs:',
-  'src/relay/relay.ts:9516': 'audition = { id: `${spec.id}~replacement`',
+  'src/relay/relay.ts:9418': 'const cfg = rotationFor(this.#opts.rotation, seatId)',
+  'src/relay/relay.ts:9470': 'const spec = implementerSeats(this.#opts).find((s) => s.id === seatId)!',
+  'src/relay/relay.ts:9477': 'const root = this.#rootOf(seatId)',
+  'src/relay/relay.ts:9515': 'const ctx = { cwd: root, watchdogMs:',
+  'src/relay/relay.ts:9522': 'audition = { id: `${spec.id}~replacement`',
 
   // Live-claim section in the same note: `Rotation is seat-local` and the `rotationWatch`
   // subsection under it (#370), the same treatment #367 gave the section after them. Their old
@@ -299,15 +299,15 @@ export const CITED: Record<string, string> = {
   // `rotation_pending`: declared, entered only by `#rotating`, restored after, and asserted from
   // inside the transaction.
   'src/relay/dispatch.ts:277': "| 'rotation_pending'",
-  'src/relay/relay.ts:9732': "if (exec) exec.state = 'rotation_pending'",
-  'src/relay/relay.ts:9736': 'if (exec && was !== undefined) exec.state = was',
+  'src/relay/relay.ts:9738': "if (exec) exec.state = 'rotation_pending'",
+  'src/relay/relay.ts:9742': 'if (exec && was !== undefined) exec.state = was',
   'src/relay/seatRotation.test.ts:373': "assert.deepEqual(during, { state: 'rotation_pending', graded: true })",
   // The two degradation fields: declared on the seat rather than the session, and reset at the
   // swap an accepted rotation makes. The reset is pinned as a range because the cursor line
   // alone also appears in `#acknowledge`, so it is not a pin by itself.
   'src/relay/relay.ts:189': 'baselineGeneration: number',
   'src/relay/relay.ts:197': 'degradationCursor: number',
-  'src/relay/relay.ts:9599-9600':
+  'src/relay/relay.ts:9605-9606':
     'impl.baselineGeneration = 0\n' +
     '      impl.degradationCursor = impl.events.length',
   // The half that is NOT built. This locates the `rotationWatch` declaration and checks it is
