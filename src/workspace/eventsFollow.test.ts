@@ -165,9 +165,15 @@ test('#350 the waiting state is said once, not every poll', async (t) => {
   const dir = emptyProject(t)
   const f = events(dir, '--follow')
   t.after(() => f.child.kill())
+  // TWO QUESTIONS, and they need asking in order: has it been said, and was it said again.
+  // This used to be one fixed 1,200ms wait and a count, which on a slow runner read `undefined`
+  // -- the line had not been written YET, so the test failed for the opposite of the reason it
+  // was about. `said` answers the first question on any machine speed; the quiet window after
+  // it answers the second, which is the one the test exists for.
+  await said(f, /waiting for one to start/)
   await stillRunning(f, 1_200)
-  // Four polls' worth of quiet at least. A line per look would have made the stderr a
-  // second stream to drown in.
+  // Four polls' worth of quiet at least, AFTER the notice arrived. A line per look would have
+  // made the stderr a second stream to drown in.
   assert.equal(f.err().match(/waiting for one to start/g)?.length, 1, f.err())
 })
 
