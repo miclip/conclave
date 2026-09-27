@@ -719,21 +719,21 @@ what was proposed, and what is still only proposal.
   the `rotateImplementer()` section below.
 - **`rotation_pending` is a real scheduler state.** It is a member of `SchedulerState`
   (`src/relay/dispatch.ts:277`). `#rotating` sets it for the length of the transfer
-  (`src/relay/relay.ts:9738`) and then restores the state the seat had before, rather than
-  assuming one (`src/relay/relay.ts:9742`). `src/relay/seatRotation.test.ts:373` reads the seat
+  (`src/relay/relay.ts:9740`) and then restores the state the seat had before, rather than
+  assuming one (`src/relay/relay.ts:9744`). `src/relay/seatRotation.test.ts:373` reads the seat
   table from inside the transaction and asserts `{ state: 'rotation_pending', graded: true }`.
 - **`baselineGeneration` and `degradationCursor` live on the seat, not the session.** Both are
   fields of `RelayParticipant` (`src/relay/relay.ts:189`, `src/relay/relay.ts:197`), which
   rotation keeps while it swaps the session inside it. An accepted rotation does not carry
   them across unchanged. At the swap it resets `baselineGeneration` to `0` and advances
-  `degradationCursor` to the end of the seat's event list (`src/relay/relay.ts:9605-9606`).
+  `degradationCursor` to the end of the seat's event list (`src/relay/relay.ts:9607-9608`).
   That is what stops a replacement being judged against its predecessor's compaction events.
 
 ### Where the build differs from the proposal
 
 The proposal had a degradation **candidate** move its seat to `rotation_pending`. The build
 enters that state only while a rotation is actually running: `#rotating` is the one place the
-relay assigns it (`src/relay/relay.ts:9738`). A candidate that is only recorded, or declined,
+relay assigns it (`src/relay/relay.ts:9740`). A candidate that is only recorded, or declined,
 does not change the seat's state. At the loop's own rotation point the seat is already
 undispatchable (`integrating`, with its task graded), which `#rotating`'s docblock records as
 measured rather than assumed.
@@ -753,7 +753,7 @@ of these three.
 
 ### `rotationWatch` becomes per-seat
 
-**Not built.** `rotationWatch` (`src/relay/relay.ts:3546`) is still one flat run-wide object:
+**Not built.** `rotationWatch` (`src/relay/relay.ts:3548`) is still one flat run-wide object:
 `armed`, plus run-wide counters for assessments, degradations, candidates, complaints, peak
 generation and rotations. There is no per-seat map and no aggregate derived from one.
 
@@ -785,18 +785,18 @@ There are two entry points, and which one a caller gets turns on whether a seat 
 
 - **`rotateImplementer(reason)` — the unnamed form**, kept because it is what every existing
   caller has: an operator, a console, an embedder. At N=1 it delegates to `rotateSeat` for
-  the lead (`src/relay/relay.ts:9242`). At N>1 it throws rather than choosing
-  (`src/relay/relay.ts:9226`), because "the implementer" names nothing there.
+  the lead (`src/relay/relay.ts:9244`). At N>1 it throws rather than choosing
+  (`src/relay/relay.ts:9228`), because "the implementer" names nothing there.
 - **`rotateSeat(seatId, reason)` — the named form**, and the only one that can act at N>1.
 
 The run handle picks between them on `#rotationSeat`, the seat the current pause is about
-(`src/relay/relay.ts:5678-5679`). No pause in front of the operator means no seat is named,
+(`src/relay/relay.ts:5680-5681`). No pause in front of the operator means no seat is named,
 and the unnamed form's own rule then applies.
 
 The singular lookup is gone from the relay, surviving only as the predecessor named in the
-docstring of what replaced it (`src/relay/relay.ts:2481`). Two filters replaced it:
-`#implementers()` (`src/relay/relay.ts:2500`) and `#dispatchSeats()`
-(`src/relay/relay.ts:2512`). Both identify an implementer seat by **rank** rather than by
+docstring of what replaced it (`src/relay/relay.ts:2483`). Two filters replaced it:
+`#implementers()` (`src/relay/relay.ts:2502`) and `#dispatchSeats()`
+(`src/relay/relay.ts:2514`). Both identify an implementer seat by **rank** rather than by
 requiring the literal `implementer` role, which is what lets a seat be rank `implementer` in
 a role an operator named. `#implementers()` then subtracts the reviewer by name;
 `#dispatchSeats()` keeps it, because a review task is dispatched like any other.
@@ -805,16 +805,16 @@ a role an operator named. `#implementers()` then subtracts the reviewer by name;
 
 | what this section named | where it is answered now |
 | --- | --- |
-| `this.participants.find((p) => p.rank === 'implementer')!` picks an arbitrary seat | `src/relay/relay.ts:2500`, `src/relay/relay.ts:2512` |
-| `const spec = this.#opts.implementer` is the one run-level spec | `src/relay/relay.ts:9470` |
-| `root: this.#opts.cwd` captures against the integration checkout | `src/relay/relay.ts:9477` |
-| `cwd: this.#opts.cwd` starts the replacement in the integration checkout | `src/relay/relay.ts:9515` |
-| the audition id must be unique per seat, not per run | `src/relay/relay.ts:9522` |
+| `this.participants.find((p) => p.rank === 'implementer')!` picks an arbitrary seat | `src/relay/relay.ts:2502`, `src/relay/relay.ts:2514` |
+| `const spec = this.#opts.implementer` is the one run-level spec | `src/relay/relay.ts:9472` |
+| `root: this.#opts.cwd` captures against the integration checkout | `src/relay/relay.ts:9479` |
+| `cwd: this.#opts.cwd` starts the replacement in the integration checkout | `src/relay/relay.ts:9517` |
+| the audition id must be unique per seat, not per run | `src/relay/relay.ts:9524` |
 
 Each is resolved the same way: by the seat, not by the run. `spec` is the seat's own, which
 is also what makes the audition id unique per seat without resting on candidate decisions
 being serialized. The rotation policy went the same way and was not on the list
-(`src/relay/relay.ts:9418`) — the run's, as amended by that seat's own entry (D7).
+(`src/relay/relay.ts:9420`) — the run's, as amended by that seat's own entry (D7).
 
 ---
 

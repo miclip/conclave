@@ -561,8 +561,10 @@ export interface RelayOptions {
    * the same routing log. That is D1's identity case stated as an option rather than as a
    * branch: nothing downstream asks how many seats there are, it asks the seat list.
    *
-   * Neither front-end sets it. There is no flag for it and adding one is a separate decision;
-   * this is the programmatic surface the dispatcher's seat table was already written against.
+   * BOTH front-ends set it, from `--implementers`: `relay` when the seat plan is a listed one,
+   * and the console when the option is present. It is also the programmatic surface the
+   * dispatcher's seat table was written against, and that is still what it is -- a caller
+   * constructing `RelayOptions` directly reaches N>1 without going through a flag.
    */
   implementers?: ParticipantSpec[] | undefined
   /**
