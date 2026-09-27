@@ -399,8 +399,8 @@ takes over two reasons that move out of `PauseReason`:
 
 | kind | moved from | raised when |
 | --- | --- | --- |
-| `rotation_pending` | `PauseReason.rotation_candidate` (`:40`) | a degradation candidate is being decided for this seat |
-| `turn_incomplete` | `PauseReason.turn_incomplete` (`:52`) | this seat's turn ended on a non-`completed` verdict |
+| `rotation_pending` | `PauseReason.rotation_candidate` | a degradation candidate is being decided for this seat |
+| `turn_incomplete` | `PauseReason.turn_incomplete` | this seat's turn ended on a non-`completed` verdict |
 | `merge_blocked` | *(new)* | this seat's merge conflicted |
 
 A seat-local block **stops that seat and nothing else.** Every other seat keeps running,
@@ -1108,6 +1108,24 @@ general, and the only thing that has to grow is the record's shape.
 
 ## Exact code change inventory
 
+This section is frozen design record, like the rest of the note outside `## LIVE:`. It names
+files and symbols and deliberately gives no line numbers: an unpinned line number rots
+silently, and nearly every one this section used to carry had come to point at unrelated
+code. A symbol can be searched for, and when it is gone, its absence is visible. The
+dispositions — **changes**, **replaced**, **survives** — are what was predicted when this
+was written, not what happened. Where a row has been checked against the build, its cell
+says so in a dated audit note; the `rotateImplementer()` row is the one whose correction
+lives in a `## LIVE:` section. A row with neither is not evidence either way. Do not move this section under a `## LIVE:` heading to get
+it checked: its claims describe a proposal rather than the current tree, and pinning them
+would make `src/contract/citations.test.ts` certify pointers while the sentences around
+them stay wrong.
+
+Nineteen of the rows below were audited against the tree on 2026-09-26, and each says so in
+its own cell: held, corrected with what happened instead, or still an open prediction. The
+`rotateImplementer()` row was corrected earlier (#367). **The other 26 verdict rows in this
+section are unchecked.** They have not been compared with the tree, and a verdict on one of
+them is still only what was predicted.
+
 ### First, a correction: issue #42's rank premise
 
 Issue #42 treated "more than one implementer" as blocked on the rank type — as though
@@ -1115,15 +1133,15 @@ naming a third seat meant opening `Rank`. That premise is wrong in both directio
 matters because it points the work at the wrong file.
 
 **Role is already open, and already on the spec.** `RoleId` is
-`export type RoleId = string` (`src/registry/roles.ts:15`), and the module's own doc says
+`export type RoleId = string` (`src/registry/roles.ts`), and the module's own doc says
 why in as many words: project configuration will assign agents to roles, so a role "cannot
 be a closed union baked into the type system" — a config naming an unknown role must be a
 validation error, not a compile error. `ParticipantSpec` already carries `role: RoleId`
-(`src/registry/types.ts:143`), alongside a per-seat `id` documented as "Stable id for this
+(`src/registry/types.ts`), alongside a per-seat `id` documented as "Stable id for this
 seat".
 
 **The relay throws it away.** `#join` builds the participant like this
-(`src/relay/relay.ts:665`):
+(`src/relay/relay.ts`):
 
 ```ts
 const p: RelayParticipant = { id: spec.id, agent: spec.agent, rank, session, events: [], baselineGeneration: 0, degradationCursor: 0 }
@@ -1134,7 +1152,7 @@ discarded at the one point where it would become run state. The gap is not in th
 system — it is one missing property in one object literal.
 
 **`Rank` and `RANK_ORDER` stay closed.** `Rank = 'human' | 'advisor' | 'implementer'`
-(`src/relay/message.ts:9`) and `RANK_ORDER` (`:12`) exist to feed `outranks()` (`:14`).
+(`src/relay/message.ts`) and `RANK_ORDER` exist to feed `outranks()`.
 They are **authority levels**, and there are exactly three because the design's central
 claim is a ranked committee: `human > advisor > implementer`.
 
@@ -1143,8 +1161,8 @@ Three implementers are *different in job* and *identical in authority* — none 
 another, and there is no fact that would make one do so. Widening `Rank` forces an
 `RANK_ORDER` entry per seat, which means inventing an authority ordering among peers that
 the design does not have and cannot justify. It also corrupts what the operator reads:
-`envelope()` (`:100`) renders rank into the routing header precisely because "Rank has to
-be legible or it does nothing" (`:93`), so a job name in the authority slot makes the
+`envelope()` renders rank into the routing header precisely because "Rank has to
+be legible or it does nothing", so a job name in the authority slot makes the
 briefing text assert an ordering that is not real.
 
 **So: keep `Rank` closed, and add `role` separately** to participants, messages, and
@@ -1155,35 +1173,35 @@ implementers is this". Neither question is served by making one field try to do 
 
 | symbol | disposition | reason |
 | --- | --- | --- |
-| `RelayOptions` (`src/relay/relay.ts:151`) | **changes** | `lead`/`implementer` are singular `ParticipantSpec` fields (`:185`–`:186`). Becomes `lead` plus `implementers: ParticipantSpec[]`. |
-| `RotationConfig` (`:107`) | **changes** | One global policy for the run. Becomes the run-level default, overridable per seat. |
-| `RelayParticipant` (`:75`) | **changes** | Gains `role` (currently dropped), plus seat execution state: `schedulerState`, `worktree`, `branch`, `idleSince`. `baselineGeneration`/`degradationCursor` already follow the seat and are unchanged. |
-| `Relay.start` (static, `:599`) | **changes** | Joins exactly two seats and hands a hardcoded two-element array to `acquire()`. Becomes a loop over the implementer list; also creates each seat's worktree *before* `#join`, since cwd is fixed at launch. |
-| `#join` (`:660`) | **changes** | Already general in shape — takes any `(spec, rank)`, keys by `spec.id`. Two edits: carry `spec.role` onto the participant (`:665`), and take the seat's worktree as cwd instead of `this.#opts.cwd` (`:662`). |
-| `#runLoop` (`:1789`) | **replaced** | The round loop is the lockstep. `find(p => p.rank === 'implementer')!` (`:1791`) silently picks one of N. Replaced by the dispatcher loop. |
-| `#exchange` (`:1193`) | **changes** | Seat-general already, and its `turn_end` + settle + salvage sequence is reused verbatim. But it samples repo-wide `dirtyPaths(cwd)` for `changedDuringTurn`, which with shared cwd would attribute another seat's writes to this turn — correct once each seat has its own worktree, which is a reason the worktree rule is load-bearing rather than tidy. |
-| `#closingQuestion` (`:1073`) | **changes** | Takes one `impl` and is called once at DONE (`:1962`); with N seats only one gets a last word. Becomes per-seat over live seats. |
-| `#considerRotation` (`:1629`) | **changes** | Takes one `impl` and mutates global counters. Becomes per-seat, feeding the per-seat rotation map. |
-| `rotationWatch` (`:1011`) | **changes** | Flat run-wide counters. Becomes a per-seat map; `armed` stays run-wide (issue #31 — it is a property of the options, set at construction). |
-| `rotationSummary()` (`:1167`) | **changes** | Renders the flat counters into one line. Keeps the one-line output, derived from the per-seat map, so the summary survives as a reader-facing surface. |
+| `RelayOptions` (`src/relay/relay.ts`) | **changes** | `lead`/`implementer` are singular `ParticipantSpec` fields. Becomes `lead` plus `implementers: ParticipantSpec[]`. |
+| `RotationConfig` | **changes** | One global policy for the run. Becomes the run-level default, overridable per seat. **Audited 2026-09-26, held:** still one run-level policy, and it gained `seats`, a per-seat override map merged field by field by `rotationFor`. |
+| `RelayParticipant` | **changes** | Gains `role` (currently dropped), plus seat execution state: `schedulerState`, `worktree`, `branch`, `idleSince`. `baselineGeneration`/`degradationCursor` already follow the seat and are unchanged. **Audited 2026-09-26, corrected:** this row predicted `role` plus `schedulerState`, `worktree`, `branch` and `idleSince` on the participant; what happened was that only `role` was added there. Scheduler state and `idleSince` live in a separate `SeatExecution` table the relay keys by seat, and worktree and branch in the worktree manifest, looked up by seat id. `baselineGeneration` and `degradationCursor` are unchanged, as predicted. |
+| `Relay.start` (static) | **changes** | Joins exactly two seats and hands a hardcoded two-element array to `acquire()`. Becomes a loop over the implementer list; also creates each seat's worktree *before* `#join`, since cwd is fixed at launch. |
+| `#join` | **changes** | Already general in shape — takes any `(spec, rank)`, keys by `spec.id`. Two edits: carry `spec.role` onto the participant, and take the seat's worktree as cwd instead of `this.#opts.cwd`. **Audited 2026-09-26, held:** it carries `role: spec.role`, takes a cwd, and `Relay.start` creates each implementer's worktree before joining it there. |
+| `#runLoop` | **replaced** | The round loop is the lockstep. `find(p => p.rank === 'implementer')!` silently picks one of N. Replaced by the dispatcher loop. **Audited 2026-09-26, corrected:** this row predicted `#runLoop` would be replaced by a dispatcher loop; what happened was that `#runLoop` survived and the dispatcher was built inside it — one iteration is one advisor turn, seats are chosen by `nextDispatch`, and `dispatch.ts` holds only the pure helpers. The single-implementer `find(…)!` is gone, as predicted. |
+| `#exchange` | **changes** | Seat-general already, and its `turn_end` + settle + salvage sequence is reused verbatim. But it samples repo-wide `dirtyPaths(cwd)` for `changedDuringTurn`, which with shared cwd would attribute another seat's writes to this turn — correct once each seat has its own worktree, which is a reason the worktree rule is load-bearing rather than tidy. **Audited 2026-09-26, held:** the turn body moved to `#exchangeTurn`, and `changedDuringTurn` samples the seat's own root rather than the run's cwd. |
+| `#closingQuestion` | **changes** | Takes one `impl` and is called once at DONE; with N seats only one gets a last word. Becomes per-seat over live seats. **Audited 2026-09-26, held:** still takes one seat, and the DONE branch now calls it for every implementer seat; seats that never worked, did not complete, or are no longer running are skipped inside it. |
+| `#considerRotation` | **changes** | Takes one `impl` and mutates global counters. Becomes per-seat, feeding the per-seat rotation map. **Audited 2026-09-26, open prediction, in part:** it is now called for each completed turn's seat and reads that seat's own policy, as predicted, but the counters it mutates are still the run-wide `rotationWatch` totals, so the per-seat map it was to feed does not exist yet (see `rotationWatch`). |
+| `rotationWatch` | **changes** | Flat run-wide counters. Becomes a per-seat map; `armed` stays run-wide (issue #31 — it is a property of the options, set at construction). **Audited 2026-09-26, open prediction:** still one flat run-wide object; `armed` is run-wide and set at construction, as predicted. Only `records` name a seat. |
+| `rotationSummary()` | **changes** | Renders the flat counters into one line. Keeps the one-line output, derived from the per-seat map, so the summary survives as a reader-facing surface. **Audited 2026-09-26, open prediction:** still renders the flat counters, since the per-seat map does not exist. It already runs past one line and names seats, but from `records`, for reasons unrelated to this row. |
 | `rotateImplementer()` | **kept, narrowed** | This row said **replaced**, and the section above records why that was wrong: `rotateSeat(seatId, reason)` was ADDED beside it, and `rotateImplementer` survived as the unnamed form — the lead at N=1, refusing at N>1 rather than picking one of them. See `## LIVE: rotateImplementer() survived` above for the citations; they are pinned there and were not here, which is how this row outlived the change it describes. |
-| `#attributeArtifacts()` (`:1493`) | **changes** | An earlier draft of this note called it survives-unchanged and had it backwards. `#treeAtOrigin` (`:1400`) snapshots `dirtyPaths(this.#opts.cwd)` once, and `#attributeArtifacts` diffs `dirtyPaths(this.#opts.cwd)` against it — both read the **integration** checkout. A seat writing inside `.conclave/worktrees/…` is in a separate working tree *and* an ignored path, so its writes produce **no candidates at all** and attribution silently returns nothing until merge. Origin snapshots and evidence cursors must become seat-scoped, and the diff must run against the informed seat's own worktree. |
-| `subagentUse()` (`:1144`) | **changes** | Already scans all participants, but collapses to a single `delegated` boolean with no seat attribution. Becomes per-seat, or keeps the boolean and adds the seat list. |
-| `stop()` (`:2280`) | **changes** | Closing every session and releasing the claim is no longer the whole of teardown. It must first **stop dispatch**, then **drain or retain each seat worktree through the manifest** — merged-and-clean trees removed, blocked/dirty/unmerged retained with recovery commands — and only then release the integration claim. Releasing the claim while seat worktrees still hold uncommitted work would report the run as cleanly finished with work stranded outside the integration checkout. |
+| `#attributeArtifacts()` | **changes** | An earlier draft of this note called it survives-unchanged and had it backwards. `#treeAtOrigin` snapshots `dirtyPaths(this.#opts.cwd)` once, and `#attributeArtifacts` diffs `dirtyPaths(this.#opts.cwd)` against it — both read the **integration** checkout. A seat writing inside `.conclave/worktrees/…` is in a separate working tree *and* an ignored path, so its writes produce **no candidates at all** and attribution silently returns nothing until merge. Origin snapshots and evidence cursors must become seat-scoped, and the diff must run against the informed seat's own worktree. **Audited 2026-09-26, held:** `#treeAtOrigin` is now a map keyed by root, and attribution diffs the reporting seat's own root against that root's snapshot, with per-participant evidence cursors. |
+| `subagentUse()` | **changes** | Already scans all participants, but collapses to a single `delegated` boolean with no seat attribution. Becomes per-seat, or keeps the boolean and adds the seat list. **Audited 2026-09-26, open prediction:** unchanged — still a single `delegated` boolean with no seat attribution. |
+| `stop()` | **changes** | Closing every session and releasing the claim is no longer the whole of teardown. It must first **stop dispatch**, then **drain or retain each seat worktree through the manifest** — merged-and-clean trees removed, blocked/dirty/unmerged retained with recovery commands — and only then release the integration claim. Releasing the claim while seat worktrees still hold uncommitted work would report the run as cleanly finished with work stranded outside the integration checkout. **Audited 2026-09-26, held:** it stops dispatch, closes sessions, waits for the loop, runs worktree cleanup against the manifest — removing merged-and-clean trees, keeping the rest with recovery lines in the routing log — and only then releases the claim. Turns still in flight are not drained; the drain is of worktrees. |
 
 ### Run handle and pauses
 
 | symbol | disposition | reason |
 | --- | --- | --- |
-| `RunControl` (`src/relay/run.ts:192`) | **changes** | Its `rotate(reason)` verb takes no seat, so the handle-to-relay contract itself encodes "there is one rotatable seat". Gains a seat id. |
-| `RunHandle.rotateImplementer` (`:303`) | **changes** | Operator-facing, no seat parameter. Becomes `rotateSeat(seatId, reason?)`. |
-| `PauseReason` (`src/relay/run.ts:38`) | **changes** | Loses two members: `rotation_candidate` (`:40`) and `turn_incomplete` (`:52`) become `SeatBlock` kinds. Keeps `advisor_escalated`, `implementer_unanswered`, `authority_conflict`, `operator_requested` — all genuinely run-wide. |
-| `RunPause` (`:150`) | **changes** | Not merely narrowed. Its `reason` type shrinks with `PauseReason`, and `verdictOf` plus the three sub-records stop being exclusively its — they must be shared with `SeatBlock`. The single `#pause` slot (`:360`) does stop being a contention point, but that is a consequence, not the whole change. |
+| `RunControl` (`src/relay/run.ts`) | **changes** | Its `rotate(reason)` verb takes no seat, so the handle-to-relay contract itself encodes "there is one rotatable seat". Gains a seat id. |
+| `RunHandle.rotateImplementer` | **changes** | Operator-facing, no seat parameter. Becomes `rotateSeat(seatId, reason?)`. **Audited 2026-09-26, corrected:** this row predicted the handle's method would become `rotateSeat(seatId, reason?)`; what happened was that `RunHandle` still has only `rotateImplementer(reason?)`, with no seat parameter, and `rotateSeat(seatId, reason)` exists on `Relay` alone. The relay picks the seat itself from the seat the current pause is about. |
+| `PauseReason` (`src/relay/run.ts`) | **changes** | Loses two members: `rotation_candidate` and `turn_incomplete` become `SeatBlock` kinds. Keeps `advisor_escalated`, `implementer_unanswered`, `authority_conflict`, `operator_requested` — all genuinely run-wide. |
+| `RunPause` | **changes** | Not merely narrowed. Its `reason` type shrinks with `PauseReason`, and `verdictOf` plus the three sub-records stop being exclusively its — they must be shared with `SeatBlock`. The single `#pause` slot does stop being a contention point, but that is a consequence, not the whole change. **Audited 2026-09-26, corrected:** this row predicted its reason type would shrink and `verdictOf` and the sub-records be shared with a `SeatBlock`; what happened was that no `SeatBlock` exists, `PauseReason` grew rather than shrank — `merge_blocked` and `review_blocked` are seat-local conditions raised as run-wide pauses — and `#pause` is still a single slot. |
 | `SeatBlock` (new) | **new** | `{ seatId, kind, detail, evidence, options, raisedAt, verdictOf, superseded?, wait?, refusal? }`, one per blocked seat, held in the seat table rather than on the handle. |
-| `PauseSupersession` (`:101`), `PauseWait` (`:129`), `PauseContinueRefusal` (`:144`) | **survive in shape, re-homed** | Unchanged as types, but must attach to a `SeatBlock` as well as a `RunPause`. Late revisions, operator waits and continue-refusals all still happen to a seat whose block is not a run-wide pause. |
-| `PauseOption` (`:86`) | **changes** | `'rotate'` is unparameterised, matching the single-target assumption. The relay decides whether to offer it by comparing `verdictOf.participant` against `find(x => x.rank === 'implementer')?.id` — a hardcoded single-implementer lookup that becomes "is this any rotatable seat". |
-| `RunHandle` decision surface (`:303`, `:360`) | **changes** | Gains `activeSeatDecision()` and requires a seat id on every seat-scoped decision and on `rotateSeat`. Deciding without naming a seat is rejected rather than defaulted. |
-| `RunHandle.requestPause` (`:317`) | **survives** | Run-wide by intent — an operator asking the *run* to pause. Consumed at a dispatch boundary instead of a round boundary. |
+| `PauseSupersession`, `PauseWait`, `PauseContinueRefusal` | **survive in shape, re-homed** | Unchanged as types, but must attach to a `SeatBlock` as well as a `RunPause`. Late revisions, operator waits and continue-refusals all still happen to a seat whose block is not a run-wide pause. |
+| `PauseOption` | **changes** | `'rotate'` is unparameterised, matching the single-target assumption. The relay decides whether to offer it by comparing `verdictOf.participant` against `find(x => x.rank === 'implementer')?.id` — a hardcoded single-implementer lookup that becomes "is this any rotatable seat". **Audited 2026-09-26, held:** `'rotate'` is still unparameterised, and the offer now asks whether the pause's seat is any rotatable implementer rather than finding the one. |
+| `RunHandle` decision surface | **changes** | Gains `activeSeatDecision()` and requires a seat id on every seat-scoped decision and on `rotateSeat`. Deciding without naming a seat is rejected rather than defaulted. |
+| `RunHandle.requestPause` | **survives** | Run-wide by intent — an operator asking the *run* to pause. Consumed at a dispatch boundary instead of a round boundary. **Audited 2026-09-26, held:** still one run-wide request, consumed in the loop's dispatch-boundary block. Caveat: the pause it raises records `no turn is in flight` as evidence, and at N>1 that can be false — the request can be consumed while sibling seats' turns are still outstanding. |
 
 ### The adapter seam — unchanged, deliberately
 
@@ -1192,37 +1210,37 @@ evidence the seam was drawn in the right place.
 
 | symbol | disposition | reason |
 | --- | --- | --- |
-| `AgentSession` (`src/contract/session.ts:255`) | **survives unchanged** | A per-child handle. The worktree it runs in is supplied at creation via `CreateParticipantContext.cwd`, not held here. |
-| `AgentEvent` union (`:144`) | **survives unchanged** | A second seat is a second stream, not a new event shape. In particular **no "idle" event is added** — seat freedom is dispatcher state. |
-| `Rank` (`src/relay/message.ts:9`), `RANK_ORDER` (`:12`) | **survive unchanged** | Authority levels; see the correction above. |
-| `RelayMessage` (`:52`) | **changes, additively** | `from: string` + `to: string[]` is already seat-keyed and needs nothing. Gains an optional `fromRole` so a reader can tell which implementer job produced a message without a seat-table lookup. |
-| `envelope()` (`:100`) | **changes, cosmetically** | Already interpolates the sender id, so it works verbatim; "THE IMPLEMENTER" just reads wrong with three. Renders role where it has one. |
-| `Audience` (`:22`) | **survives unchanged** | `'all' \| { only: string }` already addresses one participant by id, which is exactly how a single seat is addressed. |
-| `ParticipantSpec` (`src/registry/types.ts:139`) | **survives unchanged** | Already carries per-seat `id`, `agent`, `role`, `args`. cwd is deliberately not on it — it lives on `CreateParticipantContext.cwd` (`:42`), which is what lets one spec be launched into a worktree. |
-| `AgentRegistry.createParticipant` (`src/registry/registry.ts:92`) | **survives unchanged** | `(spec, ctx)` already takes cwd per call. Only the callers change — `#join` (`relay.ts:662`) and `startReplacement` (`:2218`) both hardcode `this.#opts.cwd`. |
-| `rotate()` (`src/rotation/rotate.ts:171`) | **survives unchanged** | Takes one seat's session pair and `deps`. Multi-seat means calling it per degraded seat with seat-scoped `deps.root`. |
-| `capture()` (`src/rotation/record.ts:178`), `runCheck()` (`:157`) | **survive unchanged** | Both fully parameterised on `root`. This is what makes per-seat rotation possible with no edit to `record.ts`. |
+| `AgentSession` (`src/contract/session.ts`) | **survives unchanged** | A per-child handle. The worktree it runs in is supplied at creation via `CreateParticipantContext.cwd`, not held here. |
+| `AgentEvent` union | **survives unchanged** | A second seat is a second stream, not a new event shape. In particular **no "idle" event is added** — seat freedom is dispatcher state. |
+| `Rank` (`src/relay/message.ts`), `RANK_ORDER` | **survive unchanged** | Authority levels; see the correction above. |
+| `RelayMessage` | **changes, additively** | `from: string` + `to: string[]` is already seat-keyed and needs nothing. Gains an optional `fromRole` so a reader can tell which implementer job produced a message without a seat-table lookup. |
+| `envelope()` | **changes, cosmetically** | Already interpolates the sender id, so it works verbatim; "THE IMPLEMENTER" just reads wrong with three. Renders role where it has one. |
+| `Audience` | **survives unchanged** | `'all' \| { only: string }` already addresses one participant by id, which is exactly how a single seat is addressed. |
+| `ParticipantSpec` (`src/registry/types.ts`) | **survives unchanged** | Already carries per-seat `id`, `agent`, `role`, `args`. cwd is deliberately not on it — it lives on `CreateParticipantContext.cwd`, which is what lets one spec be launched into a worktree. |
+| `AgentRegistry.createParticipant` (`src/registry/registry.ts`) | **survives unchanged** | `(spec, ctx)` already takes cwd per call. Only the callers change — `#join` and `startReplacement` in `src/relay/relay.ts` both hardcode `this.#opts.cwd`. |
+| `rotate()` (`src/rotation/rotate.ts`) | **survives unchanged** | Takes one seat's session pair and `deps`. Multi-seat means calling it per degraded seat with seat-scoped `deps.root`. |
+| `capture()` (`src/rotation/record.ts`), `runCheck()` | **survive unchanged** | Both fully parameterised on `root`. This is what makes per-seat rotation possible with no edit to `record.ts`. |
 
 ### Frontends, reporting, console
 
 | symbol | disposition | reason |
 | --- | --- | --- |
-| `SessionOptions` (`src/repl/session.ts:116`) | **changes** | `implementer: string` (`:127`) and `implementerArgs` (`:136`) are singular; becomes a list. `rounds` (`:137`) is removed and ceilings added — see below. |
-| `bin/conclave.ts` relay path (`:981`) | **changes** | Passes one `implementer` spec and `maxRounds` (`:993`); constructs `ceilings` only conditionally (`:996`). |
-| `bin/conclave.ts` session path (`:1180`) | **changes** | Passes one implementer and `rounds` (`:1191`), and **constructs no ceilings at all**. |
-| `recordSession` (`src/workspace/sessionRecord.ts:585`) | **changes** | `seats()` (`:609`) already maps every participant and keeps its shape, but must populate the new per-seat fields and needs the dispatcher and worktree manifest as inputs. `SESSION_SCHEMA` (`:62`) 1 → 2. |
-| `SessionParticipantStatus` (`:101`) | **changes** | Gains `role`, `schedulerState`, `worktree`, `branch`, `currentTask`, `queuedTasks`, `checks`, `rotation`; retains `turns`, `activity`, `awaitingPermission`. |
-| `SessionStatus` (`:132`) | **changes** | Gains top-level `queue` and `integration`. `participants` stays an array; no by-id map is added. |
-| `runReport` (`src/relay/report.ts:151`) | **changes** | Loops `relay.participants` generically, so extra seats are just extra entries — but the `rotation:` block it copies reads the single aggregate `rotationWatch`, which would lose per-seat detail. |
-| `Progress.line()` (`src/repl/render.ts:294`) | **survives** | Kept as the one-row convenience for callers with nowhere to pin a footer. Joined by `Progress.lines(width, …)`. |
-| `ScreenOptions.status` (`src/repl/screen.ts:49`) | **changes** | `() => string` becomes `() => string[]`. |
-| `Screen.draw()` (`:432`) | **changes** | Inlays status into the top rule without clipping (`:446`); the `Math.max(0, …)` only prevents a negative repeat. Must count status rows into `#height`. Note the queued rows just below (`:453`) already clip — status is missing the treatment its neighbour has. |
-| `formatSession` (`src/workspace/sessionView.ts:40`) | **changes** | Needs per-seat lines in configured order. |
-| `formatSessionJson` (`:87`) | **survives unchanged** | `JSON.stringify({ ...s.status, alive, abandoned })` spreads the whole record, so every new field serializes with no edit. |
+| `SessionOptions` (`src/repl/session.ts`) | **changes** | `implementer: string` and `implementerArgs` are singular; becomes a list. `rounds` is removed and ceilings added — see below. |
+| `bin/conclave.ts` relay path | **changes** | Passes one `implementer` spec and `maxRounds`; constructs `ceilings` only conditionally. |
+| `bin/conclave.ts` session path | **changes** | Passes one implementer and `rounds`, and **constructs no ceilings at all**. |
+| `recordSession` (`src/workspace/sessionRecord.ts`) | **changes** | `seats()` already maps every participant and keeps its shape, but must populate the new per-seat fields and needs the dispatcher and worktree manifest as inputs. `SESSION_SCHEMA` 1 → 2. |
+| `SessionParticipantStatus` | **changes** | Gains `role`, `schedulerState`, `worktree`, `branch`, `currentTask`, `queuedTasks`, `checks`, `rotation`; retains `turns`, `activity`, `awaitingPermission`. **Audited 2026-09-26, corrected:** this row predicted eight new flat fields; what happened was that `role` and `rotation` are on the participant — `checks` nested inside `rotation` — and the dispatcher's fields went into one optional `seat` block, written only at N>1: `state`, `dispatched`, `task`, and `worktree` holding path and branch. There is no `queuedTasks`. `turns`, `activity` and `awaitingPermission` are retained. |
+| `SessionStatus` | **changes** | Gains top-level `queue` and `integration`. `participants` stays an array; no by-id map is added. **Audited 2026-09-26, open prediction:** there is no top-level `queue` or `integration`; `participants` is still an array, as predicted. |
+| `runReport` (`src/relay/report.ts`) | **changes** | Loops `relay.participants` generically, so extra seats are just extra entries — but the `rotation:` block it copies reads the single aggregate `rotationWatch`, which would lose per-seat detail. |
+| `Progress.line()` (`src/repl/render.ts`) | **survives** | Kept as the one-row convenience for callers with nowhere to pin a footer. Joined by `Progress.lines(width, …)`. |
+| `ScreenOptions.status` (`src/repl/screen.ts`) | **changes** | `() => string` becomes `() => string[]`. |
+| `Screen.draw()` | **changes** | Inlays status into the top rule without clipping; the `Math.max(0, …)` only prevents a negative repeat. Must count status rows into `#height`. Note the queued rows just below already clip — status is missing the treatment its neighbour has. **Audited 2026-09-26, corrected:** this row predicted the status inlay would be counted into `#height`; what happened was that `status` is unchanged and still unclipped and uncounted, and a separate `seats` band was added, capped, clipped and counted into the height. At N>1 the console keeps seats off the status rule rather than fixing the rule. |
+| `formatSession` (`src/workspace/sessionView.ts`) | **changes** | Needs per-seat lines in configured order. |
+| `formatSessionJson` | **survives unchanged** | `JSON.stringify({ ...s.status, alive, abandoned })` spreads the whole record, so every new field serializes with no edit. |
 
 ### `--rounds` cannot survive; ceilings become required
 
-**`maxRounds` (`src/relay/relay.ts:188`, defaulted `:1814`, loop `:1818`) and the
+**`maxRounds` (`RelayOptions.maxRounds` in `src/relay/relay.ts`) and the
 `--rounds` flag are removed, not reinterpreted.** A round is one advisor turn plus one
 implementer turn. That structure is what the dispatcher replaces, so a bound expressed in
 rounds has nothing left to count. Reinterpreting it as a bound on advisor turns is not an
@@ -1234,15 +1252,15 @@ it is a new, differently-named flag.
 **`--max-turns` and `--max-minutes` become required on both frontends for concurrent
 runs.** Today they are optional and unevenly wired:
 
-- `SessionOptions` has `rounds: number` (`src/repl/session.ts:137`), forwarded as
-  `maxRounds` (`:582`), and **no ceilings field anywhere** — `ceiling` does not appear in
-  `src/repl/` at all. `turnWatchdogMs` (`:181`) is a per-turn deadline, not a run bound.
+- `SessionOptions` has `rounds: number` (`src/repl/session.ts`), forwarded as
+  `maxRounds`, and **no ceilings field anywhere** — `ceiling` does not appear in
+  `src/repl/` at all. `turnWatchdogMs` is a per-turn deadline, not a run bound.
 - Only the relay CLI constructs `ceilings`, and only conditionally
-  (`bin/conclave.ts:996`). The session/console path (`:1180`) constructs none.
+  (`bin/conclave.ts`). The session/console path constructs none.
 
 So the console frontend's *only* bound today is `rounds`. Remove rounds without adding
 ceilings and a console run becomes unbounded — and unbounded is worse with N seats than
-with one, because `#turnsTaken` counts every seat's turns (`src/relay/relay.ts:577`), so
+with one, because `#turnsTaken` counts every seat's turns (`src/relay/relay.ts`), so
 the thing being left unbounded is now consuming budget N times faster. Requiring both
 ceilings for concurrent runs is what keeps the removal of `--rounds` from being a
 regression, and it puts the intended length of an expensive run into the record on purpose,
