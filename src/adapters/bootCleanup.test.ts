@@ -35,7 +35,7 @@ import { ClaudePtyHookAdapter } from './claude.ts'
 import { HookReceiver } from '../hooks/receiver.ts'
 import { CodexPtyHookAdapter } from './codex.ts'
 import { containAdapterRunDirs, suiteTempDir } from '../testkit/tempDir.ts'
-import { waitFor } from '../testkit/waitFor.ts'
+import { ConditionNeverMet, waitFor } from '../testkit/waitFor.ts'
 
 const RUN_ROOT = containAdapterRunDirs()
 const DIR = suiteTempDir('orch-boot-cleanup')
@@ -76,8 +76,32 @@ interface Report {
   url: string
 }
 
-function readReport(path: string): Report {
-  assert.ok(existsSync(path), `the stand-in never wrote ${path}: it did not start at all`)
+/**
+ * How long the stand-in gets to write its report: the child Node process booting under a PTY
+ * and reaching its first statement. Not `READY_MS` -- that is the adapter's readiness window,
+ * and `start()` rejecting when it lapses says nothing about whether the child has got as far
+ * as its first line yet. On a loaded runner it may not have (#382).
+ *
+ * Generous on purpose, because it bounds only the failure path: a report that is coming is
+ * returned the moment it exists, so a large bound costs a passing run nothing, and a report
+ * that is missing should fail slowly rather than flakily.
+ */
+const REPORT_MS = 10_000
+
+/**
+ * The stand-in's report, once it exists.
+ *
+ * Absence after `REPORT_MS` is still not a diagnosis: a spawn that failed and a child that
+ * started but never reached its first JS action look the same from here, so the message says
+ * only what was observed.
+ */
+async function readReport(path: string): Promise<Report> {
+  try {
+    await waitFor(() => existsSync(path), { within: REPORT_MS, describe: `the stand-in to write ${path}` })
+  } catch (e) {
+    if (e instanceof ConditionNeverMet) assert.fail(`the stand-in never wrote ${path} within ${REPORT_MS}ms`)
+    throw e
+  }
   return JSON.parse(readFileSync(path, 'utf8')) as Report
 }
 
@@ -173,7 +197,7 @@ for (const { agent, start, expectedFailure } of CASES) {
     assert.ok(failure instanceof Error, `${agent} start() resolved; the stand-in was never meant to become ready`)
     assert.match(failure.message, expectedFailure)
 
-    const { pid, url } = readReport(report)
+    const { pid, url } = await readReport(report)
     childPids.push(pid)
     assert.ok(url.startsWith('http://'), `stand-in saw ORCH_HOOK_URL=${url}`)
 
@@ -259,7 +283,7 @@ for (const [agent, start] of [
       assert.match(failure.message, agent === 'claude' ? /never reported SessionStart/ : /did not negotiate an interactive terminal/)
       assert.equal(stopped, 1, 'the receiver WAS stopped: swallowing the error is not skipping the work')
 
-      const { pid, url } = readReport(report)
+      const { pid, url } = await readReport(report)
       childPids.push(pid)
       assert.equal(alive(pid), false, `${agent} child ${pid} is still running after start() rejected`)
       childPids.splice(childPids.indexOf(pid), 1)
