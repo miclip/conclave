@@ -85,7 +85,7 @@ function vendored(name: string, fn: (dir: string, t: TestContext) => void | Prom
  * counted as; it is emitted before that test's first assertion, so a failing route check does
  * not swallow it.
  */
-const VERIFIED_VENDOR_VERSION = '0.10.4'
+const VERIFIED_VENDOR_VERSION = '0.10.5'
 
 /**
  * One diagnostic naming the installed vendor version against the recorded one (#346).
