@@ -82,19 +82,48 @@ function markerPathFor(repoRoot: string, relPath: string): string {
 }
 
 /**
+ * What `begin` did. Refusal is its own shape, as with `EndResult`, because "recorded" and "an
+ * original is already on record" are answers a caller has to act on differently.
+ *
+ * #390: `begin` used to copy and rewrite unconditionally, so a second `begin` over an
+ * outstanding marker replaced the stored original with the file on disk -- the previous mutant.
+ * From then on `restore` put the mutant back and reported success, and `end` accepted it as
+ * the baseline. The refusal carries the marker that is already there, and where it is, because
+ * it holds the only hash of the true original and the caller needs it to choose a remedy.
+ */
+export type BeginResult =
+  | { begun: true; marker: MutationMarker }
+  | { begun: false; existing: MutationMarker; markerFile: string }
+
+/**
  * Record that `filePath` is about to be mutated, keeping a copy of what it is now.
  *
  * Call this BEFORE writing the mutation. Called after, it records the broken file as the
  * original and the marker becomes a lie -- so the ordering is the one thing a caller must get
  * right, and `end` cannot detect that mistake.
+ *
+ * A path that already has a marker is refused, and the check comes before anything is created
+ * or copied. It lives here rather than in the CLI so that every caller is protected: whatever
+ * is on disk while a marker is outstanding may be a mutant, and re-beginning is never a valid
+ * way to take a new baseline while the old one is unresolved. A stale marker (file already
+ * back) is refused too; `end` clears it in one step, and telling the two apart here would mean
+ * hashing a file this function is about to trust anyway.
+ *
+ * The guard is this check and not a write-once backup file, because `begin` is the only writer
+ * of a backup: `restore` only copies FROM one, and `end` only removes it. There is no second
+ * route to the `.orig` for a filesystem-level guard to stop.
  */
 export function begin(
   repoRoot: string,
   filePath: string,
   opts: { note?: string | undefined } = {},
-): MutationMarker {
+): BeginResult {
   const abs = resolve(repoRoot, filePath)
   const rel = relative(repoRoot, abs)
+  const mp = markerPathFor(repoRoot, rel)
+  if (existsSync(mp)) {
+    return { begun: false, existing: JSON.parse(readFileSync(mp, 'utf8')), markerFile: relative(repoRoot, mp) }
+  }
   const dir = mutationsDir(repoRoot)
   mkdirSync(dir, { recursive: true })
   const backupRel = join(MUTATIONS_RELATIVE, `${createHash('sha256').update(rel).digest('hex').slice(0, 16)}.orig`)
@@ -109,8 +138,8 @@ export function begin(
     startedAt: Date.now(),
     ...(opts.note === undefined ? {} : { note: opts.note }),
   }
-  writeFileSync(markerPathFor(repoRoot, rel), JSON.stringify(marker, null, 2))
-  return marker
+  writeFileSync(mp, JSON.stringify(marker, null, 2))
+  return { begun: true, marker }
 }
 
 /**

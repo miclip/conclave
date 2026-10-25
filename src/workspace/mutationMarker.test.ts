@@ -14,6 +14,11 @@ import type { TestContext } from 'node:test'
 import { tempDir } from '../testkit/tempDir.ts'
 import { mutationWarning, preflightRefusals, preflightWarnings } from '../relay/guardrails.ts'
 import { begin, end, mutationsDir, outstanding, restore } from './mutationMarker.ts'
+import type { MutationMarker } from './mutationMarker.ts'
+
+function sha256(file: string): string {
+  return createHash('sha256').update(readFileSync(file)).digest('hex')
+}
 
 /** A repository with one file in it, which is all any of these need. */
 function repo(t: TestContext, content = 'original\n'): string {
@@ -21,6 +26,13 @@ function repo(t: TestContext, content = 'original\n'): string {
   execFileSync('git', ['init', '-q', '.'], { cwd: dir })
   writeFileSync(join(dir, 'f.ts'), content)
   return dir
+}
+
+/** `begin` on a path with no marker, which is every test here but #390's: it must record. */
+function began(dir: string, path: string): MutationMarker {
+  const b = begin(dir, path)
+  assert.ok(b.begun, 'a path with no marker is recorded')
+  return b.marker
 }
 
 test('a file broken and not put back is reported as exactly that', (t) => {
@@ -168,7 +180,7 @@ test('restore puts the original back byte for byte, from the copy rather than a 
   // A hash proves a restore was correct; it cannot perform one. The copy is what makes the
   // report actionable instead of a puzzle.
   const dir = repo(t, 'exact\ncontents\twith  spacing\n')
-  const marker = begin(dir, 'f.ts')
+  const marker = began(dir, 'f.ts')
   writeFileSync(join(dir, 'f.ts'), 'destroyed\n')
 
   const r = restore(dir, 'f.ts')
@@ -194,7 +206,7 @@ test('#363 a restore from a damaged stored original is refused, and keeps both h
   // what it should have been. So the marker and the backup are kept, exactly as `end` keeps
   // them when the caller's own restore was wrong.
   const dir = repo(t)
-  const marker = begin(dir, 'f.ts')
+  const marker = began(dir, 'f.ts')
   writeFileSync(join(dir, 'f.ts'), 'mutated\n')
   writeFileSync(join(dir, marker.backup), 'a truncated backu')
 
@@ -211,7 +223,7 @@ test('#363 a marker whose stored original has vanished is a different answer fro
   // One message for both was a lie in this case: there IS a marker, so the file is known to be
   // deliberately broken, and the thing that would fix it is what is missing.
   const dir = repo(t)
-  const marker = begin(dir, 'f.ts')
+  const marker = began(dir, 'f.ts')
   writeFileSync(join(dir, 'f.ts'), 'mutated\n')
   rmSync(join(dir, marker.backup), { force: true })
 
@@ -297,6 +309,66 @@ test('#363 `conclave --help` describes all three mutation verbs, not two', (t) =
     assert.match(mutations, new RegExp(`"${verb}"`), `the help describes "${verb}"`)
   }
   assert.match(mutations, /"restore"[\s\S]*recovery path/, 'and says which one is the recovery path')
+})
+
+test('#390 a clean first begin records the original and keeps a byte-for-byte copy', (t) => {
+  const dir = repo(t, 'the true original\n')
+  const b = begin(dir, 'f.ts')
+  assert.ok(b.begun)
+  assert.equal(b.marker.sha256, sha256(join(dir, 'f.ts')))
+  assert.equal(readFileSync(join(dir, b.marker.backup), 'utf8'), 'the true original\n')
+})
+
+test('#390 a second begin on a marked path refuses and leaves the stored original alone', (t) => {
+  // The issue's shape: begin, mutate, begin again for the "next" mutant. The second begin used
+  // to copy the mutant over the `.orig`, after which `restore` put the mutant back and called
+  // it success. The `.orig` is the only writer's output (`restore` only reads it), so guarding
+  // `begin` is guarding the backup.
+  const dir = repo(t, 'the true original\n')
+  const first = began(dir, 'f.ts')
+  const backup = join(dir, first.backup)
+  const origBytes = readFileSync(backup)
+  writeFileSync(join(dir, 'f.ts'), 'MUTANT ONE\n')
+
+  const second = begin(dir, 'f.ts', { note: 'the next mutant' })
+  assert.equal(second.begun, false, 'refused')
+  assert.deepEqual(!second.begun && second.existing, first, 'and it hands back the marker already there')
+  assert.ok(readFileSync(backup).equals(origBytes), 'the stored original is byte-for-byte unchanged')
+  assert.equal(sha256(backup), first.sha256)
+  assert.equal(outstanding(dir)[0]!.marker.note, undefined, 'the marker was not rewritten either')
+
+  const r = restore(dir, 'f.ts')
+  assert.equal(r.checked && r.restored, true)
+  assert.equal(readFileSync(join(dir, 'f.ts'), 'utf8'), 'the true original\n', 'restore returns the TRUE original')
+})
+
+test('#390 a begin on a different path is still allowed while one is outstanding', (t) => {
+  const dir = repo(t)
+  began(dir, 'f.ts')
+  writeFileSync(join(dir, 'f.ts'), 'MUTANT\n')
+  writeFileSync(join(dir, 'g.ts'), 'other\n')
+  assert.equal(begin(dir, 'g.ts').begun, true)
+  assert.deepEqual(outstanding(dir).map((m) => m.marker.path), ['f.ts', 'g.ts'])
+})
+
+test('#390 `mutations begin` over an outstanding marker exits 1 and names what is on record', (t) => {
+  const { dir, run, sha } = cliRepo(t)
+  const original = sha()
+  assert.equal(run('begin', 'f.ts').status, 0)
+  writeFileSync(join(dir, 'f.ts'), 'MUTANT ONE\n')
+  const { marker } = outstanding(dir)[0]!
+
+  const r = run('begin', 'f.ts')
+  assert.equal(r.status, 1)
+  assert.match(r.stderr, /f\.ts already has an outstanding marker/)
+  assert.ok(r.stderr.includes(`original sha256 ${original}`), 'the recorded hash, in full')
+  assert.ok(r.stderr.includes(`.conclave/mutations/`) && r.stderr.includes('.json'), 'the marker file')
+  assert.ok(r.stderr.includes(new Date(marker.startedAt).toISOString()), 'when it was begun')
+  assert.match(r.stderr, /conclave mutations end f\.ts/, 'the remedy if already restored')
+  assert.match(r.stderr, /conclave mutations restore f\.ts/, 'and the one if not')
+  assert.equal(sha256(join(dir, marker.backup)), original, 'the stored original still hashes to the original')
+  assert.equal(run('restore', 'f.ts').status, 0)
+  assert.equal(sha(), original, 'and restore really does bring it back')
 })
 
 test('a corrupt marker is skipped, because a guard must not become the outage', (t) => {

@@ -1782,7 +1782,21 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
       if (action === 'begin') {
         const noteAt = rest.indexOf('--note')
         const note = noteAt >= 0 ? rest[noteAt + 1] : undefined
-        const m = beginMutation(root, target, { ...(note === undefined ? {} : { note }) })
+        const b = beginMutation(root, target, { ...(note === undefined ? {} : { note }) })
+        if (!b.begun) {
+          // #390: the marker already there holds the only record of the true original, so it
+          // is named in full -- a caller who reads this needs its hash to know which remedy.
+          const e = b.existing
+          console.error(
+            `conclave: ${e.path} already has an outstanding marker — not recorded again\n` +
+              `  marker ${b.markerFile}, stored original ${e.backup}\n` +
+              `  original sha256 ${e.sha256}, begun ${new Date(e.startedAt).toISOString()}\n` +
+              `  if you have already put the original back: \`conclave mutations end ${target}\`\n` +
+              `  otherwise: \`conclave mutations restore ${target}\`, then begin again`,
+          )
+          return 1
+        }
+        const m = b.marker
         console.log(`conclave: recorded ${m.path} as mutated (sha256 ${m.sha256.slice(0, 12)})`)
         return 0
       }
