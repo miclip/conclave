@@ -278,6 +278,17 @@ test('every built-in declares its executable and a way to obtain it', () => {
   }
 })
 
+test('kimi\'s refusal keeps the 1.x install and warns off the incompatible successor', () => {
+  // `kimi-cli` is archived and `@moonshot-ai/kimi-code` installs the same `kimi` command, so the
+  // obvious fix for a missing binary is the one this adapter cannot drive. The notice says so.
+  const agent = { ...KIMI_AGENT, launch: { ...KIMI_AGENT.launch, command: ABSENT } }
+  const refusal = checkCommandAvailable({ participant: 'implementer', agent, cwd: process.cwd() })!.refusal!
+  assert.match(refusal, /Install it with `uv tool install kimi-cli`/, 'the pinned install is still the hint')
+  assert.match(refusal, /kimi-cli is archived/)
+  assert.match(refusal, /npm `@moonshot-ai\/kimi-code`, installs the same `kimi` command/)
+  assert.match(refusal, /not compatible with this adapter/)
+})
+
 /* ------------------------------------------------------------ where it happens ---------- */
 
 /** A repository for a run to happen in. Every front-end refuses to start outside one. */

@@ -14,12 +14,17 @@
  * ## Why this shells out to Python
  *
  * Kimi's config is TOML, Node has no TOML parser, and vendoring one to read a file we are
- * about to rewrite as JSON is a poor trade. Python's `tomllib` is standard library from 3.11,
- * and `kimi-cli` itself requires Python >= 3.12 -- so a machine that can run Kimi can always
- * parse Kimi's config. The dependency is real and it is bounded by something already true.
+ * about to rewrite as JSON is a poor trade. So reading a TOML config needs a SEPARATE
+ * `python3` on PATH whose standard library has `tomllib` (Python 3.11+).
  *
- * Kimi accepts a `.json` config directly (`config_file.suffix.lower() == ".json"`), so only
- * the READ needs Python; the write is `JSON.stringify`.
+ * Running Kimi does not supply that. `uv tool install kimi-cli` gives the tool its own
+ * interpreter: the `kimi` shim's shebang names `~/.local/share/uv/tools/kimi-cli/bin/python`,
+ * a link into uv's managed `~/.local/share/uv/python/`, and none of it is put on PATH. A
+ * machine can run Kimi with no `python3` at all, or with one older than 3.11.
+ *
+ * Kimi accepts a `.json` config directly (`config_file.suffix.lower() == ".json"`), and a
+ * JSON config avoids the dependency entirely: only the TOML READ needs Python; the write is
+ * `JSON.stringify`.
  *
  * ## The credential wrinkle
  *
@@ -62,8 +67,9 @@ export function readKimiConfig(path: string): Record<string, unknown> {
   } catch (err) {
     throw new Error(
       `kimi: could not read ${path} as TOML (${err instanceof Error ? err.message : String(err)}). ` +
-        'Conclave reads it with python3 tomllib, which ships with the Python that kimi-cli ' +
-        'itself requires. Pass a .json config instead if python3 is unavailable.',
+        'Conclave reads TOML with a separate python3 on PATH that has tomllib (Python 3.11+); ' +
+        'the Python kimi-cli runs on is not used. Install one, or pass a .json config, which ' +
+        'needs no Python.',
     )
   }
 }
