@@ -17,8 +17,8 @@ import {
 import { tempDir } from '../testkit/tempDir.ts'
 
 test('a TOML config is read through python tomllib', (t) => {
-  // Node has no TOML parser, and `kimi-cli` requires Python >= 3.12, where `tomllib` is
-  // standard library. A machine that can run Kimi can always parse Kimi's config.
+  // Node has no TOML parser, so this needs a separate `python3` on PATH with `tomllib`
+  // (3.11+). Kimi does not supply one: uv runs it on its own interpreter, off PATH.
   const d = tempDir(t, 'kimi-cfg')
   const path = join(d, 'config.toml')
   writeFileSync(
@@ -30,6 +30,23 @@ test('a TOML config is read through python tomllib', (t) => {
   assert.equal(c.default_model, 'k')
   assert.deepEqual(Object.keys(c.providers as object), ['moonshot'])
   assert.equal((c.models as Record<string, { max_context_size: number }>).k!.max_context_size, 262144)
+})
+
+test('an unreadable TOML config names the python3 it needs and the JSON way around it', (t) => {
+  // The guidance must not send the operator to Kimi's own Python: uv keeps that off PATH.
+  const d = tempDir(t, 'kimi-cfg')
+  const path = join(d, 'config.toml')
+  writeFileSync(path, 'this is = = not toml\n')
+  assert.throws(
+    () => readKimiConfig(path),
+    (e: Error) => {
+      assert.match(e.message, /could not read .* as TOML/)
+      assert.match(e.message, /separate python3 on PATH that has tomllib \(Python 3\.11\+\)/)
+      assert.match(e.message, /pass a \.json config, which needs no Python/)
+      assert.ok(!/ships with the Python that kimi-cli/.test(e.message), 'the old rationale is gone')
+      return true
+    },
+  )
 })
 
 test('a missing config is empty rather than an error', (t) => {

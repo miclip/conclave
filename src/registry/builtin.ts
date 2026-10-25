@@ -62,8 +62,19 @@ import type {
  *
  * A hint is NEVER run by anything -- it is quoted into a refusal and nothing else. If one of these
  * goes stale the cost is a wrong suggestion beside a correct diagnosis, not a wrong diagnosis.
+ *
+ * Kimi's hint is kept and qualified rather than replaced. `kimi-cli` is archived upstream
+ * (github.com/MoonshotAI/kimi-cli: "[Archived] Legacy Python Kimi CLI, no longer maintained",
+ * checked 2026-10-25), and its successor, npm `@moonshot-ai/kimi-code`, installs the same `kimi`
+ * command. But that successor is not what this adapter speaks: 2.3.2 has no `--print`, `--afk`
+ * or `--config-file` and reads `~/.kimi-code` (spikes/kimi/KIMI-CODE-2.3.2.md). A global
+ * install of it also renames an existing `kimi-cli` shim to `kimi-legacy`. So the hint still
+ * names the 1.x install, and says why an operator should not swap in the obvious replacement.
  */
 const INSTALL_HINT_SOURCE = 'the install these adapters were measured against'
+const KIMI_INSTALL_HINT_SOURCE =
+  `${INSTALL_HINT_SOURCE}; kimi-cli is archived upstream, and its successor, npm ` +
+  '`@moonshot-ai/kimi-code`, installs the same `kimi` command but is not compatible with this adapter'
 
 /**
  * The pty+hook adapters. Both drive `TurnWatchdog`, which owns a timer per armed turn and
@@ -393,7 +404,7 @@ export const KIMI_AGENT: AgentDefinition = {
   launch: {
     command: 'kimi',
     baseArgs: [],
-    executable: { install: 'uv tool install kimi-cli', installFrom: INSTALL_HINT_SOURCE },
+    executable: { install: 'uv tool install kimi-cli', installFrom: KIMI_INSTALL_HINT_SOURCE },
   },
   async create(resolved: ResolvedParticipant, ctx: CreateParticipantContext): Promise<AgentSession> {
     return KimiPrintAdapter.start({
