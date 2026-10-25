@@ -565,7 +565,7 @@ be read from another terminal, over ssh, or after the process is gone.
 conclave relay --goal-file goal.txt --detach   # the goal is in neither argv; see Using it
 conclave relay "<goal>" --detach   # prints a session id and gives you your terminal back
 conclave sessions                  # every session in this project, newest first
-conclave status                    # what the most recent one is doing; a prefix picks another
+conclave status                    # the newest one not yet ended; an id or prefix picks another
 conclave events <id> --follow      # its NDJSON stream: routed messages and adapter events
 conclave guard                     # are participants live, and what changed since they started
 ```
@@ -575,6 +575,12 @@ conclave guard                     # are participants live, and what changed sin
 `status` reports who is in each seat, what each is working on, whether either is stopped at
 a permission prompt, the pause with its evidence and options, and the outcome once there is
 one. `--json` gives the same record as data.
+
+With no id, `status` describes the newest session not yet ended — so a run blocked on a prompt
+is the one answered even when a newer run has already finished — and the newest of all only when
+every session has ended. When it passes over a newer ended session it says so: a `note:` line
+first, and `skippedEndedSession` with that session's id under `--json`. The key is absent when
+nothing was skipped.
 
 Liveness is never read from the file, and never from a process check — see the warning under
 the fifo recipe above. Every read checks the pid, so a run whose process is gone shows as

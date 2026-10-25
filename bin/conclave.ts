@@ -467,8 +467,11 @@ Commands:
   status [<id>]  [--json]          What one session is doing: participants, what each is
                                    working on, whether either is stopped at a permission
                                    prompt, the current pause with its evidence and options,
-                                   and the outcome once there is one. The id is optional
-                                   and means the most recent; a unique prefix is enough.
+                                   and the outcome once there is one. With no id, the
+                                   newest session not yet ended, or the newest of all when
+                                   every one has ended; a newer ended session it skipped
+                                   is named (skippedEndedSession under --json). A unique
+                                   prefix of an id is enough.
                                    Exits non-zero only for an abandoned run -- a session
                                    that ended badly ended, and its outcome is in the record.
   events [<id>]  [--follow]        The session's event stream as NDJSON: every routed
@@ -1170,14 +1173,15 @@ function positionalId(tokens: readonly (string | undefined)[]): string | undefin
  * drained its stream, saw `ended`, and exited 0 with a plausible-looking file full of the
  * last run's events as the only clue (#360). Same dead follower, different door.
  *
- * So no id under `--follow` does not mean the newest session, as it does for `status` and
- * for a one-shot `events`; it means the newest session that has not finished. Following is
+ * So no id under `--follow` does not mean the newest session, as it does for a one-shot
+ * `events`; it means the newest session that has not finished. Following is
  * an interest in what has not happened yet, and following a finished run is a one-shot
  * read that `events <id>` already does. "Finished" is what `streamEvents` will stop on:
  * `ended`, or abandoned -- a record still saying `running` whose process is gone -- because
  * attaching to an abandoned run is a follow that ends at its first look, the same silent
- * exit 0 by another route. `status` with no id is unchanged: it describes the most recent
- * session whatever its state, because that is the run an operator asks after.
+ * exit 0 by another route. `status` with no id has a rule of its own, close to this one but
+ * not the same: it prefers the newest session not yet ended and keeps abandoned runs, because
+ * it reports rather than follows -- see `newestStatusSession`.
  *
  * NO TIMEOUT, on purpose. The wait this covers is the one #350 measured, and it is
  * unbounded at the far end: a first run's trust prompts stay up until a human answers them.
@@ -1214,6 +1218,42 @@ async function awaitLiveSession(root: string): Promise<ReadSession> {
     }
     await new Promise((r) => setTimeout(r, FOLLOW_WAIT_MS))
   }
+}
+
+/**
+ * The session `status` describes when no id was given, and the newer one it passed over.
+ *
+ * The newest session whose record does not say `ended`, else the newest of all. Not-ended is
+ * the same notion `readSession` calls `running`, and it is the record's word alone: an
+ * abandoned run -- said `running`, process gone -- is eligible, deliberately. That is the run
+ * an operator most needs `status` to surface, and it does so with the exit code of 1 a script
+ * gates on. This is NOT `awaitLiveSession`'s rule, which also skips abandoned runs because a
+ * follow of one would end at its first look; `status` reports and does not follow.
+ *
+ * Newest-of-all was the rule, and it is wrong for exactly the case the README's `/allow`
+ * recipe is for: a run blocked on a prompt while a newer one has ended -- a second run that
+ * refused to start, a quick run beside a long one -- was answered with the ended run's record,
+ * whose `blocked` is empty, so the recipe read `null` and answered nothing. `sessions` listed
+ * both correctly the whole time.
+ *
+ * `skipped` is the newest session when it is not the one chosen, necessarily an ended one, and
+ * the caller MUST say so. "No id means the most recent" is how operators have read this
+ * command since it existed; a changed answer that does not announce itself would be the same
+ * silent wrong-session report #359 removed, pointed the other way. `skipped` is absent when
+ * nothing was passed over, so its presence is the signal.
+ *
+ * Explicit ids do not come through here: a session asked for by name is that session, ended or
+ * not, and `resolveSession` is unchanged.
+ */
+function newestStatusSession(
+  root: string,
+): { session: ReadSession; skipped?: ReadSession | undefined } | { error: string } {
+  const all = listSessions(root)
+  const newest = all[0]
+  if (!newest) return resolveSession(root)
+  const live = all.find((s) => s.status.state !== 'ended')
+  if (!live || live === newest) return { session: newest }
+  return { session: live, skipped: newest }
 }
 
 /**
@@ -1816,13 +1856,17 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
 
   if (command === 'status') {
     const root = projectRootFor(process.cwd())
-    // The id is optional and means the most recent, which is what an operator running one
-    // session at a time always means. An ambiguous prefix is refused rather than resolved.
+    // The id is optional; without one this describes the newest run not yet ended (see
+    // `newestStatusSession`). An ambiguous prefix is refused rather than resolved.
     // Wherever it sits: reading only `sub` made `status --json <id>` describe the newest
     // session instead of the named one, silently (#359).
     const flags = [sub, ...rest]
     const wanted = positionalId(flags)
-    const found = resolveSession(root, wanted)
+    // No id: the newest run not yet ended, and the newer ended one passed over to reach it is
+    // disclosed below. See `newestStatusSession`.
+    const found: { session: ReadSession; skipped?: ReadSession | undefined } | { error: string } = wanted
+      ? resolveSession(root, wanted)
+      : newestStatusSession(root)
     if ('error' in found) {
       // A directory with no status.json is its own condition, and a different one from "no
       // such session": it means the id WAS issued and the process never got far enough to
@@ -1855,9 +1899,23 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
       }
       return 1
     }
+    const skipped = found.skipped
     if (flags.includes('--json')) {
-      console.log(formatSessionJson(found.session))
+      // A key on the document rather than a line on stderr: the reader of `--json` is a
+      // script, and a script never sees stderr. Absent when nothing was skipped.
+      const json = formatSessionJson(found.session)
+      console.log(
+        skipped
+          ? JSON.stringify({ ...JSON.parse(json), skippedEndedSession: skipped.status.id }, null, 2)
+          : json,
+      )
     } else {
+      if (skipped) {
+        console.log(
+          `note: the newest session, ${skipped.status.id}, has ended; showing ${found.session.status.id}. ` +
+            `\`conclave status ${skipped.status.id}\` for that one.\n`,
+        )
+      }
       console.log(formatSession(found.session, Date.now()))
     }
     // Non-zero for a run that claimed to be going and is not, so a script polling this can
