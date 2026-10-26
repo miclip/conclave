@@ -36,13 +36,83 @@
 
 import { hookTimeoutSeconds } from './hookTimeout.ts'
 import { execFileSync } from 'node:child_process'
-import { chmodSync, existsSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
 /** Where `kimi` looks when nothing is passed. */
 export function defaultKimiConfigPath(): string {
   return join(homedir(), '.kimi', 'config.toml')
+}
+
+/**
+ * A Kimi config that exists and cannot be read. One shape for both formats, so an operator
+ * cannot tell which branch failed by how well the message is written (#389): the file, the
+ * reader's reason as one line, what the file is for, and what to do. The file and its reason
+ * come first and the remedy last, as in `UnreadableMarkerError` in
+ * src/workspace/mutationMarker.ts. Kept to one line rather than
+ * that error's two, because the one caller, `kimi.ts`, embeds it in a single-line event.
+ */
+export class UnreadableKimiConfigError extends Error {
+  readonly path: string
+
+  constructor(path: string, format: 'TOML' | 'JSON', reason: string, remedy: string, cause: unknown) {
+    super(
+      `kimi: could not read ${path} as ${format} (${reason}) — it is the config the kimi seat runs ` +
+        `with, which Conclave copies to add its hooks. ${remedy}`,
+      { cause },
+    )
+    this.name = 'UnreadableKimiConfigError'
+    this.path = path
+  }
+}
+
+/**
+ * The TOML read, as the script `python3 -c` runs. It reports its own failure as ONE line on
+ * stderr rather than leaving python to print a traceback, because the traceback's shape is not
+ * ours to rely on: "the last line is the exception" stops being true when an exception carries
+ * notes (PEP 678), which python prints AFTER it. `json.dump` adds one on every value it cannot
+ * serialize, so a TOML datetime ended its stderr with `when serializing dict item 'd'` and the
+ * reason was the line above. The notes are kept, after the reason, because they name the key.
+ *
+ * `allow_nan=False` because TOML has `inf` and `nan` and JSON does not: left to its default,
+ * `json.dump` writes `Infinity`, python exits 0, and the failure surfaces in node's `JSON.parse`
+ * with nothing to say which key it was. The generated config is JSON, so such a value could
+ * not be carried into it anyway; the question is only where the failure is reported.
+ *
+ * `import tomllib` is inside the `try` so that a python older than 3.11 lands here too.
+ */
+const READ_TOML = [
+  'import sys, json',
+  'try:',
+  '    import tomllib',
+  '    json.dump(tomllib.load(open(sys.argv[1], "rb")), sys.stdout, allow_nan=False)',
+  'except Exception as e:',
+  '    parts = [type(e).__name__ + ": " + str(e)] + ["(" + n + ")" for n in getattr(e, "__notes__", [])]',
+  '    sys.stderr.write(" ".join(" ".join(parts).split()) + "\\n")',
+  '    sys.exit(1)',
+].join('\n')
+
+/**
+ * Why `python3` failed, in one line.
+ *
+ * Normally `READ_TOML`'s own one-line report. The last non-empty line is taken rather than the
+ * whole stream for what fails before that script's `try` can run -- a python so old the script
+ * does not compile prints its own traceback, and there the last line is still the best there
+ * is. Where python printed nothing -- it could not be started, or was killed -- the fallback
+ * says which, rather than leaving the parentheses empty.
+ *
+ * Not `err.message`: `execFileSync` builds that as "Command failed: python3 -c ..." followed by
+ * the whole of stderr, and interpolating it was the traceback's second copy.
+ */
+function pythonReason(err: unknown): string {
+  const e = err as { stderr?: unknown; status?: number | null; signal?: string | null; code?: unknown }
+  const stderr = typeof e.stderr === 'string' ? e.stderr : ''
+  const last = stderr.split('\n').map((l) => l.trim()).filter(Boolean).at(-1)
+  if (last) return last
+  if (typeof e.code === 'string') return `python3 could not be run: ${e.code}`
+  if (e.signal) return `python3 was killed by ${e.signal} and printed nothing`
+  return `python3 exited with status ${e.status ?? 'unknown'} and printed nothing`
 }
 
 /**
@@ -55,22 +125,49 @@ export function defaultKimiConfigPath(): string {
 export function readKimiConfig(path: string): Record<string, unknown> {
   if (!existsSync(path)) return {}
   if (path.toLowerCase().endsWith('.json')) {
-    return JSON.parse(execFileSync('cat', [path], { encoding: 'utf8' })) as Record<string, unknown>
+    try {
+      return JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>
+    } catch (err) {
+      throw new UnreadableKimiConfigError(
+        path,
+        'JSON',
+        err instanceof Error ? err.message : String(err),
+        'Fix the JSON in it, or point the seat at a config that parses.',
+        err,
+      )
+    }
   }
-  try {
-    const json = execFileSync(
-      'python3',
-      ['-c', 'import sys,tomllib,json; json.dump(tomllib.load(open(sys.argv[1],"rb")), sys.stdout)', path],
-      { encoding: 'utf8' },
-    )
-    return JSON.parse(json) as Record<string, unknown>
-  } catch (err) {
-    throw new Error(
-      `kimi: could not read ${path} as TOML (${err instanceof Error ? err.message : String(err)}). ` +
+  const unreadable = (reason: string, err: unknown) =>
+    new UnreadableKimiConfigError(
+      path,
+      'TOML',
+      reason,
+      'If the reason is in the file, fix the TOML in it. ' +
         'Conclave reads TOML with a separate python3 on PATH that has tomllib (Python 3.11+); ' +
         'the Python kimi-cli runs on is not used. Install one, or pass a .json config, which ' +
         'needs no Python.',
+      err,
     )
+  let json: string
+  try {
+    json = execFileSync(
+      'python3',
+      ['-c', READ_TOML, path],
+      // stdio set EXPLICITLY. Left to the default, execFileSync captures the child's stderr on
+      // the error AND copies it to conclave's own stderr, where python's traceback drew over the
+      // console (#389). Set, the stream is only captured, and arrives on the error alone.
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
+    )
+  } catch (err) {
+    throw unreadable(pythonReason(err), err)
+  }
+  // `READ_TOML` exits non-zero rather than write what JSON cannot hold, so this failing means
+  // the python3 on PATH printed something other than that script's output. Wrapped all the
+  // same: every way the TOML read fails reaches the operator in the one shape.
+  try {
+    return JSON.parse(json) as Record<string, unknown>
+  } catch (err) {
+    throw unreadable(`python3 printed something that is not JSON: ${err instanceof Error ? err.message : String(err)}`, err)
   }
 }
 
