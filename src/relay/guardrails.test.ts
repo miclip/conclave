@@ -137,7 +137,9 @@ test('the real reading is a positive number here, and undefined for a path that 
   // for holding a marker while the full suite runs, so a suite that fails whenever one is held
   // reports a second, unrelated failure in every mutation audit: precisely the noise that
   // trains a reader to skip past the real one.
-  const held = outstanding(process.cwd()).filter((m) => m.dirty).length > 0
+  // An unreadable marker warns too, so it counts as held for the same reason.
+  const marks = outstanding(process.cwd())
+  const held = marks.mutations.some((m) => m.dirty) || marks.unreadable.length > 0
   assert.equal(preflightWarnings(process.cwd()).length, (banded ? 1 : 0) + (held ? 1 : 0))
 })
 

@@ -100,6 +100,8 @@ import {
   end as endMutation,
   outstanding as outstandingMutations,
   restore as restoreMutation,
+  UnreadableMarkerError,
+  unreadableMarkersPhrase,
 } from '../src/workspace/mutationMarker.ts'
 
 /**
@@ -645,6 +647,16 @@ function agentsFromFlags(flags: string[]): { agents?: AgentKind[] } {
  */
 function extraArgs(raw: string): string[] {
   return raw.split(/\s+/).map((a) => a.trim()).filter(Boolean)
+}
+
+/**
+ * A `mutations` verb found a marker it cannot parse. The message is the module's, so all three
+ * verbs say the same thing; anything else is not this case and is rethrown.
+ */
+function unreadableMarker(err: unknown): 1 {
+  if (!(err instanceof UnreadableMarkerError)) throw err
+  console.error(`conclave: ${err.message}`)
+  return 1
 }
 
 /**
@@ -1782,7 +1794,23 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
       if (action === 'begin') {
         const noteAt = rest.indexOf('--note')
         const note = noteAt >= 0 ? rest[noteAt + 1] : undefined
-        const b = beginMutation(root, target, { ...(note === undefined ? {} : { note }) })
+        let b: ReturnType<typeof beginMutation>
+        try {
+          b = beginMutation(root, target, { ...(note === undefined ? {} : { note }) })
+        } catch (err) {
+          return unreadableMarker(err)
+        }
+        if (!b.begun && b.reason === 'orphaned-backup') {
+          // The stored copy may or may not be the true original -- nothing records which -- so
+          // neither file is touched and the reconciling is left to whoever can tell.
+          console.error(
+            `conclave: ${b.path} has a stored original but no marker — not recorded\n` +
+              `  orphaned backup ${b.backup}, target ${b.path}; neither was changed\n` +
+              `  inspect both and reconcile them by hand: if the backup is the true original, copy it\n` +
+              `  back over ${b.path}; then remove ${b.backup} and begin again`,
+          )
+          return 1
+        }
         if (!b.begun) {
           // #390: the marker already there holds the only record of the true original, so it
           // is named in full -- a caller who reads this needs its hash to know which remedy.
@@ -1801,7 +1829,12 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
         return 0
       }
       if (action === 'restore') {
-        const rr = restoreMutation(root, target)
+        let rr: ReturnType<typeof restoreMutation>
+        try {
+          rr = restoreMutation(root, target)
+        } catch (err) {
+          return unreadableMarker(err)
+        }
         if (!rr.checked) {
           console.error(
             rr.reason === 'no-marker'
@@ -1830,7 +1863,12 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
         )
         return 1
       }
-      const r = endMutation(root, target)
+      let r: ReturnType<typeof endMutation>
+      try {
+        r = endMutation(root, target)
+      } catch (err) {
+        return unreadableMarker(err)
+      }
       if (!r.checked) {
         // Nothing was compared, so nothing can be reported as verified. Saying "back to its
         // original" here is what #343 was: a second mutation after a `restore`, with no new
@@ -1854,8 +1892,8 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
       )
       return 1
     }
-    const all = outstandingMutations(root)
-    if (all.length === 0) {
+    const { mutations: all, unreadable } = outstandingMutations(root)
+    if (all.length === 0 && unreadable.length === 0) {
       console.log('no mutations are recorded')
       return 0
     }
@@ -1863,8 +1901,16 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
       const state = m.dirty ? 'MUTATED — not restored' : 'restored, stale marker'
       console.log(`${m.marker.path}  [${state}]  pid ${m.marker.pid}${m.marker.note ? `  — ${m.marker.note}` : ''}`)
     }
+    // Named, not merely counted: each is a file someone has to open. Never "no mutations are
+    // recorded" over one of these -- whatever it guards is the thing nobody can vouch for.
+    if (unreadable.length > 0) {
+      const { counted, guarded } = unreadableMarkersPhrase(unreadable.length)
+      console.log(`${counted}; ${guarded} may be mutated:`)
+      for (const u of unreadable) console.log(`  ${u.markerFile}  — ${u.problem}`)
+    }
     // Non-zero only for a tree actually holding a defect. A stale marker is untidy, not a
-    // reason for a commit helper to stop.
+    // reason for a commit helper to stop -- and nor is an unreadable one, which is a reason
+    // to look rather than a known defect.
     return all.some((m) => m.dirty) ? 1 : 0
   }
 

@@ -7,13 +7,13 @@
 import { strict as assert } from 'node:assert'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
 import type { TestContext } from 'node:test'
 import { tempDir } from '../testkit/tempDir.ts'
 import { mutationWarning, preflightRefusals, preflightWarnings } from '../relay/guardrails.ts'
-import { begin, end, mutationsDir, outstanding, restore } from './mutationMarker.ts'
+import { begin, end, mutationsDir, outstanding, restore, UnreadableMarkerError } from './mutationMarker.ts'
 import type { MutationMarker } from './mutationMarker.ts'
 
 function sha256(file: string): string {
@@ -42,7 +42,7 @@ test('a file broken and not put back is reported as exactly that', (t) => {
   begin(dir, 'f.ts', { note: 'the #180 shape' })
   writeFileSync(join(dir, 'f.ts'), 'reverted fix\n')
 
-  const all = outstanding(dir)
+  const all = outstanding(dir).mutations
   assert.equal(all.length, 1)
   assert.equal(all[0]!.dirty, true, 'the tree is holding a defect right now')
   assert.equal(all[0]!.marker.path, 'f.ts')
@@ -58,7 +58,7 @@ test('a marker that outlived its restore is stale, not a defect', (t) => {
   writeFileSync(join(dir, 'f.ts'), 'mutated\n')
   writeFileSync(join(dir, 'f.ts'), 'original\n')
 
-  const all = outstanding(dir)
+  const all = outstanding(dir).mutations
   assert.equal(all.length, 1, 'the marker is still there')
   assert.equal(all[0]!.dirty, false, 'but the file is not')
 })
@@ -74,7 +74,7 @@ test('end refuses to clear a marker while the file is still broken, and says bot
   assert.ok(r.checked, 'there was a marker, so a comparison happened')
   assert.equal(r.restored, false)
   assert.notEqual(r.expected, r.actual, 'the caller is told what it should have been')
-  assert.equal(outstanding(dir).length, 1, 'and the marker is KEPT')
+  assert.equal(outstanding(dir).mutations.length, 1, 'and the marker is KEPT')
 })
 
 test('end clears the marker and the stored copy once the file really is back', (t) => {
@@ -86,7 +86,7 @@ test('end clears the marker and the stored copy once the file really is back', (
   const r = end(dir, 'f.ts')
   assert.ok(r.checked)
   assert.equal(r.restored, true)
-  assert.deepEqual(outstanding(dir), [], 'nothing outstanding')
+  assert.deepEqual(outstanding(dir).mutations, [], 'nothing outstanding')
   // The copy goes too. A backup left behind for every mutation ever made would turn the
   // bookkeeping directory into the disk problem that #180 was about.
   assert.equal(readFileSync(join(dir, 'f.ts'), 'utf8'), 'original\n')
@@ -151,7 +151,7 @@ test('`mutations end` on a file that matches its marker exits 0 and clears the m
   const r = run('end', 'f.ts')
   assert.equal(r.status, 0)
   assert.match(r.stdout, /f\.ts is back to its original; marker cleared/)
-  assert.deepEqual(outstanding(dir), [], 'the marker is gone')
+  assert.deepEqual(outstanding(dir).mutations, [], 'the marker is gone')
   const list = run()
   assert.equal(list.status, 0)
   assert.match(list.stdout, /no mutations are recorded/)
@@ -172,7 +172,7 @@ test('`mutations end` on a file that differs from its marker exits non-zero, kee
   assert.ok(r.stderr.includes(`expected sha256 ${original.slice(0, 12)}`), 'says what it should have been')
   assert.ok(r.stderr.includes(`found ${mutated.slice(0, 12)}`), 'and what it found')
   assert.match(r.stderr, /conclave mutations restore f\.ts/, 'with the command that fixes it')
-  assert.equal(outstanding(dir).length, 1, 'the marker is KEPT')
+  assert.equal(outstanding(dir).mutations.length, 1, 'the marker is KEPT')
   assert.equal(run().status, 1, 'and the bare listing still refuses')
 })
 
@@ -188,7 +188,7 @@ test('restore puts the original back byte for byte, from the copy rather than a 
   assert.equal(r.checked && r.restored, true)
   assert.equal(r.checked && r.expected, marker.sha256, 'against the hash `begin` took')
   assert.equal(readFileSync(join(dir, 'f.ts'), 'utf8'), 'exact\ncontents\twith  spacing\n')
-  assert.deepEqual(outstanding(dir), [], 'restoring closes the marker')
+  assert.deepEqual(outstanding(dir).mutations, [], 'restoring closes the marker')
   assert.equal(existsSync(join(dir, marker.backup)), false, 'and takes the stored copy with it')
 })
 
@@ -215,7 +215,7 @@ test('#363 a restore from a damaged stored original is refused, and keeps both h
   assert.equal(r.checked && r.restored, false, 'and the answer is no')
   assert.equal(r.checked && r.expected, marker.sha256)
   assert.notEqual(r.checked && r.actual, marker.sha256, 'it reports what is actually on disk now')
-  assert.equal(outstanding(dir).length, 1, 'the marker is KEPT -- it is the record of what was wanted')
+  assert.equal(outstanding(dir).mutations.length, 1, 'the marker is KEPT -- it is the record of what was wanted')
   assert.equal(existsSync(join(dir, marker.backup)), true, 'and so is the backup, which is now the evidence')
 })
 
@@ -230,7 +230,7 @@ test('#363 a marker whose stored original has vanished is a different answer fro
   const r = restore(dir, 'f.ts')
   assert.equal(r.checked, false)
   assert.equal(r.checked === false && r.reason, 'no-backup')
-  assert.equal(outstanding(dir).length, 1, 'and the marker stays, because the file is still broken')
+  assert.equal(outstanding(dir).mutations.length, 1, 'and the marker stays, because the file is still broken')
 })
 
 test('#363 `mutations restore` verifies what it wrote and says it in `end`\'s words', (t) => {
@@ -248,7 +248,7 @@ test('#363 `mutations restore` verifies what it wrote and says it in `end`\'s wo
   assert.match(r.stdout, /conclave: restored f\.ts from its stored original/)
   assert.match(r.stdout, /conclave: f\.ts is back to its original; marker cleared/, "`end`'s sentence, verbatim")
   assert.equal(sha(), original, 'and it is true')
-  assert.deepEqual(outstanding(dir), [], 'marker and backup cleared on the match')
+  assert.deepEqual(outstanding(dir).mutations, [], 'marker and backup cleared on the match')
 })
 
 test('#363 `mutations restore` from a damaged backup is loud, non-zero, and keeps the marker', (t) => {
@@ -258,7 +258,7 @@ test('#363 `mutations restore` from a damaged backup is loud, non-zero, and keep
   const original = sha()
   assert.equal(run('begin', 'f.ts').status, 0)
   writeFileSync(join(dir, 'f.ts'), 'MUTATED\n')
-  const backup = join(dir, outstanding(dir)[0]!.marker.backup)
+  const backup = join(dir, outstanding(dir).mutations[0]!.marker.backup)
   writeFileSync(backup, 'a truncated backu')
 
   const r = run('restore', 'f.ts')
@@ -267,7 +267,7 @@ test('#363 `mutations restore` from a damaged backup is loud, non-zero, and keep
   assert.ok(r.stderr.includes(`expected sha256 ${original.slice(0, 12)}`), 'says what it should have been')
   assert.ok(r.stderr.includes(`found ${sha().slice(0, 12)}`), 'and what it found')
   assert.doesNotMatch(r.stderr, /conclave mutations restore f\.ts/, 'no advice to re-run what just failed')
-  assert.equal(outstanding(dir).length, 1, 'the marker is KEPT')
+  assert.equal(outstanding(dir).mutations.length, 1, 'the marker is KEPT')
   assert.equal(existsSync(backup), true, 'and the backup, which is the evidence')
   assert.equal(run().status, 1, 'and the bare listing still refuses')
 })
@@ -286,13 +286,13 @@ test('#363 `mutations restore` with a marker but no stored original says which i
   const { dir, run } = cliRepo(t)
   assert.equal(run('begin', 'f.ts').status, 0)
   writeFileSync(join(dir, 'f.ts'), 'MUTATED\n')
-  rmSync(join(dir, outstanding(dir)[0]!.marker.backup), { force: true })
+  rmSync(join(dir, outstanding(dir).mutations[0]!.marker.backup), { force: true })
 
   const r = run('restore', 'f.ts')
   assert.equal(r.status, 1)
   assert.match(r.stderr, /marker for f\.ts has no stored original — nothing to restore from/)
   assert.doesNotMatch(r.stderr, /no marker for f\.ts/, 'it does not send them looking for the wrong thing')
-  assert.equal(outstanding(dir).length, 1, 'the marker stays, because the file is still broken')
+  assert.equal(outstanding(dir).mutations.length, 1, 'the marker stays, because the file is still broken')
 })
 
 test('#363 `conclave --help` describes all three mutation verbs, not two', (t) => {
@@ -332,10 +332,10 @@ test('#390 a second begin on a marked path refuses and leaves the stored origina
 
   const second = begin(dir, 'f.ts', { note: 'the next mutant' })
   assert.equal(second.begun, false, 'refused')
-  assert.deepEqual(!second.begun && second.existing, first, 'and it hands back the marker already there')
+  assert.deepEqual(!second.begun && second.reason === 'outstanding' && second.existing, first, 'and it hands back the marker already there')
   assert.ok(readFileSync(backup).equals(origBytes), 'the stored original is byte-for-byte unchanged')
   assert.equal(sha256(backup), first.sha256)
-  assert.equal(outstanding(dir)[0]!.marker.note, undefined, 'the marker was not rewritten either')
+  assert.equal(outstanding(dir).mutations[0]!.marker.note, undefined, 'the marker was not rewritten either')
 
   const r = restore(dir, 'f.ts')
   assert.equal(r.checked && r.restored, true)
@@ -366,13 +366,37 @@ test('#390 a refused begin creates no backup at all: the claim is taken before t
   assert.equal(existsSync(backup), false, 'and it wrote no backup on its way to refusing')
 })
 
+test('#390 a begin over an orphaned backup refuses and leaves both files byte-for-byte', (t) => {
+  // The marker deleted by hand, the `.orig` left behind. The second begin used to exit 0 and
+  // copy the mutant over the stored original. Its provenance cannot be verified, so it is
+  // neither overwritten nor adopted.
+  const dir = repo(t, 'the true original\n')
+  const first = began(dir, 'f.ts')
+  const backup = join(dir, first.backup)
+  const origBytes = readFileSync(backup)
+  writeFileSync(join(dir, 'f.ts'), 'MUTANT ONE\n')
+  const mutantBytes = readFileSync(join(dir, 'f.ts'))
+  rmSync(join(dir, first.backup.replace(/\.orig$/, '.json')))
+  assert.deepEqual(outstanding(dir).mutations, [], 'the fixture has no marker left')
+
+  const second = begin(dir, 'f.ts')
+  assert.equal(second.begun, false, 'refused')
+  assert.equal(!second.begun && second.reason, 'orphaned-backup')
+  assert.deepEqual(!second.begun && second.reason === 'orphaned-backup' && [second.path, second.backup], ['f.ts', first.backup])
+  assert.ok(readFileSync(backup).equals(origBytes), 'the stored original is byte-for-byte unchanged')
+  assert.equal(sha256(backup), first.sha256, 'and still hashes to the original')
+  assert.ok(readFileSync(join(dir, 'f.ts')).equals(mutantBytes), 'the working file is untouched')
+  assert.deepEqual(outstanding(dir).mutations, [], 'and no marker was left behind')
+  assert.deepEqual(readdirSync(mutationsDir(dir)), [first.backup.split('/').pop()], 'the directory holds the orphan and nothing else')
+})
+
 test('#390 a begin on a different path is still allowed while one is outstanding', (t) => {
   const dir = repo(t)
   began(dir, 'f.ts')
   writeFileSync(join(dir, 'f.ts'), 'MUTANT\n')
   writeFileSync(join(dir, 'g.ts'), 'other\n')
   assert.equal(begin(dir, 'g.ts').begun, true)
-  assert.deepEqual(outstanding(dir).map((m) => m.marker.path), ['f.ts', 'g.ts'])
+  assert.deepEqual(outstanding(dir).mutations.map((m) => m.marker.path), ['f.ts', 'g.ts'])
 })
 
 test('#390 `mutations begin` over an outstanding marker exits 1 and names what is on record', (t) => {
@@ -380,7 +404,7 @@ test('#390 `mutations begin` over an outstanding marker exits 1 and names what i
   const original = sha()
   assert.equal(run('begin', 'f.ts').status, 0)
   writeFileSync(join(dir, 'f.ts'), 'MUTANT ONE\n')
-  const { marker } = outstanding(dir)[0]!
+  const { marker } = outstanding(dir).mutations[0]!
 
   const r = run('begin', 'f.ts')
   assert.equal(r.status, 1)
@@ -395,17 +419,150 @@ test('#390 `mutations begin` over an outstanding marker exits 1 and names what i
   assert.equal(sha(), original, 'and restore really does bring it back')
 })
 
-test('a corrupt marker is skipped, because a guard must not become the outage', (t) => {
+test('#390 `mutations begin` over an orphaned backup exits 1, names both files, and changes neither', (t) => {
+  const { dir, run, sha } = cliRepo(t)
+  const original = sha()
+  assert.equal(run('begin', 'f.ts').status, 0)
+  const { marker } = outstanding(dir).mutations[0]!
+  const backup = join(dir, marker.backup)
+  const origBytes = readFileSync(backup)
+  writeFileSync(join(dir, 'f.ts'), 'MUTANT ONE\n')
+  const mutant = sha()
+  rmSync(join(dir, marker.backup.replace(/\.orig$/, '.json')))
+
+  const r = run('begin', 'f.ts')
+  assert.equal(r.status, 1)
+  assert.ok(r.stderr.includes(`orphaned backup ${marker.backup}`), 'it names the orphaned backup')
+  assert.ok(r.stderr.includes('target f.ts'), 'and the target path')
+  assert.match(r.stderr, /inspect both and reconcile/, 'and tells the operator what to do')
+  assert.ok(readFileSync(backup).equals(origBytes), 'the stored original is byte-for-byte unchanged')
+  assert.equal(sha256(backup), original, 'and still hashes to the original')
+  assert.equal(sha(), mutant, 'the working file is untouched')
+  assert.deepEqual(outstanding(dir).mutations, [], 'and no marker was written')
+})
+
+/**
+ * A same-path marker that does not parse, with its `.orig` and a mutated target beside it.
+ * Returns everything a verb could touch, as bytes, so a test can prove it touched none of it.
+ */
+function corruptMarkerRepo(t: TestContext) {
+  const { dir, run } = cliRepo(t)
+  assert.equal(run('begin', 'f.ts').status, 0)
+  const { marker } = outstanding(dir).mutations[0]!
+  const markerFile = marker.backup.replace(/\.orig$/, '.json')
+  writeFileSync(join(dir, 'f.ts'), 'MUTANT ONE\n')
+  writeFileSync(join(dir, markerFile), '{"path": "f.ts", not json')
+  const files = [markerFile, marker.backup, 'f.ts']
+  const snapshot = () => files.map((f) => readFileSync(join(dir, f)))
+  return { dir, run, markerFile, backup: marker.backup, snapshot }
+}
+
+for (const verb of ['begin', 'end', 'restore']) {
+  test(`\`mutations ${verb}\` over a corrupt marker exits 1, says what to inspect, and changes nothing`, (t) => {
+    // Each verb used to reach its own bare JSON.parse, and the CLI printed only the parser's
+    // message -- naming neither the marker nor the file. The marker is the only record of the
+    // original's hash, so no verb may rewrite or remove it on the way to failing.
+    const { run, markerFile, backup, snapshot } = corruptMarkerRepo(t)
+    const before = snapshot()
+
+    const r = run(verb, 'f.ts')
+    assert.equal(r.status, 1)
+    assert.ok(r.stderr.includes(markerFile), 'it names the marker file')
+    assert.match(r.stderr, /the marker for f\.ts cannot be read/, 'and the target path')
+    assert.match(r.stderr, /JSON/, 'with the parser detail')
+    assert.match(r.stderr, /nothing was changed/)
+    assert.ok(r.stderr.includes(`inspect ${markerFile} and its sibling ${backup}`), 'and what to inspect')
+    assert.match(r.stderr, /recover or repair them by hand/, 'and the remedy')
+    // A control, not a regression the old code had: the handler prints the message and must not
+    // be replaced by one that lets the error escape to a stack.
+    assert.doesNotMatch(r.stderr, /at .*mutationMarker\.ts/, 'no stack trace')
+    const after = snapshot()
+    for (const [i, b] of before.entries()) assert.ok(after[i]!.equals(b), `byte-for-byte unchanged: ${i}`)
+  })
+}
+
+test('the unreadable-marker error keeps the parser failure as its cause', (t) => {
+  const { dir, markerFile } = corruptMarkerRepo(t)
+  assert.throws(
+    () => end(dir, 'f.ts'),
+    (err: unknown) =>
+      err instanceof UnreadableMarkerError &&
+      err.markerFile === markerFile &&
+      err.path === 'f.ts' &&
+      err.cause instanceof SyntaxError,
+  )
+})
+
+test('a corrupt marker is reported by name, not thrown on and not dropped', (t) => {
   // `outstanding` is called from a preflight. A bad file in the bookkeeping directory that
-  // could stop a run from starting would be a bigger hazard than the one it guards against.
+  // could stop a run from starting would be a bigger hazard than the one it guards against --
+  // but it used to be skipped silently, which made a tree whose only marker was corrupt read
+  // as a clean one.
   const dir = repo(t)
   begin(dir, 'f.ts')
   writeFileSync(join(dir, 'f.ts'), 'mutated\n')
   writeFileSync(join(mutationsDir(dir), 'garbage.json'), '{not json')
 
-  const all = outstanding(dir)
-  assert.equal(all.length, 1, 'the good marker still reports')
-  assert.equal(all[0]!.dirty, true)
+  const { mutations, unreadable } = outstanding(dir)
+  assert.equal(mutations.length, 1, 'the good marker still reports')
+  assert.equal(mutations[0]!.dirty, true)
+  assert.deepEqual(unreadable.map((u) => u.markerFile), ['.conclave/mutations/garbage.json'], 'and the bad one is named')
+  assert.match(unreadable[0]!.problem, /JSON/, 'with what was wrong with it')
+})
+
+test('a marker that parses but has no string path or sha256 is unreadable too, and all are sorted', (t) => {
+  const dir = repo(t)
+  mkdirSync(mutationsDir(dir), { recursive: true })
+  writeFileSync(join(mutationsDir(dir), 'c.json'), '{"path": "f.ts"}')
+  writeFileSync(join(mutationsDir(dir), 'a.json'), 'null')
+  writeFileSync(join(mutationsDir(dir), 'b.json'), '{"path": 5, "sha256": "x"}')
+
+  const { mutations, unreadable } = outstanding(dir)
+  assert.deepEqual(mutations, [])
+  assert.deepEqual(unreadable, [
+    { markerFile: '.conclave/mutations/a.json', problem: 'no string path or sha256' },
+    { markerFile: '.conclave/mutations/b.json', problem: 'no string path' },
+    { markerFile: '.conclave/mutations/c.json', problem: 'no string sha256' },
+  ])
+})
+
+test('`conclave mutations` over only a corrupt marker names it, exits 0, and claims nothing is clean', (t) => {
+  const { dir, run } = cliRepo(t)
+  mkdirSync(mutationsDir(dir), { recursive: true })
+  writeFileSync(join(mutationsDir(dir), '0123456789abcdef.json'), '{not json')
+
+  const r = run()
+  assert.equal(r.status, 0, 'unknown is a reason to look, not a known defect')
+  assert.doesNotMatch(r.stdout, /no mutations are recorded/, 'no clean claim over an unreadable marker')
+  assert.match(r.stdout, /^1 mutation marker could not be read; the file it guards may be mutated:$/m, 'the count')
+  assert.ok(r.stdout.includes('.conclave/mutations/0123456789abcdef.json'), 'and the name')
+})
+
+test('several unreadable markers are counted in the plural, in the listing and the warning alike', (t) => {
+  const { dir, run } = cliRepo(t)
+  mkdirSync(mutationsDir(dir), { recursive: true })
+  writeFileSync(join(mutationsDir(dir), 'a.json'), '{not json')
+  writeFileSync(join(mutationsDir(dir), 'b.json'), 'null')
+
+  const r = run()
+  assert.equal(r.status, 0)
+  assert.match(r.stdout, /^2 mutation markers could not be read; the file each guards may be mutated:$/m)
+  assert.equal(
+    mutationWarning(dir)?.reason,
+    '2 mutation markers could not be read, so the file each guards may be mutated: ' +
+      '.conclave/mutations/a.json, .conclave/mutations/b.json',
+  )
+})
+
+test('`conclave mutations` over an ordinary dirty mutation prints what it always printed', (t) => {
+  const { dir, run } = cliRepo(t)
+  assert.equal(run('begin', 'f.ts', '--note', 'why').status, 0)
+  writeFileSync(join(dir, 'f.ts'), 'MUTANT\n')
+  const { pid } = outstanding(dir).mutations[0]!.marker
+
+  const r = run()
+  assert.equal(r.status, 1)
+  assert.equal(r.stdout, `f.ts  [MUTATED — not restored]  pid ${pid}  — why\n`)
 })
 
 test('a tree holding a mutation is warned about before a run starts, and not refused', (t) => {
@@ -428,11 +585,74 @@ test('a tree holding a mutation is warned about before a run starts, and not ref
   const warnings = preflightWarnings(dir, { readFree: () => roomy })
   assert.equal(warnings.length, 1, 'the run is warned through the preflight')
   assert.match(warnings[0]!.reason, /f\.ts/)
+  // The exact text, written out rather than computed: the unreadable-marker case was added
+  // beside this one, and must not have changed it.
+  assert.deepEqual(w, {
+    reason: '1 file(s) are deliberately mutated and were never restored: f.ts',
+    remedy:
+      'A mutation left by a crash looks exactly like work in progress, which is how #180 ' +
+      'nearly committed a reverted fix. `conclave mutations` says what each one was for, ' +
+      'and `conclave mutations restore <path>` puts the original back from the stored copy.',
+  })
+})
+
+test('a corrupt marker alone is warned about by name before a run, and not refused', (t) => {
+  const dir = repo(t)
+  mkdirSync(mutationsDir(dir), { recursive: true })
+  writeFileSync(join(mutationsDir(dir), '0123456789abcdef.json'), '{not json')
+
+  const roomy = 8 * 1024 * 1024 * 1024
+  assert.deepEqual(preflightRefusals(dir, { readFree: () => roomy }), [], 'never a refusal')
+  const warnings = preflightWarnings(dir, { readFree: () => roomy })
+  assert.equal(warnings.length, 1, 'but the run is told')
+  assert.ok(warnings[0]!.reason.includes('.conclave/mutations/0123456789abcdef.json'), 'which marker')
+  assert.match(warnings[0]!.remedy, /\.orig/, 'and what to inspect beside it')
+})
+
+test('a dirty mutation and a corrupt marker together are both in the one warning', (t) => {
+  const dir = repo(t)
+  begin(dir, 'f.ts')
+  writeFileSync(join(dir, 'f.ts'), 'mutated\n')
+  writeFileSync(join(mutationsDir(dir), 'garbage.json'), '{not json')
+
+  const w = mutationWarning(dir)
+  assert.ok(w)
+  assert.match(w.reason, /1 file\(s\) are deliberately mutated and were never restored: f\.ts/)
+  assert.ok(w.reason.includes('.conclave/mutations/garbage.json'))
+  assert.match(w.remedy, /conclave mutations restore <path>/)
+  assert.match(w.remedy, /\.orig/)
+})
+
+test('a real `relay --dry-run` over a corrupt marker prints the warning and still exits 0', (t) => {
+  // Through the binary, because "warned, not refused" is a claim about what the CLI DOES with
+  // the warning, and `preflightWarnings` returning one cannot show it. No agent is launched by a
+  // dry run. The environment is built, not inherited: an empty HOME so no user configuration
+  // reaches it, and nothing else, so an ambient CONCLAVE_* variable cannot either.
+  const dir = repo(t)
+  writeFileSync(join(dir, '.gitignore'), '.conclave/\n')
+  execFileSync('git', ['add', '.'], { cwd: dir })
+  execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'init'], { cwd: dir })
+  mkdirSync(mutationsDir(dir), { recursive: true })
+  writeFileSync(join(mutationsDir(dir), '0123456789abcdef.json'), '{not json')
+
+  const cli = join(import.meta.dirname, '..', '..', 'bin', 'conclave.ts')
+  const r = spawnSync(process.execPath, [cli, 'relay', '--dry-run', 'make the tests pass'], {
+    cwd: dir,
+    encoding: 'utf8',
+    timeout: 60_000,
+    env: { PATH: process.env['PATH'] ?? '', HOME: tempDir(t, 'conclave-home') },
+  })
+  assert.equal(r.status, 0, r.stderr)
+  assert.match(r.stderr, /1 mutation marker could not be read, so the file it guards may be mutated/)
+  assert.ok(r.stderr.includes('.conclave/mutations/0123456789abcdef.json'))
 })
 
 test('a clean tree, and a merely stale marker, say nothing before a run', (t) => {
   const clean = repo(t)
   assert.equal(mutationWarning(clean), undefined, 'no markers at all')
+
+  const roomy = 8 * 1024 * 1024 * 1024
+  assert.deepEqual(preflightWarnings(clean, { readFree: () => roomy }), [], 'and nothing reaches the preflight')
 
   const stale = repo(t)
   begin(stale, 'f.ts')
@@ -444,6 +664,6 @@ test('a bookkeeping directory that cannot be read is silent rather than fatal', 
   begin(dir, 'f.ts')
   writeFileSync(join(dir, 'f.ts'), 'mutated\n')
   rmSync(mutationsDir(dir), { recursive: true, force: true })
-  assert.deepEqual(outstanding(dir), [], 'a missing directory is no markers, not a throw')
+  assert.deepEqual(outstanding(dir).mutations, [], 'a missing directory is no markers, not a throw')
   assert.equal(mutationWarning(dir), undefined)
 })

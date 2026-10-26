@@ -24,7 +24,7 @@
 
 import { execFileSync } from 'node:child_process'
 import { statfsSync } from 'node:fs'
-import { outstanding } from '../workspace/mutationMarker.ts'
+import { outstanding, unreadableMarkersPhrase } from '../workspace/mutationMarker.ts'
 
 export interface PreflightRefusal {
   reason: string
@@ -124,25 +124,45 @@ export function preflightWarnings(
  * Only the DIRTY markers. One whose file already matches its recorded original is a marker
  * that outlived its restore -- untidy, harmless, and not worth a line in front of every run.
  * The case worth interrupting someone for is a defect sitting in the tree right now.
+ *
+ * And every UNREADABLE marker, because whether its file is dirty is exactly what cannot be
+ * known. It used to be skipped, so a tree whose only marker was corrupt started a run in
+ * silence. Still a warning and never a refusal, for the reason above and the reason
+ * `outstanding` reports rather than throws: bad bookkeeping must not become the outage.
  */
 export function mutationWarning(cwd: string): PreflightWarning | undefined {
-  let dirty: ReturnType<typeof outstanding>
+  let report: ReturnType<typeof outstanding>
   try {
-    dirty = outstanding(cwd).filter((m) => m.dirty)
+    report = outstanding(cwd)
   } catch {
     // A guard that cannot read its own bookkeeping must not stop a run. Same rule as an
     // unreadable volume above.
     return undefined
   }
-  if (dirty.length === 0) return undefined
-  const named = dirty.map((m) => m.marker.path).join(', ')
-  return {
-    reason: `${dirty.length} file(s) are deliberately mutated and were never restored: ${named}`,
-    remedy:
+  const dirty = report.mutations.filter((m) => m.dirty)
+  const { unreadable } = report
+  if (dirty.length === 0 && unreadable.length === 0) return undefined
+  const reasons: string[] = []
+  const remedies: string[] = []
+  if (dirty.length > 0) {
+    const named = dirty.map((m) => m.marker.path).join(', ')
+    reasons.push(`${dirty.length} file(s) are deliberately mutated and were never restored: ${named}`)
+    remedies.push(
       'A mutation left by a crash looks exactly like work in progress, which is how #180 ' +
-      'nearly committed a reverted fix. `conclave mutations` says what each one was for, ' +
-      'and `conclave mutations restore <path>` puts the original back from the stored copy.',
+        'nearly committed a reverted fix. `conclave mutations` says what each one was for, ' +
+        'and `conclave mutations restore <path>` puts the original back from the stored copy.',
+    )
   }
+  if (unreadable.length > 0) {
+    const named = unreadable.map((u) => u.markerFile).join(', ')
+    const { counted, guarded } = unreadableMarkersPhrase(unreadable.length)
+    reasons.push(`${counted}, so ${guarded} may be mutated: ${named}`)
+    remedies.push(
+      'Inspect each marker and its sibling `.orig` by hand: the marker held the only record of ' +
+        "which file it guards and that file's original hash.",
+    )
+  }
+  return { reason: reasons.join('; and '), remedy: remedies.join(' ') }
 }
 
 /**
