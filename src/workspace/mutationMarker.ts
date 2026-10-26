@@ -30,7 +30,7 @@
  */
 
 import { createHash } from 'node:crypto'
-import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { constants, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join, relative, resolve } from 'node:path'
 
 export const MUTATIONS_RELATIVE = '.conclave/mutations'
@@ -82,6 +82,47 @@ function markerPathFor(repoRoot: string, relPath: string): string {
 }
 
 /**
+ * A marker for the requested path exists and does not parse.
+ *
+ * Thrown rather than returned, and from one place, so `begin`, `end` and `restore` fail in the
+ * same words. Before this each verb hit its own bare `JSON.parse`, and the CLI printed only the
+ * parser's message ("Expected property name or '}' in JSON at position 1") -- naming neither the
+ * marker nor the file it guards, over a tree that still holds the only copy of the original.
+ *
+ * None of the verbs can act safely on it: the marker is the sole record of the original's hash,
+ * so it is never rewritten or removed here, and the operator is pointed at it and at its `.orig`
+ * instead.
+ */
+export class UnreadableMarkerError extends Error {
+  /** Repo-relative, as every other path this module reports. */
+  readonly markerFile: string
+  /** The path the caller asked about. */
+  readonly path: string
+
+  constructor(markerFile: string, path: string, cause: unknown) {
+    const detail = cause instanceof Error ? cause.message : String(cause)
+    super(
+      `the marker for ${path} cannot be read: ${markerFile} (${detail}) — nothing was changed\n` +
+        `  inspect ${markerFile} and its sibling ${markerFile.replace(/\.json$/, '.orig')}, and recover or repair them by hand`,
+      { cause },
+    )
+    this.name = 'UnreadableMarkerError'
+    this.markerFile = markerFile
+    this.path = path
+  }
+}
+
+/** Read the marker at `mp`, which guards `rel`. The one parse every verb goes through. */
+function readMarker(repoRoot: string, mp: string, rel: string): MutationMarker {
+  const text = readFileSync(mp, 'utf8')
+  try {
+    return JSON.parse(text)
+  } catch (err) {
+    throw new UnreadableMarkerError(relative(repoRoot, mp), rel, err)
+  }
+}
+
+/**
  * What `begin` did. Refusal is its own shape, as with `EndResult`, because "recorded" and "an
  * original is already on record" are answers a caller has to act on differently.
  *
@@ -93,7 +134,8 @@ function markerPathFor(repoRoot: string, relPath: string): string {
  */
 export type BeginResult =
   | { begun: true; marker: MutationMarker }
-  | { begun: false; existing: MutationMarker; markerFile: string }
+  | { begun: false; reason: 'outstanding'; existing: MutationMarker; markerFile: string }
+  | { begun: false; reason: 'orphaned-backup'; path: string; backup: string }
 
 /**
  * Record that `filePath` is about to be mutated, keeping a copy of what it is now.
@@ -109,9 +151,23 @@ export type BeginResult =
  * back) is refused too; `end` clears it in one step, and telling the two apart here would mean
  * hashing a file this function is about to trust anyway.
  *
- * The guard is this check and not a write-once backup file, because `begin` is the only writer
- * of a backup: `restore` only copies FROM one, and `end` only removes it. There is no second
- * route to the `.orig` for a filesystem-level guard to stop.
+ * A stored original with NO marker is refused as well (`orphaned-backup`), and the backup is
+ * copied write-once to enforce it. Deleting the marker by hand -- someone tidying `.conclave`,
+ * or acting on a marker they took to be stale -- used to leave the `.orig` behind, and the next
+ * `begin` copied whatever was on disk over it: #390 again, through the marker's absence rather
+ * than its presence.
+ *
+ * The ordinary case -- an orphan already sitting there -- is caught by looking for it BEFORE the
+ * marker is claimed, so the refusal writes nothing at all. The write-once copy after the claim
+ * is only the backstop for a backup that appears between that look and the copy; there the
+ * claimed marker is withdrawn again.
+ *
+ * Adopting the orphan instead -- rebuilding a marker around it -- was considered and rejected.
+ * Nothing records where an orphaned `.orig` came from: it may be the true original, or a
+ * mutant copied in by an earlier version of this bug, and its own hash is no evidence either
+ * way. A rebuilt marker would authorize `restore` to overwrite the working file with bytes
+ * merely ASSUMED to be original, and would report that as a verified restore. Only a person
+ * can reconcile the two files, so both are left exactly as they are and the caller is told.
  */
 export function begin(
   repoRoot: string,
@@ -133,6 +189,11 @@ export function begin(
     startedAt: Date.now(),
     ...(opts.note === undefined ? {} : { note: opts.note }),
   }
+  // The early look for an orphan. Not the guard on its own -- see the EXCL copy below -- but the
+  // path every real orphan takes, and the one that leaves no transient marker behind. A backup
+  // WITH its marker is not an orphan, and falls through to the claim's refusal below, which
+  // also reads that marker -- so a corrupt one is reported as corrupt rather than as missing.
+  if (existsSync(backupAbs) && !existsSync(mp)) return { begun: false, reason: 'orphaned-backup', path: rel, backup: backupRel }
   // The marker is CLAIMED atomically, with `wx`, and claimed BEFORE the backup is copied.
   // `existsSync` then `writeFileSync` is check-then-act: two `begin` calls racing on one path
   // could both pass the check, and the loser would have already overwritten the `.orig` by the
@@ -142,13 +203,28 @@ export function begin(
     writeFileSync(mp, JSON.stringify(marker, null, 2), { flag: 'wx' })
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err
-    return { begun: false, existing: JSON.parse(readFileSync(mp, 'utf8')), markerFile: relative(repoRoot, mp) }
+    return {
+      begun: false,
+      reason: 'outstanding',
+      existing: readMarker(repoRoot, mp, rel),
+      markerFile: relative(repoRoot, mp),
+    }
   }
   // After the claim, so a lost race cannot touch a backup it does not own. A crash between the
   // two leaves a marker with no stored original, which `restore` already reports as its own
   // `no-backup` answer rather than as a restore (#363).
+  //
+  // EXCL, the backstop: a `.orig` that appeared since the early look is an orphan of unknown
+  // provenance just the same (see above) and must not be overwritten. The marker this call just
+  // claimed is withdrawn, so the refusal leaves the directory as it found it.
   mkdirSync(dirname(backupAbs), { recursive: true })
-  copyFileSync(abs, backupAbs)
+  try {
+    copyFileSync(abs, backupAbs, constants.COPYFILE_EXCL)
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err
+    rmSync(mp, { force: true })
+    return { begun: false, reason: 'orphaned-backup', path: rel, backup: backupRel }
+  }
   return { begun: true, marker }
 }
 
@@ -178,7 +254,7 @@ export function end(repoRoot: string, filePath: string): EndResult {
   const rel = relative(repoRoot, abs)
   const mp = markerPathFor(repoRoot, rel)
   if (!existsSync(mp)) return { checked: false }
-  const marker: MutationMarker = JSON.parse(readFileSync(mp, 'utf8'))
+  const marker = readMarker(repoRoot, mp, rel)
   const actual = existsSync(abs) ? sha256Of(abs) : ''
   const restored = actual === marker.sha256
   // The marker is cleared only when the file is genuinely back. A failed restore that removed
@@ -230,7 +306,7 @@ export function restore(repoRoot: string, filePath: string): RestoreResult {
   const rel = relative(repoRoot, abs)
   const mp = markerPathFor(repoRoot, rel)
   if (!existsSync(mp)) return { checked: false, reason: 'no-marker' }
-  const marker: MutationMarker = JSON.parse(readFileSync(mp, 'utf8'))
+  const marker = readMarker(repoRoot, mp, rel)
   const backupAbs = join(repoRoot, marker.backup)
   if (!existsSync(backupAbs)) return { checked: false, reason: 'no-backup' }
   copyFileSync(backupAbs, abs)
@@ -243,24 +319,68 @@ export function restore(repoRoot: string, filePath: string): RestoreResult {
   return { checked: true, restored, expected: marker.sha256, actual }
 }
 
+/** A marker file that exists and says nothing usable. Named, because a count cannot be inspected. */
+export interface UnreadableMarker {
+  /** Repo-relative, as every other path this module reports. */
+  markerFile: string
+  /** Why it was set aside: the parser's message, or the field that is missing. */
+  problem: string
+}
+
+/**
+ * "1 mutation marker could not be read" / "3 mutation markers could not be read", and whose file.
+ * Shared so the listing and the pre-run warning count the same thing in the same words.
+ */
+export function unreadableMarkersPhrase(n: number): { counted: string; guarded: string } {
+  return n === 1
+    ? { counted: '1 mutation marker could not be read', guarded: 'the file it guards' }
+    : { counted: `${n} mutation markers could not be read`, guarded: 'the file each guards' }
+}
+
+/**
+ * Everything `outstanding` found, the markers it could NOT read included.
+ *
+ * An object rather than the array it used to be, because the array was a lossy answer: a
+ * corrupt marker was dropped on the floor, so a tree whose only marker was unreadable listed as
+ * "no mutations are recorded" -- a clean claim over a file that may be broken, from the one
+ * command whose job is to say so. The marker could be guarding anything, so its existence is
+ * the report even when its contents are not.
+ */
+export interface OutstandingReport {
+  /** Sorted by path. */
+  mutations: OutstandingMutation[]
+  /** Sorted by marker file. */
+  unreadable: UnreadableMarker[]
+}
+
 /**
  * Every marker in the tree, with what is currently true of the file it names.
  *
- * Unreadable markers are skipped rather than thrown on. This is called from a preflight, and a
- * corrupt file in the bookkeeping directory must not be able to stop a run from starting --
- * that would make the guard a bigger hazard than the thing it guards against.
+ * Unreadable markers are reported rather than thrown on. This is called from a preflight, and
+ * a corrupt file in the bookkeeping directory must not be able to stop a run from starting --
+ * that would make the guard a bigger hazard than the thing it guards against. Not throwing is
+ * not the same as not telling, though: each one is named in `unreadable`.
  */
-export function outstanding(repoRoot: string): OutstandingMutation[] {
+export function outstanding(repoRoot: string): OutstandingReport {
   const dir = mutationsDir(repoRoot)
-  if (!existsSync(dir)) return []
-  const out: OutstandingMutation[] = []
+  if (!existsSync(dir)) return { mutations: [], unreadable: [] }
+  const mutations: OutstandingMutation[] = []
+  const unreadable: UnreadableMarker[] = []
   for (const name of readdirSync(dir)) {
     if (!name.endsWith('.json')) continue
+    const markerFile = join(MUTATIONS_RELATIVE, name)
     let marker: MutationMarker
     try {
       marker = JSON.parse(readFileSync(join(dir, name), 'utf8'))
-      if (typeof marker.path !== 'string' || typeof marker.sha256 !== 'string') continue
-    } catch {
+    } catch (err) {
+      unreadable.push({ markerFile, problem: err instanceof Error ? err.message : String(err) })
+      continue
+    }
+    // `null`, a number, an array: valid JSON, and no marker. Read as "every field missing".
+    const fields = (marker ?? {}) as unknown as Record<string, unknown>
+    const missing = ['path', 'sha256'].filter((k) => typeof fields[k] !== 'string')
+    if (missing.length > 0) {
+      unreadable.push({ markerFile, problem: `no string ${missing.join(' or ')}` })
       continue
     }
     const abs = join(repoRoot, marker.path)
@@ -270,7 +390,10 @@ export function outstanding(repoRoot: string): OutstandingMutation[] {
     } catch {
       dirty = true
     }
-    out.push({ marker, dirty })
+    mutations.push({ marker, dirty })
   }
-  return out.sort((a, b) => a.marker.path.localeCompare(b.marker.path))
+  return {
+    mutations: mutations.sort((a, b) => a.marker.path.localeCompare(b.marker.path)),
+    unreadable: unreadable.sort((a, b) => a.markerFile.localeCompare(b.markerFile)),
+  }
 }
