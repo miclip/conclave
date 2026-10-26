@@ -121,15 +121,10 @@ export function begin(
   const abs = resolve(repoRoot, filePath)
   const rel = relative(repoRoot, abs)
   const mp = markerPathFor(repoRoot, rel)
-  if (existsSync(mp)) {
-    return { begun: false, existing: JSON.parse(readFileSync(mp, 'utf8')), markerFile: relative(repoRoot, mp) }
-  }
   const dir = mutationsDir(repoRoot)
   mkdirSync(dir, { recursive: true })
   const backupRel = join(MUTATIONS_RELATIVE, `${createHash('sha256').update(rel).digest('hex').slice(0, 16)}.orig`)
   const backupAbs = join(repoRoot, backupRel)
-  mkdirSync(dirname(backupAbs), { recursive: true })
-  copyFileSync(abs, backupAbs)
   const marker: MutationMarker = {
     path: rel,
     sha256: sha256Of(abs),
@@ -138,7 +133,22 @@ export function begin(
     startedAt: Date.now(),
     ...(opts.note === undefined ? {} : { note: opts.note }),
   }
-  writeFileSync(mp, JSON.stringify(marker, null, 2))
+  // The marker is CLAIMED atomically, with `wx`, and claimed BEFORE the backup is copied.
+  // `existsSync` then `writeFileSync` is check-then-act: two `begin` calls racing on one path
+  // could both pass the check, and the loser would have already overwritten the `.orig` by the
+  // time the marker write told it so -- which is #390 again, narrower. `wx` makes the marker
+  // itself the lock, so exactly one caller proceeds to the copy.
+  try {
+    writeFileSync(mp, JSON.stringify(marker, null, 2), { flag: 'wx' })
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err
+    return { begun: false, existing: JSON.parse(readFileSync(mp, 'utf8')), markerFile: relative(repoRoot, mp) }
+  }
+  // After the claim, so a lost race cannot touch a backup it does not own. A crash between the
+  // two leaves a marker with no stored original, which `restore` already reports as its own
+  // `no-backup` answer rather than as a restore (#363).
+  mkdirSync(dirname(backupAbs), { recursive: true })
+  copyFileSync(abs, backupAbs)
   return { begun: true, marker }
 }
 

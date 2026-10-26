@@ -342,6 +342,30 @@ test('#390 a second begin on a marked path refuses and leaves the stored origina
   assert.equal(readFileSync(join(dir, 'f.ts'), 'utf8'), 'the true original\n', 'restore returns the TRUE original')
 })
 
+test('#390 a refused begin creates no backup at all: the claim is taken before the copy', (t) => {
+  // The ORDERING, which the refusal test above cannot see because it always has a `.orig`
+  // already. `begin` claims the marker with `wx` and copies only after winning it, so a caller
+  // that loses cannot write a backup it does not own. CodeQL flagged the original as
+  // check-then-act (js/file-system-race) and it was right: with the copy ABOVE the check, two
+  // racing calls would both reach it and the loser would clobber the `.orig` before the marker
+  // write told it to stop -- #390 again, one layer down.
+  //
+  // What this proves and what it does not: it pins the order, so moving the copy back above the
+  // claim fails here. It does NOT reproduce a real race -- two processes interleaving is not
+  // something this test schedules, and a test that claimed to would be lying about what it ran.
+  const dir = repo(t, 'the true original\n')
+  const marked = began(dir, 'f.ts')
+  const backup = join(dir, marked.backup)
+  rmSync(backup)
+  assert.equal(existsSync(backup), false, 'the fixture starts with a marker and no stored copy')
+
+  writeFileSync(join(dir, 'f.ts'), 'MUTANT ONE\n')
+  const second = begin(dir, 'f.ts')
+
+  assert.equal(second.begun, false, 'refused, because the marker is still there')
+  assert.equal(existsSync(backup), false, 'and it wrote no backup on its way to refusing')
+})
+
 test('#390 a begin on a different path is still allowed while one is outstanding', (t) => {
   const dir = repo(t)
   began(dir, 'f.ts')
