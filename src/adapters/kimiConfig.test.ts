@@ -29,7 +29,19 @@ function readInChild(
   path: string,
   env: NodeJS.ProcessEnv = process.env,
 ): { stdout: string; stderr: string; outcome: { value?: unknown; name?: string; message?: string } } {
-  const r = spawnSync(process.execPath, [fixture, path], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env })
+  // `--disable-warning=ExperimentalWarning` because NODE'S OWN output is not conclave's, and
+  // this helper exists to measure conclave's. Type stripping warns on stderr about being
+  // experimental, which node 24.0.2 -- the floor CI tests -- does and newer ones do not, so
+  // `stderr === ''` passed locally and failed on the floor alone. Suppressed at the source
+  // rather than filtered out afterwards: a filter over this stream could hide a real message
+  // that happened to match it, and the whole point of the assertion is that the stream is empty.
+  // Anything node writes here that this flag does not cover SHOULD fail the test -- that is a
+  // thing we would want to know about, not paper over.
+  const r = spawnSync(
+    process.execPath,
+    ['--disable-warning=ExperimentalWarning', fixture, path],
+    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env },
+  )
   assert.equal(r.status, 0, `the fixture itself failed: ${r.stderr}`)
   return { stdout: r.stdout, stderr: r.stderr, outcome: JSON.parse(r.stdout) }
 }
