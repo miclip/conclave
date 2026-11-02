@@ -110,7 +110,12 @@ test('#343 end with no marker says nothing was checked, not that the file is bac
   assert.equal(readFileSync(join(dir, 'f.ts'), 'utf8'), 'MUTATED SECOND TIME\n', 'the file really is still mutated')
 })
 
-/** A repository plus the binary pointed at it, for the tests that exercise the CLI's wording and exit codes. */
+/**
+ * A repository plus the binary pointed at it, for the tests that exercise the CLI's wording and
+ * exit codes. Each is its own scratch repository, never this checkout: mutation-testing this very
+ * code puts a marker under THIS repository's `.conclave/mutations`, and a bare `conclave
+ * mutations` run here would exit 1 for that marker rather than for the case under test.
+ */
 function cliRepo(t: TestContext) {
   const dir = repo(t)
   const cli = join(import.meta.dirname, '..', '..', 'bin', 'conclave.ts')
@@ -309,6 +314,24 @@ test('#363 `conclave --help` describes all three mutation verbs, not two', (t) =
     assert.match(mutations, new RegExp(`"${verb}"`), `the help describes "${verb}"`)
   }
   assert.match(mutations, /"restore"[\s\S]*recovery path/, 'and says which one is the recovery path')
+})
+
+test('#395 `conclave --help` promises a non-zero exit for an unreadable marker, and 0 for a stale one', (t) => {
+  // The help is the contract a commit helper is written against. It used to promise non-zero
+  // only for a mutation, which matched the old exit code and not the listing's own text.
+  const { dir } = cliRepo(t)
+  const cli = join(import.meta.dirname, '..', '..', 'bin', 'conclave.ts')
+  const usage = spawnSync(process.execPath, [cli, '--help'], { cwd: dir, encoding: 'utf8', timeout: 60_000 })
+  assert.equal(usage.status, 0)
+  const block = usage.stdout.slice(usage.stdout.indexOf('  mutations '))
+  const mutations = block.slice(0, block.indexOf('\n  relay ')).replace(/\s+/g, ' ')
+  assert.ok(mutations.length > 0 && mutations.length < 2000, 'found the mutations entry and nothing else')
+  assert.match(
+    mutations,
+    /exits non-zero if the tree is holding a mutation right now, or holds a marker it cannot read\./,
+    'an unreadable marker is in the non-zero promise',
+  )
+  assert.match(mutations, /A stale marker exits 0\./, 'and a stale one is not')
 })
 
 test('#390 a clean first begin records the original and keeps a byte-for-byte copy', (t) => {
@@ -526,13 +549,15 @@ test('a marker that parses but has no string path or sha256 is unreadable too, a
   ])
 })
 
-test('`conclave mutations` over only a corrupt marker names it, exits 0, and claims nothing is clean', (t) => {
+test('#395 `conclave mutations` over only a corrupt marker names it and exits 1, claiming nothing is clean', (t) => {
+  // Unknown is not clean. A commit helper gating on `conclave mutations || refuse` used to
+  // pass a tree whose output, one line above the exit code, said the file may be mutated.
   const { dir, run } = cliRepo(t)
   mkdirSync(mutationsDir(dir), { recursive: true })
   writeFileSync(join(mutationsDir(dir), '0123456789abcdef.json'), '{not json')
 
   const r = run()
-  assert.equal(r.status, 0, 'unknown is a reason to look, not a known defect')
+  assert.equal(r.status, 1, 'a gate must not read unknown as clean')
   assert.doesNotMatch(r.stdout, /no mutations are recorded/, 'no clean claim over an unreadable marker')
   assert.match(r.stdout, /^1 mutation marker could not be read; the file it guards may be mutated:$/m, 'the count')
   assert.ok(r.stdout.includes('.conclave/mutations/0123456789abcdef.json'), 'and the name')
@@ -545,7 +570,7 @@ test('several unreadable markers are counted in the plural, in the listing and t
   writeFileSync(join(mutationsDir(dir), 'b.json'), 'null')
 
   const r = run()
-  assert.equal(r.status, 0)
+  assert.equal(r.status, 1)
   assert.match(r.stdout, /^2 mutation markers could not be read; the file each guards may be mutated:$/m)
   assert.equal(
     mutationWarning(dir)?.reason,
@@ -563,6 +588,40 @@ test('`conclave mutations` over an ordinary dirty mutation prints what it always
   const r = run()
   assert.equal(r.status, 1)
   assert.equal(r.stdout, `f.ts  [MUTATED — not restored]  pid ${pid}  — why\n`)
+})
+
+test('#395 `conclave mutations` over a merely stale marker lists it and exits 0', (t) => {
+  // The other half of the line #395 changed: untidy is still not a reason for a gate to stop.
+  const { dir, run } = cliRepo(t)
+  assert.equal(run('begin', 'f.ts').status, 0)
+  writeFileSync(join(dir, 'f.ts'), 'MUTANT\n')
+  writeFileSync(join(dir, 'f.ts'), 'original\n')
+  const { pid } = outstanding(dir).mutations[0]!.marker
+
+  const r = run()
+  assert.equal(r.status, 0)
+  assert.equal(r.stdout, `f.ts  [restored, stale marker]  pid ${pid}\n`)
+})
+
+test('#395 `conclave mutations` over a clean tree exits 0', (t) => {
+  const { run } = cliRepo(t)
+  const r = run()
+  assert.equal(r.status, 0)
+  assert.equal(r.stdout, 'no mutations are recorded\n')
+})
+
+test('#395 `conclave mutations` over a dirty mutation and a corrupt marker reports both and exits 1', (t) => {
+  const { dir, run } = cliRepo(t)
+  assert.equal(run('begin', 'f.ts').status, 0)
+  writeFileSync(join(dir, 'f.ts'), 'MUTANT\n')
+  writeFileSync(join(mutationsDir(dir), 'garbage.json'), '{not json')
+  const { pid } = outstanding(dir).mutations[0]!.marker
+
+  const r = run()
+  assert.equal(r.status, 1)
+  assert.match(r.stdout, new RegExp(`^f\\.ts  \\[MUTATED — not restored\\]  pid ${pid}$`, 'm'), 'the mutation')
+  assert.match(r.stdout, /^1 mutation marker could not be read; the file it guards may be mutated:$/m, 'and the unreadable one')
+  assert.ok(r.stdout.includes('.conclave/mutations/garbage.json'))
 })
 
 test('a tree holding a mutation is warned about before a run starts, and not refused', (t) => {
