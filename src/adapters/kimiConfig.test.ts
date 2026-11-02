@@ -13,6 +13,7 @@ import test from 'node:test'
 import {
   KIMI_HOOK_EVENTS,
   readKimiConfig,
+  UnreadableKimiConfigError,
   withConclaveHooks,
   writeKimiConfig,
 } from './kimiConfig.ts'
@@ -179,11 +180,37 @@ test('#389: a malformed JSON config names the file, the reason and a remedy', (t
   assert.equal(stderr, '', 'nothing leaked to stderr')
   assert.ok(outcome.message, 'it throws')
   assert.notEqual(outcome.name, 'SyntaxError', 'not the parser\'s raw error')
-  assert.ok(outcome.message.startsWith('kimi: '), 'prefixed like the TOML branch')
+  assert.ok(outcome.message.includes(`could not read ${path} as JSON`), 'worded like the TOML branch')
   assert.ok(outcome.message.includes(path), 'names the file')
   assert.match(outcome.message, / as JSON/, 'says what it was read as')
   assert.equal(count(outcome.message, JSON_REASON), 1, 'the parser\'s reason, once')
   assert.match(outcome.message, /\b(fix|repair|correct)\b/i, 'gives a remedy')
+})
+
+test('#397: wrapped as kimi.ts wraps it, the operator reads `kimi:` once', (t) => {
+  // The error carried its own `kimi: ` and the hook-mode event in kimi.ts prefixed another,
+  // so the operator read `kimi: hook mode unavailable (kimi: could not read ...)`. The
+  // wrapper is composed here exactly as src/adapters/kimi.ts:255 composes it, for both
+  // formats, from the error the reader really throws.
+  const d = tempDir(t, 'kimi-cfg')
+  const toml = join(d, 'config.toml')
+  writeFileSync(toml, MALFORMED_TOML)
+  const json = join(d, 'config.json')
+  writeFileSync(json, MALFORMED_JSON)
+  for (const path of [toml, json]) {
+    const { outcome } = readInChild(path)
+    assert.equal(outcome.name, 'UnreadableKimiConfigError', `${path}: the reader's error`)
+    const message =
+      `kimi: hook mode unavailable (${outcome.message}); ` +
+      'turn completion will be inferred from the message stream rather than announced'
+    assert.equal(count(message, 'kimi:'), 1, `${path}: ${message}`)
+  }
+})
+
+test('#397: without the wrapper, the error still says it is about the kimi seat', () => {
+  // Read without kimi.ts's wrapper, the message must still say which tool's config it is.
+  const e = new UnreadableKimiConfigError('/x/config.json', 'JSON', 'bad', 'Fix it.', undefined)
+  assert.match(e.message, /\bthe kimi seat\b/, e.message)
 })
 
 test('#389 controls: valid configs of both kinds return the same shape, missing ones {}', (t) => {

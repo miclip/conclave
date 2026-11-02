@@ -247,6 +247,8 @@ export const CITED: Record<string, string> = {
   'src/repl/session.ts:1858': "inject(text, 'all')",
   'src/repl/session.ts:2892': 'inject(rest, { only: who })',
   'src/adapters/kimi.ts:763': 'compactionGeneration: 0,',
+  // #397's test composes the hook-mode event as this line does, to count `kimi:` in it.
+  'src/adapters/kimi.ts:255': '`kimi: hook mode unavailable (${err instanceof Error ? err.message : String(err)}); `',
   'src/rotation/rotate.ts:412': 'export async function rotate(',
   'src/adapters/claude.ts:2130': "#state: SessionState = 'running'",
   'src/adapters/codex.ts:1249': "#state: SessionState = 'running'",

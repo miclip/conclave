@@ -52,13 +52,19 @@ export function defaultKimiConfigPath(): string {
  * come first and the remedy last, as in `UnreadableMarkerError` in
  * src/workspace/mutationMarker.ts. Kept to one line rather than
  * that error's two, because the one caller, `kimi.ts`, embeds it in a single-line event.
+ *
+ * No `kimi: ` prefix of its own: `kimi.ts` supplies it when it wraps this message in
+ * `kimi: hook mode unavailable (...)`, and a prefix here printed it twice. The wrapper is the
+ * only identification some failures get (a raw `EACCES` from writing the generated config),
+ * so it stays and this one goes. The body still names the kimi seat on its own, for anyone
+ * who reads this error without the wrapper.
  */
 export class UnreadableKimiConfigError extends Error {
   readonly path: string
 
   constructor(path: string, format: 'TOML' | 'JSON', reason: string, remedy: string, cause: unknown) {
     super(
-      `kimi: could not read ${path} as ${format} (${reason}) — it is the config the kimi seat runs ` +
+      `could not read ${path} as ${format} (${reason}) — it is the config the kimi seat runs ` +
         `with, which Conclave copies to add its hooks. ${remedy}`,
       { cause },
     )
