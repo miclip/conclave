@@ -289,7 +289,8 @@ Commands:
                                    it leaves a record instead of a diff that looks like
                                    work in progress (#181). Bare, it lists what is
                                    outstanding and exits non-zero if the tree is holding a
-                                   mutation right now. "restore" is the recovery path: it
+                                   mutation right now, or holds a marker it cannot read.
+                                   A stale marker exits 0. "restore" is the recovery path: it
                                    puts the stored original back, verifies it against the
                                    sha256 taken by "begin", and clears the marker only if
                                    it matches. "end" is the check for a restore you did
@@ -1908,10 +1909,11 @@ export async function main(argv: string[], overrides: MainOverrides = {}): Promi
       console.log(`${counted}; ${guarded} may be mutated:`)
       for (const u of unreadable) console.log(`  ${u.markerFile}  — ${u.problem}`)
     }
-    // Non-zero only for a tree actually holding a defect. A stale marker is untidy, not a
-    // reason for a commit helper to stop -- and nor is an unreadable one, which is a reason
-    // to look rather than a known defect.
-    return all.some((m) => m.dirty) ? 1 : 0
+    // Non-zero unless the tree is known to be clean (#395). A stale marker is untidy, not a
+    // reason for a commit helper to stop. An unreadable one is: whether its file is mutated is
+    // unknown, and a gate that reads unknown as clean is how #180 nearly committed a reverted
+    // fix. This is the listing, not the pre-run check -- that one still only warns.
+    return all.some((m) => m.dirty) || unreadable.length > 0 ? 1 : 0
   }
 
   if (command === 'status') {

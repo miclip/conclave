@@ -237,6 +237,6 @@ A refusal names the condition and the remedy, and several are forceable. **Read 
 
 ## Mutation testing
 
-`conclave mutations begin <path>` records a file's hash and keeps a copy before you break it; `mutations end <path>` verifies the restore against that hash and **keeps the marker if the file is not genuinely back**. Bare, it lists what is outstanding and exits non-zero while the tree holds a mutation.
+`conclave mutations begin <path>` records a file's hash and keeps a copy before you break it; `mutations end <path>` verifies the restore against that hash and **keeps the marker if the file is not genuinely back**. Bare, it lists what is outstanding and exits non-zero while the tree holds a mutation or a marker it cannot read; a stale marker exits 0.
 
 Use it whenever you deliberately break a file to prove a test fails — a crash in between otherwise leaves a reverted fix that looks exactly like work in progress.
