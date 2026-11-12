@@ -151,7 +151,11 @@ type ProgramIdentity = { command: string; ecosystem: 'python' | 'npm'; package: 
  */
 const KIMI_VERIFIED_IDENTITY: ProgramIdentity = { command: 'kimi', ecosystem: 'python', package: 'kimi-cli' }
 
-type DetectedIdentity = (ProgramIdentity & { evidence: string }) | { why: string }
+/**
+ * `version` is what the same install metadata says about itself (#401), read by the same lookup
+ * that found the package, so the version always belongs to the identity reported beside it.
+ */
+type DetectedIdentity = (ProgramIdentity & { evidence: string; version?: string }) | { why: string }
 
 function readOrUndefined(path: string): string | undefined {
   try {
@@ -177,9 +181,9 @@ function npmIdentity(command: string, real: string): DetectedIdentity | undefine
   for (let up = 0; up < 6; up++) {
     const raw = readOrUndefined(join(dir, 'package.json'))
     if (raw !== undefined) {
-      let pkg: { name?: unknown; bin?: unknown }
+      let pkg: { name?: unknown; bin?: unknown; version?: unknown }
       try {
-        pkg = JSON.parse(raw) as { name?: unknown; bin?: unknown }
+        pkg = JSON.parse(raw) as { name?: unknown; bin?: unknown; version?: unknown }
       } catch {
         return undefined
       }
@@ -190,7 +194,13 @@ function npmIdentity(command: string, real: string): DetectedIdentity | undefine
           : ((pkg.bin ?? {}) as Record<string, unknown>)
       const target = bin[command]
       if (typeof target !== 'string' || resolve(dir, target) !== real) return undefined
-      return { command, ecosystem: 'npm', package: pkg.name, evidence: `${join(dir, 'package.json')} bin.${command}` }
+      return {
+        command,
+        ecosystem: 'npm',
+        package: pkg.name,
+        evidence: `${join(dir, 'package.json')} bin.${command}`,
+        ...(typeof pkg.version === 'string' ? { version: pkg.version } : {}),
+      }
     }
     dir = dirname(dir)
   }
@@ -214,12 +224,22 @@ function pythonIdentity(command: string, real: string): DetectedIdentity | undef
     join(env, 'Lib', 'site-packages'),
   ]
   for (const site of libs) {
-    for (const info of readdirSafe(site).filter((d) => d.endsWith('.dist-info'))) {
+    // Sorted, so the order is the same on every filesystem (readdir order is not), and the
+    // console-script test below is what picks the distribution, never which entry came first.
+    for (const info of readdirSafe(site).filter((d) => d.endsWith('.dist-info')).sort()) {
       const entry = readOrUndefined(join(site, info, 'entry_points.txt'))
       if (!entry || !consoleScripts(entry).includes(command)) continue
-      const name = /^Name:\s*(.+?)\s*$/m.exec(readOrUndefined(join(site, info, 'METADATA')) ?? '')?.[1]
+      const metadata = readOrUndefined(join(site, info, 'METADATA')) ?? ''
+      const name = /^Name:\s*(.+?)\s*$/m.exec(metadata)?.[1]
       if (!name) return { why: `${join(site, info)} declares ${command} but its METADATA names no distribution` }
-      return { command, ecosystem: 'python', package: name, evidence: `${join(site, info)} [console_scripts] ${command}` }
+      const version = /^Version:\s*(.+?)\s*$/m.exec(metadata)?.[1]
+      return {
+        command,
+        ecosystem: 'python',
+        package: name,
+        evidence: `${join(site, info)} [console_scripts] ${command}`,
+        ...(version ? { version } : {}),
+      }
     }
   }
   return { why: `${real} runs ${interpreter}, but no .dist-info under ${env} declares ${command}` }
@@ -294,9 +314,96 @@ function noteKimiIdentity(t: TestContext): void {
   t.diagnostic(identityNotice(KIMI_VERIFIED_IDENTITY, detected))
 }
 
+/* ------------------------------------------------- which version is installed (#401) ------ */
+
+/**
+ * What version of `agent` is installed, against the one its claims were read from (#401).
+ *
+ * A NOTICE, never a failure, for #201's own reason: failing on drift would fail the suite for
+ * everyone whose CLI updated overnight, on a day when nothing is wrong. What it adds is the
+ * sentence #201 cannot say on its own -- that a green probe search is evidence about the version
+ * installed HERE, which may not be the version the claims were read from.
+ *
+ * Read off the install tree, never by running `--version`: the npm and Python answers come from
+ * `npmIdentity` and `pythonIdentity`, the lookup #387 already trusts, because the version that
+ * matters is the one belonging to the distribution that declares the command. (The first
+ * `.dist-info` in a venv is a confident wrong answer: kimi's has 126.) Claude's native installer
+ * names its versions directory after the version, so there the resolved path IS the answer.
+ */
+type DetectedVersion = { version: string; evidence: string } | { why: string }
+
+/** The version number inside a verbatim `--version` literal: `2.1.260 (Claude Code)` -> `2.1.260`. */
+function versionIn(literal: string): string | undefined {
+  return /\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?/.exec(literal)?.[0]
+}
+
+/** `.../versions/<version>`, the native installer's layout. Any other path carries no version. */
+function claudePathVersion(real: string): DetectedVersion {
+  const name = real.split(/[\\/]/).pop() ?? ''
+  const parent = dirname(real).split(/[\\/]/).pop()
+  const version = versionIn(name)
+  if (parent !== 'versions' || version !== name) {
+    return { why: `${real} is not a versions/<version> path, so it names no version` }
+  }
+  return { version, evidence: real }
+}
+
+function detectVersion(command: string, executable: string): DetectedVersion {
+  let real: string
+  try {
+    real = realpathSync(executable)
+  } catch (e) {
+    return { why: `${executable} could not be resolved: ${String(e)}` }
+  }
+  if (command === 'claude') return claudePathVersion(real)
+  const id = npmIdentity(command, real) ?? pythonIdentity(command, real)
+  if (!id) return { why: `${real} is neither an npm bin nor a Python console script` }
+  if ('why' in id) return id
+  if (id.version === undefined) return { why: `${id.evidence} names ${id.package} but no version` }
+  return { version: id.version, evidence: `${id.ecosystem === 'python' ? 'PyPI' : 'npm'} ${id.package}, ${id.evidence}` }
+}
+
+/** One line naming the installed version against the recorded one. Never a verdict. */
+function versionNotice(agent: string, recorded: string, detected: DetectedVersion): string {
+  if ('why' in detected) {
+    return `${agent} version: not detected (${detected.why}); the claims were read from ${JSON.stringify(recorded)}`
+  }
+  const pinned = versionIn(recorded)
+  if (pinned === detected.version) {
+    return `${agent} version: checked against installed ${detected.version} (${detected.evidence}), the recorded ${JSON.stringify(recorded)}`
+  }
+  const was = pinned ?? JSON.stringify(recorded)
+  return (
+    `${agent.toUpperCase()} VERSION DRIFT: installed ${agent} is ${detected.version} (${detected.evidence}); its claims ` +
+    `were read from ${JSON.stringify(recorded)}. Every green in this file about ${agent} is evidence about ` +
+    `${detected.version}, not ${was}. Re-derive the ${agent} claims against ${detected.version} and update its sourceVersion.`
+  )
+}
+
+/** Each agent's one `sourceVersion`; "each agent pins ONE version literal" holds the uniqueness. */
+function recordedVersions(): Map<string, string> {
+  const out = new Map<string, string>()
+  for (const { agent, claim } of claims()) if (!out.has(agent)) out.set(agent, claim.sourceVersion)
+  return out
+}
+
+/** The notice for `agent` given what PATH resolved it to, if anything. */
+function sourceVersionNotice(agent: string, recorded: string, on: string | undefined): string {
+  const detected = on ? detectVersion(agent, on) : { why: `\`${agent}\` is not on PATH, so no install was examined` }
+  return versionNotice(agent, recorded, detected)
+}
+
+function noteSourceVersions(t: TestContext): void {
+  for (const [agent, recorded] of recordedVersions()) {
+    t.diagnostic(sourceVersionNotice(agent, recorded, findExecutable(agent, { cwd: process.cwd() })))
+  }
+}
+
 test('#201 every claim can still be re-derived from the installed bundle', (t) => {
   // First, so first: which kimi the rest of this run is evidence about.
   noteKimiIdentity(t)
+  // And which version of each agent (#401), before any assertion can swallow it.
+  noteSourceVersions(t)
 
   // THE CHECK THAT WAS MISSING. `sourceVersion` was the staleness rule and nothing enforced it,
   // so four Claude claims sat unverified for eight releases while a briefing was built on one of
@@ -515,4 +622,113 @@ test('the identity notice is wired into the #201 run on this machine', () => {
     stdout = (err as { stdout?: string }).stdout ?? ''
   }
   assert.match(stdout, /^\s*# (kimi identity: |KIMI IDENTITY DRIFT: )/m, `#201 emitted no kimi identity notice:\n${stdout}`)
+})
+
+/* ------------------------------------------------- which version is installed (#401) ------ */
+
+/** `npm install -g @openai/codex`, at a version this test chooses. */
+function npmCodex(root: string, version: string | undefined): string {
+  const pkg = join(root, 'lib', 'node_modules', '@openai', 'codex')
+  mkdirSync(join(pkg, 'bin'), { recursive: true })
+  mkdirSync(join(root, 'bin'))
+  writeFileSync(
+    join(pkg, 'package.json'),
+    JSON.stringify({ name: '@openai/codex', ...(version ? { version } : {}), bin: { codex: 'bin/codex.js' } }),
+  )
+  writeFileSync(join(pkg, 'bin', 'codex.js'), '#!/usr/bin/env node\n')
+  symlinkSync(join(pkg, 'bin', 'codex.js'), join(root, 'bin', 'codex'))
+  return join(root, 'bin', 'codex')
+}
+
+/** Claude's native installer: `~/.local/bin/claude` linked to `versions/<version>`. */
+function nativeClaude(root: string, dir: string, name: string): string {
+  mkdirSync(join(root, dir), { recursive: true })
+  mkdirSync(join(root, 'bin'))
+  writeFileSync(join(root, dir, name), '')
+  symlinkSync(join(root, dir, name), join(root, 'bin', 'claude'))
+  return join(root, 'bin', 'claude')
+}
+
+test('#401 an installed version that differs from the recorded one is reported as drift', (t) => {
+  const codex = npmCodex(tempDir(t, 'source-version'), '9.8.7')
+  const { result: notice, attempts } = offline(() => sourceVersionNotice('codex', 'codex-cli 9.1.0', codex))
+  assert.deepEqual(attempts, [], 'detection must not leave the machine')
+  assert.match(notice, /^CODEX VERSION DRIFT: installed codex is 9\.8\.7 \(npm @openai\/codex, \S+package\.json bin\.codex\)/)
+  assert.match(notice, /its claims were read from "codex-cli 9\.1\.0"/)
+  assert.match(notice, /Every green in this file about codex is evidence about 9\.8\.7, not 9\.1\.0\./)
+})
+
+test('#401 the Claude version is read off the versions/<version> path it resolves to', (t) => {
+  const root = tempDir(t, 'source-version')
+  const claude = nativeClaude(root, join('share', 'claude', 'versions'), '3.4.5')
+  const { result, attempts } = offline(() => ({
+    drift: sourceVersionNotice('claude', '3.4.4 (Claude Code)', claude),
+    match: sourceVersionNotice('claude', '3.4.5 (Claude Code)', claude),
+  }))
+  assert.deepEqual(attempts, [], 'detection must not leave the machine')
+  assert.match(result.drift, /^CLAUDE VERSION DRIFT: installed claude is 3\.4\.5 \(\S+versions\/3\.4\.5\)/)
+  assert.match(result.match, /^claude version: checked against installed 3\.4\.5 \(\S+versions\/3\.4\.5\), the recorded "3\.4\.5 \(Claude Code\)"$/)
+  assert.ok(!/DRIFT/.test(result.match), 'a match reports a match and nothing else')
+})
+
+test('#401 a matching version reports the match, read from the dist-info that declares the command', (t) => {
+  // The trap from #401: a decoy distribution that declares no `kimi` and, since `pythonIdentity`
+  // walks dist-infos in sorted order, is the FIRST one it reads. Reading "the first .dist-info"
+  // would report its 0.8.0.
+  const root = tempDir(t, 'source-version')
+  const kimi = uvKimiCli(root)
+  const decoy = join(root, 'uv', 'tools', 'kimi-cli', 'lib', 'python3.13', 'site-packages', 'agent_client_protocol-0.8.0.dist-info')
+  mkdirSync(decoy)
+  writeFileSync(join(decoy, 'entry_points.txt'), '[console_scripts]\nacp = acp:main\n')
+  writeFileSync(join(decoy, 'METADATA'), 'Metadata-Version: 2.4\nName: agent-client-protocol\nVersion: 0.8.0\n')
+  const infos = readdirSync(dirname(decoy)).filter((d) => d.endsWith('.dist-info')).sort()
+  assert.equal(infos[0], 'agent_client_protocol-0.8.0.dist-info', 'the decoy must be the first dist-info read, or it proves nothing')
+  const { result: notice, attempts } = offline(() => sourceVersionNotice('kimi', 'kimi, version 1.49.0', kimi))
+  assert.deepEqual(attempts, [], 'detection must not leave the machine')
+  assert.match(notice, /^kimi version: checked against installed 1\.49\.0 \(PyPI kimi-cli, \S+kimi_cli-1\.49\.0\.dist-info \[console_scripts\] kimi\), the recorded "kimi, version 1\.49\.0"$/)
+  assert.ok(!/DRIFT|0\.8\.0/.test(notice), 'a match reports a match and nothing else')
+})
+
+test('#401 a layout with no readable version says where it looked and claims none', (t) => {
+  const root = tempDir(t, 'source-version')
+  const unversioned = npmCodex(join(root, 'npm'), undefined)
+  mkdirSync(join(root, 'wrapper', 'bin'), { recursive: true })
+  const wrapper = join(root, 'wrapper', 'bin', 'opencode')
+  writeFileSync(wrapper, '#!/bin/sh\nexec something-else "$@"\n')
+  const elsewhere = nativeClaude(join(root, 'claude'), 'opt', '3.4.5')
+  const { result, attempts } = offline(() => ({
+    unversioned: sourceVersionNotice('codex', 'codex-cli 9.1.0', unversioned),
+    wrapper: sourceVersionNotice('opencode', '9.1.0', wrapper),
+    elsewhere: sourceVersionNotice('claude', '3.4.5 (Claude Code)', elsewhere),
+    absent: sourceVersionNotice('kimi', 'kimi, version 9.1.0', undefined),
+  }))
+  assert.deepEqual(attempts, [], 'detection must not leave the machine')
+  assert.match(result.unversioned, /^codex version: not detected \(\S+@openai\/codex\/package\.json bin\.codex names @openai\/codex but no version\)/)
+  assert.match(result.wrapper, /^opencode version: not detected \(\S+wrapper\/bin\/opencode is neither an npm bin nor a Python console script\)/)
+  assert.match(result.elsewhere, /^claude version: not detected \(\S+opt\/3\.4\.5 is not a versions\/<version> path, so it names no version\)/)
+  assert.match(result.absent, /^kimi version: not detected \(`kimi` is not on PATH, so no install was examined\); the claims were read from "kimi, version 9\.1\.0"$/)
+  for (const notice of Object.values(result)) {
+    assert.ok(!/DRIFT|checked against|installed \S+ is/.test(notice), `not detected is the absence of an answer: ${notice}`)
+  }
+})
+
+test('#401 the version notice is wired into the #201 run, once per agent', () => {
+  // As for the identity notice: the tests above prove the comparison, this proves #201 emits it.
+  // Any of the three answers is accepted -- what is installed here is not this test's business.
+  const env = { ...process.env }
+  delete env.NODE_TEST_CONTEXT
+  let stdout: string
+  try {
+    stdout = execFileSync(
+      process.execPath,
+      ['--test', '--test-reporter=tap', '--test-name-pattern=^#201 every claim', fileURLToPath(import.meta.url)],
+      { encoding: 'utf8', stdio: 'pipe', env },
+    )
+  } catch (err) {
+    stdout = (err as { stdout?: string }).stdout ?? ''
+  }
+  for (const agent of DECLARED.map(([a]) => a)) {
+    const lines = stdout.match(new RegExp(`^\\s*# (${agent} version: |${agent.toUpperCase()} VERSION DRIFT: )`, 'gm')) ?? []
+    assert.equal(lines.length, 1, `#201 must emit exactly one ${agent} version notice:\n${stdout}`)
+  }
 })
