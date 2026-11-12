@@ -1,0 +1,5 @@
+# Jobs written in flow style. Valid YAML, and every job here even HAS a timeout -- but the line
+# parser cannot see them, so the only acceptable result is a loud failure, never a pass.
+name: unparseable
+on: push
+jobs: { build: { runs-on: ubuntu-latest, timeout-minutes: 10, steps: [ { run: true } ] } }

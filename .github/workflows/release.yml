@@ -35,6 +35,16 @@ jobs:
           - os: ubuntu-latest
             target: linux-x64
     runs-on: ${{ matrix.os }}
+    # A ceiling on a HANG, not a performance budget (#404). Without it a job inherits GitHub's
+    # 360-minute default, and a hung one burns six hours and ends `cancelled` -- neither pass
+    # nor failure. This job runs the same suite on the same platforms as `ci.yml`'s `test`,
+    # which is the job that hung for six hours on e977053.
+    #
+    # Observed 733-920s across the last four runs, worst 15m20s.
+    # The margin is about 2.4x ON PURPOSE: a timeout that fires on a slow runner day is worse
+    # than none, because the next person learns to rerun on red instead of reading it. If the
+    # suite outgrows this, raise it against new measurements; do not tighten it to look precise.
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -94,6 +104,10 @@ jobs:
   release:
     needs: package
     runs-on: ubuntu-latest
+    # A ceiling on a hang (#404); see `package` above. Observed 15-19s across the last four
+    # runs, worst 19s. The margin is far wider than 2.4x because a few minutes is free here and
+    # a false timeout on a release is the worst kind: the archives exist and nothing publishes.
+    timeout-minutes: 10
     permissions:
       contents: write
     steps:
