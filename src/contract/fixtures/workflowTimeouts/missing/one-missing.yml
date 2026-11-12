@@ -1,0 +1,16 @@
+# One job declares a timeout; the other has one only on a STEP and inside a run script, neither
+# of which bounds the job. The scan must name `hangs` and this file.
+name: missing
+on: push
+jobs:
+  fine:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - run: true
+  hangs:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          timeout-minutes: 99
+        timeout-minutes: 5

@@ -1,0 +1,11 @@
+# Valid YAML, consistently indented 4/6 instead of this repository's 2/4, and every job HAS a
+# timeout. The parser fixes the shape rather than inferring it, so the FIRST job key is already
+# at an indent it does not understand -- and that must be a loud failure, never a pass.
+name: indented
+on: push
+jobs:
+    build:
+      runs-on: ubuntu-latest
+      timeout-minutes: 10
+      steps:
+        - run: true

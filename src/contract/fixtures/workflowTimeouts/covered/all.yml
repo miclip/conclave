@@ -1,0 +1,23 @@
+# Control: every job declares a job-level timeout. Includes the shapes a line parser can trip
+# on -- comments between keys, a block scalar, a matrix, and a step that ALSO has a timeout.
+name: covered
+on: push
+jobs:
+  # a comment at job indent
+  build:
+    strategy:
+      matrix:
+        os: [ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    steps:
+      - run: |
+          echo "timeout-minutes: 1"
+        timeout-minutes: 5
+
+  publish:
+    needs: build
+    timeout-minutes: ${{ fromJSON(vars.PUBLISH_TIMEOUT) }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: true
