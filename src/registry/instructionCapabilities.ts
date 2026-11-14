@@ -36,7 +36,7 @@
 import type { InstructionCapabilities } from './types.ts'
 
 /** Verbatim `claude --version`. */
-const CLAUDE_VERSION = '2.1.260 (Claude Code)'
+const CLAUDE_VERSION = '2.1.325 (Claude Code)'
 /** Verbatim `codex --version`. */
 const CODEX_VERSION = 'codex-cli 0.147.0'
 /** Verbatim `opencode --version`. */
@@ -48,7 +48,7 @@ export const CLAUDE_INSTRUCTION_CAPABILITIES: InstructionCapabilities = {
   subagents: {
     supported: true,
     evidence: 'inferred_from_documented_event',
-    source: '`claude --help`: `--agents <json>  JSON object defining custom agents`; `Task` and `Agent` in the installed bundle',
+    source: '`claude --help`: `--agents <json-or-file>  JSON object defining custom agents, or with --print the path to a file that holds one`; `Task` and `Agent` in the installed bundle',
     // Not the `--help` line: that text is generated and its spacing shifts between builds, so a
     // search on it fails for formatting rather than for truth.
     probes: ['--agents', 'Task'],
@@ -68,15 +68,19 @@ export const CLAUDE_INSTRUCTION_CAPABILITIES: InstructionCapabilities = {
   sessionBackgrounding: {
     supported: true,
     evidence: 'inferred_from_documented_event',
-    source: '`claude --help`: `--bg, --background  Start the session in the background and return immediately`, with `claude attach <id>`',
+    source: '`claude --help`: `--bg, --background  Start the session in the background and return immediately. Prints the id that `claude attach`, `logs`, `stop` and `rm` take; `claude agents` lists them`, with `claude attach <id|name>`',
     probes: ['--background'],
     sourceVersion: CLAUDE_VERSION,
   },
   autonomousLoop: {
     supported: true,
     evidence: 'inferred_from_documented_event',
-    // The FORM is advertised; no cap on it is. That asymmetry is the point of grading rather
-    // than a boolean -- kimi below advertises the same capability WITH an integer bound.
+    // Measured against 2.1.325: the bundle advertises a time-based auto-expiry on recurring/cron
+    // loops -- `recurringMaxAgeMs`, "Recurring tasks auto-expire after ", "auto-expired after ",
+    // "-day limit when scheduling recurring jobs". The number of days is interpolated, so it
+    // cannot be read from the string. `ScheduleWakeup`'s "Clamped to [60, 3600]" bounds the
+    // interval between iterations, not how many there are. No iteration cap like kimi's below was
+    // found. Whether the expiry is the same kind of bound as kimi's is open: see #407.
     source: '`ProposeGoalTool` and `<<autonomous-loop>>` in the installed bundle',
     probes: ['ProposeGoalTool', 'autonomous-loop'],
     sourceVersion: CLAUDE_VERSION,
