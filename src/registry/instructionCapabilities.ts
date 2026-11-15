@@ -38,7 +38,7 @@ import type { InstructionCapabilities } from './types.ts'
 /** Verbatim `claude --version`. */
 const CLAUDE_VERSION = '2.1.325 (Claude Code)'
 /** Verbatim `codex --version`. */
-const CODEX_VERSION = 'codex-cli 0.147.0'
+const CODEX_VERSION = 'codex-cli 0.153.4'
 /** Verbatim `opencode --version`. */
 const OPENCODE_VERSION = '1.18.15'
 /** Verbatim `kimi --version`. */
@@ -91,6 +91,11 @@ export const CODEX_INSTRUCTION_CAPABILITIES: InstructionCapabilities = {
   subagents: {
     supported: true,
     evidence: 'inferred_from_documented_event',
+    // Measured against 0.153.4: the claim rests on the `multi_agent  stable  true` row, which is
+    // on by default. `multi_agent_v2` is a separate config table
+    // (`features.multi_agent_v2.max_concurrent_threads_per_session`, `...wait_timeout_ms`) and
+    // `stable false`, so it is off unless opted into and does not carry the claim. The removed
+    // `multi_agent_mode` survives only as a protocol/context field name, not as a feature row.
     source: '`codex features list`: `multi_agent  stable  true`; `spawn_agent`, `wait_agent`, `close_agent` in the installed binary',
     probes: ['spawn_agent', 'wait_agent', 'close_agent'],
     sourceVersion: CODEX_VERSION,
@@ -98,13 +103,34 @@ export const CODEX_INSTRUCTION_CAPABILITIES: InstructionCapabilities = {
   backgroundTasks: {
     supported: true,
     evidence: 'inferred_from_documented_event',
+    // The source and the probe are the same string, so nothing else cross-checks it -- these are
+    // the neighbours that do, measured against 0.153.4. It sits in the TUI strings beside
+    // `tui/src/history_cell/exec.rs`, "Interacted with background terminal: " and
+    // "... and N more running", and config carries `background_terminal_max_timeout`: a terminal
+    // left running in the background that the agent later waits on or interacts with.
     source: '"Waited for background terminal: " in the installed binary',
     probes: ['Waited for background terminal: '],
     sourceVersion: CODEX_VERSION,
   },
-  // No `autonomousLoop`. "This goal persists across turns." establishes that a goal SURVIVES a
-  // turn boundary, which is not the same as the agent dispatching the next one, and nothing
-  // found says it dispatches. Persistence is not dispatch, so the row stays unresolved.
+  autonomousLoop: {
+    supported: true,
+    evidence: 'inferred_from_documented_event',
+    // Measured against 0.153.4: a model-facing `create_goal` tool ("The concrete objective to
+    // start pursuing. This starts a new active goal..."), a `goals/continuation.md` prompt
+    // ("Continue working toward the active thread goal."), and the harness submitting the next
+    // turn itself: "skipping goal continuation because turn input submission failed",
+    // "...because automatic idle work was rejected". So the goal is not merely persisted across
+    // turns; the harness dispatches the continuation.
+    //
+    // The bound found is a per-goal `token_budget` (`budget_limited`), plus a "blocked audit"
+    // of three consecutive goal turns -- and that audit is an instruction to the MODEL about
+    // when to mark a goal blocked, not a cap the harness enforces. No iteration count like
+    // kimi's below was found. Whether a token budget is the same kind of bound is open: see
+    // #409. Nothing here says whether 0.147.0 had this; it was not checked.
+    source: '`create_goal` tool and "...counting the original/user-triggered turn and any automatic goal continuations" in the installed binary',
+    probes: ['create_goal', 'automatic goal continuations'],
+    sourceVersion: CODEX_VERSION,
+  },
 }
 
 export const OPENCODE_INSTRUCTION_CAPABILITIES: InstructionCapabilities = {
