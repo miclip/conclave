@@ -40,7 +40,7 @@ const CLAUDE_VERSION = '2.1.325 (Claude Code)'
 /** Verbatim `codex --version`. */
 const CODEX_VERSION = 'codex-cli 0.153.4'
 /** Verbatim `opencode --version`. */
-const OPENCODE_VERSION = '1.18.15'
+const OPENCODE_VERSION = '1.18.27'
 /** Verbatim `kimi --version`. */
 const KIMI_VERSION = 'kimi, version 1.49.0'
 
@@ -137,20 +137,32 @@ export const OPENCODE_INSTRUCTION_CAPABILITIES: InstructionCapabilities = {
   subagents: {
     supported: true,
     evidence: 'inferred_from_documented_event',
-    source: '`opencode agent list`: `explore (subagent)` and `general (subagent)`',
+    source: '`opencode agent list`: `explore (subagent)` and `general (subagent)`; their descriptions "Fast agent specialized for exploring codebases." and "...Use this agent to execute multiple units of work in parallel." in the installed binary',
+    // No probes until 1.18.27, so #201 checked nothing about this row. `general`'s description
+    // opens "General-purpose agent for researching complex questions...", which is close to a
+    // description in claude's bundle; its last sentence is probed instead.
+    probes: ['Fast agent specialized for exploring codebases.', 'Use this agent to execute multiple units of work in parallel.'],
     sourceVersion: OPENCODE_VERSION,
   },
   backgroundTasks: {
     supported: true,
     evidence: 'inferred_from_documented_event',
-    source: '`experimental.session.background` in the installed bundle',
-    probes: ['experimental.session.background'],
+    // Measured against 1.18.27: still `experimental.`-prefixed. It is the API identifier summarised
+    // "Background subagents": "Detach any synchronous subagents currently blocking the session and
+    // continue them in the background." It is also gated: off by default, and the task tool refuses
+    // `background: true` with "Background subagents require
+    // OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=true". Advertised, which is all this row claims.
+    source: '`experimental.session.background` and `OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS` in the installed bundle',
+    probes: ['experimental.session.background', 'OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS'],
     sourceVersion: OPENCODE_VERSION,
   },
   asyncPromptSubmission: {
     supported: true,
     evidence: 'inferred_from_documented_event',
-    // The only one of the four advertising this at all.
+    // As of this pass, no claude, codex or kimi row declares this. The probe does NOT
+    // discriminate between agents: kimi's tree matches `session.prompt_async` through
+    // prompt_toolkit's `PromptSession.prompt_async()`, a TUI call that prompts the user. So it
+    // proves presence in opencode's bundle and says nothing about the others.
     source: '`session.prompt_async` in the installed bundle',
     probes: ['session.prompt_async'],
     sourceVersion: OPENCODE_VERSION,
@@ -158,10 +170,32 @@ export const OPENCODE_INSTRUCTION_CAPABILITIES: InstructionCapabilities = {
   boundedIteration: {
     supported: true,
     evidence: 'inferred_from_documented_event',
+    // Measured against 1.18.27: the sentence is verbatim, inside a longer `CRITICAL - MAXIMUM
+    // STEPS REACHED` prompt telling the model to stop using tools and summarise. The bound itself
+    // is the per-agent `steps` config, "Maximum number of agentic iterations before forcing
+    // text-only response" (`maxSteps` is deprecated in its favour). It defaults to
+    // `Y.steps??1/0`, which is unlimited, and compaction passes count toward it. It caps steps
+    // WITHIN a run, not turns across a session as kimi's `--max-ralph-iterations` does: a measured
+    // difference, not a ruling on whether they are the same capability.
     source: '"The maximum number of steps allowed for this task has been reached. Tools are disabled until next user input." in the installed bundle',
     probes: ['The maximum number of steps allowed for this task has been reached.'],
     sourceVersion: OPENCODE_VERSION,
   },
+  // `autonomousLoop` is ABSENT, i.e. unresolved, not refuted. Measured against 1.18.27:
+  //   - No goal, ralph, schedule, cron, `/loop` or idle-work mechanism. `autonomousLoop`,
+  //     `autonomous-loop`, `create_goal`, `/loop`, `ScheduleWakeup`, `Ralph`, `recurring` and
+  //     `auto_continue` have no hits in opencode's own code.
+  //   - The only turn the harness starts itself is `TaskTool.injectBackgroundResult`: once per
+  //     background task, it prompts the parent session with that subagent's result. It carries
+  //     no objective forward, and it is gated by `OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS`,
+  //     off by default. Read from the code, NOT run. Whether it counts is #411.
+  //   - `experimental.compaction.autocontinue` is a plugin hook, on by default: after AUTOMATIC
+  //     compaction it writes a synthetic user message and the same `run` goes round again. No
+  //     new prompt call is made.
+  //   - `experimental.continue_loop_on_deny` keeps one run's step loop going after a denied tool
+  //     call, up to the agent's `steps`.
+  //   - `doom_loop` is a permission asked after 3 identical tool calls in one assistant message:
+  //     a guard against repetition that dispatches nothing.
 }
 
 export const KIMI_INSTRUCTION_CAPABILITIES: InstructionCapabilities = {
