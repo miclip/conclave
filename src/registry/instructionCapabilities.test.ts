@@ -73,7 +73,7 @@ test('every built-in wires its declaration, and declares exactly what §4b resol
   // four: every one of them advertises starting background work, none advertises when it ends.
   const expected: Record<string, string[]> = {
     claude: ['autonomousLoop', 'backgroundTasks', 'sessionBackgrounding', 'subagents'],
-    codex: ['backgroundTasks', 'subagents'],
+    codex: ['autonomousLoop', 'backgroundTasks', 'subagents'],
     opencode: ['asyncPromptSubmission', 'backgroundTasks', 'boundedIteration', 'subagents'],
     kimi: ['autonomousLoop', 'backgroundTasks', 'boundedIteration', 'subagents'],
   }
