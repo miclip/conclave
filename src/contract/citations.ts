@@ -199,7 +199,7 @@ export const CITED: Record<string, string> = {
   // Live-claim section in docs/NOTES.md: #156's premise and the unverified-generation guards.
   // These citations assert current fact in a section marked `## LIVE:`, so they are checked even
   // though the rest of docs/** is frozen design record.
-  'src/adapters/claude.ts:2587-2600': 'containedFallback: true,',
+  'src/adapters/claude.ts:2599-2612': 'containedFallback: true,',
   'src/adapters/codex.ts:1714-1727': 'containedFallback: true,',
   'src/rotation/rotate.ts:484':
     'const generation = snap.containedFallback ? UNKNOWN_GENERATION : snap.compactionGeneration',
@@ -237,7 +237,7 @@ export const CITED: Record<string, string> = {
   'src/relay/relay.ts:9111':
     'const rotated = await this.#considerRotation(seat, report.prose, handle)',
   'src/adapters/codex.ts:709-715': 'this.#view = new TranscriptSessionView({',
-  'src/adapters/claude.ts:1473-1477': 'this.#view = new TranscriptSessionView({',
+  'src/adapters/claude.ts:1485-1489': 'this.#view = new TranscriptSessionView({',
   'src/relay/relay.ts:2770':
     'const p: RelayParticipant = { id: spec.id, agent: spec.agent, rank, role: spec.role, launch, session, events: [], baselineGeneration: 0, degradationCursor: 0 }',
   'src/relay/report.ts:311-321': 'const snap = await p.session.snapshot()',
@@ -250,7 +250,7 @@ export const CITED: Record<string, string> = {
   // #397's test composes the hook-mode event as this line does, to count `kimi:` in it.
   'src/adapters/kimi.ts:255': '`kimi: hook mode unavailable (${err instanceof Error ? err.message : String(err)}); `',
   'src/rotation/rotate.ts:412': 'export async function rotate(',
-  'src/adapters/claude.ts:2130': "#state: SessionState = 'running'",
+  'src/adapters/claude.ts:2142': "#state: SessionState = 'running'",
   'src/adapters/codex.ts:1249': "#state: SessionState = 'running'",
   'src/rotation/handoff.ts:79': 'compactionGeneration: CompactionGeneration',
   'src/workspace/sessionRecord.ts:1794': 'snap.turns.map(',

@@ -240,6 +240,10 @@ test('a send that never becomes a prompt is reported as swallowed input, not as 
         assert.match(e.message, /never became a prompt/)
         assert.match(e.message, /swallowed input rather than a hook failure/)
         assert.match(e.message, /`conclave config check` and `--settle` will not help/)
+        // #406: WHICH repairs were tried, not merely that one was. "after a re-submit" read as a
+        // single retry and sent operators back for another run; the child refused an escalating
+        // ladder, and that is what tells them to look at the child instead of relaunching.
+        assert.match(e.message, /after a bare Enter and a full re-type, each checked against that transcript/)
         // The half an operator acts on: there is nothing to recover, so nothing to look for.
         assert.match(e.message, /The turn was not started, so no work was lost\./)
         assert.ok(!/the prompt IS in the child's transcript/.test(e.message), 'that is the other failure')
