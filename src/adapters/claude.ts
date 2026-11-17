@@ -417,9 +417,21 @@ const SEND_HOOK_TIMEOUT = (journal: string, sentAt: number): string =>
  * misattributed to other causes before anyone read the child's own transcript.
  *
  * Distinguishing the two costs one transcript read, which is already parsed and already polled.
+ *
+ * IT NAMES THE REPAIRS THAT WERE TRIED, because "after a re-submit" read as one retry and sent
+ * operators back for another run (#406). By the time this throws, the child has refused a bare
+ * Enter AND a full re-type -- and a modal dismissal before them when one was visible -- each
+ * checked against its own transcript. That is a child refusing escalating repairs, not a blip,
+ * and the remedy is to look at it rather than to relaunch.
+ *
+ * NO FURTHER RETRY IS ADDED HERE OR ABOVE THIS, deliberately. #406 proposed re-dispatching once
+ * at the relay, on the reasoning that the turn never started so a retry is safe. It IS safe; it
+ * is also a fourth attempt at what two or three verified repairs have already failed to do, and
+ * the ladder below is where a retry belongs if one is ever warranted. A relay that silently tried
+ * again would hide exactly this condition.
  */
 const SEND_NOT_ACCEPTED =
-  "the text was typed but never became a prompt: it is absent from the child's transcript after a re-submit, so this is swallowed input rather than a hook failure. Nothing is wrong with the hooks -- `conclave config check` and `--settle` will not help. The turn was not started, so no work was lost."
+  "the text was typed but never became a prompt: it is absent from the child's transcript after a bare Enter and a full re-type, each checked against that transcript, so this is swallowed input rather than a hook failure. Nothing is wrong with the hooks -- `conclave config check` and `--settle` will not help. The turn was not started, so no work was lost."
 
 /**
  * A second `send()` while the first has not yet become a turn.
